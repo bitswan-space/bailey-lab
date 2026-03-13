@@ -1,0 +1,148 @@
+# Bitswan Automation Server
+
+<div align="center">
+CLI app and daemon for managing bitswan automation server and workspace deployments
+<br>
+<br>
+<img src="https://github.com/bitswan-space/bitswan-automation-server/actions/workflows/test.yml/badge.svg" alt="drawing"/>
+<img src="https://github.com/bitswan-space/bitswan-automation-server/actions/workflows/lint.yml/badge.svg" alt="drawing"/>
+<img src="https://pkg.go.dev/badge/github.com/bitswan-space/bitswan-automation-server.svg" alt="drawing"/>
+<img src="https://codecov.io/gh/bitswan-space/bitswan-automation-server/branch/main/graph/badge.svg" alt="drawing"/>
+<img src="https://img.shields.io/github/v/release/bitswan-space/bitswan-automation-server" alt="drawing"/>
+<img src="https://img.shields.io/github/downloads/bitswan-space/bitswan-automation-server/total.svg" alt="drawing"/>
+</div>
+
+# Table of Contents
+<!--ts-->
+   * [Features](#features)
+   * [Prerequisites](#prerequisites)
+   * [Installation](#installation) 
+   * [Contribute](#contribute)
+
+<!--te-->
+
+# Features
+- Automatically set up independent bitswan automation server deployments.
+- Deployments can either connect to the bitswan.ai SaaS, use the on prem bitswan management tools or operate completely independently
+
+
+Prerequisites
+--------------
+Before installation, make sure you have installed `Docker` and `Docker compose`. Installation guides can be found on these links :
+
+- [Docker](https://docs.docker.com/engine/install/)
+
+# Installation
+## Linux / WSL
+```
+curl -Lo bitswan https://deployment-management-backend.bitswan-devops-1.bswn.io/public/automation/latest?os=linux&arch=amd64 && chmod +x bitswan
+```
+## MacOS (Apple Sillicon M1+)
+```
+curl -Lo bitswan https://deployment-management-backend.bitswan-devops-1.bswn.io/public/automation/latest?os=darwin&arch=arm64 && chmod +x bitswan
+```
+## MacOS (Intel-based)
+```
+curl -Lo bitswan https://deployment-management-backend.bitswan-devops-1.bswn.io/public/automation/latest?os=darwin&arch=amd64 && chmod +x bitswan
+```
+
+Move the binary to a directory in your PATH
+
+```
+sudo mv bitswan /usr/local/bin/bitswan
+```
+
+Alternatively, if you don't have sudo access or prefer a local installation:
+
+```
+mkdir -p ~/bin
+mv bitswan ~/bin/
+
+#Add to PATH if using ~/bin (add this to your ~/.bashrc or ~/.zshrc)
+export PATH="$HOME/bin:$PATH"
+```
+
+# Starting the automation server daemon
+
+```
+bitswan automation-server-daemon init
+```
+
+# Setting up and connecting a workspace
+## SaaS
+
+Login to [aoc.bitswan.ai](https://aoc.bitswan.ai) and connect the automation server and add a workspace using the UI.
+
+## On-prem
+### With public domain / DNS SSL
+```sh
+bitswan workspace init --domain=my-workspace.bitswan.io my-workspace
+```
+### With internal domain / DNS SSL
+> Note:
+>
+> Before you initialize your workspace with an internal domain, make sure you have generated certificate for sub domain of workspace, e.g. `*.my-workspace.my-domain.local`. You have to specify path to the certificate and private key in `init` command. Certificate and private key must be in a format `full-chain.pem` and `private-key.pem`.
+
+```sh
+bitswan workspace init --domain=my-workspace.my-domain.local --certs-dir=/etc/certs my-workspace
+```
+
+### Local dev
+
+This is for setting up a workspace locally without first setting up a domain name or connecting to the SaaS.
+
+Create some certs for these domains using a certificate authority you setup for yourself.
+
+```sh
+mkcert --install
+```
+
+Add the CA certificate to Chrome by:
+1. Navigate to chrome://settings/certificates
+2. Go to "Authorities" tab
+3. Click "Import" and select the ca.crt file
+4. Check all trust settings and click "OK"
+
+And finally setup the workspace.
+
+```sh
+bitswan workspace init --local dev-workspace
+```
+
+You should be able to access the editor in chrome via [https://dev-workspace-editor.bitswan.localhost](https://dev-workspace-editor.bitswan.localhost).
+
+You can get the password to the editor using the command:
+
+```sh
+bitswan workspace list --long --passwords
+```
+
+You can use an OAuth2 authentication to access the editor
+
+```sh
+bitswan workspace init --domain=bitswan.localhost --mkcerts dev-workspace --oauth-config <json-file>
+```
+Example of json file
+```json
+{
+  "oauth_issuer_url": "<your-oauth-issuer-url>/realms/<yourrealm>",
+  "oauth_client_id": "<your-oauth=client-id>",
+  "oauth_client_secret": "<your-client-secret>",
+  "oauth_cookie_secret": "<your-cookie-secret>",
+  "oauth_email_domains": ["<you can use * to allow all domains>"],
+  "oauth_allowed_groups": ["<your-allowed-groups>"]
+}
+```
+
+
+## Remote git repository
+
+If you wanna connect and persist your pipelines and GitOps configuration in remote git repository you can use `--remote` flag to specify your repository. `main` branch will be used to store pipelines code and each workspace will create it's own branch (e.g. `my-workspace`) to store their configurations.
+
+```sh
+bitswan workspace --remote=git@github.com:<your-name>/<your-repo>.git my-workspace
+```
+
+# Contribute
+
+If you find issues in that setup or have some nice features / improvements, I would welcome an issue or a PR :)
