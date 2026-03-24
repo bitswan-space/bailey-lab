@@ -29,21 +29,21 @@ if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
     exit $?
 fi
 
-# Unlogged session - just exec shell
-if [ "$LOGGED" = "false" ]; then
-    exec bash -l
-fi
-
-# Write metadata file for the session browser
+# Always write metadata file for the session browser
 cat > "${SESSION_DIR}/${SESSION_ID}.meta.json" << METAEOF
 {
   "id": "${SESSION_ID}",
   "user_email": "${USER_EMAIL}",
   "worktree": "${WORKTREE}",
   "started_at": "$(date -Iseconds)",
-  "logged": true
+  "logged": $([ "$LOGGED" = "true" ] && echo "true" || echo "false")
 }
 METAEOF
+
+# Anon session - no recording, just shell
+if [ "$LOGGED" = "false" ]; then
+    exec bash -l
+fi
 
 # Record session with asciinema
 exec asciinema rec "${SESSION_DIR}/${SESSION_ID}.cast" \
