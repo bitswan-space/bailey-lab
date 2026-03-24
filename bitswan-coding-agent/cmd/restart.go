@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var restartCmd = &cobra.Command{
+var deploymentsRestartCmd = &cobra.Command{
 	Use:   "restart DEPLOYMENT_ID",
 	Short: "Restart a live-dev deployment",
 	Args:  cobra.ExactArgs(1),
@@ -23,7 +23,7 @@ var restartCmd = &cobra.Command{
 	},
 }
 
-var buildAndRestartCmd = &cobra.Command{
+var deploymentsBuildAndRestartCmd = &cobra.Command{
 	Use:   "build-and-restart DEPLOYMENT_ID",
 	Short: "Build image and restart a live-dev deployment",
 	Args:  cobra.ExactArgs(1),

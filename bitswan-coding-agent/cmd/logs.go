@@ -7,9 +7,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var logsFollow bool
+var deploymentsLogsFollow bool
 
-var logsCmd = &cobra.Command{
+var deploymentsLogsCmd = &cobra.Command{
 	Use:   "logs DEPLOYMENT_ID",
 	Short: "View deployment logs",
 	Long:  "Stream logs from a worktree-specific live-dev deployment.",
@@ -18,7 +18,7 @@ var logsCmd = &cobra.Command{
 		deploymentID := args[0]
 
 		path := fmt.Sprintf("/deployments/%s/logs", deploymentID)
-		if logsFollow {
+		if deploymentsLogsFollow {
 			path += "?follow=true"
 		}
 
@@ -29,7 +29,6 @@ var logsCmd = &cobra.Command{
 		defer resp.Body.Close()
 
 		scanner := bufio.NewScanner(resp.Body)
-		// Increase buffer size for long log lines
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			fmt.Println(scanner.Text())
@@ -44,6 +43,6 @@ var logsCmd = &cobra.Command{
 }
 
 func init() {
-	logsCmd.Flags().BoolVar(&logsFollow, "follow", false, "Follow log output")
-	logsCmd.Flags().BoolVarP(&logsFollow, "f", "f", false, "Follow log output (shorthand)")
+	deploymentsLogsCmd.Flags().BoolVar(&deploymentsLogsFollow, "follow", false, "Follow log output")
+	deploymentsLogsCmd.Flags().BoolVarP(&deploymentsLogsFollow, "f", "f", false, "Follow log output (shorthand)")
 }

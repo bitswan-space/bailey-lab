@@ -13,14 +13,15 @@ Use these to track testable requirements assigned by the developer:
 - `bitswan-agent requirements update --id REQ-ID --status pass|fail|pending` - Update status
 - `bitswan-agent requirements remove --id REQ-ID` - Remove a requirement
 
-### Deployment
-Use these to manage the live-dev deployment for your worktree:
+### Deployments
+Use these to manage the live-dev deployments for your worktree:
 - `bitswan-agent deployments list` - List all deployments (running and not started) with their public URLs
 - `bitswan-agent deployments start DEPLOYMENT_ID` - Start a live-dev deployment
-- `bitswan-agent deployments exec DEPLOYMENT_ID -- command args...` - Execute command in live-dev container
-- `bitswan-agent restart DEPLOYMENT_ID` - Restart a live-dev deployment
-- `bitswan-agent build-and-restart DEPLOYMENT_ID` - Rebuild image and restart
-- `bitswan-agent logs DEPLOYMENT_ID` - View deployment logs
+- `bitswan-agent deployments restart DEPLOYMENT_ID` - Restart a deployment
+- `bitswan-agent deployments build-and-restart DEPLOYMENT_ID` - Rebuild image and restart
+- `bitswan-agent deployments logs DEPLOYMENT_ID` - View deployment logs
+- `bitswan-agent deployments logs DEPLOYMENT_ID --follow` - Stream logs in real-time
+- `bitswan-agent deployments exec DEPLOYMENT_ID -- command args...` - Execute command in container
 
 ### Version Control
 - `bitswan-agent vcs status` - Show working tree status
@@ -39,7 +40,7 @@ Do NOT use `git push` — the human developer merges from the editor.
 
 1. Check your requirements: `bitswan-agent requirements list`
 2. Work on only a single requirement at a time.
-3. If a live-dev is running, check it: `bitswan-agent logs DEPLOYMENT_ID`
+3. If a live-dev is running, check it: `bitswan-agent deployments logs DEPLOYMENT_ID`
 4. Test changes by executing commands in the live-dev container
 5. Update requirement statuses as you verify them:
    `bitswan-agent requirements update --id REQ-ID --status pass`
