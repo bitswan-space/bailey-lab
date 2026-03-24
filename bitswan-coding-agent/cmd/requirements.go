@@ -159,7 +159,7 @@ func tomlQuote(s string) string {
 	return strconv.Quote(s)
 }
 
-func nextReqID(reqs []Requirement) string {
+func nextReqID(reqs []Requirement, prefix string) string {
 	maxNum := 0
 	re := regexp.MustCompile(`\d+$`)
 	for _, r := range reqs {
@@ -171,7 +171,7 @@ func nextReqID(reqs []Requirement) string {
 			}
 		}
 	}
-	return fmt.Sprintf("REQ-%03d", maxNum+1)
+	return fmt.Sprintf("%s%03d", prefix, maxNum+1)
 }
 
 // --- Tree helpers ---
@@ -274,10 +274,18 @@ var reqAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		status := reqAddStatus
+		if status == "" {
+			status = "pending"
+		}
+		prefix := "REQ-"
+		if status == "proposed" {
+			prefix = "AI-"
+		}
 		newReq := Requirement{
-			ID:          nextReqID(reqs),
+			ID:          nextReqID(reqs, prefix),
 			Description: reqText,
-			Status:      "pending",
+			Status:      status,
 			Parent:      reqParent,
 		}
 		reqs = append(reqs, newReq)
@@ -312,8 +320,8 @@ var reqUpdateCmd = &cobra.Command{
 		for i := range reqs {
 			if reqs[i].ID == reqID {
 				if reqStatus != "" {
-					if reqStatus != "pass" && reqStatus != "fail" && reqStatus != "pending" && reqStatus != "retest" {
-						return fmt.Errorf("--status must be one of: pass, fail, pending, retest")
+					if reqStatus != "pass" && reqStatus != "fail" && reqStatus != "pending" && reqStatus != "retest" && reqStatus != "proposed" {
+						return fmt.Errorf("--status must be one of: pass, fail, pending, retest, proposed")
 					}
 					reqs[i].Status = reqStatus
 				}
@@ -414,9 +422,10 @@ var reqOutputJSONCmd = &cobra.Command{
 var (
 	reqBPFlag string
 	reqText   string
-	reqStatus string
-	reqID     string
-	reqParent string
+	reqStatus    string
+	reqAddStatus string
+	reqID        string
+	reqParent    string
 )
 
 func init() {
@@ -432,8 +441,9 @@ func init() {
 
 	reqAddCmd.Flags().StringVar(&reqText, "text", "", "Requirement description")
 	reqAddCmd.Flags().StringVar(&reqParent, "parent", "", "Parent requirement ID (for creating sub-requirements)")
+	reqAddCmd.Flags().StringVar(&reqAddStatus, "status", "pending", "Initial status (pending|proposed)")
 	reqUpdateCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID")
-	reqUpdateCmd.Flags().StringVar(&reqStatus, "status", "", "New status (pass|fail|pending|retest)")
+	reqUpdateCmd.Flags().StringVar(&reqStatus, "status", "", "New status (pass|fail|pending|retest|proposed)")
 	reqUpdateCmd.Flags().StringVar(&reqText, "text", "", "Updated description")
 	reqRemoveCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID to remove")
 }

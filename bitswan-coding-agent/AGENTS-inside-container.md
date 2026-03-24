@@ -34,16 +34,29 @@ Do NOT use `git push` — the human developer merges from the editor.
 ## Typical Workflow
 
 1. Check your requirements: `bitswan-agent requirements list`
-2. Work on only a single requirement at a time. Get the next requirement that you should fulfill using `bitswan-agent requirements next`.
-3. Test changes using the selenium testing container.
-4. Update requirement statuses as you verify them:
+2. For any human-written requirement (REQ-xxx) that has no sub-requirements,
+   propose sub-requirements that break it down into testable pieces:
+   `bitswan-agent requirements add --text "sub-requirement" --parent REQ-001 --status proposed`
+   These get AI-xxx IDs to indicate AI origin. Do NOT propose sub-requirements
+   for AI-xxx requirements (to avoid infinite recursion).
+   The user will review your proposals and either accept them (change to pending)
+   or delete them.
+3. Work on only a single requirement at a time. Get the next non-passing
+   requirement: `bitswan-agent requirements next`
+4. Test changes using the selenium testing container.
+5. Update requirement statuses as you verify them:
    `bitswan-agent requirements update --id REQ-ID --status pass`
-   Statuses: pending, pass, fail, retest
-   If a requirement has status "retest", it means the automated test passed
-   but manual user testing found it lacking — the test case probably failed
-   to cover something. You should write a completely new, harder/different
-   test that better validates the requirement.
-5. Commit your changes when ready:
+
+   Statuses:
+   - **pending** — needs work
+   - **pass** — automated test passes
+   - **fail** — automated test fails
+   - **retest** — automated test passed but manual user testing found it
+     lacking. The test case probably failed to cover something. Write a
+     completely new, harder/different test.
+   - **proposed** — AI-suggested requirement awaiting human review
+
+6. Commit your changes when ready:
    `bitswan-agent vcs commit -m "implement feature X"`
 
 ## Directory Structure
