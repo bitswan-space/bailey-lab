@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var execCmd = &cobra.Command{
+var deploymentsExecCmd = &cobra.Command{
 	Use:   "exec DEPLOYMENT_ID -- command [args...]",
 	Short: "Execute a command in a live-dev container",
 	Long:  "Run a command inside a worktree-specific live-dev deployment container.",
@@ -17,7 +17,6 @@ var execCmd = &cobra.Command{
 
 		// Find the -- separator
 		commandArgs := args[1:]
-		// If the first arg after deployment ID is "--", skip it
 		if len(commandArgs) > 0 && commandArgs[0] == "--" {
 			commandArgs = commandArgs[1:]
 		}

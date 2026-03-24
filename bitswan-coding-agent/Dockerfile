@@ -16,7 +16,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 # System packages
 RUN apt-get update && apt-get install -y \
     openssh-server \
-    git \
     curl \
     wget \
     python3 \
@@ -25,8 +24,6 @@ RUN apt-get update && apt-get install -y \
     jq \
     tmux \
     vim \
-    build-essential \
-    ca-certificates \
     gnupg \
     && mkdir -p /run/sshd \
     && rm -rf /var/lib/apt/lists/*

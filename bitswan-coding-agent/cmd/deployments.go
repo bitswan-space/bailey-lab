@@ -82,4 +82,5 @@ func init() {
 	deploymentsStartCmd.Flags().StringVar(&worktreeFlag, "worktree", "", "Worktree name (auto-detected from $PWD if omitted)")
 	deploymentsCmd.AddCommand(deploymentsListCmd)
 	deploymentsCmd.AddCommand(deploymentsStartCmd)
+	deploymentsCmd.AddCommand(deploymentsExecCmd)
 }
