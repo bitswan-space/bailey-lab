@@ -65,9 +65,7 @@ RUN mkdir -p /workspace/worktrees /var/log/agent-sessions \
 COPY agent-session-wrapper /usr/local/bin/agent-session-wrapper
 RUN chmod +x /usr/local/bin/agent-session-wrapper
 
-# Copy CLAUDE.md template
-COPY agent-instructions.md /etc/bitswan/CLAUDE.md
-COPY agent-instructions.md /etc/bitswan/AGENTS.md
+COPY AGENTS-inside-container.md /AGENTS.md
 
 # Copy entrypoint
 COPY entrypoint-agent.sh /usr/local/bin/entrypoint-agent.sh

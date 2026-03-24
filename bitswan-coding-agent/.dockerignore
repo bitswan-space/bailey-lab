@@ -1,5 +1,3 @@
 .git
 .github
 bitswan-agent
-*.md
-!CLAUDE.md
