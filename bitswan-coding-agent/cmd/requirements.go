@@ -37,18 +37,19 @@ func detectBusinessProcess(flag string) (string, error) {
 	dir := cwd
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "process.toml")); err == nil {
-			for _, base := range []string{"/workspace/workspace", "/workspace/worktrees"} {
-				if strings.HasPrefix(dir, base) {
-					rel, err := filepath.Rel(base, dir)
-					if err == nil {
-						if base == "/workspace/worktrees" {
-							parts := strings.SplitN(rel, "/", 2)
-							if len(parts) == 2 {
-								return parts[1], nil
-							}
-						}
-						return rel, nil
-					}
+			// For worktrees: return worktrees/{name}/{bp} so the gitops service
+			// reads from the worktree's copy, not the main workspace
+			if strings.HasPrefix(dir, "/workspace/worktrees/") {
+				rel, err := filepath.Rel("/workspace", dir)
+				if err == nil {
+					return rel, nil
+				}
+			}
+			// For main workspace
+			if strings.HasPrefix(dir, "/workspace/workspace") {
+				rel, err := filepath.Rel("/workspace/workspace", dir)
+				if err == nil {
+					return rel, nil
 				}
 			}
 			return filepath.Base(dir), nil
