@@ -134,21 +134,102 @@ The author email is taken from the SSH_USER_EMAIL environment variable.`,
 	},
 }
 
+type rebaseResult struct {
+	Status          string   `json:"status"`
+	Detail          string   `json:"detail"`
+	Message         string   `json:"message"`
+	MergedInto      string   `json:"merged_into"`
+	Tip             string   `json:"tip"`
+	StashConflict   bool     `json:"stash_conflict"`
+	StashMessage    string   `json:"stash_message"`
+	ConflictedFiles []string `json:"conflicted_files"`
+	RebaseOutput    string   `json:"rebase_output"`
+}
+
+func printRebaseResult(r rebaseResult) {
+	if r.Status == "conflicts" {
+		fmt.Println("Rebase paused — conflicts in:")
+		for _, f := range r.ConflictedFiles {
+			fmt.Printf("  - %s\n", f)
+		}
+		fmt.Println("\nResolve these files, then run: bitswan-agent vcs rebase-continue")
+		fmt.Println("Or abort with: bitswan-agent vcs rebase-abort")
+	} else if r.Status == "success" {
+		fmt.Printf("Merged into %s (tip: %s)\n", r.MergedInto, r.Tip)
+		if r.StashConflict {
+			fmt.Fprintf(os.Stderr, "\nWarning: stash pop had conflicts. Previously uncommitted changes are still stashed.\n%s\n", r.StashMessage)
+		}
+	}
+}
+
 var vcsRebaseMergeCmd = &cobra.Command{
 	Use:   "rebase-and-merge",
 	Short: "Rebase onto default branch, then fast-forward merge",
 	Long: `Rebases this worktree's branch onto the workspace's current branch,
 then fast-forwards the workspace branch to include the worktree's commits.
 
-If the workspace has uncommitted changes, they are stashed before the
-operation and popped afterward. If the stash pop fails (conflicts with
-the merged changes), the command reports the conflict and leaves the
-stash for manual resolution.
+If conflicts occur, the rebase pauses and shows the conflicted files.
+Resolve them (edit the files to remove conflict markers), then run:
+  bitswan-agent vcs rebase-continue
 
-Exit codes:
-  0  Success
-  1  Rebase conflict (rebase was aborted, nothing changed)
-  2  Stash pop conflict (merge succeeded but stash couldn't be reapplied)`,
+To abort the rebase entirely:
+  bitswan-agent vcs rebase-abort
+
+If the workspace has uncommitted changes, they are stashed and restored after.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		worktree, err := detectWorktree()
+		if err != nil {
+			return err
+		}
+
+		var result rebaseResult
+		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/rebase-and-merge", worktree), nil, &result)
+		if err != nil {
+			return fmt.Errorf("rebase-and-merge failed: %w", err)
+		}
+
+		printRebaseResult(result)
+		if result.Status == "conflicts" {
+			os.Exit(1)
+		}
+		if result.StashConflict {
+			os.Exit(2)
+		}
+		return nil
+	},
+}
+
+var vcsRebaseContinueCmd = &cobra.Command{
+	Use:   "rebase-continue",
+	Short: "Continue rebase after resolving conflicts",
+	Long:  "Stages all resolved files and continues the rebase. If more conflicts arise, reports them.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		worktree, err := detectWorktree()
+		if err != nil {
+			return err
+		}
+
+		var result rebaseResult
+		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/rebase-continue", worktree), nil, &result)
+		if err != nil {
+			return fmt.Errorf("rebase-continue failed: %w", err)
+		}
+
+		printRebaseResult(result)
+		if result.Status == "conflicts" {
+			os.Exit(1)
+		}
+		if result.StashConflict {
+			os.Exit(2)
+		}
+		return nil
+	},
+}
+
+var vcsRebaseAbortCmd = &cobra.Command{
+	Use:   "rebase-abort",
+	Short: "Abort an in-progress rebase",
+	Long:  "Aborts the rebase and restores the stash if one was created.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		worktree, err := detectWorktree()
 		if err != nil {
@@ -156,29 +237,15 @@ Exit codes:
 		}
 
 		var result struct {
-			Status        string `json:"status"`
-			Detail        string `json:"detail"`
-			MergedInto    string `json:"merged_into"`
-			Tip           string `json:"tip"`
-			StashConflict bool   `json:"stash_conflict"`
-			StashMessage  string `json:"stash_message"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
 		}
-		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/rebase-and-merge", worktree), nil, &result)
+		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/rebase-abort", worktree), nil, &result)
 		if err != nil {
-			if strings.Contains(err.Error(), "Rebase failed") {
-				fmt.Fprintf(os.Stderr, "Rebase conflict:\n%s\n", err.Error())
-				os.Exit(1)
-			}
-			return fmt.Errorf("rebase-and-merge failed: %w", err)
+			return fmt.Errorf("rebase-abort failed: %w", err)
 		}
 
-		fmt.Printf("Merged into %s (tip: %s)\n", result.MergedInto, result.Tip)
-
-		if result.StashConflict {
-			fmt.Fprintf(os.Stderr, "\nWarning: stash pop had conflicts. Your previously uncommitted changes are still stashed.\n%s\n", result.StashMessage)
-			os.Exit(2)
-		}
-
+		fmt.Println(result.Message)
 		return nil
 	},
 }
@@ -191,4 +258,6 @@ func init() {
 	vcsCmd.AddCommand(vcsDiffCmd)
 	vcsCmd.AddCommand(vcsCommitCmd)
 	vcsCmd.AddCommand(vcsRebaseMergeCmd)
+	vcsCmd.AddCommand(vcsRebaseContinueCmd)
+	vcsCmd.AddCommand(vcsRebaseAbortCmd)
 }

@@ -22,6 +22,8 @@ Use these to manage the live-dev deployments for your worktree:
 - `bitswan-agent vcs help` - More commands
 - `bitswan-agent vcs commit -m "description of changes"` - Stage all changes and commit
 - `bitswan-agent vcs rebase-and-merge` - Rebase onto default branch and fast-forward merge
+- `bitswan-agent vcs rebase-continue` - Continue rebase after resolving conflicts
+- `bitswan-agent vcs rebase-abort` - Abort an in-progress rebase
 
 Commit automatically stages all changes (git add -A). Before committing:
 - Add files you don't want committed to `.gitignore`
@@ -63,6 +65,24 @@ Each automation directory contains:
    bitswan-agent deployments exec TESTING_DEPLOYMENT_ID -- pytest /app/tests/ -v
    ```
 
+
+## Merging Your Work
+
+When you're done with your worktree and want to merge into the main branch:
+
+1. Commit all your changes: `bitswan-agent vcs commit -m "final changes"`
+2. Start the rebase-and-merge: `bitswan-agent vcs rebase-and-merge`
+3. If there are **no conflicts**, the merge completes automatically.
+4. If there are **conflicts**, the command lists the conflicted files.
+   - Open each conflicted file and resolve the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
+   - After resolving ALL conflicts: `bitswan-agent vcs rebase-continue`
+   - If more conflicts arise on subsequent commits, repeat
+   - To give up: `bitswan-agent vcs rebase-abort` (reverts everything)
+
+Exit codes for rebase commands:
+- `0` = success (merge complete)
+- `1` = conflicts (resolve and continue)
+- `2` = merge succeeded but workspace stash couldn't be reapplied
 
 ## Tips
 
