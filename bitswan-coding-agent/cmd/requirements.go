@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
@@ -15,7 +14,7 @@ type Requirement struct {
 	ID          string `json:"id"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
-	Notes       string `json:"notes"`
+	Parent      string `json:"parent"`
 }
 
 var requirementsCmd = &cobra.Command{
@@ -35,17 +34,13 @@ func detectBusinessProcess(flag string) (string, error) {
 		return "", fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	// Walk up from cwd looking for process.toml, stopping at /workspace
 	dir := cwd
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "process.toml")); err == nil {
-			// Found it — return relative path from the workspace root
-			// The workspace root is typically /workspace/worktrees/<name> or /workspace/workspace
 			for _, base := range []string{"/workspace/workspace", "/workspace/worktrees"} {
 				if strings.HasPrefix(dir, base) {
 					rel, err := filepath.Rel(base, dir)
 					if err == nil {
-						// For worktrees, strip the worktree name prefix
 						if base == "/workspace/worktrees" {
 							parts := strings.SplitN(rel, "/", 2)
 							if len(parts) == 2 {
@@ -56,7 +51,6 @@ func detectBusinessProcess(flag string) (string, error) {
 					}
 				}
 			}
-			// Fallback: just use the directory name
 			return filepath.Base(dir), nil
 		}
 
@@ -70,9 +64,44 @@ func detectBusinessProcess(flag string) (string, error) {
 	return "", fmt.Errorf("no business process found (no process.toml in current directory or parents)")
 }
 
+// buildTree organizes flat requirements into a tree structure for display
+func buildTree(reqs []Requirement) []treeNode {
+	byID := make(map[string]*treeNode)
+	for i := range reqs {
+		byID[reqs[i].ID] = &treeNode{req: reqs[i]}
+	}
+	var roots []treeNode
+	for i := range reqs {
+		node := byID[reqs[i].ID]
+		if reqs[i].Parent != "" {
+			if parent, ok := byID[reqs[i].Parent]; ok {
+				parent.children = append(parent.children, *node)
+				continue
+			}
+		}
+		roots = append(roots, *node)
+	}
+	return roots
+}
+
+type treeNode struct {
+	req      Requirement
+	children []treeNode
+}
+
+func printTree(nodes []treeNode, indent string) {
+	for _, n := range nodes {
+		status := strings.ToUpper(n.req.Status)
+		fmt.Printf("%s%s [%s] %s\n", indent, n.req.ID, status, n.req.Description)
+		if len(n.children) > 0 {
+			printTree(n.children, indent+"  ")
+		}
+	}
+}
+
 var reqListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List all requirements",
+	Short: "List all requirements as a tree",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		bp, err := detectBusinessProcess(reqBPFlag)
 		if err != nil {
@@ -80,8 +109,7 @@ var reqListCmd = &cobra.Command{
 		}
 
 		var reqs []Requirement
-		err = agentRequestJSON("GET", "/requirements/"+bp, nil, &reqs)
-		if err != nil {
+		if err := agentRequestJSON("GET", "/requirements/"+bp, nil, &reqs); err != nil {
 			return fmt.Errorf("failed to list requirements: %w", err)
 		}
 
@@ -90,14 +118,8 @@ var reqListCmd = &cobra.Command{
 			return nil
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tSTATUS\tDESCRIPTION\tNOTES")
-		fmt.Fprintln(w, "--\t------\t-----------\t-----")
-		for _, r := range reqs {
-			status := strings.ToUpper(r.Status)
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.ID, status, r.Description, r.Notes)
-		}
-		w.Flush()
+		tree := buildTree(reqs)
+		printTree(tree, "")
 		return nil
 	},
 }
@@ -116,20 +138,27 @@ var reqAddCmd = &cobra.Command{
 		}
 
 		body := map[string]string{"text": reqText}
+		if reqParent != "" {
+			body["parent"] = reqParent
+		}
+
 		var req Requirement
-		err = agentRequestJSON("POST", "/requirements-add/"+bp, body, &req)
-		if err != nil {
+		if err := agentRequestJSON("POST", "/requirements-add/"+bp, body, &req); err != nil {
 			return fmt.Errorf("failed to add requirement: %w", err)
 		}
 
-		fmt.Printf("Added requirement %s: %s\n", req.ID, req.Description)
+		if req.Parent != "" {
+			fmt.Printf("Added %s (child of %s): %s\n", req.ID, req.Parent, req.Description)
+		} else {
+			fmt.Printf("Added %s: %s\n", req.ID, req.Description)
+		}
 		return nil
 	},
 }
 
 var reqUpdateCmd = &cobra.Command{
 	Use:   "update",
-	Short: "Update a requirement's status",
+	Short: "Update a requirement's status or description",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		bp, err := detectBusinessProcess(reqBPFlag)
 		if err != nil {
@@ -150,17 +179,13 @@ var reqUpdateCmd = &cobra.Command{
 		if reqText != "" {
 			body["text"] = reqText
 		}
-		if reqNotes != "" {
-			body["notes"] = reqNotes
-		}
 
 		var req Requirement
-		err = agentRequestJSON("PUT", "/requirements-update/"+bp+"/"+reqID, body, &req)
-		if err != nil {
+		if err := agentRequestJSON("PUT", "/requirements-update/"+bp+"/"+reqID, body, &req); err != nil {
 			return fmt.Errorf("failed to update requirement: %w", err)
 		}
 
-		fmt.Printf("Updated requirement %s (status: %s)\n", req.ID, req.Status)
+		fmt.Printf("Updated %s (status: %s)\n", req.ID, req.Status)
 		return nil
 	},
 }
@@ -178,12 +203,44 @@ var reqRemoveCmd = &cobra.Command{
 			return fmt.Errorf("--id is required")
 		}
 
-		err = agentRequestJSON("DELETE", "/requirements-delete/"+bp+"/"+reqID, nil, nil)
-		if err != nil {
+		if err := agentRequestJSON("DELETE", "/requirements-delete/"+bp+"/"+reqID, nil, nil); err != nil {
 			return fmt.Errorf("failed to remove requirement: %w", err)
 		}
 
-		fmt.Printf("Removed requirement %s\n", reqID)
+		fmt.Printf("Removed %s\n", reqID)
+		return nil
+	},
+}
+
+var reqNextCmd = &cobra.Command{
+	Use:   "next",
+	Short: "Get the next non-passing requirement",
+	Long:  "Returns the first requirement in tree order that doesn't have status 'pass'.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		bp, err := detectBusinessProcess(reqBPFlag)
+		if err != nil {
+			return err
+		}
+
+		var result struct {
+			Status      string      `json:"status"`
+			Message     string      `json:"message"`
+			Requirement Requirement `json:"requirement"`
+		}
+		if err := agentRequestJSON("GET", "/requirements-next/"+bp, nil, &result); err != nil {
+			return fmt.Errorf("failed to get next requirement: %w", err)
+		}
+
+		if result.Status == "all_passing" {
+			fmt.Println("All requirements passing!")
+			return nil
+		}
+
+		r := result.Requirement
+		fmt.Printf("%s [%s]: %s\n", r.ID, strings.ToUpper(r.Status), r.Description)
+		if r.Parent != "" {
+			fmt.Printf("  Parent: %s\n", r.Parent)
+		}
 		return nil
 	},
 }
@@ -198,8 +255,7 @@ var reqOutputJSONCmd = &cobra.Command{
 		}
 
 		var reqs []Requirement
-		err = agentRequestJSON("GET", "/requirements/"+bp, nil, &reqs)
-		if err != nil {
+		if err := agentRequestJSON("GET", "/requirements/"+bp, nil, &reqs); err != nil {
 			return fmt.Errorf("failed to list requirements: %w", err)
 		}
 
@@ -217,7 +273,7 @@ var (
 	reqText   string
 	reqStatus string
 	reqID     string
-	reqNotes  string
+	reqParent string
 )
 
 func init() {
@@ -228,12 +284,13 @@ func init() {
 	requirementsCmd.AddCommand(reqAddCmd)
 	requirementsCmd.AddCommand(reqUpdateCmd)
 	requirementsCmd.AddCommand(reqRemoveCmd)
+	requirementsCmd.AddCommand(reqNextCmd)
 	requirementsCmd.AddCommand(reqOutputJSONCmd)
 
 	reqAddCmd.Flags().StringVar(&reqText, "text", "", "Requirement description")
+	reqAddCmd.Flags().StringVar(&reqParent, "parent", "", "Parent requirement ID (for creating sub-requirements)")
 	reqUpdateCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID")
 	reqUpdateCmd.Flags().StringVar(&reqStatus, "status", "", "New status (pass|fail|pending)")
 	reqUpdateCmd.Flags().StringVar(&reqText, "text", "", "Updated description")
-	reqUpdateCmd.Flags().StringVar(&reqNotes, "notes", "", "Notes")
 	reqRemoveCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID to remove")
 }
