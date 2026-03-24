@@ -134,6 +134,55 @@ The author email is taken from the SSH_USER_EMAIL environment variable.`,
 	},
 }
 
+var vcsRebaseMergeCmd = &cobra.Command{
+	Use:   "rebase-and-merge",
+	Short: "Rebase onto default branch, then fast-forward merge",
+	Long: `Rebases this worktree's branch onto the workspace's current branch,
+then fast-forwards the workspace branch to include the worktree's commits.
+
+If the workspace has uncommitted changes, they are stashed before the
+operation and popped afterward. If the stash pop fails (conflicts with
+the merged changes), the command reports the conflict and leaves the
+stash for manual resolution.
+
+Exit codes:
+  0  Success
+  1  Rebase conflict (rebase was aborted, nothing changed)
+  2  Stash pop conflict (merge succeeded but stash couldn't be reapplied)`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		worktree, err := detectWorktree()
+		if err != nil {
+			return err
+		}
+
+		var result struct {
+			Status        string `json:"status"`
+			Detail        string `json:"detail"`
+			MergedInto    string `json:"merged_into"`
+			Tip           string `json:"tip"`
+			StashConflict bool   `json:"stash_conflict"`
+			StashMessage  string `json:"stash_message"`
+		}
+		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/rebase-and-merge", worktree), nil, &result)
+		if err != nil {
+			if strings.Contains(err.Error(), "Rebase failed") {
+				fmt.Fprintf(os.Stderr, "Rebase conflict:\n%s\n", err.Error())
+				os.Exit(1)
+			}
+			return fmt.Errorf("rebase-and-merge failed: %w", err)
+		}
+
+		fmt.Printf("Merged into %s (tip: %s)\n", result.MergedInto, result.Tip)
+
+		if result.StashConflict {
+			fmt.Fprintf(os.Stderr, "\nWarning: stash pop had conflicts. Your previously uncommitted changes are still stashed.\n%s\n", result.StashMessage)
+			os.Exit(2)
+		}
+
+		return nil
+	},
+}
+
 func init() {
 	vcsCommitCmd.Flags().StringVarP(&vcsCommitMessage, "message", "m", "", "Commit message (required)")
 	vcsLogCmd.Flags().IntVarP(&logCount, "count", "n", 20, "Number of commits to show")
@@ -141,4 +190,5 @@ func init() {
 	vcsCmd.AddCommand(vcsLogCmd)
 	vcsCmd.AddCommand(vcsDiffCmd)
 	vcsCmd.AddCommand(vcsCommitCmd)
+	vcsCmd.AddCommand(vcsRebaseMergeCmd)
 }

@@ -21,6 +21,7 @@ Use these to manage the live-dev deployments for your worktree:
 - `bitswan-agent vcs status` - Show working tree status
 - `bitswan-agent vcs help` - More commands
 - `bitswan-agent vcs commit -m "description of changes"` - Stage all changes and commit
+- `bitswan-agent vcs rebase-and-merge` - Rebase onto default branch and fast-forward merge
 
 Commit automatically stages all changes (git add -A). Before committing:
 - Add files you don't want committed to `.gitignore`
