@@ -9,25 +9,17 @@ development branch.
 ### Requirements Management
 Use these to track testable requirements assigned by the developer:
 - `bitswan-agent requirements list` - View all testable requirements
-- `bitswan-agent requirements add --text "description"` - Add a new requirement
-- `bitswan-agent requirements update --id REQ-ID --status pass|fail|pending` - Update status
-- `bitswan-agent requirements remove --id REQ-ID` - Remove a requirement
+- `bitswan-agent requirements help` - Get help
 
 ### Deployments
 Use these to manage the live-dev deployments for your worktree:
 - `bitswan-agent deployments list` - List all deployments (running and not started) with their public URLs
-- `bitswan-agent deployments start DEPLOYMENT_ID` - Start a live-dev deployment
-- `bitswan-agent deployments restart DEPLOYMENT_ID` - Restart a deployment
-- `bitswan-agent deployments build-and-restart DEPLOYMENT_ID` - Rebuild image and restart
-- `bitswan-agent deployments logs DEPLOYMENT_ID` - View deployment logs
-- `bitswan-agent deployments logs DEPLOYMENT_ID --follow` - Stream logs in real-time
+- `bitswan-agent deployments help` - Find more commands
 - `bitswan-agent deployments exec DEPLOYMENT_ID -- command args...` - Execute command in container
 
 ### Version Control
 - `bitswan-agent vcs status` - Show working tree status
-- `bitswan-agent vcs log` - Show recent commit history
-- `bitswan-agent vcs diff` - Show uncommitted changes
-- `bitswan-agent vcs diff path/to/file` - Show changes for a specific file
+- `bitswan-agent vcs help` - More commands
 - `bitswan-agent vcs commit -m "description of changes"` - Stage all changes and commit
 
 Commit automatically stages all changes (git add -A). Before committing:
@@ -39,69 +31,37 @@ Do NOT use `git push` — the human developer merges from the editor.
 ## Typical Workflow
 
 1. Check your requirements: `bitswan-agent requirements list`
-2. Work on only a single requirement at a time.
-3. If a live-dev is running, check it: `bitswan-agent deployments logs DEPLOYMENT_ID`
-4. Test changes by executing commands in the live-dev container
-5. Update requirement statuses as you verify them:
+2. Work on only a single requirement at a time. Get the next requirement that you should fulfill using `bitswan-agent requirements next`.
+3. Test changes using the selenium testing container.
+4. Update requirement statuses as you verify them:
    `bitswan-agent requirements update --id REQ-ID --status pass`
-6. Commit your changes when ready:
+5. Commit your changes when ready:
    `bitswan-agent vcs commit -m "implement feature X"`
 
 ## Directory Structure
 
-Each automation is a directory containing:
+Each automation directory contains:
 - `automation.toml` — Configuration (image, port, expose settings)
 - `image/` — Custom Dockerfile for the automation
 
 
-## Important Constraints
-
-- You are on a feature branch in a git worktree — your commits are isolated
-- You do NOT have access to the `.git` directory or the main branch
 - Live-dev deployments auto-reload when source files change
 
 ## Writing Selenium Tests
 
-To write end-to-end browser tests against your deployed services:
-
-1. Create a testing automation with `external-testing-network = true` in its `automation.toml`:
-   ```toml
-   [deployment]
-   expose = false
-   external-testing-network = true
-   ```
-   This puts the container on an isolated network with outbound internet access,
-   so it can reach public URLs like a real external client.
-
-2. Get the public URLs of the services you want to test:
+1. Get the public URLs of the services you want to test:
    ```
    bitswan-agent deployments list
    ```
    The URL column shows the public URL for each deployment.
 
-3. Write pytest tests using Selenium with headless Chrome:
-   ```python
-   from selenium import webdriver
-   from selenium.webdriver.chrome.options import Options
+2. Write the tests in the testing dir.
 
-   opts = Options()
-   opts.add_argument("--headless=new")
-   opts.add_argument("--no-sandbox")
-   driver = webdriver.Chrome(options=opts)
-   driver.get("https://your-deployment-url.example.com")
-   assert "Expected Title" in driver.title
-   driver.quit()
-   ```
-
-4. Run tests inside the testing container:
+3. Run tests inside the testing container:
    ```
    bitswan-agent deployments exec TESTING_DEPLOYMENT_ID -- pytest /app/tests/ -v
    ```
 
-5. Pass the target URL as an environment variable:
-   ```
-   bitswan-agent deployments exec TESTING_DEPLOYMENT_ID -- env TARGET_URL=https://... pytest /app/tests/
-   ```
 
 ## Tips
 
