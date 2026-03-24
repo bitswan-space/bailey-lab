@@ -12,6 +12,7 @@ type deployment struct {
 	DeploymentID   string `json:"deployment_id"`
 	State          string `json:"state"`
 	AutomationName string `json:"automation_name"`
+	URL            string `json:"url"`
 }
 
 var deploymentsCmd = &cobra.Command{
@@ -40,9 +41,9 @@ var deploymentsListCmd = &cobra.Command{
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "DEPLOYMENT_ID\tSTATUS\tAUTOMATION")
+		fmt.Fprintln(w, "DEPLOYMENT_ID\tSTATUS\tAUTOMATION\tURL")
 		for _, d := range result {
-			fmt.Fprintf(w, "%s\t%s\t%s\n", d.DeploymentID, d.State, d.AutomationName)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", d.DeploymentID, d.State, d.AutomationName, d.URL)
 		}
 		w.Flush()
 

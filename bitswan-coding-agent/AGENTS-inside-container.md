@@ -15,10 +15,12 @@ Use these to track testable requirements assigned by the developer:
 
 ### Deployment
 Use these to manage the live-dev deployment for your worktree:
+- `bitswan-agent deployments list` - List all deployments (running and not started) with their public URLs
+- `bitswan-agent deployments start DEPLOYMENT_ID` - Start a live-dev deployment
+- `bitswan-agent deployments exec DEPLOYMENT_ID -- command args...` - Execute command in live-dev container
 - `bitswan-agent restart DEPLOYMENT_ID` - Restart a live-dev deployment
 - `bitswan-agent build-and-restart DEPLOYMENT_ID` - Rebuild image and restart
 - `bitswan-agent logs DEPLOYMENT_ID` - View deployment logs
-- `bitswan-agent exec DEPLOYMENT_ID -- command args...` - Execute command in live-dev container
 
 ### Version Control
 - `bitswan-agent vcs status` - Show working tree status
@@ -56,6 +58,49 @@ Each automation is a directory containing:
 - You are on a feature branch in a git worktree — your commits are isolated
 - You do NOT have access to the `.git` directory or the main branch
 - Live-dev deployments auto-reload when source files change
+
+## Writing Selenium Tests
+
+To write end-to-end browser tests against your deployed services:
+
+1. Create a testing automation with `external-testing-network = true` in its `automation.toml`:
+   ```toml
+   [deployment]
+   expose = false
+   external-testing-network = true
+   ```
+   This puts the container on an isolated network with outbound internet access,
+   so it can reach public URLs like a real external client.
+
+2. Get the public URLs of the services you want to test:
+   ```
+   bitswan-agent deployments list
+   ```
+   The URL column shows the public URL for each deployment.
+
+3. Write pytest tests using Selenium with headless Chrome:
+   ```python
+   from selenium import webdriver
+   from selenium.webdriver.chrome.options import Options
+
+   opts = Options()
+   opts.add_argument("--headless=new")
+   opts.add_argument("--no-sandbox")
+   driver = webdriver.Chrome(options=opts)
+   driver.get("https://your-deployment-url.example.com")
+   assert "Expected Title" in driver.title
+   driver.quit()
+   ```
+
+4. Run tests inside the testing container:
+   ```
+   bitswan-agent deployments exec TESTING_DEPLOYMENT_ID -- pytest /app/tests/ -v
+   ```
+
+5. Pass the target URL as an environment variable:
+   ```
+   bitswan-agent deployments exec TESTING_DEPLOYMENT_ID -- env TARGET_URL=https://... pytest /app/tests/
+   ```
 
 ## Tips
 
