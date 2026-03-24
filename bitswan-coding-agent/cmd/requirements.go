@@ -312,8 +312,8 @@ var reqUpdateCmd = &cobra.Command{
 		for i := range reqs {
 			if reqs[i].ID == reqID {
 				if reqStatus != "" {
-					if reqStatus != "pass" && reqStatus != "fail" && reqStatus != "pending" {
-						return fmt.Errorf("--status must be one of: pass, fail, pending")
+					if reqStatus != "pass" && reqStatus != "fail" && reqStatus != "pending" && reqStatus != "retest" {
+						return fmt.Errorf("--status must be one of: pass, fail, pending, retest")
 					}
 					reqs[i].Status = reqStatus
 				}
@@ -433,7 +433,7 @@ func init() {
 	reqAddCmd.Flags().StringVar(&reqText, "text", "", "Requirement description")
 	reqAddCmd.Flags().StringVar(&reqParent, "parent", "", "Parent requirement ID (for creating sub-requirements)")
 	reqUpdateCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID")
-	reqUpdateCmd.Flags().StringVar(&reqStatus, "status", "", "New status (pass|fail|pending)")
+	reqUpdateCmd.Flags().StringVar(&reqStatus, "status", "", "New status (pass|fail|pending|retest)")
 	reqUpdateCmd.Flags().StringVar(&reqText, "text", "", "Updated description")
 	reqRemoveCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID to remove")
 }

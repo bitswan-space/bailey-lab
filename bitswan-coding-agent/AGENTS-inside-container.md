@@ -38,6 +38,11 @@ Do NOT use `git push` — the human developer merges from the editor.
 3. Test changes using the selenium testing container.
 4. Update requirement statuses as you verify them:
    `bitswan-agent requirements update --id REQ-ID --status pass`
+   Statuses: pending, pass, fail, retest
+   If a requirement has status "retest", it means the automated test passed
+   but manual user testing found it lacking — the test case probably failed
+   to cover something. You should write a completely new, harder/different
+   test that better validates the requirement.
 5. Commit your changes when ready:
    `bitswan-agent vcs commit -m "implement feature X"`
 
@@ -68,7 +73,7 @@ Each automation directory contains:
 
 ## Merging Your Work
 
-When you're done with your worktree and want to merge into the main branch:
+If and only if the user explicitly asks you to merge:
 
 1. Commit all your changes: `bitswan-agent vcs commit -m "final changes"`
 2. Start the rebase-and-merge: `bitswan-agent vcs rebase-and-merge`
