@@ -26,6 +26,6 @@ func init() {
 	rootCmd.AddCommand(restartCmd)
 	rootCmd.AddCommand(buildAndRestartCmd)
 	rootCmd.AddCommand(execCmd)
-	rootCmd.AddCommand(commitCmd)
+	rootCmd.AddCommand(vcsCmd)
 	rootCmd.AddCommand(deploymentsCmd)
 }

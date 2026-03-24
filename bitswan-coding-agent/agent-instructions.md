@@ -20,10 +20,18 @@ Use these to manage the live-dev deployment for your worktree:
 - `bitswan-agent logs DEPLOYMENT_ID` - View deployment logs
 - `bitswan-agent exec DEPLOYMENT_ID -- command args...` - Execute command in live-dev container
 
-### Git
-- `bitswan-agent commit --message "description of changes"` - Commit current changes
-- You can use standard `git` commands for status, diff, log within this worktree
-- Do NOT use `git push` — the human developer merges from the editor
+### Version Control
+- `bitswan-agent vcs status` - Show working tree status
+- `bitswan-agent vcs log` - Show recent commit history
+- `bitswan-agent vcs diff` - Show uncommitted changes
+- `bitswan-agent vcs diff path/to/file` - Show changes for a specific file
+- `bitswan-agent vcs commit -m "description of changes"` - Stage all changes and commit
+
+Commit automatically stages all changes (git add -A). Before committing:
+- Add files you don't want committed to `.gitignore`
+- Delete any temporary or generated files you don't need
+
+Do NOT use `git push` — the human developer merges from the editor.
 
 ## Typical Workflow
 
@@ -34,7 +42,7 @@ Use these to manage the live-dev deployment for your worktree:
 5. Update requirement statuses as you verify them:
    `bitswan-agent requirements update --id REQ-ID --status pass`
 6. Commit your changes when ready:
-   `bitswan-agent commit --message "implement feature X"`
+   `bitswan-agent vcs commit -m "implement feature X"`
 
 ## Directory Structure
 
