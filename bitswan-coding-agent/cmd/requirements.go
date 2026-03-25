@@ -210,30 +210,41 @@ func printTree(nodes []treeNode, indent string) {
 	}
 }
 
-// dfsNextNonPassing returns the first non-passing requirement in DFS order.
-func dfsNextNonPassing(reqs []Requirement) *Requirement {
+// dfsNextNonPassing returns the deepest non-passing requirement (children before
+// parents) along with the full path from root. This ensures leaf requirements
+// are fulfilled before their parents.
+func dfsNextNonPassing(reqs []Requirement) (*Requirement, []Requirement) {
 	byID := make(map[string]*Requirement)
 	children := map[string][]string{"": {}}
 	for i := range reqs {
 		r := &reqs[i]
 		byID[r.ID] = r
-		parent := r.Parent
-		children[parent] = append(children[parent], r.ID)
+		children[r.Parent] = append(children[r.Parent], r.ID)
 	}
-	var dfs func(string) *Requirement
-	dfs = func(parentID string) *Requirement {
+
+	// Returns (deepest non-passing requirement, path from root to it)
+	var dfs func(string, []Requirement) (*Requirement, []Requirement)
+	dfs = func(parentID string, path []Requirement) (*Requirement, []Requirement) {
 		for _, id := range children[parentID] {
 			r := byID[id]
-			if r.Status != "pass" {
-				return r
+			currentPath := append(append([]Requirement{}, path...), *r)
+
+			// Always recurse into children first (deepest leaf wins)
+			if kids, ok := children[id]; ok && len(kids) > 0 {
+				if found, foundPath := dfs(id, currentPath); found != nil {
+					return found, foundPath
+				}
 			}
-			if child := dfs(id); child != nil {
-				return child
+
+			// No non-passing children — check this node itself
+			if r.Status != "pass" {
+				return r, currentPath
 			}
 		}
-		return nil
+		return nil, nil
 	}
-	return dfs("")
+
+	return dfs("", nil)
 }
 
 // --- Commands ---
@@ -385,15 +396,24 @@ var reqNextCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		r := dfsNextNonPassing(reqs)
+		r, path := dfsNextNonPassing(reqs)
 		if r == nil {
 			fmt.Println("All requirements passing!")
 			return nil
 		}
-		fmt.Printf("%s [%s]: %s\n", r.ID, strings.ToUpper(r.Status), r.Description)
-		if r.Parent != "" {
-			fmt.Printf("  Parent: %s\n", r.Parent)
+
+		// Show the path from root to the target requirement
+		if len(path) > 1 {
+			fmt.Println("Path:")
+			for i, ancestor := range path[:len(path)-1] {
+				indent := strings.Repeat("  ", i)
+				fmt.Printf("%s%s: %s\n", indent, ancestor.ID, ancestor.Description)
+			}
+			fmt.Println()
 		}
+
+		fmt.Printf("Next: %s [%s]\n", r.ID, strings.ToUpper(r.Status))
+		fmt.Printf("  %s\n", r.Description)
 		return nil
 	},
 }
