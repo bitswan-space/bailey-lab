@@ -87,5 +87,6 @@ func init() {
 	deploymentsCmd.AddCommand(deploymentsLogsCmd)
 	deploymentsCmd.AddCommand(deploymentsRestartCmd)
 	deploymentsCmd.AddCommand(deploymentsBuildAndRestartCmd)
+	deploymentsCmd.AddCommand(deploymentsInspectCmd)
 	deploymentsCmd.AddCommand(deploymentsInspectEnvCmd)
 }
