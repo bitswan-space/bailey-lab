@@ -104,7 +104,16 @@ Exit codes for rebase commands:
 
 ## Secrets
 
-If you need a secret try listing the env vars with `
+If you need a secret try listing the env vars with `bitswan-coding-agent deployments inspect-env <deployment-id>`. If you can't find it, ask the user to add the secret in the secrets manager and then redeploy the container. Secret groups are specified in automation.toml using a syntax like:
+
+```
+[secrets]
+dev=["list","of","groups"]
+staging=["list","of","groups"]
+production=["list","of","groups"]
+```
+
+Secret groups are configured by the user, you must ask them for help.
 
 ## Tips
 
