@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/bitswan-space/bitswan-agent/cmd"
+	"github.com/bitswan-space/bitswan-coding-agent/cmd"
 )
 
 func main() {

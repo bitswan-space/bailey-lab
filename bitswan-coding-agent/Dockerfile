@@ -1,4 +1,4 @@
-# Stage 1: Build the bitswan-agent Go binary
+# Stage 1: Build the bitswan-coding-agent Go binary
 FROM golang:1.24-bookworm AS builder
 
 WORKDIR /src
@@ -6,7 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod tidy && go mod download
 
 COPY . .
-RUN go mod tidy && CGO_ENABLED=0 go build -ldflags="-s -w" -o /bitswan-agent .
+RUN go mod tidy && CGO_ENABLED=0 go build -ldflags="-s -w" -o /bitswan-coding-agent .
 
 # Stage 2: Runtime image
 FROM ubuntu:22.04
@@ -39,8 +39,8 @@ RUN apt-get update && apt-get install -y asciinema && rm -rf /var/lib/apt/lists/
 # Install Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
 
-# Copy bitswan-agent binary from builder
-COPY --from=builder /bitswan-agent /usr/local/bin/bitswan-agent
+# Copy bitswan-coding-agent binary from builder
+COPY --from=builder /bitswan-coding-agent /usr/local/bin/bitswan-coding-agent
 
 # Create agent user
 RUN useradd -m -s /bin/bash -u 1000 agent \

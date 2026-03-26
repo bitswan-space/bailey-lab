@@ -8,7 +8,7 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "bitswan-agent",
+	Use:   "bitswan-coding-agent",
 	Short: "BitSwan Coding Agent CLI",
 	Long:  "CLI tool for BitSwan coding agents to interact with the workspace environment.",
 }

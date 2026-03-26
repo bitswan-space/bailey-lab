@@ -1,4 +1,4 @@
-module github.com/bitswan-space/bitswan-agent
+module github.com/bitswan-space/bitswan-coding-agent
 
 go 1.24.0
 
