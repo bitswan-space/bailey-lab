@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -22,6 +23,9 @@ var deploymentsInspectEnvCmd = &cobra.Command{
 			Env          map[string]string `json:"env"`
 		}
 		if err := agentRequestJSON("GET", fmt.Sprintf("/deployments/%s/env", deploymentID), nil, &result); err != nil {
+			if strings.Contains(err.Error(), "404") {
+				return fmt.Errorf("deployment '%s' is not running. Start it first with: bitswan-coding-agent deployments start %s", deploymentID, deploymentID)
+			}
 			return fmt.Errorf("failed to get env: %w", err)
 		}
 

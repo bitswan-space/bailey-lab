@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -17,6 +18,9 @@ var deploymentsInspectCmd = &cobra.Command{
 
 		var result map[string]interface{}
 		if err := agentRequestJSON("GET", fmt.Sprintf("/deployments/%s/inspect", deploymentID), nil, &result); err != nil {
+			if strings.Contains(err.Error(), "404") {
+				return fmt.Errorf("deployment '%s' is not running. Start it first with: bitswan-coding-agent deployments start %s", deploymentID, deploymentID)
+			}
 			return fmt.Errorf("failed to inspect: %w", err)
 		}
 

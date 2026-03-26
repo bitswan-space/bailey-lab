@@ -102,6 +102,10 @@ Exit codes for rebase commands:
 - `1` = conflicts (resolve and continue)
 - `2` = merge succeeded but workspace stash couldn't be reapplied
 
+## Secrets
+
+If you need a secret try listing the env vars with `
+
 ## Tips
 
 Do not use fallbacks. If your tests are failing, it is better to improve the design or in edge cases error out than to have endless fallback logic in your code.
