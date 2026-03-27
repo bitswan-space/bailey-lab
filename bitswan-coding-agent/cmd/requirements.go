@@ -119,21 +119,35 @@ func parseRequirementsToml(content string) []Requirement {
 	return reqs
 }
 
-// extractTomlString extracts a string value for a key, handling both
-// single-line (key = "...") and multi-line (key = """...""") formats.
+// extractTomlString extracts a string value for a key, handling all TOML string types:
+// double-quoted ("..."), single-quoted ('...'), multi-line double ("""..."""),
+// and multi-line single ('''...''').
 func extractTomlString(block, key string) string {
-	// Try multi-line first: key = """..."""
-	mlPattern := regexp.MustCompile(`(?ms)^` + regexp.QuoteMeta(key) + `\s*=\s*"""(.*?)"""`)
-	if m := mlPattern.FindStringSubmatch(block); m != nil {
+	escaped := regexp.QuoteMeta(key)
+
+	// Try multi-line double-quoted: key = """..."""
+	mlDblPattern := regexp.MustCompile(`(?ms)^` + escaped + `\s*=\s*"""(.*?)"""`)
+	if m := mlDblPattern.FindStringSubmatch(block); m != nil {
 		return m[1]
 	}
-	// Single-line: key = "..."
-	slPattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `\s*=\s*"((?:[^"\\]|\\.)*)"`)
-	if m := slPattern.FindStringSubmatch(block); m != nil {
+	// Try multi-line single-quoted (literal): key = '''...'''
+	mlSglPattern := regexp.MustCompile(`(?ms)^` + escaped + `\s*=\s*'''(.*?)'''`)
+	if m := mlSglPattern.FindStringSubmatch(block); m != nil {
+		return m[1]
+	}
+	// Try single-line double-quoted: key = "..."
+	slDblPattern := regexp.MustCompile(`(?m)^` + escaped + `\s*=\s*"((?:[^"\\]|\\.)*)"`)
+	if m := slDblPattern.FindStringSubmatch(block); m != nil {
 		s := m[1]
 		s = strings.ReplaceAll(s, `\"`, `"`)
 		s = strings.ReplaceAll(s, `\\`, `\`)
 		return s
+	}
+	// Try single-line single-quoted (literal): key = '...'
+	// TOML literal strings have no escape sequences — content is verbatim
+	slSglPattern := regexp.MustCompile(`(?m)^` + escaped + `\s*=\s*'([^']*)'`)
+	if m := slSglPattern.FindStringSubmatch(block); m != nil {
+		return m[1]
 	}
 	return ""
 }
