@@ -9,6 +9,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	ansiRed   = "\033[31m"
+	ansiReset = "\033[0m"
+)
+
 var deploymentsLogsFollow bool
 var deploymentsLogsLines int
 
@@ -73,27 +78,32 @@ var deploymentsLogsCmd = &cobra.Command{
 	},
 }
 
-// printSSELogLine extracts the log line from SSE format.
-// SSE lines look like: "data: {"replica": 0, "line": "..."}"
+// printSSELogLine extracts the log line from SSE format and colors stderr red.
+// SSE lines look like: "data: {"replica": 0, "line": "...", "stream": "stdout|stderr"}"
 func printSSELogLine(line string) {
-	if strings.HasPrefix(line, "data: ") {
-		data := line[6:]
-		// Try to extract just the log line from JSON
-		// Format: {"replica": N, "line": "actual log content"}
-		if idx := strings.Index(data, `"line": "`); idx >= 0 {
-			rest := data[idx+9:]
-			// Find the closing quote (handle escaped quotes)
-			end := findClosingQuote(rest)
-			if end >= 0 {
-				logLine := rest[:end]
-				logLine = strings.ReplaceAll(logLine, `\"`, `"`)
-				logLine = strings.ReplaceAll(logLine, `\\`, `\`)
-				fmt.Println(logLine)
-				return
-			}
-		}
-		// Fallback: print raw data
+	if !strings.HasPrefix(line, "data: ") {
+		return
+	}
+	data := line[6:]
+	idx := strings.Index(data, `"line": "`)
+	if idx < 0 {
 		fmt.Println(data)
+		return
+	}
+	rest := data[idx+9:]
+	end := findClosingQuote(rest)
+	if end < 0 {
+		fmt.Println(data)
+		return
+	}
+	logLine := rest[:end]
+	logLine = strings.ReplaceAll(logLine, `\"`, `"`)
+	logLine = strings.ReplaceAll(logLine, `\\`, `\`)
+
+	if strings.Contains(data, `"stream": "stderr"`) {
+		fmt.Println(ansiRed + logLine + ansiReset)
+	} else {
+		fmt.Println(logLine)
 	}
 }
 
