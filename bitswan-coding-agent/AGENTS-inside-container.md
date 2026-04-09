@@ -21,6 +21,7 @@ Use these to manage the live-dev deployments for your worktree:
 - `bitswan-coding-agent vcs status` - Show working tree status
 - `bitswan-coding-agent vcs help` - More commands
 - `bitswan-coding-agent vcs commit -m "description of changes"` - Stage all changes and commit
+- `bitswan-coding-agent vcs sync` - Update worktree branch with latest changes from default branch, auto-resolving conflicts
 - `bitswan-coding-agent vcs rebase-and-merge` - Rebase onto default branch and fast-forward merge
 - `bitswan-coding-agent vcs rebase-continue` - Continue rebase after resolving conflicts
 - `bitswan-coding-agent vcs rebase-abort` - Abort an in-progress rebase
