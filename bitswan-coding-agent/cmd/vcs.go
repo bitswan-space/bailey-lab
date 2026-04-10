@@ -154,8 +154,8 @@ func printRebaseResult(r rebaseResult) {
 		for _, f := range r.ConflictedFiles {
 			fmt.Printf("  - %s\n", f)
 		}
-		fmt.Println("\nResolve these files, then run: bitswan-agent vcs rebase-continue")
-		fmt.Println("Or abort with: bitswan-agent vcs rebase-abort")
+		fmt.Println("\nResolve these files, then run: bitswan-coding-agent vcs rebase-continue")
+		fmt.Println("Or abort with: bitswan-coding-agent vcs rebase-abort")
 	} else if r.Status == "success" {
 		fmt.Printf("Merged into %s (tip: %s)\n", r.MergedInto, r.Tip)
 		if r.StashConflict {
@@ -172,10 +172,10 @@ then fast-forwards the workspace branch to include the worktree's commits.
 
 If conflicts occur, the rebase pauses and shows the conflicted files.
 Resolve them (edit the files to remove conflict markers), then run:
-  bitswan-agent vcs rebase-continue
+  bitswan-coding-agent vcs rebase-continue
 
 To abort the rebase entirely:
-  bitswan-agent vcs rebase-abort
+  bitswan-coding-agent vcs rebase-abort
 
 If the workspace has uncommitted changes, they are stashed and restored after.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
