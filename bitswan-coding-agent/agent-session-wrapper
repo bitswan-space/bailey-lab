@@ -44,12 +44,20 @@ METAEOF
 # Determine the shell command to run
 SHELL_CMD="bash -l"
 if [ -n "$AUTO_CMD" ]; then
-    SHELL_CMD="bash -lc '$AUTO_CMD'"
+    # Write auto command to a temp script to avoid quoting issues
+    AUTO_SCRIPT="/tmp/.auto_cmd_$$.sh"
+    echo "$AUTO_CMD" > "$AUTO_SCRIPT"
+    chmod +x "$AUTO_SCRIPT"
+    SHELL_CMD="bash -l $AUTO_SCRIPT"
 fi
 
 # Anon session - no recording, just shell
 if [ "$LOGGED" = "false" ]; then
-    exec bash -lc "${AUTO_CMD:-exec bash}"
+    if [ -n "$AUTO_CMD" ]; then
+        exec bash -l "$AUTO_SCRIPT"
+    else
+        exec bash -l
+    fi
 fi
 
 # Record session with asciinema
