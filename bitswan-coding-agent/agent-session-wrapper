@@ -6,6 +6,7 @@
 USER_EMAIL="${SSH_USER_EMAIL:-unknown}"
 LOGGED="${SSH_LOGGED:-true}"
 WORKTREE="${SSH_WORKTREE:-default}"
+AUTO_CMD="${SSH_AUTO_CMD:-}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 SESSION_ID="${TIMESTAMP}_${USER_EMAIL}_${WORKTREE}"
 SESSION_DIR="/var/log/agent-sessions"
@@ -40,12 +41,18 @@ cat > "${SESSION_DIR}/${SESSION_ID}.meta.json" << METAEOF
 }
 METAEOF
 
+# Determine the shell command to run
+SHELL_CMD="bash -l"
+if [ -n "$AUTO_CMD" ]; then
+    SHELL_CMD="bash -lc '$AUTO_CMD'"
+fi
+
 # Anon session - no recording, just shell
 if [ "$LOGGED" = "false" ]; then
-    exec bash -l
+    exec bash -lc "${AUTO_CMD:-exec bash}"
 fi
 
 # Record session with asciinema
 exec asciinema rec "${SESSION_DIR}/${SESSION_ID}.cast" \
     --title "${USER_EMAIL} - ${WORKTREE}" \
-    --command "bash -l"
+    --command "$SHELL_CMD"
