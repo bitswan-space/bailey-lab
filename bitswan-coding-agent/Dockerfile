@@ -51,7 +51,7 @@ RUN useradd -m -s /bin/bash -u 1000 agent \
 RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
     && sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
     && echo "AllowUsers agent" >> /etc/ssh/sshd_config \
-    && echo "AcceptEnv SSH_USER_EMAIL SSH_LOGGED SSH_WORKTREE" >> /etc/ssh/sshd_config \
+    && echo "AcceptEnv SSH_USER_EMAIL SSH_LOGGED SSH_WORKTREE SSH_AUTO_CMD" >> /etc/ssh/sshd_config \
     && echo "ForceCommand /usr/local/bin/agent-session-wrapper" >> /etc/ssh/sshd_config
 
 # Create workspace directories
