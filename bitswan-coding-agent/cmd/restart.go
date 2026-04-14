@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -30,32 +31,50 @@ var deploymentsBuildAndRestartCmd = &cobra.Command{
 	Short: "Build image and restart a live-dev deployment",
 	Long: `Build the automation image and restart the deployment.
 
-Streams the build output and deploy progress in real time.`,
+Streams Docker build output and deploy progress in real time (ndjson).`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		deploymentID := args[0]
 
-		// The server streams progress as text/plain
 		resp, err := agentRequest("POST", fmt.Sprintf("/deployments/%s/build-and-restart", deploymentID), nil)
 		if err != nil {
 			return fmt.Errorf("build-and-restart failed: %w", err)
 		}
 		defer resp.Body.Close()
 
-		// Stream the response line by line to stdout
+		hadError := false
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
-			line := scanner.Text()
-			fmt.Println(line)
-			// Check for error lines
-			if len(line) >= 6 && line[:6] == "ERROR:" {
-				os.Exit(1)
+			var line map[string]interface{}
+			if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+				// Not JSON, print raw
+				fmt.Println(scanner.Text())
+				continue
+			}
+
+			if s, ok := line["stream"].(string); ok {
+				fmt.Print(s)
+			}
+			if s, ok := line["status"].(string); ok {
+				fmt.Printf("=> %s\n", s)
+			}
+			if s, ok := line["error"].(string); ok {
+				fmt.Fprintf(os.Stderr, "ERROR: %s\n", s)
+				hadError = true
+			}
+			if s, ok := line["errorDetail"].(map[string]interface{}); ok {
+				if msg, ok := s["message"].(string); ok {
+					fmt.Fprintf(os.Stderr, "ERROR: %s\n", msg)
+					hadError = true
+				}
 			}
 		}
 		if err := scanner.Err(); err != nil {
 			return fmt.Errorf("error reading response: %w", err)
 		}
-
+		if hadError {
+			os.Exit(1)
+		}
 		return nil
 	},
 }
