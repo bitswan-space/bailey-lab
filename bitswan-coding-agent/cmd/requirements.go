@@ -192,29 +192,29 @@ func nextReqID(reqs []Requirement, prefix string) string {
 
 type treeNode struct {
 	req      Requirement
-	children []treeNode
+	children []*treeNode
 }
 
-func buildTree(reqs []Requirement) []treeNode {
+func buildTree(reqs []Requirement) []*treeNode {
 	byID := make(map[string]*treeNode)
 	for i := range reqs {
 		byID[reqs[i].ID] = &treeNode{req: reqs[i]}
 	}
-	var roots []treeNode
+	var roots []*treeNode
 	for i := range reqs {
 		node := byID[reqs[i].ID]
 		if reqs[i].Parent != "" {
 			if parent, ok := byID[reqs[i].Parent]; ok {
-				parent.children = append(parent.children, *node)
+				parent.children = append(parent.children, node)
 				continue
 			}
 		}
-		roots = append(roots, *node)
+		roots = append(roots, node)
 	}
 	return roots
 }
 
-func printTree(nodes []treeNode, indent string) {
+func printTree(nodes []*treeNode, indent string) {
 	for _, n := range nodes {
 		status := strings.ToUpper(n.req.Status)
 		fmt.Printf("%s%s [%s] %s\n", indent, n.req.ID, status, n.req.Description)
