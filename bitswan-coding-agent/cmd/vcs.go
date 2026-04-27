@@ -1,10 +1,8 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -252,72 +250,42 @@ var vcsRebaseAbortCmd = &cobra.Command{
 	},
 }
 
-// resolveConflictsInFile reads a file with git conflict markers and resolves
-// them by keeping one side. keepWorktree=true keeps the worktree's changes
-// (section 2 in conflict markers), false keeps the default branch's (section 1).
-func resolveConflictsInFile(path string, keepWorktree bool) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	var out []string
-	scanner := bufio.NewScanner(f)
-	// Track which section of a conflict block we're in:
-	// 0 = outside conflict, 1 = ours (HEAD), 2 = theirs (incoming)
-	section := 0
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		switch {
-		case strings.HasPrefix(line, "<<<<<<<"):
-			section = 1
-		case strings.HasPrefix(line, "=======") && section == 1:
-			section = 2
-		case strings.HasPrefix(line, ">>>>>>>"):
-			section = 0
-		default:
-			if section == 0 {
-				out = append(out, line)
-			} else if section == 1 && !keepWorktree {
-				out = append(out, line)
-			} else if section == 2 && keepWorktree {
-				out = append(out, line)
-			}
+func printSyncResult(r rebaseResult) {
+	switch r.Status {
+	case "conflicts":
+		fmt.Println("Sync paused — conflicts in:")
+		for _, f := range r.ConflictedFiles {
+			fmt.Printf("  - %s\n", f)
+		}
+		fmt.Println("\nResolve these files, then run: bitswan-coding-agent vcs sync-continue")
+		fmt.Println("Or abort with: bitswan-coding-agent vcs rebase-abort")
+	case "success":
+		fmt.Printf("Worktree synced (tip: %s)\n", r.Tip)
+		if r.StashConflict {
+			fmt.Fprintf(os.Stderr, "\nWarning: stash pop had conflicts. Previously uncommitted changes are still stashed.\n%s\n", r.StashMessage)
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, []byte(strings.Join(out, "\n")+"\n"), 0644)
 }
-
-var syncStrategy string
 
 var vcsSyncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Update worktree branch with latest changes from the default branch",
-	Long: `Rebases the worktree's feature branch onto the current default branch,
-pulling in any new commits from main/master. The default branch itself is
-not modified.
+	Long: `Rebases this worktree's branch onto the current default branch, pulling
+in any new commits from main/master. The default branch itself is not modified.
 
-If conflicts arise during the rebase, they are automatically resolved.
-By default, the worktree's (feature branch) version wins. Use --strategy=theirs
-to keep the default branch version instead.
+If conflicts occur, the rebase pauses and shows the conflicted files.
+Resolve them (edit the files to remove conflict markers), then run:
+  bitswan-coding-agent vcs sync-continue
 
-Strategies:
-  ours   — keep the worktree's changes (default)
-  theirs — keep the default branch's changes`,
+To abort the rebase entirely:
+  bitswan-coding-agent vcs rebase-abort
+
+If the worktree has uncommitted changes, they are stashed and restored after.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		keepWorktree := syncStrategy != "theirs"
-
 		worktree, err := detectWorktree()
 		if err != nil {
 			return err
 		}
-		worktreePath := filepath.Join("/workspace/worktrees", worktree)
 
 		var result rebaseResult
 		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/sync", worktree), nil, &result)
@@ -325,32 +293,40 @@ Strategies:
 			return fmt.Errorf("sync failed: %w", err)
 		}
 
-		// Loop: resolve conflicts and continue until done
-		for result.Status == "conflicts" {
-			fmt.Printf("Auto-resolving %d conflicted file(s)...\n", len(result.ConflictedFiles))
-			for _, f := range result.ConflictedFiles {
-				absPath := filepath.Join(worktreePath, f)
-				if err := resolveConflictsInFile(absPath, keepWorktree); err != nil {
-					return fmt.Errorf("failed to resolve %s: %w", f, err)
-				}
-				fmt.Printf("  resolved: %s\n", f)
-			}
+		printSyncResult(result)
+		if result.Status == "conflicts" {
+			os.Exit(1)
+		}
+		if result.StashConflict {
+			os.Exit(2)
+		}
+		return nil
+	},
+}
 
-			result = rebaseResult{}
-			err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/sync-continue", worktree), nil, &result)
-			if err != nil {
-				return fmt.Errorf("rebase-continue failed: %w", err)
-			}
+var vcsSyncContinueCmd = &cobra.Command{
+	Use:   "sync-continue",
+	Short: "Continue sync after resolving conflicts",
+	Long:  "Stages all resolved files and continues the sync. If more conflicts arise, reports them.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		worktree, err := detectWorktree()
+		if err != nil {
+			return err
 		}
 
-		if result.Status == "success" {
-			fmt.Printf("Worktree synced (tip: %s)\n", result.Tip)
-			if result.StashConflict {
-				fmt.Fprintf(os.Stderr, "\nWarning: stash pop had conflicts. Previously uncommitted changes are still stashed.\n%s\n", result.StashMessage)
-				os.Exit(2)
-			}
+		var result rebaseResult
+		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/sync-continue", worktree), nil, &result)
+		if err != nil {
+			return fmt.Errorf("sync-continue failed: %w", err)
 		}
 
+		printSyncResult(result)
+		if result.Status == "conflicts" {
+			os.Exit(1)
+		}
+		if result.StashConflict {
+			os.Exit(2)
+		}
 		return nil
 	},
 }
@@ -365,6 +341,6 @@ func init() {
 	vcsCmd.AddCommand(vcsRebaseMergeCmd)
 	vcsCmd.AddCommand(vcsRebaseContinueCmd)
 	vcsCmd.AddCommand(vcsRebaseAbortCmd)
-	vcsSyncCmd.Flags().StringVar(&syncStrategy, "strategy", "ours", `Conflict resolution strategy: "ours" (keep worktree changes) or "theirs" (keep default branch changes)`)
 	vcsCmd.AddCommand(vcsSyncCmd)
+	vcsCmd.AddCommand(vcsSyncContinueCmd)
 }
