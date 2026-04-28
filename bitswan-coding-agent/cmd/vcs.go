@@ -146,110 +146,6 @@ type rebaseResult struct {
 	RebaseOutput    string   `json:"rebase_output"`
 }
 
-func printRebaseResult(r rebaseResult) {
-	if r.Status == "conflicts" {
-		fmt.Println("Rebase paused — conflicts in:")
-		for _, f := range r.ConflictedFiles {
-			fmt.Printf("  - %s\n", f)
-		}
-		fmt.Println("\nResolve these files, then run: bitswan-coding-agent vcs rebase-continue")
-		fmt.Println("Or abort with: bitswan-coding-agent vcs rebase-abort")
-	} else if r.Status == "success" {
-		fmt.Printf("Merged into %s (tip: %s)\n", r.MergedInto, r.Tip)
-		if r.StashConflict {
-			fmt.Fprintf(os.Stderr, "\nWarning: stash pop had conflicts. Previously uncommitted changes are still stashed.\n%s\n", r.StashMessage)
-		}
-	}
-}
-
-var vcsRebaseMergeCmd = &cobra.Command{
-	Use:   "rebase-and-merge",
-	Short: "Rebase onto default branch, then fast-forward merge",
-	Long: `Rebases this worktree's branch onto the workspace's current branch,
-then fast-forwards the workspace branch to include the worktree's commits.
-
-If conflicts occur, the rebase pauses and shows the conflicted files.
-Resolve them (edit the files to remove conflict markers), then run:
-  bitswan-coding-agent vcs rebase-continue
-
-To abort the rebase entirely:
-  bitswan-coding-agent vcs rebase-abort
-
-If the workspace has uncommitted changes, they are stashed and restored after.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		worktree, err := detectWorktree()
-		if err != nil {
-			return err
-		}
-
-		var result rebaseResult
-		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/rebase-and-merge", worktree), nil, &result)
-		if err != nil {
-			return fmt.Errorf("rebase-and-merge failed: %w", err)
-		}
-
-		printRebaseResult(result)
-		if result.Status == "conflicts" {
-			os.Exit(1)
-		}
-		if result.StashConflict {
-			os.Exit(2)
-		}
-		return nil
-	},
-}
-
-var vcsRebaseContinueCmd = &cobra.Command{
-	Use:   "rebase-continue",
-	Short: "Continue rebase after resolving conflicts",
-	Long:  "Stages all resolved files and continues the rebase. If more conflicts arise, reports them.",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		worktree, err := detectWorktree()
-		if err != nil {
-			return err
-		}
-
-		var result rebaseResult
-		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/rebase-continue", worktree), nil, &result)
-		if err != nil {
-			return fmt.Errorf("rebase-continue failed: %w", err)
-		}
-
-		printRebaseResult(result)
-		if result.Status == "conflicts" {
-			os.Exit(1)
-		}
-		if result.StashConflict {
-			os.Exit(2)
-		}
-		return nil
-	},
-}
-
-var vcsRebaseAbortCmd = &cobra.Command{
-	Use:   "rebase-abort",
-	Short: "Abort an in-progress rebase",
-	Long:  "Aborts the rebase and restores the stash if one was created.",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		worktree, err := detectWorktree()
-		if err != nil {
-			return err
-		}
-
-		var result struct {
-			Status  string `json:"status"`
-			Message string `json:"message"`
-		}
-		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/rebase-abort", worktree), nil, &result)
-		if err != nil {
-			return fmt.Errorf("rebase-abort failed: %w", err)
-		}
-
-		fmt.Println(result.Message)
-		return nil
-	},
-}
-
 func printSyncResult(r rebaseResult) {
 	switch r.Status {
 	case "conflicts":
@@ -258,9 +154,9 @@ func printSyncResult(r rebaseResult) {
 			fmt.Printf("  - %s\n", f)
 		}
 		fmt.Println("\nResolve these files, then run: bitswan-coding-agent vcs sync-continue")
-		fmt.Println("Or abort with: bitswan-coding-agent vcs rebase-abort")
+		fmt.Println("Or abort with: bitswan-coding-agent vcs sync-abort")
 	case "success":
-		fmt.Printf("Worktree synced (tip: %s)\n", r.Tip)
+		fmt.Printf("Synced with %s (tip: %s)\n", r.MergedInto, r.Tip)
 		if r.StashConflict {
 			fmt.Fprintf(os.Stderr, "\nWarning: stash pop had conflicts. Previously uncommitted changes are still stashed.\n%s\n", r.StashMessage)
 		}
@@ -269,18 +165,18 @@ func printSyncResult(r rebaseResult) {
 
 var vcsSyncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Update worktree branch with latest changes from the default branch",
-	Long: `Rebases this worktree's branch onto the current default branch, pulling
-in any new commits from main/master. The default branch itself is not modified.
+	Short: "Sync this worktree with the default branch",
+	Long: `Rebases this worktree's branch onto the workspace's current default
+branch, then fast-forwards the default branch to include the worktree's commits.
 
 If conflicts occur, the rebase pauses and shows the conflicted files.
 Resolve them (edit the files to remove conflict markers), then run:
   bitswan-coding-agent vcs sync-continue
 
-To abort the rebase entirely:
-  bitswan-coding-agent vcs rebase-abort
+To abort the sync entirely:
+  bitswan-coding-agent vcs sync-abort
 
-If the worktree has uncommitted changes, they are stashed and restored after.`,
+If the workspace has uncommitted changes, they are stashed and left stashed.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		worktree, err := detectWorktree()
 		if err != nil {
@@ -331,6 +227,30 @@ var vcsSyncContinueCmd = &cobra.Command{
 	},
 }
 
+var vcsSyncAbortCmd = &cobra.Command{
+	Use:   "sync-abort",
+	Short: "Abort an in-progress sync",
+	Long:  "Aborts the sync rebase and cleans up any leftover conflict state.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		worktree, err := detectWorktree()
+		if err != nil {
+			return err
+		}
+
+		var result struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		}
+		err = agentRequestJSON("POST", fmt.Sprintf("/worktrees/%s/sync-abort", worktree), nil, &result)
+		if err != nil {
+			return fmt.Errorf("sync-abort failed: %w", err)
+		}
+
+		fmt.Println(result.Message)
+		return nil
+	},
+}
+
 func init() {
 	vcsCommitCmd.Flags().StringVarP(&vcsCommitMessage, "message", "m", "", "Commit message (required)")
 	vcsLogCmd.Flags().IntVarP(&logCount, "count", "n", 20, "Number of commits to show")
@@ -338,9 +258,7 @@ func init() {
 	vcsCmd.AddCommand(vcsLogCmd)
 	vcsCmd.AddCommand(vcsDiffCmd)
 	vcsCmd.AddCommand(vcsCommitCmd)
-	vcsCmd.AddCommand(vcsRebaseMergeCmd)
-	vcsCmd.AddCommand(vcsRebaseContinueCmd)
-	vcsCmd.AddCommand(vcsRebaseAbortCmd)
 	vcsCmd.AddCommand(vcsSyncCmd)
 	vcsCmd.AddCommand(vcsSyncContinueCmd)
+	vcsCmd.AddCommand(vcsSyncAbortCmd)
 }
