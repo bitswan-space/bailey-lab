@@ -1,0 +1,12 @@
+services:
+  workspace-dashboard:
+    build: .
+    container_name: bitswan-workspace-dashboard
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - ${WORKSPACE_DIR:-./workspace-demo}:/workspace/workspace:z
+    environment:
+      PORT: 8080
+      PTY_SHELL: /bin/bash

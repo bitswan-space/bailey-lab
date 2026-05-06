@@ -1,0 +1,21 @@
+{
+  "name": "bitswan-workspace-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace client && npm run build --workspace server",
+    "build:client": "npm run build --workspace client",
+    "build:server": "npm run build --workspace server",
+    "dev": "npm-run-all --parallel dev:client dev:server",
+    "dev:client": "npm run dev --workspace client",
+    "dev:server": "npm run dev --workspace server",
+    "start": "node server/dist/index.js"
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5"
+  }
+}

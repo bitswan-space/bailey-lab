@@ -1,0 +1,96 @@
+@import '@xterm/xterm/css/xterm.css';
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.app__header {
+  padding: 6px 12px;
+  background: #252526;
+  border-bottom: 1px solid #333;
+  font-size: 12px;
+  color: #aaa;
+}
+
+.app__terminal {
+  flex: 1;
+  min-height: 0;
+  padding: 4px;
+}
+
+.terminal-host {
+  width: 100%;
+  height: 100%;
+}
+
+.auth-screen {
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.auth-card {
+  max-width: 480px;
+  background: #252526;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 24px 28px;
+  text-align: center;
+}
+
+.auth-card h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.auth-card p {
+  margin: 0 0 12px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.auth-hint {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.auth-error {
+  background: #3a1d1d;
+  border: 1px solid #5a2a2a;
+  color: #f5b3b3;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  margin: 8px 0 16px;
+}
+
+.auth-button {
+  margin-top: 8px;
+  padding: 8px 18px;
+  font-size: 14px;
+  font-weight: 500;
+  background: #0e639c;
+  color: #fff;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.auth-button:hover {
+  background: #1177bb;
+}
