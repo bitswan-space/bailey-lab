@@ -11,9 +11,37 @@ export function Terminal() {
 
     const term = new XTerm({
       cursorBlink: true,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      // Use system monospace only. A webfont (e.g. Roboto Mono from Google
+      // Fonts) loads asynchronously, so xterm would measure cell width
+      // against the fallback font at init time and then re-render with the
+      // real font, producing visual glitches and ghosted glyphs.
+      fontFamily:
+        'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Courier New", monospace',
       fontSize: 13,
-      theme: { background: '#1e1e1e', foreground: '#d4d4d4' },
+      theme: {
+        background: '#ffffff',
+        foreground: '#18181b',
+        cursor: '#18181b',
+        cursorAccent: '#ffffff',
+        selectionBackground: 'rgba(9, 61, 245, 0.18)',
+        selectionForeground: '#18181b',
+        black: '#000000',
+        red: '#c91b00',
+        green: '#00a800',
+        yellow: '#a89500',
+        blue: '#0e639c',
+        magenta: '#a800a8',
+        cyan: '#00a8a8',
+        white: '#d4d4d4',
+        brightBlack: '#71717a',
+        brightRed: '#dc2626',
+        brightGreen: '#16a34a',
+        brightYellow: '#ca8a04',
+        brightBlue: '#2563eb',
+        brightMagenta: '#c026d3',
+        brightCyan: '#0891b2',
+        brightWhite: '#000000',
+      },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -84,5 +112,5 @@ export function Terminal() {
     };
   }, []);
 
-  return <div ref={hostRef} className="terminal-host" />;
+  return <div ref={hostRef} className="h-full w-full bg-white" />;
 }

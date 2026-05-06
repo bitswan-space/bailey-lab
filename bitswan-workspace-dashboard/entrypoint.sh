@@ -33,9 +33,29 @@ start_app() {
         # NODE_ENV=production which would skip them on `npm install`.
         unset NODE_ENV
 
-        if [ ! -d node_modules ] || [ package.json -nt node_modules ]; then
+        # Decide whether to install. Comparing package.json's mtime against
+        # node_modules/ is unreliable: npm bumps the directory mtime *after*
+        # package.json was last edited, so the next start sees node_modules
+        # as "fresher" and skips install even when deps actually changed.
+        # npm writes node_modules/.package-lock.json on every successful
+        # install, so comparing it against the source lockfile is the right
+        # signal.
+        needs_install=true
+        if [ -d node_modules ]; then
+            if [ -f package-lock.json ] && [ -f node_modules/.package-lock.json ]; then
+                if cmp -s package-lock.json node_modules/.package-lock.json; then
+                    needs_install=false
+                fi
+            elif [ ! -f package-lock.json ] && [ ! package.json -nt node_modules ]; then
+                needs_install=false
+            fi
+        fi
+
+        if [ "$needs_install" = "true" ]; then
             echo "[entrypoint] Installing dashboard dev dependencies (this may take a minute)..."
             npm install --include=dev
+        else
+            echo "[entrypoint] Dependencies already in sync, skipping install."
         fi
 
         # Vite dev server serves the SPA on APP_LISTEN_PORT and proxies /ws to
