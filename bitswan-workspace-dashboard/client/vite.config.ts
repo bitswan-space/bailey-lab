@@ -7,7 +7,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const VITE_HOST = process.env.VITE_HOST ?? 'localhost';
 const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
-const VITE_BACKEND_URL = process.env.VITE_BACKEND_URL ?? 'ws://localhost:8080';
+// Accept ws:// or http:// here; we proxy both HTTP and WS upgrades to the same host.
+const RAW_BACKEND = process.env.VITE_BACKEND_URL ?? 'http://localhost:8080';
+const BACKEND_HTTP = RAW_BACKEND.replace(/^wss?:/, (m) => (m === 'wss:' ? 'https:' : 'http:'));
 
 export default defineConfig({
   plugins: [react()],
@@ -26,9 +28,20 @@ export default defineConfig({
     port: VITE_PORT,
     strictPort: true,
     proxy: {
+      // WebSocket terminal — Vite handles the http→ws upgrade with ws:true.
       '/ws': {
-        target: VITE_BACKEND_URL,
+        target: BACKEND_HTTP,
         ws: true,
+      },
+      // JSON + SSE endpoints served by Fastify.
+      '/api': {
+        target: BACKEND_HTTP,
+        changeOrigin: true,
+      },
+      // OAuth popup completion page (Fastify route).
+      '/_login_done': {
+        target: BACKEND_HTTP,
+        changeOrigin: true,
       },
     },
   },

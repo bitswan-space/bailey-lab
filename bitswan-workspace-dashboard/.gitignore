@@ -4,3 +4,6 @@ dist/
 .env
 .DS_Store
 workspace-demo/
+.claude
+.mcp.json
+skills-lock.json
