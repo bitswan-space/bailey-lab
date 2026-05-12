@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
-import { api } from '@/api';
+import { api } from '@/lib/api';
 
+/**
+ * Fetch a BP's `README.md` over `/api/business-processes/:id/readme`.
+ * Re-fetches when `bpId` changes; resolves to `null` when the file is
+ * missing or the request fails.
+ */
 export function useReadme(bpId: string | null | undefined): {
   content: string | null;
   loading: boolean;

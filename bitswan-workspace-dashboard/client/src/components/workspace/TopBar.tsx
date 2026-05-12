@@ -55,9 +55,9 @@ function SwitchTab({ active, onClick, Icon, label, sub, tone = 'default' }: Swit
     <button
       onClick={onClick}
       className={cn(
-        // 2-col grid: icon column (auto) + label/sub column (1fr).
-        // The sub-label lives in row 2 col 2 — naturally aligned under the
-        // label without a hand-tuned padding offset.
+        // 2-col grid: icon column (auto) + label/sub column (1fr). The sub-label
+        // lives in row 2 col 2 — naturally aligned under the label without a
+        // hand-tuned padding offset.
         'grid min-w-32 grid-cols-[auto_1fr] items-center gap-x-1.5 gap-y-0.5 border-b-2 px-3.5 pb-2.5 pt-2 transition-colors',
         active
           ? 'border-primary bg-background'

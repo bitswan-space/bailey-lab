@@ -3,10 +3,12 @@ import { LayoutDashboard, TerminalSquare } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAutomations } from '@/hooks/useAutomations';
 import type { BusinessProcess, DeployedAutomation, Worktree } from '@/types';
-import { Terminal } from '@/Terminal';
-import { AutomationCard } from './AutomationCard';
-import { InspectModal, type InspectStage } from './InspectModal';
-import { ReadmeCard } from './ReadmeCard';
+import { Terminal } from '@/components/terminal/Terminal';
+import { AutomationCard } from '@/components/automations/AutomationCard';
+import { InspectModal, type InspectStage } from '@/components/automations/InspectModal';
+import { ReadmeCard } from '@/components/workspace/ReadmeCard';
+import { SectionHeader } from '@/components/shared/SectionHeader';
+import { EmptyState } from '@/components/shared/EmptyState';
 
 interface WorktreeViewProps {
   bp: BusinessProcess;
@@ -59,20 +61,20 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
 
   return (
     <div className="flex flex-col gap-5 px-7 py-6">
-      <div>
-        <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Worktree
-        </div>
-        <div className="text-lg font-semibold tracking-tight text-foreground">{wt.name}</div>
-        <div className="mt-0.5 text-sm text-muted-foreground">
-          {wt.branch} ·{' '}
-          {wt.synced ? (
-            <span className="text-emerald-600">synced with main</span>
-          ) : (
-            <span className="text-amber-600">unsynced</span>
-          )}
-        </div>
-      </div>
+      <SectionHeader
+        eyebrow="Worktree"
+        title={wt.name}
+        helper={
+          <>
+            {wt.branch} ·{' '}
+            {wt.synced ? (
+              <span className="text-emerald-600">synced with main</span>
+            ) : (
+              <span className="text-amber-600">unsynced</span>
+            )}
+          </>
+        }
+      />
 
       {status === 'connecting' && automations.length === 0 ? (
         <EmptyState message="Loading automations…" />
@@ -110,14 +112,6 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
         stages={inspectTarget?.stages ?? []}
         mode="liveDev"
       />
-    </div>
-  );
-}
-
-function EmptyState({ message }: { message: string }) {
-  return (
-    <div className="rounded-xl border border-dashed border-border px-6 py-12 text-center text-sm text-muted-foreground">
-      {message}
     </div>
   );
 }

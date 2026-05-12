@@ -11,10 +11,9 @@ export function Terminal() {
 
     const term = new XTerm({
       cursorBlink: true,
-      // Use system monospace only. A webfont (e.g. Roboto Mono from Google
-      // Fonts) loads asynchronously, so xterm would measure cell width
-      // against the fallback font at init time and then re-render with the
-      // real font, producing visual glitches and ghosted glyphs.
+      // System monospace only — a webfont loads async, so xterm would measure
+      // cell width against the fallback then re-render with the real font,
+      // producing visual glitches and ghosted glyphs.
       fontFamily:
         'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Courier New", monospace',
       fontSize: 13,

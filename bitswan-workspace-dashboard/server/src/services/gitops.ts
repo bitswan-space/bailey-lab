@@ -2,10 +2,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 export interface UpstreamEvent {
   event: string;
+  /** JSON-decoded payload, or the raw string if it wasn't valid JSON. */
   data: unknown;
 }
 
-// Mirrors bitswan-gitops list_worktrees() response shape (snake_case).
+/** Mirrors bitswan-gitops `list_worktrees()` response (app/routes/worktrees.py). */
 export interface Worktree {
   name: string;
   branch: string;
@@ -15,17 +16,53 @@ export interface Worktree {
   synced: boolean;
 }
 
+/**
+ * Mirrors bitswan-gitops `DeployedAutomation` (app/models.py). All field names
+ * are snake_case as they come off the wire.
+ */
+/* eslint-disable no-restricted-syntax -- wire-mirror nullable fields match Python's `str | None` */
+export interface DeployedAutomation {
+  container_id: string | null;
+  endpoint_name: string | null;
+  created_at: string | null;
+  name: string;
+  state: string | null;
+  status: string | null;
+  deployment_id: string | null;
+  active: boolean;
+  automation_url: string | null;
+  relative_path: string | null;
+  stage: string | null;
+  automation_name: string | null;
+  context: string | null;
+  version_hash: string | null;
+  replicas: number;
+}
+/* eslint-enable no-restricted-syntax */
+
+/**
+ * One entry of `docker inspect` output. The server passes these through to the
+ * client which renders them; we don't introspect the shape here, so a loose
+ * record type is sufficient.
+ */
+export type DockerInspect = Record<string, unknown>;
+
 type Listener = (ev: UpstreamEvent) => void;
 
 const RECONNECT_INITIAL_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
+/**
+ * Long-lived client for the bitswan-gitops HTTP API. Holds one persistent SSE
+ * subscription to `/events/stream` (with reconnect/backoff) and exposes
+ * one-shot REST calls for the Fastify routes to proxy.
+ */
 export class GitopsClient {
   private readonly baseUrl: string;
   private readonly secret: string;
   private abort: AbortController | null = null;
   private stopped = false;
-  private automationsSnapshot: unknown[] = [];
+  private automationsSnapshot: DeployedAutomation[] = [];
   private readonly listeners = new Set<Listener>();
 
   constructor(baseUrl: string, secret: string) {
@@ -33,8 +70,7 @@ export class GitopsClient {
     this.secret = secret;
   }
 
-  // Shape returned by gitops GET /worktrees/ (list_worktrees in bitswan-gitops
-  // app/routes/worktrees.py). Field names are snake_case as on the wire.
+  /** `GET /worktrees/` — list all worktrees of the workspace repo. */
   async getWorktrees(): Promise<Worktree[]> {
     const r = await fetch(`${this.baseUrl}/worktrees/`, {
       headers: { Authorization: `Bearer ${this.secret}` },
@@ -46,12 +82,16 @@ export class GitopsClient {
     return Array.isArray(data) ? (data as Worktree[]) : [];
   }
 
-  getSnapshot(): unknown[] {
+  /** Latest `automations` payload pushed by the upstream SSE feed. */
+  getSnapshot(): DeployedAutomation[] {
     return this.automationsSnapshot;
   }
 
-  // POST /automations/{id}/(start|stop|restart). gitops accepts an empty JSON
-  // body; we forward the status code so the route handler can surface 502s.
+  /**
+   * `POST /automations/{id}/(start|stop|restart)`. gitops accepts an empty
+   * JSON body; the status code is forwarded so the route handler can surface
+   * 502s on upstream failure.
+   */
   async actionAutomation(
     deploymentId: string,
     action: 'start' | 'stop' | 'restart',
@@ -70,8 +110,11 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status };
   }
 
-  // GET /automations/{id}/inspect — returns the array of Docker inspect dicts.
-  async inspectAutomation(deploymentId: string): Promise<unknown[]> {
+  /**
+   * `GET /automations/{id}/inspect` — array of Docker inspect dicts, one per
+   * replica.
+   */
+  async inspectAutomation(deploymentId: string): Promise<DockerInspect[]> {
     const r = await fetch(
       `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/inspect`,
       { headers: { Authorization: `Bearer ${this.secret}` } },
@@ -80,12 +123,14 @@ export class GitopsClient {
       throw new Error(`gitops inspect returned ${r.status}`);
     }
     const data = await r.json();
-    return Array.isArray(data) ? data : [];
+    return Array.isArray(data) ? (data as DockerInspect[]) : [];
   }
 
-  // Returns the upstream SSE body so the caller (Fastify route) can pipe it
-  // through. The AbortSignal lets callers cancel when the downstream client
-  // disconnects.
+  /**
+   * Returns the upstream SSE body so the caller (Fastify route) can pipe it
+   * through. The `signal` lets callers cancel when the downstream client
+   * disconnects.
+   */
   async streamLogs(
     deploymentId: string,
     signal: AbortSignal,
@@ -106,6 +151,7 @@ export class GitopsClient {
     return r.body;
   }
 
+  /** Subscribe to upstream events. Returns an unsubscribe function. */
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
     return () => {
@@ -113,12 +159,14 @@ export class GitopsClient {
     };
   }
 
+  /** Begin the SSE subscription. Idempotent. */
   async start(): Promise<void> {
     if (this.abort) return;
     this.stopped = false;
     void this.runStreamLoop();
   }
 
+  /** Stop the SSE subscription and cancel any in-flight reconnect wait. */
   async stop(): Promise<void> {
     this.stopped = true;
     this.abort?.abort();
@@ -174,7 +222,7 @@ export class GitopsClient {
 
   private handleEvent(ev: UpstreamEvent): void {
     if (ev.event === 'automations' && Array.isArray(ev.data)) {
-      this.automationsSnapshot = ev.data;
+      this.automationsSnapshot = ev.data as DeployedAutomation[];
     }
     for (const fn of this.listeners) {
       try {

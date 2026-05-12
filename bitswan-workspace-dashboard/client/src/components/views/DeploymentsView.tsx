@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
 import { useAutomations } from '@/hooks/useAutomations';
 import type { AutomationStage, BusinessProcess, DeployedAutomation } from '@/types';
-import { AutomationCard } from './AutomationCard';
-import { InspectModal, type InspectStage } from './InspectModal';
-import { ReadmeCard } from './ReadmeCard';
+import { AutomationCard } from '@/components/automations/AutomationCard';
+import { InspectModal, type InspectStage } from '@/components/automations/InspectModal';
+import { ReadmeCard } from '@/components/workspace/ReadmeCard';
+import { SectionHeader } from '@/components/shared/SectionHeader';
+import { EmptyState } from '@/components/shared/EmptyState';
 
 const STAGES: { id: AutomationStage; label: string; short: string }[] = [
   { id: 'dev', label: 'Development', short: 'Dev' },
@@ -28,7 +30,7 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
       const rel = a.relative_path ?? '';
       if (!rel.startsWith(bp.name)) continue;
       if (rel.includes('/worktrees/') || rel.startsWith('worktrees/')) continue;
-      const stage = (a.stage ?? '') as AutomationStage;
+      const stage = a.stage;
       if (stage !== 'dev' && stage !== 'staging' && stage !== 'production') continue;
       const key = a.automation_name ?? a.name;
       if (!byName.has(key)) byName.set(key, {});
@@ -87,32 +89,6 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
         stages={inspectTarget?.stages ?? []}
         mode="deployments"
       />
-    </div>
-  );
-}
-
-interface SectionHeaderProps {
-  eyebrow: string;
-  title: string;
-  helper?: string;
-}
-
-function SectionHeader({ eyebrow, title, helper }: SectionHeaderProps) {
-  return (
-    <div>
-      <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        {eyebrow}
-      </div>
-      <div className="text-lg font-semibold tracking-tight text-foreground">{title}</div>
-      {helper && <div className="mt-0.5 text-sm text-muted-foreground">{helper}</div>}
-    </div>
-  );
-}
-
-function EmptyState({ message }: { message: string }) {
-  return (
-    <div className="rounded-xl border border-dashed border-border px-6 py-12 text-center text-sm text-muted-foreground">
-      {message}
     </div>
   );
 }

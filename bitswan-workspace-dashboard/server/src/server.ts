@@ -3,45 +3,15 @@ import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
-import { handleTerminalConnection } from './ws.js';
-import { discoverBusinessProcesses, isValidBpId, readReadme } from './bps.js';
-import type { GitopsClient } from './gitops.js';
+import type { GitopsClient } from './services/gitops.js';
+import { registerAuthRoutes } from './routes/auth.js';
+import { registerAutomationRoutes } from './routes/automations.js';
+import { registerBusinessProcessRoutes } from './routes/business-processes.js';
+import { registerEventRoutes } from './routes/events.js';
+import { registerTerminalRoutes } from './routes/terminal.js';
+import { registerWorktreeRoutes } from './routes/worktrees.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-const LOGIN_DONE_HTML = /*html*/ `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>Signed in</title>
-    <style>
-      html, body { margin: 0; height: 100%; }
-      body {
-        font-family: ui-sans-serif, system-ui, sans-serif;
-        background: #1e1e1e;
-        color: #d4d4d4;
-        display: grid;
-        place-items: center;
-        text-align: center;
-        padding: 16px;
-      }
-    </style>
-  </head>
-  <body>
-    <div>
-      <p>Signed in successfully.</p>
-      <p style="opacity: 0.6">You can close this window.</p>
-    </div>
-    <script>
-      try {
-        if (window.opener && !window.opener.closed) {
-          window.opener.postMessage('login-done', window.location.origin);
-        }
-      } catch (e) {}
-      setTimeout(function () { window.close(); }, 50);
-    </script>
-  </body>
-</html>`;
 
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? '/workspace/workspace';
 
@@ -49,14 +19,20 @@ export interface BuildServerOptions {
   gitops: GitopsClient | null;
 }
 
-export async function buildServer(opts: BuildServerOptions): Promise<FastifyInstance> {
+/**
+ * Build the Fastify app: registers websocket support, all API/auth/terminal
+ * routes, and the static SPA fallback. The `gitops` client may be `null` in
+ * environments where the upstream env vars aren't set — routes that depend
+ * on it then degrade to empty results or 503s.
+ */
+export async function buildServer({ gitops }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
-  const { gitops } = opts;
 
+  // CSP frame-ancestors header for iframe embedding. Skip on responses that
+  // already set their own CSP (SSE endpoints set headers via reply.raw).
   const frameAncestors = process.env.DASHBOARD_FRAME_ANCESTORS;
   if (frameAncestors) {
     app.addHook('onSend', async (_req, reply) => {
-      // Don't override CSP on the SSE endpoint — it sets its own headers.
       if (!reply.sent && !reply.getHeader('Content-Security-Policy')) {
         reply.header('Content-Security-Policy', `frame-ancestors ${frameAncestors}`);
       }
@@ -65,173 +41,15 @@ export async function buildServer(opts: BuildServerOptions): Promise<FastifyInst
 
   await app.register(fastifyWebsocket);
 
-  app.get('/ws/terminal', { websocket: true }, (socket) => {
-    handleTerminalConnection(socket);
-  });
+  registerAuthRoutes(app);
+  registerTerminalRoutes(app);
+  registerBusinessProcessRoutes(app, { workspaceRoot: WORKSPACE_ROOT });
+  registerWorktreeRoutes(app, { gitops });
+  registerAutomationRoutes(app, { gitops });
+  registerEventRoutes(app, { gitops });
 
-  app.get('/_login_done', async (_req, reply) => {
-    reply.type('text/html').send(LOGIN_DONE_HTML);
-  });
-
-  // ─── /api routes ──────────────────────────────────────────────────────────
-
-  app.get('/api/business-processes', async (_req, reply) => {
-    reply.header('Cache-Control', 'no-store');
-    const bps = await discoverBusinessProcesses(WORKSPACE_ROOT);
-    return bps;
-  });
-
-  app.get('/api/worktrees', async (_req, reply) => {
-    reply.header('Cache-Control', 'no-store');
-    if (!gitops) return [];
-    try {
-      return await gitops.getWorktrees();
-    } catch (err) {
-      app.log.warn({ err }, 'failed to fetch worktrees from gitops');
-      return reply.code(502).send({ error: 'gitops unreachable' });
-    }
-  });
-
-  app.get('/api/automations', async (_req, reply) => {
-    reply.header('Cache-Control', 'no-store');
-    return gitops ? gitops.getSnapshot() : [];
-  });
-
-  // Per-automation actions: start / stop / restart.
-  for (const action of ['start', 'stop', 'restart'] as const) {
-    app.post<{ Params: { id: string } }>(
-      `/api/automations/:id/${action}`,
-      async (req, reply) => {
-        reply.header('Cache-Control', 'no-store');
-        if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-        try {
-          const r = await gitops.actionAutomation(req.params.id, action);
-          if (!r.ok) return reply.code(502).send({ error: 'gitops error', status: r.status });
-          return { ok: true };
-        } catch (err) {
-          app.log.warn({ err, action, id: req.params.id }, 'automation action failed');
-          return reply.code(502).send({ error: 'gitops unreachable' });
-        }
-      },
-    );
-  }
-
-  app.get<{ Params: { id: string } }>('/api/automations/:id/inspect', async (req, reply) => {
-    reply.header('Cache-Control', 'no-store');
-    if (!gitops) return [];
-    try {
-      return await gitops.inspectAutomation(req.params.id);
-    } catch (err) {
-      app.log.warn({ err, id: req.params.id }, 'inspect failed');
-      return reply.code(502).send({ error: 'gitops unreachable' });
-    }
-  });
-
-  app.get<{ Params: { id: string } }>('/api/automations/:id/logs', async (req, reply) => {
-    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-
-    reply.raw.setHeader('Content-Type', 'text/event-stream');
-    reply.raw.setHeader('Cache-Control', 'no-store');
-    reply.raw.setHeader('Connection', 'keep-alive');
-    reply.raw.setHeader('X-Accel-Buffering', 'no');
-    reply.raw.flushHeaders?.();
-
-    const ac = new AbortController();
-    let closed = false;
-    const cleanup = () => {
-      if (closed) return;
-      closed = true;
-      ac.abort();
-      clearInterval(keepalive);
-      try {
-        reply.raw.end();
-      } catch {
-        // ignore
-      }
-    };
-    const keepalive = setInterval(() => {
-      if (!closed) reply.raw.write(':keepalive\n\n');
-    }, 20_000);
-    req.raw.on('close', cleanup);
-    req.raw.on('error', cleanup);
-
-    try {
-      const body = await gitops.streamLogs(req.params.id, ac.signal);
-      const reader = body.getReader();
-      while (!closed) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        reply.raw.write(value);
-      }
-    } catch (err) {
-      if (!closed) {
-        app.log.warn({ err, id: req.params.id }, 'logs stream error');
-        reply.raw.write(`event: error\ndata: ${JSON.stringify(String(err))}\n\n`);
-      }
-    } finally {
-      cleanup();
-    }
-  });
-
-  app.get<{ Params: { id: string } }>(
-    '/api/business-processes/:id/readme',
-    async (req, reply) => {
-      reply.header('Cache-Control', 'no-store');
-      if (!isValidBpId(req.params.id)) {
-        return reply.code(400).send({ error: 'invalid bp id' });
-      }
-      const content = await readReadme(req.params.id);
-      return { content };
-    },
-  );
-
-  app.get('/api/events', async (req, reply) => {
-    reply.raw.setHeader('Content-Type', 'text/event-stream');
-    reply.raw.setHeader('Cache-Control', 'no-store');
-    reply.raw.setHeader('Connection', 'keep-alive');
-    reply.raw.setHeader('X-Accel-Buffering', 'no'); // disable proxy buffering
-    reply.raw.flushHeaders?.();
-
-    let closed = false;
-    const safeWrite = (chunk: string) => {
-      if (closed) return;
-      if (!reply.raw.write(chunk)) {
-        reply.raw.once('drain', () => {
-          // resume on drain — nothing to do; subsequent writes will work
-        });
-      }
-    };
-
-    // Initial snapshot so the UI can paint before the next upstream tick.
-    const snapshot = gitops ? gitops.getSnapshot() : [];
-    safeWrite(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
-
-    const unsubscribe = gitops
-      ? gitops.subscribe((ev) => {
-          safeWrite(`event: ${ev.event}\ndata: ${JSON.stringify(ev.data)}\n\n`);
-        })
-      : () => {};
-
-    // Keepalive ping defeats idle-connection killers in the proxy chain.
-    const keepalive = setInterval(() => safeWrite(`:keepalive\n\n`), 20_000);
-
-    const cleanup = () => {
-      if (closed) return;
-      closed = true;
-      clearInterval(keepalive);
-      unsubscribe();
-      try {
-        reply.raw.end();
-      } catch {
-        // ignore
-      }
-    };
-    req.raw.on('close', cleanup);
-    req.raw.on('error', cleanup);
-  });
-
-  // ─── Static SPA + fallback ────────────────────────────────────────────────
-
+  // Static SPA + SPA-fallback. Registered last so /api and /ws routes
+  // resolve before the catch-all.
   const clientDist = path.resolve(__dirname, '../../client/dist');
   await app.register(fastifyStatic, {
     root: clientDist,

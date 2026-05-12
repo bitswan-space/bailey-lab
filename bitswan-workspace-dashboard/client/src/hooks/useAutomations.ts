@@ -3,6 +3,11 @@ import type { DeployedAutomation } from '@/types';
 
 export type StreamStatus = 'connecting' | 'live' | 'error';
 
+/**
+ * Subscribe to the live `/api/events` SSE feed of automation state. Returns
+ * the latest snapshot plus a connection-status flag. Mounts a single
+ * `EventSource` per consumer and tears it down on unmount.
+ */
 export function useAutomations(): {
   data: DeployedAutomation[];
   status: StreamStatus;

@@ -10,6 +10,13 @@ interface ControlMessage {
   rows?: number;
 }
 
+/**
+ * Bridge a WebSocket to a freshly spawned pty for the lifetime of the
+ * connection. Binary frames flow as raw bytes in both directions; text
+ * frames carry JSON control messages (`resize`, `ping`). The bridge
+ * applies simple buffered-amount backpressure to avoid memory blowup
+ * when the client can't keep up with the shell.
+ */
 export function handleTerminalConnection(socket: WebSocket): void {
   let term: IPty;
   try {
@@ -61,7 +68,6 @@ export function handleTerminalConnection(socket: WebSocket): void {
         return;
       case 'ping':
         socket.send(JSON.stringify({ type: 'pong' }));
-        return;
     }
   });
 

@@ -1,4 +1,9 @@
-import type { BusinessProcess, DeployedAutomation, DockerInspect, Worktree } from './types';
+import type {
+  BusinessProcess,
+  DeployedAutomation,
+  DockerInspect,
+  Worktree,
+} from '@/types';
 
 async function getJson<T>(url: string): Promise<T> {
   const r = await fetch(url, { credentials: 'include', cache: 'no-store' });

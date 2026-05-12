@@ -1,6 +1,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Card } from '@/components/ui/card';
+import { SectionHeader } from '@/components/shared/SectionHeader';
 import { useReadme } from '@/hooks/useReadme';
 
 interface ReadmeCardProps {
@@ -12,12 +13,7 @@ export function ReadmeCard({ bpId }: ReadmeCardProps) {
 
   return (
     <section className="flex flex-col gap-3">
-      <div>
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Specification
-        </div>
-        <div className="text-lg font-semibold tracking-tight text-foreground">README</div>
-      </div>
+      <SectionHeader eyebrow="Specification" title="README" />
       <Card className="px-6 py-5">
         {loading ? (
           <div className="text-sm text-muted-foreground">Loading…</div>

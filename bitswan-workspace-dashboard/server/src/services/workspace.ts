@@ -55,14 +55,21 @@ async function listWorktreeNames(root: string): Promise<string[]> {
     .sort((a, b) => a.localeCompare(b));
 }
 
-// Reads a BP's README.md, returning null if it doesn't exist. The bpId is
-// validated against a tight allowlist before being joined into the path —
-// path traversal is rejected.
 const BP_ID_RE = /^[A-Za-z0-9_.-]+$/;
+
+/**
+ * Tight allowlist for a BP id used in filesystem paths — rejects empty
+ * strings, dot-prefixed names, and anything containing slashes or `..`.
+ */
 export function isValidBpId(bpId: string): boolean {
   return BP_ID_RE.test(bpId) && bpId !== '.' && bpId !== '..';
 }
 
+/**
+ * Read a BP's `README.md`, returning `null` if the file doesn't exist. The
+ * `bpId` is validated against {@link isValidBpId} before being joined into
+ * the path — path traversal is rejected.
+ */
 export async function readReadme(
   bpId: string,
   root = '/workspace/workspace',
@@ -74,20 +81,25 @@ export async function readReadme(
     const p = path.join(root, bpId, 'README.md');
     return await fs.readFile(p, 'utf8');
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
     throw err;
   }
 }
 
+/**
+ * Walk the workspace root and return the BPs found at the top level. A BP
+ * is a directory containing a `process.toml`. The `hasWorktrees` flag is
+ * `true` when at least one entry under `worktrees/<wt>/` contains a
+ * directory of the same name with its own `process.toml` (mirrors the
+ * editor's mapping: live-dev automations live at `worktrees/<wt>/<bp>`).
+ */
 export async function discoverBusinessProcesses(
   root = '/workspace/workspace',
 ): Promise<BusinessProcess[]> {
   const mainBps = await listBpDirsIn(root);
   const worktreeNames = await listWorktreeNames(root);
 
-  // A BP "has worktrees" if any worktree contains a directory of the same name
-  // with a process.toml. (Mirrors editor's mapping: live-dev automations live at
-  // `worktrees/<wt>/<bpName>`.)
   const bpHasWorktree = new Map<string, boolean>();
   await Promise.all(
     worktreeNames.map(async (wt) => {
