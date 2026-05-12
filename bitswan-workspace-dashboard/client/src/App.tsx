@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { AuthGate } from '@/components/auth/AuthGate';
 import { Sidebar } from '@/components/workspace/Sidebar';
 import { TopBar } from '@/components/workspace/TopBar';
+import { WorkspaceProvider } from '@/components/workspace/WorkspaceProvider';
+import { Toaster } from '@/components/ui/sonner';
 import { DeploymentsView } from '@/components/views/DeploymentsView';
 import { WorktreeView } from '@/components/views/WorktreeView';
 import { api } from '@/lib/api';
@@ -10,7 +12,10 @@ import type { BusinessProcess, Scope, Worktree } from '@/types';
 export function App() {
   return (
     <AuthGate>
-      <Shell />
+      <WorkspaceProvider>
+        <Shell />
+        <Toaster position="bottom-right" richColors closeButton />
+      </WorkspaceProvider>
     </AuthGate>
   );
 }

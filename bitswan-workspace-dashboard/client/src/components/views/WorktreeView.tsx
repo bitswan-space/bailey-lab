@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { LayoutDashboard, TerminalSquare } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useAutomations } from '@/hooks/useAutomations';
+import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import type { BusinessProcess, DeployedAutomation, Worktree } from '@/types';
 import { Terminal } from '@/components/terminal/Terminal';
 import { AutomationCard } from '@/components/automations/AutomationCard';
@@ -41,23 +41,34 @@ export function WorktreeView({ bp, wt }: WorktreeViewProps) {
 }
 
 function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
-  const { data: raw, status } = useAutomations();
+  const { automations: raw, status } = useAutomations();
   const prefix = `worktrees/${wt.name}/${bp.name}`;
-  const [inspectTarget, setInspectTarget] = useState<{
-    name: string;
-    stages: InspectStage[];
-  } | null>(null);
+  const [inspectName, setInspectName] = useState<string | null>(null);
 
-  const automations = useMemo(() => {
-    const out: { name: string; aut: DeployedAutomation }[] = [];
+  // Group worktree automations by name. Used by both the card grid and the
+  // open-modal's live stage derivation.
+  const byName = useMemo(() => {
+    const out = new Map<string, DeployedAutomation>();
     for (const a of raw) {
       const rel = a.relative_path ?? '';
       if (rel === prefix || rel.startsWith(`${prefix}/`)) {
-        out.push({ name: a.automation_name ?? a.name, aut: a });
+        out.set(a.automation_name ?? a.name, a);
       }
     }
-    return out.sort((x, y) => x.name.localeCompare(y.name));
+    return out;
   }, [raw, prefix]);
+
+  const sorted = useMemo(
+    () => Array.from(byName.entries()).sort(([a], [b]) => a.localeCompare(b)),
+    [byName],
+  );
+
+  const inspectStages: InspectStage[] = useMemo(() => {
+    if (!inspectName) return [];
+    return [{ id: 'live-dev', label: 'Live dev', automation: byName.get(inspectName) }];
+  }, [byName, inspectName]);
+
+  const handleClose = useCallback(() => setInspectName(null), []);
 
   return (
     <div className="flex flex-col gap-5 px-7 py-6">
@@ -76,15 +87,15 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
         }
       />
 
-      {status === 'connecting' && automations.length === 0 ? (
+      {status === 'connecting' && sorted.length === 0 ? (
         <EmptyState message="Loading automations…" />
-      ) : automations.length === 0 ? (
+      ) : sorted.length === 0 ? (
         <EmptyState message="No live-dev automations for this worktree." />
       ) : (
         <div className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(320px,1fr))]">
-          {automations.map(({ name, aut }) => (
+          {sorted.map(([name, aut]) => (
             <AutomationCard
-              key={name + (aut.deployment_id ?? '')}
+              key={name}
               name={name}
               stages={[{
                 id: 'live-dev',
@@ -92,12 +103,7 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
                 short: 'Live dev',
                 automation: aut,
               }]}
-              onInspect={() =>
-                setInspectTarget({
-                  name,
-                  stages: [{ id: 'live-dev', label: 'Live dev', automation: aut }],
-                })
-              }
+              onInspect={() => setInspectName(name)}
             />
           ))}
         </div>
@@ -106,10 +112,10 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
       <ReadmeCard bpId={bp.id} />
 
       <InspectModal
-        open={inspectTarget !== null}
-        onClose={() => setInspectTarget(null)}
-        name={inspectTarget?.name ?? ''}
-        stages={inspectTarget?.stages ?? []}
+        open={inspectName !== null}
+        onClose={handleClose}
+        name={inspectName ?? ''}
+        stages={inspectStages}
         mode="liveDev"
       />
     </div>

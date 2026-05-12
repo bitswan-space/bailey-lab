@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { useAutomations } from '@/hooks/useAutomations';
+import { useCallback, useMemo, useState } from 'react';
+import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import type { AutomationStage, BusinessProcess, DeployedAutomation } from '@/types';
 import { AutomationCard } from '@/components/automations/AutomationCard';
 import { InspectModal, type InspectStage } from '@/components/automations/InspectModal';
@@ -18,12 +18,11 @@ interface DeploymentsViewProps {
 }
 
 export function DeploymentsView({ bp }: DeploymentsViewProps) {
-  const { data: raw, status } = useAutomations();
-  const [inspectTarget, setInspectTarget] = useState<{
-    name: string;
-    stages: InspectStage[];
-  } | null>(null);
+  const { automations: raw, status } = useAutomations();
+  const [inspectName, setInspectName] = useState<string | null>(null);
 
+  // Group automations by automation_name → { stage: automation }. Used both
+  // to render the cards AND to derive the modal's live stages.
   const grouped = useMemo(() => {
     const byName = new Map<string, Partial<Record<AutomationStage, DeployedAutomation>>>();
     for (const a of raw) {
@@ -36,25 +35,44 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
       if (!byName.has(key)) byName.set(key, {});
       byName.get(key)![stage] = a;
     }
-    return Array.from(byName.entries()).sort(([a], [b]) => a.localeCompare(b));
+    return byName;
   }, [raw, bp.name]);
+
+  const sorted = useMemo(
+    () => Array.from(grouped.entries()).sort(([a], [b]) => a.localeCompare(b)),
+    [grouped],
+  );
+
+  // Live stages for the open modal — derived from the same grouping the
+  // cards use, so SSE updates flow through immediately.
+  const inspectStages: InspectStage[] = useMemo(() => {
+    if (!inspectName) return [];
+    const stages = grouped.get(inspectName);
+    return STAGES.map((s) => ({
+      id: s.id,
+      label: s.label,
+      automation: stages?.[s.id],
+    }));
+  }, [grouped, inspectName]);
+
+  const handleClose = useCallback(() => setInspectName(null), []);
 
   return (
     <div className="flex-1 overflow-auto bg-background">
       <div className="flex flex-col gap-5 px-7 py-6">
         <SectionHeader
           eyebrow="Automations"
-          title={`${grouped.length} ${grouped.length === 1 ? 'automation' : 'automations'} on main`}
+          title={`${sorted.length} ${sorted.length === 1 ? 'automation' : 'automations'} on main`}
           helper="Click Inspect to start / stop / restart and view logs."
         />
 
-        {status === 'connecting' && grouped.length === 0 ? (
+        {status === 'connecting' && sorted.length === 0 ? (
           <EmptyState message="Loading automations…" />
-        ) : grouped.length === 0 ? (
+        ) : sorted.length === 0 ? (
           <EmptyState message="No automations found for this business process." />
         ) : (
           <div className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(420px,1fr))]">
-            {grouped.map(([name, stages]) => (
+            {sorted.map(([name, stages]) => (
               <AutomationCard
                 key={name}
                 name={name}
@@ -64,16 +82,7 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
                   short: s.short,
                   automation: stages[s.id],
                 }))}
-                onInspect={() =>
-                  setInspectTarget({
-                    name,
-                    stages: STAGES.map((s) => ({
-                      id: s.id,
-                      label: s.label,
-                      automation: stages[s.id],
-                    })),
-                  })
-                }
+                onInspect={() => setInspectName(name)}
               />
             ))}
           </div>
@@ -83,10 +92,10 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
       </div>
 
       <InspectModal
-        open={inspectTarget !== null}
-        onClose={() => setInspectTarget(null)}
-        name={inspectTarget?.name ?? ''}
-        stages={inspectTarget?.stages ?? []}
+        open={inspectName !== null}
+        onClose={handleClose}
+        name={inspectName ?? ''}
+        stages={inspectStages}
         mode="deployments"
       />
     </div>

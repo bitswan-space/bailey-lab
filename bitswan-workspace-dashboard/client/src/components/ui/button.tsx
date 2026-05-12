@@ -41,12 +41,17 @@ export interface ButtonProps
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
+  ({ className, variant, size, asChild = false, type, ...props }, ref) => {
     const Comp = asChild ? Slot : 'button';
+    // Default to type="button" — HTML's implicit "submit" can navigate the
+    // page if any ancestor (Radix, shadcn, or future markup) renders a <form>.
+    // Callers that genuinely want a submit button must opt in explicitly.
+    const resolvedType = asChild ? type : (type ?? 'button');
     return (
       <Comp
         className={cn(buttonVariants({ variant, size, className }))}
         ref={ref}
+        type={resolvedType}
         {...props}
       />
     );

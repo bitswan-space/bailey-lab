@@ -28,11 +28,15 @@ export function LogsPane({ deploymentId, active }: LogsPaneProps) {
   const [ended, setEnded] = useState(false);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const stickyRef = useRef(true);
+  // Tracked via a ref so the transport-error handler can read the latest
+  // `ended` state without forcing the effect to re-subscribe.
+  const endedRef = useRef(false);
 
   useEffect(() => {
     setLines([]);
     setError(null);
     setEnded(false);
+    endedRef.current = false;
     if (!deploymentId || !active) return;
 
     const es = new EventSource(
@@ -76,17 +80,18 @@ export function LogsPane({ deploymentId, active }: LogsPaneProps) {
       }
     });
     es.addEventListener('end', () => {
+      endedRef.current = true;
       setEnded(true);
       es.close();
     });
     es.onerror = () => {
       // Transport-level error (network blip). EventSource auto-reconnects;
       // surface as a soft notice rather than tearing down state.
-      if (!ended) setError('Log stream disconnected — reconnecting…');
+      if (!endedRef.current) setError('Log stream disconnected — reconnecting…');
     };
 
     return () => es.close();
-  }, [deploymentId, active, ended]);
+  }, [deploymentId, active]);
 
   // Auto-scroll to bottom unless the user has scrolled up.
   useEffect(() => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity } from 'lucide-react';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -25,13 +25,20 @@ export function InspectModal({ open, onClose, name, stages, mode }: InspectModal
   const [stageId, setStageId] = useState<AutomationStage>(stages[0]?.id ?? 'dev');
   const [tab, setTab] = useState<'overview' | 'logs'>('overview');
 
-  // Reset state when the modal is reopened for a different automation.
+  // Reset state when the modal is opened for a different automation. `stages`
+  // is intentionally *not* a dep — the parent rebuilds the array on every SSE
+  // tick (so button states update live), but we only want to reset selection
+  // when the inspect target itself changes.
   useEffect(() => {
-    if (open) {
-      setStageId(stages[0]?.id ?? 'dev');
-      setTab('overview');
-    }
-  }, [open, name, stages]);
+    if (!open) return;
+    setStageId((cur) => (stagesRef.current.some((s) => s.id === cur) ? cur : stagesRef.current[0]?.id ?? 'dev'));
+    setTab('overview');
+  }, [open, name]);
+
+  // Keep a ref to the latest stages so the reset effect can pick a valid id
+  // without depending on the array reference (which churns each render).
+  const stagesRef = useRef(stages);
+  stagesRef.current = stages;
 
   const stage = useMemo(
     () => stages.find((s) => s.id === stageId) ?? stages[0],
@@ -55,7 +62,11 @@ export function InspectModal({ open, onClose, name, stages, mode }: InspectModal
                 : 'Container details and logs — per stage'}
             </div>
           </div>
-          <ActionButtons deploymentId={deploymentId} state={aut?.state ?? null} />
+          <ActionButtons
+            deploymentId={deploymentId}
+            state={aut?.state ?? null}
+            automationName={name}
+          />
         </header>
 
         {mode === 'deployments' && stages.length > 1 && (
