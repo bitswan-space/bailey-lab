@@ -4,7 +4,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import { handleTerminalConnection } from './ws.js';
-import { discoverBusinessProcesses } from './bps.js';
+import { discoverBusinessProcesses, isValidBpId, readReadme } from './bps.js';
 import type { GitopsClient } from './gitops.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -96,6 +96,94 @@ export async function buildServer(opts: BuildServerOptions): Promise<FastifyInst
     reply.header('Cache-Control', 'no-store');
     return gitops ? gitops.getSnapshot() : [];
   });
+
+  // Per-automation actions: start / stop / restart.
+  for (const action of ['start', 'stop', 'restart'] as const) {
+    app.post<{ Params: { id: string } }>(
+      `/api/automations/:id/${action}`,
+      async (req, reply) => {
+        reply.header('Cache-Control', 'no-store');
+        if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+        try {
+          const r = await gitops.actionAutomation(req.params.id, action);
+          if (!r.ok) return reply.code(502).send({ error: 'gitops error', status: r.status });
+          return { ok: true };
+        } catch (err) {
+          app.log.warn({ err, action, id: req.params.id }, 'automation action failed');
+          return reply.code(502).send({ error: 'gitops unreachable' });
+        }
+      },
+    );
+  }
+
+  app.get<{ Params: { id: string } }>('/api/automations/:id/inspect', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return [];
+    try {
+      return await gitops.inspectAutomation(req.params.id);
+    } catch (err) {
+      app.log.warn({ err, id: req.params.id }, 'inspect failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  app.get<{ Params: { id: string } }>('/api/automations/:id/logs', async (req, reply) => {
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-store');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.setHeader('X-Accel-Buffering', 'no');
+    reply.raw.flushHeaders?.();
+
+    const ac = new AbortController();
+    let closed = false;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      ac.abort();
+      clearInterval(keepalive);
+      try {
+        reply.raw.end();
+      } catch {
+        // ignore
+      }
+    };
+    const keepalive = setInterval(() => {
+      if (!closed) reply.raw.write(':keepalive\n\n');
+    }, 20_000);
+    req.raw.on('close', cleanup);
+    req.raw.on('error', cleanup);
+
+    try {
+      const body = await gitops.streamLogs(req.params.id, ac.signal);
+      const reader = body.getReader();
+      while (!closed) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        reply.raw.write(value);
+      }
+    } catch (err) {
+      if (!closed) {
+        app.log.warn({ err, id: req.params.id }, 'logs stream error');
+        reply.raw.write(`event: error\ndata: ${JSON.stringify(String(err))}\n\n`);
+      }
+    } finally {
+      cleanup();
+    }
+  });
+
+  app.get<{ Params: { id: string } }>(
+    '/api/business-processes/:id/readme',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!isValidBpId(req.params.id)) {
+        return reply.code(400).send({ error: 'invalid bp id' });
+      }
+      const content = await readReadme(req.params.id);
+      return { content };
+    },
+  );
 
   app.get('/api/events', async (req, reply) => {
     reply.raw.setHeader('Content-Type', 'text/event-stream');

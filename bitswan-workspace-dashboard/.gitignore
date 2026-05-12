@@ -7,3 +7,4 @@ workspace-demo/
 .claude
 .mcp.json
 skills-lock.json
+tsconfig.tsbuildinfo

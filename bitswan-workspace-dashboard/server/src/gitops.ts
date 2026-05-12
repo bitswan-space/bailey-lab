@@ -50,6 +50,62 @@ export class GitopsClient {
     return this.automationsSnapshot;
   }
 
+  // POST /automations/{id}/(start|stop|restart). gitops accepts an empty JSON
+  // body; we forward the status code so the route handler can surface 502s.
+  async actionAutomation(
+    deploymentId: string,
+    action: 'start' | 'stop' | 'restart',
+  ): Promise<{ ok: boolean; status: number }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/${action}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      },
+    );
+    return { ok: r.ok, status: r.status };
+  }
+
+  // GET /automations/{id}/inspect — returns the array of Docker inspect dicts.
+  async inspectAutomation(deploymentId: string): Promise<unknown[]> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/inspect`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    if (!r.ok) {
+      throw new Error(`gitops inspect returned ${r.status}`);
+    }
+    const data = await r.json();
+    return Array.isArray(data) ? data : [];
+  }
+
+  // Returns the upstream SSE body so the caller (Fastify route) can pipe it
+  // through. The AbortSignal lets callers cancel when the downstream client
+  // disconnects.
+  async streamLogs(
+    deploymentId: string,
+    signal: AbortSignal,
+  ): Promise<ReadableStream<Uint8Array>> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/logs/stream`,
+      {
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          Accept: 'text/event-stream',
+        },
+        signal,
+      },
+    );
+    if (!r.ok || !r.body) {
+      throw new Error(`gitops logs stream returned ${r.status}`);
+    }
+    return r.body;
+  }
+
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
     return () => {

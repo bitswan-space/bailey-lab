@@ -1,10 +1,12 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { LayoutDashboard, TerminalSquare } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAutomations } from '@/hooks/useAutomations';
 import type { BusinessProcess, DeployedAutomation, Worktree } from '@/types';
 import { Terminal } from '@/Terminal';
 import { AutomationCard } from './AutomationCard';
+import { InspectModal, type InspectStage } from './InspectModal';
+import { ReadmeCard } from './ReadmeCard';
 
 interface WorktreeViewProps {
   bp: BusinessProcess;
@@ -39,6 +41,10 @@ export function WorktreeView({ bp, wt }: WorktreeViewProps) {
 function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
   const { data: raw, status } = useAutomations();
   const prefix = `worktrees/${wt.name}/${bp.name}`;
+  const [inspectTarget, setInspectTarget] = useState<{
+    name: string;
+    stages: InspectStage[];
+  } | null>(null);
 
   const automations = useMemo(() => {
     const out: { name: string; aut: DeployedAutomation }[] = [];
@@ -57,9 +63,7 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
         <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Worktree
         </div>
-        <div className="text-lg font-semibold tracking-tight text-foreground">
-          {wt.name}
-        </div>
+        <div className="text-lg font-semibold tracking-tight text-foreground">{wt.name}</div>
         <div className="mt-0.5 text-sm text-muted-foreground">
           {wt.branch} ·{' '}
           {wt.synced ? (
@@ -75,16 +79,37 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
       ) : automations.length === 0 ? (
         <EmptyState message="No live-dev automations for this worktree." />
       ) : (
-        <div className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
+        <div className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(320px,1fr))]">
           {automations.map(({ name, aut }) => (
             <AutomationCard
               key={name + (aut.deployment_id ?? '')}
               name={name}
-              stages={[{ id: 'live-dev', label: 'Live dev', automation: aut }]}
+              stages={[{
+                id: 'live-dev',
+                label: 'Live dev',
+                short: 'Live dev',
+                automation: aut,
+              }]}
+              onInspect={() =>
+                setInspectTarget({
+                  name,
+                  stages: [{ id: 'live-dev', label: 'Live dev', automation: aut }],
+                })
+              }
             />
           ))}
         </div>
       )}
+
+      <ReadmeCard bpId={bp.id} />
+
+      <InspectModal
+        open={inspectTarget !== null}
+        onClose={() => setInspectTarget(null)}
+        name={inspectTarget?.name ?? ''}
+        stages={inspectTarget?.stages ?? []}
+        mode="liveDev"
+      />
     </div>
   );
 }

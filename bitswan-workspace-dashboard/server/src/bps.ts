@@ -55,6 +55,30 @@ async function listWorktreeNames(root: string): Promise<string[]> {
     .sort((a, b) => a.localeCompare(b));
 }
 
+// Reads a BP's README.md, returning null if it doesn't exist. The bpId is
+// validated against a tight allowlist before being joined into the path —
+// path traversal is rejected.
+const BP_ID_RE = /^[A-Za-z0-9_.-]+$/;
+export function isValidBpId(bpId: string): boolean {
+  return BP_ID_RE.test(bpId) && bpId !== '.' && bpId !== '..';
+}
+
+export async function readReadme(
+  bpId: string,
+  root = '/workspace/workspace',
+): Promise<string | null> {
+  if (!isValidBpId(bpId)) {
+    throw new Error(`invalid bpId: ${bpId}`);
+  }
+  try {
+    const p = path.join(root, bpId, 'README.md');
+    return await fs.readFile(p, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
 export async function discoverBusinessProcesses(
   root = '/workspace/workspace',
 ): Promise<BusinessProcess[]> {

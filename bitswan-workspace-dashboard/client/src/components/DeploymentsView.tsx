@@ -1,12 +1,14 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useAutomations } from '@/hooks/useAutomations';
 import type { AutomationStage, BusinessProcess, DeployedAutomation } from '@/types';
 import { AutomationCard } from './AutomationCard';
+import { InspectModal, type InspectStage } from './InspectModal';
+import { ReadmeCard } from './ReadmeCard';
 
-const STAGES: { id: AutomationStage; label: string }[] = [
-  { id: 'dev', label: 'Development' },
-  { id: 'staging', label: 'Staging' },
-  { id: 'production', label: 'Production' },
+const STAGES: { id: AutomationStage; label: string; short: string }[] = [
+  { id: 'dev', label: 'Development', short: 'Dev' },
+  { id: 'staging', label: 'Staging', short: 'Stg' },
+  { id: 'production', label: 'Production', short: 'Prod' },
 ];
 
 interface DeploymentsViewProps {
@@ -15,6 +17,10 @@ interface DeploymentsViewProps {
 
 export function DeploymentsView({ bp }: DeploymentsViewProps) {
   const { data: raw, status } = useAutomations();
+  const [inspectTarget, setInspectTarget] = useState<{
+    name: string;
+    stages: InspectStage[];
+  } | null>(null);
 
   const grouped = useMemo(() => {
     const byName = new Map<string, Partial<Record<AutomationStage, DeployedAutomation>>>();
@@ -37,7 +43,7 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
         <SectionHeader
           eyebrow="Automations"
           title={`${grouped.length} ${grouped.length === 1 ? 'automation' : 'automations'} on main`}
-          helper="Read-only overview. Deploy / promote actions are not wired up yet."
+          helper="Click Inspect to start / stop / restart and view logs."
         />
 
         {status === 'connecting' && grouped.length === 0 ? (
@@ -45,7 +51,7 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
         ) : grouped.length === 0 ? (
           <EmptyState message="No automations found for this business process." />
         ) : (
-          <div className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(280px,1fr))]">
+          <div className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(420px,1fr))]">
             {grouped.map(([name, stages]) => (
               <AutomationCard
                 key={name}
@@ -53,13 +59,34 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
                 stages={STAGES.map((s) => ({
                   id: s.id,
                   label: s.label,
+                  short: s.short,
                   automation: stages[s.id],
                 }))}
+                onInspect={() =>
+                  setInspectTarget({
+                    name,
+                    stages: STAGES.map((s) => ({
+                      id: s.id,
+                      label: s.label,
+                      automation: stages[s.id],
+                    })),
+                  })
+                }
               />
             ))}
           </div>
         )}
+
+        <ReadmeCard bpId={bp.id} />
       </div>
+
+      <InspectModal
+        open={inspectTarget !== null}
+        onClose={() => setInspectTarget(null)}
+        name={inspectTarget?.name ?? ''}
+        stages={inspectTarget?.stages ?? []}
+        mode="deployments"
+      />
     </div>
   );
 }
