@@ -6,10 +6,12 @@ import { useReadme } from '@/hooks/useReadme';
 
 interface ReadmeCardProps {
   bpId: string;
+  /** When set, read the worktree's copy of the README instead of main's. */
+  worktree?: string;
 }
 
-export function ReadmeCard({ bpId }: ReadmeCardProps) {
-  const { content, loading } = useReadme(bpId);
+export function ReadmeCard({ bpId, worktree }: ReadmeCardProps) {
+  const { content, loading } = useReadme(bpId, worktree);
 
   return (
     <section className="flex flex-col gap-3">

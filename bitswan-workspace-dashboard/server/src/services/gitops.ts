@@ -6,40 +6,6 @@ export interface UpstreamEvent {
   data: unknown;
 }
 
-/** Mirrors bitswan-gitops `list_worktrees()` response (app/routes/worktrees.py). */
-export interface Worktree {
-  name: string;
-  branch: string;
-  commit_hash: string;
-  commit_message: string;
-  has_requirements: boolean;
-  synced: boolean;
-}
-
-/**
- * Mirrors bitswan-gitops `DeployedAutomation` (app/models.py). All field names
- * are snake_case as they come off the wire.
- */
-/* eslint-disable no-restricted-syntax -- wire-mirror nullable fields match Python's `str | None` */
-export interface DeployedAutomation {
-  container_id: string | null;
-  endpoint_name: string | null;
-  created_at: string | null;
-  name: string;
-  state: string | null;
-  status: string | null;
-  deployment_id: string | null;
-  active: boolean;
-  automation_url: string | null;
-  relative_path: string | null;
-  stage: string | null;
-  automation_name: string | null;
-  context: string | null;
-  version_hash: string | null;
-  replicas: number;
-}
-/* eslint-enable no-restricted-syntax */
-
 /**
  * One entry of `docker inspect` output. The server passes these through to the
  * client which renders them; we don't introspect the shape here, so a loose
@@ -57,12 +23,26 @@ const RECONNECT_MAX_MS = 30_000;
  * subscription to `/events/stream` (with reconnect/backoff) and exposes
  * one-shot REST calls for the Fastify routes to proxy.
  */
+// Event names whose latest payload is worth replaying to a freshly-connected
+// SSE consumer. Anything not in this list is purely fire-and-forget.
+const REPLAYABLE_EVENTS = new Set([
+  'automations',
+  'images',
+  'processes',
+  'worktrees',
+]);
+
 export class GitopsClient {
   private readonly baseUrl: string;
   private readonly secret: string;
   private abort: AbortController | null = null;
   private stopped = false;
-  private automationsSnapshot: DeployedAutomation[] = [];
+  // Most-recent payload per event name, for replay-on-connect to downstream
+  // SSE consumers. The dashboard server's `/api/events` route iterates this
+  // when a browser connects, so a fresh page load gets the same initial
+  // snapshot gitops itself delivers on `/events/stream` connect — without
+  // tying the dashboard's response to gitops's roundtrip.
+  private readonly lastByEvent = new Map<string, unknown>();
   private readonly listeners = new Set<Listener>();
 
   constructor(baseUrl: string, secret: string) {
@@ -70,21 +50,13 @@ export class GitopsClient {
     this.secret = secret;
   }
 
-  /** `GET /worktrees/` — list all worktrees of the workspace repo. */
-  async getWorktrees(): Promise<Worktree[]> {
-    const r = await fetch(`${this.baseUrl}/worktrees/`, {
-      headers: { Authorization: `Bearer ${this.secret}` },
-    });
-    if (!r.ok) {
-      throw new Error(`gitops /worktrees/ returned ${r.status}`);
-    }
-    const data = await r.json();
-    return Array.isArray(data) ? (data as Worktree[]) : [];
-  }
-
-  /** Latest `automations` payload pushed by the upstream SSE feed. */
-  getSnapshot(): DeployedAutomation[] {
-    return this.automationsSnapshot;
+  /**
+   * Return the most-recent payload per upstream event name (currently
+   * `automations`, `images`, `processes`). Used by the downstream SSE route
+   * to replay the initial snapshot when a browser connects mid-stream.
+   */
+  getCachedEvents(): Iterable<[string, unknown]> {
+    return this.lastByEvent.entries();
   }
 
   /**
@@ -105,6 +77,52 @@ export class GitopsClient {
           'Content-Type': 'application/json',
         },
         body: '{}',
+      },
+    );
+    return { ok: r.ok, status: r.status };
+  }
+
+  /**
+   * `POST /automations/start-deploy` — workspace-bind-mount deploy. Body is
+   * `{ relative_path, stage, worktree? }`. Gitops resolves the source under
+   * `/workspace-repo`, merges `bitswan_lib`, computes the checksum, and
+   * spawns the deploy in the background.
+   */
+  async startDeploy(input: {
+    relative_path: string;
+    stage: 'dev' | 'live-dev';
+    worktree?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}/automations/start-deploy`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(input),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `DELETE /automations/{id}` — stop the container, remove the entry from
+   * `bitswan.yaml`, commit. Returns the upstream status code so the route
+   * handler can surface 502/4xx as appropriate.
+   */
+  async removeAutomation(
+    deploymentId: string,
+  ): Promise<{ ok: boolean; status: number }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${this.secret}` },
       },
     );
     return { ok: r.ok, status: r.status };
@@ -221,8 +239,8 @@ export class GitopsClient {
   }
 
   private handleEvent(ev: UpstreamEvent): void {
-    if (ev.event === 'automations' && Array.isArray(ev.data)) {
-      this.automationsSnapshot = ev.data as DeployedAutomation[];
+    if (REPLAYABLE_EVENTS.has(ev.event)) {
+      this.lastByEvent.set(ev.event, ev.data);
     }
     for (const fn of this.listeners) {
       try {

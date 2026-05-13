@@ -5,51 +5,110 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { DeployedAutomation } from '@/types';
+import type { BusinessProcess, DeployedAutomation, Worktree } from '@/types';
 
 export type StreamStatus = 'connecting' | 'live' | 'error';
 
 interface WorkspaceContextValue {
   /** Latest automations snapshot from the upstream SSE feed. */
   automations: DeployedAutomation[];
+  /** Latest business-process listing (main repo + all worktrees, deduped). */
+  // eslint-disable-next-line no-restricted-syntax -- nullable until first delivery
+  processes: BusinessProcess[] | null;
+  /** Latest worktree listing — same payload as the old `/api/worktrees` REST. */
+  // eslint-disable-next-line no-restricted-syntax -- nullable until first delivery
+  worktrees: Worktree[] | null;
   /** Live status of the SSE subscription. */
   status: StreamStatus;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 
+/** Wire shape of one entry in gitops's `processes` event. */
+interface GitopsProcessEntry {
+  id: string;
+  name: string;
+  in_main: boolean;
+  worktrees: string[];
+  has_worktrees: boolean;
+}
+
+function toBusinessProcess(p: GitopsProcessEntry): BusinessProcess {
+  return {
+    id: p.name,
+    name: p.name,
+    path: p.name,
+    inMain: p.in_main,
+    worktrees: p.worktrees,
+    hasWorktrees: p.has_worktrees,
+  };
+}
+
 /**
  * Holds the single `/api/events` SSE subscription for the whole app. Views
  * mount and unmount as the user switches scopes (Deployments / Worktree /
- * Agents), but the EventSource — and the cached snapshot — survives,
+ * Agents), but the EventSource — and the cached snapshots — survive,
  * eliminating the "Loading…" flash on every tab switch.
+ *
+ * Tracks both `automations` (Docker state) and `processes` (workspace BP
+ * list, maintained by gitops's filesystem watchers). The dashboard no
+ * longer polls for BPs — updates flow in over the SSE feed.
  */
+/* eslint-disable no-restricted-syntax -- this whole component sits at the
+   SSE-feed boundary: nullable wire types until the first delivery, JSON-parse
+   boundaries, and EventSource named-event dispatch (which the DOM types
+   model as `Event`, not `MessageEvent`). All `as` / `null` usage below is
+   intentional. */
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
-  // eslint-disable-next-line no-restricted-syntax -- DeployedAutomation is the live wire shape; see types/automation.ts
   const [automations, setAutomations] = useState<DeployedAutomation[]>([]);
+  const [processes, setProcesses] = useState<BusinessProcess[] | null>(null);
+  const [worktrees, setWorktrees] = useState<Worktree[] | null>(null);
   const [status, setStatus] = useState<StreamStatus>('connecting');
 
   useEffect(() => {
     const es = new EventSource('/api/events', { withCredentials: true });
 
-    const handlePayload = (raw: string) => {
+    const handleAutomationsPayload = (raw: string) => {
       try {
         const payload = JSON.parse(raw);
-        // eslint-disable-next-line no-restricted-syntax -- JSON boundary; runtime-checked with Array.isArray
         if (Array.isArray(payload)) setAutomations(payload as DeployedAutomation[]);
       } catch {
         // ignore non-JSON event data
       }
     };
 
-    // eslint-disable-next-line no-restricted-syntax -- EventSource named events lack typed dispatch
-    es.addEventListener('snapshot', (ev) => {
-      handlePayload((ev as MessageEvent).data);
+    const handleProcessesPayload = (raw: string) => {
+      try {
+        const payload = JSON.parse(raw);
+        if (!Array.isArray(payload)) return;
+        setProcesses((payload as GitopsProcessEntry[]).map(toBusinessProcess));
+      } catch {
+        // ignore
+      }
+    };
+
+    const handleWorktreesPayload = (raw: string) => {
+      try {
+        const payload = JSON.parse(raw);
+        // Older gitops emitted an empty object `{}` as a ping; treat that
+        // and any non-array payload as "no data, keep current state".
+        if (!Array.isArray(payload)) return;
+        setWorktrees(payload as Worktree[]);
+      } catch {
+        // ignore
+      }
+    };
+
+    es.addEventListener('automations', (ev) => {
+      handleAutomationsPayload((ev as MessageEvent).data);
       setStatus('live');
     });
-    // eslint-disable-next-line no-restricted-syntax -- same
-    es.addEventListener('automations', (ev) => {
-      handlePayload((ev as MessageEvent).data);
+    es.addEventListener('processes', (ev) => {
+      handleProcessesPayload((ev as MessageEvent).data);
+      setStatus('live');
+    });
+    es.addEventListener('worktrees', (ev) => {
+      handleWorktreesPayload((ev as MessageEvent).data);
       setStatus('live');
     });
     es.addEventListener('open', () => setStatus('live'));
@@ -59,15 +118,47 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <WorkspaceContext.Provider value={{ automations, status }}>
+    <WorkspaceContext.Provider value={{ automations, processes, worktrees, status }}>
       {children}
     </WorkspaceContext.Provider>
   );
 }
+/* eslint-enable no-restricted-syntax */
 
 /** Read the shared automations snapshot. Must be used inside `<WorkspaceProvider>`. */
-export function useAutomations(): WorkspaceContextValue {
+export function useAutomations(): {
+  automations: DeployedAutomation[];
+  status: StreamStatus;
+} {
   const v = useContext(WorkspaceContext);
   if (!v) throw new Error('useAutomations must be used inside <WorkspaceProvider>');
-  return v;
+  return { automations: v.automations, status: v.status };
+}
+
+/**
+ * Read the shared BP snapshot. Returns `null` until the first SSE delivery
+ * lands so callers can distinguish "still loading" from "no BPs".
+ */
+export function useProcesses(): {
+  // eslint-disable-next-line no-restricted-syntax -- null = first SSE not yet received
+  processes: BusinessProcess[] | null;
+  status: StreamStatus;
+} {
+  const v = useContext(WorkspaceContext);
+  if (!v) throw new Error('useProcesses must be used inside <WorkspaceProvider>');
+  return { processes: v.processes, status: v.status };
+}
+
+/**
+ * Read the shared worktree list. Returns `null` until the first SSE delivery
+ * lands so callers can show a loading state if needed.
+ */
+export function useWorktrees(): {
+  // eslint-disable-next-line no-restricted-syntax -- null = first SSE not yet received
+  worktrees: Worktree[] | null;
+  status: StreamStatus;
+} {
+  const v = useContext(WorkspaceContext);
+  if (!v) throw new Error('useWorktrees must be used inside <WorkspaceProvider>');
+  return { worktrees: v.worktrees, status: v.status };
 }

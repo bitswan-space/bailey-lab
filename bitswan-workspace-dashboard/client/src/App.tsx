@@ -2,12 +2,15 @@ import { useEffect, useMemo, useState } from 'react';
 import { AuthGate } from '@/components/auth/AuthGate';
 import { Sidebar } from '@/components/workspace/Sidebar';
 import { TopBar } from '@/components/workspace/TopBar';
-import { WorkspaceProvider } from '@/components/workspace/WorkspaceProvider';
+import {
+  WorkspaceProvider,
+  useProcesses,
+  useWorktrees,
+} from '@/components/workspace/WorkspaceProvider';
 import { Toaster } from '@/components/ui/sonner';
 import { DeploymentsView } from '@/components/views/DeploymentsView';
 import { WorktreeView } from '@/components/views/WorktreeView';
-import { api } from '@/lib/api';
-import type { BusinessProcess, Scope, Worktree } from '@/types';
+import type { Scope } from '@/types';
 
 export function App() {
   return (
@@ -21,75 +24,79 @@ export function App() {
 }
 
 function Shell() {
-  const [bps, setBps] = useState<BusinessProcess[]>([]);
-  const [worktrees, setWorktrees] = useState<Worktree[]>([]);
+  const { processes } = useProcesses();
+  const { worktrees: worktreesSnapshot } = useWorktrees();
+  // Memoise the empty-array fallback so the array identity is stable; the
+  // raw `??` on every render would force every downstream `useMemo` to
+  // recompute.
+  const allBps = useMemo(() => processes ?? [], [processes]);
+  const worktrees = useMemo(() => worktreesSnapshot ?? [], [worktreesSnapshot]);
+  // eslint-disable-next-line no-restricted-syntax -- null = "not yet selected"
   const [bpId, setBpId] = useState<string | null>(null);
   const [scope, setScope] = useState<Scope>({ type: 'deployments' });
 
-  // Load BPs once.
-  useEffect(() => {
-    let cancelled = false;
-    api.businessProcesses().then((rows) => {
-      if (cancelled) return;
-      setBps(rows);
-      const first = rows[0];
-      if (first) setBpId((cur) => cur ?? first.id);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // BPs visible in the sidebar are scoped to the current view:
+  //   - Deployments scope → BPs present in main.
+  //   - Worktree scope    → BPs present in that worktree.
+  // A BP that only exists in a worktree is invisible from Deployments
+  // (matches the user's mental model — promotion brings it into main).
+  const visibleBps = useMemo(() => {
+    if (scope.type === 'deployments') return allBps.filter((p) => p.inMain);
+    return allBps.filter((p) => p.worktrees.includes(scope.name));
+  }, [allBps, scope]);
 
-  // Load worktrees when the selected BP changes.
+  // Keep `bpId` consistent with what's visible in the sidebar. When the
+  // current BP isn't in the filtered set (initial load, scope switch, or
+  // BP removed), fall back to the first available — or clear if none.
   useEffect(() => {
-    if (!bpId) {
-      setWorktrees([]);
-      return;
-    }
-    let cancelled = false;
-    api
-      .worktrees()
-      .then((rows) => {
-        if (cancelled) return;
-        setWorktrees(rows);
-        // If our current scope refers to a worktree that doesn't exist on the
-        // new BP, reset to Deployments.
-        setScope((cur) => {
-          if (cur.type !== 'worktree') return cur;
-          return rows.some((w) => w.name === cur.name) ? cur : { type: 'deployments' };
-        });
-      })
-      .catch(() => setWorktrees([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [bpId]);
+    if (processes === null) return; // still loading; don't make decisions yet
+    if (bpId && visibleBps.some((p) => p.id === bpId)) return;
+    setBpId(visibleBps[0]?.id ?? null);
+  }, [processes, visibleBps, bpId]);
 
-  const bp = useMemo(() => bps.find((b) => b.id === bpId) ?? null, [bps, bpId]);
+  // If the current worktree-scope refers to a worktree that no longer
+  // exists in the snapshot, fall back to Deployments. (SSE delivers
+  // worktree changes; this just keeps `scope` consistent with the feed.)
+  useEffect(() => {
+    if (worktreesSnapshot === null) return;
+    if (scope.type !== 'worktree') return;
+    if (worktreesSnapshot.some((w) => w.name === scope.name)) return;
+    setScope({ type: 'deployments' });
+  }, [worktreesSnapshot, scope]);
+
+  const bp = useMemo(
+    () => visibleBps.find((b) => b.id === bpId) ?? null,
+    [visibleBps, bpId],
+  );
   const wt = useMemo(
     () =>
       scope.type === 'worktree' ? worktrees.find((w) => w.name === scope.name) ?? null : null,
     [scope, worktrees],
   );
 
+  const isLoading = processes === null;
+  const emptyMessage = isLoading
+    ? 'Loading business processes…'
+    : allBps.length === 0
+      ? 'No business processes found in this workspace.'
+      : scope.type === 'worktree'
+        ? `No business processes in worktree "${scope.name}".`
+        : 'No business processes in main.';
+
   return (
     <div className="flex h-screen bg-background text-foreground">
-      <Sidebar bps={bps} activeBpId={bpId} onSelect={setBpId} />
+      <Sidebar bps={visibleBps} activeBpId={bpId} onSelect={setBpId} />
       <div className="flex min-w-0 flex-1 flex-col">
+        <TopBar scope={scope} onScope={setScope} worktrees={worktrees} />
         {bp ? (
-          <>
-            <TopBar scope={scope} onScope={setScope} worktrees={worktrees} />
-            {scope.type === 'deployments' ? (
-              <DeploymentsView bp={bp} />
-            ) : wt ? (
-              <WorktreeView bp={bp} wt={wt} />
-            ) : null}
-          </>
+          scope.type === 'deployments' ? (
+            <DeploymentsView bp={bp} />
+          ) : wt ? (
+            <WorktreeView bp={bp} wt={wt} />
+          ) : null
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-            {bps.length === 0
-              ? 'No business processes found in this workspace.'
-              : 'Select a business process from the sidebar.'}
+            {emptyMessage}
           </div>
         )}
       </div>

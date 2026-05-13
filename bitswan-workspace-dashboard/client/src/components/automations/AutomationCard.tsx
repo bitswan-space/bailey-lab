@@ -1,4 +1,4 @@
-import { Activity, Cog, ExternalLink } from 'lucide-react';
+import { Activity, Cog, ExternalLink, Rocket, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
@@ -16,9 +16,23 @@ interface AutomationCardProps {
   name: string;
   stages: CardStage[];
   onInspect: () => void;
+  /** Stages where a Deploy button should appear when not deployed. */
+  deployableStages: AutomationStage[];
+  /** Currently in-flight deploy/remove action, keyed by stage. */
+  busyStage: AutomationStage | null;
+  onDeploy: (stage: AutomationStage) => void;
+  onRemove: (deploymentId: string, stage: AutomationStage) => void;
 }
 
-export function AutomationCard({ name, stages, onInspect }: AutomationCardProps) {
+export function AutomationCard({
+  name,
+  stages,
+  onInspect,
+  deployableStages,
+  busyStage,
+  onDeploy,
+  onRemove,
+}: AutomationCardProps) {
   return (
     <Card className="overflow-hidden rounded-xl border border-border bg-background shadow-sm">
       <header className="flex items-center gap-2.5 border-b border-border px-4 py-3.5">
@@ -47,6 +61,9 @@ export function AutomationCard({ name, stages, onInspect }: AutomationCardProps)
           const isRunning = display === 'running' || display === 'restarting';
           const openUrl = isRunning ? aut?.automation_url : null;
           const last = i === stages.length - 1;
+          const deploymentId = aut?.deployment_id ?? null;
+          const canDeploy = !deploymentId && deployableStages.includes(stage.id);
+          const busy = busyStage === stage.id;
 
           return (
             <div
@@ -75,6 +92,29 @@ export function AutomationCard({ name, stages, onInspect }: AutomationCardProps)
                 <span className={cn('size-2 rounded-full', meta.dot)} aria-hidden />
                 <div className={cn('text-xs font-medium', meta.labelColor)}>{meta.label}</div>
               </div>
+              {deploymentId ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => onRemove(deploymentId, stage.id)}
+                  disabled={busy}
+                >
+                  <Trash2 className="size-3.5" />
+                  Remove
+                </Button>
+              ) : canDeploy ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => onDeploy(stage.id)}
+                  disabled={busy}
+                >
+                  <Rocket className="size-3.5" />
+                  Deploy
+                </Button>
+              ) : null}
             </div>
           );
         })}

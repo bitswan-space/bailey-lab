@@ -16,11 +16,60 @@ export function registerAutomationRoutes(
   app: FastifyInstance,
   { gitops }: AutomationRoutesOptions,
 ): void {
-  // Snapshot of the latest automations seen on the upstream SSE feed.
-  app.get('/api/automations', async (_req, reply) => {
+  // Deploy from the bind-mounted workspace (no asset upload).
+  app.post<{
+    Body: { relative_path?: string; stage?: string; worktree?: string };
+  }>('/api/automations/deploy', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    return gitops ? gitops.getSnapshot() : [];
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { relative_path, stage, worktree } = req.body ?? {};
+    if (!relative_path || typeof relative_path !== 'string') {
+      return reply.code(400).send({ error: 'relative_path is required' });
+    }
+    if (stage !== 'dev' && stage !== 'live-dev') {
+      return reply
+        .code(400)
+        .send({ error: "stage must be 'dev' or 'live-dev'" });
+    }
+    try {
+      const r = await gitops.startDeploy({
+        relative_path,
+        stage,
+        ...(worktree ? { worktree } : {}),
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, relative_path, stage }, 'deploy failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
   });
+
+  // Remove a deployment (stops container, removes from bitswan.yaml).
+  app.delete<{ Params: { id: string } }>(
+    '/api/automations/:id',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops)
+        return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.removeAutomation(req.params.id);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status });
+        }
+        return { ok: true };
+      } catch (err) {
+        app.log.warn({ err, id: req.params.id }, 'remove failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
 
   // Per-deployment lifecycle actions.
   for (const action of ['start', 'stop', 'restart'] as const) {

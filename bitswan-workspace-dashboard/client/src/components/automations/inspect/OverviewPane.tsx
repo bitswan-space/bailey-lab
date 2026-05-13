@@ -54,6 +54,11 @@ export function OverviewPane({ deploymentId }: OverviewPaneProps) {
   if (containers.length === 0)
     return <EmptyState message="No container found for this deployment." />;
 
+  // `idx` is clamped to `[0, containers.length - 1]` by the Prev/Next
+  // handlers (and reset to 0 whenever `containers` changes), and we've
+  // already returned on the empty case above, so this lookup is always
+  // defined.
+  // eslint-disable-next-line no-restricted-syntax -- safety guarded by the length check above
   const c = containers[idx]!;
   return (
     <div className="flex flex-col gap-4">
