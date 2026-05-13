@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { LayoutDashboard, TerminalSquare } from 'lucide-react';
+import { LayoutDashboard, Plus, TerminalSquare, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import type {
@@ -16,15 +26,21 @@ import {
   RemoveConfirmDialog,
   type RemoveTarget,
 } from '@/components/automations/RemoveConfirmDialog';
+import { NewAutomationDialog } from '@/components/automations/NewAutomationDialog';
 import { ReadmeCard } from '@/components/workspace/ReadmeCard';
 import { SectionHeader } from '@/components/shared/SectionHeader';
 import { EmptyState } from '@/components/shared/EmptyState';
+import { Button } from '@/components/ui/button';
 import { api, isTransientNetworkError } from '@/lib/api';
 
 const DEPLOYABLE_STAGES: AutomationStage[] = ['live-dev'];
 
 interface WorktreeViewProps {
-  bp: BusinessProcess;
+  /** `null` when the user is on a worktree scope but no BP is selected
+   *  (e.g. fresh worktree, or all BPs filtered out). The view still
+   *  renders so the user can manage the worktree itself (delete, etc.). */
+  // eslint-disable-next-line no-restricted-syntax -- null = no BP selected for this scope
+  bp: BusinessProcess | null;
   wt: Worktree;
 }
 
@@ -67,14 +83,26 @@ interface CardEntry {
   relativePath: string;
 }
 
-function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
+function OverviewPane({
+  bp,
+  wt,
+}: {
+  // eslint-disable-next-line no-restricted-syntax -- null = no BP selected
+  bp: BusinessProcess | null;
+  wt: Worktree;
+}) {
   const { automations: raw, status } = useAutomations();
-  const prefix = `worktrees/${wt.name}/${bp.name}`;
+  // No BP → no automations to list. The prefix becomes a guaranteed-miss so
+  // the existing filter still runs cleanly without a separate code path.
+  const prefix = bp ? `worktrees/${wt.name}/${bp.name}` : null;
   const [inspectName, setInspectName] = useState<string | null>(null);
   // Busy stays set from request fire until the SSE feed confirms the
   // expected state, or the safety timeout fires. Same shape as
   // DeploymentsView.
   const [busy, setBusy] = useState<Record<string, BusyEntry | null>>({});
+  const [newAutomationOpen, setNewAutomationOpen] = useState(false);
+  const [deleteWorktreeOpen, setDeleteWorktreeOpen] = useState(false);
+  const [deletingWorktree, setDeletingWorktree] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<
     (RemoveTarget & { automationName: string }) | null
   >(null);
@@ -84,6 +112,7 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
   // automations that exist on disk but haven't been started yet.
   const byName = useMemo(() => {
     const out = new Map<string, CardEntry>();
+    if (!prefix) return out;
     for (const a of raw) {
       const rel = a.relative_path ?? '';
       if (rel !== prefix && !rel.startsWith(`${prefix}/`)) continue;
@@ -216,6 +245,54 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
     }
   }, []);
 
+  // Editor-parity flow: best-effort stop every live-dev deployment in this
+  // worktree before asking gitops to remove the directory. Gitops's
+  // `DELETE /worktrees/<name>` succeeds even if containers are still
+  // running, but cleaning them up first avoids stranded containers
+  // pointing at a now-deleted bind-mount.
+  const runDeleteWorktree = useCallback(async () => {
+    setDeletingWorktree(true);
+    try {
+      // Stop every live-dev deployment in this worktree, regardless of BP —
+      // we're tearing down the whole tree, not just the currently-selected
+      // BP's slice of it.
+      const wtPrefix = `worktrees/${wt.name}/`;
+      const liveDev = raw.filter((a) => {
+        const rel = a.relative_path ?? '';
+        return (
+          rel.startsWith(wtPrefix) &&
+          a.deployment_id &&
+          a.stage === 'live-dev'
+        );
+      });
+      await Promise.allSettled(
+        liveDev.map((a) =>
+          a.deployment_id ? api.removeAutomation(a.deployment_id) : Promise.resolve(),
+        ),
+      );
+      const work = api.deleteWorktree(wt.name);
+      toast.promise(work, {
+        loading: `Deleting worktree "${wt.name}"…`,
+        success: `Worktree "${wt.name}" deleted`,
+        error: (err: unknown) =>
+          isTransientNetworkError(err)
+            ? `Worktree "${wt.name}" deleted`
+            : `Failed to delete worktree: ${String(err)}`,
+      });
+      try {
+        await work;
+        // Scope will reset to Deployments automatically via the
+        // worktrees-snapshot effect in App.tsx once the SSE feed delivers
+        // the new list without this entry.
+      } catch {
+        // toast handled the surfacing
+      }
+    } finally {
+      setDeletingWorktree(false);
+      setDeleteWorktreeOpen(false);
+    }
+  }, [raw, wt.name]);
+
   return (
     <div className="flex flex-col gap-5 px-7 py-6">
       <SectionHeader
@@ -231,9 +308,34 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
             )}
           </>
         }
+        right={
+          <div className="flex items-center gap-2">
+            {bp && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setNewAutomationOpen(true)}
+              >
+                <Plus className="size-3.5" aria-hidden />
+                New automation
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setDeleteWorktreeOpen(true)}
+              className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+            >
+              <Trash2 className="size-3.5" aria-hidden />
+              Delete worktree
+            </Button>
+          </div>
+        }
       />
 
-      {status === 'connecting' && sorted.length === 0 ? (
+      {!bp ? (
+        <EmptyState message="No business process selected. Create one with the + in the sidebar, or pick an existing one." />
+      ) : status === 'connecting' && sorted.length === 0 ? (
         <EmptyState message="Loading automations…" />
       ) : sorted.length === 0 ? (
         <EmptyState message="No live-dev automations for this worktree." />
@@ -268,7 +370,7 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
         </div>
       )}
 
-      <ReadmeCard bpId={bp.id} worktree={wt.name} />
+      {bp && <ReadmeCard bpId={bp.id} worktree={wt.name} />}
 
       <InspectModal
         open={inspectName !== null}
@@ -288,6 +390,50 @@ function OverviewPane({ bp, wt }: { bp: BusinessProcess; wt: Worktree }) {
           void runRemove(automationName, deploymentId);
         }}
       />
+
+      {bp && (
+        <NewAutomationDialog
+          open={newAutomationOpen}
+          onOpenChange={setNewAutomationOpen}
+          bpId={bp.id}
+          worktree={wt.name}
+          existingNames={sorted.map(([n]) => n)}
+        />
+      )}
+
+      <AlertDialog
+        open={deleteWorktreeOpen}
+        onOpenChange={(o) => !deletingWorktree && setDeleteWorktreeOpen(o)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete worktree "{wt.name}"?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This force-removes the worktree directory and the{' '}
+              <code>{wt.branch}</code> branch, and drops the worktree's
+              postgres database. Any live-dev deployments under this
+              worktree will be stopped first. Uncommitted changes are{' '}
+              <strong>lost</strong>.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingWorktree}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deletingWorktree}
+              onClick={(e) => {
+                // Block AlertDialog's default close-on-action so the
+                // dialog stays up while the async delete runs; we'll
+                // close it ourselves in the handler.
+                e.preventDefault();
+                void runDeleteWorktree();
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

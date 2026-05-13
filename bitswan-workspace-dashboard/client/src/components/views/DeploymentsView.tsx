@@ -278,6 +278,7 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
           void runRemove(automationName, stageId, deploymentId);
         }}
       />
+
     </div>
   );
 }

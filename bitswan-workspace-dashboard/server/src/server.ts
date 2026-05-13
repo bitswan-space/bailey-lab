@@ -8,7 +8,9 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerAutomationRoutes } from './routes/automations.js';
 import { registerBusinessProcessRoutes } from './routes/business-processes.js';
 import { registerEventRoutes } from './routes/events.js';
+import { registerTemplateRoutes } from './routes/templates.js';
 import { registerTerminalRoutes } from './routes/terminal.js';
+import { registerWorktreeRoutes } from './routes/worktrees.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -42,7 +44,9 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
 
   registerAuthRoutes(app);
   registerTerminalRoutes(app);
-  registerBusinessProcessRoutes(app, { workspaceRoot: WORKSPACE_ROOT });
+  registerBusinessProcessRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
+  registerWorktreeRoutes(app, { gitops });
+  registerTemplateRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
   registerAutomationRoutes(app, { gitops });
   registerEventRoutes(app, { gitops });
 

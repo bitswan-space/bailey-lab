@@ -54,15 +54,19 @@ function Shell() {
     setBpId(visibleBps[0]?.id ?? null);
   }, [processes, visibleBps, bpId]);
 
-  // If the current worktree-scope refers to a worktree that no longer
-  // exists in the snapshot, fall back to Deployments. (SSE delivers
-  // worktree changes; this just keeps `scope` consistent with the feed.)
+  // Keep `scope` consistent with the worktree snapshot. Fires only when the
+  // snapshot changes — not when scope itself changes — so an optimistic
+  // setScope (e.g. just after creating a worktree) survives until the SSE
+  // feed delivers the new entry.
   useEffect(() => {
     if (worktreesSnapshot === null) return;
-    if (scope.type !== 'worktree') return;
-    if (worktreesSnapshot.some((w) => w.name === scope.name)) return;
-    setScope({ type: 'deployments' });
-  }, [worktreesSnapshot, scope]);
+    setScope((cur) => {
+      if (cur.type !== 'worktree') return cur;
+      return worktreesSnapshot.some((w) => w.name === cur.name)
+        ? cur
+        : { type: 'deployments' };
+    });
+  }, [worktreesSnapshot]);
 
   const bp = useMemo(
     () => visibleBps.find((b) => b.id === bpId) ?? null,
@@ -85,14 +89,23 @@ function Shell() {
 
   return (
     <div className="flex h-screen bg-background text-foreground">
-      <Sidebar bps={visibleBps} activeBpId={bpId} onSelect={setBpId} />
+      <Sidebar
+        bps={visibleBps}
+        activeBpId={bpId}
+        onSelect={setBpId}
+        {...(scope.type === 'worktree' ? { worktree: scope.name } : {})}
+        onCreated={(name) => setBpId(name)}
+      />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar scope={scope} onScope={setScope} worktrees={worktrees} />
-        {bp ? (
+        {scope.type === 'worktree' && wt ? (
+          // Always render the worktree view, even when no BP is selected —
+          // the user needs the Delete-worktree button reachable on empty
+          // worktrees too.
+          <WorktreeView bp={bp} wt={wt} />
+        ) : bp ? (
           scope.type === 'deployments' ? (
             <DeploymentsView bp={bp} />
-          ) : wt ? (
-            <WorktreeView bp={bp} wt={wt} />
           ) : null
         ) : (
           <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">

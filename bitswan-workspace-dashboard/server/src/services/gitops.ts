@@ -83,6 +83,118 @@ export class GitopsClient {
   }
 
   /**
+   * `POST /processes/` — create a new business-process directory in the
+   * main repo or a specific worktree. Gitops scaffolds `process.toml` +
+   * `README.md`, refreshes its in-memory cache, and broadcasts the new
+   * `processes` snapshot over SSE so the dashboard sidebar updates
+   * automatically.
+   */
+  async createProcess(input: {
+    name: string;
+    worktree?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}/processes/`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(input),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `POST /worktrees/commit` — stage and commit changes in the main repo
+   * or a specific worktree. Used after creating an automation from a
+   * template so the new files are recorded in git history rather than
+   * sitting as untracked clutter.
+   */
+  async commitWorktree(input: {
+    message: string;
+    worktree?: string;
+    paths?: string[];
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const body = {
+      message: input.message,
+      worktree: input.worktree ?? null,
+      paths: input.paths ?? null,
+    };
+    const r = await fetch(`${this.baseUrl}/worktrees/commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    let resBody: unknown = null;
+    try {
+      resBody = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body: resBody };
+  }
+
+  /**
+   * `DELETE /worktrees/{name}` — remove a worktree and its branch. Gitops
+   * handles the full teardown (git worktree remove, branch -D, postgres
+   * cleanup, privileged rm fallback for files owned by container uids).
+   */
+  async deleteWorktree(
+    name: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/worktrees/${encodeURIComponent(name)}`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${this.secret}` },
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `POST /worktrees/create` — create a new git worktree under the
+   * workspace's `worktrees/` directory and check out a branch into it.
+   * The new worktree is picked up by gitops's filesystem watcher and
+   * surfaces in the `worktrees` SSE event without a follow-up REST call.
+   */
+  async createWorktree(input: {
+    branch_name: string;
+    base_branch?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}/worktrees/create`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(input),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `POST /automations/start-deploy` — workspace-bind-mount deploy. Body is
    * `{ relative_path, stage, worktree? }`. Gitops resolves the source under
    * `/workspace-repo`, merges `bitswan_lib`, computes the checksum, and

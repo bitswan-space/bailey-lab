@@ -73,7 +73,65 @@ export interface DeployResponse {
   status?: string;
 }
 
+export interface CreateBusinessProcessRequest {
+  name: string;
+  worktree?: string;
+}
+
+export interface CreateBusinessProcessResponse {
+  id: string;
+  name: string;
+  in_main: boolean;
+  worktrees: string[];
+  has_worktrees: boolean;
+}
+
+export interface CreateWorktreeRequest {
+  branch_name: string;
+  base_branch?: string;
+}
+
+export interface TemplateEntry {
+  id: string;
+  name: string;
+  shortDescription: string;
+  iconSvg: string;
+}
+
+export interface TemplateGroupEntry extends TemplateEntry {
+  automations: string[];
+}
+
+export interface TemplatesResponse {
+  templates: TemplateEntry[];
+  groups: TemplateGroupEntry[];
+}
+
+export interface CreateAutomationRequest {
+  template_id?: string;
+  group_id?: string;
+  name?: string;
+  bp: string;
+  worktree?: string;
+}
+
+export interface CreateAutomationResponse {
+  created: { name: string; relativePath: string }[];
+}
+
 export const api = {
+  createBusinessProcess: (body: CreateBusinessProcessRequest) =>
+    postJson<CreateBusinessProcessResponse>('/api/business-processes', body),
+
+  createWorktree: (body: CreateWorktreeRequest) =>
+    postJson<{ status?: string; worktree_path?: string }>('/api/worktrees', body),
+  deleteWorktree: (name: string) =>
+    deleteEmpty(`/api/worktrees/${encodeURIComponent(name)}`),
+
+  templates: () => getJson<TemplatesResponse>('/api/templates'),
+  createAutomationFromTemplate: (body: CreateAutomationRequest) =>
+    postJson<CreateAutomationResponse>('/api/automations/from-template', body),
+
   startAutomation: (id: string) => postEmpty(`/api/automations/${encodeURIComponent(id)}/start`),
   stopAutomation: (id: string) => postEmpty(`/api/automations/${encodeURIComponent(id)}/stop`),
   restartAutomation: (id: string) =>

@@ -4,9 +4,11 @@ import {
   isValidWorktreeName,
   readReadme,
 } from '../services/workspace.js';
+import type { GitopsClient } from '../services/gitops.js';
 
 export interface BusinessProcessRoutesOptions {
   workspaceRoot: string;
+  gitops: GitopsClient | null;
 }
 
 /**
@@ -23,8 +25,36 @@ export interface BusinessProcessRoutesOptions {
  */
 export function registerBusinessProcessRoutes(
   app: FastifyInstance,
-  { workspaceRoot }: BusinessProcessRoutesOptions,
+  { workspaceRoot, gitops }: BusinessProcessRoutesOptions,
 ): void {
+  app.post<{
+    Body: { name?: string; worktree?: string };
+  }>('/api/business-processes', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
+    const { name, worktree } = req.body ?? {};
+    if (!name || typeof name !== 'string') {
+      return reply.code(400).send({ error: 'name is required' });
+    }
+    try {
+      const r = await gitops.createProcess({
+        name,
+        ...(worktree ? { worktree } : {}),
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, name, worktree }, 'BP create failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   app.get<{
     Params: { id: string };
     Querystring: { worktree?: string };

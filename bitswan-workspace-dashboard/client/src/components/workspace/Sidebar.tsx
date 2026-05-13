@@ -1,17 +1,50 @@
-import { useMemo, useState } from 'react';
-import { Folder, FolderOpen, Search } from 'lucide-react';
+import { useCallback, useMemo, useState } from 'react';
+import { Folder, FolderOpen, Plus, Search } from 'lucide-react';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { api, isTransientNetworkError } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess } from '@/types';
 
+const BP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
 interface SidebarProps {
   bps: BusinessProcess[];
+  // eslint-disable-next-line no-restricted-syntax -- null = no BP selected yet
   activeBpId: string | null;
   onSelect: (id: string) => void;
+  /**
+   * Current scope's worktree (undefined for main). New BPs are created in
+   * this scope so the user gets immediate sidebar feedback.
+   */
+  worktree?: string;
+  /**
+   * Called after a successful create so the parent can auto-select the new
+   * BP — the SSE feed will deliver it shortly, but selecting by name is
+   * idempotent.
+   */
+  onCreated?: (name: string) => void;
 }
 
-export function Sidebar({ bps, activeBpId, onSelect }: SidebarProps) {
+export function Sidebar({
+  bps,
+  activeBpId,
+  onSelect,
+  worktree,
+  onCreated,
+}: SidebarProps) {
   const [query, setQuery] = useState('');
+  const [dialogOpen, setDialogOpen] = useState(false);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return bps;
@@ -35,10 +68,27 @@ export function Sidebar({ bps, activeBpId, onSelect }: SidebarProps) {
         </div>
       </div>
 
-      <div className="flex items-center justify-between px-3.5 pb-1 pt-1.5">
+      <div className="flex items-center justify-between gap-2 px-3.5 pb-1 pt-1.5">
         <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Business Processes
         </div>
+        {/* BP creation is worktree-only in the UI — new work belongs on a
+            branch and gets promoted to main via merge. The server still
+            accepts main-scope creation; we just don't surface it. */}
+        {worktree && (
+          <button
+            type="button"
+            onClick={() => setDialogOpen(true)}
+            aria-label="New business process"
+            title={`New business process in worktree "${worktree}"`}
+            className={cn(
+              'inline-flex size-5 items-center justify-center rounded-md text-muted-foreground transition-colors',
+              'hover:bg-background/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            )}
+          >
+            <Plus className="size-3.5" aria-hidden />
+          </button>
+        )}
       </div>
 
       <div className="flex-1 space-y-0.5 overflow-auto px-2 pb-3">
@@ -74,6 +124,136 @@ export function Sidebar({ bps, activeBpId, onSelect }: SidebarProps) {
           })
         )}
       </div>
+
+      <NewBusinessProcessDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        worktree={worktree}
+        existingNames={bps.map((b) => b.name)}
+        onCreated={(name) => {
+          onCreated?.(name);
+        }}
+      />
     </aside>
+  );
+}
+
+interface NewBusinessProcessDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  worktree?: string;
+  existingNames: string[];
+  onCreated: (name: string) => void;
+}
+
+function NewBusinessProcessDialog({
+  open,
+  onOpenChange,
+  worktree,
+  existingNames,
+  onCreated,
+}: NewBusinessProcessDialogProps) {
+  const [name, setName] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const trimmed = name.trim();
+  // eslint-disable-next-line no-restricted-syntax -- error message; null = "no error yet"
+  let validationError: string | null = null;
+  if (trimmed.length === 0) {
+    validationError = null;
+  } else if (!BP_NAME_RE.test(trimmed)) {
+    validationError =
+      'Use letters, digits, underscores, dots and dashes. Must start with a letter or digit.';
+  } else if (existingNames.includes(trimmed)) {
+    validationError = `A business process named "${trimmed}" already exists in this scope.`;
+  }
+  const canSubmit = trimmed.length > 0 && !validationError && !submitting;
+
+  const reset = useCallback(() => {
+    setName('');
+    setSubmitting(false);
+  }, []);
+
+  const handleSubmit = useCallback(
+    async (e?: React.FormEvent) => {
+      e?.preventDefault();
+      if (!canSubmit) return;
+      setSubmitting(true);
+      const target = worktree ? `worktree "${worktree}"` : 'main';
+      const work = api.createBusinessProcess({
+        name: trimmed,
+        ...(worktree ? { worktree } : {}),
+      });
+      toast.promise(work, {
+        loading: `Creating "${trimmed}" in ${target}…`,
+        success: `Business process "${trimmed}" created`,
+        error: (err: unknown) =>
+          isTransientNetworkError(err)
+            ? `Business process "${trimmed}" created`
+            : `Failed to create business process: ${String(err)}`,
+      });
+      try {
+        await work;
+        onOpenChange(false);
+        reset();
+        onCreated(trimmed);
+      } catch {
+        // toast handled it
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [canSubmit, trimmed, worktree, onOpenChange, onCreated, reset],
+  );
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) reset();
+        onOpenChange(o);
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>New business process</DialogTitle>
+          <DialogDescription>
+            {worktree
+              ? `Creates a new business-process directory under worktrees/${worktree}/ with a process.toml and a starter README.`
+              : 'Creates a new business-process directory in the main workspace with a process.toml and a starter README.'}
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-2">
+          <label htmlFor="new-bp-name" className="text-sm font-medium">
+            Name
+          </label>
+          <Input
+            id="new-bp-name"
+            autoFocus
+            placeholder="my-process"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            disabled={submitting}
+            spellCheck={false}
+            autoComplete="off"
+          />
+          {validationError && (
+            <p className="text-xs text-destructive">{validationError}</p>
+          )}
+        </form>
+        <DialogFooter>
+          <Button
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+            disabled={submitting}
+          >
+            Cancel
+          </Button>
+          <Button onClick={() => void handleSubmit()} disabled={!canSubmit}>
+            Create
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
