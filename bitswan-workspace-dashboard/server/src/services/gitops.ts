@@ -111,36 +111,50 @@ export class GitopsClient {
   }
 
   /**
-   * `POST /worktrees/commit` — stage and commit changes in the main repo
-   * or a specific worktree. Used after creating an automation from a
-   * template so the new files are recorded in git history rather than
-   * sitting as untracked clutter.
+   * `GET /templates/` — workspace-aware template gallery. Built-in templates
+   * come from `/workspace/examples` (bind-mounted into gitops), with optional
+   * overrides at `<workspace_repo>/templates/`.
    */
-  async commitWorktree(input: {
-    message: string;
+  async getTemplates(): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}/templates/`, {
+      headers: { Authorization: `Bearer ${this.secret}` },
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `POST /automations/from-template` — scaffold a new automation (or every
+   * automation in a group) under a BP directory. Gitops handles the copy,
+   * UUID injection into `automation.toml`, and the git commit.
+   */
+  async createAutomationFromTemplate(input: {
+    template_id?: string;
+    group_id?: string;
+    name?: string;
+    bp: string;
     worktree?: string;
-    paths?: string[];
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
-    const body = {
-      message: input.message,
-      worktree: input.worktree ?? null,
-      paths: input.paths ?? null,
-    };
-    const r = await fetch(`${this.baseUrl}/worktrees/commit`, {
+    const r = await fetch(`${this.baseUrl}/automations/from-template`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.secret}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(input),
     });
-    let resBody: unknown = null;
+    let body: unknown = null;
     try {
-      resBody = await r.json();
+      body = await r.json();
     } catch {
-      // ignore
+      // upstream may return non-JSON on error
     }
-    return { ok: r.ok, status: r.status, body: resBody };
+    return { ok: r.ok, status: r.status, body };
   }
 
   /**

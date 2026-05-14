@@ -46,7 +46,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerTerminalRoutes(app);
   registerBusinessProcessRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
   registerWorktreeRoutes(app, { gitops });
-  registerTemplateRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
+  registerTemplateRoutes(app, { gitops });
   registerAutomationRoutes(app, { gitops });
   registerEventRoutes(app, { gitops });
 
