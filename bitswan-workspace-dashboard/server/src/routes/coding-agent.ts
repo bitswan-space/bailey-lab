@@ -16,6 +16,13 @@ const DEFAULT_PROMPT =
   'Read the BP\'s README.md, process.toml, and bitswan.yaml to orient yourself before ' +
   'making changes. Ask for clarification when the user\'s request is ambiguous.';
 
+/** Worktree-level sync flow. Mirrors bitswan-editor's syncWorktree prompt. */
+const SYNC_PROMPT =
+  'IMPORTANT: git is not installed. Use ONLY bitswan-coding-agent commands. ' +
+  'Sync this worktree with main: 1) bitswan-coding-agent vcs commit -m pre-sync-commit ' +
+  '2) bitswan-coding-agent vcs sync 3) If conflicts, resolve and run bitswan-coding-agent vcs sync-continue. ' +
+  'Tell me when sync is complete.';
+
 const SSH_KEY = '/workspace/.ssh/id_ed25519';
 
 function agentHost(): string {
@@ -37,19 +44,28 @@ function emailFromRequest(req: FastifyRequest): string {
   return 'unknown';
 }
 
+type SessionKind = 'claude' | 'sync';
+
 function buildAutoCmd(opts: {
   worktree: string;
-  bp: string;
+  bp?: string;
   sessionId: string;
   resume: boolean;
+  kind: SessionKind;
 }): string {
-  const cd = `/workspace/worktrees/${opts.worktree}/${opts.bp}`;
+  // Sync sessions cd to the worktree root (no BP); regular claude sessions
+  // cd into the BP directory.
+  const cd =
+    opts.kind === 'sync'
+      ? `/workspace/worktrees/${opts.worktree}`
+      : `/workspace/worktrees/${opts.worktree}/${opts.bp}`;
+  const prompt = opts.kind === 'sync' ? SYNC_PROMPT : DEFAULT_PROMPT;
   // Either continue a previous chat (--resume <uuid>) or start a fresh one
   // with a caller-provided UUID (--session-id <uuid>) so the dashboard can
   // resume it later.
   const claudeArgs = opts.resume
     ? `--dangerously-skip-permissions --resume ${opts.sessionId}`
-    : `--dangerously-skip-permissions --session-id ${opts.sessionId} '${DEFAULT_PROMPT}'`;
+    : `--dangerously-skip-permissions --session-id ${opts.sessionId} '${prompt}'`;
   // Inline the Claude settings stub so the agent doesn't re-prompt on every
   // session for dangerous-mode confirmation. Same shape the editor uses.
   return (
@@ -116,18 +132,24 @@ export function registerCodingAgentRoutes(
       bp?: string;
       session_id?: string;
       resume?: string;
+      kind?: string;
     };
   }>('/ws/coding-agent', { websocket: true }, async (socket, req) => {
-    const { worktree, bp, session_id, resume } = req.query;
+    const { worktree, bp, session_id, resume, kind: kindRaw } = req.query;
     if (!worktree || !isValidWorktreeName(worktree)) {
       socket.send(JSON.stringify({ type: 'error', message: 'invalid worktree' }));
       socket.close(1008, 'invalid worktree');
       return;
     }
-    if (!bp || !isValidBpId(bp)) {
-      socket.send(JSON.stringify({ type: 'error', message: 'invalid bp' }));
-      socket.close(1008, 'invalid bp');
-      return;
+    const kind: SessionKind = kindRaw === 'sync' ? 'sync' : 'claude';
+    // `bp` is required for regular claude sessions but optional (in fact
+    // ignored) for worktree-level sync sessions.
+    if (kind === 'claude') {
+      if (!bp || !isValidBpId(bp)) {
+        socket.send(JSON.stringify({ type: 'error', message: 'invalid bp' }));
+        socket.close(1008, 'invalid bp');
+        return;
+      }
     }
     // Exactly one of session_id or resume is required and both must be UUIDs.
     // Resume wins when both are present, but mixing is a client bug — flag it.
@@ -151,9 +173,10 @@ export function registerCodingAgentRoutes(
     const email = emailFromRequest(req);
     const autoCmd = buildAutoCmd({
       worktree,
-      bp,
+      ...(kind === 'claude' && bp ? { bp } : {}),
       sessionId: claudeSessionId,
       resume: isResume,
+      kind,
     });
     const host = agentHost();
 
@@ -259,7 +282,7 @@ export function registerCodingAgentRoutes(
           '-o',
           'UserKnownHostsFile=/dev/null',
           '-o',
-          'SendEnv=SSH_USER_EMAIL SSH_LOGGED SSH_WORKTREE SSH_BP SSH_CLAUDE_SESSION_ID SSH_AUTO_CMD',
+          'SendEnv=SSH_USER_EMAIL SSH_LOGGED SSH_WORKTREE SSH_BP SSH_CLAUDE_SESSION_ID SSH_SESSION_KIND SSH_AUTO_CMD',
           `agent@${host}`,
         ],
         cwd: undefined,
@@ -269,8 +292,12 @@ export function registerCodingAgentRoutes(
           SSH_USER_EMAIL: email,
           SSH_LOGGED: 'true',
           SSH_WORKTREE: worktree,
-          SSH_BP: bp,
+          // SSH_BP is only set for BP-scoped sessions. Empty/missing tells
+          // the wrapper to cd to the worktree root (which is what we want
+          // for sync sessions).
+          ...(kind === 'claude' && bp ? { SSH_BP: bp } : {}),
           SSH_CLAUDE_SESSION_ID: claudeSessionId,
+          SSH_SESSION_KIND: kind,
           SSH_AUTO_CMD: autoCmd,
         },
       });

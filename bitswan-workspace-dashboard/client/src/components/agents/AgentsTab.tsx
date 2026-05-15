@@ -85,9 +85,14 @@ export function AgentsTab({ worktree, bp, branch }: Props) {
     return unsubscribe;
   }, [subscribeOnExit, worktree, bp, refresh]);
 
-  // Sessions in *this* scope.
+  // Sessions in *this* scope: the current BP's claude sessions plus any
+  // worktree-level sync sessions (which are bp-less and surface in every BP
+  // of the worktree).
   const scopeSessions = useMemo(
-    () => allSessions.filter((s) => s.worktree === worktree && s.bp === bp),
+    () =>
+      allSessions.filter(
+        (s) => s.worktree === worktree && (s.kind === 'sync' || s.bp === bp),
+      ),
     [allSessions, worktree, bp],
   );
 
@@ -119,7 +124,7 @@ export function AgentsTab({ worktree, bp, branch }: Props) {
   }, [startNewSession, worktree, bp, agentStatus, ensureAgent]);
 
   const resumeSession = useCallback(
-    async (claudeSessionId: string) => {
+    async (claudeSessionId: string, kind: 'claude' | 'sync') => {
       if (agentStatus === 'idle' || agentStatus === 'failed') {
         try {
           await ensureAgent();
@@ -127,7 +132,12 @@ export function AgentsTab({ worktree, bp, branch }: Props) {
           // see startSession
         }
       }
-      resumeAnySession(worktree, bp, claudeSessionId);
+      resumeAnySession(
+        worktree,
+        kind === 'sync' ? null : bp,
+        claudeSessionId,
+        kind,
+      );
       setPastCast(null);
     },
     [resumeAnySession, worktree, bp, agentStatus, ensureAgent],
@@ -150,12 +160,17 @@ export function AgentsTab({ worktree, bp, branch }: Props) {
       .map((s) => {
         liveClaudeIds.add(s.id);
         const title = titleByClaudeId.get(s.id);
+        const fallback =
+          s.kind === 'sync'
+            ? `Sync (${formatTime(s.startedAt)})`
+            : `New session (${formatTime(s.startedAt)})`;
         return {
           id: `active:${s.id}`,
-          name: title || `New session (${formatTime(s.startedAt)})`,
+          name: title || fallback,
           branch,
           lastActive: relativeFrom(s.startedAt),
           status: 'running' as const,
+          kind: s.kind,
           claudeSessionId: s.id,
         };
       });
@@ -165,15 +180,23 @@ export function AgentsTab({ worktree, bp, branch }: Props) {
     // live — the active row already represents it.
     const pastRows: SessionRowData[] = past
       .filter((p) => !(p.claudeSessionId && liveClaudeIds.has(p.claudeSessionId)))
-      .map((p) => ({
-        id: `past:${p.castFile || p.timestamp}`,
-        name: p.title || `Claude session (${formatPastTimestamp(p.timestamp)})`,
-        branch,
-        lastActive: relativeFromIso(p.timestamp),
-        status: 'idle' as const,
-        castFile: p.castFile || undefined,
-        ...(p.claudeSessionId ? { claudeSessionId: p.claudeSessionId } : {}),
-      }));
+      .map((p) => {
+        const kind: 'claude' | 'sync' = p.kind === 'sync' ? 'sync' : 'claude';
+        const fallback =
+          kind === 'sync'
+            ? `Sync (${formatPastTimestamp(p.timestamp)})`
+            : `Claude session (${formatPastTimestamp(p.timestamp)})`;
+        return {
+          id: `past:${p.castFile || p.timestamp}`,
+          name: p.title || fallback,
+          branch,
+          lastActive: relativeFromIso(p.timestamp),
+          status: 'idle' as const,
+          kind,
+          castFile: p.castFile || undefined,
+          ...(p.claudeSessionId ? { claudeSessionId: p.claudeSessionId } : {}),
+        };
+      });
     return [...activeRows, ...pastRows];
   }, [scopeSessions, past, branch, titleByClaudeId]);
 
@@ -234,7 +257,7 @@ export function AgentsTab({ worktree, bp, branch }: Props) {
                     ? { onPlay: () => setPastCast(r.castFile!) }
                     : {})}
                   {...(r.id.startsWith('past:') && r.claudeSessionId
-                    ? { onResume: resumeSession }
+                    ? { onResume: (id: string) => resumeSession(id, r.kind) }
                     : {})}
                 />
               );

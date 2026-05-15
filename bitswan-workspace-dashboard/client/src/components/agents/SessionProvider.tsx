@@ -28,11 +28,15 @@ export type AgentStatus = 'idle' | 'pending' | 'ready' | 'failed';
  * different worktree / a different BP without losing their live agent
  * sessions — there is no remount.
  */
+export type SessionKind = 'claude' | 'sync';
+
 export interface ActiveSession {
   /** Stable ID — doubles as the Claude session UUID we pass via SSH. */
   id: string;
   worktree: string;
-  bp: string;
+  /** BP-scoped sessions set this; worktree-level (sync) sessions leave it null. */
+  bp: string | null;
+  kind: SessionKind;
   startedAt: number;
   exited: boolean;
   /** True when started via Resume (claude --resume <uuid>). */
@@ -49,7 +53,12 @@ interface SessionsContextValue {
   sessions: ActiveSession[];
 
   startSession(worktree: string, bp: string): string;
-  resumeSession(worktree: string, bp: string, claudeSessionId: string): string;
+  /**
+   * Start a worktree-level git-sync session. No BP — the auto-cmd cd's to
+   * the worktree root and runs the bitswan-coding-agent vcs sync flow.
+   */
+  startSyncSession(worktree: string): string;
+  resumeSession(worktree: string, bp: string | null, claudeSessionId: string, kind: SessionKind): string;
   /** Called by SessionTerminal when its WS closes. */
   markExited(id: string): void;
   /** Subscribed-to by hooks that want to invalidate caches when a session ends. */
@@ -189,7 +198,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const id = newSessionId();
       setSessions((prev) => [
         ...prev,
-        { id, worktree, bp, startedAt: Date.now(), exited: false, resume: false },
+        {
+          id,
+          worktree,
+          bp,
+          kind: 'claude',
+          startedAt: Date.now(),
+          exited: false,
+          resume: false,
+        },
       ]);
       setSelectedFor({ worktree, bp }, id);
       return id;
@@ -197,11 +214,40 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [setSelectedFor],
   );
 
+  const startSyncSession = useCallback(
+    (worktree: string) => {
+      const id = newSessionId();
+      setSessions((prev) => [
+        ...prev,
+        {
+          id,
+          worktree,
+          bp: null,
+          kind: 'sync',
+          startedAt: Date.now(),
+          exited: false,
+          resume: false,
+        },
+      ]);
+      // Sync sessions show up in every BP's Agents tab inside the worktree;
+      // we don't select them per-scope automatically — the user will click
+      // the sync row when they want to look at it. (If they were just
+      // navigated to a fresh worktree without a BP, there's nothing to
+      // select against either way.)
+      return id;
+    },
+    [],
+  );
+
   const resumeSession = useCallback(
-    (worktree: string, bp: string, claudeSessionId: string) => {
+    (worktree: string, bp: string | null, claudeSessionId: string, kind: SessionKind) => {
       setSessions((prev) => {
         const live = prev.find(
-          (s) => s.id === claudeSessionId && !s.exited && s.worktree === worktree && s.bp === bp,
+          (s) =>
+            s.id === claudeSessionId &&
+            !s.exited &&
+            s.worktree === worktree &&
+            (s.bp ?? null) === bp,
         );
         if (live) return prev;
         return [
@@ -210,13 +256,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             id: claudeSessionId,
             worktree,
             bp,
+            kind,
             startedAt: Date.now(),
             exited: false,
             resume: true,
           },
         ];
       });
-      setSelectedFor({ worktree, bp }, claudeSessionId);
+      if (bp) setSelectedFor({ worktree, bp }, claudeSessionId);
       return claudeSessionId;
     },
     [setSelectedFor],
@@ -281,6 +328,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     () => ({
       sessions,
       startSession,
+      startSyncSession,
       resumeSession,
       markExited,
       onExit,
@@ -295,6 +343,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [
       sessions,
       startSession,
+      startSyncSession,
       resumeSession,
       markExited,
       onExit,
@@ -366,13 +415,23 @@ function SessionsLayer({
       {sessions
         .filter((s) => !s.exited)
         .map((s) => {
+          // A session is "in scope" for the currently-viewed AgentsTab if
+          // (a) it's a BP-scoped claude session matching this exact (worktree, bp), or
+          // (b) it's a worktree-level sync session whose worktree matches —
+          //     those surface in any BP's Agents tab inside the same worktree.
           const inScope =
             !!currentScope &&
             currentScope.worktree === s.worktree &&
-            currentScope.bp === s.bp;
+            (s.kind === 'sync' || currentScope.bp === s.bp);
+          // Selection is per (worktree, bp) so switching BPs preserves what
+          // the user had selected in each. We always look up against the
+          // *current* scope (not the session's intrinsic scope) — that lets
+          // a user click a sync session while viewing BP-A and have it show
+          // up there without polluting BP-B's selection.
           const selected =
             inScope &&
-            selectedByScope[scopeKey({ worktree: s.worktree, bp: s.bp })] === s.id;
+            !!currentScope &&
+            selectedByScope[scopeKey(currentScope)] === s.id;
           return (
             <div
               key={s.id}
@@ -386,6 +445,7 @@ function SessionsLayer({
                 worktree={s.worktree}
                 bp={s.bp}
                 sessionId={s.id}
+                kind={s.kind}
                 resume={s.resume}
                 hidden={!selected}
                 onExit={() => markExited(s.id)}

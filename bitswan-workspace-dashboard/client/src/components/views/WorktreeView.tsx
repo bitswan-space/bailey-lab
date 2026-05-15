@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { LayoutDashboard, Plus, TerminalSquare, Trash2 } from 'lucide-react';
+import { LayoutDashboard, Plus, RefreshCw, TerminalSquare, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   AlertDialog,
@@ -20,6 +20,7 @@ import type {
   Worktree,
 } from '@/types';
 import { AgentsTab } from '@/components/agents/AgentsTab';
+import { useSessions } from '@/components/agents/SessionProvider';
 import { AutomationCard } from '@/components/automations/AutomationCard';
 import { InspectModal, type InspectStage } from '@/components/automations/InspectModal';
 import {
@@ -84,7 +85,7 @@ export function WorktreeView({ bp, wt }: WorktreeViewProps) {
       </TabsList>
 
       <TabsContent value="overview" className="flex-1 overflow-auto bg-background">
-        <OverviewPane bp={bp} wt={wt} />
+        <OverviewPane bp={bp} wt={wt} onShowAgents={() => setTab('agents')} />
       </TabsContent>
 
       {/* forceMount keeps the Agents tree (and every SessionTerminal's
@@ -126,10 +127,12 @@ interface CardEntry {
 function OverviewPane({
   bp,
   wt,
+  onShowAgents,
 }: {
   // eslint-disable-next-line no-restricted-syntax -- null = no BP selected
   bp: BusinessProcess | null;
   wt: Worktree;
+  onShowAgents: () => void;
 }) {
   const { automations: raw, status } = useAutomations();
   // No BP → no automations to list. The prefix becomes a guaranteed-miss so
@@ -143,6 +146,8 @@ function OverviewPane({
   const [newAutomationOpen, setNewAutomationOpen] = useState(false);
   const [deleteWorktreeOpen, setDeleteWorktreeOpen] = useState(false);
   const [deletingWorktree, setDeletingWorktree] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const { startSyncSession, setSelectedFor, agentStatus, ensureAgent } = useSessions();
   const [removeTarget, setRemoveTarget] = useState<
     (RemoveTarget & { automationName: string }) | null
   >(null);
@@ -363,6 +368,14 @@ function OverviewPane({
             <Button
               variant="outline"
               size="sm"
+              onClick={() => setSyncOpen(true)}
+            >
+              <RefreshCw className="size-3.5" aria-hidden />
+              Sync
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => setDeleteWorktreeOpen(true)}
               className="text-destructive hover:bg-destructive/10 hover:text-destructive"
             >
@@ -470,6 +483,48 @@ function OverviewPane({
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={syncOpen} onOpenChange={setSyncOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Sync worktree &quot;{wt.name}&quot; with main?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Opens a coding-agent session at the worktree root that runs the{' '}
+              <code>bitswan-coding-agent vcs sync</code> flow. Uncommitted
+              changes are committed as <code>pre-sync-commit</code> first; if
+              merge conflicts occur the agent will walk you through resolving
+              them via <code>vcs sync-continue</code>.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={async (e) => {
+                e.preventDefault();
+                setSyncOpen(false);
+                if (agentStatus === 'idle' || agentStatus === 'failed') {
+                  try {
+                    await ensureAgent();
+                  } catch {
+                    // surfaces via agentStatus; the session will still attempt to spawn
+                  }
+                }
+                const id = startSyncSession(wt.name);
+                // Pre-select for the current BP scope (if any) so flipping to
+                // Agents tab lands on the new sync terminal without an extra
+                // click. Sync sessions are visible from any BP's Agents tab in
+                // the same worktree.
+                if (bp) {
+                  setSelectedFor({ worktree: wt.name, bp: bp.name }, id);
+                }
+                onShowAgents();
+              }}
+            >
+              Sync
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

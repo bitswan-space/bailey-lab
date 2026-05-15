@@ -28,7 +28,7 @@ export interface AgentSession {
   timestamp: string;
   userEmail: string;
   worktree: string;
-  /** null when the session was created by the editor (no SSH_BP env var). */
+  /** null when the session was created by the editor (no SSH_BP env var) or is a worktree-level sync session. */
   bp: string | null;
   /** Empty string when no `.cast` file exists alongside the metadata. */
   castFile: string;
@@ -39,6 +39,12 @@ export interface AgentSession {
    * for legacy or editor-created sessions.
    */
   claudeSessionId: string | null;
+  /**
+   * "claude" for a regular BP-scoped chat (the default), "sync" for the
+   * worktree-level git-sync flow, or null for legacy / editor-launched
+   * sessions where the wrapper didn't record a kind.
+   */
+  kind: 'claude' | 'sync' | null;
   /**
    * First user prompt from Claude's transcript, truncated. Empty until the
    * user has actually typed something into the session.
@@ -54,6 +60,7 @@ interface RawMeta {
   bp?: string | null;
   claude_session_id?: string | null;
   claudeSessionId?: string | null;
+  kind?: string | null;
   started_at?: string;
   timestamp?: string;
   logged?: boolean;
@@ -92,8 +99,19 @@ export async function listSessions(filter: {
 
     const worktree = raw.worktree ?? '';
     const bp = raw.bp ?? null;
+    const kindRaw = raw.kind ?? null;
+    const kind: 'claude' | 'sync' | null =
+      kindRaw === 'claude' || kindRaw === 'sync' ? kindRaw : null;
     if (filter.worktree !== undefined && worktree !== filter.worktree) continue;
-    if (filter.bp !== undefined && bp !== filter.bp) continue;
+    if (filter.bp !== undefined) {
+      // Worktree-level sync sessions (bp=null, kind='sync') surface in any
+      // BP's Agents tab inside the worktree — there's nowhere else for the
+      // user to see them. Other null-bp sessions (legacy / editor) stay
+      // filtered out so the dashboard view doesn't accidentally pick them up.
+      const matchesBp = bp === filter.bp;
+      const isSyncForWorktree = kind === 'sync' && bp === null;
+      if (!matchesBp && !isSyncForWorktree) continue;
+    }
 
     const baseName = entry.slice(0, -'.meta.json'.length);
     const castName = `${baseName}.cast`;
@@ -111,6 +129,7 @@ export async function listSessions(filter: {
       castFile,
       logged: raw.logged !== false,
       claudeSessionId,
+      kind,
       title: '',
     });
   }
@@ -122,12 +141,14 @@ export async function listSessions(filter: {
 
   // Resolve titles in parallel. Each lookup is a single open+read+close on
   // the JSONL; bounded by `capped` (≤50) so concurrent fan-out is fine.
+  // Each session's title path depends on its own scope — sync sessions
+  // (bp=null) live at the worktree root, BP-scoped sessions inside the BP.
   await Promise.all(
     capped.map(async (s) => {
-      if (!s.claudeSessionId || !filter.worktree || !filter.bp) return;
+      if (!s.claudeSessionId || !s.worktree) return;
       s.title = await readFirstPromptTitle({
-        worktree: filter.worktree,
-        bp: filter.bp,
+        worktree: s.worktree,
+        bp: s.bp ?? undefined,
         claudeSessionId: s.claudeSessionId,
       });
     }),
@@ -147,13 +168,16 @@ function encodeClaudeProjectDir(absoluteCwd: string): string {
 
 async function readFirstPromptTitle(opts: {
   worktree: string;
-  bp: string;
+  bp?: string;
   claudeSessionId: string;
 }): Promise<string> {
-  // The agent runs claude with cwd = `/workspace/worktrees/<wt>/<bp>` (see
-  // routes/coding-agent.ts → buildAutoCmd). Claude encodes that path into
-  // its own projects/ subdirectory name.
-  const cwd = `/workspace/worktrees/${opts.worktree}/${opts.bp}`;
+  // The agent runs claude with cwd = `/workspace/worktrees/<wt>/<bp>` for
+  // a regular BP-scoped session, or `/workspace/worktrees/<wt>` for a
+  // worktree-level sync session (see routes/coding-agent.ts → buildAutoCmd).
+  // Claude encodes that path into its own projects/ subdirectory name.
+  const cwd = opts.bp
+    ? `/workspace/worktrees/${opts.worktree}/${opts.bp}`
+    : `/workspace/worktrees/${opts.worktree}`;
   const projDir = encodeClaudeProjectDir(cwd);
   const full = path.join(CLAUDE_PROJECTS_DIR, projDir, `${opts.claudeSessionId}.jsonl`);
   try {
