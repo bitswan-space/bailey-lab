@@ -9,7 +9,7 @@ import { registerAutomationRoutes } from './routes/automations.js';
 import { registerBusinessProcessRoutes } from './routes/business-processes.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerTemplateRoutes } from './routes/templates.js';
-import { registerTerminalRoutes } from './routes/terminal.js';
+import { registerCodingAgentRoutes } from './routes/coding-agent.js';
 import { registerWorktreeRoutes } from './routes/worktrees.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -43,7 +43,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   await app.register(fastifyWebsocket);
 
   registerAuthRoutes(app);
-  registerTerminalRoutes(app);
+  registerCodingAgentRoutes(app, { gitops });
   registerBusinessProcessRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
   registerWorktreeRoutes(app, { gitops });
   registerTemplateRoutes(app, { gitops });

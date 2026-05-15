@@ -19,7 +19,7 @@ import type {
   DeployedAutomation,
   Worktree,
 } from '@/types';
-import { Terminal } from '@/components/terminal/Terminal';
+import { AgentsTab } from '@/components/agents/AgentsTab';
 import { AutomationCard } from '@/components/automations/AutomationCard';
 import { InspectModal, type InspectStage } from '@/components/automations/InspectModal';
 import {
@@ -44,9 +44,34 @@ interface WorktreeViewProps {
   wt: Worktree;
 }
 
+const TAB_STORAGE_KEY = 'dashboard.worktreeTab';
+
+function readPersistedTab(): 'overview' | 'agents' {
+  try {
+    const raw = sessionStorage.getItem(TAB_STORAGE_KEY);
+    if (raw === 'agents') return 'agents';
+  } catch {
+    // ignore
+  }
+  return 'overview';
+}
+
 export function WorktreeView({ bp, wt }: WorktreeViewProps) {
+  const [tab, setTab] = useState<'overview' | 'agents'>(readPersistedTab);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(TAB_STORAGE_KEY, tab);
+    } catch {
+      // ignore
+    }
+  }, [tab]);
+
   return (
-    <Tabs defaultValue="overview" className="flex flex-1 flex-col overflow-hidden">
+    <Tabs
+      value={tab}
+      onValueChange={(v) => setTab(v === 'agents' ? 'agents' : 'overview')}
+      className="flex flex-1 flex-col overflow-hidden"
+    >
       <TabsList className="mx-7 mt-4 inline-flex w-fit shrink-0 gap-1 self-start bg-muted/40">
         <TabsTrigger value="overview" className="gap-1.5">
           <LayoutDashboard className="size-3.5" aria-hidden />
@@ -62,8 +87,23 @@ export function WorktreeView({ bp, wt }: WorktreeViewProps) {
         <OverviewPane bp={bp} wt={wt} />
       </TabsContent>
 
-      <TabsContent value="agents" className="flex-1 overflow-hidden bg-white">
-        <Terminal />
+      {/* forceMount keeps the Agents tree (and every SessionTerminal's
+          WebSocket) alive when the user switches to Overview. Radix sets
+          `data-state="inactive"` + `hidden` on the inactive content, so
+          xterm doesn't paint while the tab is hidden but the agent
+          sessions keep streaming in the background. */}
+      <TabsContent
+        value="agents"
+        forceMount
+        className="flex-1 overflow-hidden bg-white data-[state=inactive]:hidden"
+      >
+        {bp ? (
+          <AgentsTab worktree={wt.name} bp={bp.name} branch={wt.branch || wt.name} />
+        ) : (
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            Select a business process from the sidebar to start agent sessions.
+          </div>
+        )}
       </TabsContent>
     </Tabs>
   );
@@ -407,10 +447,10 @@ function OverviewPane({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete worktree "{wt.name}"?</AlertDialogTitle>
+            <AlertDialogTitle>Delete worktree &quot;{wt.name}&quot;?</AlertDialogTitle>
             <AlertDialogDescription>
               This force-removes the worktree directory and the{' '}
-              <code>{wt.branch}</code> branch, and drops the worktree's
+              <code>{wt.branch}</code> branch, and drops the worktree&apos;s
               postgres database. Any live-dev deployments under this
               worktree will be stopped first. Uncommitted changes are{' '}
               <strong>lost</strong>.

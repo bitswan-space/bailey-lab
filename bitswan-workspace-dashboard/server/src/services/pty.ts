@@ -12,26 +12,51 @@ const ALLOWED_ENV = {
 
 export interface SpawnOptions {
   shell?: string;
+  /**
+   * Argv for the spawned process. When omitted, defaults to `['-l']` for the
+   * fallback `/bin/bash` shell; callers that pass a different `shell` (e.g.
+   * `ssh`) must pass their own argv.
+   */
+  args?: string[];
   cwd?: string;
   cols?: number;
   rows?: number;
+  /**
+   * Extra env vars merged on top of the `ALLOWED_ENV` whitelist. Used for
+   * per-session metadata (e.g. `SSH_WORKTREE`, `SSH_BP`) that needs to
+   * survive into the spawned process so the remote `SendEnv` propagation
+   * sees them. Treated as trusted by callers — do not put user input here.
+   */
+  extraEnv?: Record<string, string>;
 }
 
 /**
- * Spawn a login shell pty with a minimal, fixed env. Inheriting the parent's
- * environment would leak server-side secrets (deploy tokens, oauth client
- * config) into the user's shell — `ALLOWED_ENV` is the entire whitelist.
+ * Spawn a pty with a minimal, fixed env. Inheriting the parent's environment
+ * would leak server-side secrets (deploy tokens, oauth client config) into
+ * the spawned process — `ALLOWED_ENV` is the entire whitelist, plus any
+ * `extraEnv` the caller explicitly passes.
  */
 export function spawnPty(opts: SpawnOptions = {}): pty.IPty {
   const shell = opts.shell ?? process.env.PTY_SHELL ?? '/bin/bash';
-  const cwd = opts.cwd ?? '/workspace/workspace';
+  // When no args are supplied, treat the shell as `/bin/bash`-like and pass
+  // `-l` for a login shell. Callers spawning `ssh` etc. provide their own argv.
+  const args = opts.args ?? ['-l'];
+  // ssh callers pass `cwd: undefined` to inherit; the bash default keeps the
+  // historical behaviour.
+  const cwd = opts.cwd === undefined ? undefined : (opts.cwd ?? '/workspace/workspace');
 
-  return pty.spawn(shell, ['-l'], {
+  const env = {
+    ...ALLOWED_ENV,
+    SHELL: shell,
+    ...(opts.extraEnv ?? {}),
+  };
+
+  return pty.spawn(shell, args, {
     name: 'xterm-256color',
     cols: opts.cols ?? 80,
     rows: opts.rows ?? 24,
-    cwd,
-    env: { ...ALLOWED_ENV, SHELL: shell },
+    cwd: cwd ?? '/workspace/workspace',
+    env,
   });
 }
 

@@ -7,6 +7,7 @@ import {
   useProcesses,
   useWorktrees,
 } from '@/components/workspace/WorkspaceProvider';
+import { SessionProvider } from '@/components/agents/SessionProvider';
 import { Toaster } from '@/components/ui/sonner';
 import { DeploymentsView } from '@/components/views/DeploymentsView';
 import { WorktreeView } from '@/components/views/WorktreeView';
@@ -16,11 +17,46 @@ export function App() {
   return (
     <AuthGate>
       <WorkspaceProvider>
-        <Shell />
-        <Toaster position="bottom-right" richColors closeButton />
+        <SessionProvider>
+          <Shell />
+          <Toaster position="bottom-right" richColors closeButton />
+        </SessionProvider>
       </WorkspaceProvider>
     </AuthGate>
   );
+}
+
+// Keys for sessionStorage. We persist scope + selected BP so the user lands
+// back on the same view after a page reload — chiefly the cold-start
+// reload that Vite HMR triggers in dev when gitops reconfigures Traefik
+// while spinning up the coding-agent container. With these persisted the
+// reload is invisible: same worktree, same BP, same tab when WorktreeView
+// remounts.
+const SCOPE_STORAGE_KEY = 'dashboard.scope';
+const BP_STORAGE_KEY = 'dashboard.bpId';
+
+function readPersistedScope(): Scope {
+  try {
+    const raw = sessionStorage.getItem(SCOPE_STORAGE_KEY);
+    if (!raw) return { type: 'deployments' };
+    const parsed = JSON.parse(raw) as Scope;
+    if (parsed.type === 'deployments') return { type: 'deployments' };
+    if (parsed.type === 'worktree' && typeof parsed.name === 'string') {
+      return { type: 'worktree', name: parsed.name };
+    }
+  } catch {
+    // ignore malformed entries
+  }
+  return { type: 'deployments' };
+}
+
+function readPersistedBpId(): string | null {
+  try {
+    return sessionStorage.getItem(BP_STORAGE_KEY);
+  } catch {
+    // eslint-disable-next-line no-restricted-syntax -- null = no persisted choice
+    return null;
+  }
 }
 
 function Shell() {
@@ -32,8 +68,25 @@ function Shell() {
   const allBps = useMemo(() => processes ?? [], [processes]);
   const worktrees = useMemo(() => worktreesSnapshot ?? [], [worktreesSnapshot]);
   // eslint-disable-next-line no-restricted-syntax -- null = "not yet selected"
-  const [bpId, setBpId] = useState<string | null>(null);
-  const [scope, setScope] = useState<Scope>({ type: 'deployments' });
+  const [bpId, setBpId] = useState<string | null>(readPersistedBpId);
+  const [scope, setScope] = useState<Scope>(readPersistedScope);
+
+  // Mirror current selection to sessionStorage on change.
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(SCOPE_STORAGE_KEY, JSON.stringify(scope));
+    } catch {
+      // ignore quota or unavailable
+    }
+  }, [scope]);
+  useEffect(() => {
+    try {
+      if (bpId) sessionStorage.setItem(BP_STORAGE_KEY, bpId);
+      else sessionStorage.removeItem(BP_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }, [bpId]);
 
   // BPs visible in the sidebar are scoped to the current view:
   //   - Deployments scope → BPs present in main.

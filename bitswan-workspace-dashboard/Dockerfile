@@ -33,8 +33,10 @@ WORKDIR /app
 # python3/make/g++ are needed at runtime because dev-mode (with a mounted host
 # source dir) re-runs `npm install` inside the container, and node-pty 1.x
 # does not ship prebuilt binaries — it compiles from source on every install.
+# openssh-client is needed by the coding-agent terminal — the dashboard
+# server shells out to `ssh agent@${WS}-coding-agent` to open agent sessions.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 make g++ \
+ && apt-get install -y --no-install-recommends python3 make g++ openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
 RUN userdel -r node 2>/dev/null || true \

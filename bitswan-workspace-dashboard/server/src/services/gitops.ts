@@ -182,6 +182,32 @@ export class GitopsClient {
   }
 
   /**
+   * `POST /worktrees/coding-agent/ensure` — start the `${WS}-coding-agent`
+   * container if it isn't already running. Idempotent: returns the same
+   * shape (`{status, message}`) whether the container was just created,
+   * just started, or already running. The dashboard calls this just before
+   * opening a coding-agent SSH session so users don't see "host not found"
+   * the first time they click Start.
+   */
+  async ensureCodingAgent(): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}/worktrees/coding-agent/ensure`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `POST /worktrees/create` — create a new git worktree under the
    * workspace's `worktrees/` directory and check out a branch into it.
    * The new worktree is picked up by gitops's filesystem watcher and

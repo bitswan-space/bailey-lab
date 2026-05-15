@@ -2,14 +2,52 @@ import { useEffect, useRef } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 
-export function Terminal() {
+export interface TerminalProps {
+  /**
+   * WebSocket path (path + query) the terminal connects to. The component
+   * derives ws/wss + host from `window.location`. Required so a single
+   * Terminal component can back both the legacy local shell and per-session
+   * agent terminals without a config switch in here.
+   */
+  wsUrl: string;
+  /** Fires once when the underlying WebSocket reports close. */
+  onExit?: () => void;
+}
+
+export function Terminal({ wsUrl, onExit }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  // Pin the latest onExit in a ref so the effect doesn't tear down + rebuild
+  // the xterm/WebSocket pair every time the parent passes a new closure.
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
 
-    const term = new XTerm({
+    // Defer the entire effect body by a macrotask so React 18 strict mode
+    // (dev) can run mount → cleanup → mount without us actually constructing
+    // the WebSocket on the cancelled first mount. The cleanup `clearTimeout`s
+    // the scheduled work; if it fires before the timer, nothing was created
+    // and the second mount's timer runs fresh. Without this, both WSes are
+    // constructed and both reach `open` fast enough to send a resize before
+    // the cleanup close arrives at the server — producing a phantom IDLE
+    // session in the sidebar.
+    let cancelled = false;
+    let teardown: (() => void) | null = null;
+    const startHandle = setTimeout(() => {
+      if (cancelled) return;
+      teardown = startTerminal(host);
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(startHandle);
+      teardown?.();
+    };
+
+    function startTerminal(host: HTMLElement): () => void {
+      const term = new XTerm({
       cursorBlink: true,
       // System monospace only — a webfont loads async, so xterm would measure
       // cell width against the fallback then re-render with the real font,
@@ -18,10 +56,13 @@ export function Terminal() {
         'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "Courier New", monospace',
       fontSize: 13,
       theme: {
-        background: '#ffffff',
+        // Match the logs pane background (`bg-zinc-50` in LogsPane.tsx) so
+        // the Agents tab feels visually continuous with the inspect logs
+        // view instead of jumping to pure white.
+        background: '#fafafa',
         foreground: '#18181b',
         cursor: '#18181b',
-        cursorAccent: '#ffffff',
+        cursorAccent: '#fafafa',
         selectionBackground: 'rgba(9, 61, 245, 0.18)',
         selectionForeground: '#18181b',
         black: '#000000',
@@ -48,8 +89,14 @@ export function Terminal() {
     fit.fit();
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.host}/ws/terminal`);
+    const ws = new WebSocket(`${proto}//${window.location.host}${wsUrl}`);
     ws.binaryType = 'arraybuffer';
+    // Track whether the connection actually reached OPEN. React 18 strict mode
+    // intentionally double-invokes effects in dev (mount → cleanup → mount), so
+    // the first WS is `.close()`d while still in CONNECTING. Without this flag
+    // the cleanup would fire `onExit` on a session that never actually started,
+    // and the parent would mark it ended before the re-mounted WS has a chance.
+    let wasOpened = false;
 
     const sendResize = () => {
       if (ws.readyState !== WebSocket.OPEN) return;
@@ -57,6 +104,7 @@ export function Terminal() {
     };
 
     ws.addEventListener('open', () => {
+      wasOpened = true;
       term.focus();
       sendResize();
     });
@@ -84,6 +132,7 @@ export function Terminal() {
 
     ws.addEventListener('close', () => {
       term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
+      if (wasOpened) onExitRef.current?.();
     });
 
     const encoder = new TextEncoder();
@@ -93,7 +142,16 @@ export function Terminal() {
       }
     });
 
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver((entries) => {
+      // When the host gets `display: none` (e.g. user switches dashboard
+      // tabs or selects another session), the observer fires with a 0×0
+      // contentRect. Running fit.fit() on that resizes xterm to 0 cols
+      // and we'd push `{cols:0, rows:0}` to the server PTY — Claude would
+      // then render its next reply at width 0 until the next real resize.
+      // Skip both the fit and the resize message in that case; the next
+      // observer tick (when display returns to block) will catch up.
+      const rect = entries[0]?.contentRect;
+      if (!rect || rect.width === 0 || rect.height === 0) return;
       try {
         fit.fit();
       } catch {
@@ -103,13 +161,14 @@ export function Terminal() {
     });
     observer.observe(host);
 
-    return () => {
-      observer.disconnect();
-      dataDisposable.dispose();
-      ws.close();
-      term.dispose();
-    };
-  }, []);
+      return () => {
+        observer.disconnect();
+        dataDisposable.dispose();
+        ws.close();
+        term.dispose();
+      };
+    }
+  }, [wsUrl]);
 
-  return <div ref={hostRef} className="h-full w-full bg-white" />;
+  return <div ref={hostRef} className="h-full w-full bg-zinc-50" />;
 }
