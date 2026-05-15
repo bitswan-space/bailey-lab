@@ -10,6 +10,11 @@ BP="${SSH_BP:-}"
 # Claude session UUID — passed by the dashboard so it can resume later via
 # `claude --resume <uuid>`. Persisted into .meta.json below.
 CLAUDE_SESSION_ID="${SSH_CLAUDE_SESSION_ID:-}"
+# Session "kind" tag: "claude" for a regular BP-scoped chat, "sync" for the
+# worktree-level git-sync agent flow. Persisted so the dashboard can pick
+# the right icon when listing past sessions. Empty for editor-launched
+# sessions.
+SESSION_KIND="${SSH_SESSION_KIND:-}"
 AUTO_CMD="${SSH_AUTO_CMD:-}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # Include the BP in the session id so concurrent dashboard sessions for the
@@ -57,6 +62,11 @@ if [ -n "$CLAUDE_SESSION_ID" ]; then
 else
     CLAUDE_ID_JSON="null"
 fi
+if [ -n "$SESSION_KIND" ]; then
+    KIND_JSON="\"${SESSION_KIND}\""
+else
+    KIND_JSON="null"
+fi
 cat > "${SESSION_DIR}/${SESSION_ID}.meta.json" << METAEOF
 {
   "id": "${SESSION_ID}",
@@ -64,6 +74,7 @@ cat > "${SESSION_DIR}/${SESSION_ID}.meta.json" << METAEOF
   "worktree": "${WORKTREE}",
   "bp": ${BP_JSON},
   "claude_session_id": ${CLAUDE_ID_JSON},
+  "kind": ${KIND_JSON},
   "started_at": "$(date -Iseconds)",
   "logged": $([ "$LOGGED" = "true" ] && echo "true" || echo "false")
 }
