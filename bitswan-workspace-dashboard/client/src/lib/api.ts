@@ -46,6 +46,15 @@ async function deleteEmpty(url: string): Promise<void> {
   await fetchWithRetry(url, { method: 'DELETE' });
 }
 
+async function patchJson<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetchWithRetry(url, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return (await r.json()) as T;
+}
+
 /**
  * True for the `TypeError: Failed to fetch` / `NetworkError ...` surface
  * that Chromium and Firefox raise when a connection is torn down mid-flight
@@ -160,4 +169,50 @@ export const api = {
     );
     return content;
   },
+
+  requirements: {
+    list: (bpId: string, worktree: string) =>
+      getJson<Requirement[]>(
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements?worktree=${encodeURIComponent(worktree)}`,
+      ),
+    add: (bpId: string, worktree: string, body: AddRequirementRequest) =>
+      postJson<Requirement>(
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements?worktree=${encodeURIComponent(worktree)}`,
+        body,
+      ),
+    update: (
+      bpId: string,
+      worktree: string,
+      id: string,
+      patch: UpdateRequirementRequest,
+    ) =>
+      patchJson<Requirement>(
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements/${encodeURIComponent(id)}?worktree=${encodeURIComponent(worktree)}`,
+        patch,
+      ),
+    remove: (bpId: string, worktree: string, id: string) =>
+      deleteEmpty(
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements/${encodeURIComponent(id)}?worktree=${encodeURIComponent(worktree)}`,
+      ),
+  },
 };
+
+export type ReqStatus = 'pending' | 'pass' | 'fail' | 'retest' | 'proposed';
+
+export interface Requirement {
+  id: string;
+  description: string;
+  status: ReqStatus;
+  parent: string;
+}
+
+export interface AddRequirementRequest {
+  text: string;
+  parent?: string;
+  status?: ReqStatus;
+}
+
+export interface UpdateRequirementRequest {
+  description?: string;
+  status?: ReqStatus;
+}

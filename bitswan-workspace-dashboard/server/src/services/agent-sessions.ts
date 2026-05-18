@@ -41,10 +41,11 @@ export interface AgentSession {
   claudeSessionId: string | null;
   /**
    * "claude" for a regular BP-scoped chat (the default), "sync" for the
-   * worktree-level git-sync flow, or null for legacy / editor-launched
-   * sessions where the wrapper didn't record a kind.
+   * worktree-level git-sync flow, "requirement" for a per-requirement
+   * focused session, or null for legacy / editor-launched sessions where
+   * the wrapper didn't record a kind.
    */
-  kind: 'claude' | 'sync' | null;
+  kind: 'claude' | 'sync' | 'requirement' | null;
   /**
    * First user prompt from Claude's transcript, truncated. Empty until the
    * user has actually typed something into the session.
@@ -100,8 +101,10 @@ export async function listSessions(filter: {
     const worktree = raw.worktree ?? '';
     const bp = raw.bp ?? null;
     const kindRaw = raw.kind ?? null;
-    const kind: 'claude' | 'sync' | null =
-      kindRaw === 'claude' || kindRaw === 'sync' ? kindRaw : null;
+    const kind: 'claude' | 'sync' | 'requirement' | null =
+      kindRaw === 'claude' || kindRaw === 'sync' || kindRaw === 'requirement'
+        ? kindRaw
+        : null;
     if (filter.worktree !== undefined && worktree !== filter.worktree) continue;
     if (filter.bp !== undefined) {
       // Worktree-level sync sessions (bp=null, kind='sync') surface in any

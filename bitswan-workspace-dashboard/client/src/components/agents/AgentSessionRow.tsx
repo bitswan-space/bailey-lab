@@ -1,5 +1,5 @@
 import type { KeyboardEvent } from 'react';
-import { Bot, Play, RefreshCw, RotateCcw } from 'lucide-react';
+import { Bot, ClipboardCheck, Play, RefreshCw, RotateCcw } from 'lucide-react';
 
 export interface SessionRowData {
   /** Unique id within the AgentsTab session list. */
@@ -9,7 +9,7 @@ export interface SessionRowData {
   lastActive: string;
   status: 'running' | 'idle';
   /** Which kind of session — drives the leading icon. */
-  kind: 'claude' | 'sync';
+  kind: 'claude' | 'sync' | 'requirement';
   /** Present on past sessions only — used to fire playback. */
   castFile?: string;
   /** Present when this past row has a known Claude session UUID — enables Resume. */
@@ -61,6 +61,8 @@ export function AgentSessionRow({ s, active, onClick, onPlay, onResume }: Props)
       <div className="inline-flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
         {s.kind === 'sync' ? (
           <RefreshCw className="size-3.5 text-muted-foreground" aria-hidden />
+        ) : s.kind === 'requirement' ? (
+          <ClipboardCheck className="size-3.5 text-muted-foreground" aria-hidden />
         ) : (
           <Bot className="size-3.5 text-muted-foreground" aria-hidden />
         )}

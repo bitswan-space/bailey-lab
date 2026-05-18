@@ -6,6 +6,7 @@ import { handleTerminalConnection } from '../services/terminal-session.js';
 import type { GitopsClient } from '../services/gitops.js';
 import { isValidBpId, isValidWorktreeName } from '../services/workspace.js';
 import { castStream, listSessions } from '../services/agent-sessions.js';
+import { listRequirements, type Requirement } from '../services/requirements.js';
 
 export interface CodingAgentRoutesOptions {
   gitops: GitopsClient | null;
@@ -22,6 +23,34 @@ const SYNC_PROMPT =
   'Sync this worktree with main: 1) bitswan-coding-agent vcs commit -m pre-sync-commit ' +
   '2) bitswan-coding-agent vcs sync 3) If conflicts, resolve and run bitswan-coding-agent vcs sync-continue. ' +
   'Tell me when sync is complete.';
+
+/**
+ * Per-requirement focused prompt. The user has clicked "Run agent on this
+ * requirement" in the dashboard, so we point Claude at a single id and
+ * instruct it on the canonical lifecycle. Apostrophes in the user-typed
+ * description are escaped centrally in `buildAutoCmd` — write this prompt
+ * naturally.
+ */
+function buildRequirementPrompt(req: Requirement): string {
+  return (
+    `Work on requirement ${req.id}: ${req.description}. ` +
+    `Read the BP's README.md, process.toml, and any existing source first. ` +
+    `Use \`bitswan-coding-agent requirements list\` to see the full tree and ` +
+    `\`bitswan-coding-agent requirements next\` to confirm ordering. ` +
+    `When the requirement passes, run \`bitswan-coding-agent requirements update --id ${req.id} --status pass\`. ` +
+    `If it doesn't pass, set status to fail or retest as appropriate.`
+  );
+}
+
+/**
+ * Make a string safe to embed inside a bash single-quoted region. Inside
+ * `'…'` everything is literal except the closing quote itself, so the
+ * standard trick is to end the quoted region, insert an escaped quote,
+ * and reopen the quoted region: `'\''`.
+ */
+function bashSingleQuoteEscape(s: string): string {
+  return s.replace(/'/g, "'\\''");
+}
 
 const SSH_KEY = '/workspace/.ssh/id_ed25519';
 
@@ -44,7 +73,7 @@ function emailFromRequest(req: FastifyRequest): string {
   return 'unknown';
 }
 
-type SessionKind = 'claude' | 'sync';
+type SessionKind = 'claude' | 'sync' | 'requirement';
 
 function buildAutoCmd(opts: {
   worktree: string;
@@ -52,20 +81,29 @@ function buildAutoCmd(opts: {
   sessionId: string;
   resume: boolean;
   kind: SessionKind;
+  /** Requirement to focus the agent on. Required when kind === 'requirement'. */
+  requirement?: Requirement;
 }): string {
-  // Sync sessions cd to the worktree root (no BP); regular claude sessions
-  // cd into the BP directory.
+  // Sync sessions cd to the worktree root (no BP); regular claude and
+  // requirement sessions cd into the BP directory.
   const cd =
     opts.kind === 'sync'
       ? `/workspace/worktrees/${opts.worktree}`
       : `/workspace/worktrees/${opts.worktree}/${opts.bp}`;
-  const prompt = opts.kind === 'sync' ? SYNC_PROMPT : DEFAULT_PROMPT;
+  let prompt: string;
+  if (opts.kind === 'sync') prompt = SYNC_PROMPT;
+  else if (opts.kind === 'requirement' && opts.requirement) {
+    prompt = buildRequirementPrompt(opts.requirement);
+  } else prompt = DEFAULT_PROMPT;
   // Either continue a previous chat (--resume <uuid>) or start a fresh one
   // with a caller-provided UUID (--session-id <uuid>) so the dashboard can
-  // resume it later.
+  // resume it later. The prompt is embedded inside single quotes; any
+  // apostrophes in the requirement description (or in the canned prompt
+  // templates) would otherwise terminate the quoted region.
+  const safePrompt = bashSingleQuoteEscape(prompt);
   const claudeArgs = opts.resume
     ? `--dangerously-skip-permissions --resume ${opts.sessionId}`
-    : `--dangerously-skip-permissions --session-id ${opts.sessionId} '${prompt}'`;
+    : `--dangerously-skip-permissions --session-id ${opts.sessionId} '${safePrompt}'`;
   // Inline the Claude settings stub so the agent doesn't re-prompt on every
   // session for dangerous-mode confirmation. Same shape the editor uses.
   return (
@@ -133,21 +171,60 @@ export function registerCodingAgentRoutes(
       session_id?: string;
       resume?: string;
       kind?: string;
+      requirement_id?: string;
     };
   }>('/ws/coding-agent', { websocket: true }, async (socket, req) => {
-    const { worktree, bp, session_id, resume, kind: kindRaw } = req.query;
+    const { worktree, bp, session_id, resume, kind: kindRaw, requirement_id } = req.query;
     if (!worktree || !isValidWorktreeName(worktree)) {
       socket.send(JSON.stringify({ type: 'error', message: 'invalid worktree' }));
       socket.close(1008, 'invalid worktree');
       return;
     }
-    const kind: SessionKind = kindRaw === 'sync' ? 'sync' : 'claude';
-    // `bp` is required for regular claude sessions but optional (in fact
-    // ignored) for worktree-level sync sessions.
-    if (kind === 'claude') {
+    const kind: SessionKind =
+      kindRaw === 'sync' ? 'sync' : kindRaw === 'requirement' ? 'requirement' : 'claude';
+    // `bp` is required for regular claude sessions and requirement sessions;
+    // optional (and ignored) for worktree-level sync sessions.
+    if (kind !== 'sync') {
       if (!bp || !isValidBpId(bp)) {
         socket.send(JSON.stringify({ type: 'error', message: 'invalid bp' }));
         socket.close(1008, 'invalid bp');
+        return;
+      }
+    }
+    // For requirement sessions, look up the description in the TOML so we
+    // can embed it in the prompt. Refuse to spawn if the id isn't there —
+    // running a session against a stale id would just confuse Claude.
+    let requirement: Requirement | undefined;
+    if (kind === 'requirement') {
+      if (!requirement_id) {
+        socket.send(
+          JSON.stringify({ type: 'error', message: 'requirement_id is required' }),
+        );
+        socket.close(1008, 'missing requirement_id');
+        return;
+      }
+      try {
+        const reqs = await listRequirements({
+          workspaceRoot: process.env.WORKSPACE_ROOT ?? '/workspace/workspace',
+          worktree,
+          bp: bp!,
+        });
+        requirement = reqs.find((r) => r.id === requirement_id);
+      } catch (err) {
+        socket.send(
+          JSON.stringify({
+            type: 'error',
+            message: `failed to load requirement: ${err instanceof Error ? err.message : String(err)}`,
+          }),
+        );
+        socket.close(1011, 'requirement load failed');
+        return;
+      }
+      if (!requirement) {
+        socket.send(
+          JSON.stringify({ type: 'error', message: `requirement ${requirement_id} not found` }),
+        );
+        socket.close(1008, 'unknown requirement');
         return;
       }
     }
@@ -173,10 +250,11 @@ export function registerCodingAgentRoutes(
     const email = emailFromRequest(req);
     const autoCmd = buildAutoCmd({
       worktree,
-      ...(kind === 'claude' && bp ? { bp } : {}),
+      ...(kind !== 'sync' && bp ? { bp } : {}),
       sessionId: claudeSessionId,
       resume: isResume,
       kind,
+      ...(requirement ? { requirement } : {}),
     });
     const host = agentHost();
 
@@ -295,7 +373,7 @@ export function registerCodingAgentRoutes(
           // SSH_BP is only set for BP-scoped sessions. Empty/missing tells
           // the wrapper to cd to the worktree root (which is what we want
           // for sync sessions).
-          ...(kind === 'claude' && bp ? { SSH_BP: bp } : {}),
+          ...(kind !== 'sync' && bp ? { SSH_BP: bp } : {}),
           SSH_CLAUDE_SESSION_ID: claudeSessionId,
           SSH_SESSION_KIND: kind,
           SSH_AUTO_CMD: autoCmd,

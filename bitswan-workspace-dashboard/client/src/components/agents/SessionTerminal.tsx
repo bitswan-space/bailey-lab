@@ -5,7 +5,9 @@ interface Props {
   worktree: string;
   /** Null for worktree-level sync sessions; the WS route handles missing bp. */
   bp: string | null;
-  kind: 'claude' | 'sync';
+  kind: 'claude' | 'sync' | 'requirement';
+  /** Requirement id when kind === 'requirement'. The server reads the description from the TOML. */
+  requirementId?: string;
   /** Claude session UUID. We control it client-side so we can `--resume` it later. */
   sessionId: string;
   /** When true, ssh into the agent with `claude --resume <sessionId>` instead of a fresh session. */
@@ -23,6 +25,7 @@ export function SessionTerminal({
   worktree,
   bp,
   kind,
+  requirementId,
   sessionId,
   resume,
   hidden,
@@ -35,10 +38,11 @@ export function SessionTerminal({
       worktree,
       kind,
       ...(bp ? { bp } : {}),
+      ...(requirementId ? { requirement_id: requirementId } : {}),
       ...(resume ? { resume: sessionId } : { session_id: sessionId }),
     });
     return `/ws/coding-agent?${params.toString()}`;
-  }, [worktree, bp, kind, sessionId, resume]);
+  }, [worktree, bp, kind, requirementId, sessionId, resume]);
 
   return (
     <div className="h-full w-full" style={{ display: hidden ? 'none' : 'block' }}>

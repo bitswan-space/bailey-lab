@@ -28,7 +28,7 @@ export type AgentStatus = 'idle' | 'pending' | 'ready' | 'failed';
  * different worktree / a different BP without losing their live agent
  * sessions — there is no remount.
  */
-export type SessionKind = 'claude' | 'sync';
+export type SessionKind = 'claude' | 'sync' | 'requirement';
 
 export interface ActiveSession {
   /** Stable ID — doubles as the Claude session UUID we pass via SSH. */
@@ -37,6 +37,12 @@ export interface ActiveSession {
   /** BP-scoped sessions set this; worktree-level (sync) sessions leave it null. */
   bp: string | null;
   kind: SessionKind;
+  /**
+   * Requirement id this session focuses on. Set for kind='requirement' so
+   * the WS URL can be re-built on resume (we need to re-look-up the
+   * description on the server).
+   */
+  requirementId?: string;
   startedAt: number;
   exited: boolean;
   /** True when started via Resume (claude --resume <uuid>). */
@@ -58,6 +64,12 @@ interface SessionsContextValue {
    * the worktree root and runs the bitswan-coding-agent vcs sync flow.
    */
   startSyncSession(worktree: string): string;
+  /**
+   * Start a focused session against a single requirement. The server reads
+   * the requirement's description from the BP's testable-requirements.toml
+   * and embeds it in Claude's prompt.
+   */
+  startRequirementSession(worktree: string, bp: string, requirementId: string): string;
   resumeSession(worktree: string, bp: string | null, claudeSessionId: string, kind: SessionKind): string;
   /** Called by SessionTerminal when its WS closes. */
   markExited(id: string): void;
@@ -239,6 +251,30 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const startRequirementSession = useCallback(
+    (worktree: string, bp: string, requirementId: string) => {
+      const id = newSessionId();
+      setSessions((prev) => [
+        ...prev,
+        {
+          id,
+          worktree,
+          bp,
+          kind: 'requirement',
+          requirementId,
+          startedAt: Date.now(),
+          exited: false,
+          resume: false,
+        },
+      ]);
+      // Pre-select for the BP scope so flipping to the Agents tab lands on
+      // the new session immediately.
+      setSelectedFor({ worktree, bp }, id);
+      return id;
+    },
+    [setSelectedFor],
+  );
+
   const resumeSession = useCallback(
     (worktree: string, bp: string | null, claudeSessionId: string, kind: SessionKind) => {
       setSessions((prev) => {
@@ -329,6 +365,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       sessions,
       startSession,
       startSyncSession,
+      startRequirementSession,
       resumeSession,
       markExited,
       onExit,
@@ -344,6 +381,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       sessions,
       startSession,
       startSyncSession,
+      startRequirementSession,
       resumeSession,
       markExited,
       onExit,
@@ -449,6 +487,7 @@ function SessionsLayer({
                 resume={s.resume}
                 hidden={!selected}
                 onExit={() => markExited(s.id)}
+                {...(s.requirementId ? { requirementId: s.requirementId } : {})}
               />
             </div>
           );

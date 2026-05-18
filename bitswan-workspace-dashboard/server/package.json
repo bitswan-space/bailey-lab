@@ -12,6 +12,7 @@
   "dependencies": {
     "@fastify/static": "^7.0.4",
     "@fastify/websocket": "^10.0.1",
+    "@iarna/toml": "^2.2.5",
     "fastify": "^4.28.1",
     "node-pty": "^1.0.0"
   },

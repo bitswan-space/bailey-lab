@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { LayoutDashboard, Plus, RefreshCw, TerminalSquare, Trash2 } from 'lucide-react';
+import {
+  ClipboardCheck,
+  LayoutDashboard,
+  Plus,
+  RefreshCw,
+  TerminalSquare,
+  Trash2,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import {
   AlertDialog,
@@ -21,6 +28,7 @@ import type {
 } from '@/types';
 import { AgentsTab } from '@/components/agents/AgentsTab';
 import { useSessions } from '@/components/agents/SessionProvider';
+import { RequirementsTab } from '@/components/requirements/RequirementsTab';
 import { AutomationCard } from '@/components/automations/AutomationCard';
 import { InspectModal, type InspectStage } from '@/components/automations/InspectModal';
 import {
@@ -47,10 +55,12 @@ interface WorktreeViewProps {
 
 const TAB_STORAGE_KEY = 'dashboard.worktreeTab';
 
-function readPersistedTab(): 'overview' | 'agents' {
+type WorktreeTab = 'overview' | 'requirements' | 'agents';
+
+function readPersistedTab(): WorktreeTab {
   try {
     const raw = sessionStorage.getItem(TAB_STORAGE_KEY);
-    if (raw === 'agents') return 'agents';
+    if (raw === 'agents' || raw === 'requirements') return raw;
   } catch {
     // ignore
   }
@@ -58,7 +68,7 @@ function readPersistedTab(): 'overview' | 'agents' {
 }
 
 export function WorktreeView({ bp, wt }: WorktreeViewProps) {
-  const [tab, setTab] = useState<'overview' | 'agents'>(readPersistedTab);
+  const [tab, setTab] = useState<WorktreeTab>(readPersistedTab);
   useEffect(() => {
     try {
       sessionStorage.setItem(TAB_STORAGE_KEY, tab);
@@ -70,7 +80,9 @@ export function WorktreeView({ bp, wt }: WorktreeViewProps) {
   return (
     <Tabs
       value={tab}
-      onValueChange={(v) => setTab(v === 'agents' ? 'agents' : 'overview')}
+      onValueChange={(v) =>
+        setTab(v === 'agents' || v === 'requirements' ? (v as WorktreeTab) : 'overview')
+      }
       className="flex flex-1 flex-col overflow-hidden"
     >
       <TabsList className="mx-7 mt-4 inline-flex w-fit shrink-0 gap-1 self-start bg-muted/40">
@@ -82,10 +94,31 @@ export function WorktreeView({ bp, wt }: WorktreeViewProps) {
           <TerminalSquare className="size-3.5" aria-hidden />
           Agents
         </TabsTrigger>
+        <TabsTrigger value="requirements" className="gap-1.5">
+          <ClipboardCheck className="size-3.5" aria-hidden />
+          Requirements
+        </TabsTrigger>
       </TabsList>
 
       <TabsContent value="overview" className="flex-1 overflow-auto bg-background">
         <OverviewPane bp={bp} wt={wt} onShowAgents={() => setTab('agents')} />
+      </TabsContent>
+
+      <TabsContent
+        value="requirements"
+        className="flex-1 overflow-hidden bg-background"
+      >
+        {bp ? (
+          <RequirementsTab
+            worktree={wt.name}
+            bp={bp.name}
+            onShowAgents={() => setTab('agents')}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            Select a business process from the sidebar to view its requirements.
+          </div>
+        )}
       </TabsContent>
 
       {/* forceMount keeps the Agents tree (and every SessionTerminal's

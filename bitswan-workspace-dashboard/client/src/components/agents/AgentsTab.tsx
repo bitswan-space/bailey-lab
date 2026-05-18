@@ -124,7 +124,7 @@ export function AgentsTab({ worktree, bp, branch }: Props) {
   }, [startNewSession, worktree, bp, agentStatus, ensureAgent]);
 
   const resumeSession = useCallback(
-    async (claudeSessionId: string, kind: 'claude' | 'sync') => {
+    async (claudeSessionId: string, kind: 'claude' | 'sync' | 'requirement') => {
       if (agentStatus === 'idle' || agentStatus === 'failed') {
         try {
           await ensureAgent();
@@ -163,7 +163,9 @@ export function AgentsTab({ worktree, bp, branch }: Props) {
         const fallback =
           s.kind === 'sync'
             ? `Sync (${formatTime(s.startedAt)})`
-            : `New session (${formatTime(s.startedAt)})`;
+            : s.kind === 'requirement'
+              ? `${s.requirementId ?? 'Requirement'} (${formatTime(s.startedAt)})`
+              : `New session (${formatTime(s.startedAt)})`;
         return {
           id: `active:${s.id}`,
           name: title || fallback,
@@ -181,11 +183,18 @@ export function AgentsTab({ worktree, bp, branch }: Props) {
     const pastRows: SessionRowData[] = past
       .filter((p) => !(p.claudeSessionId && liveClaudeIds.has(p.claudeSessionId)))
       .map((p) => {
-        const kind: 'claude' | 'sync' = p.kind === 'sync' ? 'sync' : 'claude';
+        const kind: 'claude' | 'sync' | 'requirement' =
+          p.kind === 'sync'
+            ? 'sync'
+            : p.kind === 'requirement'
+              ? 'requirement'
+              : 'claude';
         const fallback =
           kind === 'sync'
             ? `Sync (${formatPastTimestamp(p.timestamp)})`
-            : `Claude session (${formatPastTimestamp(p.timestamp)})`;
+            : kind === 'requirement'
+              ? `Requirement (${formatPastTimestamp(p.timestamp)})`
+              : `Claude session (${formatPastTimestamp(p.timestamp)})`;
         return {
           id: `past:${p.castFile || p.timestamp}`,
           name: p.title || fallback,

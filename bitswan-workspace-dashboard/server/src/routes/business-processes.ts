@@ -4,6 +4,14 @@ import {
   isValidWorktreeName,
   readReadme,
 } from '../services/workspace.js';
+import {
+  addRequirement,
+  isReqStatus,
+  listRequirements,
+  removeRequirement,
+  updateRequirement,
+  type ReqStatus,
+} from '../services/requirements.js';
 import type { GitopsClient } from '../services/gitops.js';
 
 export interface BusinessProcessRoutesOptions {
@@ -69,5 +77,125 @@ export function registerBusinessProcessRoutes(
     }
     const content = await readReadme(req.params.id, workspaceRoot, worktree);
     return { content };
+  });
+
+  // ---- Testable requirements ------------------------------------------
+  //
+  // Worktree-only. The TOML file lives at
+  //   <workspaceRoot>/worktrees/<worktree>/<bp>/testable-requirements.toml
+  // and is shared with `bitswan-coding-agent requirements …` — both write
+  // the same schema. See server/src/services/requirements.ts.
+
+  function validateBpWorktree(bp: string, worktree?: string): string | null {
+    if (!isValidBpId(bp)) return 'invalid bp id';
+    if (!worktree) return 'worktree is required';
+    if (!isValidWorktreeName(worktree)) return 'invalid worktree';
+    return null;
+  }
+
+  app.get<{
+    Params: { id: string };
+    Querystring: { worktree?: string };
+  }>('/api/business-processes/:id/requirements', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const err = validateBpWorktree(req.params.id, req.query.worktree);
+    if (err) return reply.code(400).send({ error: err });
+    try {
+      return await listRequirements({
+        workspaceRoot,
+        worktree: req.query.worktree!,
+        bp: req.params.id,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      app.log.warn({ err: e, id: req.params.id }, 'requirements list failed');
+      return reply.code(500).send({ error: msg });
+    }
+  });
+
+  app.post<{
+    Params: { id: string };
+    Querystring: { worktree?: string };
+    Body: { text?: string; parent?: string; status?: string };
+  }>('/api/business-processes/:id/requirements', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const err = validateBpWorktree(req.params.id, req.query.worktree);
+    if (err) return reply.code(400).send({ error: err });
+    const { text, parent, status } = req.body ?? {};
+    if (text !== undefined && typeof text !== 'string') {
+      return reply.code(400).send({ error: 'text must be a string' });
+    }
+    if (status !== undefined && !isReqStatus(status)) {
+      return reply.code(400).send({ error: 'invalid status' });
+    }
+    try {
+      return await addRequirement({
+        workspaceRoot,
+        worktree: req.query.worktree!,
+        bp: req.params.id,
+        text: text ?? '',
+        ...(parent ? { parent } : {}),
+        ...(status ? { status: status as ReqStatus } : {}),
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      app.log.warn({ err: e, id: req.params.id }, 'requirements add failed');
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
+  app.patch<{
+    Params: { id: string; reqId: string };
+    Querystring: { worktree?: string };
+    Body: { description?: string; status?: string };
+  }>('/api/business-processes/:id/requirements/:reqId', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const err = validateBpWorktree(req.params.id, req.query.worktree);
+    if (err) return reply.code(400).send({ error: err });
+    const { description, status } = req.body ?? {};
+    if (status !== undefined && !isReqStatus(status)) {
+      return reply.code(400).send({ error: 'invalid status' });
+    }
+    if (description === undefined && status === undefined) {
+      return reply.code(400).send({ error: 'description or status required' });
+    }
+    try {
+      return await updateRequirement({
+        workspaceRoot,
+        worktree: req.query.worktree!,
+        bp: req.params.id,
+        id: req.params.reqId,
+        patch: {
+          ...(description !== undefined ? { description } : {}),
+          ...(status !== undefined ? { status: status as ReqStatus } : {}),
+        },
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const code = msg.includes('not found') ? 404 : 400;
+      return reply.code(code).send({ error: msg });
+    }
+  });
+
+  app.delete<{
+    Params: { id: string; reqId: string };
+    Querystring: { worktree?: string };
+  }>('/api/business-processes/:id/requirements/:reqId', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const err = validateBpWorktree(req.params.id, req.query.worktree);
+    if (err) return reply.code(400).send({ error: err });
+    try {
+      await removeRequirement({
+        workspaceRoot,
+        worktree: req.query.worktree!,
+        bp: req.params.id,
+        id: req.params.reqId,
+      });
+      return reply.code(204).send();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const code = msg.includes('not found') ? 404 : 400;
+      return reply.code(code).send({ error: msg });
+    }
   });
 }
