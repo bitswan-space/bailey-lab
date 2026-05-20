@@ -6,23 +6,12 @@ import { handleTerminalConnection } from '../services/terminal-session.js';
 import type { GitopsClient } from '../services/gitops.js';
 import { isValidBpId, isValidWorktreeName } from '../services/workspace.js';
 import { castStream, listSessions } from '../services/agent-sessions.js';
+import { DEFAULT_PROMPT, SYNC_PROMPT } from '../services/agent-prompts.js';
 import { listRequirements, type Requirement } from '../services/requirements.js';
 
 export interface CodingAgentRoutesOptions {
   gitops: GitopsClient | null;
 }
-
-const DEFAULT_PROMPT =
-  'You are a BitSwan coding agent. Start by running: bitswan-coding-agent --help. ' +
-  'Read the BP\'s README.md, process.toml, and bitswan.yaml to orient yourself before ' +
-  'making changes. Ask for clarification when the user\'s request is ambiguous.';
-
-/** Worktree-level sync flow. Mirrors bitswan-editor's syncWorktree prompt. */
-const SYNC_PROMPT =
-  'IMPORTANT: git is not installed. Use ONLY bitswan-coding-agent commands. ' +
-  'Sync this worktree with main: 1) bitswan-coding-agent vcs commit -m pre-sync-commit ' +
-  '2) bitswan-coding-agent vcs sync 3) If conflicts, resolve and run bitswan-coding-agent vcs sync-continue. ' +
-  'Tell me when sync is complete.';
 
 /**
  * Per-requirement focused prompt. The user has clicked "Run agent on this
@@ -75,6 +64,36 @@ function emailFromRequest(req: FastifyRequest): string {
 
 type SessionKind = 'claude' | 'sync' | 'requirement';
 
+/**
+ * Default name passed to Claude via `-n`. Shown in Claude's `/resume`
+ * picker and in its own UI/terminal title; survives session resumption.
+ * Users can rename via Claude's `/rename` at any time. We don't bake the
+ * timestamp into the name because it represents the *conversation*, not a
+ * specific ssh attempt — multiple resumes of the same conversation share
+ * the same name.
+ */
+function defaultSessionName(opts: {
+  kind: SessionKind;
+  worktree: string;
+  bp?: string;
+  requirement?: Requirement;
+}): string {
+  switch (opts.kind) {
+    case 'sync':
+      return `Sync · ${opts.worktree}`;
+    case 'requirement': {
+      const id = opts.requirement?.id ?? 'requirement';
+      return opts.bp
+        ? `Req ${id} · ${opts.worktree}/${opts.bp}`
+        : `Req ${id} · ${opts.worktree}`;
+    }
+    default:
+      return opts.bp
+        ? `Claude · ${opts.worktree}/${opts.bp}`
+        : `Claude · ${opts.worktree}`;
+  }
+}
+
 function buildAutoCmd(opts: {
   worktree: string;
   bp?: string;
@@ -101,9 +120,23 @@ function buildAutoCmd(opts: {
   // apostrophes in the requirement description (or in the canned prompt
   // templates) would otherwise terminate the quoted region.
   const safePrompt = bashSingleQuoteEscape(prompt);
+  // Pass a default display name on the *first* run of a conversation —
+  // `--resume` reattaches an existing conversation that already has a name
+  // (either the one we set on first run or whatever the user has changed
+  // it to via Claude's /rename). The name surfaces in Claude's /resume
+  // picker so the user has something better than "You are a BitSwan coding
+  // agent…" when picking sessions from inside Claude.
+  const safeName = bashSingleQuoteEscape(
+    defaultSessionName({
+      kind: opts.kind,
+      worktree: opts.worktree,
+      ...(opts.bp ? { bp: opts.bp } : {}),
+      ...(opts.requirement ? { requirement: opts.requirement } : {}),
+    }),
+  );
   const claudeArgs = opts.resume
     ? `--dangerously-skip-permissions --resume ${opts.sessionId}`
-    : `--dangerously-skip-permissions --session-id ${opts.sessionId} '${safePrompt}'`;
+    : `--dangerously-skip-permissions --session-id ${opts.sessionId} -n '${safeName}' '${safePrompt}'`;
   // Inline the Claude settings stub so the agent doesn't re-prompt on every
   // session for dangerous-mode confirmation. Same shape the editor uses.
   return (

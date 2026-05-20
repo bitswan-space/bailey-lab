@@ -3,6 +3,7 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import type { Readable } from 'node:stream';
+import { isBootstrapPrompt } from './agent-prompts.js';
 
 /**
  * Bind-mount target for the coding-agent's session transcripts. The agent
@@ -169,6 +170,24 @@ function encodeClaudeProjectDir(absoluteCwd: string): string {
   return absoluteCwd.replace(/[^A-Za-z0-9]/g, '-');
 }
 
+/**
+ * Pick the best human-readable title for a session from its Claude JSONL.
+ *
+ * Claude writes three relevant record types as a conversation progresses:
+ *   - `ai-title` / `aiTitle` — Claude's auto-generated summary, refreshed as
+ *     the conversation evolves (e.g. "Extend lorem ipsum text for REQ-004").
+ *     Preferred because it actually describes what the conversation is
+ *     *about* — the dashboard's default `-n` name (custom-title) is just
+ *     "Claude · wt/bp", which is what we'd fall back to anyway.
+ *   - `custom-title` / `customTitle` — name set by `-n` on start, or
+ *     overwritten by `/rename` inside Claude. Used when no ai-title exists yet.
+ *   - `user` messages — first user prompt, after skipping our own bootstrap
+ *     and the local-command-caveat wrapper. Last resort.
+ *
+ * The first two are repeated (re-written each time they change). We take the
+ * *last* occurrence of each. The user-prompt scan keeps the first non-meta
+ * match. A single streaming pass collects all three.
+ */
 async function readFirstPromptTitle(opts: {
   worktree: string;
   bp?: string;
@@ -183,38 +202,68 @@ async function readFirstPromptTitle(opts: {
     : `/workspace/worktrees/${opts.worktree}`;
   const projDir = encodeClaudeProjectDir(cwd);
   const full = path.join(CLAUDE_PROJECTS_DIR, projDir, `${opts.claudeSessionId}.jsonl`);
+
+  let customTitle = '';
+  let aiTitle = '';
+  let firstPrompt = '';
+
   try {
     const stream = fsSync.createReadStream(full, { encoding: 'utf8' });
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     try {
       for await (const line of rl) {
         if (!line.startsWith('{')) continue;
-        let entry: { type?: string; isMeta?: boolean; message?: { role?: string; content?: unknown } };
+        let entry: {
+          type?: string;
+          isMeta?: boolean;
+          customTitle?: string;
+          aiTitle?: string;
+          message?: { role?: string; content?: unknown };
+        };
         try {
           entry = JSON.parse(line);
         } catch {
           continue;
         }
+
+        if (entry.type === 'custom-title' && typeof entry.customTitle === 'string') {
+          const t = entry.customTitle.trim();
+          if (t) customTitle = t;
+          continue;
+        }
+        if (entry.type === 'ai-title' && typeof entry.aiTitle === 'string') {
+          const t = entry.aiTitle.trim();
+          if (t) aiTitle = t;
+          continue;
+        }
+        if (firstPrompt) continue; // already found one; nothing else to do for user-msg pass
         if (entry.type !== 'user' || entry.isMeta) continue;
         const content = entry.message?.content;
-        const text = typeof content === 'string'
-          ? content
-          : Array.isArray(content)
+        const text =
+          typeof content === 'string'
             ? content
-                .map((c) =>
-                  typeof c === 'object' && c !== null && 'text' in c && typeof (c as { text: unknown }).text === 'string'
-                    ? (c as { text: string }).text
-                    : '',
-                )
-                .join(' ')
-            : '';
+            : Array.isArray(content)
+              ? content
+                  .map((c) =>
+                    typeof c === 'object' &&
+                    c !== null &&
+                    'text' in c &&
+                    typeof (c as { text: unknown }).text === 'string'
+                      ? (c as { text: string }).text
+                      : '',
+                  )
+                  .join(' ')
+              : '';
         const cleaned = text.replace(/\s+/g, ' ').trim();
         if (!cleaned) continue;
         // Skip Claude's own command-caveat wrapper; it's not a real prompt.
         if (cleaned.startsWith('<local-command-caveat>')) continue;
-        return cleaned.length > TITLE_MAX_LEN
-          ? cleaned.slice(0, TITLE_MAX_LEN - 1) + '…'
-          : cleaned;
+        // Skip the dashboard's own bootstrap prompts (the canned text we
+        // pass to Claude on session start). Without this every session
+        // row reads the same generic "You are a BitSwan coding agent…"
+        // until the user types their first real message.
+        if (isBootstrapPrompt(cleaned)) continue;
+        firstPrompt = cleaned;
       }
     } finally {
       rl.close();
@@ -226,7 +275,12 @@ async function readFirstPromptTitle(opts: {
       // Don't spam logs over a transient read race — silently fall back.
     }
   }
-  return '';
+
+  const chosen = aiTitle || customTitle || firstPrompt;
+  if (!chosen) return '';
+  return chosen.length > TITLE_MAX_LEN
+    ? chosen.slice(0, TITLE_MAX_LEN - 1) + '…'
+    : chosen;
 }
 
 /**
