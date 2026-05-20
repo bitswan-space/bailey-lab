@@ -15,7 +15,7 @@
     "@fastify/websocket": "^10.0.1",
     "@iarna/toml": "^2.2.5",
     "fastify": "^4.28.1",
-    "node-pty": "^1.0.0"
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",

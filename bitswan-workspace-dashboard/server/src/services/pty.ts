@@ -1,4 +1,4 @@
-import * as pty from 'node-pty';
+import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 
 const ALLOWED_ENV = {
   TERM: 'xterm-256color',

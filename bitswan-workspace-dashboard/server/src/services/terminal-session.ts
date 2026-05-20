@@ -1,5 +1,5 @@
 import type { WebSocket } from 'ws';
-import type { IPty } from 'node-pty';
+import type { IPty } from '@homebridge/node-pty-prebuilt-multiarch';
 import { killPty } from './pty.js';
 
 const BACKPRESSURE_LIMIT = 1024 * 1024;

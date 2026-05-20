@@ -4,7 +4,7 @@ FROM node:20-bookworm-slim AS builder
 WORKDIR /build
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 make g++ curl jq ca-certificates \
+ && apt-get install -y --no-install-recommends curl jq ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # Fetch the bitswan oauth2-proxy fork
@@ -30,13 +30,12 @@ RUN npm prune --omit=dev
 FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
 
-# python3/make/g++ are needed at runtime because dev-mode (with a mounted host
-# source dir) re-runs `npm install` inside the container, and node-pty 1.x
-# does not ship prebuilt binaries — it compiles from source on every install.
 # openssh-client is needed by the coding-agent terminal — the dashboard
 # server shells out to `ssh agent@${WS}-coding-agent` to open agent sessions.
+# (The pty binding ships prebuilds via @homebridge/node-pty-prebuilt-multiarch,
+# so dev-mode `npm install` no longer needs a C toolchain at runtime.)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 make g++ openssh-client \
+ && apt-get install -y --no-install-recommends openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
 RUN userdel -r node 2>/dev/null || true \
