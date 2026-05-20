@@ -1,4 +1,4 @@
-import { Activity, Cog, ExternalLink, Rocket, Trash2 } from 'lucide-react';
+import { Activity, ArrowRight, Cog, ExternalLink, Rocket, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
@@ -18,10 +18,13 @@ interface AutomationCardProps {
   onInspect: () => void;
   /** Stages where a Deploy button should appear when not deployed. */
   deployableStages: AutomationStage[];
-  /** Currently in-flight deploy/remove action, keyed by stage. */
+  /** Stages eligible to receive a promote (i.e. not the first stage). */
+  promotableStages: AutomationStage[];
+  /** Currently in-flight deploy/remove/promote action, keyed by stage. */
   busyStage: AutomationStage | null;
   onDeploy: (stage: AutomationStage) => void;
   onRemove: (deploymentId: string, stage: AutomationStage) => void;
+  onPromote: (stage: AutomationStage) => void;
 }
 
 export function AutomationCard({
@@ -29,9 +32,11 @@ export function AutomationCard({
   stages,
   onInspect,
   deployableStages,
+  promotableStages,
   busyStage,
   onDeploy,
   onRemove,
+  onPromote,
 }: AutomationCardProps) {
   return (
     <Card className="overflow-hidden rounded-xl border border-border bg-background shadow-sm">
@@ -63,6 +68,12 @@ export function AutomationCard({
           const last = i === stages.length - 1;
           const deploymentId = aut?.deployment_id ?? null;
           const canDeploy = !deploymentId && deployableStages.includes(stage.id);
+          const prevAut = i > 0 ? stages[i - 1]?.automation : undefined;
+          const canPromote =
+            !deploymentId &&
+            promotableStages.includes(stage.id) &&
+            !!prevAut?.deployment_id &&
+            !!prevAut?.version_hash;
           const busy = busyStage === stage.id;
 
           return (
@@ -102,6 +113,17 @@ export function AutomationCard({
                 >
                   <Trash2 className="size-3.5" />
                   Remove
+                </Button>
+              ) : canPromote ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => onPromote(stage.id)}
+                  disabled={busy}
+                >
+                  <ArrowRight className="size-3.5" />
+                  Promote
                 </Button>
               ) : canDeploy ? (
                 <Button

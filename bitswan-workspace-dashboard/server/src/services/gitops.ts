@@ -307,6 +307,55 @@ export class GitopsClient {
   }
 
   /**
+   * `POST /automations/{id}/deploy` — re-deploy at a given checksum into the
+   * specified stage. Used for promotions from a deployed source stage to the
+   * next one; gitops resolves the source from `automation_name`+`context`+
+   * `stage` and skips the upload step because the assets already live under
+   * the existing checksum.
+   */
+  async promoteDeploy(
+    deploymentId: string,
+    input: {
+      checksum: string;
+      stage: 'staging' | 'production';
+      automation_name: string;
+      context?: string;
+      relative_path?: string;
+      deployed_by?: string;
+    },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const form = new URLSearchParams();
+    form.append('checksum', input.checksum);
+    form.append('stage', input.stage);
+    form.append('automation_name', input.automation_name);
+    if (input.context) form.append('context', input.context);
+    // Without `relative_path`, gitops writes a bitswan.yaml entry with no
+    // path field — which then trips the dashboard's per-BP filter (we
+    // group by `relative_path.startsWith(bp.name)`), and the promoted
+    // stage never appears as deployed in the UI.
+    if (input.relative_path) form.append('relative_path', input.relative_path);
+    if (input.deployed_by) form.append('deployed_by', input.deployed_by);
+    const r = await fetch(
+      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/deploy`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: form.toString(),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `DELETE /automations/{id}` — stop the container, remove the entry from
    * `bitswan.yaml`, commit. Returns the upstream status code so the route
    * handler can surface 502/4xx as appropriate.

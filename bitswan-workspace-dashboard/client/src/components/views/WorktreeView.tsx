@@ -469,10 +469,15 @@ function OverviewPane({
                 automation: entry.automation,
               }]}
               deployableStages={DEPLOYABLE_STAGES}
+              promotableStages={[]}
               busyStage={busy[name]?.stage ?? null}
               onInspect={() => setInspectName(name)}
               onDeploy={() => {
                 void runDeploy(name, entry.relativePath);
+              }}
+              onPromote={() => {
+                // Worktree view only renders a single live-dev stage —
+                // promotion is not applicable here.
               }}
               onRemove={(deploymentId) => {
                 setRemoveTarget({

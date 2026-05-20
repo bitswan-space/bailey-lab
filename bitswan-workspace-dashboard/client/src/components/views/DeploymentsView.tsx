@@ -20,8 +20,10 @@ const STAGES: { id: AutomationStage; label: string; short: string }[] = [
 ];
 
 // Deploy from the dashboard is only wired for the dev stage in this iteration;
-// staging / production happen via "promote" (out of scope).
+// staging / production happen via "promote".
 const DEPLOYABLE_STAGES: AutomationStage[] = ['dev'];
+// Promote targets — order in STAGES determines what counts as "previous".
+const PROMOTABLE_STAGES: AutomationStage[] = ['staging', 'production'];
 
 interface DeploymentsViewProps {
   bp: BusinessProcess;
@@ -183,6 +185,43 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
     [],
   );
 
+  const runPromote = useCallback(
+    async (
+      name: string,
+      targetStage: 'staging' | 'production',
+      checksum: string,
+      relativePath: string,
+    ) => {
+      setBusy((m) => ({
+        ...m,
+        [name]: { stage: targetStage, expect: 'deployed', startedAt: Date.now() },
+      }));
+      const work = api.promoteAutomation({
+        automation_name: name,
+        context: bp.name,
+        stage: targetStage,
+        checksum,
+        relative_path: relativePath,
+      });
+      toast.promise(work, {
+        loading: `Promoting ${name} to ${targetStage}…`,
+        success: `${name} promoted to ${targetStage}`,
+        error: (err: unknown) =>
+          isTransientNetworkError(err)
+            ? `${name} promoted to ${targetStage}`
+            : `Failed to promote ${name}: ${String(err)}`,
+      });
+      try {
+        await work;
+      } catch (err) {
+        if (!isTransientNetworkError(err)) {
+          setBusy((m) => ({ ...m, [name]: null }));
+        }
+      }
+    },
+    [bp.name],
+  );
+
   const runRemove = useCallback(
     async (name: string, stage: AutomationStage, deploymentId: string) => {
       setBusy((m) => ({
@@ -235,6 +274,7 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
                   automation: entry.stages[s.id],
                 }))}
                 deployableStages={DEPLOYABLE_STAGES}
+                promotableStages={PROMOTABLE_STAGES}
                 busyStage={busy[name]?.stage ?? null}
                 onInspect={() => setInspectName(name)}
                 onDeploy={(stage) => {
@@ -242,6 +282,18 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
                   // DEPLOYABLE_STAGES; the card guarantees the narrow.
                   if (stage !== 'dev') return;
                   void runDeploy(name, stage, entry.relativePath);
+                }}
+                onPromote={(stage) => {
+                  if (stage !== 'staging' && stage !== 'production') return;
+                  const prevId =
+                    stage === 'staging' ? 'dev' : 'staging';
+                  const checksum = entry.stages[prevId]?.version_hash;
+                  if (!checksum) return;
+                  // entry.relativePath is the source dir (e.g. "<bp>/<auto>")
+                  // — gitops needs it to write the new bitswan.yaml entry
+                  // with a relative_path so the dashboard's per-BP filter
+                  // surfaces the new stage.
+                  void runPromote(name, stage, checksum, entry.relativePath);
                 }}
                 onRemove={(deploymentId, stage) => {
                   setRemoveTarget({

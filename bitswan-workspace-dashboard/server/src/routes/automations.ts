@@ -49,6 +49,76 @@ export function registerAutomationRoutes(
     }
   });
 
+  // Promote an already-deployed automation from one stage to the next.
+  // Mirrors bitswan-editor's promote flow: re-deploys at the source stage's
+  // checksum into `staging` or `production`. The target deployment_id is
+  // derived from `automation_name` + `context` (BP name) + `stage` using
+  // the same algorithm as the editor's `promoteStageCommand`.
+  app.post<{
+    Body: {
+      automation_name?: string;
+      context?: string;
+      stage?: string;
+      checksum?: string;
+      relative_path?: string;
+      deployed_by?: string;
+    };
+  }>('/api/automations/promote', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { automation_name, context, stage, checksum, relative_path, deployed_by } =
+      req.body ?? {};
+    if (!automation_name || typeof automation_name !== 'string') {
+      return reply.code(400).send({ error: 'automation_name is required' });
+    }
+    if (!checksum || typeof checksum !== 'string') {
+      return reply.code(400).send({ error: 'checksum is required' });
+    }
+    if (stage !== 'staging' && stage !== 'production') {
+      return reply
+        .code(400)
+        .send({ error: "stage must be 'staging' or 'production'" });
+    }
+
+    const sanitize = (s: string): string =>
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, '')
+        .replace(/^[,.-]+/g, '');
+
+    // `automation_name` may arrive as a path (e.g. "bp/leaf") if it was
+    // stored that way upstream; take the leaf, matching the editor's
+    // `sourcePathParts.pop()` step.
+    const leaf = automation_name.split('/').pop() ?? automation_name;
+    const src = sanitize(leaf);
+    const bp = context ? sanitize(context) : '';
+    const bpPrefix = bp ? `${bp}-` : '';
+    const targetDeploymentId =
+      stage === 'production'
+        ? `${src}-${bp || 'production'}`
+        : `${src}-${bpPrefix}${stage}`;
+
+    try {
+      const r = await gitops.promoteDeploy(targetDeploymentId, {
+        checksum,
+        stage,
+        automation_name: src,
+        ...(bp ? { context: bp } : {}),
+        ...(relative_path ? { relative_path } : {}),
+        ...(deployed_by ? { deployed_by } : {}),
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, automation_name, stage }, 'promote failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   // Remove a deployment (stops container, removes from bitswan.yaml).
   app.delete<{ Params: { id: string } }>(
     '/api/automations/:id',
