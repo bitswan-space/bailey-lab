@@ -56,6 +56,39 @@ async function patchJson<T>(url: string, body: unknown): Promise<T> {
 }
 
 /**
+ * PUT with a JSON body that may legitimately return a 4xx with a JSON
+ * body (e.g. 409 on save-conflict) — we want to surface those instead of
+ * throwing. Callers narrow the return via the union type.
+ */
+async function putJsonAllow4xx<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetch(url, {
+    method: 'PUT',
+    credentials: 'include',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  // Parse JSON regardless of status — the body carries the structured
+  // error shape (binary / too-large / conflict / …).
+  return (await r.json()) as T;
+}
+
+/**
+ * Multipart POST without our retry layer (retrying an upload would
+ * double-write files and break browser progress tracking).
+ */
+async function postMultipart<T>(url: string, form: FormData): Promise<T> {
+  const r = await fetch(url, {
+    method: 'POST',
+    credentials: 'include',
+    cache: 'no-store',
+    body: form,
+  });
+  if (!r.ok) throw new Error(`${url} returned ${r.status}`);
+  return (await r.json()) as T;
+}
+
+/**
  * True for the `TypeError: Failed to fetch` / `NetworkError ...` surface
  * that Chromium and Firefox raise when a connection is torn down mid-flight
  * (we hit this routinely when Traefik reconfigures routes after a container
@@ -170,6 +203,40 @@ export const api = {
     return content;
   },
 
+  worktreeFiles: {
+    tree: (name: string) =>
+      getJson<FileTreeNode[]>(`/api/worktrees/${encodeURIComponent(name)}/files`),
+    content: (name: string, p: string) =>
+      getJson<FileContentResponse>(
+        `/api/worktrees/${encodeURIComponent(name)}/files/content?path=${encodeURIComponent(p)}`,
+      ),
+    save: (
+      name: string,
+      p: string,
+      body: { content: string; etag?: FileEtag },
+    ) =>
+      putJsonAllow4xx<FileSaveResponse>(
+        `/api/worktrees/${encodeURIComponent(name)}/files/content?path=${encodeURIComponent(p)}`,
+        body,
+      ),
+    upload: (name: string, p: string, files: File[]) => {
+      const form = new FormData();
+      for (const f of files) form.append('files', f, f.name);
+      return postMultipart<FileUploadResponse>(
+        `/api/worktrees/${encodeURIComponent(name)}/files/upload?path=${encodeURIComponent(p)}`,
+        form,
+      );
+    },
+    status: (name: string) =>
+      getJson<{ changed: ChangedFile[] }>(
+        `/api/worktrees/${encodeURIComponent(name)}/status`,
+      ),
+    diff: (name: string, p?: string) =>
+      getJson<{ diff: string }>(
+        `/api/worktrees/${encodeURIComponent(name)}/diff${p ? `?path=${encodeURIComponent(p)}` : ''}`,
+      ),
+  },
+
   requirements: {
     list: (bpId: string, worktree: string) =>
       getJson<Requirement[]>(
@@ -196,6 +263,41 @@ export const api = {
       ),
   },
 };
+
+export interface FileTreeNode {
+  name: string;
+  kind: 'file' | 'folder';
+  /** Workspace-relative path (without the `worktrees/<name>/` prefix). */
+  path: string;
+  children?: FileTreeNode[];
+}
+
+export type ChangedKind = 'A' | 'M' | 'D';
+
+export interface ChangedFile {
+  path: string;
+  kind: ChangedKind;
+  adds: number;
+  dels: number;
+}
+
+export interface FileEtag {
+  mtimeMs: number;
+  size: number;
+}
+
+export type FileContentResponse =
+  | { content: string; truncated: boolean; etag: FileEtag }
+  | { error: 'binary' | 'too-large' | 'not-found' | string };
+
+export type FileSaveResponse =
+  | { ok: true; etag: FileEtag }
+  | { error: 'conflict'; expected?: FileEtag; actual?: FileEtag }
+  | { error: 'binary' | 'too-large' | 'not-found' | string };
+
+export interface FileUploadResponse {
+  written: { name: string; size: number }[];
+}
 
 export type ReqStatus = 'pending' | 'pass' | 'fail' | 'retest' | 'proposed';
 

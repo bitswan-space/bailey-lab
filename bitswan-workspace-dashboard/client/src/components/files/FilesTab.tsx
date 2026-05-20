@@ -1,0 +1,257 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowUp, RefreshCw, Upload } from 'lucide-react';
+import { useDropzone, type DropEvent } from 'react-dropzone';
+import { toast } from 'sonner';
+import { api, type ChangedKind } from '@/lib/api';
+import { useFileContent } from '@/hooks/useFileContent';
+import { useFileTree } from '@/hooks/useFileTree';
+import { useWorktreeStatus } from '@/hooks/useWorktreeStatus';
+import { FileTree } from './FileTree';
+import { FileViewer } from './FileViewer';
+
+interface Props {
+  worktree: string;
+  /**
+   * Currently-selected business process. When set, the explorer "cd"s
+   * into that folder: only its contents render, uploads default to it,
+   * and a breadcrumb points it out. Falsy → show the whole worktree.
+   */
+  bp?: string | null;
+}
+
+/**
+ * Worktree file explorer: 280 px tree on the left, content viewer on the
+ * right. Status badges on the tree come from the same `/status` endpoint
+ * the Diff tab uses, merged in by path. The tree pane doubles as a drop
+ * target for file uploads.
+ */
+export function FilesTab({ worktree, bp }: Props) {
+  const { tree, loading: treeLoading, refresh: refreshTree } = useFileTree(worktree);
+  const { changed, refresh: refreshStatus } = useWorktreeStatus(worktree);
+  const [openPath, setOpenPath] = useState<string | null>(null);
+  const {
+    data,
+    loading: contentLoading,
+    refresh: refreshContent,
+    setRefetchPaused,
+  } = useFileContent(worktree, openPath);
+
+  // Lets the user pop out of BP scope back to the full worktree view
+  // without having to deselect the BP in the sidebar. Reset whenever
+  // the user navigates to a different BP / worktree so each cd starts
+  // scoped again.
+  const [showFullTree, setShowFullTree] = useState(false);
+  useEffect(() => {
+    setShowFullTree(false);
+    setOpenPath(null);
+  }, [bp, worktree]);
+
+  // Resolve the BP folder in the current tree. If the BP doesn't exist
+  // as a top-level folder yet (e.g. brand-new BP with no files), or the
+  // user has popped back to the full tree, we fall through to the
+  // unscoped view so they're never stuck staring at "No files".
+  const { displayTree, rootDir } = useMemo(() => {
+    if (!bp || showFullTree) return { displayTree: tree, rootDir: '' };
+    const folder = tree.find((n) => n.kind === 'folder' && n.name === bp);
+    if (!folder) return { displayTree: tree, rootDir: '' };
+    return { displayTree: folder.children ?? [], rootDir: bp };
+  }, [tree, bp, showFullTree]);
+
+  const statusByPath = useMemo<Map<string, ChangedKind>>(() => {
+    const out = new Map<string, ChangedKind>();
+    for (const c of changed) out.set(c.path, c.kind);
+    return out;
+  }, [changed]);
+
+  // Upload target for the **click** path (the Upload button → OS picker)
+  // is the directory the currently-open file lives in, or — when no file
+  // is open — the scoped root (BP folder when cd'd in, worktree root
+  // otherwise). The **drag-drop** path uses whatever folder the user is
+  // hovering over instead — see `dragHoverFolder` below.
+  const uploadDir = useMemo(() => {
+    if (!openPath) return rootDir;
+    const i = openPath.lastIndexOf('/');
+    return i < 0 ? rootDir : openPath.slice(0, i);
+  }, [openPath, rootDir]);
+
+  // `dragHoverFolder` is the folder row the user is currently dragging
+  // over. `''` is the panel root (set by file rows / empty space when
+  // a drag is in progress); `null` means no drag.
+  const [dragHoverFolder, setDragHoverFolderState] = useState<string | null>(null);
+  // A ref shadow so the dropzone's `onDrop` (whose closure is captured
+  // at hook-setup time) can read the latest value without re-creating
+  // the dropzone on every drag step.
+  const dragHoverRef = useRef<string | null>(null);
+  const setDragHoverFolder = useCallback((p: string | null) => {
+    dragHoverRef.current = p;
+    setDragHoverFolderState(p);
+  }, []);
+
+  const performUpload = useCallback(
+    async (accepted: File[], dest: string) => {
+      try {
+        const r = await api.worktreeFiles.upload(worktree, dest, accepted);
+        const count = r.written.length;
+        const where = dest ? `/${dest}` : ' the worktree root';
+        toast.success(
+          `Uploaded ${count} file${count === 1 ? '' : 's'} to${where}`,
+        );
+        void refreshTree();
+        void refreshStatus();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        toast.error(`Upload failed: ${message}`);
+      }
+    },
+    [worktree, refreshTree, refreshStatus],
+  );
+
+  const onDrop = useCallback(
+    async (accepted: File[], _rej: unknown, event?: DropEvent) => {
+      if (accepted.length === 0) {
+        setDragHoverFolder(null);
+        return;
+      }
+      // `event` is a DragEvent for drag-drops and a synthetic Change
+      // event when triggered by the OS file picker (the Upload button).
+      // For drags we use the latest hovered folder; if the user dropped
+      // on a file row or empty space (hover==='') we fall back to the
+      // panel's scoped root (BP folder when cd'd in).
+      const isDrag = !!event && 'dataTransfer' in event;
+      const dest = isDrag ? (dragHoverRef.current || rootDir) : uploadDir;
+      await performUpload(accepted, dest);
+      setDragHoverFolder(null);
+    },
+    [rootDir, uploadDir, performUpload, setDragHoverFolder],
+  );
+
+  // `noClick`/`noKeyboard` keep the dropzone from intercepting clicks on
+  // tree rows — uploads happen via the Upload button (which calls `open`)
+  // or by drag-and-drop. `onDragLeave` only fires when the drag actually
+  // leaves the panel — useful for resetting the hover claim.
+  const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
+    onDrop,
+    onDragLeave: () => setDragHoverFolder(null),
+    noClick: true,
+    noKeyboard: true,
+    multiple: true,
+  });
+
+  const handleRefresh = () => {
+    void refreshTree();
+    void refreshStatus();
+  };
+
+  const dropOverlayTarget = dragHoverFolder || rootDir;
+  const uploadButtonTitle = `Upload to ${uploadDir ? '/' + uploadDir : 'worktree root'}`;
+
+  return (
+    <div className="flex h-full overflow-hidden bg-background">
+      <aside
+        {...getRootProps()}
+        className="relative flex w-[280px] shrink-0 flex-col border-r border-border bg-background outline-none"
+      >
+        <input {...getInputProps()} />
+        <div className="flex shrink-0 items-center justify-between gap-1 border-b border-border px-3 py-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Explorer
+            </div>
+            {rootDir ? (
+              <button
+                type="button"
+                onClick={() => setShowFullTree(true)}
+                className="group inline-flex min-w-0 items-center gap-1 rounded px-1 py-0.5 font-mono text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Show whole worktree"
+              >
+                <ArrowUp className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
+                <span className="truncate">/{rootDir}</span>
+              </button>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={open}
+              className="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              title={uploadButtonTitle}
+            >
+              <Upload className="size-3.5" aria-hidden />
+            </button>
+            <button
+              type="button"
+              onClick={handleRefresh}
+              className="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="Refresh"
+            >
+              <RefreshCw className="size-3.5" aria-hidden />
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto">
+          {treeLoading && tree.length === 0 ? (
+            <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+              Loading…
+            </div>
+          ) : displayTree.length === 0 ? (
+            <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+              {rootDir
+                ? `No files in /${rootDir} yet.`
+                : 'No files in this worktree.'}
+            </div>
+          ) : (
+            <FileTree
+              // Re-key on the active scope (worktree + BP + escape-hatch
+              // toggle) so each navigation re-runs the rows' initial
+              // `open` state — otherwise rows mounted under a previous
+              // scope would hold onto their toggled state and the
+              // explorer wouldn't follow the user's selection.
+              key={`${worktree}::${rootDir || ''}`}
+              tree={displayTree}
+              openPath={openPath}
+              statusByPath={statusByPath}
+              onOpen={setOpenPath}
+              dragHoverFolder={dragHoverFolder}
+              onDragHoverChange={setDragHoverFolder}
+            />
+          )}
+        </div>
+        {isDragActive ? (
+          // When the user is hovering a specific folder, we let *that*
+          // folder's own highlight be the visible target and dim the
+          // panel-wide overlay so the row stays readable. When no folder
+          // is hovered (file row / empty space), show the panel-root
+          // overlay instead — which is the BP folder when we've cd'd in.
+          <div
+            className={`pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1 text-center text-[12px] font-medium text-sky-900 ring-2 ring-inset ring-sky-400 ${
+              dragHoverFolder ? 'bg-sky-50/40' : 'bg-sky-100/80'
+            }`}
+            aria-hidden
+          >
+            <Upload className="size-5" />
+            <span>Drop files into</span>
+            <span className="font-mono text-[11px]">
+              {dropOverlayTarget ? `/${dropOverlayTarget}` : '/'}
+            </span>
+          </div>
+        ) : null}
+      </aside>
+      <main className="flex-1 overflow-hidden">
+        <FileViewer
+          worktree={worktree}
+          path={openPath}
+          data={data}
+          loading={contentLoading}
+          setRefetchPaused={setRefetchPaused}
+          onAfterSave={() => {
+            // A save can move a previously-clean file into the M
+            // bucket, change adds/dels, etc. Refresh both surfaces;
+            // the editor's local etag is already updated in-component.
+            void refreshStatus();
+            void refreshContent();
+          }}
+        />
+      </main>
+    </div>
+  );
+}

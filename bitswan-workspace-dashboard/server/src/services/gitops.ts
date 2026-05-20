@@ -182,6 +182,50 @@ export class GitopsClient {
   }
 
   /**
+   * `GET /worktrees/{name}/status` — per-file change list for a worktree
+   * (path + A/M/D kind + +adds/-dels). Drives the dashboard's Diff +
+   * Files tabs.
+   */
+  async worktreeStatus(
+    name: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/worktrees/${encodeURIComponent(name)}/status`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `GET /worktrees/{name}/diff[?path=<rel>]` — unified diff of the
+   * worktree's working tree vs. its own HEAD. Optional path filter
+   * narrows the diff to one file. Drives the dashboard's Diff tab.
+   */
+  async worktreeDiff(
+    name: string,
+    path?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const qs = path ? `?path=${encodeURIComponent(path)}` : '';
+    const r = await fetch(
+      `${this.baseUrl}/worktrees/${encodeURIComponent(name)}/diff${qs}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `POST /worktrees/coding-agent/ensure` — start the `${WS}-coding-agent`
    * container if it isn't already running. Idempotent: returns the same
    * shape (`{status, message}`) whether the container was just created,

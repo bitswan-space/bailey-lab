@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ClipboardCheck,
+  FileText,
+  GitPullRequest,
   LayoutDashboard,
   Plus,
   RefreshCw,
@@ -29,6 +31,8 @@ import type {
 import { AgentsTab } from '@/components/agents/AgentsTab';
 import { useSessions } from '@/components/agents/SessionProvider';
 import { RequirementsTab } from '@/components/requirements/RequirementsTab';
+import { FilesTab } from '@/components/files/FilesTab';
+import { DiffTab } from '@/components/diff/DiffTab';
 import { AutomationCard } from '@/components/automations/AutomationCard';
 import { InspectModal, type InspectStage } from '@/components/automations/InspectModal';
 import {
@@ -55,12 +59,19 @@ interface WorktreeViewProps {
 
 const TAB_STORAGE_KEY = 'dashboard.worktreeTab';
 
-type WorktreeTab = 'overview' | 'requirements' | 'agents';
+type WorktreeTab = 'overview' | 'files' | 'diff' | 'agents' | 'requirements';
 
 function readPersistedTab(): WorktreeTab {
   try {
     const raw = sessionStorage.getItem(TAB_STORAGE_KEY);
-    if (raw === 'agents' || raw === 'requirements') return raw;
+    if (
+      raw === 'agents' ||
+      raw === 'requirements' ||
+      raw === 'files' ||
+      raw === 'diff'
+    ) {
+      return raw;
+    }
   } catch {
     // ignore
   }
@@ -81,7 +92,11 @@ export function WorktreeView({ bp, wt }: WorktreeViewProps) {
     <Tabs
       value={tab}
       onValueChange={(v) =>
-        setTab(v === 'agents' || v === 'requirements' ? (v as WorktreeTab) : 'overview')
+        setTab(
+          v === 'agents' || v === 'requirements' || v === 'files' || v === 'diff'
+            ? (v as WorktreeTab)
+            : 'overview',
+        )
       }
       className="flex flex-1 flex-col overflow-hidden"
     >
@@ -98,10 +113,26 @@ export function WorktreeView({ bp, wt }: WorktreeViewProps) {
           <ClipboardCheck className="size-3.5" aria-hidden />
           Requirements
         </TabsTrigger>
+        <TabsTrigger value="files" className="gap-1.5">
+          <FileText className="size-3.5" aria-hidden />
+          Files
+        </TabsTrigger>
+        <TabsTrigger value="diff" className="gap-1.5">
+          <GitPullRequest className="size-3.5" aria-hidden />
+          Diff
+        </TabsTrigger>
       </TabsList>
 
       <TabsContent value="overview" className="flex-1 overflow-auto bg-background">
         <OverviewPane bp={bp} wt={wt} onShowAgents={() => setTab('agents')} />
+      </TabsContent>
+
+      <TabsContent value="files" className="flex-1 overflow-hidden bg-background">
+        <FilesTab worktree={wt.name} bp={bp?.name ?? null} />
+      </TabsContent>
+
+      <TabsContent value="diff" className="flex-1 overflow-hidden bg-background">
+        <DiffTab worktree={wt.name} />
       </TabsContent>
 
       <TabsContent
