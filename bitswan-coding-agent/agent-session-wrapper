@@ -6,13 +6,32 @@
 USER_EMAIL="${SSH_USER_EMAIL:-unknown}"
 LOGGED="${SSH_LOGGED:-true}"
 WORKTREE="${SSH_WORKTREE:-default}"
+BP="${SSH_BP:-}"
+# Claude session UUID — passed by the dashboard so it can resume later via
+# `claude --resume <uuid>`. Persisted into .meta.json below.
+CLAUDE_SESSION_ID="${SSH_CLAUDE_SESSION_ID:-}"
+# Session "kind" tag: "claude" for a regular BP-scoped chat, "sync" for the
+# worktree-level git-sync agent flow. Persisted so the dashboard can pick
+# the right icon when listing past sessions. Empty for editor-launched
+# sessions.
+SESSION_KIND="${SSH_SESSION_KIND:-}"
 AUTO_CMD="${SSH_AUTO_CMD:-}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-SESSION_ID="${TIMESTAMP}_${USER_EMAIL}_${WORKTREE}"
+# Include the BP in the session id so concurrent dashboard sessions for the
+# same (user, worktree, BP) still get distinct files (the timestamp resolves
+# collisions even when BP is empty).
+if [ -n "$BP" ]; then
+    SESSION_ID="${TIMESTAMP}_${USER_EMAIL}_${WORKTREE}_${BP}"
+else
+    SESSION_ID="${TIMESTAMP}_${USER_EMAIL}_${WORKTREE}"
+fi
 SESSION_DIR="/var/log/agent-sessions"
 
-# Determine working directory
-if [ -d "/workspace/worktrees/${WORKTREE}" ]; then
+# Determine working directory. When SSH_BP is set (dashboard) land in the BP
+# directory; otherwise fall back to the worktree root (editor behaviour).
+if [ -n "$BP" ] && [ -d "/workspace/worktrees/${WORKTREE}/${BP}" ]; then
+    cd "/workspace/worktrees/${WORKTREE}/${BP}"
+elif [ -d "/workspace/worktrees/${WORKTREE}" ]; then
     cd "/workspace/worktrees/${WORKTREE}"
 elif [ "$WORKTREE" = "default" ]; then
     cd /workspace/worktrees
@@ -30,12 +49,32 @@ if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
     exit $?
 fi
 
-# Always write metadata file for the session browser
+# Always write metadata file for the session browser. `bp` is JSON null when
+# the caller didn't set SSH_BP (e.g. editor sessions); the dashboard's per-BP
+# filter treats null/absent as "not this BP".
+if [ -n "$BP" ]; then
+    BP_JSON="\"${BP}\""
+else
+    BP_JSON="null"
+fi
+if [ -n "$CLAUDE_SESSION_ID" ]; then
+    CLAUDE_ID_JSON="\"${CLAUDE_SESSION_ID}\""
+else
+    CLAUDE_ID_JSON="null"
+fi
+if [ -n "$SESSION_KIND" ]; then
+    KIND_JSON="\"${SESSION_KIND}\""
+else
+    KIND_JSON="null"
+fi
 cat > "${SESSION_DIR}/${SESSION_ID}.meta.json" << METAEOF
 {
   "id": "${SESSION_ID}",
   "user_email": "${USER_EMAIL}",
   "worktree": "${WORKTREE}",
+  "bp": ${BP_JSON},
+  "claude_session_id": ${CLAUDE_ID_JSON},
+  "kind": ${KIND_JSON},
   "started_at": "$(date -Iseconds)",
   "logged": $([ "$LOGGED" = "true" ] && echo "true" || echo "false")
 }
@@ -49,6 +88,20 @@ if [ -n "$AUTO_CMD" ]; then
     echo "$AUTO_CMD" > "$AUTO_SCRIPT"
     chmod +x "$AUTO_SCRIPT"
     SHELL_CMD="bash -l $AUTO_SCRIPT"
+fi
+
+# Browser-close persistence: when the dashboard passes a Claude session
+# UUID, wrap the shell in dtach so the underlying claude process survives
+# ssh disconnects. `dtach -A` attaches to an existing socket OR creates a
+# new one running the trailing command. When the user reconnects (or
+# clicks Resume), the same dtach socket is found and they pick up exactly
+# where the agent left off — no `--resume` needed for the still-running
+# case. Idle close on the dashboard server kills the underlying process,
+# at which point dtach removes the socket, so the *next* attach starts
+# fresh from claude's on-disk history via `--resume <uuid>`.
+if [ -n "$CLAUDE_SESSION_ID" ]; then
+    DTACH_SOCKET="/tmp/.claude-dtach-${CLAUDE_SESSION_ID}.sock"
+    SHELL_CMD="dtach -A ${DTACH_SOCKET} -z ${SHELL_CMD}"
 fi
 
 # Anon session - no recording, just shell
