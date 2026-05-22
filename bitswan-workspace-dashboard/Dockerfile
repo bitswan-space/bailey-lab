@@ -32,10 +32,14 @@ WORKDIR /app
 
 # openssh-client is needed by the coding-agent terminal — the dashboard
 # server shells out to `ssh agent@${WS}-coding-agent` to open agent sessions.
+# ca-certificates ships the system CA bundle and `update-ca-certificates`,
+# which the entrypoint runs at startup so any custom CAs mounted into
+# /usr/local/share/ca-certificates/custom are trusted by oauth2-proxy (Go's
+# crypto/x509 reads the merged bundle at /etc/ssl/certs/ca-certificates.crt).
 # (The pty binding ships prebuilds via @homebridge/node-pty-prebuilt-multiarch,
 # so dev-mode `npm install` no longer needs a C toolchain at runtime.)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-client \
+ && apt-get install -y --no-install-recommends openssh-client ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 RUN userdel -r node 2>/dev/null || true \
@@ -57,7 +61,11 @@ COPY --from=builder --chown=coder:coder /build/node_modules ./node_modules
 COPY --chown=coder:coder entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-USER coder
+# Entrypoint starts as root so it can refresh the CA bundle when the daemon
+# mounts custom CAs (via UPDATE_CA_CERTIFICATES=true), then drops to `coder`
+# via `runuser` before launching the dashboard / oauth2-proxy. Without this
+# the dashboard's oauth2-proxy can't verify Keycloak certs signed by a
+# private CA (mkcert / corporate root).
 ENV NODE_ENV=production
 ENV PORT=8080
 ENV INTERNAL_PORT=8081

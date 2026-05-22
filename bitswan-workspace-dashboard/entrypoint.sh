@@ -1,6 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Root-only bootstrap: refresh the system CA bundle when the daemon mounted
+# extra CAs (see internal/certauthority/mount.go in bitswan-automation-server
+# — `trustCA=true` mounts ~/.config/bitswan/certauthorities into
+# /usr/local/share/ca-certificates/custom and sets UPDATE_CA_CERTIFICATES=true).
+# Without this oauth2-proxy can't verify Keycloak certs signed by a private
+# CA — Go's crypto/x509 reads /etc/ssl/certs/ca-certificates.crt and that
+# file is only rebuilt by `update-ca-certificates`, which needs root.
+if [ "$(id -u)" = "0" ]; then
+    if [ "${UPDATE_CA_CERTIFICATES:-false}" = "true" ] \
+       && [ -d /usr/local/share/ca-certificates/custom ]; then
+        echo "[entrypoint] Updating CA certificates from /usr/local/share/ca-certificates/custom..."
+        # Copy out of the read-only mount, normalise .pem → .crt (the only
+        # extension update-ca-certificates indexes), then rebuild the bundle.
+        cp /usr/local/share/ca-certificates/custom/*.crt /usr/local/share/ca-certificates/ 2>/dev/null || true
+        cp /usr/local/share/ca-certificates/custom/*.pem /usr/local/share/ca-certificates/ 2>/dev/null || true
+        for f in /usr/local/share/ca-certificates/*.pem; do
+            [ -f "$f" ] || continue
+            mv "$f" "${f%.pem}.crt"
+        done
+        update-ca-certificates 2>&1 \
+          | grep -v "WARNING:.*exactly one certificate or CRL" \
+          || true
+    fi
+    # Drop privileges and re-exec the same script as coder. `runuser` is in
+    # util-linux (always present on Debian); -- and -p preserve env vars
+    # like OAUTH_ENABLED / BITSWAN_DEV_MODE / PORT.
+    exec runuser -u coder -- "$0" "$@"
+fi
+
 EXTERNAL_PORT="${PORT:-8080}"
 INTERNAL_PORT="${INTERNAL_PORT:-8081}"
 DEV_BACKEND_PORT="${DEV_BACKEND_PORT:-8082}"
