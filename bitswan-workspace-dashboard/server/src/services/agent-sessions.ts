@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
@@ -14,13 +15,30 @@ export const SESSIONS_DIR =
   process.env.AGENT_SESSIONS_DIR ?? '/workspace/agent-sessions';
 
 /**
- * Bind-mount target for Claude's per-project JSONL transcripts. The agent
- * writes here as user `agent` (its $HOME is `/home/agent`, mounted from
- * `gitopsPath/coding-agent-home`); we read these files read-only to lift
- * the first user prompt out as a session title.
+ * Read-only view of the coding-agent's `/home/agent`, bind-mounted in from
+ * `gitopsPath/coding-agent-home`. Holds per-user Claude config dirs at
+ * `.claude_<slug>/projects/<encoded-cwd>/<uuid>.jsonl` (new layout) and the
+ * legacy shared `.claude/projects/...` (pre-isolation sessions).
  */
-export const CLAUDE_PROJECTS_DIR =
-  process.env.CLAUDE_PROJECTS_DIR ?? '/workspace/.claude/projects';
+export const AGENT_HOME_DIR =
+  process.env.AGENT_HOME_DIR ?? '/workspace/agent-home';
+
+/**
+ * Map a user email to the directory suffix the coding-agent wrapper uses
+ * for that user's Claude config (CLAUDE_CONFIG_DIR=/home/agent/.claude_<slug>).
+ * MUST stay in sync with `sanitize_email` in
+ * `bitswan-coding-agent/agent-session-wrapper` — the bash and TS
+ * implementations have to produce identical slugs so the dashboard reads
+ * the same path the agent wrote.
+ */
+export function sanitizeEmail(raw: string): string {
+  const clean = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '_')
+    .slice(0, 40);
+  const hash = crypto.createHash('sha256').update(raw).digest('hex').slice(0, 8);
+  return `${clean}_${hash}`;
+}
 
 const TITLE_MAX_LEN = 80;
 
@@ -72,12 +90,16 @@ interface RawMeta {
  * Scan `SESSIONS_DIR` and return parsed session metadata. When `bp` is
  * supplied the result is filtered to sessions started under that exact
  * (worktree, bp) pair — editor sessions (which have `bp = null`) are
- * dropped from the per-BP view.
+ * dropped from the per-BP view. When `userEmail` is supplied, only
+ * sessions started by that user are returned (legacy sessions whose
+ * meta has no recorded email are kept under the assumption they predate
+ * per-user isolation).
  */
 export async function listSessions(filter: {
   worktree?: string;
   bp?: string;
   limit?: number;
+  userEmail?: string;
 }): Promise<AgentSession[]> {
   let entries: string[];
   try {
@@ -106,6 +128,14 @@ export async function listSessions(filter: {
       kindRaw === 'claude' || kindRaw === 'sync' || kindRaw === 'requirement'
         ? kindRaw
         : null;
+    const userEmail = raw.user_email ?? raw.userEmail ?? '';
+    if (filter.userEmail !== undefined) {
+      // Skip if this session belongs to someone else. Sessions with no
+      // recorded email (legacy / pre-isolation) are kept so users don't
+      // suddenly lose access to old sessions; new sessions always carry an
+      // email courtesy of the wrapper's hard-fail.
+      if (userEmail && userEmail !== 'unknown' && userEmail !== filter.userEmail) continue;
+    }
     if (filter.worktree !== undefined && worktree !== filter.worktree) continue;
     if (filter.bp !== undefined) {
       // Worktree-level sync sessions (bp=null, kind='sync') surface in any
@@ -127,7 +157,7 @@ export async function listSessions(filter: {
     sessions.push({
       id: raw.id ?? baseName,
       timestamp: raw.started_at ?? raw.timestamp ?? '',
-      userEmail: raw.user_email ?? raw.userEmail ?? '',
+      userEmail,
       worktree,
       bp,
       castFile,
@@ -141,7 +171,24 @@ export async function listSessions(filter: {
   sessions.sort(
     (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
   );
-  const capped = sessions.slice(0, filter.limit ?? 50);
+
+  // Dedupe by claudeSessionId. The wrapper writes a fresh .meta.json on
+  // every SSH connection, so each resume of the same conversation adds
+  // another row. Keep the most-recent meta (first after the sort above) so
+  // the cast filename and timestamp reflect the latest attempt; legacy /
+  // editor sessions without a UUID stay as-is since each is a distinct
+  // conversation.
+  const seenClaudeIds = new Set<string>();
+  const deduped: AgentSession[] = [];
+  for (const s of sessions) {
+    if (s.claudeSessionId) {
+      if (seenClaudeIds.has(s.claudeSessionId)) continue;
+      seenClaudeIds.add(s.claudeSessionId);
+    }
+    deduped.push(s);
+  }
+
+  const capped = deduped.slice(0, filter.limit ?? 50);
 
   // Resolve titles in parallel. Each lookup is a single open+read+close on
   // the JSONL; bounded by `capped` (≤50) so concurrent fan-out is fine.
@@ -154,10 +201,45 @@ export async function listSessions(filter: {
         worktree: s.worktree,
         bp: s.bp ?? undefined,
         claudeSessionId: s.claudeSessionId,
+        userEmail: s.userEmail,
       });
     }),
   );
   return capped;
+}
+
+/**
+ * Look up the recorded `user_email` for a session by its Claude conversation
+ * UUID. Returns null when no meta file references that UUID. Used to gate
+ * `resume` requests so a user can't attach to (and steal) another user's
+ * still-running claude process via the dtach socket.
+ */
+export async function findSessionOwnerEmail(
+  claudeSessionId: string,
+): Promise<string | null> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(SESSIONS_DIR);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    throw err;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith('.meta.json')) continue;
+    let raw: RawMeta;
+    try {
+      const buf = await fs.readFile(path.join(SESSIONS_DIR, entry), 'utf8');
+      raw = JSON.parse(buf) as RawMeta;
+    } catch {
+      continue;
+    }
+    const id = raw.claude_session_id ?? raw.claudeSessionId ?? null;
+    if (id === claudeSessionId) {
+      return raw.user_email ?? raw.userEmail ?? null;
+    }
+  }
+  return null;
 }
 
 /**
@@ -192,6 +274,7 @@ async function readFirstPromptTitle(opts: {
   worktree: string;
   bp?: string;
   claudeSessionId: string;
+  userEmail?: string;
 }): Promise<string> {
   // The agent runs claude with cwd = `/workspace/worktrees/<wt>/<bp>` for
   // a regular BP-scoped session, or `/workspace/worktrees/<wt>` for a
@@ -201,7 +284,20 @@ async function readFirstPromptTitle(opts: {
     ? `/workspace/worktrees/${opts.worktree}/${opts.bp}`
     : `/workspace/worktrees/${opts.worktree}`;
   const projDir = encodeClaudeProjectDir(cwd);
-  const full = path.join(CLAUDE_PROJECTS_DIR, projDir, `${opts.claudeSessionId}.jsonl`);
+  // Per-user sessions write transcripts under `.claude_<slug>/projects/...`;
+  // legacy / unattributed sessions land in the shared `.claude/projects/...`.
+  // Try the per-user path first when we have an email, then fall back.
+  const candidates: string[] = [];
+  if (opts.userEmail && opts.userEmail !== 'unknown') {
+    const slug = sanitizeEmail(opts.userEmail);
+    candidates.push(
+      path.join(AGENT_HOME_DIR, `.claude_${slug}`, 'projects', projDir, `${opts.claudeSessionId}.jsonl`),
+    );
+  }
+  candidates.push(
+    path.join(AGENT_HOME_DIR, '.claude', 'projects', projDir, `${opts.claudeSessionId}.jsonl`),
+  );
+  const full = candidates.find((p) => fsSync.existsSync(p)) ?? candidates[candidates.length - 1];
 
   let customTitle = '';
   let aiTitle = '';

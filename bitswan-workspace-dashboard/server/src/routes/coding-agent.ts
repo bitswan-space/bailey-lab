@@ -5,7 +5,7 @@ import { spawnPty } from '../services/pty.js';
 import { handleTerminalConnection } from '../services/terminal-session.js';
 import type { GitopsClient } from '../services/gitops.js';
 import { isValidBpId, isValidWorktreeName } from '../services/workspace.js';
-import { castStream, listSessions } from '../services/agent-sessions.js';
+import { castStream, findSessionOwnerEmail, listSessions } from '../services/agent-sessions.js';
 import { DEFAULT_PROMPT, SYNC_PROMPT } from '../services/agent-prompts.js';
 import { listRequirements, type Requirement } from '../services/requirements.js';
 
@@ -54,9 +54,12 @@ function agentHost(): string {
 }
 
 function emailFromRequest(req: FastifyRequest): string {
-  // oauth2-proxy fronts the dashboard and sets this header on every
-  // upstream request; outside that boundary there's no authenticated user.
-  const raw = req.headers['x-auth-request-email'];
+  // oauth2-proxy fronts the dashboard and forwards the authenticated email.
+  // `x-forwarded-email` is on by default (`--pass-user-headers`);
+  // `x-auth-request-email` requires `--set-xauthrequest=true` and isn't
+  // enabled in our default config. Check both so we work either way.
+  const headers = req.headers;
+  const raw = headers['x-auth-request-email'] ?? headers['x-forwarded-email'];
   if (typeof raw === 'string' && raw) return raw;
   if (Array.isArray(raw) && raw[0]) return raw[0];
   return 'unknown';
@@ -281,6 +284,7 @@ export function registerCodingAgentRoutes(
     const isResume = Boolean(resumeId);
 
     const email = emailFromRequest(req);
+
     const autoCmd = buildAutoCmd({
       worktree,
       ...(kind !== 'sync' && bp ? { bp } : {}),
@@ -332,6 +336,39 @@ export function registerCodingAgentRoutes(
       }
       return;
     }
+
+    // Block resuming another user's session. The session list returns every
+    // session for the (worktree, bp), so a malicious user could grab another
+    // user's claude session UUID and pass it as `resume`. Without this gate
+    // they'd attach to the still-running dtach socket
+    // (/tmp/.claude-dtach-<UUID>.sock) and end up driving Claude under the
+    // *original* user's CLAUDE_CONFIG_DIR — leaking that user's Anthropic
+    // account. Sessions with no recorded owner (pre-isolation legacy) fall
+    // through; new sessions always carry an email.
+    //
+    // This check runs *after* firstFrame so the disk lookup doesn't race the
+    // client's first message — `socket.once('message', …)` inside the
+    // firstFrame promise has to be attached before any awaits, or the
+    // browser's open-time resize event arrives during the await with no
+    // listener and is lost (the WS then times out after 5s with no spawn).
+    if (isResume && resumeId) {
+      const ownerEmail = await findSessionOwnerEmail(resumeId);
+      if (
+        ownerEmail &&
+        ownerEmail !== 'unknown' &&
+        ownerEmail !== email
+      ) {
+        socket.send(
+          JSON.stringify({
+            type: 'error',
+            message: 'cannot resume a session started by another user',
+          }),
+        );
+        socket.close(1008, 'forbidden resume');
+        return;
+      }
+    }
+
     let aborted = false;
     socket.once('close', () => {
       aborted = true;
@@ -453,8 +490,9 @@ export function registerCodingAgentRoutes(
     if (!bp || !isValidBpId(bp)) {
       return reply.code(400).send({ error: 'invalid bp' });
     }
+    const userEmail = emailFromRequest(req);
     try {
-      const sessions = await listSessions({ worktree, bp });
+      const sessions = await listSessions({ worktree, bp, userEmail });
       return sessions;
     } catch (err) {
       app.log.warn({ err, worktree, bp }, 'list sessions failed');
