@@ -16,14 +16,38 @@ CLAUDE_SESSION_ID="${SSH_CLAUDE_SESSION_ID:-}"
 # sessions.
 SESSION_KIND="${SSH_SESSION_KIND:-}"
 AUTO_CMD="${SSH_AUTO_CMD:-}"
+
+# Per-user Claude config dir keyed off the oauth2-proxy email. Without it,
+# whichever user logs into `claude` first leaks their account to every other
+# user of this container. Dashboard sessions must carry an email; editor
+# sessions don't and use a shared default. Email is sanitized + hashed to
+# defang RFC-valid local parts that can contain `/` or `..`.
+sanitize_email() {
+    local raw="$1"
+    local clean hash
+    clean=$(printf '%s' "$raw" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '_' | cut -c1-40)
+    hash=$(printf '%s' "$raw" | sha256sum | head -c 8)
+    printf '%s_%s' "$clean" "$hash"
+}
+if [ -n "$SSH_USER_EMAIL" ] && [ "$SSH_USER_EMAIL" != "unknown" ]; then
+    EMAIL_SLUG=$(sanitize_email "$SSH_USER_EMAIL")
+elif [ -n "$SESSION_KIND" ]; then
+    echo "agent-session-wrapper: SSH_USER_EMAIL not set for dashboard session (kind=$SESSION_KIND); refusing to start" >&2
+    exit 1
+else
+    EMAIL_SLUG="default"
+fi
+export CLAUDE_CONFIG_DIR="/home/agent/.claude_${EMAIL_SLUG}"
+mkdir -p "$CLAUDE_CONFIG_DIR"
+
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # Include the BP in the session id so concurrent dashboard sessions for the
 # same (user, worktree, BP) still get distinct files (the timestamp resolves
 # collisions even when BP is empty).
 if [ -n "$BP" ]; then
-    SESSION_ID="${TIMESTAMP}_${USER_EMAIL}_${WORKTREE}_${BP}"
+    SESSION_ID="${TIMESTAMP}_${EMAIL_SLUG}_${WORKTREE}_${BP}"
 else
-    SESSION_ID="${TIMESTAMP}_${USER_EMAIL}_${WORKTREE}"
+    SESSION_ID="${TIMESTAMP}_${EMAIL_SLUG}_${WORKTREE}"
 fi
 SESSION_DIR="/var/log/agent-sessions"
 
