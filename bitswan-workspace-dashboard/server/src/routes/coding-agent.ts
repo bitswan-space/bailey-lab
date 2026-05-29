@@ -169,9 +169,9 @@ function idleTimeoutMs(): number {
 
 /**
  * Wait until DNS resolves the agent hostname. The container takes a moment
- * to register with docker's embedded DNS after `coding-agent/ensure` returns
- * — without this poll, the first session attempt after a cold start fails
- * with "Could not resolve hostname".
+ * to register with docker's embedded DNS after it starts — without this poll,
+ * the first session attempt after a cold start can fail with "Could not
+ * resolve hostname".
  */
 async function waitForAgentDns(host: string, attempts = 15, delayMs = 1000): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
@@ -374,49 +374,33 @@ export function registerCodingAgentRoutes(
       aborted = true;
     });
 
-    // Make sure the agent container is up before we try to ssh into it.
-    // Skipping when gitops isn't configured lets local dev (no upstream) still
-    // attempt the ssh — useful for debugging an already-running agent.
-    if (gitops) {
-      try {
-        socket.send(JSON.stringify({ type: 'info', message: 'Starting coding agent…' }));
-        const r = await gitops.ensureCodingAgent();
-        if (aborted) return;
-        if (!r.ok) {
-          socket.send(
-            JSON.stringify({
-              type: 'error',
-              message: `Failed to start coding agent (gitops returned ${r.status})`,
-            }),
-          );
-          socket.close(1011, 'ensure failed');
-          return;
-        }
-        const ready = await waitForAgentDns(host);
-        if (aborted) return;
-        if (!ready) {
-          socket.send(
-            JSON.stringify({
-              type: 'error',
-              message: `Coding agent host ${host} did not become reachable`,
-            }),
-          );
-          socket.close(1011, 'agent unreachable');
-          return;
-        }
-      } catch (err) {
-        if (aborted) return;
+    // The coding-agent container is provisioned by the automation-server
+    // during workspace init. Poll DNS once so we don't race the brief gap
+    // between container start and Docker's embedded DNS publishing the host.
+    try {
+      const ready = await waitForAgentDns(host);
+      if (aborted) return;
+      if (!ready) {
         socket.send(
           JSON.stringify({
             type: 'error',
-            message: `gitops error: ${err instanceof Error ? err.message : String(err)}`,
+            message: `Coding agent host ${host} did not become reachable`,
           }),
         );
-        socket.close(1011, 'ensure failed');
+        socket.close(1011, 'agent unreachable');
         return;
       }
+    } catch (err) {
+      if (aborted) return;
+      socket.send(
+        JSON.stringify({
+          type: 'error',
+          message: `agent DNS lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+        }),
+      );
+      socket.close(1011, 'agent unreachable');
+      return;
     }
-    if (aborted) return;
 
     const spawn = (cols: number, rows: number) =>
       spawnPty({
@@ -458,25 +442,6 @@ export function registerCodingAgentRoutes(
     // that handleTerminalConnection has registered its own 'message'
     // listener.
     socket.emit('message', firstFrame.data, firstFrame.isBinary);
-  });
-
-  app.post('/api/coding-agent/ensure', async (_req, reply) => {
-    reply.header('Cache-Control', 'no-store');
-    if (!gitops) {
-      return reply.code(503).send({ error: 'gitops not configured' });
-    }
-    try {
-      const r = await gitops.ensureCodingAgent();
-      if (!r.ok) {
-        return reply
-          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
-          .send({ error: 'gitops error', status: r.status, body: r.body });
-      }
-      return r.body ?? { status: 'ok' };
-    } catch (err) {
-      app.log.warn({ err }, 'ensure coding-agent failed');
-      return reply.code(502).send({ error: 'gitops unreachable' });
-    }
   });
 
   app.get<{

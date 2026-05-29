@@ -201,14 +201,6 @@ export const api = {
   inspectAutomation: (id: string) =>
     getJson<DockerInspect[]>(`/api/automations/${encodeURIComponent(id)}/inspect`),
 
-  /**
-   * Ensure the coding-agent container is up. Idempotent on the gitops side.
-   * Returns when the container is at least in `running` state — `dev-coding-agent`
-   * still needs a moment to register with Docker's embedded DNS after that,
-   * which the /ws/coding-agent handler waits for separately.
-   */
-  ensureCodingAgent: () => postEmpty('/api/coding-agent/ensure'),
-
   readme: async (bpId: string, worktree?: string): Promise<string | null> => {
     const qs = worktree ? `?worktree=${encodeURIComponent(worktree)}` : '';
     const { content } = await getJson<{ content: string | null }>(

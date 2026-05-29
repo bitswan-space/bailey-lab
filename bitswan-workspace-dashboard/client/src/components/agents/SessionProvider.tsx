@@ -8,7 +8,6 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { api, isTransientNetworkError } from '@/lib/api';
 import { SessionTerminal } from './SessionTerminal';
 
 /**
@@ -148,37 +147,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle');
   // eslint-disable-next-line no-restricted-syntax -- imperative subscriber list
   const exitListeners = useRef<Set<(s: ActiveSession) => void>>(new Set());
-  // Inflight promise lock so multiple AgentsTabs (or rapid retries) coalesce.
-  // eslint-disable-next-line no-restricted-syntax -- null = no call in flight
-  const ensureInflight = useRef<Promise<void> | null>(null);
-
   const ensureAgent = useCallback(async () => {
-    if (ensureInflight.current) {
-      return ensureInflight.current;
-    }
-    setAgentStatus('pending');
-    const p = (async () => {
-      try {
-        await api.ensureCodingAgent();
-        setAgentStatus('ready');
-      } catch (err) {
-        // Transient network errors during a cold-start are expected (the
-        // upstream Traefik briefly tears the route down when the new agent
-        // container registers). Treat those as a soft success — by the
-        // time the user clicks Start, the agent is up and the SSH path's
-        // own DNS poll bridges the rest. Hard errors surface as `failed`
-        // so the UI can prompt a retry.
-        if (isTransientNetworkError(err)) {
-          setAgentStatus('ready');
-        } else {
-          setAgentStatus('failed');
-        }
-      } finally {
-        ensureInflight.current = null;
-      }
-    })();
-    ensureInflight.current = p;
-    return p;
+    // The coding-agent container is provisioned and started by the
+    // automation-server during workspace init, so the dashboard no longer
+    // needs to ask gitops to ensure it. The /ws/coding-agent path still
+    // polls SSH readiness, which covers the case where the container is
+    // briefly unavailable.
+    setAgentStatus('ready');
   }, []);
 
   // Auto-warm when the user is *actually looking* at an Agents tab — not
