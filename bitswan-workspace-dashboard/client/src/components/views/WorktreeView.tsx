@@ -6,6 +6,7 @@ import {
   LayoutDashboard,
   Plus,
   RefreshCw,
+  Rocket,
   TerminalSquare,
   Trash2,
 } from 'lucide-react';
@@ -45,8 +46,12 @@ import { SectionHeader } from '@/components/shared/SectionHeader';
 import { EmptyState } from '@/components/shared/EmptyState';
 import { Button } from '@/components/ui/button';
 import { api, isTransientNetworkError } from '@/lib/api';
+import { deployBpWithToast } from '@/lib/deployBp';
 
-const DEPLOYABLE_STAGES: AutomationStage[] = ['live-dev'];
+// Deploy happens at the business-process level (one button starts every
+// automation in the BP in live-dev), so cards expose no per-automation Deploy
+// button — `deployableStages` is empty.
+const DEPLOYABLE_STAGES: AutomationStage[] = [];
 
 interface WorktreeViewProps {
   /** `null` when the user is on a worktree scope but no BP is selected
@@ -199,6 +204,9 @@ function OverviewPane({
   onShowAgents: () => void;
 }) {
   const { automations: raw, status } = useAutomations();
+  // Whole-BP live-dev deploy in flight — blocks the header Deploy button
+  // until the polled deploy task reaches a terminal state.
+  const [bpDeploying, setBpDeploying] = useState(false);
   // No BP → no automations to list. The prefix becomes a guaranteed-miss so
   // the existing filter still runs cleanly without a separate code path.
   const prefix = bp ? `worktrees/${wt.name}/${bp.name}` : null;
@@ -301,35 +309,48 @@ function OverviewPane({
     return () => clearTimeout(t);
   }, [busy]);
 
-  const runDeploy = useCallback(
-    async (name: string, relativePath: string) => {
-      setBusy((m) => ({
-        ...m,
-        [name]: { stage: 'live-dev', expect: 'deployed', startedAt: Date.now() },
-      }));
-      const work = api.deployAutomation({
-        relative_path: relativePath,
+  // Start the whole business process in live-dev with one click. The header
+  // button blocks for the duration; progress messages stream into a single
+  // updating toast (driven by polling the deploy task's status).
+  const runDeployBP = useCallback(async () => {
+    if (!bp) return;
+    const members = Array.from(byName.keys());
+    setBpDeploying(true);
+    // Seed the per-member busy map (reusing the SSE-driven clear) so the
+    // cards' action buttons also disable while the deploy is in flight.
+    setBusy((m) => {
+      const next = { ...m };
+      for (const name of members) {
+        next[name] = {
+          stage: 'live-dev',
+          expect: 'deployed',
+          startedAt: Date.now(),
+        };
+      }
+      return next;
+    });
+    try {
+      const outcome = await deployBpWithToast({
+        bp: bp.name,
         stage: 'live-dev',
         worktree: wt.name,
+        loading: `Starting ${bp.name} in ${wt.name}…`,
+        success: `${bp.name} started in ${wt.name}`,
+        failurePrefix: `Failed to start ${bp.name}`,
       });
-      toast.promise(work, {
-        loading: `Starting ${name} live-dev…`,
-        success: `${name} started in ${wt.name}`,
-        error: (err: unknown) =>
-          isTransientNetworkError(err)
-            ? `${name} started in ${wt.name}`
-            : `Failed to start ${name}: ${String(err)}`,
-      });
-      try {
-        await work;
-      } catch (err) {
-        if (!isTransientNetworkError(err)) {
-          setBusy((m) => ({ ...m, [name]: null }));
-        }
+      if (outcome !== 'completed') {
+        // Clear member busy right away so the user can retry; on success the
+        // SSE-watching effect clears each member as its deployment lands.
+        setBusy((m) => {
+          const next = { ...m };
+          for (const name of members) next[name] = null;
+          return next;
+        });
       }
-    },
-    [wt.name],
-  );
+    } finally {
+      setBpDeploying(false);
+    }
+  }, [bp, byName, wt.name]);
 
   const runRemove = useCallback(async (name: string, deploymentId: string) => {
     setBusy((m) => ({
@@ -402,6 +423,8 @@ function OverviewPane({
     }
   }, [raw, wt.name]);
 
+  const bpBusy = bpDeploying || Object.values(busy).some(Boolean);
+
   return (
     <div className="flex flex-col gap-5 px-7 py-6">
       <SectionHeader
@@ -419,6 +442,16 @@ function OverviewPane({
         }
         right={
           <div className="flex items-center gap-2">
+            {bp && sorted.length > 0 && (
+              <Button
+                size="sm"
+                onClick={() => void runDeployBP()}
+                disabled={bpBusy}
+              >
+                <Rocket className="size-3.5" aria-hidden />
+                {bpDeploying ? 'Deploying…' : 'Deploy'}
+              </Button>
+            )}
             {bp && (
               <Button
                 variant="outline"
@@ -473,7 +506,8 @@ function OverviewPane({
               busyStage={busy[name]?.stage ?? null}
               onInspect={() => setInspectName(name)}
               onDeploy={() => {
-                void runDeploy(name, entry.relativePath);
+                // Per-automation deploy is disabled (deployableStages is
+                // empty); deploys happen at the BP level via "Deploy".
               }}
               onPromote={() => {
                 // Worktree view only renders a single live-dev stage —

@@ -49,6 +49,60 @@ export function registerAutomationRoutes(
     }
   });
 
+  // Deploy a whole business process (all member automations) as one unit.
+  app.post<{
+    Body: { bp?: string; stage?: string; worktree?: string };
+  }>('/api/automations/deploy-bp', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { bp, stage, worktree } = req.body ?? {};
+    if (!bp || typeof bp !== 'string') {
+      return reply.code(400).send({ error: 'bp is required' });
+    }
+    if (stage !== 'dev' && stage !== 'live-dev') {
+      return reply
+        .code(400)
+        .send({ error: "stage must be 'dev' or 'live-dev'" });
+    }
+    try {
+      const r = await gitops.deployBusinessProcess({
+        bp,
+        stage,
+        ...(worktree ? { worktree } : {}),
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp, stage }, 'deploy-bp failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Deploy-task status snapshot (poll fallback for SSE drops).
+  app.get<{ Params: { taskId: string } }>(
+    '/api/automations/deploy-status/:taskId',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.getDeployStatus(req.params.taskId);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, taskId: req.params.taskId }, 'deploy-status failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   // Promote an already-deployed automation from one stage to the next.
   // Mirrors bitswan-editor's promote flow: re-deploys at the source stage's
   // checksum into `staging` or `production`. The target deployment_id is

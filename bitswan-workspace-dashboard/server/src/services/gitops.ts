@@ -281,6 +281,56 @@ export class GitopsClient {
   }
 
   /**
+   * `POST /automations/deploy-bp` — deploy every automation under one business
+   * process as a single unit. Body is `{ bp, stage, worktree? }`. Gitops
+   * enumerates the BP's members, reserves them atomically, and runs one
+   * batched deploy in the background under a single BP-level deploy task.
+   */
+  async deployBusinessProcess(input: {
+    bp: string;
+    stage: 'dev' | 'live-dev';
+    worktree?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}/automations/deploy-bp`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(input),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `GET /automations/deploy-status/{taskId}` — snapshot of a deploy task.
+   * Poll fallback for clients that can't rely on the live `deploy_progress`
+   * SSE event (it is fire-and-forget — not cached/replayed — so a dropped
+   * stream loses the terminal event).
+   */
+  async getDeployStatus(
+    taskId: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/deploy-status/${encodeURIComponent(taskId)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `POST /automations/{id}/deploy` — re-deploy at a given checksum into the
    * specified stage. Used for promotions from a deployed source stage to the
    * next one; gitops resolves the source from `automation_name`+`context`+

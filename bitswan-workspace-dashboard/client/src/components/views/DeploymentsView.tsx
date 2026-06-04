@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Rocket } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import type { AutomationStage, BusinessProcess, DeployedAutomation } from '@/types';
@@ -11,7 +12,9 @@ import {
 import { ReadmeCard } from '@/components/workspace/ReadmeCard';
 import { SectionHeader } from '@/components/shared/SectionHeader';
 import { EmptyState } from '@/components/shared/EmptyState';
+import { Button } from '@/components/ui/button';
 import { api, isTransientNetworkError } from '@/lib/api';
+import { deployBpWithToast } from '@/lib/deployBp';
 
 const STAGES: { id: AutomationStage; label: string; short: string }[] = [
   { id: 'dev', label: 'Development', short: 'Dev' },
@@ -19,9 +22,10 @@ const STAGES: { id: AutomationStage; label: string; short: string }[] = [
   { id: 'production', label: 'Production', short: 'Prod' },
 ];
 
-// Deploy from the dashboard is only wired for the dev stage in this iteration;
-// staging / production happen via "promote".
-const DEPLOYABLE_STAGES: AutomationStage[] = ['dev'];
+// Deploy happens at the business-process level (one button deploys every
+// automation in the BP to dev), so cards expose no per-automation Deploy
+// button — `deployableStages` is empty.
+const DEPLOYABLE_STAGES: AutomationStage[] = [];
 // Promote targets — order in STAGES determines what counts as "previous".
 const PROMOTABLE_STAGES: AutomationStage[] = ['staging', 'production'];
 
@@ -50,6 +54,9 @@ interface BusyEntry {
 
 export function DeploymentsView({ bp }: DeploymentsViewProps) {
   const { automations: raw, status } = useAutomations();
+  // Whole-BP deploy in flight — blocks the header Deploy button until the
+  // polled deploy task reaches a terminal state.
+  const [bpDeploying, setBpDeploying] = useState(false);
   const [inspectName, setInspectName] = useState<string | null>(null);
   // Per-automation busy state. Kept set from the moment we fire the request
   // until either the SSE feed reflects the expected new state or
@@ -155,35 +162,42 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
     return () => clearTimeout(t);
   }, [busy]);
 
-  const runDeploy = useCallback(
-    async (name: string, stage: 'dev', relativePath: string) => {
-      setBusy((m) => ({
-        ...m,
-        [name]: { stage, expect: 'deployed', startedAt: Date.now() },
-      }));
-      const work = api.deployAutomation({ relative_path: relativePath, stage });
-      toast.promise(work, {
-        loading: `Deploying ${name} to ${stage}…`,
-        success: `${name} deployed to ${stage}`,
-        error: (err: unknown) =>
-          isTransientNetworkError(err)
-            ? `${name} deployed to ${stage}`
-            : `Failed to deploy ${name}: ${String(err)}`,
-      });
-      try {
-        await work;
-        // Leave busy set — the SSE-watching effect will clear it when the
-        // expected state lands (or the timeout fires).
-      } catch (err) {
-        // Real failure (not a transient network blip) — clear busy now so
-        // the user can retry without waiting for the safety timeout.
-        if (!isTransientNetworkError(err)) {
-          setBusy((m) => ({ ...m, [name]: null }));
-        }
+  // Deploy the whole business process (every automation on dev) in one click.
+  // The header button blocks for the duration; progress messages stream into
+  // a single updating toast (driven by polling the deploy task's status).
+  const runDeployBP = useCallback(async () => {
+    const members = Array.from(grouped.keys());
+    setBpDeploying(true);
+    // Seed the per-member busy map (reusing the SSE-driven clear) so the
+    // cards' action buttons also disable while the deploy is in flight.
+    setBusy((m) => {
+      const next = { ...m };
+      for (const name of members) {
+        next[name] = { stage: 'dev', expect: 'deployed', startedAt: Date.now() };
       }
-    },
-    [],
-  );
+      return next;
+    });
+    try {
+      const outcome = await deployBpWithToast({
+        bp: bp.name,
+        stage: 'dev',
+        loading: `Deploying ${bp.name}…`,
+        success: `${bp.name} deployed`,
+        failurePrefix: `Failed to deploy ${bp.name}`,
+      });
+      if (outcome !== 'completed') {
+        // Clear member busy right away so the user can retry; on success the
+        // SSE-watching effect clears each member as its dev deployment lands.
+        setBusy((m) => {
+          const next = { ...m };
+          for (const name of members) next[name] = null;
+          return next;
+        });
+      }
+    } finally {
+      setBpDeploying(false);
+    }
+  }, [grouped, bp.name]);
 
   const runPromote = useCallback(
     async (
@@ -248,13 +262,27 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
     [],
   );
 
+  const bpBusy = bpDeploying || Object.values(busy).some(Boolean);
+
   return (
     <div className="flex-1 overflow-auto bg-background">
       <div className="flex flex-col gap-5 px-7 py-6">
         <SectionHeader
           eyebrow="Automations"
           title={`${sorted.length} ${sorted.length === 1 ? 'automation' : 'automations'} on main`}
-          helper="Click Deploy to start an automation on dev, or Inspect to view logs."
+          helper="Deploy runs every automation in this business process on dev. Inspect to view logs."
+          right={
+            sorted.length > 0 ? (
+              <Button
+                size="sm"
+                onClick={() => void runDeployBP()}
+                disabled={bpBusy}
+              >
+                <Rocket className="size-3.5" />
+                {bpDeploying ? 'Deploying…' : 'Deploy'}
+              </Button>
+            ) : undefined
+          }
         />
 
         {status === 'connecting' && sorted.length === 0 ? (
@@ -277,11 +305,9 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
                 promotableStages={PROMOTABLE_STAGES}
                 busyStage={busy[name]?.stage ?? null}
                 onInspect={() => setInspectName(name)}
-                onDeploy={(stage) => {
-                  // Only "dev" is deployable in this view per
-                  // DEPLOYABLE_STAGES; the card guarantees the narrow.
-                  if (stage !== 'dev') return;
-                  void runDeploy(name, stage, entry.relativePath);
+                onDeploy={() => {
+                  // Per-automation deploy is disabled (deployableStages is
+                  // empty); deploys happen at the BP level via "Deploy".
                 }}
                 onPromote={(stage) => {
                   if (stage !== 'staging' && stage !== 'production') return;

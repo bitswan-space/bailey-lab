@@ -115,6 +115,32 @@ export interface DeployResponse {
   status?: string;
 }
 
+export interface DeployBPRequest {
+  /** Business-process directory name. */
+  bp: string;
+  stage: 'dev' | 'live-dev';
+  worktree?: string;
+}
+
+export interface DeployBPResponse {
+  task_id: string;
+  bp: string;
+  deployment_ids: string[];
+  status?: string;
+}
+
+/** Gitops deploy-task snapshot from `GET /automations/deploy-status/{task_id}`. */
+export interface DeployStatusResponse {
+  task_id: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  step?: string | null;
+  message?: string;
+  error?: string | null;
+  bp?: string | null;
+  total?: number | null;
+  current?: number;
+}
+
 export interface PromoteRequest {
   automation_name: string;
   /** BP name; becomes the deployment context (and a prefix on the new id). */
@@ -193,6 +219,12 @@ export const api = {
 
   deployAutomation: (body: DeployRequest) =>
     postJson<DeployResponse>('/api/automations/deploy', body),
+  deployBusinessProcess: (body: DeployBPRequest) =>
+    postJson<DeployBPResponse>('/api/automations/deploy-bp', body),
+  deployStatus: (taskId: string) =>
+    getJson<DeployStatusResponse>(
+      `/api/automations/deploy-status/${encodeURIComponent(taskId)}`,
+    ),
   promoteAutomation: (body: PromoteRequest) =>
     postJson<DeployResponse>('/api/automations/promote', body),
   removeAutomation: (id: string) =>
