@@ -164,6 +164,22 @@ export interface CreateBusinessProcessResponse {
   in_main: boolean;
   worktrees: string[];
   has_worktrees: boolean;
+  /** Automations scaffolded from the default template group (auto-setup). */
+  automations_created?: string[];
+  /** Deploy task for the auto-deploy of the scaffolded automations. */
+  deploy_task_id?: string | null;
+  /** Auto-setup failure detail (BP itself was still created). */
+  setup_error?: string | null;
+}
+
+/** Gitops `POST /worktrees/create` response (plus auto-deploy fields). */
+export interface CreateWorktreeResponse {
+  name: string;
+  path: string;
+  postgres_db?: string;
+  /** Deploy task for the auto live-dev of the worktree's automations. */
+  deploy_task_id?: string | null;
+  deploy_error?: string | null;
 }
 
 export interface CreateWorktreeRequest {
@@ -204,7 +220,7 @@ export const api = {
     postJson<CreateBusinessProcessResponse>('/api/business-processes', body),
 
   createWorktree: (body: CreateWorktreeRequest) =>
-    postJson<{ status?: string; worktree_path?: string }>('/api/worktrees', body),
+    postJson<CreateWorktreeResponse>('/api/worktrees', body),
   deleteWorktree: (name: string) =>
     deleteEmpty(`/api/worktrees/${encodeURIComponent(name)}`),
 

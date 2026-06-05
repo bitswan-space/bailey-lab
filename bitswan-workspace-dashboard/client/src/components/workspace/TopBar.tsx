@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { api, isTransientNetworkError } from '@/lib/api';
+import { watchDeployTask } from '@/lib/deployBp';
 import { cn } from '@/lib/utils';
 import type { Scope, Worktree } from '@/types';
 
@@ -234,10 +235,24 @@ function NewWorktreeDialog({
             : `Failed to create worktree: ${String(err)}`,
       });
       try {
-        await work;
+        const res = await work;
         onOpenChange(false);
         reset();
         onCreated(trimmed);
+        // Server-side auto-deploy: gitops starts live-dev for every BP
+        // automation in the new worktree — watch its task with a second
+        // toast (fire-and-forget).
+        if (res.deploy_error) {
+          toast.error(
+            `Failed to start automations in "${trimmed}": ${res.deploy_error}`,
+          );
+        } else if (res.deploy_task_id) {
+          void watchDeployTask(res.deploy_task_id, `wt-deploy-${trimmed}`, {
+            loading: `Starting automations in ${trimmed}…`,
+            success: `Worktree ${trimmed} automations started`,
+            failurePrefix: `Failed to start automations in ${trimmed}`,
+          });
+        }
       } catch {
         // already reported via toast.promise
       } finally {

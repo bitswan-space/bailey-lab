@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { api, isTransientNetworkError } from '@/lib/api';
+import { watchDeployTask } from '@/lib/deployBp';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess } from '@/types';
 
@@ -193,10 +194,26 @@ function NewBusinessProcessDialog({
             : `Failed to create business process: ${String(err)}`,
       });
       try {
-        await work;
+        const res = await work;
         onOpenChange(false);
         reset();
         onCreated(trimmed);
+        // Server-side auto-setup: the BP was scaffolded from the default
+        // template group and a deploy was kicked off in the background —
+        // watch its task with a second toast (fire-and-forget).
+        if (res.setup_error) {
+          toast.error(`Auto-setup for "${trimmed}" failed: ${res.setup_error}`);
+        } else if (res.deploy_task_id) {
+          void watchDeployTask(
+            res.deploy_task_id,
+            `bp-deploy-${worktree ?? 'main'}-${trimmed}`,
+            {
+              loading: `Setting up ${trimmed}…`,
+              success: `${trimmed} ready`,
+              failurePrefix: `Failed to set up ${trimmed}`,
+            },
+          );
+        }
       } catch {
         // toast handled it
       } finally {

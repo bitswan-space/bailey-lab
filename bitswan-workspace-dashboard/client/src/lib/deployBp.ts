@@ -12,15 +12,78 @@ const MAX_POLL_FAILURES = 5;
 
 export type BpDeployOutcome = 'completed' | 'failed' | 'timeout' | 'lost';
 
+export interface DeployToastCopy {
+  loading: string;
+  success: string;
+  failurePrefix: string;
+}
+
 /**
- * Kick off a whole-BP deploy and surface its progress in a single updating
- * toast: loading → live step messages → success/error. Resolves with the
- * terminal outcome so callers can clear their busy state.
+ * Watch an already-started gitops deploy task and surface its progress in a
+ * single updating toast: loading → live step messages → success/error.
+ * Resolves with the terminal outcome.
+ *
+ * Used both by `deployBpWithToast` (explicit BP deploys) and by the
+ * create-BP / create-worktree flows, whose responses carry a
+ * `deploy_task_id` for the server-side auto-deploy.
  *
  * Progress comes from polling gitops's `deploy-status/{task_id}` endpoint
  * (via the server proxy), deliberately NOT from the `deploy_progress` SSE
  * event: that event is fire-and-forget — a dropped stream loses the terminal
  * event and would leave the UI stuck "deploying" forever.
+ */
+export async function watchDeployTask(
+  taskId: string,
+  toastId: string,
+  copy: DeployToastCopy,
+): Promise<BpDeployOutcome> {
+  toast.loading(copy.loading, { id: toastId, duration: Infinity });
+
+  const deadline = Date.now() + TIMEOUT_MS;
+  let failures = 0;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    let status: DeployStatusResponse;
+    try {
+      status = await api.deployStatus(taskId);
+      failures = 0;
+    } catch {
+      failures += 1;
+      if (failures >= MAX_POLL_FAILURES) {
+        toast.error(
+          `${copy.failurePrefix}: lost track of the deploy task — check the cards for the real state`,
+          { id: toastId, duration: 8000 },
+        );
+        return 'lost';
+      }
+      continue;
+    }
+    if (status.status === 'completed') {
+      toast.success(copy.success, { id: toastId, duration: 5000 });
+      return 'completed';
+    }
+    if (status.status === 'failed') {
+      toast.error(
+        `${copy.failurePrefix}: ${status.error || status.message || 'deployment failed'}`,
+        { id: toastId, duration: 10000 },
+      );
+      return 'failed';
+    }
+    if (status.message) {
+      toast.loading(status.message, { id: toastId, duration: Infinity });
+    }
+  }
+
+  toast.error(`${copy.failurePrefix}: timed out waiting for deploy status`, {
+    id: toastId,
+    duration: 8000,
+  });
+  return 'timeout';
+}
+
+/**
+ * Kick off a whole-BP deploy and watch it via `watchDeployTask`. Resolves
+ * with the terminal outcome so callers can clear their busy state.
  */
 export async function deployBpWithToast(opts: {
   bp: string;
@@ -61,44 +124,9 @@ export async function deployBpWithToast(opts: {
     return 'failed';
   }
 
-  const deadline = Date.now() + TIMEOUT_MS;
-  let failures = 0;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-    let status: DeployStatusResponse;
-    try {
-      status = await api.deployStatus(taskId);
-      failures = 0;
-    } catch {
-      failures += 1;
-      if (failures >= MAX_POLL_FAILURES) {
-        toast.error(
-          `${opts.failurePrefix}: lost track of the deploy task — check the cards for the real state`,
-          { id: toastId, duration: 8000 },
-        );
-        return 'lost';
-      }
-      continue;
-    }
-    if (status.status === 'completed') {
-      toast.success(opts.success, { id: toastId, duration: 5000 });
-      return 'completed';
-    }
-    if (status.status === 'failed') {
-      toast.error(
-        `${opts.failurePrefix}: ${status.error || status.message || 'deployment failed'}`,
-        { id: toastId, duration: 10000 },
-      );
-      return 'failed';
-    }
-    if (status.message) {
-      toast.loading(status.message, { id: toastId, duration: Infinity });
-    }
-  }
-
-  toast.error(`${opts.failurePrefix}: timed out waiting for deploy status`, {
-    id: toastId,
-    duration: 8000,
+  return watchDeployTask(taskId, toastId, {
+    loading: opts.loading,
+    success: opts.success,
+    failurePrefix: opts.failurePrefix,
   });
-  return 'timeout';
 }
