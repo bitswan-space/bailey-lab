@@ -309,6 +309,33 @@ export class GitopsClient {
   }
 
   /**
+   * `POST /automations/promote-bp` — promote every automation under one
+   * business process from the previous stage to `stage` as a single unit
+   * (dev→staging or staging→production). Re-deploys recorded checksums; no
+   * builds. Returns 202 with a single BP-level deploy task.
+   */
+  async promoteBusinessProcess(input: {
+    bp: string;
+    stage: 'staging' | 'production';
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}/automations/promote-bp`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(input),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `GET /automations/deploy-status/{taskId}` — snapshot of a deploy task.
    * Poll fallback for clients that can't rely on the live `deploy_progress`
    * SSE event (it is fire-and-forget — not cached/replayed — so a dropped

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Rocket } from 'lucide-react';
+import { ArrowRight, Rocket } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import type { AutomationStage, BusinessProcess, DeployedAutomation } from '@/types';
@@ -14,7 +14,7 @@ import { SectionHeader } from '@/components/shared/SectionHeader';
 import { EmptyState } from '@/components/shared/EmptyState';
 import { Button } from '@/components/ui/button';
 import { api, isTransientNetworkError } from '@/lib/api';
-import { deployBpWithToast } from '@/lib/deployBp';
+import { deployBpWithToast, promoteBpWithToast } from '@/lib/deployBp';
 
 const STAGES: { id: AutomationStage; label: string; short: string }[] = [
   { id: 'dev', label: 'Development', short: 'Dev' },
@@ -57,6 +57,10 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
   // Whole-BP deploy in flight — blocks the header Deploy button until the
   // polled deploy task reaches a terminal state.
   const [bpDeploying, setBpDeploying] = useState(false);
+  // Whole-BP promotion in flight (target stage), same blocking semantics.
+  const [bpPromoting, setBpPromoting] = useState<'staging' | 'production' | null>(
+    null,
+  );
   const [inspectName, setInspectName] = useState<string | null>(null);
   // Per-automation busy state. Kept set from the moment we fire the request
   // until either the SSE feed reflects the expected new state or
@@ -199,6 +203,67 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
     }
   }, [grouped, bp.name]);
 
+  // Promote every automation of the BP from the previous stage to `target`
+  // as one unit (one task, one compose-up). Mirrors runDeployBP's busy/toast
+  // handling; only members with a source-stage deployment participate.
+  const runPromoteBP = useCallback(
+    async (target: 'staging' | 'production') => {
+      const source = target === 'staging' ? 'dev' : 'staging';
+      const members = Array.from(grouped.entries())
+        .filter(
+          ([, e]) =>
+            e.stages[source]?.deployment_id && e.stages[source]?.version_hash,
+        )
+        .map(([name]) => name);
+      if (members.length === 0) return;
+      setBpPromoting(target);
+      setBusy((m) => {
+        const next = { ...m };
+        for (const name of members) {
+          next[name] = { stage: target, expect: 'deployed', startedAt: Date.now() };
+        }
+        return next;
+      });
+      try {
+        const outcome = await promoteBpWithToast({
+          bp: bp.name,
+          stage: target,
+          loading: `Promoting ${bp.name} to ${target}…`,
+          success: `${bp.name} promoted to ${target}`,
+          failurePrefix: `Failed to promote ${bp.name} to ${target}`,
+        });
+        if (outcome !== 'completed') {
+          setBusy((m) => {
+            const next = { ...m };
+            for (const name of members) next[name] = null;
+            return next;
+          });
+        }
+      } finally {
+        setBpPromoting(null);
+      }
+    },
+    [grouped, bp.name],
+  );
+
+  // A promote target is offered when at least one automation has a
+  // deployment (with a checksum) at the source stage. The server enforces
+  // the same rule, so these are purely presentational.
+  const canPromoteToStaging = useMemo(
+    () =>
+      Array.from(grouped.values()).some(
+        (e) => e.stages.dev?.deployment_id && e.stages.dev?.version_hash,
+      ),
+    [grouped],
+  );
+  const canPromoteToProduction = useMemo(
+    () =>
+      Array.from(grouped.values()).some(
+        (e) => e.stages.staging?.deployment_id && e.stages.staging?.version_hash,
+      ),
+    [grouped],
+  );
+
   const runPromote = useCallback(
     async (
       name: string,
@@ -262,7 +327,8 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
     [],
   );
 
-  const bpBusy = bpDeploying || Object.values(busy).some(Boolean);
+  const bpBusy =
+    bpDeploying || bpPromoting !== null || Object.values(busy).some(Boolean);
 
   return (
     <div className="flex-1 overflow-auto bg-background">
@@ -273,14 +339,42 @@ export function DeploymentsView({ bp }: DeploymentsViewProps) {
           helper="Deploy runs every automation in this business process on dev. Inspect to view logs."
           right={
             sorted.length > 0 ? (
-              <Button
-                size="sm"
-                onClick={() => void runDeployBP()}
-                disabled={bpBusy}
-              >
-                <Rocket className="size-3.5" />
-                {bpDeploying ? 'Deploying…' : 'Deploy'}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => void runDeployBP()}
+                  disabled={bpBusy}
+                >
+                  <Rocket className="size-3.5" />
+                  {bpDeploying ? 'Deploying…' : 'Deploy'}
+                </Button>
+                {canPromoteToStaging && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void runPromoteBP('staging')}
+                    disabled={bpBusy}
+                  >
+                    <ArrowRight className="size-3.5" />
+                    {bpPromoting === 'staging'
+                      ? 'Promoting…'
+                      : 'Promote to staging'}
+                  </Button>
+                )}
+                {canPromoteToProduction && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void runPromoteBP('production')}
+                    disabled={bpBusy}
+                  >
+                    <ArrowRight className="size-3.5" />
+                    {bpPromoting === 'production'
+                      ? 'Promoting…'
+                      : 'Promote to production'}
+                  </Button>
+                )}
+              </div>
             ) : undefined
           }
         />

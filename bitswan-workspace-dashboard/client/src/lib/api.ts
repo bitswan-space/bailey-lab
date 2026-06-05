@@ -129,6 +129,12 @@ export interface DeployBPResponse {
   status?: string;
 }
 
+export interface PromoteBPRequest {
+  /** Business-process directory name. */
+  bp: string;
+  stage: 'staging' | 'production';
+}
+
 /** Gitops deploy-task snapshot from `GET /automations/deploy-status/{task_id}`. */
 export interface DeployStatusResponse {
   task_id: string;
@@ -237,6 +243,8 @@ export const api = {
     postJson<DeployResponse>('/api/automations/deploy', body),
   deployBusinessProcess: (body: DeployBPRequest) =>
     postJson<DeployBPResponse>('/api/automations/deploy-bp', body),
+  promoteBusinessProcess: (body: PromoteBPRequest) =>
+    postJson<DeployBPResponse>('/api/automations/promote-bp', body),
   deployStatus: (taskId: string) =>
     getJson<DeployStatusResponse>(
       `/api/automations/deploy-status/${encodeURIComponent(taskId)}`,

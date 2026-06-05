@@ -82,6 +82,35 @@ export function registerAutomationRoutes(
     }
   });
 
+  // Promote a whole business process (all member automations) one stage up.
+  app.post<{
+    Body: { bp?: string; stage?: string };
+  }>('/api/automations/promote-bp', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { bp, stage } = req.body ?? {};
+    if (!bp || typeof bp !== 'string') {
+      return reply.code(400).send({ error: 'bp is required' });
+    }
+    if (stage !== 'staging' && stage !== 'production') {
+      return reply
+        .code(400)
+        .send({ error: "stage must be 'staging' or 'production'" });
+    }
+    try {
+      const r = await gitops.promoteBusinessProcess({ bp, stage });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp, stage }, 'promote-bp failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   // Deploy-task status snapshot (poll fallback for SSE drops).
   app.get<{ Params: { taskId: string } }>(
     '/api/automations/deploy-status/:taskId',

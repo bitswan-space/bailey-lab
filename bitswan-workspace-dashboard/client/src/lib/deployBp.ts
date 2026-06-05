@@ -130,3 +130,49 @@ export async function deployBpWithToast(opts: {
     failurePrefix: opts.failurePrefix,
   });
 }
+
+/**
+ * Kick off a whole-BP promotion (dev→staging or staging→production) and watch
+ * it via `watchDeployTask`. Resolves with the terminal outcome so callers can
+ * clear their busy state.
+ */
+export async function promoteBpWithToast(opts: {
+  bp: string;
+  stage: 'staging' | 'production';
+  /** Toast copy. */
+  loading: string;
+  success: string;
+  failurePrefix: string;
+}): Promise<BpDeployOutcome> {
+  const toastId = `bp-promote-${opts.stage}-${opts.bp}`;
+  toast.loading(opts.loading, { id: toastId, duration: Infinity });
+
+  let taskId: string;
+  try {
+    const res = await api.promoteBusinessProcess({
+      bp: opts.bp,
+      stage: opts.stage,
+    });
+    taskId = res.task_id;
+    if (!taskId) throw new Error('gitops returned no task_id');
+  } catch (err) {
+    if (isTransientNetworkError(err)) {
+      toast.info(
+        `${opts.bp}: promote request sent — connection blipped, watch the cards for status`,
+        { id: toastId, duration: 8000 },
+      );
+      return 'lost';
+    }
+    toast.error(`${opts.failurePrefix}: ${String(err)}`, {
+      id: toastId,
+      duration: 8000,
+    });
+    return 'failed';
+  }
+
+  return watchDeployTask(taskId, toastId, {
+    loading: opts.loading,
+    success: opts.success,
+    failurePrefix: opts.failurePrefix,
+  });
+}
