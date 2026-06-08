@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AuthGate } from '@/components/auth/AuthGate';
-import { Sidebar } from '@/components/workspace/Sidebar';
-import { TopBar } from '@/components/workspace/TopBar';
+import { TopNav } from '@/components/workspace/TopNav';
 import {
   WorkspaceProvider,
   useProcesses,
@@ -9,9 +8,8 @@ import {
 } from '@/components/workspace/WorkspaceProvider';
 import { SessionProvider } from '@/components/agents/SessionProvider';
 import { Toaster } from '@/components/ui/sonner';
-import { DeploymentsView } from '@/components/views/DeploymentsView';
-import { WorktreeView } from '@/components/views/WorktreeView';
-import type { Scope } from '@/types';
+import { WorkspaceView } from '@/components/views/WorkspaceView';
+import type { FlowTab } from '@/types';
 
 export function App() {
   return (
@@ -26,146 +24,149 @@ export function App() {
   );
 }
 
-// Keys for sessionStorage. We persist scope + selected BP so the user lands
-// back on the same view after a page reload — chiefly the cold-start
-// reload that Vite HMR triggers in dev when gitops reconfigures Traefik
-// while spinning up the coding-agent container. With these persisted the
-// reload is invisible: same worktree, same BP, same tab when WorktreeView
-// remounts.
-const SCOPE_STORAGE_KEY = 'dashboard.scope';
+// Keys for sessionStorage. We persist the selected BP, worktree and tab so
+// the user lands back on the same view after a page reload — chiefly the
+// cold-start reload that Vite HMR triggers in dev when gitops reconfigures
+// Traefik while spinning up the coding-agent container.
 const BP_STORAGE_KEY = 'dashboard.bpId';
+const WT_STORAGE_KEY = 'dashboard.worktree';
+const TAB_STORAGE_KEY = 'dashboard.flowTab';
 
-function readPersistedScope(): Scope {
-  try {
-    const raw = sessionStorage.getItem(SCOPE_STORAGE_KEY);
-    if (!raw) return { type: 'deployments' };
-    const parsed = JSON.parse(raw) as Scope;
-    if (parsed.type === 'deployments') return { type: 'deployments' };
-    if (parsed.type === 'worktree' && typeof parsed.name === 'string') {
-      return { type: 'worktree', name: parsed.name };
-    }
-  } catch {
-    // ignore malformed entries
-  }
-  return { type: 'deployments' };
-}
+const FLOW_TABS: FlowTab[] = [
+  'description',
+  'agent',
+  'requirements',
+  'sync-deploy',
+  'deployments',
+];
 
+// eslint-disable-next-line no-restricted-syntax -- null = no persisted choice
 function readPersistedBpId(): string | null {
   try {
     return sessionStorage.getItem(BP_STORAGE_KEY);
   } catch {
-    // eslint-disable-next-line no-restricted-syntax -- null = no persisted choice
     return null;
   }
+}
+
+// eslint-disable-next-line no-restricted-syntax -- null = no persisted choice
+function readPersistedWorktree(): string | null {
+  try {
+    return sessionStorage.getItem(WT_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function readPersistedTab(): FlowTab {
+  try {
+    const raw = sessionStorage.getItem(TAB_STORAGE_KEY);
+    if (raw && (FLOW_TABS as string[]).includes(raw)) return raw as FlowTab;
+  } catch {
+    // ignore malformed entries
+  }
+  return 'description';
 }
 
 function Shell() {
   const { processes } = useProcesses();
   const { worktrees: worktreesSnapshot } = useWorktrees();
-  // Memoise the empty-array fallback so the array identity is stable; the
-  // raw `??` on every render would force every downstream `useMemo` to
-  // recompute.
+  // Memoise the empty-array fallback so the array identity is stable.
   const allBps = useMemo(() => processes ?? [], [processes]);
   const worktrees = useMemo(() => worktreesSnapshot ?? [], [worktreesSnapshot]);
   // eslint-disable-next-line no-restricted-syntax -- null = "not yet selected"
   const [bpId, setBpId] = useState<string | null>(readPersistedBpId);
-  const [scope, setScope] = useState<Scope>(readPersistedScope);
+  // eslint-disable-next-line no-restricted-syntax -- null = no worktree selected
+  const [worktree, setWorktree] = useState<string | null>(readPersistedWorktree);
+  const [tab, setTab] = useState<FlowTab>(readPersistedTab);
 
-  // Mirror current selection to sessionStorage on change.
+  // One-time cleanup of pre-redesign persistence keys.
   useEffect(() => {
     try {
-      sessionStorage.setItem(SCOPE_STORAGE_KEY, JSON.stringify(scope));
+      sessionStorage.removeItem('dashboard.scope');
+      sessionStorage.removeItem('dashboard.worktreeTab');
     } catch {
-      // ignore quota or unavailable
+      // ignore
     }
-  }, [scope]);
+  }, []);
+
+  // Mirror current selection to sessionStorage on change.
   useEffect(() => {
     try {
       if (bpId) sessionStorage.setItem(BP_STORAGE_KEY, bpId);
       else sessionStorage.removeItem(BP_STORAGE_KEY);
     } catch {
-      // ignore
+      // ignore quota or unavailable
     }
   }, [bpId]);
+  useEffect(() => {
+    try {
+      if (worktree) sessionStorage.setItem(WT_STORAGE_KEY, worktree);
+      else sessionStorage.removeItem(WT_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }, [worktree]);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(TAB_STORAGE_KEY, tab);
+    } catch {
+      // ignore
+    }
+  }, [tab]);
 
-  // BPs visible in the sidebar are scoped to the current view:
-  //   - Deployments scope → BPs present in main.
-  //   - Worktree scope    → BPs present in that worktree.
-  // A BP that only exists in a worktree is invisible from Deployments
-  // (matches the user's mental model — promotion brings it into main).
-  const visibleBps = useMemo(() => {
-    if (scope.type === 'deployments') return allBps.filter((p) => p.inMain);
-    return allBps.filter((p) => p.worktrees.includes(scope.name));
-  }, [allBps, scope]);
-
-  // Keep `bpId` consistent with what's visible in the sidebar. When the
-  // current BP isn't in the filtered set (initial load, scope switch, or
-  // BP removed), fall back to the first available — or clear if none.
+  // The BP switcher lists every BP (main + worktrees; the processes feed is
+  // already deduped by name). Keep `bpId` consistent: when the current BP
+  // disappears, fall back to the first available — or clear if none.
   useEffect(() => {
     if (processes === null) return; // still loading; don't make decisions yet
-    if (bpId && visibleBps.some((p) => p.id === bpId)) return;
-    setBpId(visibleBps[0]?.id ?? null);
-  }, [processes, visibleBps, bpId]);
+    if (bpId && allBps.some((p) => p.id === bpId)) return;
+    setBpId(allBps[0]?.id ?? null);
+  }, [processes, allBps, bpId]);
 
-  // Keep `scope` consistent with the worktree snapshot. Fires only when the
-  // snapshot changes — not when scope itself changes — so an optimistic
-  // setScope (e.g. just after creating a worktree) survives until the SSE
-  // feed delivers the new entry.
+  // Keep `worktree` consistent with the snapshot. Fires only when the
+  // snapshot changes — not when the selection itself changes — so an
+  // optimistic setWorktree (e.g. just after creating one) survives until
+  // the SSE feed delivers the new entry. Auto-selects the first worktree
+  // when none is selected.
   useEffect(() => {
     if (worktreesSnapshot === null) return;
-    setScope((cur) => {
-      if (cur.type !== 'worktree') return cur;
-      return worktreesSnapshot.some((w) => w.name === cur.name)
-        ? cur
-        : { type: 'deployments' };
+    setWorktree((cur) => {
+      if (cur && worktreesSnapshot.some((w) => w.name === cur)) return cur;
+      return worktreesSnapshot[0]?.name ?? null;
     });
   }, [worktreesSnapshot]);
 
   const bp = useMemo(
-    () => visibleBps.find((b) => b.id === bpId) ?? null,
-    [visibleBps, bpId],
+    () => allBps.find((b) => b.id === bpId) ?? null,
+    [allBps, bpId],
   );
   const wt = useMemo(
-    () =>
-      scope.type === 'worktree' ? worktrees.find((w) => w.name === scope.name) ?? null : null,
-    [scope, worktrees],
+    () => (worktree ? worktrees.find((w) => w.name === worktree) ?? null : null),
+    [worktree, worktrees],
   );
 
   const isLoading = processes === null;
-  const emptyMessage = isLoading
-    ? 'Loading business processes…'
-    : allBps.length === 0
-      ? 'No business processes found in this workspace.'
-      : scope.type === 'worktree'
-        ? `No business processes in worktree "${scope.name}".`
-        : 'No business processes in main.';
 
   return (
-    <div className="flex h-screen bg-background text-foreground">
-      <Sidebar
-        bps={visibleBps}
+    <div className="flex h-screen flex-col bg-background text-foreground">
+      <TopNav
+        bps={allBps}
         activeBpId={bpId}
-        onSelect={setBpId}
-        {...(scope.type === 'worktree' ? { worktree: scope.name } : {})}
-        onCreated={(name) => setBpId(name)}
+        onSelectBp={setBpId}
+        worktree={worktree}
+        worktrees={worktrees}
+        onSelectWorktree={setWorktree}
+        tab={tab}
+        onTab={setTab}
       />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar scope={scope} onScope={setScope} worktrees={worktrees} />
-        {scope.type === 'worktree' && wt ? (
-          // Always render the worktree view, even when no BP is selected —
-          // the user needs the Delete-worktree button reachable on empty
-          // worktrees too.
-          <WorktreeView bp={bp} wt={wt} />
-        ) : bp ? (
-          scope.type === 'deployments' ? (
-            <DeploymentsView bp={bp} />
-          ) : null
-        ) : (
-          <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-            {emptyMessage}
-          </div>
-        )}
-      </div>
+      {isLoading ? (
+        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+          Loading business processes…
+        </div>
+      ) : (
+        <WorkspaceView bp={bp} wt={wt} tab={tab} onTab={setTab} />
+      )}
     </div>
   );
 }

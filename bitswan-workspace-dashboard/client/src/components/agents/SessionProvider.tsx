@@ -156,9 +156,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setAgentStatus('ready');
   }, []);
 
-  // Auto-warm when the user is *actually looking* at an Agents tab — not
-  // merely when WorktreeView is mounted with its TabsContent force-mounted
-  // in the background. The hidden TabsContent has display:none and so a
+  // Auto-warm when the user is *actually looking* at the Coding Agent tab —
+  // not merely when the agent pane is mounted hidden in the background
+  // (WorkspaceView keeps it mounted across tab switches). The hidden pane
+  // has display:none and so a
   // zero-sized rect; only fire when the pane has real dimensions. Without
   // this, a fresh worktree visit would silently cold-start the coding-agent
   // container, Traefik would reconfigure mid-session, and Vite's HMR client

@@ -22,7 +22,7 @@ import type { Requirement, ReqStatus } from '@/lib/api';
 interface Props {
   worktree: string;
   bp: string;
-  /** Caller-controlled handler to flip the WorktreeView tab to Agents. */
+  /** Caller-controlled handler to flip the workspace to the Coding Agent tab. */
   onShowAgents: () => void;
 }
 
