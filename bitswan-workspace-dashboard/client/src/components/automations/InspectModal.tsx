@@ -6,11 +6,14 @@ import type { AutomationStage, DeployedAutomation } from '@/types';
 import { ActionButtons } from './inspect/ActionButtons';
 import { OverviewPane } from './inspect/OverviewPane';
 import { LogsPane } from './inspect/LogsPane';
+import { StageActions } from './inspect/StageActions';
 
 export interface InspectStage {
   id: AutomationStage;
   label: string;
   automation: DeployedAutomation | undefined;
+  /** Workspace-relative source path — enables the per-stage Deploy action. */
+  relativePath?: string;
 }
 
 interface InspectModalProps {
@@ -19,9 +22,26 @@ interface InspectModalProps {
   name: string;
   stages: InspectStage[];
   mode: 'deployments' | 'liveDev';
+  /** Worktree the source lives in (live-dev deploys only). */
+  worktree?: string;
+  /** Parent-tracked in-flight state for the stage actions (e.g. a confirmed
+   *  Remove waiting for the SSE snapshot to reflect it). */
+  actionBusy?: boolean;
+  /** When set, deployed stages show a Remove button that delegates to the
+   *  parent's confirm dialog. */
+  onRemove?: (deploymentId: string, stage: InspectStage) => void;
 }
 
-export function InspectModal({ open, onClose, name, stages, mode }: InspectModalProps) {
+export function InspectModal({
+  open,
+  onClose,
+  name,
+  stages,
+  mode,
+  worktree,
+  actionBusy,
+  onRemove,
+}: InspectModalProps) {
   const [stageId, setStageId] = useState<AutomationStage>(stages[0]?.id ?? 'dev');
   const [tab, setTab] = useState<'overview' | 'logs'>('overview');
 
@@ -62,6 +82,14 @@ export function InspectModal({ open, onClose, name, stages, mode }: InspectModal
                 : 'Container details and logs — per stage'}
             </div>
           </div>
+          <StageActions
+            name={name}
+            stage={stage}
+            mode={mode}
+            worktree={worktree}
+            busy={actionBusy}
+            onRemove={onRemove}
+          />
           <ActionButtons
             deploymentId={deploymentId}
             state={aut?.state ?? null}

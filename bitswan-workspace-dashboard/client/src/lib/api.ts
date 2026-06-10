@@ -115,6 +115,38 @@ export interface DeployResponse {
   status?: string;
 }
 
+export interface DeployBPRequest {
+  /** Business-process directory name. */
+  bp: string;
+  stage: 'dev' | 'live-dev';
+  worktree?: string;
+}
+
+export interface DeployBPResponse {
+  task_id: string;
+  bp: string;
+  deployment_ids: string[];
+  status?: string;
+}
+
+export interface PromoteBPRequest {
+  /** Business-process directory name. */
+  bp: string;
+  stage: 'staging' | 'production';
+}
+
+/** Gitops deploy-task snapshot from `GET /automations/deploy-status/{task_id}`. */
+export interface DeployStatusResponse {
+  task_id: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  step?: string | null;
+  message?: string;
+  error?: string | null;
+  bp?: string | null;
+  total?: number | null;
+  current?: number;
+}
+
 export interface PromoteRequest {
   automation_name: string;
   /** BP name; becomes the deployment context (and a prefix on the new id). */
@@ -138,6 +170,22 @@ export interface CreateBusinessProcessResponse {
   in_main: boolean;
   worktrees: string[];
   has_worktrees: boolean;
+  /** Automations scaffolded from the default template group (auto-setup). */
+  automations_created?: string[];
+  /** Deploy task for the auto-deploy of the scaffolded automations. */
+  deploy_task_id?: string | null;
+  /** Auto-setup failure detail (BP itself was still created). */
+  setup_error?: string | null;
+}
+
+/** Gitops `POST /worktrees/create` response (plus auto-deploy fields). */
+export interface CreateWorktreeResponse {
+  name: string;
+  path: string;
+  postgres_db?: string;
+  /** Deploy task for the auto live-dev of the worktree's automations. */
+  deploy_task_id?: string | null;
+  deploy_error?: string | null;
 }
 
 export interface CreateWorktreeRequest {
@@ -178,7 +226,7 @@ export const api = {
     postJson<CreateBusinessProcessResponse>('/api/business-processes', body),
 
   createWorktree: (body: CreateWorktreeRequest) =>
-    postJson<{ status?: string; worktree_path?: string }>('/api/worktrees', body),
+    postJson<CreateWorktreeResponse>('/api/worktrees', body),
   deleteWorktree: (name: string) =>
     deleteEmpty(`/api/worktrees/${encodeURIComponent(name)}`),
 
@@ -193,6 +241,14 @@ export const api = {
 
   deployAutomation: (body: DeployRequest) =>
     postJson<DeployResponse>('/api/automations/deploy', body),
+  deployBusinessProcess: (body: DeployBPRequest) =>
+    postJson<DeployBPResponse>('/api/automations/deploy-bp', body),
+  promoteBusinessProcess: (body: PromoteBPRequest) =>
+    postJson<DeployBPResponse>('/api/automations/promote-bp', body),
+  deployStatus: (taskId: string) =>
+    getJson<DeployStatusResponse>(
+      `/api/automations/deploy-status/${encodeURIComponent(taskId)}`,
+    ),
   promoteAutomation: (body: PromoteRequest) =>
     postJson<DeployResponse>('/api/automations/promote', body),
   removeAutomation: (id: string) =>
