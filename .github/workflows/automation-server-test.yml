@@ -1,10 +1,20 @@
-name: Test and coverage
+name: automation-server Test and coverage
 
 on:
   push:
     branches:
       - main
+    paths:
+      - 'bitswan-automation-server/**'
+      - '.github/workflows/automation-server-test.yml'
   pull_request:
+    paths:
+      - 'bitswan-automation-server/**'
+      - '.github/workflows/automation-server-test.yml'
+
+defaults:
+  run:
+    working-directory: bitswan-automation-server
 
 jobs:
   test:

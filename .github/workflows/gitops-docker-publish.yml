@@ -1,8 +1,15 @@
-name: Build and Push Docker Image
+name: gitops Build and Push Docker Image
 
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'bitswan-gitops/**'
+      - '.github/workflows/gitops-docker-publish.yml'
+
+defaults:
+  run:
+    working-directory: bitswan-gitops
 
 jobs:
   build-and-push:

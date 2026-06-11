@@ -1,6 +1,18 @@
-name: Lint & Test
+name: gitops Lint & Test
 
-on: [push, pull_request]
+on:
+  push:
+    paths:
+      - 'bitswan-gitops/**'
+      - '.github/workflows/gitops-lint.yml'
+  pull_request:
+    paths:
+      - 'bitswan-gitops/**'
+      - '.github/workflows/gitops-lint.yml'
+
+defaults:
+  run:
+    working-directory: bitswan-gitops
 
 jobs:
   test:

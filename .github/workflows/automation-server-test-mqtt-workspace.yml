@@ -1,6 +1,18 @@
-name: MQTT Workspace Test
+name: automation-server MQTT Workspace Test
 
-on: [push, pull_request]
+on:
+  push:
+    paths:
+      - 'bitswan-automation-server/**'
+      - '.github/workflows/automation-server-test-mqtt-workspace.yml'
+  pull_request:
+    paths:
+      - 'bitswan-automation-server/**'
+      - '.github/workflows/automation-server-test-mqtt-workspace.yml'
+
+defaults:
+  run:
+    working-directory: bitswan-automation-server
 
 jobs:
   mqtt-workspace-test:

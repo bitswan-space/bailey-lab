@@ -1,9 +1,11 @@
-# .github/workflows/calver-release.yml
-name: CalVer Release
+name: automation-server CalVer Release
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'bitswan-automation-server/**'
+      - '.github/workflows/automation-server-release.yml'
 
 permissions:
   contents: write
@@ -12,6 +14,10 @@ permissions:
 env:
   # Add your binary name once—used in several steps
   APP_NAME: bitswan-automation-server
+
+defaults:
+  run:
+    working-directory: bitswan-automation-server
 
 jobs:
   build-and-release:
