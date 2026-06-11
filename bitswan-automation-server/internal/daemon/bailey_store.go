@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -61,6 +63,17 @@ CREATE TABLE IF NOT EXISTS access_requests (
   PRIMARY KEY (endpoint_host, email),
   FOREIGN KEY (endpoint_host) REFERENCES endpoints(hostname) ON DELETE CASCADE
 );
+
+-- Upstreams of routes that go through the protected-ingress chain.
+-- Written by route registration; the gate resolves inner-host requests
+-- to their service through this table (see upstreamForHost). Keyed by
+-- the OUTER hostname, like the ACL. Not joined to endpoints: a route
+-- can be protected before anyone owns it.
+CREATE TABLE IF NOT EXISTS protected_routes (
+  hostname   TEXT PRIMARY KEY COLLATE NOCASE,
+  upstream   TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `
 
 // baileyDBPath returns the absolute on-disk location of the daemon's
@@ -100,3 +113,46 @@ func openBaileyDB() (*sql.DB, error) {
 	})
 	return baileyDB, baileyDBErr
 }
+
+// saveProtectedRoute records (or replaces) the upstream a protected
+// hostname's traffic should reach once it has passed the gate.
+// hostname may be the outer or inner form; stored by outer.
+func saveProtectedRoute(hostname, upstream string) error {
+	db, err := openBaileyDB()
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`INSERT INTO protected_routes (hostname, upstream, updated_at)
+	    VALUES (?, ?, ?)
+	    ON CONFLICT(hostname) DO UPDATE SET upstream = excluded.upstream, updated_at = excluded.updated_at`,
+		toOuterHost(hostname), upstream, nowRFC3339())
+	return err
+}
+
+// lookupProtectedRouteUpstream returns the recorded upstream for a
+// hostname (outer or inner form), or "" if none is recorded.
+func lookupProtectedRouteUpstream(hostname string) (string, error) {
+	db, err := openBaileyDB()
+	if err != nil {
+		return "", err
+	}
+	var up string
+	err = db.QueryRow(`SELECT upstream FROM protected_routes WHERE hostname = ? COLLATE NOCASE`,
+		toOuterHost(hostname)).Scan(&up)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return up, err
+}
+
+// deleteProtectedRoute drops the upstream record for a hostname.
+func deleteProtectedRoute(hostname string) error {
+	db, err := openBaileyDB()
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`DELETE FROM protected_routes WHERE hostname = ? COLLATE NOCASE`, toOuterHost(hostname))
+	return err
+}
+
+func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }

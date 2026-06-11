@@ -34,7 +34,12 @@ const (
 // inner-host request to:
 //
 //	bailey--inner.<domain>      → http://<daemon>:8080 (daemon HTTP server)
-//	<workspace>--inner.<domain> → http://<workspace>__traefik:80
+//	anything else               → the upstream recorded for the route in
+//	                              bailey.db (written by addRouteToIngress)
+//	fallback                    → http://<workspace>__traefik:80 when a
+//	                              workspace sub-traefik matches the label
+//	                              (covers deployments routed before the
+//	                              protected_routes table existed)
 //
 // Returns nil for hostnames that aren't recognised — the proxy 502s in
 // that case, which is the right behaviour: a request for an unknown
@@ -49,6 +54,15 @@ func upstreamForHost(host string) *url.URL {
 	if isBaileyHost(outer) {
 		u, _ := url.Parse("http://" + upstreamDaemonHost() + ":8080")
 		return u
+	}
+	if up, err := lookupProtectedRouteUpstream(outer); err == nil && up != "" {
+		if !strings.Contains(up, "://") {
+			up = "http://" + up
+		}
+		u, err := url.Parse(up)
+		if err == nil {
+			return u
+		}
 	}
 	// Workspace hostname: <workspace>-<service>.<domain> (outer form).
 	// Drop the .<domain> tail to get the label, then trim back to a

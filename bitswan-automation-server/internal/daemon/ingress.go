@@ -886,9 +886,10 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 	wrapAvailable := containerRunning("bitswan-protected-proxy")
 	if wrapAvailable && workspaceName != "" && isWorkspaceTraefikRunning(workspaceName) {
 		// INNER hostname carries the actual app content: route it in
-		// the workspace's own traefik (the gate forwards to
-		// <workspace>__traefik:80 by hostname) and through the auth
-		// chain in platform-traefik.
+		// the workspace's own traefik and through the auth chain in
+		// platform-traefik. The gate forwards post-auth inner traffic
+		// to the sub-traefik (recorded below), which can reach
+		// containers on the workspace's own networks.
 		workspaceTraefikURL := traefikapi.GetWorkspaceTraefikBaseURL(workspaceName)
 		if err := traefikapi.AddRouteWithTraefik(inner, req.Upstream, workspaceTraefikURL); err != nil {
 			return fmt.Errorf("failed to add inner route to workspace sub-traefik: %w", err)
@@ -899,6 +900,9 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 		// OUTER hostname serves only the wrap.
 		if err := traefikapi.AddRouteWithTLSDomains(outer, "bitswan-protected-proxy:80", "", certResolver, tlsDomains); err != nil {
 			return fmt.Errorf("failed to add outer route to platform traefik: %w", err)
+		}
+		if err := saveProtectedRoute(outer, workspaceName+"__traefik:80"); err != nil {
+			fmt.Printf("Warning: failed to record protected route for %s: %v\n", outer, err)
 		}
 	} else if workspaceName != "" && isWorkspaceTraefikRunning(workspaceName) {
 		// Two-tier routing without the wrap: platform-traefik →
@@ -913,21 +917,28 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 				return fmt.Errorf("failed to add route to platform traefik for %s: %w", h, err)
 			}
 		}
+	} else if wrapAvailable {
+		// No workspace sub-traefik but the protected chain is up:
+		// route BOTH hostnames through it. The gate resolves the
+		// post-auth upstream from the protected_routes record, so the
+		// service must be reachable from the daemon (bitswan_network —
+		// true for all workspace services today).
+		for _, h := range []string{outer, inner} {
+			if err := traefikapi.AddRouteWithTLSDomains(h, "bitswan-protected-proxy:80", "", certResolver, tlsDomains); err != nil {
+				return fmt.Errorf("failed to add route for %s: %w", h, err)
+			}
+		}
+		if err := saveProtectedRoute(outer, req.Upstream); err != nil {
+			fmt.Printf("Warning: failed to record protected route for %s: %v\n", outer, err)
+		}
 	} else {
-		// No workspace sub-traefik — single-tier routing. Inner goes
-		// directly to the upstream; outer goes to the wrap when it's
-		// available, otherwise to the same upstream so callers can
-		// reach the service at the canonical hostname (matches what
-		// addRouteCaddy does).
-		if err := traefikapi.AddRouteWithTLSDomains(inner, req.Upstream, "", certResolver, tlsDomains); err != nil {
-			return fmt.Errorf("failed to add inner route: %w", err)
-		}
-		outerUpstream := req.Upstream
-		if wrapAvailable {
-			outerUpstream = "bitswan-protected-proxy:80"
-		}
-		if err := traefikapi.AddRouteWithTLSDomains(outer, outerUpstream, "", certResolver, tlsDomains); err != nil {
-			return fmt.Errorf("failed to add outer route: %w", err)
+		// Bare environment (no protected proxy): single-tier direct
+		// routes for both hostnames so the service stays reachable at
+		// its canonical name (matches what addRouteCaddy does).
+		for _, h := range []string{outer, inner} {
+			if err := traefikapi.AddRouteWithTLSDomains(h, req.Upstream, "", certResolver, tlsDomains); err != nil {
+				return fmt.Errorf("failed to add route for %s: %w", h, err)
+			}
 		}
 	}
 
@@ -963,6 +974,9 @@ func removeRouteFromIngress(hostname string) error {
 	if err == nil {
 		if derr := deleteEndpoint(outer); derr != nil {
 			fmt.Printf("Warning: failed to remove Bailey endpoint for %s: %v\n", outer, derr)
+		}
+		if derr := deleteProtectedRoute(outer); derr != nil {
+			fmt.Printf("Warning: failed to remove protected route record for %s: %v\n", outer, derr)
 		}
 	}
 	return err

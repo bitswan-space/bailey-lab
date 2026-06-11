@@ -189,6 +189,34 @@ func TestUpstreamForHost(t *testing.T) {
 	}
 }
 
+func TestUpstreamForHost_ProtectedRouteRecord(t *testing.T) {
+	// Route registration records the upstream; the gate resolves the
+	// inner host through it regardless of workspace-traefik presence.
+	if err := saveProtectedRoute("gateup-editor.example.com", "gateup-editor:9999"); err != nil {
+		t.Fatal(err)
+	}
+	u := upstreamForHost("gateup-editor--inner.example.com")
+	if u == nil || u.Host != "gateup-editor:9999" || u.Scheme != "http" {
+		t.Errorf("recorded route upstream = %v, want http://gateup-editor:9999", u)
+	}
+
+	// Replacing the record (e.g. a redeploy moved the port) wins.
+	if err := saveProtectedRoute("gateup-editor.example.com", "gateup-editor:8080"); err != nil {
+		t.Fatal(err)
+	}
+	if u := upstreamForHost("gateup-editor--inner.example.com"); u == nil || u.Host != "gateup-editor:8080" {
+		t.Errorf("replaced route upstream = %v, want gateup-editor:8080", u)
+	}
+
+	// Deleting the record falls back to (absent) workspace traefik → nil.
+	if err := deleteProtectedRoute("gateup-editor.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if u := upstreamForHost("gateup-editor--inner.example.com"); u != nil {
+		t.Errorf("deleted route still resolves: %v", u)
+	}
+}
+
 func TestIsAdminGroups(t *testing.T) {
 	cases := []struct {
 		groups []string

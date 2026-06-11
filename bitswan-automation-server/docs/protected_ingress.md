@@ -57,10 +57,19 @@ browser ── https ──▶ platform-traefik
 ```
 
 The gate resolves the upstream per request from the hostname — there is no
-intermediate `traefik-protected` hop. The single shared Keycloak client
-(`bitswan-protected-client`) carries the callback URIs of every protected
-hostname; they are registered idempotently via the AOC's
-`GetOrCreateOAuthClient`.
+intermediate `traefik-protected` hop. Route registration records each
+protected hostname's upstream in the `protected_routes` table of bailey.db,
+which is the gate's primary lookup; a `<workspace>__traefik:80` fallback by
+hostname label covers deployments routed before the table existed. The
+single shared Keycloak client (`bitswan-protected-client`) carries the
+callback URIs of every protected hostname; they are registered idempotently
+via the AOC's `GetOrCreateOAuthClient`.
+
+Services behind the protected chain must not run their own oauth2-proxy:
+both layers would claim `/oauth2/*` on the same hostname and the inner
+proxy's callback would be swallowed by the outer one. Bailey is the auth
+layer; workspace services should be started with their per-service OAuth
+disabled (`OAUTH_ENABLED=false`).
 
 ## Per-endpoint ACL
 
