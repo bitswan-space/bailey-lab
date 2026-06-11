@@ -97,7 +97,7 @@ func strictInnerCSP(innerHost string) string {
 		// Domain unconfigured (bootstrap window). Fall back to a CSP
 		// that at least pins frame-ancestors so the bare app can't be
 		// embedded by arbitrary origins.
-		return "frame-ancestors https://" + outer
+		return "frame-ancestors 'self' https://" + outer
 	}
 	wild := "https://*." + domain
 	wildWS := "wss://*." + domain
@@ -113,7 +113,12 @@ func strictInnerCSP(innerHost string) string {
 		"media-src " + src + " data: blob:",
 		"worker-src " + src + " blob:",
 		"form-action " + src,
-		"frame-ancestors https://" + outer,
+		// 'self' is required alongside the outer host: apps commonly
+		// nest their own same-origin iframes (the editor's landing page
+		// frames code-server, preview panes frame rendered output, …)
+		// and frame-ancestors checks EVERY ancestor in the chain — for
+		// a nested frame that chain is [inner app page, outer wrap].
+		"frame-ancestors 'self' https://" + outer,
 	}, "; ")
 }
 

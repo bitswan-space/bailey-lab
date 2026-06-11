@@ -75,7 +75,7 @@ func TestStrictInnerCSP_NoDomainConfigured(t *testing.T) {
 	// No automation server config in the test HOME → domain is empty →
 	// the fallback CSP must still pin frame-ancestors to the outer host.
 	csp := strictInnerCSP("app--inner.example.com")
-	if csp != "frame-ancestors https://app.example.com" {
+	if csp != "frame-ancestors 'self' https://app.example.com" {
 		t.Errorf("fallback CSP = %q", csp)
 	}
 }
@@ -85,7 +85,10 @@ func TestStrictInnerCSP_WithDomain(t *testing.T) {
 	csp := strictInnerCSP("myws-editor--inner.acme.bswn.io")
 	for _, want := range []string{
 		"default-src 'self' https://*.acme.bswn.io",
-		"frame-ancestors https://myws-editor.acme.bswn.io",
+		// 'self' must be present so apps can nest their own iframes
+		// (every ancestor in the chain is checked, including the
+		// same-origin parent of a nested frame).
+		"frame-ancestors 'self' https://myws-editor.acme.bswn.io",
 		"connect-src 'self' https://*.acme.bswn.io wss://*.acme.bswn.io wss://myws-editor--inner.acme.bswn.io",
 		"script-src 'self' https://*.acme.bswn.io 'unsafe-inline' 'unsafe-eval' blob:",
 	} {
