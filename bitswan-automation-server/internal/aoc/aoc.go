@@ -626,6 +626,45 @@ func (c *AOCClient) GetKeycloakClientSecret(workspaceId string) (*KeycloakClient
 	return &response, nil
 }
 
+// OAuthClientResponse represents the response from the server-level
+// Keycloak OAuth client endpoint.
+type OAuthClientResponse struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	IssuerURL    string `json:"issuer_url"`
+}
+
+// GetOrCreateOAuthClient provisions a Keycloak OIDC client for a named
+// service (e.g. "bitswan-protected") scoped to this automation server.
+// The client_id is deterministic:
+// automation-server-{server_id}-{service_name}-client. If the client
+// already exists, the redirect_uri is added to its allowlist and the
+// existing credentials are returned — safe to call once per hostname.
+func (c *AOCClient) GetOrCreateOAuthClient(serviceName, redirectURI string) (*OAuthClientResponse, error) {
+	payload := map[string]string{
+		"service_name": serviceName,
+		"redirect_uri": redirectURI,
+	}
+	jsonBytes, _ := json.Marshal(payload)
+	url := fmt.Sprintf("%s/api/automation_server/keycloak/oauth-client", c.settings.AOCUrl)
+	resp, err := c.sendRequest("POST", url, jsonBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get/create OAuth client: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("OAuth client request failed (%s): %s", resp.Status, string(body))
+	}
+
+	var result OAuthClientResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse OAuth client response: %w", err)
+	}
+	return &result, nil
+}
+
 func generateCookieSecret() (string, error) {
 	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, 32)

@@ -229,9 +229,23 @@ func (s *Server) Run() error {
 		Handler: s.setupRoutes(),
 	}
 
-	// Create HTTP server for docs (listens on TCP port 8080)
+	// Create HTTP server for docs + Bailey gate pages (TCP port 8080).
+	// The protected gate proxies bailey--inner.<domain> here, so the
+	// gate's own pages (share, request-access, whoami) must be mounted
+	// on this mux — they are what the wrap iframe shows on the Bailey
+	// management hostname.
 	docsMux := http.NewServeMux()
-	docsMux.HandleFunc("/", s.handleDocs) // Root path serves docs
+	docsMux.HandleFunc(gatePathPrefix+"/", handleGatePathRoot)
+	docsMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// "/" on the Bailey hostname is also the post-logout landing
+		// page (Keycloak does exact redirect-URI matching). Until the
+		// management UI ships (stage 3), send users to the share index.
+		if isBaileyHost(requestEndpointHost(r)) {
+			http.Redirect(w, r, gatePathPrefix+"/share", http.StatusFound)
+			return
+		}
+		s.handleDocs(w, r)
+	})
 	docsMux.HandleFunc("/api-docs", s.handleDocs)
 
 	// ACME DNS-01 bridge for Traefik's httpreq provider. Served on the TCP
@@ -264,6 +278,19 @@ func (s *Server) Run() error {
 				time.Sleep(2 * time.Second)
 			}
 		}
+	}()
+
+	// Protected ingress: start the gate listener and register the
+	// Bailey management hostname. Both are no-ops in practice until a
+	// domain is configured and the bitswan-protected-proxy container
+	// exists (see docs/protected_ingress.md), so this is safe on bare
+	// servers.
+	go func() {
+		time.Sleep(3 * time.Second)
+		if err := startProtectedGate(); err != nil {
+			fmt.Printf("Warning: protected gate failed to start: %v\n", err)
+		}
+		setupBaileyRoutes()
 	}()
 
 	// Handle shutdown signals
