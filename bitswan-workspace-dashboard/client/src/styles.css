@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Core palette (Light) — mirrors aoc-frontend/src/index.css */
+    --background: 255 255 255;
+    --foreground: 24 24 27;
+
+    --card: 255 255 255;
+    --card-foreground: 9 9 11;
+
+    --popover: 255 255 255;
+    --popover-foreground: 9 9 11;
+
+    --primary: 9 61 245;
+    --primary-foreground: 250 250 250;
+
+    --secondary: 245 245 246;
+    --secondary-foreground: 9 61 245;
+
+    --muted: 245 245 246;
+    --muted-foreground: 113 113 122;
+
+    --accent: 245 245 246;
+    --accent-foreground: 24 24 27;
+
+    --destructive: 220 38 38;
+    --destructive-foreground: 254 242 242;
+
+    --border: 228 228 231;
+    --input: 209 213 219;
+    --ring: 59 130 246;
+
+    --radius: 6px;
+    --radius-sm: 2px;
+    --radius-lg: 8px;
+    --radius-xl: 12px;
+  }
+
+  .dark {
+    --background: 9 9 11;
+    --foreground: 250 250 250;
+
+    --card: 9 9 11;
+    --card-foreground: 250 250 250;
+
+    --popover: 9 9 11;
+    --popover-foreground: 250 250 250;
+
+    --primary: 250 250 250;
+    --primary-foreground: 24 24 27;
+
+    --secondary: 39 39 42;
+    --secondary-foreground: 250 250 250;
+
+    --muted: 39 39 42;
+    --muted-foreground: 161 161 170;
+
+    --accent: 39 39 42;
+    --accent-foreground: 250 250 250;
+
+    --destructive: 127 29 29;
+    --destructive-foreground: 254 242 242;
+
+    --border: 39 39 42;
+    --input: 39 39 42;
+    --ring: 212 212 216;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    margin: 0;
+  }
+}

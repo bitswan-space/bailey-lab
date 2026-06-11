@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Workspace Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap"
+    />
+    <script>
+      // If this window was opened as the OAuth login popup (named
+      // "workspace-dashboard-login" by the iframe), notify the opener and
+      // close immediately. Runs before the SPA bundle loads so the user
+      // doesn't see a flash of the dashboard inside the popup.
+      // window.name is preserved across the OAuth round-trip (Keycloak +
+      // oauth2-proxy callback) so this works regardless of the final URL
+      // oauth2-proxy redirects to.
+      (function () {
+        try {
+          if (
+            window.opener &&
+            !window.opener.closed &&
+            window.name === 'workspace-dashboard-login'
+          ) {
+            window.opener.postMessage('login-done', window.location.origin);
+            setTimeout(function () { window.close(); }, 50);
+          }
+        } catch (e) {
+          // ignore — opener may be cross-origin with restrictive policies
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
