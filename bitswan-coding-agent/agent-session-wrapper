@@ -1,0 +1,143 @@
+#!/bin/bash
+# Session wrapper for SSH connections to the coding agent container.
+# Records terminal sessions using asciinema when logging is enabled.
+# Supports logged and unlogged sessions based on SSH_LOGGED env var.
+
+USER_EMAIL="${SSH_USER_EMAIL:-unknown}"
+LOGGED="${SSH_LOGGED:-true}"
+WORKTREE="${SSH_WORKTREE:-default}"
+BP="${SSH_BP:-}"
+# Claude session UUID — passed by the dashboard so it can resume later via
+# `claude --resume <uuid>`. Persisted into .meta.json below.
+CLAUDE_SESSION_ID="${SSH_CLAUDE_SESSION_ID:-}"
+# Session "kind" tag: "claude" for a regular BP-scoped chat, "sync" for the
+# worktree-level git-sync agent flow. Persisted so the dashboard can pick
+# the right icon when listing past sessions. Empty for editor-launched
+# sessions.
+SESSION_KIND="${SSH_SESSION_KIND:-}"
+AUTO_CMD="${SSH_AUTO_CMD:-}"
+
+# Per-user Claude config dir keyed off the oauth2-proxy email. Without it,
+# whichever user logs into `claude` first leaks their account to every other
+# user of this container. Dashboard sessions must carry an email; editor
+# sessions don't and use a shared default. Email is sanitized + hashed to
+# defang RFC-valid local parts that can contain `/` or `..`.
+sanitize_email() {
+    local raw="$1"
+    local clean hash
+    clean=$(printf '%s' "$raw" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '_' | cut -c1-40)
+    hash=$(printf '%s' "$raw" | sha256sum | head -c 8)
+    printf '%s_%s' "$clean" "$hash"
+}
+if [ -n "$SSH_USER_EMAIL" ] && [ "$SSH_USER_EMAIL" != "unknown" ]; then
+    EMAIL_SLUG=$(sanitize_email "$SSH_USER_EMAIL")
+elif [ -n "$SESSION_KIND" ]; then
+    echo "agent-session-wrapper: SSH_USER_EMAIL not set for dashboard session (kind=$SESSION_KIND); refusing to start" >&2
+    exit 1
+else
+    EMAIL_SLUG="default"
+fi
+export CLAUDE_CONFIG_DIR="/home/agent/.claude_${EMAIL_SLUG}"
+mkdir -p "$CLAUDE_CONFIG_DIR"
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+# Include the BP in the session id so concurrent dashboard sessions for the
+# same (user, worktree, BP) still get distinct files (the timestamp resolves
+# collisions even when BP is empty).
+if [ -n "$BP" ]; then
+    SESSION_ID="${TIMESTAMP}_${EMAIL_SLUG}_${WORKTREE}_${BP}"
+else
+    SESSION_ID="${TIMESTAMP}_${EMAIL_SLUG}_${WORKTREE}"
+fi
+SESSION_DIR="/var/log/agent-sessions"
+
+# Determine working directory. When SSH_BP is set (dashboard) land in the BP
+# directory; otherwise fall back to the worktree root (editor behaviour).
+if [ -n "$BP" ] && [ -d "/workspace/worktrees/${WORKTREE}/${BP}" ]; then
+    cd "/workspace/worktrees/${WORKTREE}/${BP}"
+elif [ -d "/workspace/worktrees/${WORKTREE}" ]; then
+    cd "/workspace/worktrees/${WORKTREE}"
+elif [ "$WORKTREE" = "default" ]; then
+    cd /workspace/worktrees
+fi
+
+# If SSH_ORIGINAL_COMMAND is set (non-interactive), just run it
+if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
+    if [ "$LOGGED" = "false" ]; then
+        exec bash -c "$SSH_ORIGINAL_COMMAND"
+    fi
+    # For logged sessions, record the command execution too
+    asciinema rec "${SESSION_DIR}/${SESSION_ID}.cast" \
+        --title "${USER_EMAIL} - ${WORKTREE} (cmd)" \
+        --command "bash -c '$SSH_ORIGINAL_COMMAND'" 2>/dev/null
+    exit $?
+fi
+
+# Always write metadata file for the session browser. `bp` is JSON null when
+# the caller didn't set SSH_BP (e.g. editor sessions); the dashboard's per-BP
+# filter treats null/absent as "not this BP".
+if [ -n "$BP" ]; then
+    BP_JSON="\"${BP}\""
+else
+    BP_JSON="null"
+fi
+if [ -n "$CLAUDE_SESSION_ID" ]; then
+    CLAUDE_ID_JSON="\"${CLAUDE_SESSION_ID}\""
+else
+    CLAUDE_ID_JSON="null"
+fi
+if [ -n "$SESSION_KIND" ]; then
+    KIND_JSON="\"${SESSION_KIND}\""
+else
+    KIND_JSON="null"
+fi
+cat > "${SESSION_DIR}/${SESSION_ID}.meta.json" << METAEOF
+{
+  "id": "${SESSION_ID}",
+  "user_email": "${USER_EMAIL}",
+  "worktree": "${WORKTREE}",
+  "bp": ${BP_JSON},
+  "claude_session_id": ${CLAUDE_ID_JSON},
+  "kind": ${KIND_JSON},
+  "started_at": "$(date -Iseconds)",
+  "logged": $([ "$LOGGED" = "true" ] && echo "true" || echo "false")
+}
+METAEOF
+
+# Determine the shell command to run
+SHELL_CMD="bash -l"
+if [ -n "$AUTO_CMD" ]; then
+    # Write auto command to a temp script to avoid quoting issues
+    AUTO_SCRIPT="/tmp/.auto_cmd_$$.sh"
+    echo "$AUTO_CMD" > "$AUTO_SCRIPT"
+    chmod +x "$AUTO_SCRIPT"
+    SHELL_CMD="bash -l $AUTO_SCRIPT"
+fi
+
+# Browser-close persistence: when the dashboard passes a Claude session
+# UUID, wrap the shell in dtach so the underlying claude process survives
+# ssh disconnects. `dtach -A` attaches to an existing socket OR creates a
+# new one running the trailing command. When the user reconnects (or
+# clicks Resume), the same dtach socket is found and they pick up exactly
+# where the agent left off — no `--resume` needed for the still-running
+# case. Idle close on the dashboard server kills the underlying process,
+# at which point dtach removes the socket, so the *next* attach starts
+# fresh from claude's on-disk history via `--resume <uuid>`.
+if [ -n "$CLAUDE_SESSION_ID" ]; then
+    DTACH_SOCKET="/tmp/.claude-dtach-${CLAUDE_SESSION_ID}.sock"
+    SHELL_CMD="dtach -A ${DTACH_SOCKET} -z ${SHELL_CMD}"
+fi
+
+# Anon session - no recording, just shell
+if [ "$LOGGED" = "false" ]; then
+    if [ -n "$AUTO_CMD" ]; then
+        exec bash -l "$AUTO_SCRIPT"
+    else
+        exec bash -l
+    fi
+fi
+
+# Record session with asciinema
+exec asciinema rec "${SESSION_DIR}/${SESSION_ID}.cast" \
+    --title "${USER_EMAIL} - ${WORKTREE}" \
+    --command "$SHELL_CMD"
