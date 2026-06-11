@@ -1,0 +1,1067 @@
+import asyncio
+from configparser import ConfigParser
+from dataclasses import dataclass
+from io import StringIO
+from datetime import datetime, timezone
+import hashlib
+import logging
+import os
+import re
+import threading
+from typing import Any, Optional
+import shlex
+import subprocess
+import shutil
+import tarfile
+import tempfile
+import httpx
+
+logger = logging.getLogger(__name__)
+
+import humanize
+import toml
+import yaml
+from fastapi import HTTPException
+
+
+# Thread-safe git lock that works across both async and sync contexts
+# Uses a threading.Lock as the underlying mechanism for cross-thread safety
+_git_thread_lock = threading.Lock()
+
+
+class GitLockContext:
+    """
+    Context manager for git lock that works in both async and sync contexts.
+    Uses a threading.Lock internally for cross-thread safety (needed for background threads).
+    """
+
+    def __init__(self, timeout: float = 10.0):
+        self.timeout = timeout
+        self._acquired = False
+
+    async def __aenter__(self):
+        """Async context manager entry - acquires lock without blocking event loop."""
+        loop = asyncio.get_event_loop()
+        # Run the blocking lock acquisition in a thread pool to avoid blocking the event loop
+        acquired = await loop.run_in_executor(
+            None, lambda: _git_thread_lock.acquire(timeout=self.timeout)
+        )
+        if not acquired:
+            raise Exception(f"Failed to acquire git lock within {self.timeout} seconds")
+        self._acquired = True
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit - releases lock."""
+        if self._acquired:
+            _git_thread_lock.release()
+            self._acquired = False
+        return False
+
+    def __enter__(self):
+        """Sync context manager entry - for use in background threads."""
+        acquired = _git_thread_lock.acquire(timeout=self.timeout)
+        if not acquired:
+            raise Exception(f"Failed to acquire git lock within {self.timeout} seconds")
+        self._acquired = True
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Sync context manager exit - for use in background threads."""
+        if self._acquired:
+            _git_thread_lock.release()
+            self._acquired = False
+        return False
+
+
+@dataclass
+class ServiceDependency:
+    """A declared infrastructure service dependency from automation.toml."""
+
+    enabled: bool = True
+
+
+KNOWN_STAGES = {"live-dev", "dev", "staging", "production"}
+
+# Network realms: each gets its own set of infrastructure services (Kafka, CouchDB).
+# live-dev shares the dev realm.
+SERVICE_REALMS = {"dev", "staging", "production"}
+
+
+@dataclass
+class AutomationConfig:
+    """Unified automation configuration from either automation.toml or pipelines.conf."""
+
+    id: str | None = (
+        None  # Unique automation ID (used as Keycloak client_id when auth=True)
+    )
+    auth: bool = False  # Enable Keycloak authentication
+    image: str = "bitswan/pipeline-runtime-environment:latest"
+    expose: bool = False
+    port: int = 8080
+    # Per-stage expose_to groups (from [expose_to] section in automation.toml)
+    dev_expose_to: list[str] | None = None
+    staging_expose_to: list[str] | None = None
+    production_expose_to: list[str] | None = None
+    config_format: str = "ini"  # "toml" or "ini"
+    mount_path: str = "/opt/pipelines"  # "/app/" for TOML, "/opt/pipelines" for INI
+    # Stage-specific secret groups (only for automation.toml - no general fallback)
+    live_dev_groups: list[str] | None = None
+    dev_groups: list[str] | None = None
+    staging_groups: list[str] | None = None
+    production_groups: list[str] | None = None
+    # CORS allowed domains for Keycloak client (optional)
+    allowed_domains: list[str] | None = None
+    # Infrastructure service dependencies
+    services: dict[str, ServiceDependency] | None = None
+    # Use host network for external access (Selenium testing)
+    external_testing_network: bool = False
+
+
+def get_expose_to_for_stage(config: AutomationConfig, stage: str) -> list[str]:
+    """Resolve expose_to groups for a given stage."""
+    if stage == "live-dev" or stage == "dev":
+        groups = config.dev_expose_to
+    elif stage == "staging":
+        groups = config.staging_expose_to
+    elif stage == "production":
+        groups = config.production_expose_to
+    else:
+        groups = None
+    return groups or []
+
+
+def _parse_string_or_list(value) -> list[str] | None:
+    """Parse a value that can be either a string or list into a list."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [str(g).strip() for g in value if str(g).strip()]
+    if isinstance(value, str):
+        return [g.strip() for g in value.split() if g.strip()]
+    return None
+
+
+def parse_automation_toml(content: str) -> AutomationConfig | None:
+    """Parse automation.toml content from a string and return AutomationConfig."""
+    if not content or not content.strip():
+        return None
+    try:
+        data = toml.loads(content)
+    except toml.TomlDecodeError as e:
+        raise ValueError(f"Syntax error in automation.toml: {e}") from e
+
+    deployment = data.get("deployment", {})
+    secrets = data.get("secrets", {})
+    expose_to_section = data.get("expose_to", {})
+
+    # Parse allowed_domains as a list (for CORS in Keycloak client)
+    allowed_domains = deployment.get("allowed_domains")
+    if isinstance(allowed_domains, list):
+        allowed_domains = [str(d).strip() for d in allowed_domains if str(d).strip()]
+    else:
+        allowed_domains = None
+
+    # Parse [services.*] sections
+    services_data = data.get("services", {})
+    services = None
+    if services_data and isinstance(services_data, dict):
+        services = {}
+        for svc_type, svc_conf in services_data.items():
+            if not isinstance(svc_conf, dict):
+                continue
+            services[svc_type] = ServiceDependency(
+                enabled=svc_conf.get("enabled", True),
+            )
+
+    return AutomationConfig(
+        id=deployment.get("id"),
+        auth=deployment.get("auth", False),
+        image=deployment.get("image", "bitswan/pipeline-runtime-environment:latest"),
+        expose=deployment.get("expose", False),
+        port=deployment.get("port", 8080),
+        config_format="toml",
+        mount_path="/app/",
+        live_dev_groups=_parse_string_or_list(secrets.get("live-dev")),
+        dev_groups=_parse_string_or_list(secrets.get("dev")),
+        staging_groups=_parse_string_or_list(secrets.get("staging")),
+        production_groups=_parse_string_or_list(secrets.get("production")),
+        # Per-stage expose_to from [expose_to] section
+        dev_expose_to=_parse_string_or_list(expose_to_section.get("dev")),
+        staging_expose_to=_parse_string_or_list(expose_to_section.get("staging")),
+        production_expose_to=_parse_string_or_list(expose_to_section.get("production")),
+        allowed_domains=allowed_domains,
+        services=services,
+        external_testing_network=deployment.get("external-testing-network", False),
+    )
+
+
+def sanitize_automation_name(name: str) -> str:
+    """Lowercase + replace each char outside [a-z0-9-] with '-', trim hyphens.
+
+    Single shared implementation: deployment-id derivation (automation_service)
+    and template scaffolding (template_service) must agree on the same output
+    for a given input, otherwise scaffolded folders won't round-trip back to
+    the same deployment id.
+    """
+    return re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")
+
+
+def read_automation_toml(source_dir: str) -> AutomationConfig | None:
+    """Read automation.toml from a directory."""
+    toml_path = os.path.join(source_dir, "automation.toml")
+    if os.path.exists(toml_path):
+        with open(toml_path, "r") as f:
+            content = f.read()
+        return parse_automation_toml(content)
+    return None
+
+
+def read_automation_config(source_dir: str) -> AutomationConfig:
+    """
+    Read automation configuration with priority: automation.toml > pipelines.conf.
+    Returns AutomationConfig with deployment settings.
+    """
+    # Try automation.toml first (highest priority)
+    toml_config = read_automation_toml(source_dir)
+    if toml_config:
+        return toml_config
+
+    # Fall back to pipelines.conf
+    pipeline_conf = read_pipeline_conf(source_dir)
+    if pipeline_conf:
+        # Parse id and auth for Keycloak
+        automation_id = None
+        if pipeline_conf.has_option("deployment", "id"):
+            automation_id = pipeline_conf.get("deployment", "id")
+        auth = pipeline_conf.getboolean("deployment", "auth", fallback=False)
+
+        return AutomationConfig(
+            id=automation_id,
+            auth=auth,
+            image=pipeline_conf.get(
+                "deployment",
+                "pre",
+                fallback="bitswan/pipeline-runtime-environment:latest",
+            ),
+            expose=pipeline_conf.getboolean("deployment", "expose", fallback=False),
+            port=int(pipeline_conf.get("deployment", "port", fallback="8080")),
+            config_format="ini",
+            mount_path="/opt/pipelines",
+        )
+
+    # Return default config if no config file found
+    return AutomationConfig()
+
+
+async def wait_coroutine(*args, **kwargs) -> int:
+    coro = await asyncio.create_subprocess_exec(*args, **kwargs)
+    result = await coro.wait()
+    return result
+
+
+def _build_git_command(*command, cwd=None):
+    """
+    Build the command to execute, handling HOST_PATH case with nsenter if needed.
+    Returns (exec_command, proc_kwargs) where exec_command is the command list
+    and proc_kwargs are kwargs for subprocess execution.
+    """
+    host_path = os.environ.get("HOST_PATH")
+    host_home = os.environ.get("HOST_HOME")
+    host_user = os.environ.get("HOST_USER")
+
+    # If all host environment variables are set, use nsenter to run git command on host
+    if cwd and host_path and host_home and host_user:
+        formatted_command = " ".join(shlex.quote(arg) for arg in command)
+        host_command = (
+            f"PATH={host_path} su - {host_user} -c "
+            f'"cd {cwd} && PATH={host_path} HOME={host_home} {formatted_command}"'
+        )
+        exec_command = [
+            "nsenter",
+            "-t",
+            "1",
+            "-m",
+            "-u",
+            "-n",
+            "-i",
+            "sh",
+            "-c",
+            host_command,
+        ]
+        return exec_command, {}
+    else:
+        # Fallback to local git command
+        return list(command), {"cwd": cwd}
+
+
+async def call_git_command(*command, **kwargs) -> bool:
+    cwd = kwargs.get("cwd")
+    exec_command, proc_kwargs = _build_git_command(*command, cwd=cwd)
+    result = await wait_coroutine(*exec_command, **proc_kwargs)
+    return result == 0
+
+
+async def call_git_command_with_output(*command, **kwargs) -> tuple[str, str, int]:
+    """
+    Execute a git command and return (stdout, stderr, return_code).
+    Handles HOST_PATH case using nsenter if needed.
+    """
+    cwd = kwargs.get("cwd")
+    exec_command, proc_kwargs = _build_git_command(*command, cwd=cwd)
+
+    # Execute the command and capture output
+    proc = await asyncio.create_subprocess_exec(
+        *exec_command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        **proc_kwargs,
+    )
+    stdout, stderr = await proc.communicate()
+    return stdout.decode(), stderr.decode(), proc.returncode
+
+
+def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
+    bitswan_yaml_path = os.path.join(bitswan_dir, "bitswan.yaml")
+    try:
+        if os.path.exists(bitswan_yaml_path):
+            with open(bitswan_yaml_path, "r") as f:
+                bs_yaml: dict = yaml.safe_load(f)
+                return bs_yaml
+    except Exception:
+        return None
+
+
+def calculate_uptime(created_at: str) -> str:
+    created_at = datetime.fromisoformat(created_at)
+    uptime = datetime.now(timezone.utc) - created_at
+    return humanize.naturaldelta(uptime)
+
+
+def parse_pipeline_conf(content: str) -> ConfigParser | None:
+    """Parse pipelines.conf content from a string."""
+    if not content or not content.strip():
+        return None
+    try:
+        config = ConfigParser()
+        config.read_file(StringIO(content))
+        return config
+    except Exception:
+        return None
+
+
+def read_pipeline_conf(source_dir: str) -> ConfigParser | None:
+    """Read pipelines.conf from a directory (legacy method, uses parse_pipeline_conf internally)."""
+    conf_file_path = os.path.join(source_dir, "pipelines.conf")
+    if os.path.exists(conf_file_path):
+        with open(conf_file_path, "r") as f:
+            content = f.read()
+        return parse_pipeline_conf(content)
+    return None
+
+
+def test_read_pipeline_conf():
+    import tempfile
+
+    # create a tempdir with a pipelines.conf file
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        with open(os.path.join(tmpdirname, "pipelines.conf"), "w") as f:
+            f.write("[pipeline1]\n")
+            f.write("key1=value1\n")
+            f.write("key2=value2\n")
+
+        config = read_pipeline_conf(tmpdirname)
+        assert config.get("pipeline1", "key1") == "value1"
+
+
+def generate_workspace_url(
+    workspace_name: str,
+    automation_name: str,
+    context: str,
+    stage: str,
+    gitops_domain: str,
+    full: bool = False,
+) -> str:
+    from app.services.automation_service import make_hostname_label
+
+    label = make_hostname_label(workspace_name, automation_name, context, stage)
+    url = f"{label}.{gitops_domain}"
+    return f"https://{url}" if full else url
+
+
+def add_workspace_route_to_ingress(
+    automation_name: str, context: str, stage: str, port: str
+) -> bool:
+    from app.services.automation_service import make_hostname_label
+
+    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
+    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+    hostname = generate_workspace_url(
+        workspace_name, automation_name, context, stage, gitops_domain, False
+    )
+    svc_name = make_hostname_label(workspace_name, automation_name, context, stage)
+    upstream = f"{svc_name}:{port}"
+    return add_route_to_ingress(hostname, upstream, workspace_name)
+
+
+def _ingress_client_and_base() -> tuple:
+    """Return (httpx.Client, base_url) for the ingress daemon.
+
+    Prefers the Unix socket (BITSWAN_INGRESS_SOCKET) — access is controlled
+    by the docker-compose bind-mount, no token needed.
+    Falls back to BITSWAN_INGRESS_URL for environments without the socket.
+    """
+    socket_path = os.environ.get(
+        "BITSWAN_INGRESS_SOCKET", "/var/run/bitswan/automation-server.sock"
+    )
+    if os.path.exists(socket_path):
+        # Hostname in the URL is ignored by UDS transport; use a placeholder.
+        return httpx.Client(
+            transport=httpx.HTTPTransport(uds=socket_path), timeout=10
+        ), "http://daemon"
+    base_url = os.environ.get(
+        "BITSWAN_INGRESS_URL", "http://bitswan-automation-server-daemon:8080"
+    )
+    return httpx.Client(timeout=10), base_url
+
+
+def add_route_to_ingress(
+    hostname: str, upstream: str, workspace_name: str = ""
+) -> bool:
+    body = {
+        "hostname": hostname,
+        "upstream": upstream,
+        "workspace_name": workspace_name,
+    }
+    try:
+        client, base = _ingress_client_and_base()
+        with client:
+            response = client.post(f"{base}/ingress/add-route", json=body)
+        if response.status_code != 200:
+            logger.warning(
+                f"Ingress add-route failed for {hostname}: HTTP {response.status_code} — {response.text}"
+            )
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"Ingress add-route request failed for {hostname}: {e}")
+        return False
+
+
+def remove_route_from_ingress(
+    automation_name: str, context: str, stage: str, workspace_name: str
+) -> bool:
+    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
+    hostname = generate_workspace_url(
+        workspace_name, automation_name, context, stage, gitops_domain, False
+    )
+    try:
+        client, base = _ingress_client_and_base()
+        with client:
+            response = client.delete(f"{base}/ingress/remove-route/{hostname}")
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def calculate_checksum(file_path):
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+
+# Symlink targets we accept inside deploy-archive tarballs. Anything outside
+# this allowlist (or any relative path that data_filter rejects) is dropped.
+# Currently only React templates use absolute-target symlinks (committed
+# `package.json` and `node_modules` pointing at /deps/...).
+_ALLOWED_LINK_PREFIXES: tuple[str, ...] = ("/deps/",)
+
+
+def bitswan_extract_filter(
+    member: tarfile.TarInfo, dest_path: str
+) -> tarfile.TarInfo | None:
+    """Tar extraction filter for deploy archives.
+
+    Always runs ``tarfile.data_filter`` first so the member's *name* (and
+    every other piece of metadata) goes through PEP 706's traversal /
+    absolute-path / mode / hardlink checks. The only policy we widen is
+    on symlinks: ``data_filter`` rejects every absolute symlink target,
+    but we permit those whose target is under ``_ALLOWED_LINK_PREFIXES``.
+    """
+    try:
+        return tarfile.data_filter(member, dest_path)
+    except tarfile.AbsoluteLinkError:
+        # data_filter raises AbsoluteLinkError only after the member name
+        # has already been validated (no traversal, not absolute, stays
+        # inside dest). We override its decision strictly for symlinks
+        # whose target is in the allowlist; hardlinks are never widened.
+        if not member.issym():
+            return None
+        target = member.linkname or ""
+        normalized = os.path.normpath(target)
+        # Reject '..' segments even inside an allowlisted prefix — they
+        # let the link reach back out of the allowed subtree.
+        if any(part == ".." for part in normalized.split(os.sep)):
+            return None
+        if not any(
+            normalized == p.rstrip("/") or normalized.startswith(p)
+            for p in _ALLOWED_LINK_PREFIXES
+        ):
+            return None
+        # Strip ownership and special permissions; keep mode predictable.
+        member.uid = member.gid = 0
+        member.uname = member.gname = ""
+        member.mode = 0o755
+        return member
+
+
+def _calculate_git_blob_hash_from_content(content: bytes) -> str:
+    """
+    Calculate git blob hash from in-memory bytes. Used for symlinks, whose
+    "blob content" is the link target string.
+    """
+    header = f"blob {len(content)}\0".encode("utf-8")
+    return hashlib.sha1(header + content).hexdigest()
+
+
+def _calculate_git_blob_hash(file_path: str) -> str:
+    """
+    Calculate git blob hash for a file (SHA1 of "blob <size>\\0<content>").
+    """
+    with open(file_path, "rb") as f:
+        content = f.read()
+    return _calculate_git_blob_hash_from_content(content)
+
+
+def _calculate_git_tree_hash_recursive(
+    dir_paths: list[str], relative_path: str = "", logger=None
+) -> str:
+    """
+    Calculate git tree hash for a directory recursively.
+    Implements git's tree object format directly without spawning git processes.
+    Tree format: "tree <size>\\0<entries>" where each entry is "<mode> <name>\\0<20-byte-sha1>"
+
+    Accepts multiple `dir_paths` and overlays them in order — later paths win
+    on filename collisions. With a single path, this matches a plain
+    single-dir walk. Empty input (or all-missing dirs) yields git's empty-tree
+    SHA naturally from the tree-object encoding.
+    """
+    # name -> (source_path, is_directory, is_symlink); later dirs overwrite earlier
+    entry_map: dict[str, tuple[str, bool, bool]] = {}
+
+    for dir_path in dir_paths:
+        full_dir = os.path.join(dir_path, relative_path) if relative_path else dir_path
+        if not os.path.isdir(full_dir):
+            continue
+        for item in os.listdir(full_dir):
+            if item == ".git":
+                continue
+            item_path = os.path.join(full_dir, item)
+            # lstat-style check: symlinks must be detected before any os.path.is*
+            # call that follows them. Symlinks are hashed git-style (mode 120000)
+            # so the deploy archive's checksum reflects them faithfully — the
+            # client-side calculation does the same.
+            is_symlink = os.path.islink(item_path)
+            if not is_symlink and not os.access(item_path, os.R_OK):
+                if logger:
+                    entry_relative_path = (
+                        f"{relative_path}/{item}" if relative_path else item
+                    )
+                    logger.info(f"Skipping unreadable: {entry_relative_path}")
+                continue
+            if is_symlink:
+                entry_map[item] = (item_path, False, True)
+                continue
+            is_dir = os.path.isdir(item_path)
+            # Skip anything that's not a regular file or directory
+            if not is_dir and not os.path.isfile(item_path):
+                continue
+            entry_map[item] = (item_path, is_dir, False)
+
+    def _git_sort_key(name: str, is_dir: bool) -> bytes:
+        key = f"{name}/" if is_dir else name
+        return key.encode("utf-8")
+
+    # Git-style ordering: symlinks sort like regular files (no trailing slash).
+    items = sorted(entry_map.items(), key=lambda kv: _git_sort_key(kv[0], kv[1][1]))
+
+    entries = []
+    for name, (item_path, is_dir, is_symlink) in items:
+        entry_relative_path = f"{relative_path}/{name}" if relative_path else name
+
+        if is_symlink:
+            target = os.readlink(item_path)
+            blob_hash = _calculate_git_blob_hash_from_content(target.encode("utf-8"))
+            entries.append({"mode": "120000", "name": name, "hash": blob_hash})
+            if logger:
+                logger.info(
+                    f"CHECKSUM LINK: {entry_relative_path} -> 120000 {blob_hash} (target: {target})"
+                )
+        elif is_dir:
+            tree_hash = _calculate_git_tree_hash_recursive(
+                dir_paths, entry_relative_path, logger
+            )
+            entries.append({"mode": "040000", "name": name, "hash": tree_hash})
+            if logger:
+                logger.info(f"CHECKSUM DIR:  {entry_relative_path}/ -> {tree_hash}")
+        else:
+            blob_hash = _calculate_git_blob_hash(item_path)
+            # Match git's executable detection: any of u/g/o +x flips the
+            # mode to 100755. Mirrors the editor-side checksum so the
+            # deploy cache reacts to chmod +x/-x on files whose bits
+            # round-trip through the tarball intact.
+            file_mode = os.stat(item_path).st_mode
+            mode = "100755" if file_mode & 0o111 else "100644"
+            entries.append({"mode": mode, "name": name, "hash": blob_hash})
+            if logger:
+                logger.info(
+                    f"CHECKSUM FILE: {entry_relative_path} -> {mode} {blob_hash}"
+                )
+
+    # Build tree object: "tree <size>\\0<entries>"
+    entry_bytes = bytearray()
+    for entry in entries:
+        # Each entry: "<mode> <name>\\0<20-byte-sha1>"
+        hash_bytes = bytes.fromhex(entry["hash"])
+        entry_str = f"{entry['mode']} {entry['name']}\0"
+        entry_bytes.extend(entry_str.encode("utf-8"))
+        entry_bytes.extend(hash_bytes)
+
+    tree_content = bytes(entry_bytes)
+    tree_header = f"tree {len(tree_content)}\0".encode("utf-8")
+    result_hash = hashlib.sha1(tree_header + tree_content).hexdigest()
+    return result_hash
+
+
+async def calculate_git_tree_hash(dir_paths: list[str]) -> str:
+    """
+    Calculate git tree hash for one or more directories using git's tree object
+    format. Multiple directories are overlaid later-wins-on-collision (mirrors
+    the editor's pre-merged-tar checksum). Implementation calculates the hash
+    directly without spawning git processes, making it much more efficient.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info(f"=== SERVER CHECKSUM CALCULATION START for {len(dir_paths)} dirs ===")
+    for dp in dir_paths:
+        logger.info(f"  - {dp}")
+
+    # Run the recursive calculation in a thread pool to keep it async
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: _calculate_git_tree_hash_recursive(dir_paths, "", logger)
+    )
+
+    logger.info(f"=== SERVER CHECKSUM CALCULATION END: {result} ===")
+    return result
+
+
+async def update_git(
+    bitswan_home: str,
+    bitswan_home_host: str,
+    deployment_id: str,
+    action: str,
+    deployed_by: str | None = None,
+    message: str | None = None,
+):
+    """
+    Update git repository with changes to bitswan.yaml.
+
+    Uses async lock with minimal hold time - only during the actual git operations
+    that need to be atomic (add, commit). Pull and push are done with retries
+    to handle concurrent access gracefully.
+    """
+    host_path = os.environ.get("HOST_PATH")
+
+    if host_path:
+        bitswan_dir = bitswan_home_host
+    else:
+        bitswan_dir = bitswan_home
+
+    bitswan_yaml_path = os.path.join(bitswan_dir, "bitswan.yaml")
+
+    # Check if we have a remote (this is a read-only operation, no lock needed)
+    has_remote = await call_git_command(
+        "git", "remote", "show", "origin", cwd=bitswan_dir
+    )
+
+    # Resolve the current branch so we can push/pull explicitly even when no
+    # upstream is configured (e.g. on freshly-created worktree branches).
+    current_branch = None
+    if has_remote:
+        stdout, _, rc = await call_git_command_with_output(
+            "git", "rev-parse", "--abbrev-ref", "HEAD", cwd=bitswan_dir
+        )
+        if rc == 0:
+            current_branch = stdout.strip() or None
+
+    # Use async lock with shorter timeout - operations should be fast
+    async with GitLockContext(timeout=10.0):
+        # Pull latest changes if we have a remote and the remote tracking
+        # branch exists. Skip the pull for branches that only live locally
+        # (e.g. new worktree branches that have never been pushed).
+        if has_remote and current_branch:
+            await call_git_command(
+                "git", "fetch", "origin", current_branch, cwd=bitswan_dir
+            )
+            _, _, rc = await call_git_command_with_output(
+                "git",
+                "rev-parse",
+                "--verify",
+                f"refs/remotes/origin/{current_branch}",
+                cwd=bitswan_dir,
+            )
+            if rc == 0:
+                res = await call_git_command(
+                    "git",
+                    "pull",
+                    "--rebase=false",
+                    "origin",
+                    current_branch,
+                    cwd=bitswan_dir,
+                )
+                if not res:
+                    # Try to recover from merge conflicts by accepting ours for bitswan.yaml
+                    await call_git_command(
+                        "git", "checkout", "--ours", bitswan_yaml_path, cwd=bitswan_dir
+                    )
+                    await call_git_command(
+                        "git", "add", bitswan_yaml_path, cwd=bitswan_dir
+                    )
+
+        # Stage and commit changes
+        await call_git_command("git", "add", bitswan_yaml_path, cwd=bitswan_dir)
+
+        # Also stage docker-compose.yaml if it exists (generated by AutomationService)
+        # Check existence using the container path (bitswan_home), but add using bitswan_dir
+        # which may be the host path when HOST_PATH is set.
+        dc_container_path = os.path.join(bitswan_home, "docker-compose.yaml")
+        if os.path.exists(dc_container_path):
+            dc_git_path = os.path.join(bitswan_dir, "docker-compose.yaml")
+            await call_git_command("git", "add", dc_git_path, cwd=bitswan_dir)
+
+        author = (
+            f"{deployed_by} <{deployed_by}>"
+            if deployed_by
+            else "gitops <info@bitswan.space>"
+        )
+        await call_git_command(
+            "git",
+            "commit",
+            "--author",
+            author,
+            "-m",
+            message or f"{action} deployment {deployment_id}",
+            cwd=bitswan_dir,
+        )
+
+        subprocess.run(["chown", "-R", "1000:1000", "/gitops/gitops"], check=False)
+
+        # Push changes if we have a remote. Use -u with an explicit branch so
+        # the first push from a new branch sets its upstream instead of failing
+        # with "no upstream branch".
+        if has_remote:
+            if current_branch:
+                res = await call_git_command(
+                    "git",
+                    "push",
+                    "-u",
+                    "origin",
+                    current_branch,
+                    cwd=bitswan_dir,
+                )
+            else:
+                res = await call_git_command("git", "push", cwd=bitswan_dir)
+            if not res:
+                raise Exception("Error pushing to git")
+
+
+async def docker_compose_up(
+    bitswan_dir: str,
+    docker_compose: str,
+    container_name: str | None = None,
+    extra_services: list[str] | None = None,
+) -> None:
+    async def setup_asyncio_process(cmd: list[Any]) -> dict[str, Any]:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=bitswan_dir,
+        )
+
+        stdout, stderr = await proc.communicate(input=docker_compose.encode())
+
+        res = {
+            "cmd": cmd,
+            "stdout": stdout.decode("utf-8"),
+            "stderr": stderr.decode("utf-8"),
+            "return_code": proc.returncode,
+        }
+        return res
+
+    docker_compose_cmd = [
+        "docker",
+        "compose",
+        "-f",
+        "/dev/stdin",
+        "up",
+        "-d",
+        "--remove-orphans",
+    ]
+    if container_name:
+        docker_compose_cmd.append(container_name)
+    if extra_services:
+        docker_compose_cmd.extend(extra_services)
+
+    up_result = await setup_asyncio_process(docker_compose_cmd)
+
+    return {
+        "up_result": up_result,
+    }
+
+
+async def save_image(
+    build_context_path: str,
+    build_context_hash: str,
+    image_tag: str,
+    copy_context: bool = True,
+    build_status: Optional[str] = None,
+    log_file_path: Optional[str] = None,
+):
+    """
+    Save and commit the build context (extracted zip contents) to git.
+    Uses the build_context_hash as the directory name for deduplication.
+
+    Uses async lock with minimal hold time for better concurrency.
+    """
+
+    bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
+    bitswan_dir = os.path.join(bs_home, "gitops")
+
+    images_base_dir = os.path.join(bitswan_dir, "images")
+    image_dir = os.path.join(images_base_dir, build_context_hash)
+    source_dir = os.path.join(image_dir, "src")
+
+    # File system operations don't need the git lock
+    if not os.path.exists(images_base_dir):
+        os.makedirs(images_base_dir, exist_ok=True)
+        subprocess.run(["chown", "-R", "1000:1000", images_base_dir], check=False)
+
+    # Create the specific image directory
+    os.makedirs(image_dir, exist_ok=True)
+    subprocess.run(["chown", "-R", "1000:1000", image_dir], check=False)
+
+    # Copy the build context to the gitops directory if requested
+    if copy_context:
+        source_abs = os.path.abspath(build_context_path)
+        destination_abs = os.path.abspath(source_dir)
+        if source_abs != destination_abs:
+            if os.path.exists(source_dir):
+                shutil.rmtree(source_dir)
+            shutil.copytree(build_context_path, source_dir)
+
+    log_relative_path = None
+    if log_file_path and os.path.exists(log_file_path):
+        try:
+            log_relative_path = os.path.relpath(log_file_path, bitswan_dir)
+        except ValueError:
+            log_relative_path = None
+
+    # Check if we have a remote (read-only, no lock needed)
+    has_remote = await call_git_command(
+        "git", "remote", "show", "origin", cwd=bitswan_dir
+    )
+
+    # Use async lock for the actual git operations
+    async with GitLockContext(timeout=10.0):
+        if has_remote:
+            res = await call_git_command(
+                "git", "pull", "--rebase=false", cwd=bitswan_dir
+            )
+            if not res:
+                # Non-fatal - we'll try to push anyway
+                pass
+
+        add_result = await call_git_command(
+            "git", "add", os.path.join("images", build_context_hash), cwd=bitswan_dir
+        )
+        if not add_result:
+            raise Exception("Error adding files to git")
+
+        if log_relative_path:
+            log_add_result = await call_git_command(
+                "git",
+                "add",
+                log_relative_path,
+                cwd=bitswan_dir,
+            )
+            if not log_add_result:
+                raise Exception("Error adding log file to git")
+
+        commit_message = f"Add build context {build_context_hash}"
+        if image_tag:
+            commit_message += f" for image {image_tag}"
+        if build_status:
+            commit_message += f" ({build_status})"
+        await call_git_command(
+            "git",
+            "commit",
+            "-m",
+            commit_message,
+            cwd=bitswan_dir,
+        )
+
+        subprocess.run(["chown", "-R", "1000:1000", "/gitops/gitops"], check=False)
+
+        if has_remote:
+            res = await call_git_command("git", "push", cwd=bitswan_dir)
+            if not res:
+                raise Exception("Error pushing to git")
+
+
+async def merge_bitswan_yaml(src_path: str, dst_path: str):
+    """
+    Merge bitswan.yaml files by combining deployments from both files.
+    """
+    try:
+        # Load existing bitswan.yaml if it exists
+        existing_yaml = {}
+        if os.path.exists(dst_path):
+            with open(dst_path, "r") as f:
+                existing_yaml = yaml.safe_load(f) or {}
+
+        # Load new bitswan.yaml from worktree
+        new_yaml = {}
+        if os.path.exists(src_path):
+            with open(src_path, "r") as f:
+                new_yaml = yaml.safe_load(f) or {}
+
+        # Merge deployments
+        merged_yaml = existing_yaml.copy()
+        if "deployments" not in merged_yaml:
+            merged_yaml["deployments"] = {}
+
+        if "deployments" in new_yaml:
+            merged_yaml["deployments"].update(new_yaml["deployments"])
+
+        # Write merged yaml
+        with open(dst_path, "w") as f:
+            yaml.dump(merged_yaml, f, default_flow_style=False, sort_keys=False)
+
+    except Exception:
+        shutil.copy2(src_path, dst_path)
+
+
+async def merge_worktree(worktree_path: str, repo: str):
+    for item in os.listdir(worktree_path):
+        if item == ".git":
+            continue
+
+        src_path = os.path.join(worktree_path, item)
+        dst_path = os.path.join(repo, item)
+
+        if item == "bitswan.yaml":
+            await merge_bitswan_yaml(src_path, dst_path)
+            continue
+
+        if os.path.exists(dst_path):
+            if os.path.isdir(dst_path):
+                shutil.rmtree(dst_path)
+            else:
+                os.remove(dst_path)
+
+        if os.path.isdir(src_path):
+            shutil.copytree(src_path, dst_path)
+        else:
+            shutil.copy2(src_path, dst_path)
+
+
+async def copy_worktree(branch_name: str = None):
+    """
+    Create a temp worktree for the target branch, copy files to main repo, then clean up.
+    This works regardless of whether the current directory is already a worktree.
+
+    Uses async lock with optimized hold time - file copying is done outside the lock.
+    """
+    bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
+    repo = os.path.join(bs_home, "gitops")
+
+    temp_dir = tempfile.mkdtemp(prefix=f"gitops_worktree_{branch_name}_")
+    worktree_path = os.path.join(temp_dir, "worktree")
+
+    try:
+        # Use async lock for git operations
+        async with GitLockContext(timeout=15.0):
+            if not await call_git_command(
+                "git", "fetch", "origin", "--prune", "--tags", cwd=repo
+            ):
+                raise HTTPException(
+                    status_code=500, detail="Failed to fetch from origin"
+                )
+            if not await call_git_command(
+                "git", "rev-parse", f"origin/{branch_name}", cwd=repo
+            ):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Remote branch origin/{branch_name} not found",
+                )
+
+            if not await call_git_command(
+                "git",
+                "worktree",
+                "add",
+                worktree_path,
+                f"origin/{branch_name}",
+                cwd=repo,
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Failed to create worktree for origin/{branch_name}",
+                )
+            if not await call_git_command("git", "reset", "--hard", "HEAD", cwd=repo):
+                raise HTTPException(
+                    status_code=409, detail="Failed to reset working tree"
+                )
+
+        # File merge operations don't need the git lock
+        await merge_worktree(worktree_path, repo)
+
+        # Re-acquire lock for staging and committing
+        async with GitLockContext(timeout=10.0):
+            if not await call_git_command("git", "add", "-A", cwd=repo):
+                raise HTTPException(status_code=409, detail="Failed to stage files")
+
+            msg = f"Switch to content from origin/{branch_name} using worktree"
+            await call_git_command("git", "commit", "-m", msg, cwd=repo)
+
+            has_remote = await call_git_command(
+                "git", "remote", "show", "origin", cwd=repo
+            )
+            if has_remote:
+                if not await call_git_command(
+                    "git", "push", "-u", "origin", "HEAD", cwd=repo
+                ):
+                    print(
+                        f"Warning: Push failed for branch {branch_name}, continuing anyway"
+                    )
+
+            # Remove worktree while holding lock to prevent conflicts
+            try:
+                if os.path.exists(worktree_path):
+                    await call_git_command(
+                        "git", "worktree", "remove", worktree_path, cwd=repo
+                    )
+            except Exception as e:
+                print(f"Failed to remove worktree: {e}")
+
+    finally:
+        try:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Failed to remove temp directory: {e}")

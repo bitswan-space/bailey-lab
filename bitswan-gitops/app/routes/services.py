@@ -1,0 +1,297 @@
+"""
+FastAPI routes for infrastructure service management (CouchDB, Kafka).
+
+Mirrors the automation server's HTTP API for service management,
+allowing the daemon to proxy requests here.
+"""
+
+import os
+
+from fastapi import APIRouter, HTTPException
+
+from app.models import (
+    ServiceActionRequest,
+    ServiceBackupRequest,
+    ServiceClearRequest,
+    ServiceDisableRequest,
+    ServiceEnableRequest,
+    ServiceRestoreRequest,
+)
+from app.dependencies import get_automation_service
+from app.services.infra_service import get_service
+
+router = APIRouter(prefix="/services", tags=["services"])
+
+SUPPORTED_SERVICES = ("couchdb", "kafka", "postgres", "minio")
+
+
+def _get_workspace_name() -> str:
+    return os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+
+
+def _validate_service_type(service_type: str) -> None:
+    if service_type not in SUPPORTED_SERVICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown service type: {service_type}. Supported: {', '.join(SUPPORTED_SERVICES)}",
+        )
+
+
+@router.post("/{service_type}/enable")
+async def enable_service(service_type: str, request: ServiceEnableRequest):
+    """Enable an infrastructure service."""
+    _validate_service_type(service_type)
+    workspace = _get_workspace_name()
+
+    try:
+        svc = get_service(
+            service_type,
+            workspace,
+            stage=request.stage,
+            image=request.image,
+            kafka_image=request.kafka_image,
+            ui_image=request.ui_image,
+            postgres_image=request.postgres_image,
+            pgadmin_image=request.pgadmin_image,
+            minio_image=request.minio_image,
+        )
+        result = await svc.enable()
+
+        # Trigger a full deploy so the new service container is created and started
+        try:
+            automation_service = get_automation_service()
+            await automation_service.deploy_automations()
+        except Exception as e:
+            # Enable succeeded but deploy failed — service is enabled but not running
+            result["warning"] = f"Service enabled but failed to start container: {e}"
+
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{service_type}/disable")
+async def disable_service(service_type: str, request: ServiceDisableRequest):
+    """Disable an infrastructure service."""
+    _validate_service_type(service_type)
+    workspace = _get_workspace_name()
+
+    try:
+        svc = get_service(service_type, workspace, stage=request.stage)
+        result = await svc.disable()
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{service_type}/status")
+async def get_service_status(
+    service_type: str,
+    stage: str = "",
+    show_passwords: bool = False,
+):
+    """Get the status of an infrastructure service."""
+    _validate_service_type(service_type)
+    workspace = _get_workspace_name()
+
+    try:
+        svc = get_service(service_type, workspace, stage=stage)
+        result = await svc.status(show_passwords=show_passwords)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{service_type}/start")
+async def start_service(service_type: str, request: ServiceActionRequest):
+    """Start an infrastructure service."""
+    _validate_service_type(service_type)
+    workspace = _get_workspace_name()
+
+    try:
+        svc = get_service(service_type, workspace, stage=request.stage)
+        result = await svc.start()
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{service_type}/stop")
+async def stop_service(service_type: str, request: ServiceActionRequest):
+    """Stop an infrastructure service."""
+    _validate_service_type(service_type)
+    workspace = _get_workspace_name()
+
+    try:
+        svc = get_service(service_type, workspace, stage=request.stage)
+        result = await svc.stop()
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{service_type}/update")
+async def update_service(service_type: str, request: ServiceActionRequest):
+    """Update an infrastructure service (restart to pick up new compose config)."""
+    _validate_service_type(service_type)
+    workspace = _get_workspace_name()
+
+    try:
+        svc = get_service(service_type, workspace, stage=request.stage)
+        if not svc.is_enabled():
+            raise ValueError(f"{svc.display_name} is not enabled")
+        await svc.stop()
+        await svc.start()
+        return {"status": "updated", "service": service_type}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/couchdb/initialize")
+async def initialize_couchdb(request: ServiceActionRequest):
+    """Create CouchDB system databases (_users, _replicator, _global_changes).
+
+    Call this once after a fresh CouchDB container starts for the first time.
+    Safe to call multiple times — skips databases that already exist.
+    """
+    workspace = _get_workspace_name()
+
+    try:
+        from app.services.couchdb_service import CouchDBService
+
+        svc = CouchDBService(workspace, stage=request.stage)
+        result = await svc.initialize()
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/couchdb/backup")
+async def backup_couchdb(request: ServiceBackupRequest):
+    """Backup CouchDB databases to a tarball."""
+    workspace = _get_workspace_name()
+
+    try:
+        from app.services.couchdb_service import CouchDBService
+
+        svc = CouchDBService(workspace, stage=request.stage)
+        result = await svc.backup(backup_path=request.backup_path)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/couchdb/restore")
+async def restore_couchdb(request: ServiceRestoreRequest):
+    """Restore CouchDB databases from a backup."""
+    workspace = _get_workspace_name()
+
+    try:
+        from app.services.couchdb_service import CouchDBService
+
+        svc = CouchDBService(workspace, stage=request.stage)
+        result = await svc.restore(backup_path=request.backup_path, force=request.force)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/postgres/backup")
+async def backup_postgres(request: ServiceBackupRequest):
+    """Backup PostgreSQL databases to a tarball."""
+    workspace = _get_workspace_name()
+
+    try:
+        from app.services.postgres_service import PostgresService
+
+        svc = PostgresService(workspace, stage=request.stage)
+        result = await svc.backup(backup_path=request.backup_path)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/postgres/restore")
+async def restore_postgres(request: ServiceRestoreRequest):
+    """Restore PostgreSQL databases from a backup."""
+    workspace = _get_workspace_name()
+
+    try:
+        from app.services.postgres_service import PostgresService
+
+        svc = PostgresService(workspace, stage=request.stage)
+        result = await svc.restore(backup_path=request.backup_path, force=request.force)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/postgres/clear")
+async def clear_postgres(request: ServiceClearRequest):
+    """Delete all data from PostgreSQL databases."""
+    workspace = _get_workspace_name()
+
+    try:
+        from app.services.postgres_service import PostgresService
+
+        svc = PostgresService(workspace, stage=request.stage)
+        result = await svc.clear()
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/minio/backup")
+async def backup_minio(request: ServiceBackupRequest):
+    """Backup MinIO data to a tarball."""
+    workspace = _get_workspace_name()
+
+    try:
+        from app.services.minio_service import MinioService
+
+        svc = MinioService(workspace, stage=request.stage)
+        result = await svc.backup(backup_path=request.backup_path)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/minio/restore")
+async def restore_minio(request: ServiceRestoreRequest):
+    """Restore MinIO data from a backup."""
+    workspace = _get_workspace_name()
+
+    try:
+        from app.services.minio_service import MinioService
+
+        svc = MinioService(workspace, stage=request.stage)
+        result = await svc.restore(backup_path=request.backup_path, force=request.force)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))

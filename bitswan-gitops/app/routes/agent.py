@@ -1,0 +1,1130 @@
+import asyncio
+import logging
+import os
+import re
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Security
+from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
+
+from app.async_docker import get_async_docker_client, DockerError
+from app.dependencies import get_automation_service
+from app.deploy_runner import spawn_set_deploy
+from app.services.automation_service import (
+    AutomationService,
+    make_hostname_label,
+    scan_workspace_sources,
+)
+from app.utils import (
+    call_git_command,
+    call_git_command_with_output,
+    GitLockContext,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/agent", tags=["agent"])
+
+# Strong references to background deploy tasks — prevents GC before completion
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_bg(coro) -> asyncio.Task:
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
+
+
+security = HTTPBearer()
+
+# Pattern for valid worktree live-dev deployment IDs
+# Format: {name}-wt-{worktree}-{bp}-live-dev
+LIVE_DEV_PATTERN = re.compile(r"^.+-wt-.+-live-dev$")
+
+# Cached agent secret — resolved lazily from the coding agent container
+_cached_agent_secret: str | None = None
+
+
+def _resolve_agent_secret() -> str:
+    """Get the agent secret, discovering it from the running coding agent container if needed."""
+    global _cached_agent_secret
+
+    # 1. Already cached
+    if _cached_agent_secret:
+        return _cached_agent_secret
+
+    # 2. Set in our environment (e.g. by ensure_coding_agent)
+    from_env = os.environ.get("BITSWAN_GITOPS_AGENT_SECRET", "")
+    if from_env:
+        _cached_agent_secret = from_env
+        return from_env
+
+    # 3. Discover from the running coding agent container
+    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace")
+    agent_container_name = f"{workspace_name}-coding-agent"
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{range .Config.Env}}{{println .}}{{end}}",
+                agent_container_name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith("BITSWAN_GITOPS_AGENT_SECRET="):
+                    secret = line.split("=", 1)[1]
+                    if secret:
+                        _cached_agent_secret = secret
+                        os.environ["BITSWAN_GITOPS_AGENT_SECRET"] = secret
+                        logger.info(
+                            "Discovered agent secret from coding agent container"
+                        )
+                        return secret
+    except Exception as e:
+        logger.debug("Failed to inspect coding agent container: %s", e)
+
+    return ""
+
+
+def verify_agent_token(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+):
+    agent_secret = _resolve_agent_secret()
+    if not agent_secret or credentials.credentials != agent_secret:
+        raise HTTPException(status_code=401, detail="Invalid agent token")
+
+
+def _validate_deployment_id(deployment_id: str):
+    """Validate that deployment_id matches the *-wt-*-live-dev pattern."""
+    if not LIVE_DEV_PATTERN.match(deployment_id):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Deployment '{deployment_id}' is not a valid live-dev worktree deployment",
+        )
+
+
+def _get_workspace_dir() -> str:
+    """Return the workspace repository directory (the main git repo)."""
+    return os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
+
+
+def _get_worktrees_base() -> str:
+    return os.path.join(_get_workspace_dir(), "worktrees")
+
+
+# Worktree name validation. The route param can never contain a path
+# separator (FastAPI splits on `/`), but values like `..` or `..foo` would
+# still escape the worktrees base when joined. The regex matches the one
+# in app/routes/worktrees.py — keep them in sync.
+_WORKTREE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
+
+
+def _validate_worktree_name(name: str) -> None:
+    if not name or not _WORKTREE_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid worktree name: must be alphanumeric with hyphens "
+                "only and must not start with a hyphen."
+            ),
+        )
+
+
+def _resolve_worktree_path(name: str) -> str:
+    """Validate `name` and return the realpath to the worktree directory.
+
+    Belt-and-suspenders: even though the regex blocks `..` and `/`,
+    realpath containment ensures a malicious symlink inside the worktrees
+    base can't redirect git operations elsewhere. Mirrors the helper of
+    the same name in app/routes/worktrees.py.
+    """
+    _validate_worktree_name(name)
+    base = os.path.realpath(_get_worktrees_base())
+    candidate = os.path.realpath(os.path.join(base, name))
+    if candidate != base and not candidate.startswith(base + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid worktree name")
+    return candidate
+
+
+# --- Deployment endpoints ---
+
+
+def _scan_automations(worktree: str | None = None) -> list[dict]:
+    """Scan the filesystem for automation sources (automation.toml).
+
+    Thin wrapper over `scan_workspace_sources` that keeps the existing
+    `_get_workspace_dir()` resolution behaviour.
+    """
+    return scan_workspace_sources(_get_workspace_dir(), worktree)
+
+
+@router.get("/deployments")
+async def list_agent_deployments(
+    worktree: str = Query(None),
+    _token=Depends(verify_agent_token),
+):
+    """List deployments for a worktree, including those not yet started."""
+    if not worktree:
+        raise HTTPException(status_code=400, detail="worktree parameter is required")
+
+    # Scan filesystem for all automation sources in this worktree
+    sources = _scan_automations(worktree)
+
+    # Query running containers to get their state
+    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "")
+    docker_client = get_async_docker_client()
+    running_states: dict[str, str] = {}
+
+    try:
+        containers = await docker_client.list_containers(
+            all=True,
+            filters={"label": [f"gitops.workspace={workspace_name}"]},
+        )
+        for container in containers:
+            labels = container.get("Labels", {})
+            dep_id = labels.get("gitops.deployment_id", "")
+            if f"-wt-{worktree}" in dep_id and dep_id.endswith("-live-dev"):
+                running_states[dep_id] = container.get("State", "unknown")
+    except DockerError:
+        pass  # If Docker query fails, we still show sources as "not deployed"
+
+    def _make_url(src):
+        if gitops_domain:
+            label = make_hostname_label(
+                workspace_name, src["automation_name"], src["context"], src["stage"]
+            )
+            return f"https://{label}.{gitops_domain}"
+        return ""
+
+    # Merge: filesystem sources + running state
+    result = []
+    for src in sources:
+        dep_id = src["deployment_id"]
+        state = running_states.pop(dep_id, "not deployed")
+        result.append(
+            {
+                "deployment_id": dep_id,
+                "state": state,
+                "automation_name": src["automation_name"],
+                "context": src["context"],
+                "stage": src["stage"],
+                "relative_path": src["relative_path"],
+                "worktree": src["worktree"],
+                "url": _make_url(src),
+            }
+        )
+
+    # Include any running containers not found on filesystem (orphaned)
+    for dep_id, state in running_states.items():
+        orphan = {"automation_name": dep_id, "context": "", "stage": "live-dev"}
+        result.append(
+            {
+                "deployment_id": dep_id,
+                "state": state,
+                "automation_name": dep_id,
+                "context": "",
+                "stage": "live-dev",
+                "relative_path": None,
+                "worktree": worktree,
+                "url": _make_url(orphan),
+            }
+        )
+
+    return result
+
+
+class StartDeploymentRequest(BaseModel):
+    relative_path: str
+    worktree: str | None = None
+
+
+@router.post("/deployments/start")
+async def start_agent_deployment(
+    body: StartDeploymentRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+    _token=Depends(verify_agent_token),
+):
+    """Start a live-dev deployment for an automation."""
+    sources = _scan_automations(body.worktree)
+    source = next(
+        (s for s in sources if s["relative_path"] == body.relative_path), None
+    )
+    if not source:
+        ctx = f" in worktree '{body.worktree}'" if body.worktree else ""
+        raise HTTPException(
+            status_code=404,
+            detail=f"No automation source at '{body.relative_path}'{ctx}",
+        )
+
+    deployment_id = source["deployment_id"]
+
+    # Guard: reject if already deploying
+    from app.deploy_manager import deploy_manager
+
+    if deploy_manager.is_deploying(deployment_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Deployment {deployment_id} is already in progress",
+        )
+
+    task = await deploy_manager.create_task(deployment_id)
+    if task is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Deployment {deployment_id} is already in progress",
+        )
+
+    # Only send minimal info — the gitops service reads automation.toml
+    # directly from the workspace filesystem for live-dev config
+    deploy_kwargs = dict(
+        deployment_id=deployment_id,
+        checksum="live-dev",
+        stage="live-dev",
+        relative_path=source["relative_path"],
+        automation_name=source["automation_name"],
+        context=source["context"],
+        deployed_by="agent@bitswan.local",
+    )
+
+    async def _run_deploy():
+        try:
+            await deploy_manager.update_task(
+                task.task_id, message="Starting live-dev deployment..."
+            )
+            await automation_service.deploy_automation(**deploy_kwargs)
+            await deploy_manager.update_task(
+                task.task_id, message="Live-dev deployment completed"
+            )
+        except Exception as exc:
+            logger.exception(
+                "Live-dev deploy failed for %s (task %s)",
+                deployment_id,
+                task.task_id,
+            )
+            await deploy_manager.update_task(
+                task.task_id, error=str(exc), message="Deployment failed"
+            )
+
+    _spawn_bg(_run_deploy())
+
+    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "")
+    url = ""
+    if gitops_domain:
+        label = make_hostname_label(
+            workspace_name,
+            source["automation_name"],
+            source["context"],
+            source["stage"],
+        )
+        url = f"https://{label}.{gitops_domain}"
+
+    return {
+        "task_id": task.task_id,
+        "deployment_id": deployment_id,
+        "url": url,
+        "status": "pending",
+    }
+
+
+@router.get("/deployments/{deployment_id}/inspect")
+async def inspect_deployment(
+    deployment_id: str,
+    _token=Depends(verify_agent_token),
+):
+    """Full inspect of a deployment container."""
+    _validate_deployment_id(deployment_id)
+
+    docker_client = get_async_docker_client()
+    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+
+    try:
+        containers = await docker_client.list_containers(
+            all=True,
+            filters={
+                "label": [
+                    f"gitops.deployment_id={deployment_id}",
+                    f"gitops.workspace={workspace_name}",
+                ]
+            },
+        )
+    except DockerError as e:
+        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
+
+    if not containers:
+        raise HTTPException(
+            status_code=404, detail=f"No container found for '{deployment_id}'"
+        )
+
+    container_id = containers[0].get("Id")
+    try:
+        info = await docker_client.get_container(container_id)
+    except DockerError as e:
+        raise HTTPException(status_code=500, detail=f"Docker inspect error: {str(e)}")
+
+    state = info.get("State", {})
+    config = info.get("Config", {})
+    host_config = info.get("HostConfig", {})
+    network_settings = info.get("NetworkSettings", {})
+
+    # Extract useful fields
+    networks = {}
+    for net_name, net_info in network_settings.get("Networks", {}).items():
+        networks[net_name] = {
+            "ip": net_info.get("IPAddress", ""),
+            "aliases": net_info.get("Aliases", []),
+        }
+
+    mounts = []
+    for m in info.get("Mounts", []):
+        mounts.append(
+            {
+                "source": m.get("Source", ""),
+                "destination": m.get("Destination", ""),
+                "mode": m.get("Mode", ""),
+                "rw": m.get("RW", True),
+            }
+        )
+
+    ports = {}
+    for port, bindings in (network_settings.get("Ports") or {}).items():
+        if bindings:
+            ports[port] = [
+                {"host_ip": b.get("HostIp", ""), "host_port": b.get("HostPort", "")}
+                for b in bindings
+            ]
+        else:
+            ports[port] = None
+
+    return {
+        "deployment_id": deployment_id,
+        "container_id": container_id[:12],
+        "container_name": info.get("Name", "").lstrip("/"),
+        "image": config.get("Image", ""),
+        "state": {
+            "status": state.get("Status", ""),
+            "running": state.get("Running", False),
+            "started_at": state.get("StartedAt", ""),
+            "finished_at": state.get("FinishedAt", ""),
+            "exit_code": state.get("ExitCode", 0),
+            "restarting": state.get("Restarting", False),
+        },
+        "networks": networks,
+        "ports": ports,
+        "mounts": mounts,
+        "labels": config.get("Labels", {}),
+        "restart_policy": host_config.get("RestartPolicy", {}).get("Name", ""),
+    }
+
+
+@router.get("/deployments/{deployment_id}/env")
+async def get_deployment_env(
+    deployment_id: str,
+    _token=Depends(verify_agent_token),
+):
+    """Get environment variables for a deployment container (from docker inspect)."""
+    _validate_deployment_id(deployment_id)
+
+    docker_client = get_async_docker_client()
+    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+
+    try:
+        containers = await docker_client.list_containers(
+            all=True,
+            filters={
+                "label": [
+                    f"gitops.deployment_id={deployment_id}",
+                    f"gitops.workspace={workspace_name}",
+                ]
+            },
+        )
+    except DockerError as e:
+        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
+
+    if not containers:
+        raise HTTPException(
+            status_code=404, detail=f"No container found for '{deployment_id}'"
+        )
+
+    container_id = containers[0].get("Id")
+    try:
+        info = await docker_client.get_container(container_id)
+        env_list = info.get("Config", {}).get("Env", [])
+    except DockerError as e:
+        raise HTTPException(status_code=500, detail=f"Docker inspect error: {str(e)}")
+
+    # Parse "KEY=VALUE" into dict
+    env_vars = {}
+    for entry in env_list:
+        key, _, value = entry.partition("=")
+        env_vars[key] = value
+
+    return {"deployment_id": deployment_id, "env": env_vars}
+
+
+@router.get("/deployments/{deployment_id}/logs")
+async def stream_deployment_logs(
+    deployment_id: str,
+    lines: int = Query(200, ge=1, le=10000),
+    since: int = Query(0, ge=0),
+    automation_service: AutomationService = Depends(get_automation_service),
+    _token=Depends(verify_agent_token),
+):
+    _validate_deployment_id(deployment_id)
+    return StreamingResponse(
+        automation_service.stream_automation_logs(
+            deployment_id, lines=lines, since=since
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/deployments/{deployment_id}/restart")
+async def restart_deployment(
+    deployment_id: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+    _token=Depends(verify_agent_token),
+):
+    _validate_deployment_id(deployment_id)
+    return await automation_service.restart_automation(deployment_id)
+
+
+@router.post("/deployments/{deployment_id}/build-and-restart")
+async def build_and_restart_deployment(
+    deployment_id: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+    _token=Depends(verify_agent_token),
+):
+    """Build image and restart deployment. Streams ndjson progress."""
+    _validate_deployment_id(deployment_id)
+
+    from app.deploy_manager import deploy_manager
+
+    if deploy_manager.is_deploying(deployment_id):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Deployment {deployment_id} is already in progress",
+        )
+
+    import json as _json
+    import docker as _docker
+
+    async def _stream():
+        from app.services.automation_service import read_bitswan_yaml
+
+        def _ndjson(**kwargs):
+            return _json.dumps(kwargs) + "\n"
+
+        yield _ndjson(status="Looking up deployment...")
+        bs_yaml = read_bitswan_yaml(automation_service.gitops_dir)
+        dep_conf = (bs_yaml or {}).get("deployments", {}).get(deployment_id, {})
+        relative_path = dep_conf.get("relative_path", "")
+
+        # Build image if image/ directory exists
+        if relative_path:
+            source_dir = os.path.join(
+                automation_service.workspace_repo_dir, relative_path
+            )
+            image_dir = os.path.join(source_dir, "image")
+            if os.path.isdir(image_dir) and os.path.isfile(
+                os.path.join(image_dir, "Dockerfile")
+            ):
+                from app.utils import calculate_git_tree_hash
+                import toml as _toml
+
+                # Compute content hash and build disambiguated tag
+                # matching the editor scheme: internal/{ws}-{bp}-{name}:sha{hash}
+                checksum = await calculate_git_tree_hash([image_dir])
+                auto_name = os.path.basename(source_dir)
+                ws_name = automation_service.workspace_name or "workspace"
+                # Extract BP name from relative_path
+                # e.g. "worktrees/test2/foobar/backend" → bp = "foobar"
+                # e.g. "foobar/backend" → bp = "foobar"
+                rel_parts = relative_path.replace("\\", "/").split("/")
+                if len(rel_parts) >= 2 and rel_parts[0] == "worktrees":
+                    bp_name = rel_parts[2] if len(rel_parts) >= 4 else ""
+                else:
+                    bp_name = rel_parts[0] if len(rel_parts) >= 2 else ""
+                bp_sanitized = (
+                    re.sub(r"[^a-z0-9-]", "-", bp_name.lower()).strip("-")
+                    if bp_name
+                    else ""
+                )
+                full_image_name = (
+                    f"{ws_name}-{bp_sanitized}-{auto_name}"
+                    if bp_sanitized
+                    else f"{ws_name}-{auto_name}"
+                )
+                full_tag = f"internal/{full_image_name}:sha{checksum}"
+
+                yield _ndjson(status=f"Building image {full_tag}...")
+
+                # Build using Docker API directly — streams ndjson
+                client = _docker.from_env()
+                try:
+
+                    def _build():
+                        return client.api.build(
+                            path=image_dir,
+                            tag=full_tag,
+                            rm=True,
+                            decode=True,
+                        )
+
+                    build_iter = await asyncio.to_thread(_build)
+                    build_error = None
+                    for line in build_iter:
+                        if "stream" in line:
+                            line["stream"] = re.sub(
+                                r"\x1b\[[0-9;]*[a-zA-Z]", "", line["stream"]
+                            )
+                        yield _json.dumps(line) + "\n"
+                        if "error" in line:
+                            build_error = line["error"]
+                finally:
+                    client.close()
+
+                if build_error:
+                    return
+
+                # Update automation.toml with the new image tag
+                automation_toml_path = os.path.join(source_dir, "automation.toml")
+                if os.path.isfile(automation_toml_path):
+                    with open(automation_toml_path, "r") as f:
+                        config = _toml.load(f)
+                    config.setdefault("deployment", {})["image"] = full_tag
+                    with open(automation_toml_path, "w") as f:
+                        _toml.dump(config, f)
+                    yield _ndjson(status=f"Updated automation.toml: image = {full_tag}")
+
+                yield _ndjson(status=f"Image built: {full_tag}")
+
+        yield _ndjson(status="Deploying...")
+        try:
+            await automation_service.deploy_automation(
+                deployment_id=deployment_id, stage="live-dev"
+            )
+            yield _ndjson(status="Deploy completed successfully")
+        except Exception as exc:
+            yield _ndjson(error=str(exc))
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson")
+
+
+@router.get("/images/builds/{checksum}/stream")
+async def stream_agent_build_logs(
+    checksum: str,
+    _token=Depends(verify_agent_token),
+):
+    """Stream image build logs (proxied from image service)."""
+    from app.services.image_service import ImageService
+
+    image_service = ImageService()
+    return StreamingResponse(
+        image_service.stream_build_logs(checksum), media_type="text/plain"
+    )
+
+
+@router.get("/deployments/{deployment_id}/deploy-status")
+async def get_deployment_status(
+    deployment_id: str,
+    _token=Depends(verify_agent_token),
+):
+    """Get the active deploy task for a deployment, if any."""
+    from app.deploy_manager import deploy_manager
+
+    task_id = deploy_manager._active_deploys.get(deployment_id)
+    if not task_id:
+        return {"deploying": False}
+    task = deploy_manager.get_task(task_id)
+    if not task:
+        return {"deploying": False}
+    return {"deploying": True, **task.to_dict()}
+
+
+# --- Worktree commit endpoint ---
+
+
+class CommitRequest(BaseModel):
+    message: str
+    author_email: str = "agent@bitswan.local"
+
+
+@router.post("/worktrees/{worktree_name}/commit")
+async def commit_worktree(
+    worktree_name: str,
+    body: CommitRequest,
+    _token=Depends(verify_agent_token),
+):
+    worktree_path = _resolve_worktree_path(worktree_name)
+
+    if not os.path.exists(worktree_path):
+        raise HTTPException(
+            status_code=404, detail=f"Worktree '{worktree_name}' not found"
+        )
+
+    async with GitLockContext(timeout=15.0):
+        # Stage all changes
+        success = await call_git_command("git", "add", "-A", cwd=worktree_path)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to stage changes")
+
+        # Commit with the provided message and author
+        author = f"{body.author_email} <{body.author_email}>"
+        stdout, stderr, rc = await call_git_command_with_output(
+            "git",
+            "commit",
+            "-m",
+            body.message,
+            "--author",
+            author,
+            cwd=worktree_path,
+        )
+        if rc != 0:
+            # Check if it's just "nothing to commit"
+            if "nothing to commit" in stdout or "nothing to commit" in stderr:
+                raise HTTPException(status_code=400, detail="Nothing to commit")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to commit: {stderr.strip()}",
+            )
+
+    # Get the commit hash
+    hash_stdout, _, hash_rc = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=worktree_path
+    )
+    commit_hash = hash_stdout.strip() if hash_rc == 0 else "unknown"
+
+    return {"status": "success", "commit_hash": commit_hash}
+
+
+# --- VCS query endpoints ---
+
+
+@router.get("/worktrees/{worktree_name}/status")
+async def worktree_status(
+    worktree_name: str,
+    _token=Depends(verify_agent_token),
+):
+    worktree_path = _resolve_worktree_path(worktree_name)
+    if not os.path.exists(worktree_path):
+        raise HTTPException(
+            status_code=404, detail=f"Worktree '{worktree_name}' not found"
+        )
+
+    stdout, stderr, rc = await call_git_command_with_output(
+        "git", "status", cwd=worktree_path
+    )
+    if rc != 0:
+        raise HTTPException(
+            status_code=500, detail=f"git status failed: {stderr.strip()}"
+        )
+    return {"output": stdout}
+
+
+@router.get("/worktrees/{worktree_name}/log")
+async def worktree_log(
+    worktree_name: str,
+    n: int = Query(20, ge=1, le=200),
+    _token=Depends(verify_agent_token),
+):
+    worktree_path = _resolve_worktree_path(worktree_name)
+    if not os.path.exists(worktree_path):
+        raise HTTPException(
+            status_code=404, detail=f"Worktree '{worktree_name}' not found"
+        )
+
+    stdout, stderr, rc = await call_git_command_with_output(
+        "git", "log", "--oneline", f"-{n}", cwd=worktree_path
+    )
+    if rc != 0:
+        raise HTTPException(status_code=500, detail=f"git log failed: {stderr.strip()}")
+    return {"output": stdout}
+
+
+@router.get("/worktrees/{worktree_name}/diff")
+async def worktree_diff(
+    worktree_name: str,
+    path: str = Query(None),
+    _token=Depends(verify_agent_token),
+):
+    worktree_path = _resolve_worktree_path(worktree_name)
+    if not os.path.exists(worktree_path):
+        raise HTTPException(
+            status_code=404, detail=f"Worktree '{worktree_name}' not found"
+        )
+
+    git_args = ["git", "diff", "HEAD"]
+    if path:
+        git_args += ["--", path]
+    stdout, stderr, rc = await call_git_command_with_output(
+        *git_args, cwd=worktree_path
+    )
+    if rc != 0:
+        raise HTTPException(
+            status_code=500, detail=f"git diff failed: {stderr.strip()}"
+        )
+    return {"output": stdout}
+
+
+# --- Rebase and merge endpoint ---
+
+
+async def _stash_workspace(workspace_dir: str) -> bool:
+    """Stash all changes including untracked files. Returns True if a stash was created."""
+    before, _, _ = await call_git_command_with_output(
+        "git", "stash", "list", cwd=workspace_dir
+    )
+    count_before = len(before.strip().splitlines()) if before.strip() else 0
+    await call_git_command_with_output(
+        "git",
+        "stash",
+        "push",
+        "--include-untracked",
+        "-m",
+        "rebase-merge-stash",
+        cwd=workspace_dir,
+    )
+    after, _, _ = await call_git_command_with_output(
+        "git", "stash", "list", cwd=workspace_dir
+    )
+    count_after = len(after.strip().splitlines()) if after.strip() else 0
+    return count_after > count_before
+
+
+async def _clean_workspace_conflicts(workspace_dir: str):
+    """Clean up any leftover unmerged/conflict state in the workspace directory.
+
+    This handles the case where a previous stash pop or merge left unmerged
+    files. Without cleanup, every subsequent merge attempt fails permanently
+    with 'Merging is not possible because you have unmerged files'.
+    """
+    stdout, _, _ = await call_git_command_with_output(
+        "git", "diff", "--name-only", "--diff-filter=U", cwd=workspace_dir
+    )
+    unmerged = [f for f in stdout.strip().splitlines() if f]
+    if not unmerged:
+        return
+
+    logger.warning(
+        "Workspace has %d unmerged files from previous operation, "
+        "resolving by resetting to HEAD: %s",
+        len(unmerged),
+        unmerged,
+    )
+    # Reset the index and working tree to HEAD, clearing the merge state
+    await call_git_command_with_output(
+        "git", "reset", "--hard", "HEAD", cwd=workspace_dir
+    )
+
+
+async def _complete_merge(workspace_dir: str, worktree_path: str, **_kwargs) -> dict:
+    """After a successful rebase, fast-forward the default branch.
+
+    Any stashed workspace changes are left stashed — the "dirt" in main
+    (e.g. live-dev config changes written by deploys) doesn't need to be
+    restored and popping it is what caused the permanent-stuck-conflict bug.
+    """
+    # Clean up any leftover conflict state from a previous failed operation
+    await _clean_workspace_conflicts(workspace_dir)
+
+    # Get default branch
+    stdout, stderr, rc = await call_git_command_with_output(
+        "git", "rev-parse", "--abbrev-ref", "HEAD", cwd=workspace_dir
+    )
+    if rc != 0:
+        return {
+            "status": "error",
+            "detail": f"Failed to detect default branch: {stderr.strip()}",
+        }
+    default_branch = stdout.strip()
+
+    # Get worktree tip
+    tip_stdout, _, rc = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=worktree_path
+    )
+    if rc != 0:
+        return {"status": "error", "detail": "Failed to get worktree HEAD after rebase"}
+    tip_sha = tip_stdout.strip()
+
+    # Fast-forward
+    stdout, stderr, rc = await call_git_command_with_output(
+        "git", "merge", "--ff-only", tip_sha, cwd=workspace_dir
+    )
+    if rc != 0:
+        return {"status": "error", "detail": f"Fast-forward failed: {stderr.strip()}"}
+
+    return {
+        "status": "success",
+        "merged_into": default_branch,
+        "tip": tip_sha[:12],
+    }
+
+
+async def _attach_sync_auto_deploy(result: dict, worktree_name: str) -> None:
+    """After a successful sync merge, deploy changed+new main automations to
+    dev in the background and attach `result["deploy"]`.
+
+    Best-effort — never raises (sync already succeeded). MUST be called AFTER
+    the sync handler's GitLockContext is released: the spawned deploy takes
+    its own git locks and the lock is non-reentrant. Zero changed members →
+    no task, no `deploy` field.
+    """
+    try:
+        service = get_automation_service()
+        members = await service.changed_dev_members()
+        if not members:
+            return
+        res = await spawn_set_deploy(
+            label=f"sync:{worktree_name}",
+            members=members,
+            stage="dev",
+            service=service,
+        )
+        if res.get("deploy"):
+            result["deploy"] = res["deploy"]
+        elif res.get("error"):
+            result["deploy"] = {"error": res["error"]}
+    except Exception as e:
+        logger.warning("Sync auto-deploy spawn failed for '%s': %s", worktree_name, e)
+        result["deploy"] = {"error": str(e)}
+
+
+@router.post("/worktrees/{worktree_name}/sync")
+async def sync_worktree(
+    worktree_name: str,
+    _token=Depends(verify_agent_token),
+):
+    """Sync the worktree with the default branch: rebase the worktree onto the
+    default branch, then fast-forward the default branch to the worktree tip.
+    If conflicts occur, returns status='conflicts' with conflict details —
+    resolve the files and call sync-continue."""
+    workspace_dir = _get_workspace_dir()
+    worktree_path = _resolve_worktree_path(worktree_name)
+
+    if not os.path.exists(worktree_path):
+        raise HTTPException(
+            status_code=404, detail=f"Worktree '{worktree_name}' not found"
+        )
+
+    async with GitLockContext(timeout=30.0):
+        # Clean up any leftover conflict state from a previous failed operation.
+        # Without this, a single stash-pop conflict permanently breaks all
+        # subsequent merge attempts.
+        await _clean_workspace_conflicts(workspace_dir)
+
+        # Detect default branch
+        stdout, stderr, rc = await call_git_command_with_output(
+            "git", "rev-parse", "--abbrev-ref", "HEAD", cwd=workspace_dir
+        )
+        if rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to detect default branch: {stderr.strip()}",
+            )
+        default_branch = stdout.strip()
+
+        # Stash workspace changes so ff-only merge can proceed on a clean index.
+        # The stash is left intentionally — main branch dirt (live-dev deploy
+        # artifacts) doesn't need restoring and popping it risks conflicts.
+        await _stash_workspace(workspace_dir)
+
+        # Start rebase
+        stdout, stderr, rc = await call_git_command_with_output(
+            "git", "rebase", default_branch, cwd=worktree_path
+        )
+
+        if rc != 0:
+            # Check whether this is actually a conflict or some other failure
+            conflict_stdout, _, _ = await call_git_command_with_output(
+                "git", "diff", "--name-only", "--diff-filter=U", cwd=worktree_path
+            )
+            conflicted_files = [f for f in conflict_stdout.strip().splitlines() if f]
+
+            if not conflicted_files:
+                # Not a conflict — abort the rebase
+                await call_git_command_with_output(
+                    "git", "rebase", "--abort", cwd=worktree_path
+                )
+                rebase_output = f"{stdout.strip()}\n{stderr.strip()}".strip()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Rebase failed: {rebase_output}",
+                )
+
+            return {
+                "status": "conflicts",
+                "message": "Sync paused due to conflicts. Resolve the files and run sync-continue.",
+                "conflicted_files": conflicted_files,
+                "rebase_output": f"{stdout.strip()}\n{stderr.strip()}".strip(),
+                "default_branch": default_branch,
+            }
+
+        # No conflicts — complete the merge (stash left intentionally)
+        result = await _complete_merge(workspace_dir, worktree_path)
+        if result["status"] == "error":
+            raise HTTPException(status_code=500, detail=result["detail"])
+
+    # Lock released — auto-deploy changed automations to dev (best-effort).
+    await _attach_sync_auto_deploy(result, worktree_name)
+    return result
+
+
+@router.post("/worktrees/{worktree_name}/sync-continue")
+async def sync_continue(
+    worktree_name: str,
+    _token=Depends(verify_agent_token),
+):
+    """After resolving conflicts, stage resolved files and continue the sync rebase.
+    If more conflicts arise, returns status='conflicts' again.
+    When the rebase completes, fast-forwards the default branch."""
+    workspace_dir = _get_workspace_dir()
+    worktree_path = _resolve_worktree_path(worktree_name)
+
+    if not os.path.exists(worktree_path):
+        raise HTTPException(
+            status_code=404, detail=f"Worktree '{worktree_name}' not found"
+        )
+
+    async with GitLockContext(timeout=30.0):
+        # Stage all resolved files
+        _, add_stderr, add_rc = await call_git_command_with_output(
+            "git", "add", "-A", cwd=worktree_path
+        )
+        if add_rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to stage resolved files: {add_stderr.strip()}",
+            )
+
+        # Continue rebase
+        stdout, stderr, rc = await call_git_command_with_output(
+            "git", "-c", "core.editor=true", "rebase", "--continue", cwd=worktree_path
+        )
+
+        if rc != 0:
+            # More conflicts
+            conflict_stdout, _, _ = await call_git_command_with_output(
+                "git", "diff", "--name-only", "--diff-filter=U", cwd=worktree_path
+            )
+            conflicted_files = [f for f in conflict_stdout.strip().splitlines() if f]
+
+            if conflicted_files:
+                return {
+                    "status": "conflicts",
+                    "message": "More conflicts encountered. Resolve and run sync-continue again.",
+                    "conflicted_files": conflicted_files,
+                    "rebase_output": f"{stdout.strip()}\n{stderr.strip()}".strip(),
+                }
+
+            # rebase --continue failed but no conflict markers — something else went wrong
+            raise HTTPException(
+                status_code=500,
+                detail=f"Sync continue failed: {stderr.strip()}\n{stdout.strip()}",
+            )
+
+        # Rebase complete — stash (if any) is left stashed intentionally
+        result = await _complete_merge(workspace_dir, worktree_path)
+        if result["status"] == "error":
+            raise HTTPException(status_code=500, detail=result["detail"])
+
+    # Lock released — auto-deploy changed automations to dev (best-effort).
+    await _attach_sync_auto_deploy(result, worktree_name)
+    return result
+
+
+@router.post("/worktrees/{worktree_name}/sync-abort")
+async def sync_abort(
+    worktree_name: str,
+    _token=Depends(verify_agent_token),
+):
+    """Abort an in-progress sync (rebase) and clean up any leftover conflict state."""
+    workspace_dir = _get_workspace_dir()
+    worktree_path = _resolve_worktree_path(worktree_name)
+
+    if not os.path.exists(worktree_path):
+        raise HTTPException(
+            status_code=404, detail=f"Worktree '{worktree_name}' not found"
+        )
+
+    async with GitLockContext(timeout=15.0):
+        # Abort the worktree rebase (if one is in progress)
+        await call_git_command_with_output(
+            "git", "rebase", "--abort", cwd=worktree_path
+        )
+
+        # Clean up any leftover conflict state in the workspace dir
+        await _clean_workspace_conflicts(workspace_dir)
+
+        # Stash is left intentionally — the "dirt" in main doesn't need restoring
+
+    return {"status": "aborted", "message": "Sync aborted."}
+
+
+# --- Docker exec endpoint ---
+
+
+class ExecRequest(BaseModel):
+    command: list[str]
+
+
+@router.post("/deployments/{deployment_id}/exec")
+async def exec_in_deployment(
+    deployment_id: str,
+    body: ExecRequest,
+    _token=Depends(verify_agent_token),
+):
+    _validate_deployment_id(deployment_id)
+
+    docker_client = get_async_docker_client()
+    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+
+    # Find the container
+    try:
+        containers = await docker_client.list_containers(
+            all=False,
+            filters={
+                "label": [
+                    f"gitops.deployment_id={deployment_id}",
+                    f"gitops.workspace={workspace_name}",
+                ]
+            },
+        )
+    except DockerError as e:
+        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
+
+    if not containers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No running container found for deployment '{deployment_id}'",
+        )
+
+    container_id = containers[0].get("Id")
+
+    try:
+        exec_id = await docker_client.exec_create(container_id, body.command)
+        output = await docker_client.exec_start(exec_id)
+        exec_info = await docker_client.exec_inspect(exec_id)
+        exit_code = exec_info.get("ExitCode", -1)
+    except DockerError as e:
+        raise HTTPException(status_code=500, detail=f"Docker exec error: {str(e)}")
+
+    return {
+        "exit_code": exit_code,
+        "output": output,
+    }

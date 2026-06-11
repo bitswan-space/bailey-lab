@@ -1,0 +1,8 @@
+gitops.py
+
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv
+.envruff-x86_64-unknown-linux-gnu/
