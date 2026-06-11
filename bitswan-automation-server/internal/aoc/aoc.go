@@ -39,6 +39,7 @@ type AutomationServerInfo struct {
 	AutomationServerId string `json:"automation_server_id"`
 	KeycloakOrgId      string `json:"keycloak_org_id"`
 	IsConnected        bool   `json:"is_connected"`
+	Domain             string `json:"domain"`
 	CreatedAt          string `json:"created_at"`
 	UpdatedAt          string `json:"updated_at"`
 }
@@ -699,6 +700,50 @@ func GetMQTTEnvironmentVariables(creds *MQTTCredentials) []string {
 		"MQTT_PORT=" + fmt.Sprint(creds.Port),
 		"MQTT_TOPIC=" + creds.Topic,
 	}
+}
+
+// SetDomain sets the automation server's public domain in the settings
+// (persisted on the next SaveConfig call).
+func (c *AOCClient) SetDomain(domain string) {
+	c.settings.Domain = domain
+}
+
+// PresentDNSChallenge publishes an ACME DNS-01 challenge TXT record via the
+// AOC. The body shape matches lego's HTTPREQ provider: {fqdn, value}. The AOC
+// only allows records under this automation server's own domain.
+func (c *AOCClient) PresentDNSChallenge(fqdn, value string) error {
+	return c.sendDNSChallenge("present", fqdn, value)
+}
+
+// CleanupDNSChallenge removes an ACME DNS-01 challenge TXT record previously
+// published via PresentDNSChallenge.
+func (c *AOCClient) CleanupDNSChallenge(fqdn, value string) error {
+	return c.sendDNSChallenge("cleanup", fqdn, value)
+}
+
+func (c *AOCClient) sendDNSChallenge(action, fqdn, value string) error {
+	payload := map[string]string{
+		"fqdn":  fqdn,
+		"value": value,
+	}
+
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal DNS challenge request: %w", err)
+	}
+
+	resp, err := c.sendRequest("POST", fmt.Sprintf("%s/api/automation_server/dns/acme-challenge/%s", c.settings.AOCUrl, action), jsonBytes)
+	if err != nil {
+		return fmt.Errorf("error sending DNS challenge %s request: %w", action, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("AOC DNS challenge %s failed: %s - %s", action, resp.Status, string(body))
+	}
+
+	return nil
 }
 
 // SaveConfig saves the current configuration to the automation server config file

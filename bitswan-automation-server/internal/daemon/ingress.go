@@ -333,49 +333,14 @@ func initCaddyIngress(verbose bool) (bool, error) {
 	return true, nil
 }
 
-// initTraefikIngress starts a new Traefik ingress proxy.
-func initTraefikIngress(verbose bool) (bool, error) {
-	homeDir := os.Getenv("HOME")
-	bitswanConfig := homeDir + "/.config/bitswan/"
-	traefikConfig := bitswanConfig + "traefik"
-	traefikCertsDir := traefikConfig + "/certs"
-
-	traefikProjectName := "bitswan-traefik"
-
-	// Check if Traefik is already running with REST provider support.
-	if err := traefikapi.InitTraefik(); err == nil {
-		return false, nil
-	}
-
-	// Traefik is either not running or is running without REST provider support.
-	// Stop and remove any existing container named "traefik" so we can start a fresh one.
-	existingIdBytes, _ := exec.Command("docker", "ps", "-q", "-f", "name=traefik").Output()
-	if existingId := strings.TrimSpace(string(existingIdBytes)); existingId != "" {
-		if verbose {
-			fmt.Println("Existing Traefik container does not support REST provider — stopping it to reinitialize...")
-		}
-		exec.Command("docker", "stop", existingId).Run()
-		exec.Command("docker", "rm", existingId).Run()
-	}
-
-	if err := os.MkdirAll(bitswanConfig, 0755); err != nil {
-		return false, fmt.Errorf("failed to create bitswan config directory: %w", err)
-	}
-	if err := os.MkdirAll(traefikConfig, 0755); err != nil {
-		return false, fmt.Errorf("failed to create ingress config directory: %w", err)
-	}
-
-	// Create acme directory for Let's Encrypt certificate storage
-	acmeDir := traefikConfig + "/acme"
-	if err := os.MkdirAll(acmeDir, 0700); err != nil {
-		return false, fmt.Errorf("failed to create acme directory: %w", err)
-	}
-
-	acmeEmail := os.Getenv("BITSWAN_ACME_EMAIL")
-	if acmeEmail == "" {
-		acmeEmail = "noreply@bitswan.space"
-	}
-	traefikStaticConfig := fmt.Sprintf(`entryPoints:
+// renderTraefikStaticConfig renders the global Traefik static configuration.
+// When dnsChallenge is true, an additional cert resolver is included that
+// issues certificates via the ACME DNS-01 challenge using lego's httpreq
+// provider (pointed at the daemon's AOC bridge through HTTPREQ_* env vars in
+// the Traefik container) — used for wildcard certificates, which HTTP-01
+// cannot issue.
+func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
+	cfg := fmt.Sprintf(`entryPoints:
   web:
     address: ":80"
   websecure:
@@ -397,10 +362,68 @@ certificatesResolvers:
         entryPoint: web
 `, acmeEmail)
 
-	traefikConfigFilePath := traefikConfig + "/traefik.yml"
-	if err := os.WriteFile(traefikConfigFilePath, []byte(traefikStaticConfig), 0755); err != nil {
-		return false, fmt.Errorf("failed to write traefik.yml: %w", err)
+	if dnsChallenge {
+		cfg += fmt.Sprintf(`  %s:
+    acme:
+      email: %s
+      storage: /acme/acme-dns.json
+      dnsChallenge:
+        provider: httpreq
+`, dnsCertResolverName, acmeEmail)
 	}
+
+	return cfg
+}
+
+// initTraefikIngress starts a new Traefik ingress proxy, or reconfigures a
+// running one when the desired configuration has changed (e.g. the
+// automation server registered with the AOC and was assigned a domain, so
+// Traefik must be told to obtain a DNS-01 wildcard certificate).
+func initTraefikIngress(verbose bool) (bool, error) {
+	homeDir := os.Getenv("HOME")
+	bitswanConfig := homeDir + "/.config/bitswan/"
+	traefikConfig := bitswanConfig + "traefik"
+	traefikCertsDir := traefikConfig + "/certs"
+
+	traefikProjectName := "bitswan-traefik"
+
+	if err := os.MkdirAll(bitswanConfig, 0755); err != nil {
+		return false, fmt.Errorf("failed to create bitswan config directory: %w", err)
+	}
+	if err := os.MkdirAll(traefikConfig, 0755); err != nil {
+		return false, fmt.Errorf("failed to create ingress config directory: %w", err)
+	}
+
+	// Create acme directory for Let's Encrypt certificate storage
+	acmeDir := traefikConfig + "/acme"
+	if err := os.MkdirAll(acmeDir, 0700); err != nil {
+		return false, fmt.Errorf("failed to create acme directory: %w", err)
+	}
+
+	acmeEmail := os.Getenv("BITSWAN_ACME_EMAIL")
+	if acmeEmail == "" {
+		acmeEmail = "noreply@bitswan.space"
+	}
+
+	// When the AOC has assigned this automation server a domain, configure a
+	// DNS-01 cert resolver so Traefik can obtain a *.<domain> wildcard
+	// certificate. Traefik's httpreq provider authenticates against the
+	// daemon's bridge endpoints with basic auth using a shared secret.
+	wildcardDomain := getWildcardCertDomain()
+	var traefikEnv map[string]string
+	if wildcardDomain != "" {
+		secret, err := getOrCreateACMEBridgeSecret(traefikConfig)
+		if err != nil {
+			return false, err
+		}
+		traefikEnv = map[string]string{
+			"HTTPREQ_ENDPOINT": acmeBridgeEndpoint(),
+			"HTTPREQ_USERNAME": acmeBridgeUsername,
+			"HTTPREQ_PASSWORD": secret,
+		}
+	}
+
+	traefikStaticConfig := renderTraefikStaticConfig(acmeEmail, wildcardDomain != "")
 
 	hostHomeDir := os.Getenv("HOST_HOME")
 	traefikConfigForCompose := traefikConfig
@@ -416,23 +439,58 @@ certificatesResolvers:
 		if err := os.MkdirAll(traefikConfigForCompose+"/acme", 0700); err != nil {
 			return false, fmt.Errorf("failed to create ingress acme directory on host: %w", err)
 		}
-
-		traefikConfigFilePathHost := traefikConfigForCompose + "/traefik.yml"
-		if _, err := os.Stat(traefikConfigFilePathHost); os.IsNotExist(err) {
-			if err := os.WriteFile(traefikConfigFilePathHost, []byte(traefikStaticConfig), 0755); err != nil {
-				return false, fmt.Errorf("failed to write traefik.yml on host: %w", err)
-			}
-		}
 	}
 
-	traefikDockerCompose, err := dockercompose.CreateTraefikDockerComposeFile(traefikConfigForCompose)
+	traefikDockerCompose, err := dockercompose.CreateTraefikDockerComposeFile(traefikConfigForCompose, traefikEnv)
 	if err != nil {
 		return false, fmt.Errorf("failed to create ingress docker-compose file: %w", err)
 	}
 
+	traefikConfigFilePath := traefikConfig + "/traefik.yml"
 	traefikDockerComposePath := traefikConfig + "/docker-compose.yml"
-	if err := os.WriteFile(traefikDockerComposePath, []byte(traefikDockerCompose), 0755); err != nil {
+
+	// Check if Traefik is already running with REST provider support and
+	// matching configuration — nothing to do then. If the configuration has
+	// drifted (e.g. the DNS-01 resolver was just enabled), fall through and
+	// recreate the container; InitTraefik re-pushes the saved routes after.
+	if err := traefikapi.InitTraefik(); err == nil {
+		currentConfig, _ := os.ReadFile(traefikConfigFilePath)
+		currentCompose, _ := os.ReadFile(traefikDockerComposePath)
+		if string(currentConfig) == traefikStaticConfig && string(currentCompose) == traefikDockerCompose {
+			return false, nil
+		}
+		if verbose {
+			fmt.Println("Traefik configuration changed — restarting Traefik to apply it...")
+		}
+	}
+
+	// Traefik is not running, lacks REST provider support, or has stale
+	// configuration. Stop and remove any existing container named "traefik"
+	// so we can start a fresh one. The filter is anchored so workspace
+	// sub-traefik containers ({ws}__traefik) are not matched.
+	existingIdBytes, _ := exec.Command("docker", "ps", "-q", "-f", "name=^traefik$").Output()
+	if existingId := strings.TrimSpace(string(existingIdBytes)); existingId != "" {
+		exec.Command("docker", "stop", existingId).Run()
+		exec.Command("docker", "rm", existingId).Run()
+	}
+
+	if err := os.WriteFile(traefikConfigFilePath, []byte(traefikStaticConfig), 0755); err != nil {
+		return false, fmt.Errorf("failed to write traefik.yml: %w", err)
+	}
+	if traefikConfigForCompose != traefikConfig {
+		traefikConfigFilePathHost := traefikConfigForCompose + "/traefik.yml"
+		if err := os.WriteFile(traefikConfigFilePathHost, []byte(traefikStaticConfig), 0755); err != nil {
+			return false, fmt.Errorf("failed to write traefik.yml on host: %w", err)
+		}
+	}
+
+	// 0600: when the DNS-01 resolver is enabled, the compose file carries the
+	// ACME bridge secret in the traefik service environment.
+	if err := os.WriteFile(traefikDockerComposePath, []byte(traefikDockerCompose), 0600); err != nil {
 		return false, fmt.Errorf("failed to write ingress docker-compose file: %w", err)
+	}
+	if err := os.Chmod(traefikDockerComposePath, 0600); err != nil {
+		return false, fmt.Errorf("failed to set ingress docker-compose file permissions: %w", err)
 	}
 
 	traefikDockerComposeCom := exec.Command("docker", "compose", "-p", traefikProjectName, "up", "-d")
@@ -449,8 +507,18 @@ certificatesResolvers:
 	}
 
 	time.Sleep(5 * time.Second)
+	// InitTraefik pushes the saved dynamic config (rest-state.json) back to
+	// the REST provider, restoring all routes after the restart.
 	if err := traefikapi.InitTraefik(); err != nil {
 		return false, fmt.Errorf("failed to init ingress: %w", err)
+	}
+
+	// Switch any existing ACME routes under the wildcard domain to the
+	// shared wildcard certificate.
+	if wildcardDomain != "" {
+		if err := traefikapi.ApplyWildcardCertResolver(wildcardDomain, dnsCertResolverName); err != nil {
+			fmt.Printf("Warning: failed to apply wildcard cert resolver to existing routes: %v\n", err)
+		}
 	}
 
 	return true, nil
@@ -513,8 +581,16 @@ providers:
 		}
 	}
 
+	// Use the shared wildcard certificate when the workspace domain is the
+	// automation server's AOC-assigned domain — sub-traefik hostnames are
+	// {workspace}-{service}.{domain}, exactly one level under it.
+	wildcardResolver := ""
+	if wildcardDomain := getWildcardCertDomain(); wildcardDomain != "" && strings.EqualFold(strings.TrimSuffix(domain, "."), wildcardDomain) {
+		wildcardResolver = dnsCertResolverName
+	}
+
 	// No stage networks — just bitswan_network for backward compatibility
-	traefikDockerCompose, err := dockercompose.CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikConfigForCompose, domain, nil)
+	traefikDockerCompose, err := dockercompose.CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikConfigForCompose, domain, wildcardResolver, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to create workspace traefik docker-compose file: %w", err)
 	}
@@ -702,8 +778,9 @@ func isWorkspaceTraefikRunning(workspaceName string) bool {
 // Otherwise, adds the route directly to the platform traefik (single-tier).
 func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 	certResolver := ""
+	var tlsDomains []traefikapi.TLSDomain
 	if !req.Mkcert && req.CertsDir == "" && !strings.HasSuffix(req.Hostname, ".localhost") {
-		certResolver = "letsencrypt"
+		certResolver, tlsDomains = certResolverForHostname(req.Hostname)
 	}
 
 	// Handle certificates
@@ -728,12 +805,12 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 
 		// Add route at platform traefik: hostname → workspace sub-traefik
 		workspaceTraefikUpstream := fmt.Sprintf("%s__traefik:80", workspaceName)
-		if err := traefikapi.AddRouteWithTraefik(req.Hostname, workspaceTraefikUpstream, "", certResolver); err != nil {
+		if err := traefikapi.AddRouteWithTLSDomains(req.Hostname, workspaceTraefikUpstream, "", certResolver, tlsDomains); err != nil {
 			return fmt.Errorf("failed to add route to platform traefik: %w", err)
 		}
 	} else {
 		// No workspace sub-traefik — single-tier routing at platform traefik
-		if err := traefikapi.AddRouteWithTraefik(req.Hostname, req.Upstream, "", certResolver); err != nil {
+		if err := traefikapi.AddRouteWithTLSDomains(req.Hostname, req.Upstream, "", certResolver, tlsDomains); err != nil {
 			return fmt.Errorf("failed to add route: %w", err)
 		}
 	}
@@ -827,11 +904,8 @@ func MigrateCaddyToTraefik(verbose bool) error {
 	// Step 4: Re-add routes to Traefik
 	fmt.Println("Migrating routes to Traefik...")
 	for _, route := range exported {
-		certResolver := ""
-		if !strings.HasSuffix(route.hostname, ".localhost") {
-			certResolver = "letsencrypt"
-		}
-		if err := traefikapi.AddRouteWithTraefik(route.hostname, route.upstream, "", certResolver); err != nil {
+		certResolver, tlsDomains := certResolverForHostname(route.hostname)
+		if err := traefikapi.AddRouteWithTLSDomains(route.hostname, route.upstream, "", certResolver, tlsDomains); err != nil {
 			fmt.Printf("Warning: failed to migrate route %s -> %s: %v\n", route.hostname, route.upstream, err)
 		} else if verbose {
 			fmt.Printf("Migrated route: %s -> %s\n", route.hostname, route.upstream)
@@ -921,11 +995,8 @@ func updateTraefik(verbose bool) error {
 	// Step 5: Re-add routes
 	fmt.Println("Restoring routes to Traefik...")
 	for _, route := range exported {
-		certResolver := ""
-		if !strings.HasSuffix(route.hostname, ".localhost") {
-			certResolver = "letsencrypt"
-		}
-		if err := traefikapi.AddRouteWithTraefik(route.hostname, route.upstream, "", certResolver); err != nil {
+		certResolver, tlsDomains := certResolverForHostname(route.hostname)
+		if err := traefikapi.AddRouteWithTLSDomains(route.hostname, route.upstream, "", certResolver, tlsDomains); err != nil {
 			fmt.Printf("Warning: failed to restore route %s -> %s: %v\n", route.hostname, route.upstream, err)
 		} else if verbose {
 			fmt.Printf("Restored route: %s -> %s\n", route.hostname, route.upstream)

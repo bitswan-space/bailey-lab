@@ -32,6 +32,10 @@ type AutomationOperationsCenterSettings struct {
 	AutomationServerId string `toml:"automation_server_id"`
 	AccessToken        string `toml:"access_token"`
 	ExpiresAt          string `toml:"expires_at,omitempty"`
+	// Domain is the automation server's public domain assigned by the AOC
+	// (e.g. acme-prod.bswn.io). When set, the daemon configures Traefik to
+	// obtain a DNS-01 wildcard certificate for *.<domain> via the AOC.
+	Domain string `toml:"domain,omitempty"`
 }
 
 // GetRealUserHomeDir returns the home directory of the actual user,
