@@ -79,5 +79,6 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.noOauth, "no-oauth", false, "Disable automatically fetching OAuth configuration from AOC")
 	cmd.Flags().StringVar(&o.sshPort, "ssh-port", "", "Use SSH over a custom port with custom SSH config for repositories behind firewalls (e.g., 443, 22)")
 	cmd.Flags().BoolVar(&o.staging, "staging", false, "Use staging images for editor and gitops")
+	cmd.Flags().String("owner", "", "Email of the user who owns the workspace's endpoints in the Bailey ACL (enables access control + sharing for them)")
 	return cmd
 }

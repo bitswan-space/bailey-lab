@@ -660,13 +660,15 @@ func (c *Client) InitIngress(verbose bool, ingressType ...string) (*IngressInitR
 	return &result, nil
 }
 
-// AddIngressRoute adds a route to the ingress proxy
-func (c *Client) AddIngressRoute(hostname, upstream string, mkcert bool, certsDir string) (*IngressAddRouteResponse, error) {
+// AddIngressRoute adds a route to the ingress proxy. ownerEmail (may
+// be empty) records the endpoint's owner in the Bailey ACL.
+func (c *Client) AddIngressRoute(hostname, upstream string, mkcert bool, certsDir, ownerEmail string) (*IngressAddRouteResponse, error) {
 	reqBody := IngressAddRouteRequest{
-		Hostname: hostname,
-		Upstream: upstream,
-		Mkcert:   mkcert,
-		CertsDir: certsDir,
+		Hostname:   hostname,
+		Upstream:   upstream,
+		Mkcert:     mkcert,
+		CertsDir:   certsDir,
+		OwnerEmail: ownerEmail,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {

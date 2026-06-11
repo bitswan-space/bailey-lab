@@ -53,6 +53,10 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	noOauth := fs.Bool("no-oauth", false, "")
 	sshPort := fs.String("ssh-port", "", "")
 	staging := fs.Bool("staging", false, "")
+	// Email of the user creating the workspace. Passed through to
+	// route registration so the workspace's endpoints (gitops, editor,
+	// dashboard) are recorded under this owner in the Bailey ACL.
+	owner := fs.String("owner", "", "")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("failed to parse flags: %w", err)
@@ -577,6 +581,8 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		Mkcert:        *mkCerts,
 		CertsDir:      *certsDir,
 		WorkspaceName: workspaceName,
+		OwnerEmail:    *owner,
+		DisplayName:   workspaceName + " (gitops)",
 	}, ""); err != nil {
 		return fmt.Errorf("failed to register GitOps service: %w", err)
 	}
@@ -742,6 +748,8 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			Mkcert:        *mkCerts,
 			CertsDir:      *certsDir,
 			WorkspaceName: workspaceName,
+			OwnerEmail:    *owner,
+			DisplayName:   workspaceName + " (editor)",
 		}, ""); err != nil {
 			return fmt.Errorf("failed to register Editor service: %w", err)
 		}
@@ -787,6 +795,8 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			Mkcert:        *mkCerts,
 			CertsDir:      *certsDir,
 			WorkspaceName: workspaceName,
+			OwnerEmail:    *owner,
+			DisplayName:   workspaceName + " (dashboard)",
 		}, ""); err != nil {
 			return fmt.Errorf("failed to register Dashboard service: %w", err)
 		}

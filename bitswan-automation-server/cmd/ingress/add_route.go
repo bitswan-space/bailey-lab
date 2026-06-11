@@ -11,6 +11,7 @@ import (
 func newAddRouteCmd() *cobra.Command {
 	var mkcert bool
 	var certsDir string
+	var owner string
 
 	cmd := &cobra.Command{
 		Use:   "add-route <hostname> <upstream>",
@@ -34,7 +35,7 @@ Examples:
 				os.Exit(1)
 			}
 
-			result, err := client.AddIngressRoute(hostname, upstream, mkcert, certsDir)
+			result, err := client.AddIngressRoute(hostname, upstream, mkcert, certsDir, owner)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -47,6 +48,7 @@ Examples:
 
 	cmd.Flags().BoolVar(&mkcert, "mkcert", false, "Generate certificates using mkcert for the hostname")
 	cmd.Flags().StringVar(&certsDir, "certs-dir", "", "The directory where the certificates are located")
+	cmd.Flags().StringVar(&owner, "owner", "", "Email of the endpoint owner in the Bailey ACL (enables access control + sharing)")
 
 	return cmd
 } 
