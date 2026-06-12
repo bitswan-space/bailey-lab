@@ -10,7 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"net/url"
+
 	"github.com/bitswan-space/bitswan-workspaces/internal/caddyapi"
+	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 	"github.com/bitswan-space/bitswan-workspaces/internal/util"
@@ -55,6 +58,11 @@ type IngressAddRouteRequest struct {
 	// DisplayName is a friendly label for the endpoint shown in Bailey
 	// UIs. If empty, the hostname is used.
 	DisplayName string `json:"display_name,omitempty"`
+	// ParentEndpoint is the hostname of the endpoint this route's
+	// Bailey ACL delegates membership to — for workspace-spawned routes
+	// that's the workspace dashboard. When empty, the daemon resolves
+	// it from the workspace's recorded metadata (dashboard-url).
+	ParentEndpoint string `json:"parent_endpoint,omitempty"`
 }
 
 // IngressAddRouteResponse represents the response from adding a route
@@ -740,6 +748,7 @@ func addRouteToIngress(req IngressAddRouteRequest, jwtToken string) error {
 	}
 
 	ingressType := DetectIngressType()
+	workspaceName := resolveWorkspaceName(req, jwtToken)
 
 	switch ingressType {
 	case IngressCaddy:
@@ -747,7 +756,6 @@ func addRouteToIngress(req IngressAddRouteRequest, jwtToken string) error {
 			return err
 		}
 	case IngressTraefik:
-		workspaceName := resolveWorkspaceName(req, jwtToken)
 		if err := addRouteTraefik(req, workspaceName); err != nil {
 			return err
 		}
@@ -767,20 +775,60 @@ func addRouteToIngress(req IngressAddRouteRequest, jwtToken string) error {
 		fmt.Printf("Warning: AOC didn't accept protected-client redirect URI for %s: %v\n", outer, err)
 	}
 
-	// When the caller supplied an owner email (workspace init, the
-	// add-route CLI), record the hostname in the Bailey ACL so it is
-	// access-controlled and shows up on the owner's share index.
-	// Ownerless routes stay open until something claims them.
-	if req.OwnerEmail != "" {
+	// Record the hostname in the Bailey ACL so it is access-controlled
+	// and shows up on the owner's share index.
+	//
+	// Parent linkage: workspace-spawned routes (gitops deploying
+	// automations / business processes / live-dev services) delegate
+	// membership to the workspace's dashboard endpoint, so everyone in
+	// the workspace can share what they deploy there (see roleFor). The
+	// association is explicit data: the caller states it via
+	// req.ParentEndpoint, or the daemon reads the dashboard hostname
+	// recorded in the workspace's own metadata.
+	//
+	// Owner: the caller-supplied email (workspace init, the add-route
+	// CLI), falling back to the parent endpoint's owner for workspace-
+	// spawned routes. Routes that are neither owned nor part of a
+	// workspace stay open until something claims them.
+	parent := req.ParentEndpoint
+	if parent == "" && workspaceName != "" {
+		parent = workspaceDashboardEndpoint(workspaceName)
+	}
+	if strings.EqualFold(parent, outer) {
+		parent = "" // the dashboard itself has no parent
+	}
+	ownerEmail := req.OwnerEmail
+	if ownerEmail == "" && parent != "" {
+		if parentEp, err := getEndpoint(parent); err == nil && parentEp != nil {
+			ownerEmail = parentEp.OwnerEmail
+		}
+	}
+	if ownerEmail != "" {
 		display := req.DisplayName
 		if display == "" {
 			display = outer
 		}
-		if _, err := registerEndpoint(outer, req.OwnerEmail, display); err != nil {
+		if _, err := registerEndpoint(outer, ownerEmail, display, parent); err != nil {
 			fmt.Printf("Warning: failed to register Bailey endpoint for %s: %v\n", outer, err)
 		}
 	}
 	return nil
+}
+
+// workspaceDashboardEndpoint returns the hostname of a workspace's
+// dashboard endpoint as recorded in the workspace's metadata (the
+// dashboard-url written at workspace init), or "" when the workspace
+// has no dashboard or no metadata.
+func workspaceDashboardEndpoint(workspaceName string) string {
+	metadata, err := config.GetWorkspaceMetadata(workspaceName)
+	if err != nil || metadata.DashboardURL == nil {
+		return ""
+	}
+	u, err := url.Parse(*metadata.DashboardURL)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // addRouteCaddy adds a route to Caddy.

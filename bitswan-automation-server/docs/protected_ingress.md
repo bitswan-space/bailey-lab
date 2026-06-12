@@ -105,6 +105,22 @@ Resolution order for a request to endpoint `H` by user `U`:
 their own per-page authorization — but it is registered as an endpoint on
 first sign-in so it has an owner ("the server owner") for later stages.
 
+### Workspace inheritance
+
+Endpoints spawned from a workspace (automations, business processes,
+live-dev services) record the workspace's **dashboard endpoint** as their
+`parent_endpoint` at registration time. The association is explicit data,
+never inferred from hostnames: route registrations carry a
+`parent_endpoint` field, and when a workspace-scoped registration omits it
+the daemon reads the dashboard hostname from the workspace's own metadata
+(`dashboard-url`).
+
+Role resolution treats **every member of the parent — owner or access — as
+an owner of the child**: the dashboard is the workspace's membership
+surface, and anyone working in a workspace must be able to share the
+automations they create there. Delegation is one-way; an access-role member
+does not gain owner rights on the dashboard itself.
+
 ## Sharing UI
 
 Owners see a **Share** button in the wrap footer. It opens a Google-Docs-style

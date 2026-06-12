@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,11 +32,19 @@ const baileySchema = `
 -- the user whose action created the endpoint (the workspace creator
 -- for editor/gitops/dashboard, the deployer for automations, the
 -- first signed-in user for the bailey management surface).
+--
+-- parent_endpoint links a workspace-spawned endpoint (automation,
+-- business process, live-dev service) to the workspace's dashboard
+-- endpoint, recorded explicitly at registration time; membership of
+-- the parent delegates to the child (see roleFor). A soft reference,
+-- not a foreign key: the parent may be registered after the child
+-- (workspace init creates gitops/editor before the dashboard).
 CREATE TABLE IF NOT EXISTS endpoints (
-  hostname     TEXT PRIMARY KEY COLLATE NOCASE,
-  owner_email  TEXT NOT NULL COLLATE NOCASE,
-  display_name TEXT,
-  created_at   TEXT NOT NULL
+  hostname        TEXT PRIMARY KEY COLLATE NOCASE,
+  owner_email     TEXT NOT NULL COLLATE NOCASE,
+  display_name    TEXT,
+  parent_endpoint TEXT COLLATE NOCASE,
+  created_at      TEXT NOT NULL
 );
 
 -- Grants attached to an endpoint. principal_type is 'email' or 'group';
@@ -107,6 +116,15 @@ func openBaileyDB() (*sql.DB, error) {
 		if _, err := db.Exec(baileySchema); err != nil {
 			db.Close()
 			baileyDBErr = fmt.Errorf("apply schema: %w", err)
+			return
+		}
+		// Migration for databases created before parent_endpoint existed
+		// (CREATE TABLE IF NOT EXISTS doesn't touch existing tables).
+		// "duplicate column name" just means the column is already there.
+		if _, err := db.Exec(`ALTER TABLE endpoints ADD COLUMN parent_endpoint TEXT COLLATE NOCASE`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate endpoints.parent_endpoint: %w", err)
 			return
 		}
 		baileyDB = db

@@ -571,18 +571,28 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		return fmt.Errorf("failed to create deployment directory: %w", err)
 	}
 
+	// The workspace dashboard endpoint is the workspace's membership
+	// surface: the other workspace endpoints (gitops, editor, and later
+	// every automation gitops deploys) register it as their ACL parent,
+	// so workspace members can share what the workspace spawns.
+	workspaceParent := ""
+	if !*noDashboard {
+		workspaceParent = fmt.Sprintf("%s-dashboard.%s", workspaceName, *domain)
+	}
+
 	// Register GitOps service route via the daemon's ingress abstraction.
 	// addRouteToIngress detects the ingress type and handles certs + routing.
 	gitopsHostname := fmt.Sprintf("%s-gitops.%s", workspaceName, *domain)
 	gitopsUpstream := fmt.Sprintf("%s-gitops:8079", workspaceName)
 	if err := addRouteToIngress(IngressAddRouteRequest{
-		Hostname:      gitopsHostname,
-		Upstream:      gitopsUpstream,
-		Mkcert:        *mkCerts,
-		CertsDir:      *certsDir,
-		WorkspaceName: workspaceName,
-		OwnerEmail:    *owner,
-		DisplayName:   workspaceName + " (gitops)",
+		Hostname:       gitopsHostname,
+		Upstream:       gitopsUpstream,
+		Mkcert:         *mkCerts,
+		CertsDir:       *certsDir,
+		WorkspaceName:  workspaceName,
+		OwnerEmail:     *owner,
+		DisplayName:    workspaceName + " (gitops)",
+		ParentEndpoint: workspaceParent,
 	}, ""); err != nil {
 		return fmt.Errorf("failed to register GitOps service: %w", err)
 	}
@@ -743,13 +753,14 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		editorHostname := fmt.Sprintf("%s-editor.%s", workspaceName, *domain)
 		editorUpstream := fmt.Sprintf("%s-editor:9999", workspaceName)
 		if err := addRouteToIngress(IngressAddRouteRequest{
-			Hostname:      editorHostname,
-			Upstream:      editorUpstream,
-			Mkcert:        *mkCerts,
-			CertsDir:      *certsDir,
-			WorkspaceName: workspaceName,
-			OwnerEmail:    *owner,
-			DisplayName:   workspaceName + " (editor)",
+			Hostname:       editorHostname,
+			Upstream:       editorUpstream,
+			Mkcert:         *mkCerts,
+			CertsDir:       *certsDir,
+			WorkspaceName:  workspaceName,
+			OwnerEmail:     *owner,
+			DisplayName:    workspaceName + " (editor)",
+			ParentEndpoint: workspaceParent,
 		}, ""); err != nil {
 			return fmt.Errorf("failed to register Editor service: %w", err)
 		}

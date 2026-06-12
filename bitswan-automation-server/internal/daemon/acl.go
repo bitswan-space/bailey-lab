@@ -28,7 +28,11 @@ type endpointRecord struct {
 	Hostname    string
 	OwnerEmail  string
 	DisplayName string
-	CreatedAt   string
+	// ParentEndpoint is the hostname of the endpoint this one delegates
+	// membership to (the workspace dashboard for workspace-spawned
+	// endpoints). Empty for top-level endpoints.
+	ParentEndpoint string
+	CreatedAt      string
 }
 
 // endpointRole is "owner", "access", or "" (no access).
@@ -64,10 +68,10 @@ func getEndpoint(hostname string) (*endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), created_at
+	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), created_at
 	                    FROM endpoints WHERE hostname = ? COLLATE NOCASE`, hostname)
 	var e endpointRecord
-	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.CreatedAt); err != nil {
+	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -76,10 +80,12 @@ func getEndpoint(hostname string) (*endpointRecord, error) {
 	return &e, nil
 }
 
-// registerEndpoint creates the endpoint row. Idempotent: if it already
-// exists, returns the existing record without overwriting — the
-// original owner is preserved.
-func registerEndpoint(hostname, ownerEmail, displayName string) (*endpointRecord, error) {
+// registerEndpoint creates the endpoint row. parentEndpoint (may be
+// empty) is the hostname whose membership this endpoint delegates to —
+// the workspace dashboard for workspace-spawned endpoints. Idempotent:
+// if the row already exists, returns the existing record without
+// overwriting — the original owner and parent are preserved.
+func registerEndpoint(hostname, ownerEmail, displayName, parentEndpoint string) (*endpointRecord, error) {
 	db, err := openBaileyDB()
 	if err != nil {
 		return nil, err
@@ -90,9 +96,9 @@ func registerEndpoint(hostname, ownerEmail, displayName string) (*endpointRecord
 		return nil, fmt.Errorf("hostname and owner are required")
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = db.Exec(`INSERT OR IGNORE INTO endpoints (hostname, owner_email, display_name, created_at)
-	                  VALUES (?, ?, ?, ?)`,
-		hostname, ownerEmail, displayName, now)
+	_, err = db.Exec(`INSERT OR IGNORE INTO endpoints (hostname, owner_email, display_name, parent_endpoint, created_at)
+	                  VALUES (?, ?, ?, ?, ?)`,
+		hostname, ownerEmail, displayName, parentEndpoint, now)
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +188,41 @@ func listGrants(hostname string) ([]endpointGrant, error) {
 // want "unregistered means open" must check getEndpoint themselves.
 //
 // groups is the caller's Keycloak groups (X-Forwarded-Groups split).
+//
+// roleFor includes parent delegation: an endpoint registered with a
+// parent endpoint (the workspace dashboard, recorded explicitly at
+// registration time — see addRouteToIngress) inherits membership from
+// it, and ANY member of the parent counts as an OWNER of the child.
+// The dashboard is the workspace's membership surface; everyone
+// working in a workspace must be able to share the automations they
+// create there, not just open them. The parent's own ACL is unchanged
+// — an access-role member does not become owner of the dashboard
+// itself.
 func roleFor(hostname, email string, groups []string) (endpointRole, error) {
+	role, err := directRoleFor(hostname, email, groups)
+	if err != nil || role == roleOwner {
+		return role, err
+	}
+	ep, err := getEndpoint(hostname)
+	if err != nil || ep == nil {
+		return role, err
+	}
+	if ep.ParentEndpoint != "" && !strings.EqualFold(ep.ParentEndpoint, ep.Hostname) {
+		parentRole, err := directRoleFor(ep.ParentEndpoint, email, groups)
+		if err != nil {
+			return role, err
+		}
+		if parentRole != roleNone {
+			return roleOwner, nil
+		}
+	}
+	return role, nil
+}
+
+// directRoleFor resolves the caller's role from the endpoint's own
+// rows only — no parent delegation. Original owner ⇒ owner; otherwise
+// the highest role across matching email/group grants.
+func directRoleFor(hostname, email string, groups []string) (endpointRole, error) {
 	ep, err := getEndpoint(hostname)
 	if err != nil {
 		return roleNone, err
@@ -288,7 +328,7 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), created_at FROM endpoints`)
+	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), created_at FROM endpoints`)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +336,7 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	var out []endpointRecord
 	for rows.Next() {
 		var e endpointRecord
-		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

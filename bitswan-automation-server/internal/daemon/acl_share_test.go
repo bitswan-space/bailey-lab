@@ -48,7 +48,7 @@ func decodeListing(t *testing.T, w *httptest.ResponseRecorder) shareListing {
 
 func TestShareAPI_OwnerOnly(t *testing.T) {
 	host := "share-ownersonly.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if w := shareAPIRequest(t, http.MethodGet, host, "stranger@example.com", nil); w.Code != http.StatusForbidden {
@@ -67,7 +67,7 @@ func TestShareAPI_UnknownEndpoint(t *testing.T) {
 
 func TestShareAPI_GrantRevokeLifecycle(t *testing.T) {
 	host := "share-lifecycle.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -108,7 +108,7 @@ func TestShareAPI_GrantRevokeLifecycle(t *testing.T) {
 
 func TestShareAPI_GrantClearsPendingRequest(t *testing.T) {
 	host := "share-clears-request.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addAccessRequest(host, "wantsin@example.com"); err != nil {
@@ -138,7 +138,7 @@ func TestShareAPI_GrantClearsPendingRequest(t *testing.T) {
 
 func TestShareAPI_DenyRequest(t *testing.T) {
 	host := "share-deny.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addAccessRequest(host, "nope@example.com"); err != nil {
@@ -162,7 +162,7 @@ func TestShareAPI_DenyRequest(t *testing.T) {
 
 func TestHandleRequestAccess(t *testing.T) {
 	host := "share-reqaccess.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	r := httptest.NewRequest(http.MethodPost, "https://"+host+gatePathPrefix+"/request-access/"+url.PathEscape(host), nil)
@@ -189,7 +189,7 @@ func TestHandleRequestAccess(t *testing.T) {
 
 func TestSharePageHTML_EmbedsModal(t *testing.T) {
 	host := "share-page.example.com"
-	ep, err := registerEndpoint(host, "owner@example.com", "Share Page")
+	ep, err := registerEndpoint(host, "owner@example.com", "Share Page", "")
 	if err != nil {
 		t.Fatal(err)
 	}
