@@ -5,6 +5,7 @@ import (
 	"html"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // Bailey chrome — a thin footer pinned to the bottom of every
@@ -67,9 +68,11 @@ func serveBaileyChrome(w http.ResponseWriter, r *http.Request) {
 	// connect-src 'self' lets the share modal's fetch reach
 	// /2fa-gate/api/share/<host> on the same outer host (passed through
 	// to the gate by the wrap middleware).
+	// img-src includes the inner host so the tab favicon mirrored from
+	// the iframe (see nav-sync) can be fetched.
 	csp := "frame-src https://" + innerHost + "; default-src 'none'; " +
 		"script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
-		"img-src 'self' data:; font-src data:; connect-src 'self'"
+		"img-src 'self' data: https://" + innerHost + "; font-src data:; connect-src 'self'"
 	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
@@ -146,18 +149,39 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
 <script>%[12]s</script>
 <script>
 (function(){
-  // The iframe content posts {type:'bailey-nav', path:'...'} whenever
-  // it navigates (see inner_navsync.go). Mirror that path into the
-  // outer URL bar so reloads land on the same page. Filter messages
-  // to ones that look like a bailey nav payload to avoid acting on
-  // chatter from upstream apps' own postMessage use.
+  // The iframe content posts {type:'bailey-nav', path, title, favicon}
+  // whenever it navigates or its head changes (see inner_navsync.go).
+  // Mirror those into the outer page so the URL bar, tab title, and
+  // tab icon all read like the app. Only messages from the paired
+  // inner origin are honoured — upstream apps' own postMessage chatter
+  // (and anything a third-party frame might shout) is ignored.
+  var innerOrigin = %[14]s;
   var lastPath = location.pathname + location.search + location.hash;
+  function setFavicon(href){
+    // The icon must come from the inner origin (or be inline data:) —
+    // matching the wrap's CSP, and keeping the tab icon under the
+    // authority of the endpoint actually being displayed.
+    if (href.indexOf(innerOrigin + '/') !== 0 && href.indexOf('data:image/') !== 0) return;
+    var l = document.getElementById('bailey-favicon');
+    if (!l) {
+      l = document.createElement('link');
+      l.id = 'bailey-favicon'; l.rel = 'icon';
+      document.head.appendChild(l);
+    }
+    if (l.href !== href) l.href = href;
+  }
   window.addEventListener('message', function(ev){
+    if (ev.origin !== innerOrigin) return;
     var d = ev && ev.data;
-    if (!d || d.type !== 'bailey-nav' || typeof d.path !== 'string') return;
-    if (d.path === lastPath) return;
-    lastPath = d.path;
-    try { history.replaceState(null, '', d.path); } catch (e) {}
+    if (!d || d.type !== 'bailey-nav') return;
+    if (typeof d.path === 'string' && d.path !== lastPath) {
+      lastPath = d.path;
+      try { history.replaceState(null, '', d.path); } catch (e) {}
+    }
+    if (typeof d.title === 'string' && d.title && d.title !== document.title) {
+      document.title = d.title;
+    }
+    if (typeof d.favicon === 'string' && d.favicon) setFavicon(d.favicon);
   });
 })();
 </script>
@@ -170,5 +194,15 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
 		shareBtn,
 		shareModal,
 		shareScript,
-		html.EscapeString(logoutURLForHost(host)))
+		html.EscapeString(logoutURLForHost(host)),
+		jsString("https://"+toInnerHost(host)))
+}
+
+// jsString renders s as a double-quoted JS string literal, safe to
+// embed inside an inline <script> (Go's %q escaping covers quotes and
+// control chars; hostnames can't contain "</script>" but escape "<"
+// anyway for defence in depth).
+func jsString(s string) string {
+	q := fmt.Sprintf("%q", s)
+	return strings.ReplaceAll(q, "<", "\\u003c")
 }

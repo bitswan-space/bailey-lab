@@ -9,26 +9,39 @@ import (
 	"strings"
 )
 
-// Inner-content URL sync. The wrap's outer URL (the one the user sees
-// in their address bar) needs to mirror the path of whatever the
-// iframe is currently showing — otherwise reloading the page ends up
-// back at "/" instead of, say, /2fa-gate/share.
+// Inner-content sync. The wrap's outer page (the one the user sees in
+// their address bar and tab strip) needs to mirror three things from
+// whatever the iframe is currently showing:
+//
+//   - the path  — so reloads resume on the same page instead of "/"
+//   - the title — so the tab reads like the app, not "Bailey"
+//   - the favicon — so the tab keeps the app's icon
 //
 // Outer and inner are different origins (the whole point of the
-// outer/inner split), so the parent page can't read the iframe's
-// location. Workaround: every HTML document served on the inner
-// subdomain gets a small inline script appended that postMessages the
-// current path to window.parent — on initial load and on every
-// pushState / replaceState / popstate. The wrap listens for those
-// messages (see chrome_wrap.go) and history.replaceStates its own URL.
+// outer/inner split), so the parent page can't read any of this from
+// the iframe directly. Workaround: every HTML document served on the
+// inner subdomain gets a small inline script appended that postMessages
+// the current state to window.parent — on load, on every pushState /
+// replaceState / popstate / hashchange, and whenever <title> mutates
+// (SPAs update it long after load). The wrap listens (chrome_wrap.go),
+// verifies the message origin, and mirrors the values.
 
 const navSyncScript = `<script>(function(){
+  var last = '';
+  function fav(){
+    var l = document.querySelector('link[rel="icon"],link[rel="shortcut icon"],link[rel~="icon"]');
+    return (l && l.href) ? l.href : (location.origin + '/favicon.ico');
+  }
   function post(){
-    if (window.parent && window.parent !== window) {
-      try {
-        window.parent.postMessage({type:'bailey-nav', path: location.pathname + location.search + location.hash}, '*');
-      } catch (e) {}
-    }
+    if (!window.parent || window.parent === window) return;
+    var msg = {type:'bailey-nav',
+               path: location.pathname + location.search + location.hash,
+               title: document.title,
+               favicon: fav()};
+    var key = msg.path + '|' + msg.title + '|' + msg.favicon;
+    if (key === last) return;
+    last = key;
+    try { window.parent.postMessage(msg, '*'); } catch (e) {}
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', post);
@@ -39,6 +52,10 @@ const navSyncScript = `<script>(function(){
   history.replaceState = function(){ var r = _replace.apply(this, arguments); post(); return r; };
   window.addEventListener('popstate', post);
   window.addEventListener('hashchange', post);
+  if (window.MutationObserver) {
+    var head = document.head || document.documentElement;
+    new MutationObserver(post).observe(head, {subtree:true, childList:true, characterData:true});
+  }
 })();</script>`
 
 func appendNavSyncToHTML(body []byte) []byte {
