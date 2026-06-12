@@ -5,7 +5,6 @@ import (
 	"html"
 	"net/http"
 	"net/url"
-	"strings"
 )
 
 // Bailey chrome — a thin footer pinned to the bottom of every
@@ -16,11 +15,21 @@ import (
 // origin stays per-app, so browser storage isolation between apps is
 // preserved.
 
+// Footer styling follows the workspace dashboard's dark theme (the
+// shadcn/zinc palette mirrored from aoc-frontend): zinc-950 surface,
+// zinc-800 hairline border, zinc-400 muted text, 6px radii, Roboto.
 const (
-	chromeFooterPx = 22
-	chromeFooterBg = "#0D1326"
-	chromeFooterFg = "#FAFAFA"
+	chromeFooterPx     = 28
+	chromeFooterBg     = "#09090B" // zinc-950 — dashboard dark --background
+	chromeFooterBorder = "#27272A" // zinc-800 — dashboard dark --border
+	chromeFooterFg     = "#FAFAFA" // dashboard dark --foreground
+	chromeFooterMuted  = "#A1A1AA" // zinc-400 — dashboard dark --muted-foreground
 )
+
+// chromeShieldSVG is a small lucide-style shield mark for the footer —
+// inline so the wrap page needs no external assets (its CSP allows
+// none) and renders identically everywhere, unlike an emoji.
+const chromeShieldSVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1z"/></svg>`
 
 // serveBaileyChrome renders the wrap HTML for an outer-hostname
 // request. Must only be called for authenticated top-level HTML GETs —
@@ -72,14 +81,13 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
 	if email != "" {
 		emailDisp = email
 	}
-	fence := strings.Repeat("▲", 400)
 	apiURL := gatePathPrefix + "/api/share/" + url.PathEscape(host)
 
 	shareBtn := ""
 	shareModal := ""
 	shareScript := ""
 	if isOwner {
-		shareBtn = `<a class="btn" href="#" onclick="window.__baileyShareOpen();return false;">Share</a>`
+		shareBtn = `<a class="btn btn-primary" href="#" onclick="window.__baileyShareOpen();return false;">Share</a>`
 		shareModal = shareModalHTML()
 		shareScript = shareModalJS(host, emailDisp, apiURL)
 	}
@@ -94,30 +102,48 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
   iframe.bailey-content { position: fixed; inset: 0 0 %[2]dpx 0; width: 100vw; height: calc(100vh - %[2]dpx); border: 0; display: block; background: white; }
   footer.bailey-footer {
     position: fixed; left: 0; right: 0; bottom: 0; height: %[2]dpx;
-    background: %[1]s; color: %[3]s;
-    font: 12px/%[2]dpx -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    display: flex; align-items: center; overflow: hidden; white-space: nowrap; z-index: 2147483647;
+    box-sizing: border-box;
+    background: %[1]s; color: %[4]s;
+    border-top: 1px solid %[3]s;
+    font: 12px/1 Roboto, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    display: flex; align-items: center; gap: 8px; padding: 0 10px;
+    overflow: hidden; white-space: nowrap; z-index: 2147483647;
   }
-  footer.bailey-footer .label   { padding: 0 10px; flex-shrink: 0; }
-  footer.bailey-footer .label b { font-weight: 600; }
-  footer.bailey-footer .sep     { padding: 0 6px; opacity: 0.55; flex-shrink: 0; }
-  footer.bailey-footer .fence   { flex: 1; opacity: 0.45; letter-spacing: 1px; overflow: hidden; }
-  footer.bailey-footer a.btn    { padding: 0 12px; color: %[3]s; text-decoration: none; flex-shrink: 0; border-left: 1px solid rgba(255,255,255,0.18); cursor: pointer; }
-  footer.bailey-footer a.btn:hover { background: rgba(255,255,255,0.06); }
-%[8]s
+  footer.bailey-footer .brand {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: %[4]s; flex-shrink: 0;
+  }
+  footer.bailey-footer .brand svg { color: %[5]s; }
+  footer.bailey-footer .brand b { color: %[5]s; font-weight: 500; }
+  footer.bailey-footer .dot   { color: %[4]s; opacity: 0.5; flex-shrink: 0; }
+  footer.bailey-footer .who   { color: %[4]s; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; }
+  footer.bailey-footer .who b { color: %[5]s; font-weight: 500; }
+  footer.bailey-footer .spacer { flex: 1; }
+  footer.bailey-footer a.btn {
+    display: inline-flex; align-items: center; height: 20px;
+    padding: 0 10px; border-radius: 6px;
+    color: %[4]s; text-decoration: none; flex-shrink: 0; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  footer.bailey-footer a.btn:hover { background: %[3]s; color: %[5]s; }
+  footer.bailey-footer a.btn-primary {
+    background: %[5]s; color: #18181B; font-weight: 500;
+  }
+  footer.bailey-footer a.btn-primary:hover { background: #E4E4E7; color: #18181B; }
+%[9]s
 </style>
 </head><body>
-<iframe class="bailey-content" src="%[4]s" allow="clipboard-read; clipboard-write; fullscreen; camera; microphone; geolocation"></iframe>
+<iframe class="bailey-content" src="%[6]s" allow="clipboard-read; clipboard-write; fullscreen; camera; microphone; geolocation"></iframe>
 <footer class="bailey-footer">
-  <span class="label">🛡 Protected by Bitswan Bailey</span>
-  <span class="sep">·</span>
-  <span class="label">Logged in as <b>%[5]s</b></span>
-  <span class="fence">%[6]s</span>
-  %[7]s
+  <span class="brand">%[7]s Protected by Bitswan <b>Bailey</b></span>
+  <span class="dot">·</span>
+  <span class="who"><b>%[8]s</b></span>
+  <span class="spacer"></span>
+  %[10]s
   <a class="btn" href="/oauth2/sign_out" target="_top">Logout</a>
 </footer>
-%[9]s
-<script>%[10]s</script>
+%[11]s
+<script>%[12]s</script>
 <script>
 (function(){
   // The iframe content posts {type:'bailey-nav', path:'...'} whenever
@@ -136,12 +162,12 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
 })();
 </script>
 </body></html>`,
-		chromeFooterBg, chromeFooterPx, chromeFooterFg,
+		chromeFooterBg, chromeFooterPx, chromeFooterBorder, chromeFooterMuted, chromeFooterFg,
 		html.EscapeString(iframeSrc),
+		chromeShieldSVG,
 		html.EscapeString(emailDisp),
-		fence,
-		shareBtn,
 		shareModalCSS,
+		shareBtn,
 		shareModal,
 		shareScript)
 }

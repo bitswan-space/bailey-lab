@@ -41,7 +41,7 @@ func TestChromeWrap_OuterHostGetsWrap(t *testing.T) {
 	if !strings.Contains(body, `src="https://`+inner+`/some/page?x=1"`) {
 		t.Errorf("wrap iframe doesn't carry the requested path:\n%s", body)
 	}
-	if !strings.Contains(body, "Protected by Bitswan Bailey") {
+	if !strings.Contains(body, "Protected by Bitswan") || !strings.Contains(body, "bailey-footer") {
 		t.Error("wrap footer missing")
 	}
 	if !strings.Contains(body, "user@example.com") {
