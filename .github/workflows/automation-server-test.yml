@@ -151,6 +151,25 @@ jobs:
           ./bitswan _test init --gitops-image bitswan/gitops-local:latest --no-remove || exit 1
           ./bitswan _test cleanup || true
 
+      - name: "Diagnostics on Test 1 failure"
+        if: failure()
+        run: |
+          echo "::group::docker ps -a"
+          docker ps -a || true
+          echo "::endgroup::"
+          echo "::group::docker images"
+          docker images || true
+          echo "::endgroup::"
+          # --no-remove leaves the workspace up on failure, so dump every
+          # container's recent logs — the gitops container's deploy pipeline
+          # output and any deployed-automation container are what we need.
+          for c in $(docker ps -aq); do
+            name=$(docker inspect --format '{{.Name}} ({{.State.Status}}, exit={{.State.ExitCode}})' "$c" 2>/dev/null || echo "$c")
+            echo "::group::logs $name"
+            docker logs --tail 200 "$c" 2>&1 || true
+            echo "::endgroup::"
+          done
+
       - name: "Test 2: Init with Caddy (backward compat)"
         timeout-minutes: 15
         run: |

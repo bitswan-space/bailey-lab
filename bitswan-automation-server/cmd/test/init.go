@@ -77,6 +77,16 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	workspaceName := fmt.Sprintf("test-workspace-%d", time.Now().Unix())
 	fmt.Printf("Test workspace name: %s\n", workspaceName)
 
+	// On failure, only tear the workspace down when the caller hasn't asked to
+	// keep it. --no-remove means "leave workspace and deployment running" — and
+	// that's most valuable precisely when a step fails, so CI (which always
+	// passes --no-remove) can dump container logs to diagnose the failure.
+	cleanupOnFailure := func() {
+		if !noRemove {
+			cleanupWorkspace(workspaceName)
+		}
+	}
+
 	// Step 1: Initialize workspace
 	fmt.Println("\n[1/6] Initializing workspace...")
 	client, err := daemon.NewClient()
@@ -114,7 +124,7 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	// Step 2: Wait for gitops service to be ready
 	fmt.Println("\n[2/6] Waiting for gitops service to be ready...")
 	if err := waitForGitopsReady(metadata.GitopsURL, metadata.GitopsSecret, workspaceName); err != nil {
-		cleanupWorkspace(workspaceName)
+		cleanupOnFailure()
 		return fmt.Errorf("gitops service did not become ready: %w", err)
 	}
 	fmt.Println("✓ Gitops service ready")
@@ -132,7 +142,7 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	)
 	relativePath, err := createAutomationFromTemplate(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, templateID, bp, automation)
 	if err != nil {
-		cleanupWorkspace(workspaceName)
+		cleanupOnFailure()
 		return fmt.Errorf("failed to create automation from template: %w", err)
 	}
 	fmt.Printf("✓ Automation created at: %s\n", relativePath)
@@ -144,12 +154,12 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	fmt.Println("\n[4/6] Deploying automation...")
 	taskID, deploymentID, _, err := startDeploy(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, relativePath, "dev")
 	if err != nil {
-		cleanupWorkspace(workspaceName)
+		cleanupOnFailure()
 		return fmt.Errorf("failed to start deploy: %w", err)
 	}
 	fmt.Printf("  Deploy started: task=%s deployment=%s\n", taskID, deploymentID)
 	if err := waitForDeployTask(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, taskID); err != nil {
-		cleanupWorkspace(workspaceName)
+		cleanupOnFailure()
 		return fmt.Errorf("deploy did not complete: %w", err)
 	}
 	fmt.Println("✓ Automation deployed")
@@ -158,11 +168,11 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	fmt.Println("\n[5/6] Waiting for deployment to be ready...")
 	endpointURL, err := waitForDeployment(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, deploymentID)
 	if err != nil {
-		cleanupWorkspace(workspaceName)
+		cleanupOnFailure()
 		return fmt.Errorf("failed to wait for deployment: %w", err)
 	}
 	if endpointURL == "" {
-		cleanupWorkspace(workspaceName)
+		cleanupOnFailure()
 		return fmt.Errorf("deployment ready but no endpoint URL found")
 	}
 	fmt.Printf("✓ Deployment ready at: %s\n", endpointURL)
