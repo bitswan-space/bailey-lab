@@ -11,6 +11,7 @@ import { registerBusinessProcessRoutes } from './routes/business-processes.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerTemplateRoutes } from './routes/templates.js';
 import { registerCodingAgentRoutes } from './routes/coding-agent.js';
+import { registerSnapshotRoutes } from './routes/snapshots.js';
 import { registerWorktreeRoutes } from './routes/worktrees.js';
 import { registerWorktreeFilesRoutes } from './routes/worktree-files.js';
 
@@ -60,6 +61,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerWorktreeFilesRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
   registerTemplateRoutes(app, { gitops });
   registerAutomationRoutes(app, { gitops });
+  registerSnapshotRoutes(app, { gitops });
   registerEventRoutes(app, { gitops });
 
   // Static SPA + SPA-fallback. Registered last so /api and /ws routes

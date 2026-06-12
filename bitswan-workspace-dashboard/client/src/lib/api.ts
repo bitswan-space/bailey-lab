@@ -1,4 +1,10 @@
-import type { DockerInspect } from '@/types';
+import type {
+  DockerInspect,
+  SnapshotListResponse,
+  SnapshotEligibility,
+  SnapshotStage,
+  SnapshotTask,
+} from '@/types';
 
 async function getJson<T>(url: string): Promise<T> {
   const r = await fetch(url, { credentials: 'include', cache: 'no-store' });
@@ -303,6 +309,60 @@ export const api = {
     diff: (name: string, p?: string) =>
       getJson<{ diff: string }>(
         `/api/worktrees/${encodeURIComponent(name)}/diff${p ? `?path=${encodeURIComponent(p)}` : ''}`,
+      ),
+  },
+
+  snapshots: {
+    /** Snapshots + eligibility + disk usage + in-flight tasks for one BP. */
+    list: (bp: string) =>
+      getJson<SnapshotListResponse>(`/api/snapshots/${encodeURIComponent(bp)}`),
+    /** Registry flags + live service availability per stage. */
+    eligibility: (bp: string) =>
+      getJson<SnapshotEligibility>(
+        `/api/snapshots/${encodeURIComponent(bp)}/eligibility`,
+      ),
+    /** Opt the BP into per-BP databases at one stage (starts empty). */
+    provision: (bp: string, stage: SnapshotStage, bpName?: string) =>
+      postJson<{ bp: string; stage: string; services: Record<string, string> }>(
+        `/api/snapshots/${encodeURIComponent(bp)}/provision`,
+        { stage, ...(bpName ? { bp_name: bpName } : {}) },
+      ),
+    /** Start a background snapshot. 202 + task_id. */
+    create: (bp: string, stage: SnapshotStage, label?: string) =>
+      postJson<{ task_id: string }>(
+        `/api/snapshots/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}`,
+        { label: label ?? '' },
+      ),
+    /** Restore a snapshot into a target stage (replace semantics). */
+    restore: (
+      bp: string,
+      body: {
+        snapshot_id: string;
+        source_stage: SnapshotStage;
+        target_stage: SnapshotStage;
+      },
+    ) =>
+      postJson<{ task_id: string }>(
+        `/api/snapshots/${encodeURIComponent(bp)}/restore`,
+        body,
+      ),
+    /** One-click stage→stage data clone. */
+    clone: (
+      bp: string,
+      body: { source_stage: SnapshotStage; target_stage: SnapshotStage },
+    ) =>
+      postJson<{ task_id: string }>(
+        `/api/snapshots/${encodeURIComponent(bp)}/clone`,
+        body,
+      ),
+    remove: (bp: string, stage: SnapshotStage, snapshotId: string) =>
+      deleteEmpty(
+        `/api/snapshots/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}/${encodeURIComponent(snapshotId)}`,
+      ),
+    /** Snapshot-task poll endpoint (the SSE event is a freshness bonus). */
+    taskStatus: (taskId: string) =>
+      getJson<SnapshotTask>(
+        `/api/snapshots/tasks/${encodeURIComponent(taskId)}`,
       ),
   },
 
