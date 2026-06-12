@@ -80,6 +80,15 @@ fi
 
 chown -R 1000 /gitops/gitops/
 
+# Per-BP stage snapshots live on a dedicated bind mount (/gitops/snapshots,
+# see dockercompose.go). Docker creates the mount point owned by root, but the
+# gitops process runs as user1000 and must create per-BP snapshot dirs beneath
+# it — otherwise snapshot/restore/clone fail with EACCES on /gitops/snapshots.
+# Chown the mount point only (not -R): the tree can be large and everything
+# under it is already created as user1000.
+mkdir -p /gitops/snapshots
+chown 1000 /gitops/snapshots
+
 # Always set up Docker group permissions for user1000
 # This ensures user1000 can access Docker socket even when running as root
 setup_docker_group

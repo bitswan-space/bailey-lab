@@ -90,6 +90,10 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		"volumes": []string{
 			gitopsPathForVolumes + "/gitops:/gitops/gitops:z",
 			gitopsPathForVolumes + "/secrets:/gitops/secrets:z",
+			// Per-BP stage snapshots (app/services/snapshot_service.py).
+			// /gitops itself is the container's writable layer, so anything
+			// not bind-mounted there is lost on container recreation.
+			gitopsPathForVolumes + "/snapshots:/gitops/snapshots:z",
 			sshDir + ":/home/user1000/.ssh:z",
 			"/var/run/docker.sock:/var/run/docker.sock",
 			"/var/run/bitswan:/var/run/bitswan",
