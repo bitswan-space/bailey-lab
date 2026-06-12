@@ -2226,6 +2226,17 @@ fi
                     deployed_by=deployed_by,
                 )
 
+        # Make the just-applied deployment visible to GET /automations/ right
+        # away. That listing reads a cache (see get_automations) which is
+        # otherwise only refreshed by the inotify filesystem watcher in
+        # lifespan.py. inotify doesn't fire on bind/overlay mounts in some
+        # environments (notably Docker-in-Docker CI), so a successful deploy
+        # would stay invisible to the listing until an unrelated event
+        # triggered a refresh. Refresh explicitly so the listing is correct
+        # regardless of the watcher — and so clients polling right after a
+        # deploy never observe stale state.
+        await self.refresh_all()
+
         return {
             "message": "Deployed services successfully",
             "deployments": list(deployments.get(deployment_id, {}).keys()),

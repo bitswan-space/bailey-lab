@@ -128,10 +128,11 @@ jobs:
 
       - name: Build gitops image from source
         run: |
-          # Clone the gitops repo and build a fresh image so integration tests
-          # use code that talks to the daemon socket (not Caddy directly).
-          git clone --depth 1 https://github.com/bitswan-space/bitswan-gitops.git /tmp/bitswan-gitops
-          docker build -t bitswan/gitops-local:latest /tmp/bitswan-gitops
+          # Build a fresh image from the in-repo gitops source so integration
+          # tests exercise this monorepo's code (and talk to the daemon socket,
+          # not Caddy directly). Path is absolute because this job inherits the
+          # bitswan-automation-server working-directory default.
+          docker build -t bitswan/gitops-local:latest "${{ github.workspace }}/bitswan-gitops"
 
       - name: Initialize daemon
         run: |
@@ -150,12 +151,31 @@ jobs:
           ./bitswan _test init --gitops-image bitswan/gitops-local:latest --no-remove || exit 1
           ./bitswan _test cleanup || true
 
+      - name: "Diagnostics on Test 1 failure"
+        if: failure()
+        run: |
+          echo "::group::docker ps -a"
+          docker ps -a || true
+          echo "::endgroup::"
+          echo "::group::docker images"
+          docker images || true
+          echo "::endgroup::"
+          # --no-remove leaves the workspace up on failure, so dump every
+          # container's recent logs — the gitops container's deploy pipeline
+          # output and any deployed-automation container are what we need.
+          for c in $(docker ps -aq); do
+            name=$(docker inspect --format '{{.Name}} ({{.State.Status}}, exit={{.State.ExitCode}})' "$c" 2>/dev/null || echo "$c")
+            echo "::group::logs $name"
+            docker logs --tail 200 "$c" 2>&1 || true
+            echo "::endgroup::"
+          done
+
       - name: "Test 2: Init with Caddy (backward compat)"
         timeout-minutes: 15
         run: |
           echo "=== Testing with Caddy (backward compatibility) ==="
           # Rebuild gitops image (previous test cleanup deletes it)
-          docker build -t bitswan/gitops-local:latest /tmp/bitswan-gitops
+          docker build -t bitswan/gitops-local:latest "${{ github.workspace }}/bitswan-gitops"
           # Stop Traefik so a fresh Caddy can be started
           docker rm -f traefik 2>/dev/null || true
           docker compose -p bitswan-traefik down 2>/dev/null || true
@@ -173,7 +193,7 @@ jobs:
         run: |
           echo "=== Testing migration from Caddy to Traefik ==="
           # Rebuild gitops image (previous test cleanup deletes it)
-          docker build -t bitswan/gitops-local:latest /tmp/bitswan-gitops
+          docker build -t bitswan/gitops-local:latest "${{ github.workspace }}/bitswan-gitops"
           # Ensure Caddy is running with some routes
           docker rm -f traefik 2>/dev/null || true
           docker compose -p bitswan-traefik down 2>/dev/null || true
