@@ -755,23 +755,29 @@ func addRouteToIngress(req IngressAddRouteRequest, jwtToken string) error {
 		return fmt.Errorf("no ingress proxy detected")
 	}
 
-	// When the caller supplied an owner email (gitops deploying an
-	// exposed automation, workspace init registering a workspace
-	// service, …), record the hostname in the Bailey ACL so it is
-	// access-controlled and shows up on the owner's share index, and
-	// register the OAuth callback URIs for both subdomains. Best-effort
-	// — a failure here doesn't unwind the route registration above.
+	// Every hostname routed through the protected chain needs its OAuth
+	// callback URIs (outer + inner) on the shared Keycloak client —
+	// otherwise the first session-less request to it dead-ends on a
+	// Keycloak "Invalid parameter: redirect_uri" page. This must NOT be
+	// owner-gated: gitops registers automation/live-dev routes without
+	// knowing the deployer. Best-effort — a failure here doesn't unwind
+	// the route registration above.
+	outer := toOuterHost(req.Hostname)
+	if err := registerProtectedRedirectURI(outer); err != nil {
+		fmt.Printf("Warning: AOC didn't accept protected-client redirect URI for %s: %v\n", outer, err)
+	}
+
+	// When the caller supplied an owner email (workspace init, the
+	// add-route CLI), record the hostname in the Bailey ACL so it is
+	// access-controlled and shows up on the owner's share index.
+	// Ownerless routes stay open until something claims them.
 	if req.OwnerEmail != "" {
-		outer := toOuterHost(req.Hostname)
 		display := req.DisplayName
 		if display == "" {
 			display = outer
 		}
 		if _, err := registerEndpoint(outer, req.OwnerEmail, display); err != nil {
 			fmt.Printf("Warning: failed to register Bailey endpoint for %s: %v\n", outer, err)
-		}
-		if err := registerProtectedRedirectURI(outer); err != nil {
-			fmt.Printf("Warning: AOC didn't accept protected-client redirect URI for %s: %v\n", outer, err)
 		}
 	}
 	return nil
