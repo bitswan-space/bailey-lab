@@ -874,9 +874,7 @@ class SnapshotService:
                 gunzip_input=True,
             )
             if rc != 0:
-                raise RuntimeError(
-                    f"docker cp into {bucket} failed: {stderr.strip()}"
-                )
+                raise RuntimeError(f"docker cp into {bucket} failed: {stderr.strip()}")
             # Replace semantics: recreate the bucket empty, then mirror in.
             _, stderr, rc = await run_docker_command(
                 "docker",
