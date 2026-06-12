@@ -881,6 +881,15 @@ class AutomationService:
                 await report(step, message)
 
         bs_yaml = read_bitswan_yaml(self.gitops_dir) or {"deployments": {}}
+
+        # First-deploy gating for per-BP databases: must look at bitswan.yaml
+        # BEFORE these members are written into it (a BP that already has
+        # deployments at the target realm keeps its data on the shared DB and
+        # is never auto-migrated).
+        from app.services.bp_databases import register_new_bps_for_members
+
+        register_new_bps_for_members(bs_yaml, members)
+
         deployments = bs_yaml.setdefault("deployments", {})
 
         for m in members:
@@ -1025,6 +1034,7 @@ class AutomationService:
             extra_services=member_services + infra_service_names,
         )
         await self._post_deploy_infra_services(bs_yaml)
+        await self._provision_bp_databases(bs_yaml, deployment_ids)
 
         for result in deployment_result.values():
             if result["return_code"] != 0:
@@ -2019,6 +2029,26 @@ fi
 
         await _report("updating_config", "Updating deployment configuration...")
 
+        # First-deploy gating for per-BP databases (pre-write bitswan.yaml
+        # check — see write_deployment_entries for the batched equivalent).
+        from app.services.bp_databases import register_new_bps_for_members
+
+        _existing_conf = bs_yaml.get("deployments", {}).get(deployment_id) or {}
+        register_new_bps_for_members(
+            bs_yaml,
+            [
+                {
+                    "relative_path": relative_path
+                    or _existing_conf.get("relative_path"),
+                    "stage": (
+                        stage
+                        if stage is not None
+                        else (_existing_conf.get("stage") or "production")
+                    ),
+                }
+            ],
+        )
+
         # Update bitswan.yaml with new parameters if provided
         has_updates = any(
             v is not None
@@ -2152,6 +2182,7 @@ fi
             extra_services=infra_service_names,
         )
         await self._post_deploy_infra_services(bs_yaml)
+        await self._provision_bp_databases(bs_yaml, [deployment_id])
 
         # record deployment in bitswan.yaml
 
@@ -2250,6 +2281,7 @@ fi
         # are included automatically via --remove-orphans
         deployment_result = await docker_compose_up(self.gitops_dir, dc_yaml)
         await self._post_deploy_infra_services(filtered_bs_yaml)
+        await self._provision_bp_databases(filtered_bs_yaml, list(deployments.keys()))
 
         for result in deployment_result.values():
             if result["return_code"] != 0:
@@ -2349,6 +2381,7 @@ fi
             extra_services=infra_service_names,
         )
         await self._post_deploy_infra_services(bs_yaml)
+        await self._provision_bp_databases(bs_yaml, [deployment_id])
 
         for result in deployment_result.values():
             if result["return_code"] != 0:
@@ -2873,6 +2906,19 @@ fi
                             f"Post-deploy init for {svc.display_name} failed: {e}"
                         )
 
+    async def _provision_bp_databases(
+        self, bs_yaml: dict | None, deployment_ids: list[str]
+    ) -> None:
+        """Create per-BP logical databases for registered BPs after compose-up.
+
+        Runs after `_post_deploy_infra_services` so the stage's service
+        containers exist. Best-effort — the registry retries unprovisioned
+        services on the next deploy.
+        """
+        from app.services.bp_databases import provision_for_deployments
+
+        await provision_for_deployments(self.workspace_name, bs_yaml, deployment_ids)
+
     def get_org_group_path(self):
         """Fetch the Keycloak org group path for this workspace from AOC.
 
@@ -3006,6 +3052,26 @@ fi
         return secret_names
 
     def generate_docker_compose(self, bs_yaml: dict):
+        from app.services.bp_databases import (
+            bp_resource_names,
+            derive_bp_and_worktree,
+            is_registered,
+            load_registry,
+        )
+        from app.services.infra_service import stage_for_deployment
+
+        # Per-BP database registry, loaded once per compose generation.
+        # Unreadable registry degrades to "no BP is provisioned" for env
+        # injection only (provisioning paths fail loudly instead).
+        try:
+            bp_registry = load_registry()
+        except Exception as e:
+            logger.warning(
+                "BP database registry unreadable, skipping per-BP env injection: %s",
+                e,
+            )
+            bp_registry = {"version": 1, "bps": {}}
+
         dc = {
             "version": "3",
             "services": {},
@@ -3108,23 +3174,9 @@ fi
             # URL template lets automations find each other by substituting {name}.
             # Deployment ID format: {automationName}-{context}
             deployment_context = conf.get("deployment_context", "")
+            # relative_path is like "Test/backend" or "worktrees/bar/Test/backend"
+            bp_sanitized, wt_name = derive_bp_and_worktree(relative_path)
             if not deployment_context:
-                # Derive context from relative_path and stage
-                # relative_path is like "Test/backend" or "worktrees/bar/Test/backend"
-                bp_name = ""
-                wt_name = ""
-                if relative_path:
-                    parts = relative_path.replace("\\", "/").split("/")
-                    if len(parts) >= 2 and parts[0] == "worktrees":
-                        wt_name = parts[1]  # extract worktree name
-                        parts = parts[2:]  # skip "worktrees/{name}"
-                    if len(parts) >= 2:
-                        bp_name = parts[0]
-                bp_sanitized = (
-                    re.sub(r"[^a-z0-9-]", "-", bp_name.lower()).strip("-")
-                    if bp_name
-                    else ""
-                )
                 wt_part = f"-wt-{wt_name}" if wt_name else ""
                 stage_suffix = f"-{stage}" if stage and stage != "production" else ""
                 if bp_sanitized:
@@ -3139,7 +3191,21 @@ fi
             if deployment_context:
                 entry["environment"]["BITSWAN_DEPLOYMENT_CONTEXT"] = deployment_context
 
-            # For worktree live-devs, override POSTGRES_DB to use the cloned database
+            # Per-BP database namespace for snapshot-eligible BPs: compose
+            # `environment:` beats the shared defaults coming from the
+            # service secrets env_file. Names are stage-independent so
+            # snapshots restore across stages without rewriting.
+            if bp_sanitized and is_registered(
+                bp_registry, bp_sanitized, stage_for_deployment(stage)
+            ):
+                bp_names = bp_resource_names(bp_sanitized)
+                entry["environment"]["POSTGRES_DB"] = bp_names["postgres_db"]
+                entry["environment"]["COUCHDB_DB_PREFIX"] = bp_names["couchdb_prefix"]
+                entry["environment"]["MINIO_BUCKET"] = bp_names["minio_bucket"]
+
+            # For worktree live-devs, override POSTGRES_DB to use the cloned
+            # database. Ordering is load-bearing: this MUST come after the
+            # per-BP injection above so the worktree clone wins.
             if wt_name and stage == "live-dev":
                 wt_db = "postgres_wt_" + re.sub(r"[^a-z0-9_]", "_", wt_name.lower())
                 entry["environment"]["POSTGRES_DB"] = wt_db

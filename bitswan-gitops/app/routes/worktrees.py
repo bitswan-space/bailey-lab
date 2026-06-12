@@ -23,20 +23,12 @@ router = APIRouter(prefix="/worktrees", tags=["worktrees"])
 
 def _get_postgres_secrets(stage: str = "dev") -> dict | None:
     """Read Postgres connection info from the secrets file for the given stage."""
-    bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
-    suffix = f"-{stage}" if stage != "production" else ""
-    secrets_path = os.path.join(bs_home, "secrets", f"postgres{suffix}")
-    if not os.path.exists(secrets_path):
-        return None
-    info = {}
-    with open(secrets_path) as f:
-        for line in f:
-            line = line.strip()
-            if "=" in line and not line.startswith("#"):
-                key, _, value = line.partition("=")
-                info[key] = value
+    from app.services.bp_databases import get_service_secrets
+
+    info = get_service_secrets("postgres", stage)
     if (
-        info.get("POSTGRES_USER")
+        info
+        and info.get("POSTGRES_USER")
         and info.get("POSTGRES_PASSWORD")
         and info.get("POSTGRES_HOST")
     ):

@@ -25,12 +25,13 @@ export interface Worktree {
   synced: boolean;
 }
 
-/** The top-bar flow tabs. Description and Deployments work without a worktree
- *  (Deployments is always main-scoped); the other three follow the selected
- *  worktree. */
+/** The top-bar flow tabs. Description, Deployments and Snapshots work
+ *  without a worktree (both are always main-scoped); the other three follow
+ *  the selected worktree. */
 export type FlowTab =
   | 'description'
   | 'agent'
   | 'requirements'
   | 'sync-deploy'
-  | 'deployments';
+  | 'deployments'
+  | 'snapshots';

@@ -465,6 +465,103 @@ export class GitopsClient {
     return r.body;
   }
 
+  // ---------------------------------------------------------------------
+  // Per-BP stage snapshots (`/snapshots/*`). Create/restore/clone return
+  // 202 + task_id; progress is polled via `snapshotTaskStatus` (the
+  // `snapshot_progress` SSE event is fire-and-forget, same as deploys).
+  // ---------------------------------------------------------------------
+
+  /** Shared fetch shape for the snapshot endpoints. */
+  private async requestJson(
+    method: string,
+    path: string,
+    bodyObj?: unknown,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${this.secret}`,
+        ...(bodyObj !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(bodyObj !== undefined ? { body: JSON.stringify(bodyObj) } : {}),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET /snapshots/{bp}` — snapshots + eligibility + disk usage + active tasks. */
+  listSnapshots(bp: string) {
+    return this.requestJson('GET', `/snapshots/${encodeURIComponent(bp)}`);
+  }
+
+  /** `GET /snapshots/{bp}/eligibility` — registry flags + live availability. */
+  snapshotEligibility(bp: string) {
+    return this.requestJson(
+      'GET',
+      `/snapshots/${encodeURIComponent(bp)}/eligibility`,
+    );
+  }
+
+  /** `POST /snapshots/{bp}/provision` — opt a BP into per-BP databases at one stage. */
+  provisionBp(bp: string, input: { stage: string; bp_name?: string }) {
+    return this.requestJson(
+      'POST',
+      `/snapshots/${encodeURIComponent(bp)}/provision`,
+      input,
+    );
+  }
+
+  /** `POST /snapshots/{bp}/{stage}` — start a background snapshot (202 + task_id). */
+  createSnapshot(bp: string, stage: string, input: { label?: string }) {
+    return this.requestJson(
+      'POST',
+      `/snapshots/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}`,
+      input,
+    );
+  }
+
+  /** `POST /snapshots/{bp}/restore` — restore a snapshot into a target stage. */
+  restoreSnapshot(
+    bp: string,
+    input: { snapshot_id: string; source_stage: string; target_stage: string },
+  ) {
+    return this.requestJson(
+      'POST',
+      `/snapshots/${encodeURIComponent(bp)}/restore`,
+      input,
+    );
+  }
+
+  /** `POST /snapshots/{bp}/clone` — one-click stage→stage data clone. */
+  cloneStage(bp: string, input: { source_stage: string; target_stage: string }) {
+    return this.requestJson(
+      'POST',
+      `/snapshots/${encodeURIComponent(bp)}/clone`,
+      input,
+    );
+  }
+
+  /** `DELETE /snapshots/{bp}/{stage}/{snapshotId}` — delete one snapshot. */
+  deleteSnapshot(bp: string, stage: string, snapshotId: string) {
+    return this.requestJson(
+      'DELETE',
+      `/snapshots/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}/${encodeURIComponent(snapshotId)}`,
+    );
+  }
+
+  /** `GET /snapshots/tasks/{taskId}` — snapshot-task poll endpoint. */
+  snapshotTaskStatus(taskId: string) {
+    return this.requestJson(
+      'GET',
+      `/snapshots/tasks/${encodeURIComponent(taskId)}`,
+    );
+  }
+
   /** Subscribe to upstream events. Returns an unsubscribe function. */
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);

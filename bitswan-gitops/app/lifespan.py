@@ -14,6 +14,7 @@ from watchdog.events import FileSystemEventHandler
 from .async_docker import get_async_docker_client
 from .dependencies import get_automation_service
 from .deploy_manager import deploy_manager
+from .snapshot_manager import snapshot_manager
 from .event_broadcaster import event_broadcaster
 from .mqtt import mqtt_resource
 from .mqtt_publish_automations import publish_automations
@@ -512,6 +513,14 @@ async def lifespan(app: FastAPI):
             trigger="interval",
             minutes=10,
             name="cleanup_deploy_tasks",
+        )
+
+        # Same for snapshot tasks
+        scheduler.add_job(
+            snapshot_manager.cleanup_old_tasks,
+            trigger="interval",
+            minutes=10,
+            name="cleanup_snapshot_tasks",
         )
 
         # Daily backup at 2 AM UTC (if configured)

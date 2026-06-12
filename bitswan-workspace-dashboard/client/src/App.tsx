@@ -38,6 +38,7 @@ const FLOW_TABS: FlowTab[] = [
   'requirements',
   'sync-deploy',
   'deployments',
+  'snapshots',
 ];
 
 // eslint-disable-next-line no-restricted-syntax -- null = no persisted choice

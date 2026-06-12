@@ -126,3 +126,30 @@ class ServiceRestoreRequest(BaseModel):
 
 class ServiceClearRequest(BaseModel):
     stage: str = ""
+
+
+# =============================================================================
+# Stage Snapshot Models
+# =============================================================================
+
+
+class SnapshotProvisionRequest(BaseModel):
+    """Explicit opt-in to per-BP databases at one stage (starts empty)."""
+
+    stage: str
+    bp_name: str = ""  # original BP folder name; defaults to the URL value
+
+
+class SnapshotCreateRequest(BaseModel):
+    label: str = ""
+
+
+class SnapshotRestoreRequest(BaseModel):
+    snapshot_id: str
+    source_stage: str
+    target_stage: str
+
+
+class SnapshotCloneRequest(BaseModel):
+    source_stage: str
+    target_stage: str
