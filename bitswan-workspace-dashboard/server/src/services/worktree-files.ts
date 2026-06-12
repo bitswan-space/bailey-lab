@@ -266,6 +266,73 @@ export async function writeWorktreeFile(opts: {
   return { ok: true, etag: statEtag(st) };
 }
 
+export type FileDeleteResult = { ok: true } | { error: 'not-found' };
+
+/**
+ * Delete a single file inside a worktree. Directories are refused (the
+ * dashboard only ever deletes files, e.g. spec attachments) — a missing
+ * or non-file target reports `not-found`.
+ */
+export async function deleteWorktreeFile(opts: {
+  worktree: string;
+  path: string;
+  workspaceRoot: string;
+}): Promise<FileDeleteResult> {
+  const root = worktreeRoot(opts);
+  let abs: string;
+  try {
+    abs = resolveInsideWorktree(root, opts.path);
+  } catch {
+    return { error: 'not-found' };
+  }
+  let st: import('node:fs').Stats;
+  try {
+    st = await fs.stat(abs);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { error: 'not-found' };
+    }
+    throw err;
+  }
+  if (!st.isFile()) return { error: 'not-found' };
+  await fs.unlink(abs);
+  return { ok: true };
+}
+
+export type FileStatResult =
+  | { abs: string; size: number; name: string }
+  | { error: 'not-found' };
+
+/**
+ * Resolve + stat a file inside a worktree for raw streaming (downloads,
+ * binary attachments). Unlike {@link readWorktreeFile} this places no
+ * size or text-ness constraints — the route layer streams the bytes.
+ */
+export async function statWorktreeFile(opts: {
+  worktree: string;
+  path: string;
+  workspaceRoot: string;
+}): Promise<FileStatResult> {
+  const root = worktreeRoot(opts);
+  let abs: string;
+  try {
+    abs = resolveInsideWorktree(root, opts.path);
+  } catch {
+    return { error: 'not-found' };
+  }
+  let st: import('node:fs').Stats;
+  try {
+    st = await fs.stat(abs);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { error: 'not-found' };
+    }
+    throw err;
+  }
+  if (!st.isFile()) return { error: 'not-found' };
+  return { abs, size: st.size, name: path.basename(abs) };
+}
+
 /**
  * Resolve a workspace-relative directory path inside a worktree (for
  * upload targets). Creates the directory if it doesn't exist. The empty

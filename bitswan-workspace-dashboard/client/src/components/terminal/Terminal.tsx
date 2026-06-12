@@ -88,6 +88,25 @@ export function Terminal({ wsUrl, onExit }: TerminalProps) {
     term.open(host);
     fit.fit();
 
+    // Claude's TUI enables mouse tracking, so a plain click-drag is delivered
+    // to the app as mouse events rather than selecting text — hold Shift to
+    // force a local selection (xterm's built-in bypass). Once selected, xterm
+    // does nothing on its own to copy, so wire the standard shortcuts:
+    // Cmd+C (mac) or Ctrl+Shift+C (so plain Ctrl+C still sends SIGINT to the
+    // process). Returning false stops xterm from also forwarding the keys.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== 'keydown') return true;
+      const isCopy =
+        (e.metaKey && e.key.toLowerCase() === 'c') ||
+        (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'c');
+      if (isCopy && term.hasSelection()) {
+        const sel = term.getSelection();
+        if (sel) void navigator.clipboard?.writeText(sel);
+        return false;
+      }
+      return true;
+    });
+
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${window.location.host}${wsUrl}`);
     ws.binaryType = 'arraybuffer';

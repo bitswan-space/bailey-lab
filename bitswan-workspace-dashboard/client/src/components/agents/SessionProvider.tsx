@@ -27,7 +27,14 @@ export type AgentStatus = 'idle' | 'pending' | 'ready' | 'failed';
  * different worktree / a different BP without losing their live agent
  * sessions — there is no remount.
  */
-export type SessionKind = 'claude' | 'sync' | 'requirement';
+export type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
+
+/**
+ * BP-scoped kinds that differ from a plain claude session only by the
+ * canned prompt the server passes on first run. `startSession` accepts
+ * these directly — no dedicated start helper needed per kind.
+ */
+export type BpSessionKind = 'claude' | 'write-tests' | 'automation';
 
 export interface ActiveSession {
   /** Stable ID — doubles as the Claude session UUID we pass via SSH. */
@@ -57,7 +64,12 @@ interface SessionsContextValue {
   /** All sessions across every (worktree, bp) — the AgentsTab filters by scope. */
   sessions: ActiveSession[];
 
-  startSession(worktree: string, bp: string): string;
+  /**
+   * Start a BP-scoped session. `kind` defaults to a plain claude chat;
+   * 'write-tests' / 'automation' run the same way but with the matching
+   * canned prompt embedded by the server.
+   */
+  startSession(worktree: string, bp: string, kind?: BpSessionKind): string;
   /**
    * Start a worktree-level git-sync session. No BP — the auto-cmd cd's to
    * the worktree root and runs the bitswan-coding-agent vcs sync flow.
@@ -182,7 +194,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const startSession = useCallback(
-    (worktree: string, bp: string) => {
+    (worktree: string, bp: string, kind: BpSessionKind = 'claude') => {
       const id = newSessionId();
       setSessions((prev) => [
         ...prev,
@@ -190,7 +202,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           id,
           worktree,
           bp,
-          kind: 'claude',
+          kind,
           startedAt: Date.now(),
           exited: false,
           resume: false,

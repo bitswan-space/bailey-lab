@@ -86,3 +86,288 @@
     margin: 0;
   }
 }
+
+/* Specification editor (SpecificationTab) — Word-like page document.
+   Sizes mirror the design handoff (Workspace Dashboard / wt-spec artboard). */
+.spec-doc .ProseMirror {
+  min-height: 600px;
+  padding: 32px 56px;
+  outline: none;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-size: 15px;
+  line-height: 1.7;
+  color: #09090b;
+}
+.spec-doc .ProseMirror h1 {
+  margin: 0 0 12px;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: #09090b;
+}
+.spec-doc .ProseMirror h2 {
+  margin: 26px 0 8px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: #09090b;
+}
+.spec-doc .ProseMirror h3 {
+  margin: 20px 0 6px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  color: #09090b;
+}
+.spec-doc .ProseMirror p {
+  margin: 0 0 12px;
+  color: #3f3f46;
+}
+.spec-doc .ProseMirror ul,
+.spec-doc .ProseMirror ol {
+  margin: 0 0 14px;
+  padding-left: 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.spec-doc .ProseMirror li > ul,
+.spec-doc .ProseMirror li > ol {
+  margin-bottom: 0;
+  position: relative;
+}
+/* Guide line dropping from the parent bullet down its nested items. */
+.spec-doc .ProseMirror li > ul::before,
+.spec-doc .ProseMirror li > ol::before {
+  content: '';
+  position: absolute;
+  left: -13px;
+  top: 2px;
+  bottom: 2px;
+  width: 1px;
+  background: #e4e4e7;
+}
+.spec-doc .ProseMirror ul {
+  list-style: disc;
+}
+.spec-doc .ProseMirror ol {
+  list-style: decimal;
+}
+.spec-doc .ProseMirror li,
+.spec-doc .ProseMirror li p {
+  margin: 0;
+  color: #3f3f46;
+}
+.spec-doc .ProseMirror strong {
+  font-weight: 600;
+  color: #09090b;
+}
+.spec-doc .ProseMirror blockquote {
+  margin: 12px 0;
+  padding: 6px 16px;
+  border-left: 3px solid #d4d4d8;
+  color: #71717a;
+  font-style: italic;
+}
+.spec-doc .ProseMirror a {
+  color: #2563eb;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.spec-doc .ProseMirror hr {
+  margin: 18px 0;
+  border: 0;
+  border-top: 1px solid #e4e4e7;
+}
+.spec-doc .ProseMirror code {
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #f1f5f9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+}
+.spec-doc .ProseMirror pre {
+  margin: 0 0 14px;
+  padding: 12px 16px;
+  border-radius: 6px;
+  background: #f4f4f5;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.spec-doc .ProseMirror pre code {
+  padding: 0;
+  background: transparent;
+  font-size: inherit;
+}
+
+/* Mermaid flowchart preview blocks inside the spec editor */
+.spec-doc .mermaid-preview {
+  position: relative;
+  margin: 0 0 14px;
+  height: 280px;
+  overflow: hidden;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fafafa;
+  cursor: pointer;
+}
+.spec-doc .mermaid-preview-rf {
+  height: 100%;
+}
+.spec-doc .mermaid-preview-overlay {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 10;
+  transform: translateX(-50%);
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(24, 24, 27, 0.85);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+.spec-doc .mermaid-preview:hover .mermaid-preview-overlay {
+  opacity: 1;
+}
+.spec-doc .mermaid-preview-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 11;
+  width: 22px;
+  height: 22px;
+  border: 1px solid #e4e4e7;
+  border-radius: 6px;
+  background: #fff;
+  color: #71717a;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.spec-doc .mermaid-preview:hover .mermaid-preview-delete {
+  opacity: 1;
+}
+.spec-doc .mermaid-preview-delete:hover {
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+
+/* Images in the spec document (attachments resolve via the raw endpoint) */
+.spec-doc .ProseMirror img {
+  max-width: 100%;
+  border-radius: 6px;
+}
+.spec-doc .ProseMirror img.ProseMirror-selectednode {
+  outline: 2px solid #2563eb;
+}
+
+/* Code blocks in the spec editor: language dropdown + highlight theme */
+.spec-doc .spec-code-block {
+  position: relative;
+  margin: 0 0 14px;
+}
+.spec-doc .spec-code-block pre {
+  margin: 0;
+}
+.spec-doc .spec-code-lang {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 5;
+  padding: 1px 4px;
+  border: 1px solid #e4e4e7;
+  border-radius: 5px;
+  background: #fff;
+  color: #71717a;
+  font-family: inherit;
+  font-size: 11px;
+  opacity: 0.55;
+  transition: opacity 0.15s;
+  cursor: pointer;
+}
+.spec-doc .spec-code-block:hover .spec-code-lang,
+.spec-doc .spec-code-lang:focus {
+  opacity: 1;
+}
+
+/* highlight.js theme (github-light palette), scoped to the spec editor */
+.spec-doc .hljs-comment,
+.spec-doc .hljs-code,
+.spec-doc .hljs-formula {
+  color: #6a737d;
+}
+.spec-doc .hljs-keyword,
+.spec-doc .hljs-doctag,
+.spec-doc .hljs-template-tag,
+.spec-doc .hljs-template-variable,
+.spec-doc .hljs-type,
+.spec-doc .hljs-variable.language_ {
+  color: #d73a49;
+}
+.spec-doc .hljs-title,
+.spec-doc .hljs-title.class_,
+.spec-doc .hljs-title.class_.inherited__,
+.spec-doc .hljs-title.function_ {
+  color: #6f42c1;
+}
+.spec-doc .hljs-attr,
+.spec-doc .hljs-attribute,
+.spec-doc .hljs-literal,
+.spec-doc .hljs-meta,
+.spec-doc .hljs-number,
+.spec-doc .hljs-operator,
+.spec-doc .hljs-selector-attr,
+.spec-doc .hljs-selector-class,
+.spec-doc .hljs-selector-id,
+.spec-doc .hljs-variable {
+  color: #005cc5;
+}
+.spec-doc .hljs-string,
+.spec-doc .hljs-regexp,
+.spec-doc .hljs-meta .hljs-string {
+  color: #032f62;
+}
+.spec-doc .hljs-built_in,
+.spec-doc .hljs-symbol {
+  color: #e36209;
+}
+.spec-doc .hljs-name,
+.spec-doc .hljs-quote,
+.spec-doc .hljs-selector-tag,
+.spec-doc .hljs-selector-pseudo {
+  color: #22863a;
+}
+.spec-doc .hljs-section {
+  color: #005cc5;
+  font-weight: 600;
+}
+.spec-doc .hljs-bullet {
+  color: #735c0f;
+}
+.spec-doc .hljs-emphasis {
+  font-style: italic;
+}
+.spec-doc .hljs-strong {
+  font-weight: 600;
+}
+.spec-doc .hljs-addition {
+  color: #22863a;
+  background-color: #f0fff4;
+}
+.spec-doc .hljs-deletion {
+  color: #b31d28;
+  background-color: #ffeef0;
+}
+
+/* Hint that links are Ctrl/Cmd+clickable */
+.spec-doc .ProseMirror a:hover {
+  cursor: pointer;
+}

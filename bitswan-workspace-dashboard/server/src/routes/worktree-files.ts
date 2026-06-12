@@ -1,11 +1,13 @@
-import { promises as fs } from 'node:fs';
+import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { isValidWorktreeName } from '../services/workspace.js';
 import {
+  deleteWorktreeFile,
   ensureWorktreeDir,
   readWorktreeFile,
   readWorktreeTree,
+  statWorktreeFile,
   writeWorktreeFile,
   type FileEtag,
 } from '../services/worktree-files.js';
@@ -182,6 +184,69 @@ export function registerWorktreeFilesRoutes(
     return { written };
   });
 
+  app.delete<{
+    Params: { name: string };
+    Querystring: { path?: string };
+  }>('/api/worktrees/:name/files', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!isValidWorktreeName(req.params.name)) {
+      return reply.code(400).send({ error: 'invalid worktree' });
+    }
+    const p = req.query.path;
+    if (!p || typeof p !== 'string') {
+      return reply.code(400).send({ error: 'path is required' });
+    }
+    try {
+      const r = await deleteWorktreeFile({
+        worktree: req.params.name,
+        path: p,
+        workspaceRoot,
+      });
+      if ('error' in r) return reply.code(404).send({ error: r.error });
+      return reply.code(204).send();
+    } catch (err) {
+      app.log.warn({ err, name: req.params.name, path: p }, 'file delete failed');
+      return reply.code(500).send({ error: String(err) });
+    }
+  });
+
+  app.get<{
+    Params: { name: string };
+    Querystring: { path?: string };
+  }>('/api/worktrees/:name/files/raw', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!isValidWorktreeName(req.params.name)) {
+      return reply.code(400).send({ error: 'invalid worktree' });
+    }
+    const p = req.query.path;
+    if (!p || typeof p !== 'string') {
+      return reply.code(400).send({ error: 'path is required' });
+    }
+    try {
+      const r = await statWorktreeFile({
+        worktree: req.params.name,
+        path: p,
+        workspaceRoot,
+      });
+      if ('error' in r) return reply.code(404).send({ error: r.error });
+      const { type, inline } = rawContentMeta(r.name);
+      // RFC 5987 encoding so names with spaces/unicode survive the header.
+      const encodedName = encodeURIComponent(r.name);
+      return reply
+        .header('X-Content-Type-Options', 'nosniff')
+        .header(
+          'Content-Disposition',
+          `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodedName}`,
+        )
+        .header('Content-Length', r.size)
+        .type(type)
+        .send(createReadStream(r.abs));
+    } catch (err) {
+      app.log.warn({ err, name: req.params.name, path: p }, 'raw file read failed');
+      return reply.code(500).send({ error: String(err) });
+    }
+  });
+
   app.get<{ Params: { name: string } }>(
     '/api/worktrees/:name/status',
     async (req, reply) => {
@@ -231,4 +296,38 @@ export function registerWorktreeFilesRoutes(
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   });
+}
+
+/**
+ * Content-type + disposition policy for raw file streaming. Only inert
+ * raster images and PDF render inline; everything else (notably SVG and
+ * HTML, which can carry scripts that would run on the dashboard's
+ * origin) is forced to download as an attachment.
+ */
+function rawContentMeta(fileName: string): { type: string; inline: boolean } {
+  const ext = path.extname(fileName).toLowerCase();
+  switch (ext) {
+    case '.png':
+      return { type: 'image/png', inline: true };
+    case '.jpg':
+    case '.jpeg':
+      return { type: 'image/jpeg', inline: true };
+    case '.gif':
+      return { type: 'image/gif', inline: true };
+    case '.webp':
+      return { type: 'image/webp', inline: true };
+    case '.pdf':
+      return { type: 'application/pdf', inline: true };
+    case '.svg':
+      return { type: 'image/svg+xml', inline: false };
+    case '.txt':
+    case '.md':
+      return { type: 'text/plain; charset=utf-8', inline: false };
+    case '.csv':
+      return { type: 'text/csv; charset=utf-8', inline: false };
+    case '.json':
+      return { type: 'application/json', inline: false };
+    default:
+      return { type: 'application/octet-stream', inline: false };
+  }
 }

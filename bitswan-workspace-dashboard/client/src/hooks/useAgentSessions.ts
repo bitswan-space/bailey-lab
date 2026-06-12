@@ -10,8 +10,8 @@ export interface AgentSession {
   logged: boolean;
   /** Claude conversation UUID; null for legacy / editor-created sessions. */
   claudeSessionId: string | null;
-  /** "claude" / "sync" / "requirement" / null. Drives the row icon. */
-  kind: 'claude' | 'sync' | 'requirement' | null;
+  /** "claude" / "sync" / "requirement" / "write-tests" / "automation" / null. Drives the row icon. */
+  kind: 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation' | null;
   /** First user prompt from the JSONL, truncated. Empty until user typed. */
   title: string;
 }

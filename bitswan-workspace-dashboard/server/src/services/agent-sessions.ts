@@ -61,10 +61,11 @@ export interface AgentSession {
   /**
    * "claude" for a regular BP-scoped chat (the default), "sync" for the
    * worktree-level git-sync flow, "requirement" for a per-requirement
-   * focused session, or null for legacy / editor-launched sessions where
-   * the wrapper didn't record a kind.
+   * focused session, "write-tests" / "automation" for the Requirements
+   * tab's canned-prompt sessions, or null for legacy / editor-launched
+   * sessions where the wrapper didn't record a kind.
    */
-  kind: 'claude' | 'sync' | 'requirement' | null;
+  kind: 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation' | null;
   /**
    * First user prompt from Claude's transcript, truncated. Empty until the
    * user has actually typed something into the session.
@@ -124,8 +125,12 @@ export async function listSessions(filter: {
     const worktree = raw.worktree ?? '';
     const bp = raw.bp ?? null;
     const kindRaw = raw.kind ?? null;
-    const kind: 'claude' | 'sync' | 'requirement' | null =
-      kindRaw === 'claude' || kindRaw === 'sync' || kindRaw === 'requirement'
+    const kind: AgentSession['kind'] =
+      kindRaw === 'claude' ||
+      kindRaw === 'sync' ||
+      kindRaw === 'requirement' ||
+      kindRaw === 'write-tests' ||
+      kindRaw === 'automation'
         ? kindRaw
         : null;
     const userEmail = raw.user_email ?? raw.userEmail ?? '';

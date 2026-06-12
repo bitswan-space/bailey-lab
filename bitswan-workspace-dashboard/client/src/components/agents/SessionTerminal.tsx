@@ -5,7 +5,7 @@ interface Props {
   worktree: string;
   /** Null for worktree-level sync sessions; the WS route handles missing bp. */
   bp: string | null;
-  kind: 'claude' | 'sync' | 'requirement';
+  kind: 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
   /** Requirement id when kind === 'requirement'. The server reads the description from the TOML. */
   requirementId?: string;
   /** Claude session UUID. We control it client-side so we can `--resume` it later. */

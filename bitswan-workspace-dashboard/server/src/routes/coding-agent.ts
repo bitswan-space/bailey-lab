@@ -6,7 +6,12 @@ import { handleTerminalConnection } from '../services/terminal-session.js';
 import type { GitopsClient } from '../services/gitops.js';
 import { isValidBpId, isValidWorktreeName } from '../services/workspace.js';
 import { castStream, findSessionOwnerEmail, listSessions } from '../services/agent-sessions.js';
-import { DEFAULT_PROMPT, SYNC_PROMPT } from '../services/agent-prompts.js';
+import {
+  BUILD_AUTOMATION_PROMPT,
+  DEFAULT_PROMPT,
+  SYNC_PROMPT,
+  WRITE_TESTS_PROMPT,
+} from '../services/agent-prompts.js';
 import { listRequirements, type Requirement } from '../services/requirements.js';
 
 export interface CodingAgentRoutesOptions {
@@ -65,7 +70,7 @@ function emailFromRequest(req: FastifyRequest): string {
   return 'unknown';
 }
 
-type SessionKind = 'claude' | 'sync' | 'requirement';
+type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
 
 /**
  * Default name passed to Claude via `-n`. Shown in Claude's `/resume`
@@ -90,6 +95,14 @@ function defaultSessionName(opts: {
         ? `Req ${id} · ${opts.worktree}/${opts.bp}`
         : `Req ${id} · ${opts.worktree}`;
     }
+    case 'write-tests':
+      return opts.bp
+        ? `Write tests · ${opts.worktree}/${opts.bp}`
+        : `Write tests · ${opts.worktree}`;
+    case 'automation':
+      return opts.bp
+        ? `Build automation · ${opts.worktree}/${opts.bp}`
+        : `Build automation · ${opts.worktree}`;
     default:
       return opts.bp
         ? `Claude · ${opts.worktree}/${opts.bp}`
@@ -116,7 +129,9 @@ function buildAutoCmd(opts: {
   if (opts.kind === 'sync') prompt = SYNC_PROMPT;
   else if (opts.kind === 'requirement' && opts.requirement) {
     prompt = buildRequirementPrompt(opts.requirement);
-  } else prompt = DEFAULT_PROMPT;
+  } else if (opts.kind === 'write-tests') prompt = WRITE_TESTS_PROMPT;
+  else if (opts.kind === 'automation') prompt = BUILD_AUTOMATION_PROMPT;
+  else prompt = DEFAULT_PROMPT;
   // Either continue a previous chat (--resume <uuid>) or start a fresh one
   // with a caller-provided UUID (--session-id <uuid>) so the dashboard can
   // resume it later. The prompt is embedded inside single quotes; any
@@ -217,7 +232,12 @@ export function registerCodingAgentRoutes(
       return;
     }
     const kind: SessionKind =
-      kindRaw === 'sync' ? 'sync' : kindRaw === 'requirement' ? 'requirement' : 'claude';
+      kindRaw === 'sync' ||
+      kindRaw === 'requirement' ||
+      kindRaw === 'write-tests' ||
+      kindRaw === 'automation'
+        ? kindRaw
+        : 'claude';
     // `bp` is required for regular claude sessions and requirement sessions;
     // optional (and ignored) for worktree-level sync sessions.
     if (kind !== 'sync') {
