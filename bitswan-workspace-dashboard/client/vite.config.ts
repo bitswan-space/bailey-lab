@@ -10,6 +10,12 @@ const VITE_PORT = Number(process.env.VITE_PORT ?? 5173);
 // Accept ws:// or http:// here; we proxy both HTTP and WS upgrades to the same host.
 const RAW_BACKEND = process.env.VITE_BACKEND_URL ?? 'http://localhost:8080';
 const BACKEND_HTTP = RAW_BACKEND.replace(/^wss?:/, (m) => (m === 'wss:' ? 'https:' : 'http:'));
+// Extra hostnames the dev server may be reached through (comma-separated).
+// A leading dot allows the domain and all subdomains, e.g. *.bswn.io sandbox proxies.
+const VITE_ALLOWED_HOSTS = (process.env.VITE_ALLOWED_HOSTS ?? '.bswn.io')
+  .split(',')
+  .map((h) => h.trim())
+  .filter(Boolean);
 
 export default defineConfig({
   plugins: [react()],
@@ -27,6 +33,7 @@ export default defineConfig({
     host: VITE_HOST,
     port: VITE_PORT,
     strictPort: true,
+    allowedHosts: VITE_ALLOWED_HOSTS,
     proxy: {
       // WebSocket terminal — Vite handles the http→ws upgrade with ws:true.
       '/ws': {

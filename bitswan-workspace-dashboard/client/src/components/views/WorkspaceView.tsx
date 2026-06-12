@@ -4,6 +4,7 @@ import { DeploymentsTab } from '@/components/views/DeploymentsTab';
 import { SyncDeployTab } from '@/components/views/SyncDeployTab';
 import { RequirementsTab } from '@/components/requirements/RequirementsTab';
 import { ReadmeCard } from '@/components/workspace/ReadmeCard';
+import { SpecificationTab } from '@/components/workspace/SpecificationTab';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess, FlowTab, Worktree } from '@/types';
@@ -58,16 +59,18 @@ export function WorkspaceView({ bp, wt, tab, onTab }: WorkspaceViewProps) {
         <WorktreeGate bp={bp} wt={wt} what="run coding agents" />
       )}
 
-      {tab === 'description' && (
-        <div className="flex-1 overflow-auto bg-background">
-          <div className="mx-auto max-w-4xl px-7 py-6">
-            <ReadmeCard
-              bpId={bp.id}
-              {...(bpInWt && wt ? { worktree: wt.name } : {})}
-            />
+      {tab === 'description' &&
+        (bpInWt && wt ? (
+          // Worktree scope: the spec is editable — writes the worktree's
+          // README.md. Main scope below stays read-only (no write path).
+          <SpecificationTab bp={bp} worktree={wt.name} onShowAgents={() => onTab('agent')} />
+        ) : (
+          <div className="flex-1 overflow-auto bg-background">
+            <div className="mx-auto max-w-4xl px-7 py-6">
+              <ReadmeCard bpId={bp.id} />
+            </div>
           </div>
-        </div>
-      )}
+        ))}
 
       {tab === 'requirements' &&
         (wt && bpInWt ? (

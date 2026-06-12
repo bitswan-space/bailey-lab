@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Plus } from 'lucide-react';
+import { FlaskConical, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   AlertDialog,
@@ -14,7 +14,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useRequirements } from '@/hooks/useRequirements';
-import { useSessions } from '@/components/agents/SessionProvider';
+import { useSessions, type BpSessionKind } from '@/components/agents/SessionProvider';
 import { nextStatus } from './StatusBadge';
 import { RequirementsTable } from './RequirementsTable';
 import type { Requirement, ReqStatus } from '@/lib/api';
@@ -45,6 +45,7 @@ export function RequirementsTab({ worktree, bp, onShowAgents }: Props) {
     remove,
   } = useRequirements(worktree, bp);
   const {
+    startSession,
     startRequirementSession,
     setSelectedFor,
     agentStatus,
@@ -130,6 +131,21 @@ export function RequirementsTab({ worktree, bp, onShowAgents }: Props) {
     onShowAgents();
   };
 
+  // "Write tests" / "Build automation": same launch flow as onRunAgent but
+  // against the whole requirements set — the server picks the canned prompt
+  // from the kind.
+  const onStartCanned = async (kind: BpSessionKind) => {
+    if (agentStatus === 'idle' || agentStatus === 'failed') {
+      try {
+        await ensureAgent();
+      } catch {
+        // surfaces via agentStatus; the session will still attempt to spawn
+      }
+    }
+    startSession(worktree, bp, kind);
+    onShowAgents();
+  };
+
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
       <div className="flex shrink-0 flex-col gap-3 border-b border-border bg-background px-6 py-4">
@@ -148,10 +164,21 @@ export function RequirementsTab({ worktree, bp, onShowAgents }: Props) {
               </>
             )}
           </div>
-          <Button onClick={() => onNew()} size="sm" variant="outline">
-            <Plus className="size-3.5" aria-hidden />
-            New requirement
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={() => void onStartCanned('write-tests')}
+              size="sm"
+              variant="outline"
+              title="Start an agent session that writes tests for these requirements"
+            >
+              <FlaskConical className="size-3.5" aria-hidden />
+              Write tests
+            </Button>
+            <Button onClick={() => onNew()} size="sm" variant="outline">
+              <Plus className="size-3.5" aria-hidden />
+              New requirement
+            </Button>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <Input

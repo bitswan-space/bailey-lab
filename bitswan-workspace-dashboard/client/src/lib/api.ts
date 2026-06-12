@@ -289,6 +289,13 @@ export const api = {
         form,
       );
     },
+    remove: (name: string, p: string) =>
+      deleteEmpty(
+        `/api/worktrees/${encodeURIComponent(name)}/files?path=${encodeURIComponent(p)}`,
+      ),
+    /** URL that streams a file's raw bytes (downloads, binary attachments). */
+    rawUrl: (name: string, p: string) =>
+      `/api/worktrees/${encodeURIComponent(name)}/files/raw?path=${encodeURIComponent(p)}`,
     status: (name: string) =>
       getJson<{ changed: ChangedFile[] }>(
         `/api/worktrees/${encodeURIComponent(name)}/status`,
