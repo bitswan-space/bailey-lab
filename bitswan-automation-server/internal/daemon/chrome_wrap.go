@@ -140,7 +140,7 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
   <span class="who"><b>%[8]s</b></span>
   <span class="spacer"></span>
   %[10]s
-  <a class="btn" href="/oauth2/sign_out" target="_top">Logout</a>
+  <a class="btn" href="%[13]s" target="_top">Logout</a>
 </footer>
 %[11]s
 <script>%[12]s</script>
@@ -169,5 +169,6 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
 		shareModalCSS,
 		shareBtn,
 		shareModal,
-		shareScript)
+		shareScript,
+		html.EscapeString(logoutURLForHost(host)))
 }

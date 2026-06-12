@@ -65,6 +65,13 @@ single shared Keycloak client (`bitswan-protected-client`) carries the
 callback URIs of every protected hostname; they are registered idempotently
 via the AOC's `GetOrCreateOAuthClient`.
 
+Logout is two-layered: the wrap's Logout button hits oauth2-proxy's
+`/oauth2/sign_out` with an `rd=` to Keycloak's RP-initiated logout
+(`end_session`), because clearing the proxy cookie alone leaves the
+Keycloak SSO session alive and the next request silently signs the user
+back in. For the `rd=` to be honoured, the IdP's hostname must be in
+oauth2-proxy's `whitelist_domains` alongside the endpoint domain.
+
 Services behind the protected chain must not run their own oauth2-proxy:
 both layers would claim `/oauth2/*` on the same hostname and the inner
 proxy's callback would be swallowed by the outer one. Bailey is the auth
