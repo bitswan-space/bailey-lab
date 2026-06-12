@@ -299,10 +299,13 @@ async function readFirstPromptTitle(opts: {
       path.join(AGENT_HOME_DIR, `.claude_${slug}`, 'projects', projDir, `${opts.claudeSessionId}.jsonl`),
     );
   }
-  candidates.push(
-    path.join(AGENT_HOME_DIR, '.claude', 'projects', projDir, `${opts.claudeSessionId}.jsonl`),
+  // The shared-path fallback, pushed last; doubles as the "none exist"
+  // default so `full` is always defined.
+  const sharedPath = path.join(
+    AGENT_HOME_DIR, '.claude', 'projects', projDir, `${opts.claudeSessionId}.jsonl`,
   );
-  const full = candidates.find((p) => fsSync.existsSync(p)) ?? candidates[candidates.length - 1];
+  candidates.push(sharedPath);
+  const full = candidates.find((p) => fsSync.existsSync(p)) ?? sharedPath;
 
   let customTitle = '';
   let aiTitle = '';

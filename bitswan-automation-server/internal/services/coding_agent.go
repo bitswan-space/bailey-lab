@@ -107,12 +107,18 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 	}
 
 	bitswanCodingAgent := map[string]interface{}{
-		"image":    codingAgentImage,
-		"restart":  "always",
-		"hostname": workspaceName + "-coding-agent",
-		"networks": []string{"bitswan_network"},
-		"environment": envVars,
-		"volumes":  volumes,
+		"image":   codingAgentImage,
+		"restart": "always",
+		// gitops' verify_agent_token discovers the agent secret via
+		// `docker inspect {workspace}-coding-agent`, which resolves container
+		// names, not hostnames — without container_name compose would name
+		// this `{project}-bitswan-coding-agent-1` and discovery would fail,
+		// 401-ing every /agent/* request.
+		"container_name": workspaceName + "-coding-agent",
+		"hostname":       workspaceName + "-coding-agent",
+		"networks":       []string{"bitswan_network"},
+		"environment":    envVars,
+		"volumes":        volumes,
 	}
 
 	// Construct the docker-compose data structure

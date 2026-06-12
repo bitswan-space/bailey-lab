@@ -11,10 +11,15 @@ import {
   Globe,
   Layers,
   Loader2,
+  Play,
+  RotateCcw,
   Rocket,
+  Square,
+  Trash2,
   TriangleAlert,
   X,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import type { BusinessProcess, DeployedAutomation } from '@/types';
@@ -26,6 +31,16 @@ import {
   RemoveConfirmDialog,
   type RemoveTarget,
 } from '@/components/automations/RemoveConfirmDialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { EmptyState } from '@/components/shared/EmptyState';
 import { Button } from '@/components/ui/button';
 import { api, isTransientNetworkError } from '@/lib/api';
@@ -121,6 +136,32 @@ function healthLabel(agg: StageAgg): string {
   }
 }
 
+type LifecycleAction = 'start' | 'stop' | 'restart' | 'remove';
+
+const ACTION_VERB: Record<LifecycleAction, { ing: string; past: string }> = {
+  start: { ing: 'Starting', past: 'started' },
+  stop: { ing: 'Stopping', past: 'stopped' },
+  restart: { ing: 'Restarting', past: 'restarted' },
+  remove: { ing: 'Removing', past: 'removed' },
+};
+
+// Dispatch a single deployment to its lifecycle endpoint. start/restart re-run
+// gitops' post-deploy hooks (cert + oauth2-proxy re-injection) per container,
+// so a bulk Restart here is the sidecar-safe way to bounce every container —
+// unlike a raw `docker restart`, which strips the injected oauth2-proxy.
+function callAction(action: LifecycleAction, id: string): Promise<unknown> {
+  switch (action) {
+    case 'start':
+      return api.startAutomation(id);
+    case 'stop':
+      return api.stopAutomation(id);
+    case 'restart':
+      return api.restartAutomation(id);
+    case 'remove':
+      return api.removeAutomation(id);
+  }
+}
+
 interface DeploymentsTabProps {
   bp: BusinessProcess;
 }
@@ -151,6 +192,12 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
   // keeps the modal's Remove button disabled so it can't be re-issued.
   // eslint-disable-next-line no-restricted-syntax -- null = no remove in flight
   const [removingId, setRemovingId] = useState<string | null>(null);
+  // Bulk container action in flight (acts on every deployed member of the
+  // selected stage), and per-row action in flight keyed by deployment id.
+  // eslint-disable-next-line no-restricted-syntax -- null = no bulk op in flight
+  const [bulkBusy, setBulkBusy] = useState<LifecycleAction | null>(null);
+  const [bulkRemoveOpen, setBulkRemoveOpen] = useState(false);
+  const [rowBusy, setRowBusy] = useState<Record<string, LifecycleAction>>({});
 
   // Group the BP's main-scoped automations by name. Deployed entries
   // (dev/staging/production) and discoverable ones (stage === null)
@@ -341,6 +388,7 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
           : 'not-deployed';
         return {
           name,
+          deploymentId: aut?.deployment_id ?? null,
           display,
           versionHash8: aut?.version_hash?.slice(0, 8) ?? null,
           automationUrl: aut?.automation_url ?? null,
@@ -349,6 +397,87 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
     [sorted, selectedStage],
   );
   const openApp = rows.filter((r) => r.automationUrl && r.display === 'running');
+
+  const stageLabel =
+    STAGES.find((s) => s.id === selectedStage)?.label ?? selectedStage;
+
+  // Deployed members at the selected stage — the targets for bulk actions.
+  const deployedMembers = useMemo(
+    () =>
+      rows.flatMap((r) =>
+        r.deploymentId ? [{ name: r.name, deploymentId: r.deploymentId }] : [],
+      ),
+    [rows],
+  );
+
+  // Single-row start/stop/restart. Remove is routed through the shared
+  // RemoveConfirmDialog (see the Remove button's onClick) so it can't fire
+  // without confirmation.
+  const runRowAction = useCallback(
+    async (action: 'start' | 'stop' | 'restart', name: string, id: string) => {
+      setRowBusy((b) => ({ ...b, [id]: action }));
+      const v = ACTION_VERB[action];
+      const work = callAction(action, id);
+      toast.promise(work, {
+        loading: `${v.ing} ${name}…`,
+        success: `${name} ${v.past}`,
+        error: (err: unknown) =>
+          isTransientNetworkError(err)
+            ? `${name} ${v.past}`
+            : `Failed to ${action} ${name}: ${String(err)}`,
+      });
+      try {
+        await work;
+      } catch {
+        // toast handled it
+      } finally {
+        setRowBusy((b) => {
+          const next = { ...b };
+          delete next[id];
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  // Apply an action to every deployed member of the selected stage in parallel.
+  const runBulk = useCallback(
+    async (action: LifecycleAction) => {
+      const members = deployedMembers;
+      if (members.length === 0) return;
+      setBulkBusy(action);
+      const v = ACTION_VERB[action];
+      const n = members.length;
+      const work = (async () => {
+        const results = await Promise.allSettled(
+          members.map((m) => callAction(action, m.deploymentId)),
+        );
+        const failed = results.filter(
+          (r) =>
+            r.status === 'rejected' &&
+            !isTransientNetworkError((r as PromiseRejectedResult).reason),
+        ).length;
+        if (failed > 0) throw new Error(`${failed} of ${n} failed`);
+        return n;
+      })();
+      toast.promise(work, {
+        loading: `${v.ing} ${n} container${n === 1 ? '' : 's'}…`,
+        success: (count: number) =>
+          `${count} container${count === 1 ? '' : 's'} ${v.past}`,
+        error: (err: unknown) =>
+          `Could not ${action} every container: ${String(err)}`,
+      });
+      try {
+        await work;
+      } catch {
+        // toast handled it
+      } finally {
+        setBulkBusy(null);
+      }
+    },
+    [deployedMembers],
+  );
 
   if (status === 'connecting' && sorted.length === 0) {
     return (
@@ -543,7 +672,7 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
 
         {/* Containers */}
         <div>
-          <div className="flex items-center border-b border-border">
+          <div className="flex items-center justify-between border-b border-border">
             <span className="flex items-center gap-2 border-b-2 border-foreground px-1 pb-2 text-[13px] font-semibold text-foreground">
               <Boxes className="size-4" aria-hidden />
               Containers
@@ -551,10 +680,74 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
                 {rows.length}
               </span>
             </span>
+            {deployedMembers.length > 0 && (
+              <div className="flex items-center gap-1.5 pb-1.5">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={bulkBusy !== null || bpBusy}
+                  title={`Start all ${deployedMembers.length} containers (${stageLabel})`}
+                  onClick={() => void runBulk('start')}
+                >
+                  {bulkBusy === 'start' ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Play className="size-3.5" aria-hidden />
+                  )}
+                  Start all
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={bulkBusy !== null || bpBusy}
+                  title={`Stop all ${deployedMembers.length} containers (${stageLabel})`}
+                  onClick={() => void runBulk('stop')}
+                >
+                  {bulkBusy === 'stop' ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Square className="size-3.5" aria-hidden />
+                  )}
+                  Stop all
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={bulkBusy !== null || bpBusy}
+                  title={`Restart all ${deployedMembers.length} containers (${stageLabel})`}
+                  onClick={() => void runBulk('restart')}
+                >
+                  {bulkBusy === 'restart' ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <RotateCcw className="size-3.5" aria-hidden />
+                  )}
+                  Restart all
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-red-600 hover:text-red-700"
+                  disabled={bulkBusy !== null || bpBusy}
+                  title={`Remove all ${deployedMembers.length} containers (${stageLabel})`}
+                  onClick={() => setBulkRemoveOpen(true)}
+                >
+                  {bulkBusy === 'remove' ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Trash2 className="size-3.5" aria-hidden />
+                  )}
+                  Remove all
+                </Button>
+              </div>
+            )}
           </div>
           <div className="mt-3 flex flex-col gap-2">
             {rows.map((r) => {
               const sMeta = STATUS_META[r.display];
+              const id = r.deploymentId;
+              const busy = id ? rowBusy[id] : undefined;
+              const rowDisabled = bulkBusy !== null || bpBusy || busy !== undefined;
               return (
                 <div
                   key={r.name}
@@ -580,6 +773,46 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
                       {sMeta.label}
                     </span>
                   </span>
+                  {id && (
+                    <div className="flex items-center gap-0.5">
+                      <IconAction
+                        title="Start"
+                        icon={Play}
+                        busy={busy === 'start'}
+                        disabled={rowDisabled}
+                        onClick={() => void runRowAction('start', r.name, id)}
+                      />
+                      <IconAction
+                        title="Stop"
+                        icon={Square}
+                        busy={busy === 'stop'}
+                        disabled={rowDisabled}
+                        onClick={() => void runRowAction('stop', r.name, id)}
+                      />
+                      <IconAction
+                        title="Restart"
+                        icon={RotateCcw}
+                        busy={busy === 'restart'}
+                        disabled={rowDisabled}
+                        onClick={() => void runRowAction('restart', r.name, id)}
+                      />
+                      <IconAction
+                        title="Remove"
+                        icon={Trash2}
+                        danger
+                        busy={removingId === id}
+                        disabled={rowDisabled || removingId === id}
+                        onClick={() =>
+                          setRemoveTarget({
+                            deploymentId: id,
+                            name: r.name,
+                            automationName: r.name,
+                            stageLabel,
+                          })
+                        }
+                      />
+                    </div>
+                  )}
                   <Button
                     variant="outline"
                     size="sm"
@@ -601,6 +834,7 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
         name={inspectName ?? ''}
         stages={inspectStages}
         mode="deployments"
+        initialStageId={selectedStage}
         actionBusy={removingId !== null}
         onRemove={(deploymentId, stage) => {
           if (!inspectName) return;
@@ -624,7 +858,75 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
           void runRemove(automationName, stageLabel, deploymentId);
         }}
       />
+
+      <AlertDialog
+        open={bulkRemoveOpen}
+        onOpenChange={(o) => !o && setBulkRemoveOpen(false)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove all containers?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This stops and removes all {deployedMembers.length} deployed
+              container{deployedMembers.length === 1 ? '' : 's'} for {bp.name} (
+              {stageLabel}) from bitswan.yaml. The source files on disk are kept;
+              you can deploy again later.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setBulkRemoveOpen(false)}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setBulkRemoveOpen(false);
+                void runBulk('remove');
+              }}
+            >
+              Remove all
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
+  );
+}
+
+/** Square icon-only button for per-container lifecycle actions. */
+function IconAction({
+  title,
+  icon: Icon,
+  busy,
+  disabled,
+  danger,
+  onClick,
+}: {
+  title: string;
+  icon: LucideIcon;
+  busy: boolean;
+  disabled: boolean;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className={cn(
+        'size-8',
+        danger && 'text-red-600 hover:bg-red-50 hover:text-red-700',
+      )}
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {busy ? (
+        <Loader2 className="size-3.5 animate-spin" aria-hidden />
+      ) : (
+        <Icon className="size-3.5" aria-hidden />
+      )}
+    </Button>
   );
 }
 
