@@ -22,6 +22,8 @@ interface InspectModalProps {
   name: string;
   stages: InspectStage[];
   mode: 'deployments' | 'liveDev';
+  /** Stage tab to open on. Defaults to the first stage (dev) when unset. */
+  initialStageId?: AutomationStage;
   /** Worktree the source lives in (live-dev deploys only). */
   worktree?: string;
   /** Parent-tracked in-flight state for the stage actions (e.g. a confirmed
@@ -38,20 +40,28 @@ export function InspectModal({
   name,
   stages,
   mode,
+  initialStageId,
   worktree,
   actionBusy,
   onRemove,
 }: InspectModalProps) {
-  const [stageId, setStageId] = useState<AutomationStage>(stages[0]?.id ?? 'dev');
+  const [stageId, setStageId] = useState<AutomationStage>(
+    initialStageId ?? stages[0]?.id ?? 'dev',
+  );
   const [tab, setTab] = useState<'overview' | 'logs'>('overview');
 
   // Reset state when the modal is opened for a different automation. `stages`
   // is intentionally *not* a dep — the parent rebuilds the array on every SSE
   // tick (so button states update live), but we only want to reset selection
-  // when the inspect target itself changes.
+  // when the inspect target itself changes. Prefer the caller's requested stage
+  // (e.g. Inspect was clicked while viewing Production) over the first stage.
   useEffect(() => {
     if (!open) return;
-    setStageId((cur) => (stagesRef.current.some((s) => s.id === cur) ? cur : stagesRef.current[0]?.id ?? 'dev'));
+    const ss = stagesRef.current;
+    const want = initialStageRef.current;
+    setStageId(
+      want && ss.some((s) => s.id === want) ? want : ss[0]?.id ?? 'dev',
+    );
     setTab('overview');
   }, [open, name]);
 
@@ -59,6 +69,8 @@ export function InspectModal({
   // without depending on the array reference (which churns each render).
   const stagesRef = useRef(stages);
   stagesRef.current = stages;
+  const initialStageRef = useRef(initialStageId);
+  initialStageRef.current = initialStageId;
 
   const stage = useMemo(
     () => stages.find((s) => s.id === stageId) ?? stages[0],
