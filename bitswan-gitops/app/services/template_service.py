@@ -309,6 +309,51 @@ async def _commit(
     return hash_stdout.strip() if hash_rc == 0 else None
 
 
+async def rename_automation(
+    *,
+    workspace_root: str,
+    bp: str,
+    old_name: str,
+    new_name: str,
+    worktree: Optional[str] = None,
+) -> dict:
+    """Rename an automation directory within a BP and commit. Returns
+    `{ "name", "relative_path" }` for the new location.
+
+    The directory name is the automation's identity on disk; deployed
+    containers keep their existing deployment_id until the next deploy.
+    Validation of `bp`/`worktree` shape happens at the route layer.
+    """
+    bp_full, bp_rel = _bp_destination(workspace_root, bp, worktree)
+    old_san = sanitize_automation_name(old_name or "")
+    new_san = sanitize_automation_name(new_name or "")
+    if not new_san or not _AUTOMATION_NAME_RE.match(new_san):
+        raise ValueError("Invalid automation name")
+    src = os.path.join(bp_full, old_san)
+    if not os.path.isdir(src):
+        raise FileNotFoundError(f'No automation "{old_san}" in this business process.')
+    if old_san == new_san:
+        return {"name": new_san, "relative_path": os.path.join(bp_rel, new_san)}
+    dest = os.path.join(bp_full, new_san)
+    if os.path.exists(dest):
+        raise FileExistsError(
+            f'A folder named "{new_san}" already exists in this business process.'
+        )
+    os.rename(src, dest)
+
+    commit_cwd = (
+        os.path.join(workspace_root, "worktrees", worktree)
+        if worktree
+        else workspace_root
+    )
+    try:
+        await _commit(commit_cwd, f"Rename automation {old_san} → {new_san}")
+    except Exception as e:  # noqa: BLE001 — surface but don't undo the rename
+        logger.warning("rename commit failed: %s", e)
+
+    return {"name": new_san, "relative_path": os.path.join(bp_rel, new_san)}
+
+
 async def create_automation_from_template(
     *,
     workspace_root: str,
