@@ -47,7 +47,6 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 	// Use HOME directly - inside container this is /root, on host it's the user's home
 	// The workspace files are mounted at /root/.config/bitswan in the container
 	homeDir := os.Getenv("HOME")
-	bitswanPath := filepath.Join(homeDir, ".config", "bitswan") + "/"
 	workspacePath := filepath.Join(homeDir, ".config", "bitswan", "workspaces", workspaceName)
 	metadataPath := filepath.Join(workspacePath, "metadata.yaml")
 
@@ -92,15 +91,7 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 		}
 	}
 
-	// 1. Create or update examples directory
-	fmt.Println("Ensuring examples are up to date...")
-	err := ensureExamples(bitswanPath, true)
-	if err != nil {
-		return fmt.Errorf("failed to download examples: %w", err)
-	}
-	fmt.Println("Examples are up to date!")
-
-	// 2. Update Docker images and docker-compose file
+	// Update Docker images and docker-compose file
 	fmt.Println("Updating Docker images and docker-compose file...")
 	if err := workspace.UpdateWorkspaceDeployment(workspaceName, *gitopsImage, *staging, *trustCA); err != nil {
 		return fmt.Errorf("failed to update workspace deployment: %w", err)

@@ -606,11 +606,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		}
 	}
 
-	err = ensureExamples(bitswanConfig, *verbose)
-	if err != nil {
-		return fmt.Errorf("failed to download examples: %w", err)
-	}
-
 	var aocEnvVars []string
 	var mqttEnvVars []string
 	workspaceId := ""
@@ -868,55 +863,6 @@ type RepositoryInfo struct {
 	Org      string
 	Repo     string
 	IsSSH    bool
-}
-
-func ensureExamples(bitswanConfig string, verbose bool) error {
-	repoURL := "https://github.com/bitswan-space/BitSwan.git"
-	targetDir := filepath.Join(bitswanConfig, "bitswan-src")
-
-	if _, err := os.Stat(filepath.Join(targetDir, ".git")); os.IsNotExist(err) {
-		if verbose {
-			fmt.Printf("Cloning BitSwan repository to %s\n", targetDir)
-		}
-
-		if err := os.MkdirAll(filepath.Dir(targetDir), 0755); err != nil {
-			return fmt.Errorf("failed to create parent directory: %w", err)
-		}
-
-		cmd := exec.Command("git", "clone", repoURL, targetDir)
-		if err := util.RunCommandVerbose(cmd, verbose); err != nil {
-			return fmt.Errorf("failed to clone repository: %w", err)
-		}
-
-		if verbose {
-			fmt.Println("Repository cloned successfully")
-		}
-	} else {
-		if err := updateExamples(bitswanConfig, verbose); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func updateExamples(bitswanConfig string, verbose bool) error {
-	repoPath := filepath.Join(bitswanConfig, "bitswan-src")
-	if verbose {
-		fmt.Printf("Updating BitSwan repository at %s\n", repoPath)
-	}
-
-	cmd := exec.Command("git", "-c", fmt.Sprintf("safe.directory=%s", repoPath), "pull")
-	cmd.Dir = repoPath
-
-	if err := util.RunCommandVerbose(cmd, verbose); err != nil {
-		return fmt.Errorf("failed to update repository: %w", err)
-	}
-
-	if verbose {
-		fmt.Println("Repository updated successfully")
-	}
-	return nil
 }
 
 func setHostsFile(workspaceName, domain string, noIde bool) error {
