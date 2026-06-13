@@ -325,6 +325,23 @@ class AutomationService:
         is applied live by `get_automations()` so we don't have to couple
         the cache to Docker events.
         """
+        def _expose_for(rel_or_dir: str | None) -> bool:
+            """Read [deployment] expose from an automation's directory. Frontends
+            (expose=true) vs worker containers (expose=false) — definition-based,
+            so undeployed automations classify correctly. Best-effort."""
+            if not rel_or_dir:
+                return False
+            d = (
+                rel_or_dir
+                if os.path.isabs(rel_or_dir)
+                else os.path.join(self.workspace_repo_dir, rel_or_dir)
+            )
+            try:
+                cfg = read_automation_config(d)
+                return bool(cfg and cfg.expose)
+            except Exception:
+                return False
+
         deployments = (bs_yaml or {}).get("deployments", {}) or {}
         deployed: list[DeployedAutomation] = []
         for deployment_id, cfg in deployments.items():
@@ -351,6 +368,7 @@ class AutomationService:
                     context=cfg.get("context", None),
                     version_hash=cfg.get("checksum", None),
                     replicas=cfg.get("replicas", 1),
+                    expose=_expose_for(cfg.get("relative_path")),
                 )
             )
 
@@ -382,6 +400,7 @@ class AutomationService:
                     context=src["context"],
                     version_hash=None,
                     replicas=1,
+                    expose=_expose_for(src.get("source_path")),
                 )
             )
 
