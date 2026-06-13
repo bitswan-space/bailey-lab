@@ -8,6 +8,9 @@ COPY pyproject.toml .
 COPY LICENSE .
 COPY README.md .
 COPY app/ ./app/
+# Bake the automation templates into the image so they are version-locked to
+# this gitops build (no external examples repo to clone or mount).
+COPY examples/ /opt/bitswan/examples/
 COPY start.sh .
 
 RUN pip install -e .

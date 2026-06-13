@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bitswan frontend</title>
+  <style>
+    body { font: 15px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; color: #18181b; }
+    h1 { font-size: 1.4rem; } code { background: #f4f4f5; padding: .1em .35em; border-radius: 4px; }
+    #out { white-space: pre-wrap; background: #f4f4f5; padding: 1rem; border-radius: 8px; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Bitswan frontend</h1>
+  <p>This page is served by the frontend shim. The button calls
+     <code>/api/hello</code>, which the shim proxies to the <code>backend</code> worker.</p>
+  <button id="go">Call backend</button>
+  <div id="out">…</div>
+  <script>
+    document.getElementById('go').onclick = async () => {
+      const out = document.getElementById('out');
+      out.textContent = 'calling…';
+      try {
+        const r = await fetch('/api/hello');
+        out.textContent = JSON.stringify(await r.json(), null, 2);
+      } catch (e) { out.textContent = 'error: ' + e; }
+    };
+  </script>
+</body>
+</html>

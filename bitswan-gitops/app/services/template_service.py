@@ -27,9 +27,30 @@ from app.utils import (
 
 logger = logging.getLogger(__name__)
 
-# Same root the editor uses. Mounted read-only into the gitops container by
-# bitswan-automation-server's compose generation.
-TEMPLATES_ROOT = "/workspace/examples"
+# Built-in templates are baked into the gitops image at /opt/bitswan/examples
+# (Dockerfile `COPY examples/`), so they are version-locked to the gitops
+# build. BITSWAN_TEMPLATES_DIR overrides the baked path (used in dev when the
+# source tree is mounted). The legacy /workspace/examples mount is still
+# consulted so older deployments that mount an examples repo keep working.
+# Workspace-local overrides at <workspace_repo>/templates/ win over both.
+BUILTIN_TEMPLATE_ROOTS = [
+    os.environ.get("BITSWAN_TEMPLATES_DIR", "/opt/bitswan/examples"),
+    "/workspace/examples",
+]
+
+
+def _discover_builtins() -> tuple[list["TemplateInfo"], list["TemplateGroupInfo"]]:
+    """Merge built-in templates/groups across every built-in root, earlier
+    roots winning on id collision (the baked path beats the legacy mount)."""
+    by_id_t: dict[str, "TemplateInfo"] = {}
+    by_id_g: dict[str, "TemplateGroupInfo"] = {}
+    for root in BUILTIN_TEMPLATE_ROOTS:
+        t_list, g_list = _discover_in_root(root)
+        for t in t_list:
+            by_id_t.setdefault(t.id, t)
+        for g in g_list:
+            by_id_g.setdefault(g.id, g)
+    return list(by_id_t.values()), list(by_id_g.values())
 
 # Editor-compatible automation directory naming.
 _AUTOMATION_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -174,7 +195,7 @@ def discover_templates(workspace_root: str) -> dict:
     Workspace overrides at `<workspace_root>/templates/` win against built-ins
     of the same id, matching the editor's behaviour.
     """
-    builtin_t, builtin_g = _discover_in_root(TEMPLATES_ROOT)
+    builtin_t, builtin_g = _discover_builtins()
     override_t, override_g = _discover_in_root(
         os.path.join(workspace_root, "templates")
     )
@@ -390,7 +411,7 @@ async def create_automation_from_template(
 def _all_templates(workspace_root: str) -> list[TemplateInfo]:
     """Helper to re-fetch the full TemplateInfo (incl. source_dir) — `discover_templates`
     returns dicts trimmed for HTTP response."""
-    builtin_t, _ = _discover_in_root(TEMPLATES_ROOT)
+    builtin_t, _ = _discover_builtins()
     override_t, _ = _discover_in_root(os.path.join(workspace_root, "templates"))
     merged: dict[str, TemplateInfo] = {t.id: t for t in builtin_t}
     for t in override_t:
@@ -399,7 +420,7 @@ def _all_templates(workspace_root: str) -> list[TemplateInfo]:
 
 
 def _all_groups(workspace_root: str) -> list[TemplateGroupInfo]:
-    _, builtin_g = _discover_in_root(TEMPLATES_ROOT)
+    _, builtin_g = _discover_builtins()
     _, override_g = _discover_in_root(os.path.join(workspace_root, "templates"))
     merged: dict[str, TemplateGroupInfo] = {g.id: g for g in builtin_g}
     for g in override_g:

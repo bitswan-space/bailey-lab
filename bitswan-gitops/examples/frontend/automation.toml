@@ -1,0 +1,7 @@
+# A frontend is the only part of a business process exposed through Bailey.
+# It serves static assets and proxies /api to the "backend" worker over the
+# private Docker network (see image/main.go). Access is controlled entirely
+# by the Bailey share button + the workspace ACL — there is no expose_to.
+[deployment]
+expose = true
+port = 8080
