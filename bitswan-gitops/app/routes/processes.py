@@ -111,9 +111,7 @@ async def create_process(
         # split anymore — a frontend is reachable through Bailey and access
         # is controlled by the share button; developers add more frontends or
         # workers from the dashboard's Environment panel.
-        group_id = os.environ.get(
-            "BITSWAN_DEFAULT_TEMPLATE_GROUP", "business-process"
-        )
+        group_id = os.environ.get("BITSWAN_DEFAULT_TEMPLATE_GROUP", "business-process")
         workspace_root = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
         created = await template_service.create_automation_from_template(
             workspace_root=workspace_root,

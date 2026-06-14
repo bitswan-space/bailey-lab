@@ -325,6 +325,7 @@ class AutomationService:
         is applied live by `get_automations()` so we don't have to couple
         the cache to Docker events.
         """
+
         def _expose_for(rel_or_dir: str | None) -> bool:
             """Read [deployment] expose from an automation's directory. Frontends
             (expose=true) vs worker containers (expose=false) — definition-based,

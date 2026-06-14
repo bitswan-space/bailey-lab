@@ -56,6 +56,7 @@ def _discover_builtins() -> tuple[list["TemplateInfo"], list["TemplateGroupInfo"
             by_id_g.setdefault(g.id, g)
     return list(by_id_t.values()), list(by_id_g.values())
 
+
 # Editor-compatible automation directory naming.
 _AUTOMATION_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
