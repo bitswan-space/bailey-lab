@@ -34,8 +34,15 @@ function seedData() {
     userDevices: Object.fromEntries(Object.entries(D.USER_DEVICES).map(([k, v]) => [k, v.map(d => ({ ...d }))])),
     // Live identity + load status, filled by fetchLive().
     me: null,            // { email, isAdmin }
-    load: { devices: 'idle', approvals: 'idle', workspaces: 'idle', whoami: 'idle' },
-    error: {},           // { devices, approvals, workspaces, whoami }
+    // Live overview (counts + identity card + activity feed) and people
+    // roster, fetched from /bailey/api/overview and /bailey/api/people. Null
+    // until loaded; the views render loading/error/empty from load+error and
+    // do NOT fall back to seed.
+    overview: null,      // { counts, identity, activity }
+    people: null,        // [{ name,email,role,workspaceCount,deviceCount,lastActive,invited }]
+    peopleWarning: null, // partial-enumeration `error` string from /people (200 + error)
+    load: { devices: 'idle', approvals: 'idle', workspaces: 'idle', whoami: 'idle', overview: 'idle', people: 'idle' },
+    error: {},           // { devices, approvals, workspaces, whoami, overview, people }
   };
 }
 
@@ -98,6 +105,83 @@ function adaptWorkspace(w, callerEmail) {
     apps: [],
     live: true,
   };
+}
+
+// /bailey/api/people → { people:[{name,email,role,workspace_count,
+//   device_count,last_active,invited}], error? }
+// Maps the snake_case DTO onto the camelCase fields the People view reads.
+// last_active is an optional timestamp; render blank when absent (no
+// fabricated "now"). name == email from the backend until a profile source
+// exists — passed through verbatim (no local-part heuristics).
+function adaptPerson(p) {
+  return {
+    id: p.email,
+    name: p.name || p.email,
+    email: p.email,
+    role: p.role || 'member',
+    workspaceCount: p.workspace_count || 0,
+    deviceCount: p.device_count || 0,
+    lastActive: p.last_active ? formatWhen(p.last_active) : '',
+    invited: !!p.invited,
+  };
+}
+
+// /bailey/api/overview → { counts, identity, activity }. Maps the identity
+// card + activity feed onto the shapes OverviewView renders. uptime_sec →
+// a human label; region/claimed_at may be empty (rendered as a dash).
+function adaptOverview(o) {
+  const id = o.identity || {};
+  const counts = o.counts || {};
+  return {
+    counts: {
+      workspaces: counts.workspaces || 0,
+      people: counts.people || 0,
+      trustedDevices: counts.trusted_devices || 0,
+      pendingApprovals: counts.pending_approvals || 0,
+    },
+    identity: {
+      claimedBy: id.claimed_by || '',
+      claimedAt: id.claimed_at ? formatWhen(id.claimed_at) : '',
+      version: id.version || '',
+      online: id.online !== false,
+      region: id.region || '',
+      uptime: uptimeLabel(id.uptime_sec),
+      startTime: id.start_time || '',
+    },
+    activity: (o.activity || []).map(adaptActivity),
+  };
+}
+
+// One audit-log event → the row OverviewView renders. The backend feed is
+// {ts,actor,action,target}; map the action verb to an icon/tone and a
+// readable phrase. Unknown actions fall back to a neutral generic row
+// rather than being dropped.
+const ACTIVITY_KINDS = {
+  'device.approve':   { icon: 'shield-check', tone: 'success', verb: 'approved a device for' },
+  'device.revoke':    { icon: 'user-x',       tone: 'danger',  verb: 'revoked a device for' },
+  'totp.enrol':       { icon: 'key-round',    tone: 'warning', verb: 'enrolled an authenticator' },
+  'server.claim':     { icon: 'flag',         tone: 'primary', verb: 'claimed this server' },
+  'workspace.create': { icon: 'folder-plus',  tone: 'primary', verb: 'created workspace' },
+  'workspace.trash':  { icon: 'trash-2',      tone: 'danger',  verb: 'trashed workspace' },
+};
+function adaptActivity(a) {
+  const k = ACTIVITY_KINDS[a.action] || { icon: 'activity', tone: 'neutral', verb: a.action || 'did something' };
+  const target = a.target || '';
+  return {
+    icon: k.icon,
+    tone: k.tone,
+    who: a.actor || '',
+    text: target ? `${k.verb} ${target}` : k.verb,
+    when: a.ts ? formatWhen(a.ts) : '',
+  };
+}
+
+function uptimeLabel(secs) {
+  if (secs == null) return '';
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h`;
+  return `${Math.floor(secs / 86400)}d`;
 }
 
 function formatWhen(ts) {
@@ -406,11 +490,38 @@ function App() {
     } catch (e) { setLoad('workspaces', 'error'); setErr('workspaces', e.message); }
   };
 
+  const loadOverview = useAR();
+  loadOverview.current = async () => {
+    setLoad('overview', 'loading');
+    try {
+      const r = await Api.overview();
+      setData(d => ({ ...d, overview: adaptOverview(r) }));
+      setLoad('overview', 'ok'); setErr('overview', null);
+    } catch (e) { setLoad('overview', 'error'); setErr('overview', e.message); }
+  };
+
+  const loadPeople = useAR();
+  loadPeople.current = async () => {
+    setLoad('people', 'loading');
+    try {
+      const r = await Api.people();
+      // /people degrades gracefully: a 200 may carry an `error` describing a
+      // partial-enumeration failure. Keep the roster AND surface the warning;
+      // only a thrown ApiError becomes a full error state.
+      setData(d => ({
+        ...d,
+        people: (r.people || []).map(adaptPerson),
+        peopleWarning: r.error || null,
+      }));
+      setLoad('people', 'ok'); setErr('people', null);
+    } catch (e) { setLoad('people', 'error'); setErr('people', e.message); }
+  };
+
   // refresh(list) re-fetches one (or all) live lists. Passed through ctx
   // so a view's mutation handler can sync after writing to the backend.
   const refresh = useAR();
   refresh.current = (which) => {
-    const all = { devices: loadDevices, approvals: loadApprovals, workspaces: loadWorkspaces, whoami: loadWhoami };
+    const all = { devices: loadDevices, approvals: loadApprovals, workspaces: loadWorkspaces, whoami: loadWhoami, overview: loadOverview, people: loadPeople };
     if (which && all[which]) return all[which].current();
     return Promise.all(Object.values(all).map(r => r.current()));
   };
@@ -441,6 +552,11 @@ function App() {
     loadDevices.current();
     loadApprovals.current();
     loadWorkspaces.current();
+    // Admin-only endpoints (403 for non-admins). The Admin nav section is
+    // hidden once whoami confirms isAdmin=false, so a non-admin won't reach
+    // these views; if they did, the 403 surfaces as the view's error state.
+    loadOverview.current();
+    loadPeople.current();
   }, [gate.status, liveScene]);
 
   useALucide();

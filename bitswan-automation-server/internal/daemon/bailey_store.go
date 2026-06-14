@@ -154,6 +154,22 @@ CREATE TABLE IF NOT EXISTS singletons (
   key   TEXT PRIMARY KEY,
   value BLOB NOT NULL
 );
+
+-- Append-only security audit log. One row per security-relevant
+-- mutation (device approve/revoke, workspace create/trash, server
+-- claim, TOTP enrol). Powers the Server Console overview's recent
+-- security-activity feed. Never updated or deleted in normal operation
+-- — it is the record of what happened, in order. ts is RFC3339 UTC;
+-- actor is the email that performed the action ('' for system); action
+-- is a short stable verb (see audit* constants); target is the thing
+-- acted on (a device id, workspace name, or affected email).
+CREATE TABLE IF NOT EXISTS events (
+  ts     TEXT NOT NULL,
+  actor  TEXT NOT NULL COLLATE NOCASE,
+  action TEXT NOT NULL,
+  target TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_ts_idx ON events(ts);
 `
 
 // baileyDBPath returns the absolute on-disk location of the daemon's

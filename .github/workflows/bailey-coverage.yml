@@ -1,0 +1,66 @@
+name: Bailey stage-2/3 coverage gate
+
+# Enforces a statement-coverage floor on the Bailey stage-2/3 surface:
+#   - the new backend daemon files (aggregate, weighted by statements)
+#   - the server console's src/console/** (Vitest + v8)
+# Either dropping below 80% fails the build.
+#
+# Triggers mirror the monorepo's existing per-project CI: push to main and any
+# PR, scoped to the two projects this gate covers plus this workflow file.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'bitswan-automation-server/**'
+      - 'bitswan-server-console/**'
+      - '.github/workflows/bailey-coverage.yml'
+  pull_request:
+    paths:
+      - 'bitswan-automation-server/**'
+      - 'bitswan-server-console/**'
+      - '.github/workflows/bailey-coverage.yml'
+
+jobs:
+  coverage-gate:
+    runs-on: ubuntu-latest
+    env:
+      THRESHOLD: '80'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── Backend: aggregate statement coverage over the new daemon files ──
+      # scripts/coverage-backend.sh runs `go test` and prints the aggregate %
+      # on stdout; FAIL_UNDER makes it exit non-zero below the threshold.
+      - name: Backend new-file coverage gate
+        working-directory: bitswan-automation-server
+        run: |
+          chmod +x scripts/coverage-backend.sh
+          FAIL_UNDER="${THRESHOLD}" ./scripts/coverage-backend.sh
+
+      # ── Frontend: src/console/** statement coverage via Vitest + v8 ──
+      - name: Install console deps
+        working-directory: bitswan-server-console
+        run: npm install --no-audit --no-fund
+
+      - name: Console coverage
+        working-directory: bitswan-server-console
+        run: npm run coverage
+
+      - name: Console coverage gate
+        working-directory: bitswan-server-console
+        run: |
+          PCT="$(node -e "const s=require('./coverage/coverage-summary.json');console.log(s.total.statements.pct)")"
+          echo "Console src/console/** statement coverage: ${PCT}%"
+          node -e "process.exit(Number('${PCT}') < Number('${THRESHOLD}') ? 1 : 0)" || {
+            echo "ERROR: console coverage ${PCT}% is below threshold ${THRESHOLD}%";
+            exit 1;
+          }

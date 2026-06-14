@@ -176,6 +176,21 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
+	case "/bailey/api/overview":
+		if r.Method == http.MethodGet {
+			s.handleBaileyOverview(w, r)
+			return
+		}
+	case "/bailey/api/people":
+		if r.Method == http.MethodGet {
+			handleBaileyPeople(w, r)
+			return
+		}
+	case "/bailey/api/people/invite":
+		if r.Method == http.MethodPost {
+			handleBaileyPeopleInvite(w, r)
+			return
+		}
 	case "/bailey/api/admin/devices":
 		if r.Method == http.MethodGet {
 			handleAdminDevicesAPI(w, r)

@@ -37,6 +37,35 @@ func init() {
 // what "claimed" means for the gate, alongside any trusted device.
 const settingRootAdmin = "root_admin_email"
 
+// settingClaimedAt is the server_settings key holding the RFC3339 time
+// the server was claimed. Recorded alongside settingRootAdmin so the
+// overview identity card can show claimed_at. Absent on servers
+// provisioned under the older silent-TOFU path (which trusted a device
+// without recording a root admin); the overview reports "" in that case.
+const settingClaimedAt = "claimed_at"
+
+// serverClaimedAt returns the recorded claim time (RFC3339 UTC), or ""
+// if it was never recorded.
+func serverClaimedAt() string {
+	v, _ := dbGetSetting(settingClaimedAt)
+	return strings.TrimSpace(v)
+}
+
+// recordServerClaim records email as root admin, stamps the claim time,
+// and writes the audit event. Caller must already have verified the
+// server is unclaimed (serverRootAdmin() == "") under the same request
+// to avoid a TOCTOU double-claim overwriting the recorded owner. Shared
+// by both claim entry points (the SPA handleGateClaim and the legacy
+// server-rendered claimHandler).
+func recordServerClaim(email string) error {
+	if err := dbSetSetting(settingRootAdmin, email, email); err != nil {
+		return err
+	}
+	_ = dbSetSetting(settingClaimedAt, nowRFC3339(), email)
+	_ = recordEvent(email, auditServerClaim, email)
+	return nil
+}
+
 // serverRootAdmin returns the claimed root-admin email, or "" if the
 // server has not been claimed yet.
 func serverRootAdmin() string {
@@ -117,7 +146,7 @@ func claimHandler(w http.ResponseWriter, r *http.Request, email string) {
 		// between, addDevice still succeeds but we must not overwrite the
 		// recorded root admin.
 		if serverRootAdmin() == "" {
-			if err := dbSetSetting(settingRootAdmin, email, email); err != nil {
+			if err := recordServerClaim(email); err != nil {
 				http.Error(w, "record root admin: "+err.Error(), http.StatusInternalServerError)
 				return
 			}

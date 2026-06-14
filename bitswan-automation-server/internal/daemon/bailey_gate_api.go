@@ -159,7 +159,7 @@ func handleGateClaim(w http.ResponseWriter, r *http.Request, email string, group
 	// Re-check root admin under the request to avoid a TOCTOU double-claim
 	// overwriting the recorded owner (matches claimHandler).
 	if serverRootAdmin() == "" {
-		if err := dbSetSetting(settingRootAdmin, email, email); err != nil {
+		if err := recordServerClaim(email); err != nil {
 			writeJSONError(w, "record root admin: "+err.Error(), http.StatusInternalServerError)
 			return
 		}

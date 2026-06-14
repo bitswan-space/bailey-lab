@@ -52,33 +52,46 @@ function AppLaunchTile({ app, onOpen }) {
 }
 
 // ─── OVERVIEW ───────────────────────────────────────────────────────────────
-// Stat tiles use live counts (workspaces, devices, pending) from the APIs.
-// TODO(api): no backend endpoint yet — the People count, the server-identity
-// card (region/version/uptime/claimed*), and the "Recent security activity"
-// feed have no endpoints, so they stay on seed data (window.SC_DATA.SERVER /
-// .ACTIVITY and the seed user list).
+// Fully wired to GET /bailey/api/overview (admin-only): stat-tile counts, the
+// server-identity card (claimed-by/version/region/uptime/start-time), and the
+// "Recent security activity" feed all come from that endpoint's adapted
+// response (data.overview). No seed fallback — a failed fetch shows the error
+// UI; an empty activity feed shows an empty state.
 function OverviewView({ ctx }) {
-  const { data, currentUser, go } = ctx;
-  const S = window.SC_DATA.SERVER;
-  const pending = data.pending.length;
-  const trustedDevices = data.myDevices.length;
+  const { data, go, refresh } = ctx;
+  const ov = data.overview;
+  const loaded = data.load.overview === 'ok' && ov;
+  // The server host stays in the page header; it's part of the SPA origin and
+  // not duplicated by the overview endpoint.
+  const host = window.SC_DATA.SERVER.host;
+
   const idRow = (label, value, mono) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, padding: '9px 0', borderBottom: `1px solid ${WC.surface2}` }}>
       <span style={{ fontSize: 12.5, color: WC.muted, whiteSpace: 'nowrap' }}>{label}</span>
-      <span style={{ fontSize: 13, fontWeight: 500, color: WC.fg, fontFamily: mono ? 'Geist Mono, monospace' : 'inherit', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value}</span>
+      <span style={{ fontSize: 13, fontWeight: 500, color: WC.fg, fontFamily: mono ? 'Geist Mono, monospace' : 'inherit', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{value || '—'}</span>
     </div>
   );
+
+  const counts = loaded ? ov.counts : { workspaces: 0, people: 0, trustedDevices: 0, pendingApprovals: 0 };
+  const pending = counts.pendingApprovals;
 
   return (
     <div>
       <WPageHeader title="Server overview"
-        subtitle={`${S.host} — manage workspaces, people, and the devices this server trusts.`} />
+        subtitle={`${host} — manage workspaces, people, and the devices this server trusts.`} />
 
+      {/* Loading / error banner for the overview fetch (retryable). */}
+      {data.load.overview !== 'ok' && (
+        <WLiveState status={data.load.overview} error={data.error.overview}
+          label="Loading server overview…" onRetry={() => refresh('overview')} />
+      )}
+
+      {loaded && (<>
       {/* Stat tiles */}
       <div style={{ display: 'flex', gap: 14, marginBottom: 20 }}>
-        <WStat label="Workspaces" value={data.workspaces.filter(w => w.status === 'active').length} icon="layout-grid" onClick={() => go('workspaces')} />
-        <WStat label="People" value={data.users.length} icon="users" onClick={() => go('users')} />
-        <WStat label="Devices" value={trustedDevices} icon="laptop" tone="success" onClick={() => go('devices')} />
+        <WStat label="Workspaces" value={counts.workspaces} icon="layout-grid" onClick={() => go('workspaces')} />
+        <WStat label="People" value={counts.people} icon="users" onClick={() => go('users')} />
+        <WStat label="Devices" value={counts.trustedDevices} icon="laptop" tone="success" onClick={() => go('devices')} />
         <WStat label="Pending" value={pending} icon="shield-alert" tone={pending ? 'warning' : 'neutral'}
           sub={pending ? 'Needs your review' : 'All clear'} onClick={() => go('approvals')} />
       </div>
@@ -109,19 +122,21 @@ function OverviewView({ ctx }) {
                 <WIcon name="server" size={18} color="#fff" />
               </div>
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 700, color: WC.fg, whiteSpace: 'nowrap' }}>{S.name}</div>
-                <div style={{ fontSize: 12, color: WC.muted, fontFamily: 'Geist Mono, monospace', whiteSpace: 'nowrap' }}>{S.host}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: WC.fg, whiteSpace: 'nowrap' }}>{host}</div>
+                <div style={{ fontSize: 12, color: WC.muted, fontFamily: 'Geist Mono, monospace', whiteSpace: 'nowrap' }}>Bailey server</div>
               </div>
-              <span style={{ marginLeft: 'auto' }}><WPill tone="success" size="xs">● Online</WPill></span>
+              {ov.identity.online && (
+                <span style={{ marginLeft: 'auto' }}><WPill tone="success" size="xs">● Online</WPill></span>
+              )}
             </div>
             <div style={{ padding: '4px 20px 14px' }}>
-              {idRow('Region', S.region)}
-              {idRow('Version', S.version, true)}
-              {idRow('Claimed by', S.claimedBy, true)}
-              {idRow('Claimed', S.claimedAt)}
+              {idRow('Region', ov.identity.region)}
+              {idRow('Version', ov.identity.version, true)}
+              {idRow('Claimed by', ov.identity.claimedBy, true)}
+              {idRow('Claimed', ov.identity.claimedAt)}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 0' }}>
                 <span style={{ fontSize: 12.5, color: WC.muted }}>Uptime</span>
-                <span style={{ fontSize: 13, fontWeight: 500, color: WC.fg }}>{S.uptime}</span>
+                <span style={{ fontSize: 13, fontWeight: 500, color: WC.fg }}>{ov.identity.uptime || '—'}</span>
               </div>
             </div>
           </WCard>
@@ -133,7 +148,10 @@ function OverviewView({ ctx }) {
             Recent security activity
           </div>
           <div style={{ padding: '6px 10px 10px' }}>
-            {window.SC_DATA.ACTIVITY.map((a, i) => {
+            {ov.activity.length === 0 ? (
+              <WEmpty icon="activity" title="No activity yet"
+                text="Device approvals, workspace changes, and other events will appear here." />
+            ) : ov.activity.map((a, i) => {
               const tones = { success: '#16a34a', primary: WC.primary, danger: WC.red, warning: WC.amber, neutral: WC.muted };
               return (
                 <div key={i} style={{ display: 'flex', gap: 11, padding: '10px', borderRadius: 8, alignItems: 'flex-start' }}>
@@ -143,7 +161,7 @@ function OverviewView({ ctx }) {
                   </span>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, color: WC.fg, lineHeight: '18px' }}>
-                      <span style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}>{a.who}</span> {a.text}
+                      {a.who && <span style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}>{a.who}</span>} {a.text}
                     </div>
                     <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 2 }}>{a.when}</div>
                   </div>
@@ -153,6 +171,7 @@ function OverviewView({ ctx }) {
           </div>
         </WCard>
       </div>
+      </>)}
     </div>
   );
 }

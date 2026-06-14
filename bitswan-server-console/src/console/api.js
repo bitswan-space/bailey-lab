@@ -196,6 +196,16 @@ export const Api = {
     postNDJSON('/bailey/api/workspaces/empty-trash', { confirmation: 'empty trash' }, onEvent),
   notificationsCount: () => getJSON('/bailey/api/notifications-count'),
   // Admin-only (403 for non-admins).
+  // Server overview: counts + server-identity card + recent-activity feed.
+  overview: () => getJSON('/bailey/api/overview'),
+  // People roster: every identity the daemon persists, with role/workspace/
+  // device counts. Degrades to a 200 with an `error` field on partial
+  // enumeration failure (the view surfaces it without dropping the roster).
+  people: () => getJSON('/bailey/api/people'),
+  // Invite is stubbed 501 on the backend (no Keycloak admin client yet), so
+  // the People view keeps its control disabled rather than calling this.
+  // Wired here for when the backend lands; throws ApiError(501) until then.
+  invite: (email, role) => postJSON('/bailey/api/people/invite', { email, role }),
   adminDevices: () => getJSON('/bailey/api/admin/devices'),
   adminRemoveDevice: (email, id) => postForm('/bailey/api/admin/devices/remove', { email, id }),
   adminNetworkMap: () => getJSON('/bailey/api/admin/network-map'),

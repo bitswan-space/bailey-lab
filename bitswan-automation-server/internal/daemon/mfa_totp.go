@@ -43,7 +43,13 @@ type totpRecord struct {
 }
 
 func loadTOTPRecord(email string) (*totpRecord, error) { return dbLoadTOTP(email) }
-func saveTOTPRecord(rec *totpRecord) error             { return dbSaveTOTP(rec) }
+func saveTOTPRecord(rec *totpRecord) error {
+	err := dbSaveTOTP(rec)
+	if err == nil && rec != nil {
+		_ = recordEvent(rec.Email, auditTOTPEnrol, rec.Email)
+	}
+	return err
+}
 func signingKey() ([]byte, error)                      { return dbSigningKey() }
 
 // signedSessionCookie packs (email, expiry) and HMACs them with the

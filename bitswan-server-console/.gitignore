@@ -1,6 +1,7 @@
 node_modules/
 dist/
 *.log
+coverage/
 
 # Heavy design captures — the JSX/HTML/CSS reference under wireframe/ is kept
 # (small, useful for backend wiring), but the screenshot/upload PNGs (~5MB) are

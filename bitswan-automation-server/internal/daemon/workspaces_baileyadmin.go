@@ -242,6 +242,7 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 		writeEvent(map[string]any{"event": "error", "error": initErr.Error()})
 		return
 	}
+	_ = recordEvent(email, auditWorkspaceCreate, name)
 	gitopsURL := fmt.Sprintf("https://%s-gitops.%s", name, domain)
 	dashboardURL := fmt.Sprintf("https://%s-dashboard.%s", name, domain)
 	writeEvent(map[string]any{
@@ -309,6 +310,7 @@ func (s *Server) handleTrashWorkspace(w http.ResponseWriter, r *http.Request, em
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	_ = recordEvent(email, auditWorkspaceTrash, workspaceName)
 	// Fire-and-forget the container teardown. Output goes to the
 	// daemon's stdout (visible via `docker logs bitswan-automation-server-daemon`).
 	go stopWorkspaceContainers(workspaceName, os.Stdout)

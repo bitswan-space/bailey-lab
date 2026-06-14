@@ -49,8 +49,22 @@ type deviceRecord struct {
 func anyDevicesExist() bool                               { return dbAnyDevicesExist() }
 func listAllDevices() ([]deviceRecord, error)             { return dbListAllDevices() }
 func loadDevices(email string) ([]deviceRecord, error)    { return dbListDevices(email) }
-func addDevice(email, name string) (*deviceRecord, error) { return dbAddDevice(email, name) }
-func removeDevice(email, id string) error                 { return dbRemoveDevice(email, id) }
+func addDevice(email, name string) (*deviceRecord, error) {
+	rec, err := dbAddDevice(email, name)
+	if err == nil && rec != nil {
+		// A device became trusted (pair-approve claim, self-trust, or
+		// claim TOFU all funnel through here). Audit best-effort.
+		_ = recordEvent(email, auditDeviceApprove, rec.ID)
+	}
+	return rec, err
+}
+func removeDevice(email, id string) error {
+	err := dbRemoveDevice(email, id)
+	if err == nil {
+		_ = recordEvent(email, auditDeviceRevoke, id)
+	}
+	return err
+}
 func findDevice(email, id string) (*deviceRecord, error)  { return dbFindDevice(email, id) }
 func touchDevice(email, id string)                        { dbTouchDevice(email, id) }
 

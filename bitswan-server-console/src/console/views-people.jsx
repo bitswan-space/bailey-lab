@@ -13,39 +13,43 @@ const { useState: useP } = React;
 const P_ROLE_TONE = { admin: 'primary', auditor: 'info', member: 'neutral', viewer: 'outline' };
 
 // ─── USERS & ROLES ──────────────────────────────────────────────────────────
-// TODO(api): no backend endpoint yet — there is no user/role list, invite,
-// suspend, or role-change route under /bailey/api/* (the admin devices API
-// returns per-user devices but no roles/status). This whole view, plus the
-// per-user device drawer below, stays on seed data. (When wiring the
-// drawer later, /bailey/api/admin/devices/remove is the real revoke route.)
+// Wired to GET /bailey/api/people (admin-only): the roster, per-person role,
+// workspace/device counts, last-active and invited flag all come from
+// data.people. No seed fallback — a failed fetch shows the error UI, an empty
+// roster shows the empty state, and /people's partial-enumeration `error`
+// (200 + error) shows a non-fatal warning above the still-rendered roster.
+//
+// Controls the backend doesn't expose yet are disabled (not faked):
+//   • Invite — POST /people/invite returns 501 (no Keycloak admin client),
+//     so the button is disabled with a tooltip rather than calling it.
+//   • Role change & suspend — no role-write / suspend route exists, so the
+//     role pill is read-only and the suspend control is omitted.
+// The per-user device drawer still uses seed device data (the admin devices
+// API isn't keyed by these identities yet) and is only reachable when the
+// backend reports a device count.
 function UsersView({ ctx }) {
-  const { data, setData, toast, go, currentUser } = ctx;
+  const { data, toast, go } = ctx;
   const [query, setQuery] = useP('');
-  const [inviteOpen, setInviteOpen] = useP(false);
-  const [roleEditId, setRoleEditId] = useP(null);
   const [devicesUserId, setDevicesUserId] = useP(null);
 
   const ROLES = window.SC_DATA.ROLES;
-  const getDevices = u => (u.id === currentUser.id ? data.myDevices : (data.userDevices[u.id] || []));
-  const list = data.users.filter(u =>
+  const people = data.people || [];
+  const loaded = data.load.people === 'ok';
+  const list = people.filter(u =>
     u.name.toLowerCase().includes(query.toLowerCase()) || u.email.toLowerCase().includes(query.toLowerCase()));
-  const wsCountFor = id => data.workspaces.filter(w => w.members.includes(id)).length;
 
-  const setRole = (id, role) => {
-    setData(d => ({ ...d, users: d.users.map(u => u.id === id ? { ...u, role } : u) }));
-    setRoleEditId(null);
-    toast('Role updated', 'success');
-  };
-  const setStatus = (id, status) => {
-    setData(d => ({ ...d, users: d.users.map(u => u.id === id ? { ...u, status } : u) }));
-    toast(status === 'suspended' ? 'User suspended' : 'User reactivated', 'info');
-  };
+  const INVITE_DISABLED = "Invites aren't wired up yet — the backend has no Keycloak admin client (POST /people/invite returns 501).";
+  const ROLE_DISABLED = "Role changes aren't wired up yet — the backend has no role-write endpoint.";
 
   return (
     <div>
       <PPageHeader title="People &amp; roles"
         subtitle="Everyone with access to this server. Roles govern what they can do; devices govern where they can do it from."
-        actions={<PBtn variant="primary" leftIcon="user-plus" onClick={() => setInviteOpen(true)}>Invite person</PBtn>} />
+        actions={
+          <span title={INVITE_DISABLED} style={{ display: 'inline-flex' }}>
+            <PBtn variant="primary" leftIcon="user-plus" disabled onClick={() => {}}>Invite person</PBtn>
+          </span>
+        } />
 
       {/* role legend */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 18 }}>
@@ -58,207 +62,105 @@ function UsersView({ ctx }) {
         ))}
       </div>
 
+      {/* Loading / error banner for the roster fetch (retryable). */}
+      {data.load.people !== 'ok' && (
+        <PLiveState status={data.load.people} error={data.error.people}
+          label="Loading people…" onRetry={() => ctx.refresh('people')} />
+      )}
+
+      {/* Non-fatal partial-enumeration warning (200 + error from /people). */}
+      {loaded && data.peopleWarning && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', marginBottom: 14,
+          border: `1px solid ${PC.amber}55`, background: '#fffbeb', borderRadius: 10 }}>
+          <PIcon name="alert-triangle" size={15} color="#b45309" style={{ flex: '0 0 auto' }} />
+          <span style={{ flex: 1, fontSize: 12.5, color: '#92400e', lineHeight: '17px' }}>
+            Some identities couldn't be enumerated: {data.peopleWarning}
+          </span>
+        </div>
+      )}
+
+      {loaded && (<>
       <div style={{ position: 'relative', maxWidth: 320, marginBottom: 14 }}>
         <PIcon name="search" size={14} color={PC.mutedFg} style={{ position: 'absolute', left: 11, top: 11 }} />
         <PTextInput value={query} onChange={setQuery} placeholder="Search people…" style={{ paddingLeft: 32 }} />
       </div>
 
+      {list.length === 0 ? (
+        <PCard><PEmpty icon="users"
+          title={query ? 'No people match' : 'No people yet'}
+          text={query ? 'Try a different search term.' : 'Identities appear here as people sign in, link devices, or get workspace access.'} /></PCard>
+      ) : (
       <PCard pad={0}>
-        <div style={{ display: 'grid', gridTemplateColumns: '2.2fr 1fr 1fr 1fr 0.9fr 40px', gap: 12,
+        <div style={{ display: 'grid', gridTemplateColumns: '2.2fr 1fr 1fr 1fr 0.9fr', gap: 12,
           padding: '11px 18px', borderBottom: `1px solid ${PC.border}`, background: PC.surface,
           fontSize: 11, fontWeight: 600, color: PC.muted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-          <span>Person</span><span>Role</span><span>Workspaces</span><span>Devices</span><span>Last active</span><span></span>
+          <span>Person</span><span>Role</span><span>Workspaces</span><span>Devices</span><span>Last active</span>
         </div>
         {list.map(u => (
-          <div key={u.id} style={{ display: 'grid', gridTemplateColumns: '2.2fr 1fr 1fr 1fr 0.9fr 40px', gap: 12,
-            padding: '12px 18px', borderBottom: `1px solid ${PC.surface2}`, alignItems: 'center',
-            opacity: u.status === 'suspended' ? 0.6 : 1 }}>
+          <div key={u.id} style={{ display: 'grid', gridTemplateColumns: '2.2fr 1fr 1fr 1fr 0.9fr', gap: 12,
+            padding: '12px 18px', borderBottom: `1px solid ${PC.surface2}`, alignItems: 'center' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 }}>
               <PAvatar user={u} size={32} />
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg, display: 'flex', alignItems: 'center', gap: 7 }}>
                   {u.name}
-                  {u.root && <span title="First admin (root)"><PIcon name="crown" size={13} color={PC.amber} /></span>}
-                  {u.status === 'invited' && <PPill tone="warning" size="xs">Invited</PPill>}
-                  {u.status === 'suspended' && <PPill tone="danger" size="xs">Suspended</PPill>}
+                  {u.role === 'admin' && <span title="Administrator"><PIcon name="crown" size={13} color={PC.amber} /></span>}
+                  {u.invited && <PPill tone="warning" size="xs">Invited</PPill>}
                 </div>
                 <div style={{ fontSize: 11.5, color: PC.muted, fontFamily: 'Geist Mono, monospace' }}>{u.email}</div>
               </div>
             </div>
-            <div>
-              {roleEditId === u.id ? (
-                <PSelect value={u.role} onChange={v => setRole(u.id, v)}
-                  options={ROLES.map(r => ({ value: r.id, label: r.label }))} style={{ maxWidth: 130 }} />
-              ) : (
-                <button onClick={() => u.root ? null : setRoleEditId(u.id)} title={u.root ? 'Root admin role is fixed' : 'Change role'}
-                  style={{ border: 0, background: 'transparent', cursor: u.root ? 'default' : 'pointer', padding: 0 }}>
-                  <PPill tone={P_ROLE_TONE[u.role]} size="xs">{u.role}</PPill>
-                </button>
-              )}
+            <div title={ROLE_DISABLED}>
+              <PPill tone={P_ROLE_TONE[u.role] || 'neutral'} size="xs">{u.role}</PPill>
             </div>
-            <span style={{ fontSize: 13, color: PC.fg }}>{wsCountFor(u.id)}</span>
-            {(() => { const n = getDevices(u).length; return (
-              <button onClick={() => n > 0 && setDevicesUserId(u.id)} title={n ? 'Manage devices' : 'No devices'}
-                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 9px', borderRadius: 7,
-                  border: `1px solid ${n ? PC.border : 'transparent'}`, background: n ? '#fff' : 'transparent',
-                  cursor: n ? 'pointer' : 'default', fontFamily: 'inherit', fontSize: 13, color: n ? PC.fg : PC.mutedFg, fontWeight: 500, width: 'fit-content' }}
-                onMouseEnter={e => { if (n) e.currentTarget.style.background = PC.surface2; }}
-                onMouseLeave={e => { if (n) e.currentTarget.style.background = '#fff'; }}>
-                <PIcon name="laptop" size={13} color={PC.mutedFg} />{n}
-                {n > 0 && <PIcon name="chevron-right" size={12} color={PC.mutedFg} />}
-              </button>
-            ); })()}
-            <span style={{ fontSize: 12.5, color: PC.muted }}>{u.lastActive}</span>
-            {u.root ? <span /> : (
-              <button onClick={() => setStatus(u.id, u.status === 'suspended' ? 'active' : 'suspended')}
-                title={u.status === 'suspended' ? 'Reactivate' : 'Suspend'}
-                style={{ width: 28, height: 28, border: 0, background: 'transparent', borderRadius: 6, cursor: 'pointer',
-                  color: PC.mutedFg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                onMouseEnter={e => e.currentTarget.style.background = PC.surface2}
-                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                <PIcon name={u.status === 'suspended' ? 'user-check' : 'user-x'} size={15} />
-              </button>
-            )}
+            <span style={{ fontSize: 13, color: PC.fg }}>{u.workspaceCount}</span>
+            <button onClick={() => u.deviceCount > 0 && setDevicesUserId(u.id)} title={u.deviceCount ? 'Manage devices' : 'No devices'}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 9px', borderRadius: 7,
+                border: `1px solid ${u.deviceCount ? PC.border : 'transparent'}`, background: u.deviceCount ? '#fff' : 'transparent',
+                cursor: u.deviceCount ? 'pointer' : 'default', fontFamily: 'inherit', fontSize: 13, color: u.deviceCount ? PC.fg : PC.mutedFg, fontWeight: 500, width: 'fit-content' }}
+              onMouseEnter={e => { if (u.deviceCount) e.currentTarget.style.background = PC.surface2; }}
+              onMouseLeave={e => { if (u.deviceCount) e.currentTarget.style.background = '#fff'; }}>
+              <PIcon name="laptop" size={13} color={PC.mutedFg} />{u.deviceCount}
+              {u.deviceCount > 0 && <PIcon name="chevron-right" size={12} color={PC.mutedFg} />}
+            </button>
+            <span style={{ fontSize: 12.5, color: PC.muted }}>{u.lastActive || '—'}</span>
           </div>
         ))}
       </PCard>
+      )}
+      </>)}
 
-      <InvitePersonModal open={inviteOpen} onClose={() => setInviteOpen(false)} data={data} setData={setData} toast={toast} />
-      <UserDevicesDrawer userId={devicesUserId} onClose={() => setDevicesUserId(null)} ctx={ctx} getDevices={getDevices} />
+      <UserDevicesDrawer userId={devicesUserId} onClose={() => setDevicesUserId(null)} ctx={ctx} />
     </div>
   );
 }
 
 // ─── ADMIN: view & revoke another user's devices ────────────────────────────
-function UserDevicesDrawer({ userId, onClose, ctx, getDevices }) {
-  const { data, setData, toast, currentUser } = ctx;
-  const [confirm, setConfirm] = useP(null);
-  const u = data.users.find(x => x.id === userId);
+// TODO(api): the People roster is keyed by email (from /people), but the admin
+// devices API (/bailey/api/admin/devices) isn't yet correlated to these
+// identities, so this drawer can't list a person's real devices. It is only
+// reachable when /people reports device_count > 0; until the device API is
+// wired here, revoke is disabled and the drawer explains why rather than
+// faking a revoke against seed data.
+function UserDevicesDrawer({ userId, onClose, ctx }) {
+  const { data } = ctx;
+  const u = (data.people || []).find(x => x.id === userId);
   if (!u) return null;
-  const isSelf = u.id === currentUser.id;
-  const devices = getDevices(u);
-
-  const revoke = (dev) => {
-    setData(d => {
-      const users = d.users.map(x => x.id === u.id ? { ...x, devices: Math.max(0, x.devices - 1) } : x);
-      if (isSelf) return { ...d, users, myDevices: d.myDevices.filter(x => x.id !== dev.id) };
-      return { ...d, users, userDevices: { ...d.userDevices, [u.id]: (d.userDevices[u.id] || []).filter(x => x.id !== dev.id) } };
-    });
-    toast(`Revoked ${dev.name} for ${u.name.split(' ')[0]}`, 'danger');
-    setConfirm(null);
-  };
-  const revokeAll = () => {
-    setData(d => {
-      const users = d.users.map(x => x.id === u.id ? { ...x, devices: 0 } : x);
-      if (isSelf) return { ...d, users, myDevices: d.myDevices.filter(x => x.current) };
-      return { ...d, users, userDevices: { ...d.userDevices, [u.id]: [] } };
-    });
-    toast(`Signed out all devices for ${u.name.split(' ')[0]}`, 'danger');
-    setConfirm(null);
-  };
+  const firstName = (u.name || u.email).split(/[ @]/)[0];
 
   return (
-    <PDrawer open={!!userId} onClose={onClose} icon="laptop" title={`${u.name.split(' ')[0]}'s devices`}
-      subtitle={`${devices.length} trusted device${devices.length !== 1 ? 's' : ''} · ${u.email}`}
-      footer={devices.length > 1 && (
-        <PBtn variant="danger" leftIcon="shield-x" onClick={() => setConfirm('all')}>Sign out all devices</PBtn>
-      )}>
+    <PDrawer open={!!userId} onClose={onClose} icon="laptop" title={`${firstName}'s devices`}
+      subtitle={`${u.deviceCount} trusted device${u.deviceCount !== 1 ? 's' : ''} · ${u.email}`}>
       <div style={{ display: 'flex', gap: 10, padding: 13, background: PC.surface, borderRadius: 10, border: `1px solid ${PC.border}`, marginBottom: 16 }}>
         <PIcon name="shield-alert" size={15} color={PC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
         <span style={{ fontSize: 12, color: PC.muted, lineHeight: '17px' }}>
-          Revoking a device signs it out immediately and removes its trust. Use this if a device is lost or stolen — {u.name.split(' ')[0]} will need to re-link it{!isSelf && ' (or be re-approved if it was their last device)'}.
+          The backend reports {firstName} has {u.deviceCount} trusted device{u.deviceCount !== 1 ? 's' : ''} on this server.
         </span>
       </div>
 
-      {devices.length === 0 ? (
-        <PEmpty icon="laptop" title="No trusted devices" text={`${u.name.split(' ')[0]} has no devices linked to this server.`} />
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {devices.map(dev => {
-            const danger = confirm === dev.id;
-            return (
-              <div key={dev.id} style={{ border: `1px solid ${danger ? PC.red : PC.border}`, borderRadius: 11, padding: 14,
-                background: danger ? PC.redSoft : '#fff' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 13 }}>
-                  <span style={{ width: 40, height: 40, borderRadius: 10, flex: '0 0 auto', background: PC.surface2,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <PDeviceIcon kind={dev.kind} size={19} color={PC.fg} />
-                  </span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                      <span style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg, whiteSpace: 'nowrap' }}>{dev.name}</span>
-                      {dev.current && <PPill tone="success" size="xs">This device</PPill>}
-                    </div>
-                    <div style={{ fontSize: 11.5, color: PC.muted, marginTop: 2 }}>{dev.browser} · {dev.os}</div>
-                    <div style={{ fontSize: 11, color: PC.mutedFg, marginTop: 3, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><PIcon name="map-pin" size={11} color={PC.mutedFg} />{dev.location}</span>
-                      <span style={{ fontFamily: 'Geist Mono, monospace' }}>{dev.ip}</span>
-                      <span>{dev.lastActive}</span>
-                    </div>
-                  </div>
-                  {!dev.current && (
-                    danger ? (
-                      <div style={{ display: 'flex', gap: 6, flex: '0 0 auto' }}>
-                        <PBtn variant="ghost" size="sm" onClick={() => setConfirm(null)}>Cancel</PBtn>
-                        <PBtn variant="danger" size="sm" onClick={() => revoke(dev)}>Confirm</PBtn>
-                      </div>
-                    ) : (
-                      <PBtn variant="default" size="sm" leftIcon="log-out" onClick={() => setConfirm(dev.id)}>Revoke</PBtn>
-                    )
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      <PModal open={confirm === 'all'} onClose={() => setConfirm(null)} icon="shield-x" title={`Sign out all of ${u.name.split(' ')[0]}'s devices?`}
-        subtitle="Every trusted device loses access immediately. They'll need to be re-approved or re-linked to get back in."
-        footer={<>
-          <PBtn variant="default" onClick={() => setConfirm(null)}>Cancel</PBtn>
-          <PBtn variant="primary" style={{ background: PC.red, borderColor: PC.red }} onClick={revokeAll}>Sign out everything</PBtn>
-        </>} />
+      <PEmpty icon="laptop" title="Per-person device list isn't wired yet"
+        text="The admin devices API isn't yet correlated to these identities, so individual devices and revoke can't be shown here. Manage devices from Device approvals for now." />
     </PDrawer>
-  );
-}
-
-function InvitePersonModal({ open, onClose, data, setData, toast }) {
-  const [email, setEmail] = useP('');
-  const [role, setRole] = useP('member');
-  React.useEffect(() => { if (open) { setEmail(''); setRole('member'); } }, [open]);
-  const invite = () => {
-    const name = email.split('@')[0].replace(/\./g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-    const colors = ['#0ea5e9', '#d946ef', '#65a30d', '#e11d48', '#7c3aed'];
-    setData(d => ({ ...d, users: [...d.users, {
-      id: 'u-' + Math.random().toString(36).slice(2, 6), name, email: email.trim(), role,
-      status: 'invited', color: colors[d.users.length % colors.length], lastActive: '—', devices: 0,
-    }] }));
-    toast(`Invitation sent to ${email.trim()}`, 'success');
-    onClose();
-  };
-  return (
-    <PModal open={open} onClose={onClose} icon="user-plus" title="Invite a person"
-      subtitle="They'll sign in via Keycloak — then their first device waits for your approval."
-      footer={<>
-        <PBtn variant="default" onClick={onClose}>Cancel</PBtn>
-        <PBtn variant="primary" disabled={!email.includes('@')} onClick={invite}>Send invite</PBtn>
-      </>}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <PField label="Work email" hint="Must match an account in your Keycloak realm.">
-          <PTextInput value={email} onChange={setEmail} placeholder="name@harmonum.ai" mono autoFocus />
-        </PField>
-        <PField label="Server role">
-          <PSelect value={role} onChange={setRole} options={window.SC_DATA.ROLES.map(r => ({ value: r.id, label: `${r.label} — ${r.desc}` }))} />
-        </PField>
-        <div style={{ display: 'flex', gap: 10, padding: 13, background: PC.surface, borderRadius: 10, border: `1px solid ${PC.border}` }}>
-          <PIcon name="info" size={15} color={PC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
-          <span style={{ fontSize: 12, color: PC.muted, lineHeight: '17px' }}>
-            Inviting only grants the <em>right</em> to sign in. After signing in with Keycloak, this person's first device shows you a code that you must enter to trust it.
-          </span>
-        </div>
-      </div>
-    </PModal>
   );
 }
 
