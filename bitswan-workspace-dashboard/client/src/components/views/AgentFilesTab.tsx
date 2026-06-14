@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
-import { Bot, FolderTree, GitPullRequest } from 'lucide-react';
-import { AgentsTab } from '@/components/agents/AgentsTab';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Folder, GitPullRequest, Loader2, MessageSquare, Plus } from 'lucide-react';
 import { FilesTab } from '@/components/files/FilesTab';
 import { DiffTab } from '@/components/diff/DiffTab';
 import { Button } from '@/components/ui/button';
+import { useSessions } from '@/components/agents/SessionProvider';
+import { useAgentSessions } from '@/hooks/useAgentSessions';
 import { cn } from '@/lib/utils';
 
 interface AgentFilesTabProps {
@@ -12,40 +13,121 @@ interface AgentFilesTabProps {
   branch: string;
 }
 
-type Inner = 'agent' | 'files';
+type Sub = 'chat' | 'files';
 
 /**
- * The Coding Agent tab: the agent session view plus an inner "Files" area
- * (per the design's agent tool tabs) hosting the file browser with a Diff
- * toggle. Both panes stay mounted (`hidden`-toggled) so agent terminals and
- * their pane binding survive the inner toggle.
+ * The Agents screen, per the wireframe (Workspace Dashboard → Agents): one
+ * agent per business process — no session list. A header chip shows the
+ * agent (status dot + name), then Chat / Files sub-tabs; the right-hand
+ * ENVIRONMENT panel lives in WorkspaceView.
+ *
+ *   - Chat  → the live coding-agent terminal. It renders in SessionProvider's
+ *     portal layer over this pane, so it must stay mounted (we hide it, not
+ *     unmount it, when Files is active) or the running terminal is torn down.
+ *   - Files → the worktree file browser with a Diff toggle.
+ *
+ * (Plan, Notes, and the Playwright Browser pane from the wireframe are
+ * intentionally not built.)
  */
-export function AgentFilesTab({ worktree, bp, branch }: AgentFilesTabProps) {
-  const [inner, setInner] = useState<Inner>('agent');
-  const [showDiff, setShowDiff] = useState(false);
+export function AgentFilesTab({ worktree, bp, branch: _branch }: AgentFilesTabProps) {
+  const {
+    sessions: allSessions,
+    startSession,
+    setCurrentScope,
+    setPaneEl,
+    selectedFor,
+    setSelectedFor,
+    agentStatus,
+    ensureAgent,
+  } = useSessions();
+  const { sessions: past } = useAgentSessions(worktree, bp);
 
-  // Reset the Diff toggle when leaving Files or changing worktree, matching
-  // the design prototype's behaviour.
+  const [sub, setSub] = useState<Sub>('chat');
+  const [showDiff, setShowDiff] = useState(false);
   useEffect(() => {
     setShowDiff(false);
-  }, [inner, worktree]);
+  }, [sub, worktree]);
+
+  // Bind this BP as the active scope and hand the provider the Chat pane so
+  // it can portal the terminal over it. Cleanup unbinds so terminals stay
+  // alive (just hidden) when the user navigates away.
+  const paneRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    setCurrentScope({ worktree, bp });
+    return () => setCurrentScope(null);
+  }, [worktree, bp, setCurrentScope]);
+  useEffect(() => {
+    setPaneEl(paneRef.current);
+    return () => setPaneEl(null);
+  }, [setPaneEl]);
+
+  // The BP's live sessions. One agent per BP: the selected active session, or
+  // the first running one. Sync sessions are worktree-level and bp-less.
+  const active = useMemo(
+    () =>
+      allSessions.filter(
+        (s) => !s.exited && s.worktree === worktree && (s.kind === 'sync' || s.bp === bp),
+      ),
+    [allSessions, worktree, bp],
+  );
+  const selectedId = selectedFor({ worktree, bp });
+  const agent = active.find((s) => s.id === selectedId) ?? active[0];
+
+  // Keep the scope selection pointed at the live agent so the provider shows
+  // the right terminal.
+  useEffect(() => {
+    if (agent && agent.id !== selectedId) {
+      setSelectedFor({ worktree, bp }, agent.id);
+    }
+  }, [agent, selectedId, setSelectedFor, worktree, bp]);
+
+  // A friendly name for the agent chip: the conversation title once the poll
+  // has one, else a stable fallback.
+  const title = useMemo(() => {
+    if (!agent) return null;
+    const p = past.find((x) => x.claudeSessionId === agent.id);
+    return p?.title || 'Coding agent';
+  }, [agent, past]);
+
+  const start = useCallback(async () => {
+    if (agentStatus === 'idle' || agentStatus === 'failed') {
+      try {
+        await ensureAgent();
+      } catch {
+        // ensureAgent surfaces failure via agentStatus.
+      }
+    }
+    startSession(worktree, bp);
+  }, [agentStatus, ensureAgent, startSession, worktree, bp]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex h-9 shrink-0 items-center gap-4 border-b border-border bg-muted/40 px-5">
-        <InnerTab
-          active={inner === 'agent'}
-          onClick={() => setInner('agent')}
-          icon={<Bot className="size-3.5" aria-hidden />}
-          label="Agent"
+      {/* Header: agent chip + sub-tabs */}
+      <div className="flex h-10 shrink-0 items-center gap-4 border-b border-border bg-background px-5">
+        <div className="flex items-center gap-2 border-r border-border pr-4">
+          <span
+            className={cn(
+              'size-1.5 rounded-full',
+              agent ? 'bg-emerald-600' : 'bg-muted-foreground/40',
+            )}
+          />
+          <span className="text-[13px] font-semibold text-foreground">
+            {title ?? 'No agent running'}
+          </span>
+        </div>
+        <SubTab
+          active={sub === 'chat'}
+          onClick={() => setSub('chat')}
+          icon={<MessageSquare className="size-3.5" aria-hidden />}
+          label="Chat"
         />
-        <InnerTab
-          active={inner === 'files'}
-          onClick={() => setInner('files')}
-          icon={<FolderTree className="size-3.5" aria-hidden />}
+        <SubTab
+          active={sub === 'files'}
+          onClick={() => setSub('files')}
+          icon={<Folder className="size-3.5" aria-hidden />}
           label="Files"
         />
-        {inner === 'files' && (
+        {sub === 'files' && (
           <Button
             variant={showDiff ? 'default' : 'outline'}
             size="sm"
@@ -58,28 +140,49 @@ export function AgentFilesTab({ worktree, bp, branch }: AgentFilesTabProps) {
         )}
       </div>
 
-      {/* Both panes stay mounted; visibility via `hidden` so the agent
-          terminal (and its SessionProvider pane binding) survives. */}
-      <div className={cn('min-h-0 flex-1', inner !== 'agent' && 'hidden')}>
-        <AgentsTab worktree={worktree} bp={bp} branch={branch} />
-      </div>
-      <div
+      {/* Chat pane — always mounted (hidden when on Files) so the live
+          terminal portal target survives the toggle. */}
+      <main
+        ref={paneRef}
         className={cn(
-          'min-h-0 flex-1 overflow-hidden',
-          inner !== 'files' && 'hidden',
+          'relative min-h-0 flex-1 overflow-hidden bg-zinc-50',
+          sub !== 'chat' && 'hidden',
         )}
       >
-        {showDiff ? (
-          <DiffTab worktree={worktree} />
-        ) : (
-          <FilesTab worktree={worktree} bp={bp} />
+        {!agent && (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+            {agentStatus === 'failed' ? (
+              <span className="text-destructive">
+                Coding agent unavailable — click Start to retry.
+              </span>
+            ) : (
+              <span>No agent running for this business process yet.</span>
+            )}
+            <Button onClick={start} disabled={agentStatus === 'pending'} size="sm">
+              {agentStatus === 'pending' ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin" /> Starting coding agent…
+                </>
+              ) : (
+                <>
+                  <Plus className="size-3.5" /> Start agent
+                </>
+              )}
+            </Button>
+          </div>
         )}
+      </main>
+
+      {/* Files pane — mounted alongside so toggling back to Chat doesn't
+          remount (and re-fetch) the tree. */}
+      <div className={cn('min-h-0 flex-1 overflow-hidden', sub !== 'files' && 'hidden')}>
+        {showDiff ? <DiffTab worktree={worktree} /> : <FilesTab worktree={worktree} bp={bp} />}
       </div>
     </div>
   );
 }
 
-function InnerTab({
+function SubTab({
   active,
   onClick,
   icon,
