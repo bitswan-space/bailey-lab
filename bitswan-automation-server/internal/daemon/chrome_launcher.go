@@ -3,10 +3,33 @@ package daemon
 import (
 	"fmt"
 	"html"
+	"net/url"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 )
+
+// aocFrontendURL turns the configured AOC API base (aoc_url, e.g.
+// https://api.<domain>) into the AOC web-app URL the launcher should link to
+// (https://aoc.<domain>/). The config stores the API host; the user-facing app
+// lives at the sibling "aoc." host. Falls back to the raw value if it doesn't
+// match the api.<domain> convention.
+func aocFrontendURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	if strings.HasPrefix(u.Host, "api.") {
+		u.Host = "aoc." + strings.TrimPrefix(u.Host, "api.")
+	}
+	u.Path = "/"
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
 
 // The Bailey launcher — a Start-menu-style button pinned to the left of the
 // chrome footer. Clicking the BitSwan mark opens a popup that jumps the top
@@ -45,7 +68,7 @@ type launcherData struct {
 func baileyLauncherData(email string, groups []string) launcherData {
 	var d launcherData
 	if cfg, err := config.NewAutomationServerConfig().LoadConfig(); err == nil && cfg != nil {
-		d.AOCUrl = cfg.AutomationOperationsCenter.AOCUrl
+		d.AOCUrl = aocFrontendURL(cfg.AutomationOperationsCenter.AOCUrl)
 		if dom := cfg.ProtectedHostnameDomain(); dom != "" {
 			// The Server Console is served by the daemon on the reserved
 			// bailey.<domain> host (see serveServerConsole).
@@ -65,9 +88,16 @@ func baileyLauncherData(email string, groups []string) launcherData {
 		if g, ok := byHost[k]; ok {
 			return g
 		}
+		// Default to the hostname. Only surface the endpoint's
+		// DisplayName when the caller actually has a role on it —
+		// otherwise grouping an accessible child frontend under its
+		// parent dashboard would leak the display name of a workspace
+		// the caller was never granted visibility into.
 		name := host
-		if ep, _ := getEndpoint(host); ep != nil && ep.DisplayName != "" {
-			name = ep.DisplayName
+		if role, _ := roleFor(host, email, groups); role != roleNone {
+			if ep, _ := getEndpoint(host); ep != nil && ep.DisplayName != "" {
+				name = ep.DisplayName
+			}
 		}
 		g := &launcherWorkspace{Name: name}
 		byHost[k] = g

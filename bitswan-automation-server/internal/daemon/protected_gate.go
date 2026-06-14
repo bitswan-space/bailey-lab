@@ -114,7 +114,33 @@ func startProtectedGate() error {
 	// Per-request Director — picks the upstream by hostname.
 	proxy := &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
-			up := upstreamForHost(requestEndpointHost(r))
+			// SECURITY (defence-in-depth, identity header injection):
+			// Re-anchor the forwarded-identity headers before proxying.
+			// We (1) capture the identity as resolved from the request
+			// the gate received (set by the trusted oauth2-proxy hop,
+			// bitswan-protected-proxy, in FRONT of this listener), (2)
+			// strip every client-supplied identity header, then (3) only
+			// re-apply the trusted identity on the leg to the daemon's
+			// own :8080 Bailey upstream. For all other upstreams (the
+			// user-controlled workspace apps) the identity headers stay
+			// stripped, so a malicious/compromised upstream can never see
+			// or have injected a forged X-Forwarded-Email/-Groups, and a
+			// client talking straight to :9080 (bypassing oauth2-proxy)
+			// cannot inject identity that flows downstream.
+			//
+			// NOTE: this does not by itself close the stage-4 gap — the
+			// daemon's :8080 listener still trusts X-Forwarded-* with no
+			// proof the request came through the gate (see the comment at
+			// identityFromHeaders and at the docsServer wiring in
+			// server.go). The full fix is the stage-4 proxy split that
+			// makes :8080 reachable only via the gate. This strip is the
+			// conservative, non-breaking mitigation against identity
+			// injection into/through upstream apps.
+			endpointHost := requestEndpointHost(r)
+			email, groups := identityFromHeaders(r)
+			stripForwardedIdentityHeaders(r)
+
+			up := upstreamForHost(endpointHost)
 			if up == nil {
 				// Force a 502 by pointing the request at an unreachable
 				// sentinel — the simplest way to surface "no upstream
@@ -127,6 +153,15 @@ func startProtectedGate() error {
 			r.URL.Host = up.Host
 			if h := r.Header.Get("X-Forwarded-Host"); h != "" {
 				r.Host = h
+			}
+			// Re-apply the gate-trusted identity ONLY to the Bailey
+			// daemon upstream, which legitimately consumes it. Other
+			// upstreams never receive forwarded identity.
+			if isBaileyHost(toOuterHost(endpointHost)) && email != "" {
+				r.Header.Set("X-Forwarded-Email", email)
+				if len(groups) > 0 {
+					r.Header.Set("X-Forwarded-Groups", strings.Join(groups, ","))
+				}
 			}
 		},
 		// Flush immediately after every chunk so streaming upstream

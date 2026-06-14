@@ -131,6 +131,18 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(rest, "/")
 		if len(parts) == 2 {
 			workspaceName, action := parts[0], parts[1]
+			// SECURITY (path traversal): the {name} segment is taken
+			// straight off the URL and flows into filesystem paths
+			// (filepath.Join under ~/.config/bitswan/workspaces) and
+			// docker compose project names. Go's http.ServeMux does NOT
+			// clean percent-encoded dot segments, so /%2e%2e/restore
+			// arrives here as workspaceName=="..". Validate against the
+			// same regex the create path uses and 400 anything that
+			// isn't a well-formed workspace name.
+			if !nameRe.MatchString(workspaceName) {
+				http.Error(w, `{"error":"invalid workspace name"}`, http.StatusBadRequest)
+				return
+			}
 			switch action {
 			case "trash":
 				s.handleTrashWorkspace(w, r, email, workspaceName)

@@ -253,9 +253,22 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 	})
 }
 
-// callerOwnsWorkspace is the auth check for trash + restore.
-// A caller owns the workspace if they're the owner of its gitops
-// endpoint, OR they're the server owner (audit override).
+// callerOwnsWorkspace is the auth check for trash + restore + update +
+// empty-trash. A caller owns the workspace if they're the DIRECT owner
+// of its gitops endpoint, OR they're the server owner (audit override).
+//
+// SECURITY (parent-delegation escalation): we resolve the gitops role
+// with directRoleFor, NOT roleFor. roleFor applies parent delegation —
+// the gitops endpoint's parent is the workspace dashboard, and ANY
+// direct role on the dashboard (including a routine `access` grant) is
+// promoted to OWNER of the child gitops endpoint. Granting a teammate
+// `access` to the dashboard is the normal way to let them into a
+// workspace, so using roleFor here would let any access-role member
+// trash/permanently-delete the whole workspace. Parent delegation is
+// for "can share what I deploy", never for destroying the workspace.
+// directRoleFor reads only the gitops endpoint's own rows (original
+// owner or a direct grant on gitops itself), so a dashboard access
+// member is correctly denied.
 func callerOwnsWorkspace(callerEmail string, callerGroups []string, isServerOwner bool, workspaceName string) bool {
 	if isServerOwner {
 		return true
@@ -265,7 +278,7 @@ func callerOwnsWorkspace(callerEmail string, callerGroups []string, isServerOwne
 		return false
 	}
 	gitopsHost := workspaceName + "-gitops." + sc.ProtectedHostnameDomain()
-	role, err := roleFor(gitopsHost, callerEmail, callerGroups)
+	role, err := directRoleFor(gitopsHost, callerEmail, callerGroups)
 	if err != nil {
 		return false
 	}
@@ -279,6 +292,12 @@ func callerOwnsWorkspace(callerEmail string, callerGroups []string, isServerOwne
 // to the trash section immediately and the actual container teardown
 // happens in the background. Owner-only.
 func (s *Server) handleTrashWorkspace(w http.ResponseWriter, r *http.Request, email, workspaceName string) {
+	// Defence-in-depth path-traversal guard (the dispatcher already
+	// validates, but the sink helpers build filesystem paths from this).
+	if !nameRe.MatchString(workspaceName) {
+		http.Error(w, `{"error":"invalid workspace name"}`, http.StatusBadRequest)
+		return
+	}
 	_, groups := identityFromHeaders(r)
 	serverOwner, _ := callerIsServerOwner(email, r)
 	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
@@ -306,6 +325,11 @@ func (s *Server) handleTrashWorkspace(w http.ResponseWriter, r *http.Request, em
 // handleRestoreWorkspace removes the trash marker and brings the
 // workspace's containers back up. Owner-only.
 func (s *Server) handleRestoreWorkspace(w http.ResponseWriter, r *http.Request, email, workspaceName string) {
+	// Defence-in-depth path-traversal guard (see handleTrashWorkspace).
+	if !nameRe.MatchString(workspaceName) {
+		http.Error(w, `{"error":"invalid workspace name"}`, http.StatusBadRequest)
+		return
+	}
 	_, groups := identityFromHeaders(r)
 	serverOwner, _ := callerIsServerOwner(email, r)
 	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {

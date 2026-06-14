@@ -72,10 +72,10 @@ var (
 //   - Admin without a valid TOTP session → remember origin + redirect to
 //     the challenge page (which itself bounces to enrol if not enrolled).
 //   - No trusted device:
-//       · admin && no devices exist yet → bootstrap-TOFU: auto-pair this
-//         browser (addDevice + setDeviceCookie) so the very first admin
-//         on a fresh server isn't locked out.
-//       · otherwise → remember origin + redirect to the pending-pair page.
+//     · admin && no devices exist yet → bootstrap-TOFU: auto-pair this
+//     browser (addDevice + setDeviceCookie) so the very first admin
+//     on a fresh server isn't locked out.
+//     · otherwise → remember origin + redirect to the pending-pair page.
 //   - Trusted device → touchDevice, then pass through.
 func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
 	if os.Getenv("BAILEY_MFA_GATE_DISABLE") == "1" {
@@ -140,6 +140,27 @@ func rememberOrigin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// safeOriginTarget validates a stashed redirect target and returns a
+// guaranteed same-origin absolute path. The _bailey_origin cookie is
+// scoped to the whole protected domain (cookieDomainForProtected
+// returns ".<domain>"), so any sibling host under that domain — e.g. a
+// user-controlled workspace app — can plant it. Without validation an
+// attacker plants _bailey_origin=//evil.example (or /\evil.example) and
+// the victim is bounced off-domain (open redirect / post-auth phishing)
+// the next time they clear the gate, since http.Redirect forwards a
+// protocol-relative target unchanged.
+//
+// Only a strict same-origin absolute path is allowed: a single leading
+// '/', not '//' and not '/\'. Anything else collapses to "/".
+func safeOriginTarget(target string) string {
+	if target == "" || target[0] != '/' ||
+		strings.HasPrefix(target, "//") ||
+		strings.HasPrefix(target, "/\\") {
+		return "/"
+	}
+	return target
+}
+
 // originRedirect sends the user back to the path stashed by
 // rememberOrigin (defaulting to "/"), clearing the cookie on the way.
 func originRedirect(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +168,7 @@ func originRedirect(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(gateOriginCookie); err == nil && c.Value != "" {
 		target = c.Value
 	}
+	target = safeOriginTarget(target)
 	http.SetCookie(w, &http.Cookie{Name: gateOriginCookie, Value: "", Path: "/", MaxAge: -1})
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }

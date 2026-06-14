@@ -150,6 +150,26 @@ func pendingPairPollHandler(w http.ResponseWriter, r *http.Request, email string
 	})
 }
 
+// approverIsTrusted reports whether the request making an approval is
+// itself a second-factor-cleared browser. An approval mints device
+// trust for a brand-new browser, so the approving request must not be a
+// first-factor-only (oauth-only) session — otherwise a user who has
+// only cleared oauth can self-approve a new browser and bootstrap the
+// device factor out of single-factor state (and a spoofed-admin could
+// approve anyone). Trusted means: an already-paired device cookie for
+// the approver, OR (admins only) a valid TOTP session. The legitimate
+// first-device bootstrap goes through TOTP recovery (recoveryHandler),
+// not first-factor self-approval.
+func approverIsTrusted(r *http.Request, approverEmail string, approverIsAdmin bool) bool {
+	if currentDeviceForRequest(r, approverEmail) != nil {
+		return true
+	}
+	if approverIsAdmin && hasValidSession(r, approverEmail) {
+		return true
+	}
+	return false
+}
+
 func approveHandler(w http.ResponseWriter, r *http.Request, approverEmail string) {
 	approverIsAdmin := isAdmin(r)
 	switch r.Method {
@@ -167,6 +187,12 @@ func approveHandler(w http.ResponseWriter, r *http.Request, approverEmail string
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprint(w, approveListHTML(approverEmail, approverIsAdmin, targetEmail, "Both email and code are required."))
+			return
+		}
+		if !approverIsTrusted(r, approverEmail, approverIsAdmin) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, approveListHTML(approverEmail, approverIsAdmin, targetEmail, "Approve from a browser that's already trusted. To trust your first browser, use authenticator recovery."))
 			return
 		}
 		if !strings.EqualFold(targetEmail, approverEmail) && !approverIsAdmin {
@@ -212,6 +238,13 @@ func handleApprovePairJSON(w http.ResponseWriter, r *http.Request, approverEmail
 		writeJSONError(w, "email and code required", http.StatusBadRequest)
 		return
 	}
+	if !approverIsTrusted(r, approverEmail, approverIsAdmin) {
+		// The approving browser must itself be second-factor-cleared —
+		// see approverIsTrusted. A first-factor-only browser cannot
+		// approve a new device pairing.
+		writeJSONError(w, "approve from an already-trusted browser; use authenticator recovery to trust your first browser", http.StatusForbidden)
+		return
+	}
 	if !strings.EqualFold(targetEmail, approverEmail) && !approverIsAdmin {
 		writeJSONError(w, "only admins can approve a different user", http.StatusForbidden)
 		return
@@ -241,8 +274,11 @@ func completeNewDevicePairFor(w http.ResponseWriter, r *http.Request, email, app
 }
 
 func originRedirectPath(r *http.Request) string {
+	// The returned value is echoed as JSON redirect_path and assigned to
+	// window.location client-side, so it must be a validated same-origin
+	// path — see safeOriginTarget (open-redirect defence).
 	if c, err := r.Cookie(gateOriginCookie); err == nil && c.Value != "" {
-		return c.Value
+		return safeOriginTarget(c.Value)
 	}
 	return "/"
 }

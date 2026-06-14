@@ -175,6 +175,11 @@ func (s *Server) handleAdminDefaultImagesPost(w http.ResponseWriter, r *http.Req
 // since this restarts running automations. Returns an NDJSON stream
 // of progress events identical to the create flow.
 func (s *Server) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, email, workspaceName string) {
+	// Defence-in-depth path-traversal guard (see handleTrashWorkspace).
+	if !nameRe.MatchString(workspaceName) {
+		http.Error(w, `{"error":"invalid workspace name"}`, http.StatusBadRequest)
+		return
+	}
 	_, groups := identityFromHeaders(r)
 	serverOwner, _ := callerIsServerOwner(email, r)
 	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
