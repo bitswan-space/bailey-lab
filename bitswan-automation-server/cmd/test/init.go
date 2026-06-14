@@ -552,9 +552,19 @@ func testFrontendEndpoint(endpointURL, workspaceName string) error {
 // testCodingAgentCLI verifies the bitswan-coding-agent CLI can authenticate to
 // gitops from inside the coding-agent container. `deployments list` hits gitops
 // GET /agent/deployments with the agent token — the same auth path as
-// `vcs commit`, but needs no worktree or staged changes. This guards the
-// agent-token wiring: gitops must resolve the same BITSWAN_GITOPS_AGENT_SECRET
-// the coding-agent container was given, or every agent call 401s.
+// `vcs commit`. This guards the agent-token wiring: gitops must resolve the same
+// BITSWAN_GITOPS_AGENT_SECRET the coding-agent container was given, or every
+// agent call 401s.
+//
+// We pass --worktree explicitly. Without it the CLI tries to auto-detect the
+// worktree from $PWD and fails client-side ("cannot detect worktree") before
+// ever contacting gitops — so it can't test auth for this e2e, which deploys a
+// main (non-worktree) BP and therefore has no worktree on disk. With the flag
+// the request reaches the handler: gitops runs verify_agent_token first, so a
+// good token yields HTTP 200 (an empty list for a worktree that doesn't exist —
+// scan_workspace_sources returns [] for a missing dir) while a bad token yields
+// 401. Either way the listed contents are irrelevant; the not-401 round-trip is
+// the signal we want.
 func testCodingAgentCLI(workspaceName string) error {
 	container, err := codingAgentContainer(workspaceName)
 	if err != nil {
@@ -562,7 +572,7 @@ func testCodingAgentCLI(workspaceName string) error {
 	}
 
 	cmd := exec.Command("docker", "exec", container,
-		"bitswan-coding-agent", "deployments", "list")
+		"bitswan-coding-agent", "deployments", "list", "--worktree", workspaceName)
 	out, runErr := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 
