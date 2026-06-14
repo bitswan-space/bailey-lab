@@ -136,12 +136,9 @@ jobs:
           # Verify daemon is running
           ./bitswan automation-server-daemon status || exit 1
 
-      # NOTE: business-process / automation deployment is exercised by the
-      # stage-1.5 PR's `_test init` (which ships the baked example templates the
-      # gitops image bakes in). This branch carries only the protected-ingress
-      # work, so it tests the ingress lifecycle directly — Caddy init and
-      # Caddy→Traefik migration — without building the gitops image or deploying
-      # an app.
+      # Ingress lifecycle (inherited from the protected-ingress branch): Caddy
+      # init + Caddy→Traefik migration. The business-process deploy e2e below
+      # then exercises this branch's templates on top of Traefik.
       - name: "Ingress: Caddy init (backward compat)"
         timeout-minutes: 10
         run: |
@@ -167,6 +164,37 @@ jobs:
           fi
           echo "Routes after migration:"
           ./bitswan ingress list-routes || true
+
+      - name: Build gitops image from source
+        run: |
+          # Build a fresh gitops image from this monorepo's source so the e2e
+          # exercises the in-repo gitops (and its baked example templates), not
+          # a published image. Absolute path: this job's default working dir is
+          # bitswan-automation-server.
+          docker build -t bitswan/gitops-local:latest -f "${{ github.workspace }}/bitswan-gitops/Dockerfile" "${{ github.workspace }}"
+
+      - name: "E2E: create a business process and reach its frontend"
+        timeout-minutes: 15
+        run: |
+          echo "=== Creating a business process and verifying the frontend ==="
+          ./bitswan _test init --gitops-image bitswan/gitops-local:latest --no-remove || exit 1
+          ./bitswan _test cleanup || true
+
+      - name: "Diagnostics on E2E failure"
+        if: failure()
+        run: |
+          echo "::group::docker ps -a"
+          docker ps -a || true
+          echo "::endgroup::"
+          # --no-remove leaves the workspace up on failure; dump every
+          # container's recent logs (gitops deploy pipeline + the BP's
+          # frontend/backend containers are what we need).
+          for c in $(docker ps -aq); do
+            name=$(docker inspect --format '{{.Name}} ({{.State.Status}}, exit={{.State.ExitCode}})' "$c" 2>/dev/null || echo "$c")
+            echo "::group::logs $name"
+            docker logs --tail 200 "$c" 2>&1 || true
+            echo "::endgroup::"
+          done
 
       - name: Final cleanup
         if: always()
