@@ -22,6 +22,9 @@ interface BpSwitcherProps {
   // eslint-disable-next-line no-restricted-syntax -- null = no BP selected yet
   activeBpId: string | null;
   onSelect: (id: string) => void;
+  /** Fired after a new BP is created — selects it and focuses its
+   *  Description tab. Falls back to onSelect when not provided. */
+  onCreated?: (name: string) => void;
   /** New BPs are created in the selected worktree; the footer button is
    *  hidden when no worktree is selected. */
   // eslint-disable-next-line no-restricted-syntax -- null = no worktree selected
@@ -29,7 +32,7 @@ interface BpSwitcherProps {
 }
 
 /** Top-bar business-process switcher: searchable popover + "+ New BP". */
-export function BpSwitcher({ bps, activeBpId, onSelect, worktree }: BpSwitcherProps) {
+export function BpSwitcher({ bps, activeBpId, onSelect, onCreated, worktree }: BpSwitcherProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -153,7 +156,7 @@ export function BpSwitcher({ bps, activeBpId, onSelect, worktree }: BpSwitcherPr
         onOpenChange={setDialogOpen}
         worktree={worktree ?? undefined}
         existingNames={bps.map((b) => b.name)}
-        onCreated={(name) => onSelect(name)}
+        onCreated={(name) => (onCreated ?? onSelect)(name)}
       />
     </>
   );
