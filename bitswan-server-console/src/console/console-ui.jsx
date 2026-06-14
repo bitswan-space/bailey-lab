@@ -1,4 +1,5 @@
 import React from 'react';
+import QRCodeLib from 'qrcode';
 // console-ui.jsx — shared primitives for the server console.
 // Reuses the design-system palette + Icon/Btn/Pill from the workspace shell.
 
@@ -216,6 +217,36 @@ function QRCode({ seed = 'bailey', size = 168, fg = '#09090b' }) {
       {finder(0, 0)}{finder(N - 7, 0)}{finder(0, N - 7)}
     </svg>
   );
+}
+
+// ─── Real, scannable QR (encodes the given text, e.g. an otpauth:// URL) ─────
+// Distinct from the decorative QRCode above (which is a seeded pattern used in
+// prototype/preview scenes). QRImage renders an actually-scannable code so an
+// authenticator app can read the live TOTP enrolment secret.
+function QRImage({ value, size = 168 }) {
+  const [src, setSrc] = useS('');
+  const [err, setErr] = useS(false);
+  useE(() => {
+    let alive = true;
+    setSrc(''); setErr(false);
+    if (!value) return;
+    QRCodeLib.toDataURL(value, { width: size, margin: 1, errorCorrectionLevel: 'M' })
+      .then(url => { if (alive) setSrc(url); })
+      .catch(() => { if (alive) setErr(true); });
+    return () => { alive = false; };
+  }, [value, size]);
+  if (err) {
+    return (
+      <div style={{ width: size, height: size, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        border: `1px solid ${C.border}`, borderRadius: 8, color: C.red, fontSize: 12, textAlign: 'center', padding: 8 }}>
+        Couldn't render QR
+      </div>
+    );
+  }
+  if (!src) {
+    return <div style={{ width: size, height: size, borderRadius: 8, background: C.surface2 }} />;
+  }
+  return <img src={src} width={size} height={size} alt="Authenticator QR code" style={{ display: 'block', borderRadius: 8 }} />;
 }
 
 // ─── Toggle switch ──────────────────────────────────────────────────────────
@@ -453,7 +484,7 @@ function LiveState({ status, error, label, onRetry }) {
 }
 
 window.SC_UI = {
-  Avatar, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRCode,
+  Avatar, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRCode, QRImage,
   Toggle, DeviceIcon, Toast, EmptyState, CopyChip, ProtoHint, Stat,
   Drawer, Select, AvatarStack, LoadBanner, ErrorBanner, LiveState,
 };

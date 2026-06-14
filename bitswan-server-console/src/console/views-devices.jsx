@@ -4,11 +4,11 @@ import React from 'react';
 const { C: DC, Icon: DIcon, Btn: DBtn, Pill: DPill } = window.WD_SHELL;
 const {
   Card: DCard, PageHeader: DPageHeader, Field: DField, Modal: DModal,
-  SegmentedCode: DSeg, QRCode: DQR, DeviceIcon: DDeviceIcon, ProtoHint: DProtoHint,
+  SegmentedCode: DSeg, QRCode: DQR, QRImage: DQRImage, DeviceIcon: DDeviceIcon, ProtoHint: DProtoHint,
   CopyChip: DCopyChip, Toggle: DToggle, EmptyState: DEmpty, LiveState: DLiveState,
 } = window.SC_UI;
 const { Api: DApi } = window.SC_API;
-const { useState: useD } = React;
+const { useState: useD, useEffect: useDE } = React;
 
 const TRUST_BADGE = {
   root:   { label: 'Root device', tone: 'primary', icon: 'crown' },
@@ -231,24 +231,39 @@ function Step({ n }) {
 }
 
 // ─── SECURITY & RECOVERY ────────────────────────────────────────────────────
-// TODO(api): no backend endpoint yet — TOTP enrolment + recovery codes are
-// not exposed under /bailey/api/* (they live behind the gate at
-// /2fa-gate/account/2fa and /2fa-gate/recovery as HTML pages). This view
-// stays on seed/prototype data.
+// Wired to the real gate APIs:
+//   • enrolment status comes from gate-state (synced into data.recovery by App)
+//   • Set up   → SetupTotpModal: GET /totp/enroll then POST /totp/verify
+//   • Regenerate → POST /backup-codes/regenerate (returns the new plaintext set)
+// Backup codes are only ever returned once (only hashes are stored), so the
+// card can show codes only for the set generated in this browser session.
 function SecurityView({ ctx }) {
   const { data, setData, toast } = ctx;
   const rec = data.recovery;
   const [setupOpen, setSetupOpen] = useD(false);
   const [showCodes, setShowCodes] = useD(false);
+  const [regenBusy, setRegenBusy] = useD(false);
+  // Codes shown here are only those generated in this session (empty when the
+  // user enrolled earlier — the plaintext can't be re-fetched).
+  const sessionCodes = rec.recoveryCodes || [];
 
   const removeTotp = () => {
-    setData(d => ({ ...d, recovery: { ...d.recovery, totpActive: false } }));
-    toast('Authenticator recovery removed', 'info');
+    // No backend "remove" endpoint in the gate contract; keep the control
+    // visible only as a local toggle would be misleading, so we surface it.
+    toast('Removing the authenticator is done from account settings', 'info');
   };
-  const regenerate = () => {
-    const gen = () => Math.random().toString(36).slice(2, 6).toUpperCase() + '-' + Math.random().toString(36).slice(2, 6).toUpperCase();
-    setData(d => ({ ...d, recovery: { ...d.recovery, recoveryCodes: Array.from({ length: 8 }, gen) } }));
-    toast('New recovery codes generated', 'success');
+  const regenerate = async () => {
+    setRegenBusy(true);
+    try {
+      const r = await DApi.regenerateBackupCodes();
+      setData(d => ({ ...d, recovery: { ...d.recovery, recoveryCodes: (r && r.backup_codes) || [] } }));
+      setShowCodes(true);
+      toast('New recovery codes generated', 'success');
+    } catch (e) {
+      toast(e.message || 'Could not regenerate codes', 'error');
+    } finally {
+      setRegenBusy(false);
+    }
   };
 
   return (
@@ -301,16 +316,27 @@ function SecurityView({ ctx }) {
             </div>
             {showCodes && (
               <div style={{ padding: 20 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
-                  {rec.recoveryCodes.map((c, i) => (
-                    <div key={i} style={{ fontFamily: 'Geist Mono, monospace', fontSize: 13.5, fontWeight: 500, color: DC.fg,
-                      padding: '9px 10px', background: DC.surface, border: `1px solid ${DC.border}`, borderRadius: 8, textAlign: 'center', letterSpacing: 0.5 }}>{c}</div>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-                  <DCopyChip text={rec.recoveryCodes.join('\n')} label="Copy all" />
-                  <DBtn variant="default" size="sm" leftIcon="refresh-cw" onClick={regenerate}>Regenerate</DBtn>
-                </div>
+                {sessionCodes.length > 0 ? (
+                  <>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+                      {sessionCodes.map((c, i) => (
+                        <div key={i} style={{ fontFamily: 'Geist Mono, monospace', fontSize: 13.5, fontWeight: 500, color: DC.fg,
+                          padding: '9px 10px', background: DC.surface, border: `1px solid ${DC.border}`, borderRadius: 8, textAlign: 'center', letterSpacing: 0.5 }}>{c}</div>
+                      ))}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                      <DCopyChip text={sessionCodes.join('\n')} label="Copy all" />
+                      <DBtn variant="default" size="sm" leftIcon="refresh-cw" onClick={regenerate} disabled={regenBusy}>{regenBusy ? 'Generating…' : 'Regenerate'}</DBtn>
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ textAlign: 'center' }}>
+                    <p style={{ margin: '0 auto 14px', fontSize: 12.5, color: DC.muted, lineHeight: '18px', maxWidth: 380 }}>
+                      Backup codes are shown only once, when they're created. We can't display your existing codes again — generate a fresh set if you need them (this invalidates the old set).
+                    </p>
+                    <DBtn variant="default" size="sm" leftIcon="refresh-cw" onClick={regenerate} disabled={regenBusy}>{regenBusy ? 'Generating…' : 'Generate new codes'}</DBtn>
+                  </div>
+                )}
               </div>
             )}
           </DCard>
@@ -322,18 +348,48 @@ function SecurityView({ ctx }) {
   );
 }
 
+// SetupTotpModal — real opt-in authenticator enrolment:
+//   step 1: GET /bailey/api/totp/enroll → {secret, otpauth_url}; render a
+//           scannable QR from otpauth_url + the base32 secret to type manually.
+//           The pending secret lives in an HttpOnly cookie set by the GET; we
+//           never persist it client-side.
+//   step 2: POST /bailey/api/totp/verify {code} → {backup_codes}; confirms +
+//           persists enrolment and returns the one-time plaintext backup codes.
+//   step 3: show the returned backup codes (the only time they're visible).
 function SetupTotpModal({ open, onClose, data, setData, toast, onDone }) {
   const [step, setStep] = useD(1);
   const [code, setCode] = useD('');
-  const [error, setError] = useD(false);
-  const rec = data.recovery;
-  React.useEffect(() => { if (open) { setStep(1); setCode(''); setError(false); } }, [open]);
+  const [error, setError] = useD('');
+  const [enroll, setEnroll] = useD(null);     // { secret, otpauth_url }
+  const [enrollErr, setEnrollErr] = useD('');
+  const [verifying, setVerifying] = useD(false);
+  const [codes, setCodes] = useD([]);         // backup_codes from /verify
 
-  const verify = () => {
-    if (code.replace(/\D/g, '').length === 6) {
-      setData(d => ({ ...d, recovery: { ...d.recovery, totpActive: true } }));
+  // On open, reset and request a fresh enrolment session.
+  useDE(() => {
+    if (!open) return;
+    setStep(1); setCode(''); setError(''); setEnroll(null); setEnrollErr(''); setVerifying(false); setCodes([]);
+    let alive = true;
+    DApi.totpEnroll()
+      .then(r => { if (alive) setEnroll(r); })
+      .catch(e => { if (alive) setEnrollErr(e.message || 'Could not start authenticator setup.'); });
+    return () => { alive = false; };
+  }, [open]);
+
+  const verify = async () => {
+    if (code.replace(/\D/g, '').length < 6) { setError('Enter all 6 digits from your app.'); return; }
+    setVerifying(true); setError('');
+    try {
+      const r = await DApi.totpVerify(code.replace(/\D/g, ''));
+      const bc = (r && r.backup_codes) || [];
+      setCodes(bc);
+      setData(d => ({ ...d, recovery: { ...d.recovery, totpActive: true, recoveryCodes: bc } }));
       setStep(3);
-    } else setError(true);
+    } catch (e) {
+      setError(e.message || 'That code did not match. Try the current code.');
+    } finally {
+      setVerifying(false);
+    }
   };
   const finish = () => { toast('Authenticator recovery enabled', 'success'); onDone && onDone(); onClose(); };
 
@@ -344,15 +400,25 @@ function SetupTotpModal({ open, onClose, data, setData, toast, onDone }) {
           <p style={{ margin: '0 0 16px', fontSize: 13, color: DC.muted, lineHeight: '19px' }}>
             Scan this QR with your authenticator app, or enter the key manually.
           </p>
-          <div style={{ display: 'inline-block', padding: 12, border: `1px solid ${DC.border}`, borderRadius: 14 }}>
-            <DQR seed="totp-harmonum-tomas" size={168} />
-          </div>
-          <div style={{ marginTop: 16, marginBottom: 6, display: 'flex', justifyContent: 'center' }}>
-            <DCopyChip text={rec.totpSecret.replace(/\s/g, '')} label={rec.totpSecret} />
-          </div>
-          <div style={{ marginTop: 18 }}>
-            <DBtn variant="primary" rightIcon="arrow-right" onClick={() => setStep(2)} style={{ width: '100%' }}>I've added it — continue</DBtn>
-          </div>
+          {enrollErr ? (
+            <div style={{ fontSize: 12.5, color: DC.red, fontWeight: 500, padding: '12px 0' }}>{enrollErr}</div>
+          ) : (
+            <>
+              <div style={{ display: 'inline-block', padding: 12, border: `1px solid ${DC.border}`, borderRadius: 14 }}>
+                {enroll && enroll.otpauth_url
+                  ? <DQRImage value={enroll.otpauth_url} size={168} />
+                  : <div style={{ width: 168, height: 168, borderRadius: 8, background: DC.surface2 }} />}
+              </div>
+              <div style={{ marginTop: 16, marginBottom: 6, display: 'flex', justifyContent: 'center' }}>
+                {enroll && enroll.secret
+                  ? <DCopyChip text={enroll.secret} label={enroll.secret} />
+                  : <span style={{ fontSize: 12, color: DC.muted }}>Loading setup key…</span>}
+              </div>
+              <div style={{ marginTop: 18 }}>
+                <DBtn variant="primary" rightIcon="arrow-right" disabled={!enroll} onClick={() => setStep(2)} style={{ width: '100%' }}>I've added it — continue</DBtn>
+              </div>
+            </>
+          )}
         </div>
       )}
       {step === 2 && (
@@ -361,13 +427,12 @@ function SetupTotpModal({ open, onClose, data, setData, toast, onDone }) {
             Enter the current 6-digit code from your authenticator app to confirm it's set up.
           </p>
           <div style={{ display: 'flex', justifyContent: 'center' }}>
-            <DSeg format={[3, 3]} value={code} onChange={v => { setCode(v); setError(false); }} size="lg" auto mono />
+            <DSeg format={[3, 3]} value={code} onChange={v => { setCode(v); setError(''); }} size="lg" auto mono />
           </div>
-          {error && <div style={{ marginTop: 12, fontSize: 12.5, color: DC.red, fontWeight: 500 }}>Enter all 6 digits from your app.</div>}
-          <div style={{ marginTop: 10, display: 'flex', justifyContent: 'center' }}><DProtoHint>prototype — any 6 digits work</DProtoHint></div>
+          {error && <div style={{ marginTop: 12, fontSize: 12.5, color: DC.red, fontWeight: 500 }}>{error}</div>}
           <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
             <DBtn variant="default" onClick={() => setStep(1)} style={{ flex: 1 }}>Back</DBtn>
-            <DBtn variant="primary" disabled={code.replace(/\D/g, '').length < 6} onClick={verify} style={{ flex: 1 }}>Verify</DBtn>
+            <DBtn variant="primary" disabled={verifying || code.replace(/\D/g, '').length < 6} onClick={verify} style={{ flex: 1 }}>{verifying ? 'Verifying…' : 'Verify'}</DBtn>
           </div>
         </div>
       )}
@@ -378,13 +443,14 @@ function SetupTotpModal({ open, onClose, data, setData, toast, onDone }) {
           </div>
           <div style={{ fontSize: 16, fontWeight: 700, color: DC.fg, marginBottom: 6 }}>Recovery is on</div>
           <p style={{ margin: '0 auto 18px', fontSize: 13, color: DC.muted, lineHeight: '19px', maxWidth: 340 }}>
-            Save your backup codes somewhere safe. If you're ever locked out of every device, your authenticator gets you back in.
+            Save these backup codes somewhere safe — this is the only time they're shown. If you're ever locked out of every device, your authenticator or a backup code gets you back in.
           </p>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 18, textAlign: 'left' }}>
-            {rec.recoveryCodes.slice(0, 4).map((c, i) => (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 14, textAlign: 'left' }}>
+            {codes.map((c, i) => (
               <div key={i} style={{ fontFamily: 'Geist Mono, monospace', fontSize: 13, padding: '8px 10px', background: DC.surface, border: `1px solid ${DC.border}`, borderRadius: 8, textAlign: 'center' }}>{c}</div>
             ))}
           </div>
+          {codes.length > 0 && <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 18 }}><DCopyChip text={codes.join('\n')} label="Copy all codes" /></div>}
           <DBtn variant="primary" onClick={finish} style={{ width: '100%' }}>Done</DBtn>
         </div>
       )}

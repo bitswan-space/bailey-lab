@@ -25,8 +25,10 @@ function seedData() {
     // ── Seed-only slices (no backend endpoint — see report) ──
     // TODO(api): no backend endpoint yet — user/role list, invite, suspend.
     users: D.USERS.map(u => ({ ...u })),
-    // TODO(api): no backend endpoint yet — TOTP / recovery codes.
-    recovery: { ...D.RECOVERY, recoveryCodes: [...D.RECOVERY.recoveryCodes] },
+    // Recovery: TOTP enrolment status is synced from gate-state on load;
+    // recoveryCodes holds only the plaintext set generated THIS session
+    // (the backend stores hashes and returns codes once), so start empty.
+    recovery: { ...D.RECOVERY, totpActive: false, recoveryCodes: [] },
     // TODO(api): no backend endpoint yet — per-user device drawer (admin
     // devices API exists but the People view keys devices by seed user id).
     userDevices: Object.fromEntries(Object.entries(D.USER_DEVICES).map(([k, v]) => [k, v.map(d => ({ ...d }))])),
@@ -269,11 +271,83 @@ function Console({ data, setData, toast, scene, setScene, refresh }) {
   );
 }
 
+// pickScene maps a /bailey/api/gate-state response to the scene the SPA should
+// render, per the backend's scene-selection rule. `recoverIntent` is true when
+// the URL carries an explicit recovery entry (?recover). Evaluated in order:
+//   1. recovery intent      → 'recovery'
+//   2. trusted              → 'console' (gate cleared — render the app)
+//   3. unclaimed & can_claim → 'bootstrap' (first-admin claim)
+//   4. unclaimed & !can_claim → 'waiting' (claimed by someone else / not eligible)
+//   5. claimed but untrusted → 'approval'
+function pickScene(gs, recoverIntent) {
+  if (recoverIntent) return 'recovery';
+  if (!gs) return 'console';
+  if (gs.trusted) return 'console';
+  if (!gs.claimed) return gs.can_claim ? 'bootstrap' : 'waiting';
+  return 'approval';
+}
+
+function hasRecoverIntent() {
+  try {
+    const p = new URLSearchParams(window.location.search);
+    return p.has('recover') || p.get('return') === 'recover' || window.location.pathname.replace(/\/+$/, '') === '/recover';
+  } catch (e) { return false; }
+}
+
+// Neutral full-screen spinner shown while gate-state is in flight, so the SPA
+// never flashes the wrong scene before it knows the device-trust status.
+function GateSpinner() {
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: AC.surface,
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14 }}>
+      <div style={{ width: 32, height: 32, borderRadius: 8, background: AC.fg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <AIcon name="hexagon" size={18} color="#fff" />
+      </div>
+      <AIcon name="loader" size={20} color={AC.muted} />
+    </div>
+  );
+}
+
+// Full-screen "not eligible to claim" message for the unclaimed-but-can't-claim
+// case (the server is waiting to be claimed by an eligible admin).
+function WaitingScene() {
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: AC.surface,
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div style={{ width: 420, maxWidth: '100%', background: '#fff', border: `1px solid ${AC.border}`,
+        borderRadius: 16, boxShadow: '0 20px 50px rgba(0,0,0,0.10)', padding: '30px 30px 26px', textAlign: 'center' }}>
+        <div style={{ width: 52, height: 52, borderRadius: 13, background: AC.surface2, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+          <AIcon name="clock" size={24} color={AC.muted} />
+        </div>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: AC.fg }}>Waiting to be claimed</h1>
+        <p style={{ margin: '8px auto 0', fontSize: 13.5, color: AC.muted, lineHeight: '20px', maxWidth: 340 }}>
+          This Bailey server hasn't been claimed yet, and your account isn't eligible to claim it. Ask the person setting up this server to sign in first.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [data, setData] = useA(seedData);
-  const [scene, setScene] = useA('console');
+  // gate: { status:'loading'|'ok'|'error', state, error } from gate-state.
+  const [gate, setGate] = useA({ status: 'loading', state: null, error: null });
+  // previewScene overrides the live gate scene for the design-preview menu.
+  // null = follow the real gate-state; otherwise force the chosen scene.
+  const [previewScene, setPreviewScene] = useA(null);
   const [toast, setToastState] = useA(null);
   const toastTimer = useAR(null);
+
+  const loadGate = useAR();
+  loadGate.current = async () => {
+    setGate(g => ({ ...g, status: 'loading' }));
+    try {
+      const s = await Api.gateState();
+      setGate({ status: 'ok', state: s, error: null });
+    } catch (e) {
+      setGate({ status: 'error', state: null, error: e.message });
+    }
+  };
 
   const showToast = (text, tone = 'info') => {
     setToastState({ text, tone });
@@ -341,25 +415,70 @@ function App() {
     return Promise.all(Object.values(all).map(r => r.current()));
   };
 
+  // Resolve the device-trust gate first.
+  useAE(() => { loadGate.current(); }, []);
+
+  // The live scene the gate picks (overridden by the preview menu when set).
+  const recoverIntent = hasRecoverIntent();
+  const liveScene = pickScene(gate.state, recoverIntent);
+  const scene = previewScene || liveScene;
+
+  // Only load the console data lists once the gate is cleared (trusted) — the
+  // console APIs are gated, so calling them while untrusted would error. When
+  // previewing a scene over a really-trusted session we still load so the
+  // console behind the preview is real.
   useAE(() => {
+    if (gate.status !== 'ok') return;
+    if (liveScene !== 'console') return;
+    // Reflect real TOTP enrolment from gate-state into the recovery slice so
+    // Security & recovery shows the true "Active / Not set up" state. The
+    // backup-codes plaintext is only ever returned once (on enroll/regenerate),
+    // so we don't synthesize codes here — the card just knows enrolment exists.
+    if (gate.state) {
+      setData(d => ({ ...d, recovery: { ...d.recovery, totpActive: !!gate.state.totp_enrolled } }));
+    }
     loadWhoami.current();
     loadDevices.current();
     loadApprovals.current();
     loadWorkspaces.current();
-  }, []);
+  }, [gate.status, liveScene]);
 
   useALucide();
   useAE(() => { if (window.lucide) window.lucide.createIcons(); });
   useAE(() => { const id = setInterval(() => window.lucide && window.lucide.createIcons(), 400); return () => clearInterval(id); }, []);
 
+  // setScene from the preview menu: 'console' clears the override (back to the
+  // real gate-state); any other id forces that scene for design preview.
+  const setScene = (s) => setPreviewScene(s === 'console' ? null : s);
+
+  // While gate-state is loading we show a neutral spinner so we never flash the
+  // wrong scene. A gate-state error is treated as "not signed in / not trusted"
+  // and we surface it inline rather than silently assuming a state.
+  if (gate.status === 'loading') {
+    return <div style={{ position: 'relative', width: '100%', height: '100%' }}><GateSpinner /></div>;
+  }
+
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <Console data={data} setData={setData} toast={showToast} scene={scene} setScene={setScene} refresh={(w) => refresh.current(w)} />
-      {scene === 'bootstrap' && <BootstrapScene onClaim={() => { setScene('console'); showToast('Server claimed — you are the root admin', 'success'); }} />}
+      {gate.status === 'error' && previewScene == null && (
+        <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: '10px 16px', background: AC.red,
+          color: '#fff', fontSize: 12.5, textAlign: 'center', zIndex: 90 }}>
+          Couldn't load device-trust state: {gate.error}
+        </div>
+      )}
+      {scene === 'waiting' && <WaitingScene />}
+      {scene === 'bootstrap' && <BootstrapScene
+        preview={previewScene === 'bootstrap'}
+        onClaim={() => { setScene('console'); showToast('Server claimed — you are the root admin', 'success'); }} />}
       {scene === 'approval' && <ApprovalScene
+        gateState={gate.state}
+        preview={previewScene === 'approval'}
         onApproved={() => { setScene('console'); showToast('Device approved — welcome in', 'success'); }}
         goConsole={() => setScene('console')} />}
       {scene === 'recovery' && <RecoveryScene
+        gateState={gate.state}
+        preview={previewScene === 'recovery'}
         onRecovered={() => { setScene('console'); showToast('Recovered — this device is now trusted', 'success'); }}
         goConsole={() => setScene('console')} />}
       <AToast toast={toast} />

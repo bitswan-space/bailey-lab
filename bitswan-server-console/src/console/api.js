@@ -164,6 +164,19 @@ function extractErrorText(text) {
 
 export const Api = {
   whoami: () => getJSON('/bailey/api/whoami'),
+  // ── Device-trust GATE (callable by an authenticated but UNtrusted user) ──
+  // These drive the full-screen onboarding/auth scenes. gateState picks the
+  // scene; the rest are the per-scene actions. Success-with-trust responses
+  // set the _bailey_device cookie and may return a redirect_path to follow.
+  gateState: () => getJSON('/bailey/api/gate-state'),
+  claim: () => postJSON('/bailey/api/claim', {}),
+  pendingPair: () => getJSON('/bailey/api/pending-pair'),
+  pendingPairPoll: () => getJSON('/bailey/api/pending-pair/poll'),
+  selfTrust: (totp) => postJSON('/bailey/api/self-trust', { totp }),
+  recover: (body) => postJSON('/bailey/api/recover', body),
+  totpEnroll: () => getJSON('/bailey/api/totp/enroll'),
+  totpVerify: (code) => postJSON('/bailey/api/totp/verify', { code }),
+  regenerateBackupCodes: () => postJSON('/bailey/api/backup-codes/regenerate', {}),
   devices: () => getJSON('/bailey/api/devices'),
   removeDevice: (id) => postForm('/bailey/api/devices/remove', { id }),
   approvals: () => getJSON('/bailey/api/approvals'),

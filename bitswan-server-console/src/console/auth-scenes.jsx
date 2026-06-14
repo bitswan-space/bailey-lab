@@ -3,8 +3,19 @@ import React from 'react';
 // first-admin bootstrap · awaiting device approval · account recovery
 
 const { C: SC, Icon: SIcon, Btn: SBtn, Pill: SPill } = window.WD_SHELL;
-const { QRCode: SQR, SegmentedCode: SSeg, CopyChip: SCopyChip, ProtoHint: SProtoHint, Avatar: SAvatar, Modal: SModal } = window.SC_UI;
+const { QRCode: SQR, SegmentedCode: SSeg, CopyChip: SCopyChip, Avatar: SAvatar, Modal: SModal } = window.SC_UI;
+const { Api: SApi } = window.SC_API;
 const { useState: useSc, useEffect: useScE } = React;
+
+// followRedirect navigates to the redirect_path returned by a trust-granting
+// gate endpoint, or reloads in place when none is given (the SPA re-fetches
+// gate-state, now sees trusted:true, and renders the console). On the console
+// host a bare reload lands the user in the console; on an app host the
+// redirect_path points back at the original app URL.
+function followRedirect(redirectPath) {
+  if (redirectPath) window.location.assign(redirectPath);
+  else window.location.reload();
+}
 
 // ─── "Why so complicated?" explainer ────────────────────────────────────────
 // Shared across the device-trust scenes (bootstrap · approval · recovery).
@@ -87,9 +98,23 @@ function OAuthButton({ label, icon, onClick }) {
 }
 
 // ─── 1. FIRST-ADMIN BOOTSTRAP ───────────────────────────────────────────────
-function BootstrapScene({ onClaim }) {
+// POST /bailey/api/claim records the caller as root admin and TOFU-trusts this
+// browser; on ok we follow the (cookie-backed) trusted state into the console.
+// `preview` short-circuits the API for the design-preview menu.
+function BootstrapScene({ onClaim, preview }) {
   const [claiming, setClaiming] = useSc(false);
-  const claim = () => { setClaiming(true); setTimeout(onClaim, 1100); };
+  const [error, setError] = useSc('');
+  const claim = async () => {
+    setClaiming(true); setError('');
+    if (preview) { setTimeout(onClaim, 1100); return; }
+    try {
+      await SApi.claim();
+      followRedirect(null); // reload — now trusted, lands in console
+    } catch (e) {
+      setError(e.message || 'Could not claim this server.');
+      setClaiming(false);
+    }
+  };
   return (
     <SceneShell badge={<SPill tone="warning" size="xs">Unclaimed</SPill>}
       footerNote="This is a one-time step. After the server is claimed, new sign-ins require device approval.">
@@ -108,9 +133,10 @@ function BootstrapScene({ onClaim }) {
           </div>
         ) : (
           <SBtn variant="primary" leftIcon="key-round" onClick={claim} style={{ width: '100%', height: 44, fontSize: 14 }}>
-            Log in with Keycloak
+            Claim this server
           </SBtn>
         )}
+        {error && <div style={{ marginTop: 12, textAlign: 'center', fontSize: 12.5, color: SC.red, fontWeight: 500 }}>{error}</div>}
         <div style={{ textAlign: 'center', marginTop: 16 }}><WhyComplicatedLink /></div>
       </div>
       <div style={{ display: 'flex', gap: 10, padding: '14px 22px', background: SC.surface, borderTop: `1px solid ${SC.border}` }}>
@@ -125,56 +151,101 @@ function BootstrapScene({ onClaim }) {
 
 // ─── 2. AWAITING DEVICE APPROVAL ────────────────────────────────────────────
 // What a user sees after Keycloak login on an untrusted device.
-function ApprovalScene({ onApproved, goConsole }) {
-  const code = window.SC_DATA.PENDING_DEVICES[0]?.code || '4821-7K39';
-  const totpActive = window.SC_DATA.RECOVERY.totpActive;
+//   • Admin tab  — GET /pending-pair for the code to read out to an admin,
+//                  then poll GET /pending-pair/poll until {approved:true}.
+//   • Authenticator tab — POST /self-trust {totp} to trust this browser now.
+//                  Shown only when gateState.totp_enrolled.
+// `preview` runs the design-preview menu without touching the backend.
+function ApprovalScene({ onApproved, goConsole, gateState, preview }) {
+  const totpEnrolled = !preview && !!(gateState && gateState.totp_enrolled);
+  // In preview, fall back to the seed code + show the authenticator tab so the
+  // design is fully browsable; live, the tab only appears when enrolled.
+  const showTotpTab = preview ? true : totpEnrolled;
+  const email = (gateState && gateState.email) || (preview ? 'alex@harmonum.ai' : '');
+
   const [method, setMethod] = useSc('admin');   // 'admin' | 'totp'
+  const [code, setCode] = useSc(preview ? (window.SC_DATA.PENDING_DEVICES[0]?.code || '4821-7K39') : '');
+  const [codeErr, setCodeErr] = useSc('');
   const [totp, setTotp] = useSc('');
   const [error, setError] = useSc(false);
+  const [trusting, setTrusting] = useSc(false);
   const [dots, setDots] = useSc(1);
   useScE(() => { const t = setInterval(() => setDots(d => (d % 3) + 1), 500); return () => clearInterval(t); }, []);
   useScE(() => { setTotp(''); setError(false); }, [method]);
 
-  const verifyTotp = () => {
-    if (totp.replace(/\D/g, '').length === 6) onApproved();
-    else setError(true);
+  // Fetch the pairing code + poll for admin approval (live only).
+  useScE(() => {
+    if (preview) return;
+    let alive = true;
+    let timer = null;
+    SApi.pendingPair()
+      .then(r => { if (alive && r) setCode(r.code || ''); })
+      .catch(e => { if (alive) setCodeErr(e.message || 'Could not request a pairing code.'); });
+    const tick = async () => {
+      try {
+        const r = await SApi.pendingPairPoll();
+        if (!alive) return;
+        if (r && r.approved) { followRedirect(r.redirect_path); return; }
+      } catch (e) { /* transient poll error — keep polling */ }
+      if (alive) timer = setTimeout(tick, 2500);
+    };
+    timer = setTimeout(tick, 2500);
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [preview]);
+
+  const verifyTotp = async () => {
+    if (totp.replace(/\D/g, '').length < 6) { setError(true); return; }
+    if (preview) { onApproved(); return; }
+    setTrusting(true); setError(false);
+    try {
+      const r = await SApi.selfTrust(totp);
+      followRedirect(r && r.redirect_path);
+    } catch (e) {
+      setError(true); setTrusting(false);
+    }
   };
 
   return (
     <SceneShell footerNote={<>Wrong account? <button onClick={goConsole} style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Sign out</button></>}>
       <div style={{ padding: '26px 28px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '10px 12px', background: SC.surface, borderRadius: 10, marginBottom: 20 }}>
-          <SAvatar user={{ name: 'Alex Mráz', color: '#2a9d90' }} size={32} />
+          <SAvatar user={{ name: email || 'Signed-in user', color: '#2a9d90' }} size={32} />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: SC.fg }}>Signed in as Alex Mráz</div>
-            <div style={{ fontSize: 11.5, color: SC.muted, fontFamily: 'Geist Mono, monospace' }}>alex@harmonum.ai</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: SC.fg }}>Signed in</div>
+            <div style={{ fontSize: 11.5, color: SC.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{email || '—'}</div>
           </div>
           <SIcon name="badge-check" size={17} color="#16a34a" />
         </div>
 
         <h1 style={{ margin: 0, textAlign: 'center', fontSize: 20, fontWeight: 700, color: SC.fg, letterSpacing: '-0.3px' }}>Trust this device</h1>
         <p style={{ margin: '8px auto 18px', textAlign: 'center', fontSize: 13, color: SC.muted, lineHeight: '19px', maxWidth: 350 }}>
-          You're signed in, but this device isn't trusted yet. Confirm it with your authenticator, or have an admin approve the code.
+          You're signed in, but this device isn't trusted yet. {showTotpTab ? 'Confirm it with your authenticator, or have an admin approve the code.' : 'Have an admin approve the code below.'}
         </p>
 
-        {/* method switch */}
-        <div style={{ display: 'flex', gap: 6, padding: 4, background: SC.surface, borderRadius: 10, marginBottom: 20 }}>
-          <MethodTab active={method === 'admin'} icon="user-check" label="Admin approval" onClick={() => setMethod('admin')} />
-          <MethodTab active={method === 'totp'} icon="key-round" label="Authenticator" onClick={() => setMethod('totp')} />
-        </div>
+        {/* method switch — authenticator tab only when this user has TOTP enrolled */}
+        {showTotpTab && (
+          <div style={{ display: 'flex', gap: 6, padding: 4, background: SC.surface, borderRadius: 10, marginBottom: 20 }}>
+            <MethodTab active={method === 'admin'} icon="user-check" label="Admin approval" onClick={() => setMethod('admin')} />
+            <MethodTab active={method === 'totp'} icon="key-round" label="Authenticator" onClick={() => setMethod('totp')} />
+          </div>
+        )}
 
-        {method === 'admin' ? (
+        {method === 'admin' || !showTotpTab ? (
           <>
-            <div style={{ display: 'flex', gap: 18, alignItems: 'center', justifyContent: 'center' }}>
-              <div style={{ padding: 9, border: `1px solid ${SC.border}`, borderRadius: 12 }}>
-                <SQR seed={'approve-' + code} size={120} />
+            {codeErr ? (
+              <div style={{ textAlign: 'center', fontSize: 12.5, color: SC.red, fontWeight: 500, padding: '8px 0' }}>{codeErr}</div>
+            ) : (
+              <div style={{ display: 'flex', gap: 18, alignItems: 'center', justifyContent: 'center' }}>
+                <div style={{ padding: 9, border: `1px solid ${SC.border}`, borderRadius: 12 }}>
+                  <SQR seed={'approve-' + (code || 'pending')} size={120} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: SC.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Your code</div>
+                  <div style={{ fontFamily: 'Geist Mono, monospace', fontSize: 28, fontWeight: 700, color: SC.fg, letterSpacing: 1 }}>{code || '······'}</div>
+                  <div style={{ marginTop: 10 }}><SCopyChip text={code} label="Copy code" /></div>
+                </div>
               </div>
-              <div>
-                <div style={{ fontSize: 11, fontWeight: 600, color: SC.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Your code</div>
-                <div style={{ fontFamily: 'Geist Mono, monospace', fontSize: 28, fontWeight: 700, color: SC.fg, letterSpacing: 1 }}>{code}</div>
-                <div style={{ marginTop: 10 }}><SCopyChip text={code} label="Copy code" /></div>
-              </div>
-            </div>
+            )}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 20, fontSize: 13, color: SC.primary, fontWeight: 500 }}>
               <SIcon name="loader" size={15} color={SC.primary} />
               Waiting for an admin{'.'.repeat(dots)}
@@ -188,10 +259,9 @@ function ApprovalScene({ onApproved, goConsole }) {
             <div style={{ display: 'flex', justifyContent: 'center' }}>
               <SSeg format={[3, 3]} value={totp} onChange={v => { setTotp(v); setError(false); }} size="lg" auto mono />
             </div>
-            <div style={{ marginTop: 10, display: 'flex', justifyContent: 'center' }}><SProtoHint>prototype — any 6 digits work</SProtoHint></div>
-            {error && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>Enter all 6 digits from your app.</div>}
+            {error && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>That code didn't match. Try the current code from your app.</div>}
             <div style={{ marginTop: 16 }}>
-              <SBtn variant="primary" leftIcon="shield-check" onClick={verifyTotp} disabled={totp.replace(/\D/g, '').length < 6} style={{ width: '100%' }}>Verify &amp; trust this device</SBtn>
+              <SBtn variant="primary" leftIcon="shield-check" onClick={verifyTotp} disabled={trusting || totp.replace(/\D/g, '').length < 6} style={{ width: '100%' }}>{trusting ? 'Verifying…' : 'Verify & trust this device'}</SBtn>
             </div>
           </div>
         )}
@@ -199,8 +269,13 @@ function ApprovalScene({ onApproved, goConsole }) {
       </div>
 
       <div style={{ padding: '14px 22px', background: SC.surface, borderTop: `1px solid ${SC.border}` }}>
-        {method === 'admin'
-          ? <SBtn variant="primary" leftIcon="check" onClick={onApproved} style={{ width: '100%' }}>Simulate admin approval → enter console</SBtn>
+        {(method === 'admin' || !showTotpTab)
+          ? <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <SIcon name="shield" size={15} color={SC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
+              <span style={{ fontSize: 11.5, color: SC.muted, lineHeight: '16px' }}>
+                Read this code to an admin. Once they approve it from a trusted device, you'll be let in automatically.
+              </span>
+            </div>
           : <div style={{ textAlign: 'center', fontSize: 12, color: SC.muted }}>No authenticator set up? <button onClick={() => setMethod('admin')} style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Ask an admin instead</button></div>}
       </div>
     </SceneShell>
@@ -220,20 +295,40 @@ function MethodTab({ active, icon, label, onClick }) {
 }
 
 // ─── 3. ACCOUNT RECOVERY ────────────────────────────────────────────────────
-function RecoveryScene({ onRecovered, goConsole }) {
-  const [mode, setMode] = useSc('totp');   // 'totp' | 'backup'
+// POST /bailey/api/recover trusts this browser from a recovery factor:
+//   • authenticator  → { totp }
+//   • backup code    → { backup }  (single-use)
+// Tabs reflect which factors the user actually has (gateState.totp_enrolled /
+// backup_codes); default to the authenticator tab. `preview` skips the API.
+function RecoveryScene({ onRecovered, goConsole, gateState, preview }) {
+  const hasTotp = preview ? true : !!(gateState && gateState.totp_enrolled);
+  const hasBackup = preview ? true : !!(gateState && gateState.backup_codes);
+  const [mode, setMode] = useSc(hasTotp ? 'totp' : 'backup');   // 'totp' | 'backup'
   const [code, setCode] = useSc('');
   const [backup, setBackup] = useSc('');
   const [error, setError] = useSc(false);
+  const [busy, setBusy] = useSc(false);
 
+  const recover = async (body) => {
+    if (preview) { onRecovered(); return; }
+    setBusy(true); setError(false);
+    try {
+      const r = await SApi.recover(body);
+      followRedirect(r && r.redirect_path);
+    } catch (e) {
+      setError(true); setBusy(false);
+    }
+  };
   const submitTotp = () => {
-    if (code.replace(/\D/g, '').length === 6) onRecovered();
+    if (code.replace(/\D/g, '').length === 6) recover({ totp: code.replace(/\D/g, '') });
     else setError(true);
   };
   const submitBackup = () => {
-    if (backup.replace(/[^A-Z0-9]/gi, '').length >= 8) onRecovered();
+    if (backup.replace(/[^A-Z0-9]/gi, '').length >= 8) recover({ backup });
     else setError(true);
   };
+  // Can the user switch tabs at all? Only when both factors exist.
+  const canSwitch = hasTotp && hasBackup;
 
   return (
     <SceneShell badge={<SPill tone="danger" size="xs">Locked out</SPill>}
@@ -244,7 +339,7 @@ function RecoveryScene({ onRecovered, goConsole }) {
         </div>
         <h1 style={{ margin: 0, textAlign: 'center', fontSize: 21, fontWeight: 700, color: SC.fg, letterSpacing: '-0.3px' }}>Recover your account</h1>
         <p style={{ margin: '8px auto 22px', textAlign: 'center', fontSize: 13, color: SC.muted, lineHeight: '19px', maxWidth: 340 }}>
-          You've lost access to every trusted device. Confirm your authenticator to trust this device and get back in.
+          You've lost access to every trusted device. {mode === 'totp' ? 'Confirm your authenticator' : 'Use a single-use backup code'} to trust this device and get back in.
         </p>
 
         {mode === 'totp' ? (
@@ -253,10 +348,9 @@ function RecoveryScene({ onRecovered, goConsole }) {
             <div style={{ display: 'flex', justifyContent: 'center' }}>
               <SSeg format={[3, 3]} value={code} onChange={v => { setCode(v); setError(false); }} size="lg" auto mono />
             </div>
-            <div style={{ marginTop: 10, display: 'flex', justifyContent: 'center' }}><SProtoHint>prototype — any 6 digits work</SProtoHint></div>
-            {error && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>Enter all 6 digits.</div>}
+            {error && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>That code didn't match. Try the current code from your app.</div>}
             <div style={{ marginTop: 18 }}>
-              <SBtn variant="primary" onClick={submitTotp} style={{ width: '100%' }} disabled={code.replace(/\D/g, '').length < 6}>Verify &amp; trust this device</SBtn>
+              <SBtn variant="primary" onClick={submitTotp} style={{ width: '100%' }} disabled={busy || code.replace(/\D/g, '').length < 6}>{busy ? 'Verifying…' : 'Verify & trust this device'}</SBtn>
             </div>
           </div>
         ) : (
@@ -265,21 +359,23 @@ function RecoveryScene({ onRecovered, goConsole }) {
             <input value={backup} onChange={e => { setBackup(e.target.value.toUpperCase()); setError(false); }} placeholder="XXXX-XXXX" autoFocus
               style={{ width: 200, height: 46, textAlign: 'center', fontFamily: 'Geist Mono, monospace', fontSize: 20, fontWeight: 600,
                 letterSpacing: 1, border: `1.5px solid ${error ? SC.red : SC.border}`, borderRadius: 10, outline: 'none', color: SC.fg }} />
-            {error && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>That doesn't look like a backup code.</div>}
+            {error && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>That backup code wasn't accepted. Each code works only once.</div>}
             <div style={{ marginTop: 18 }}>
-              <SBtn variant="primary" onClick={submitBackup} style={{ width: '100%' }}>Use backup code</SBtn>
+              <SBtn variant="primary" onClick={submitBackup} style={{ width: '100%' }} disabled={busy}>{busy ? 'Checking…' : 'Use backup code'}</SBtn>
             </div>
           </div>
         )}
         <div style={{ textAlign: 'center', marginTop: 18 }}><WhyComplicatedLink /></div>
       </div>
 
-      <div style={{ padding: '13px 22px', background: SC.surface, borderTop: `1px solid ${SC.border}`, textAlign: 'center' }}>
-        <button onClick={() => { setMode(m => m === 'totp' ? 'backup' : 'totp'); setError(false); }}
-          style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontSize: 12.5, fontWeight: 600 }}>
-          {mode === 'totp' ? 'Use a backup code instead' : 'Use authenticator app instead'}
-        </button>
-      </div>
+      {canSwitch && (
+        <div style={{ padding: '13px 22px', background: SC.surface, borderTop: `1px solid ${SC.border}`, textAlign: 'center' }}>
+          <button onClick={() => { setMode(m => m === 'totp' ? 'backup' : 'totp'); setError(false); }}
+            style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontSize: 12.5, fontWeight: 600 }}>
+            {mode === 'totp' ? 'Use a backup code instead' : 'Use authenticator app instead'}
+          </button>
+        </div>
+      )}
     </SceneShell>
   );
 }

@@ -67,6 +67,18 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// --- Device-trust GATE API (pre-trust flow) ---
+	// These power the React gate scenes (Bootstrap/Approval/Recovery) and
+	// MUST be reachable by an OAuth-authenticated but UNtrusted user — they
+	// are how a user becomes trusted. They live under /bailey/api/* (chrome
+	// wrap bypass) and are exempt from enforceMFAGate. Their own per-route
+	// rules (eligibleToClaim, totp.Validate, approverIsTrusted on the
+	// approver side) carry the security; do NOT add an isAdmin/trusted gate
+	// in front of them or the gate becomes un-clearable.
+	if s.handleGateAPI(w, r, email, groups) {
+		return
+	}
+
 	// --- Routes open to any signed-in user ---
 	switch r.URL.Path {
 	case "/bailey/api/notifications-count":
