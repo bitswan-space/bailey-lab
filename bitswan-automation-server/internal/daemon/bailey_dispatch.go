@@ -1,0 +1,185 @@
+package daemon
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+)
+
+// isBaileyDataPath reports whether a path on the Server Console host is
+// a backend data/asset path that must reach the daemon's handleBailey
+// (and the gate's MFA pages) rather than the SPA's index.html fallback.
+// Without this, the console's own fetch() calls would resolve to
+// index.html (the SPA catch-all) and never hit the JSON handlers.
+func isBaileyDataPath(p string) bool {
+	return strings.HasPrefix(p, "/bailey/api/") ||
+		strings.HasPrefix(p, "/bailey/static/") ||
+		p == "/bailey/favicon.svg" ||
+		p == "/bailey/signout" ||
+		strings.HasPrefix(p, gatePathPrefix+"/")
+}
+
+// handleBailey is the JSON/API dispatcher for the Bailey management
+// surface, mounted at /bailey/* on the daemon's TCP server. The HTML
+// pages are served by the React Server Console (serveServerConsole,
+// wired in chromeWrapMiddleware); this handler carries only the
+// data/JSON endpoints the console fetches, plus the favicon, static
+// asset bundle, and sign-out.
+//
+// Identity is the oauth2-proxy-forwarded header set. /bailey/api/* and
+// /bailey/static/* bypass the chrome wrap (see chromeWrapMiddleware) so
+// a fetch() gets JSON, not the wrap HTML or a gate redirect. Admin-only
+// routes enforce isAdmin (403) here, since the underlying handlers
+// don't self-gate.
+//
+// Routes from #340's server-rendered admin pages that the React console
+// either replaces or that depend on subsystems not present in this
+// build (SIEM, the VPN CA download, cert-authority management) are
+// intentionally NOT wired here.
+func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
+	// Favicon — public to any authenticated caller; referenced by every
+	// Bailey-served HTML head (bitswanFavicon).
+	if r.URL.Path == "/bailey/favicon.svg" {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		fmt.Fprint(w, bitswanLogoSVG)
+		return
+	}
+
+	email, groups := identityFromHeaders(r)
+
+	// Whoami: diagnostic available to any authenticated user.
+	if r.URL.Path == "/bailey/api/whoami" {
+		handleWhoami(w, r)
+		return
+	}
+
+	// Static asset bundle — public to any authenticated caller.
+	if strings.HasPrefix(r.URL.Path, "/bailey/static/") {
+		handleBaileyStatic(w, r)
+		return
+	}
+
+	// Sign-out works for any authenticated identity; never gated.
+	if r.URL.Path == "/bailey/signout" {
+		signoutRedirect(w, r, "/")
+		return
+	}
+
+	// --- Routes open to any signed-in user ---
+	switch r.URL.Path {
+	case "/bailey/api/notifications-count":
+		if r.Method == http.MethodGet {
+			handleNotificationsCount(w, r)
+			return
+		}
+	case "/bailey/api/devices":
+		if r.Method == http.MethodGet {
+			handleBaileyDevicesAPI(w, r, email)
+			return
+		}
+	case "/bailey/api/devices/remove":
+		if r.Method == http.MethodPost {
+			handleBaileyDevicesRemoveAPI(w, r, email)
+			return
+		}
+	case "/bailey/api/approvals":
+		if r.Method == http.MethodGet {
+			handleBaileyApprovalsAPI(w, r, email, isAdminGroups(groups))
+			return
+		}
+	case "/bailey/api/endpoints":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		listing, err := buildEndpointListing(email, groups, r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(listing)
+		return
+	case "/bailey/api/workspaces":
+		switch r.Method {
+		case http.MethodGet:
+			handleListAccessibleWorkspaces(w, r, email)
+			return
+		case http.MethodPost:
+			s.handleCreateWorkspaceFromBaileyAdmin(w, r, email)
+			return
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+	case "/bailey/api/workspaces/empty-trash":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleEmptyTrash(w, r, email)
+		return
+	}
+
+	// Per-workspace trash/restore/update — path:
+	// /bailey/api/workspaces/{name}/{action}. Exact-match switch can't
+	// express the variable segment, so prefix-match here (mirrors #340).
+	if strings.HasPrefix(r.URL.Path, "/bailey/api/workspaces/") && r.Method == http.MethodPost {
+		rest := strings.TrimPrefix(r.URL.Path, "/bailey/api/workspaces/")
+		parts := strings.Split(rest, "/")
+		if len(parts) == 2 {
+			workspaceName, action := parts[0], parts[1]
+			switch action {
+			case "trash":
+				s.handleTrashWorkspace(w, r, email, workspaceName)
+				return
+			case "restore":
+				s.handleRestoreWorkspace(w, r, email, workspaceName)
+				return
+			case "update":
+				s.handleUpdateWorkspace(w, r, email, workspaceName)
+				return
+			}
+		}
+	}
+
+	// --- Admin-only routes below ---
+	if !isAdmin(r) {
+		http.Error(w, `{"error":"admin only"}`, http.StatusForbidden)
+		return
+	}
+
+	switch r.URL.Path {
+	case "/bailey/api/admin/devices":
+		if r.Method == http.MethodGet {
+			handleAdminDevicesAPI(w, r)
+			return
+		}
+	case "/bailey/api/admin/devices/remove":
+		if r.Method == http.MethodPost {
+			handleAdminDeviceRemoveAPI(w, r)
+			return
+		}
+	case "/bailey/api/admin/network-map":
+		if r.Method == http.MethodGet {
+			handleNetworkMapAPI(w, r)
+			return
+		}
+	case "/bailey/api/admin/default-images":
+		switch r.Method {
+		case http.MethodGet:
+			s.handleAdminDefaultImagesGet(w, r)
+			return
+		case http.MethodPost:
+			s.handleAdminDefaultImagesPost(w, r, email)
+			return
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+	}
+
+	http.NotFound(w, r)
+}

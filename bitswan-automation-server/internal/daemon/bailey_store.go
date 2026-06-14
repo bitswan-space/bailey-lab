@@ -89,6 +89,59 @@ CREATE TABLE IF NOT EXISTS protected_routes (
   upstream   TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- TOTP enrolment records. One row per email that has set up a second
+-- factor (admins always, other users optionally as recovery).
+CREATE TABLE IF NOT EXISTS totp_records (
+  email      TEXT PRIMARY KEY COLLATE NOCASE,
+  secret     TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- Paired devices. One row per browser/device a user has trusted; the
+-- device cookie carries (email, id) and the gate matches it here.
+-- last_seen is nullable (never-touched rows read back as '').
+CREATE TABLE IF NOT EXISTS devices (
+  id         TEXT PRIMARY KEY,
+  email      TEXT NOT NULL COLLATE NOCASE,
+  name       TEXT NOT NULL,
+  paired_at  TEXT NOT NULL,
+  last_seen  TEXT
+);
+CREATE INDEX IF NOT EXISTS devices_email_idx ON devices(email);
+
+-- Pending device-pairing requests. A new browser mints a 6-digit code
+-- here; a trusted browser or admin approves it; the new browser's poll
+-- claims the approval and is issued a device cookie. Shared between the
+-- proxy and daemon containers via the same bailey.db file.
+CREATE TABLE IF NOT EXISTS pending_pairs (
+  email         TEXT PRIMARY KEY COLLATE NOCASE,
+  code          TEXT NOT NULL,
+  issued_at     TEXT NOT NULL,
+  expires_at    TEXT NOT NULL,
+  approved_by   TEXT,
+  approver_info TEXT
+);
+CREATE INDEX IF NOT EXISTS pending_pairs_code_idx ON pending_pairs(code);
+
+-- Server-wide key/value settings. Used today for default container
+-- images (default_gitops_image, default_dashboard_image) — the bailey
+-- admin Updates page writes here, and workspace_init reads the value
+-- before falling back to a Docker Hub latest-tag lookup. Free-form so
+-- future settings don't need their own table.
+CREATE TABLE IF NOT EXISTS server_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL COLLATE NOCASE
+);
+
+-- Per-server singletons (the HMAC signing key for session cookies).
+-- value is a BLOB so the raw 32-byte key round-trips without encoding.
+CREATE TABLE IF NOT EXISTS singletons (
+  key   TEXT PRIMARY KEY,
+  value BLOB NOT NULL
+);
 `
 
 // baileyDBPath returns the absolute on-disk location of the daemon's

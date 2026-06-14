@@ -34,7 +34,9 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 			// through to the normal chrome wrap below, with its iframe pointed
 			// here — so the console window carries the Bailey bar (and the
 			// launcher) like every other protected app.
-			if isServerConsoleHost(toOuterHost(host)) && !strings.HasPrefix(r.URL.Path, "/oauth2/") {
+			if isServerConsoleHost(toOuterHost(host)) &&
+				!strings.HasPrefix(r.URL.Path, "/oauth2/") &&
+				!isBaileyDataPath(r.URL.Path) {
 				serveServerConsole(w, r)
 				return
 			}

@@ -21,6 +21,11 @@ import (
 // stdoutMutex protects stdout redirection from concurrent requests
 var stdoutMutex sync.Mutex
 
+// stderrMutex protects stderr redirection from concurrent requests
+// (the bailey-admin workspace-create handler captures os.Stderr the
+// same way it captures os.Stdout, on a separate pipe).
+var stderrMutex sync.Mutex
+
 // ServiceEnableRequest represents the request to enable a service
 type ServiceEnableRequest struct {
 	ServiceType    string                 `json:"service_type"` // "editor", "kafka", "couchdb", "postgres", "minio"

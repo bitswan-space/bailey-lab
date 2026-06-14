@@ -79,6 +79,10 @@ type endpointGrant struct {
 type accessRequest struct {
 	Email       string `json:"email"`
 	RequestedAt string `json:"requested_at"`
+	// Hostname is the endpoint the request is against. Empty on rows
+	// from the per-host listAccessRequests (the caller already knows
+	// the host); populated by listAllAccessRequests, which spans hosts.
+	Hostname string `json:"hostname,omitempty"`
 }
 
 // getEndpoint returns the registered endpoint or nil if unknown.
@@ -332,6 +336,32 @@ func listAccessRequests(hostname string) ([]accessRequest, error) {
 	for rows.Next() {
 		var item accessRequest
 		if err := rows.Scan(&item.Email, &item.RequestedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// listAllAccessRequests returns every pending access request across all
+// endpoints, newest first. The notifications surface filters these down
+// to the ones the caller can grant on (per-row roleFor); the Hostname
+// field is populated so it can.
+func listAllAccessRequests() ([]accessRequest, error) {
+	db, err := openBaileyDB()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT endpoint_host, email, requested_at FROM access_requests
+	                       ORDER BY requested_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []accessRequest{}
+	for rows.Next() {
+		var item accessRequest
+		if err := rows.Scan(&item.Hostname, &item.Email, &item.RequestedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)

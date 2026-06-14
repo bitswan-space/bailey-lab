@@ -19,6 +19,23 @@ import (
 // the org's display name.
 const adminGroupSuffix = "/admin"
 
+// adminGroup is an alias of adminGroupSuffix kept for the ported admin
+// handlers (bailey_admin_helpers.go) that reference it by that name.
+const adminGroup = adminGroupSuffix
+
+// baileyConfigName is the name of the AOC oauth config the Bailey
+// management surface authenticates against. Used by signoutRedirect to
+// build the Keycloak end-session URL.
+const baileyConfigName = "bailey"
+
+// isAdmin reports whether the request's forwarded identity is in the
+// org admin group. Thin wrapper over identityFromHeaders/isAdminGroups
+// so handlers can ask the question without unpacking headers.
+func isAdmin(r *http.Request) bool {
+	_, g := identityFromHeaders(r)
+	return isAdminGroups(g)
+}
+
 // identityFromHeaders extracts the authenticated user from the
 // oauth2-proxy-forwarded headers. Returns ("", nil) when there is no
 // identity on the request (e.g. before the OIDC handshake has run, or

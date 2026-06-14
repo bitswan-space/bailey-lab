@@ -329,6 +329,32 @@ func handleGatePath(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, gatePathPrefix+"/request-access/"):
 		handleRequestAccess(w, r, email)
 
+	// --- Stage 2/3 MFA + device pages (assigned in mfa_pair.go /
+	// mfa_account.go init()). Each takes the resolved email. ---
+	case r.URL.Path == gatePathPrefix+"/pending-pair":
+		handlePendingPair(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/pending-pair/poll":
+		handlePendingPairPoll(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/approve":
+		handleApprovePair(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/recovery":
+		handleRecovery(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/account/devices":
+		handleAccountDevices(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/account/2fa":
+		handleAccountTOTP(w, r, email)
+
+	// TOTP enrol/challenge for admins. handleTOTPGate decides enrol vs
+	// challenge from the path suffix.
+	case strings.HasPrefix(r.URL.Path, gatePathPrefix+enrollPathSuffix),
+		strings.HasPrefix(r.URL.Path, gatePathPrefix+challengePathSuffix):
+		handleTOTPGate(w, r, gatePathPrefix, email)
+
 	default:
 		http.NotFound(w, r)
 	}

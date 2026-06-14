@@ -236,6 +236,12 @@ func (s *Server) Run() error {
 	// management hostname.
 	docsMux := http.NewServeMux()
 	docsMux.HandleFunc(gatePathPrefix+"/", handleGatePathRoot)
+	// Bailey management surface (JSON/API + favicon + static + sign-out).
+	// The React Server Console (the HTML) is served by serveServerConsole
+	// in chromeWrapMiddleware on the console inner host; these are the
+	// data endpoints it fetches, proxied here through the gate.
+	docsMux.HandleFunc("/bailey", s.handleBailey)
+	docsMux.HandleFunc("/bailey/", s.handleBailey)
 	docsMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// "/" on the Bailey hostname is also the post-logout landing
 		// page (Keycloak does exact redirect-URI matching). Until the
