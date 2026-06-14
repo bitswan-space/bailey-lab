@@ -3,8 +3,43 @@ import React from 'react';
 // first-admin bootstrap · awaiting device approval · account recovery
 
 const { C: SC, Icon: SIcon, Btn: SBtn, Pill: SPill } = window.WD_SHELL;
-const { QRCode: SQR, SegmentedCode: SSeg, CopyChip: SCopyChip, ProtoHint: SProtoHint, Avatar: SAvatar } = window.SC_UI;
+const { QRCode: SQR, SegmentedCode: SSeg, CopyChip: SCopyChip, ProtoHint: SProtoHint, Avatar: SAvatar, Modal: SModal } = window.SC_UI;
 const { useState: useSc, useEffect: useScE } = React;
+
+// ─── "Why so complicated?" explainer ────────────────────────────────────────
+// Shared across the device-trust scenes (bootstrap · approval · recovery).
+// A small help link that opens the end-to-end access-control explainer in the
+// console's standard Modal (focusable, Escape-to-close, backdrop click).
+function WhyComplicatedLink() {
+  const [open, setOpen] = useSc(false);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)} style={{
+        border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer',
+        font: 'inherit', fontSize: 12.5, fontWeight: 600, textDecoration: 'underline',
+        textUnderlineOffset: 2, padding: 0 }}>
+        Why so complicated?
+      </button>
+      <SModal open={open} onClose={() => setOpen(false)} title="End-to-end access control" icon="shield" width={560}>
+        <h3 style={{ margin: '0 0 4px', fontSize: 14.5, fontWeight: 700, color: SC.fg }}>Two locks, not one</h3>
+        <p style={{ margin: '0 0 6px', fontSize: 13, color: SC.muted, lineHeight: '19px' }}>
+          Single sign-on proves who you are. Bailey adds a second, independent check that lives on this server and that you control: a new device has to be approved here before it can reach anything. Your data sovereignty stays with you, not with a third party.
+        </p>
+        <h3 style={{ margin: '16px 0 4px', fontSize: 14.5, fontWeight: 700, color: SC.fg }}>Safe even if your login provider is breached</h3>
+        <p style={{ margin: '0 0 6px', fontSize: 13, color: SC.muted, lineHeight: '19px' }}>
+          If an attacker compromised your central identity provider (SSO / Keycloak), they still couldn't get to your data. A fresh device must be confirmed on this server — by reading back the code shown on the device — and that approval happens on infrastructure you own, beyond the identity provider's reach.
+        </p>
+        <h3 style={{ margin: '16px 0 4px', fontSize: 14.5, fontWeight: 700, color: SC.fg }}>Lost or stolen device? Cut it off instantly</h3>
+        <p style={{ margin: '0 0 6px', fontSize: 13, color: SC.muted, lineHeight: '19px' }}>
+          Every browser you trust is a named device you can see and revoke. If a laptop or phone is lost or stolen, remove its device here and it loses access immediately — no password reset, no waiting on anyone else.
+        </p>
+        <p style={{ margin: '18px 0 0', fontSize: 11.5, color: SC.mutedFg, lineHeight: '17px' }}>
+          That's the small step when you first connect a device or recover access — the cost of data sovereignty that survives even a compromised identity provider.
+        </p>
+      </SModal>
+    </>
+  );
+}
 
 // shared centered chrome
 function SceneShell({ children, footerNote, badge }) {
@@ -76,6 +111,7 @@ function BootstrapScene({ onClaim }) {
             Log in with Keycloak
           </SBtn>
         )}
+        <div style={{ textAlign: 'center', marginTop: 16 }}><WhyComplicatedLink /></div>
       </div>
       <div style={{ display: 'flex', gap: 10, padding: '14px 22px', background: SC.surface, borderTop: `1px solid ${SC.border}` }}>
         <SIcon name="shield" size={15} color={SC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
@@ -159,6 +195,7 @@ function ApprovalScene({ onApproved, goConsole }) {
             </div>
           </div>
         )}
+        <div style={{ textAlign: 'center', marginTop: 18 }}><WhyComplicatedLink /></div>
       </div>
 
       <div style={{ padding: '14px 22px', background: SC.surface, borderTop: `1px solid ${SC.border}` }}>
@@ -234,6 +271,7 @@ function RecoveryScene({ onRecovered, goConsole }) {
             </div>
           </div>
         )}
+        <div style={{ textAlign: 'center', marginTop: 18 }}><WhyComplicatedLink /></div>
       </div>
 
       <div style={{ padding: '13px 22px', background: SC.surface, borderTop: `1px solid ${SC.border}`, textAlign: 'center' }}>

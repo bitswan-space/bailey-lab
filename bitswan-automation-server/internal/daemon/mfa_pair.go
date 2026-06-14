@@ -297,6 +297,7 @@ func pendingPairHTML(email string, e *pairingEntry) string {
   <div style="font-size:72px;letter-spacing:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:300;color:#18181B;margin:8px 0;">%s</div>
   <p style="color:#71717A;font-size:14px;margin:24px 0 4px;">Read this code to an admin to trust this browser.</p>
   <p style="color:#A1A1AA;font-size:13px;margin:0;" id="status">Waiting for approval…</p>
+  %s
 </div>
 <script>
 async function poll() {
@@ -314,7 +315,7 @@ async function poll() {
 poll();
 </script>
 <meta http-equiv="refresh" content="%d">`,
-		bitswanLogoSVG, html.EscapeString(e.Code),
+		bitswanLogoSVG, html.EscapeString(e.Code), whySoComplicatedHelper(),
 		html.EscapeString(mfaGatePathPrefix), int(pairingTTL.Seconds()))
 	_ = email
 	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>Trust device</title>%s<style>%s
@@ -375,9 +376,10 @@ func approveListHTML(approverEmail string, approverIsAdmin bool, errorForEmail, 
   <p>Signed in as <code>%s</code>%s. You can approve %s pending device requests.</p>
   <p class="note">Ask the user to read the 6-digit code shown on their screen, type it below, and click Approve.</p>
   %s%s
+  %s
 </div>
 <meta http-equiv="refresh" content="5">`,
-		bitswanLogoSVG, html.EscapeString(approverEmail), adminBadge, scope, banner, rows)
+		bitswanLogoSVG, html.EscapeString(approverEmail), adminBadge, scope, banner, rows, whySoComplicatedHelper())
 	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>Approve devices</title>%s<style>%s</style></head><body>%s</body></html>`,
 		bitswanFavicon, bitswanPageCSS, body)
 }
@@ -396,8 +398,9 @@ func recoveryFormHTML(email, errMsg string) string {
     <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autofocus required style="font-size:18px;letter-spacing:4px;padding:6px 8px;width:120px;">
     <button type="submit" style="background:#093DF5;color:white;border:0;padding:8px 16px;margin-left:8px;border-radius:4px;font-size:14px;cursor:pointer;">Recover</button>
   </form>
+  %s
 </div>`,
-		bitswanLogoSVG, html.EscapeString(email), errBlock, html.EscapeString(mfaGatePathPrefix))
+		bitswanLogoSVG, html.EscapeString(email), errBlock, html.EscapeString(mfaGatePathPrefix), whySoComplicatedHelper())
 	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>Recovery</title>%s<style>%s</style></head><body>%s</body></html>`,
 		bitswanFavicon, bitswanPageCSS, body)
 }

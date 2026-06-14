@@ -34,3 +34,47 @@ th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #E4E4E7; 
 th { background: #F5F5F6; font-weight: 600; color: #18181B; }
 code { background: #F5F5F6; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
 `
+
+// whySoComplicatedHelper returns the "Why so complicated?" help link plus
+// the explainer modal markup, with all CSS and JS inlined (these pages run
+// under a strict CSP that forbids external assets). The returned blob is
+// safe to drop near a page's main action; the modal is hidden until the
+// link toggles it, and it closes on backdrop click or Escape. Self-contained
+// so it can be injected into the pending-pair, approval, and recovery pages
+// without any per-page wiring.
+func whySoComplicatedHelper() string {
+	return `
+<style>
+.bsw-why-link { display:inline-block; margin-top:16px; font-size:13px; color:#093DF5; text-decoration:underline; cursor:pointer; background:none; border:0; padding:0; font:inherit; }
+.bsw-why-link:hover { color:#0731C4; }
+.bsw-why-overlay { display:none; position:fixed; inset:0; background:rgba(24,24,27,0.55); z-index:1000; align-items:center; justify-content:center; padding:20px; }
+.bsw-why-overlay.bsw-open { display:flex; }
+.bsw-why-modal { background:#fff; border:1px solid #E4E4E7; border-radius:12px; max-width:560px; width:100%; max-height:85vh; overflow-y:auto; padding:28px 32px; text-align:left; box-shadow:0 10px 40px rgba(0,0,0,0.2); }
+.bsw-why-modal h2 { font-size:20px; font-weight:600; color:#18181B; margin:0 0 4px; }
+.bsw-why-modal h3 { font-size:15px; font-weight:600; color:#18181B; margin:20px 0 4px; }
+.bsw-why-modal p { font-size:14px; line-height:1.55; color:#3F3F46; margin:6px 0; }
+.bsw-why-modal .bsw-why-close-row { display:flex; justify-content:flex-end; }
+.bsw-why-close { background:none; border:0; font-size:22px; line-height:1; color:#A1A1AA; cursor:pointer; padding:0; }
+.bsw-why-close:hover { color:#18181B; }
+.bsw-why-foot { font-size:12px; color:#A1A1AA; margin-top:20px; line-height:1.5; }
+</style>
+<button type="button" class="bsw-why-link" onclick="bswOpenWhy()">Why so complicated?</button>
+<div class="bsw-why-overlay" id="bsw-why-overlay" onclick="if(event.target===this)bswCloseWhy()">
+  <div class="bsw-why-modal" role="dialog" aria-modal="true" aria-labelledby="bsw-why-title" tabindex="-1">
+    <div class="bsw-why-close-row"><button type="button" class="bsw-why-close" aria-label="Close" onclick="bswCloseWhy()">&times;</button></div>
+    <h2 id="bsw-why-title">End-to-end access control</h2>
+    <h3>Two locks, not one</h3>
+    <p>Single sign-on proves who you are. Bailey adds a second, independent check that lives on this server and that you control: a new device has to be approved here before it can reach anything. Your data sovereignty stays with you, not with a third party.</p>
+    <h3>Safe even if your login provider is breached</h3>
+    <p>If an attacker compromised your central identity provider (SSO / Keycloak), they still couldn't get to your data. A fresh device must be confirmed on this server &mdash; by reading back the code shown on the device &mdash; and that approval happens on infrastructure you own, beyond the identity provider's reach.</p>
+    <h3>Lost or stolen device? Cut it off instantly</h3>
+    <p>Every browser you trust is a named device you can see and revoke. If a laptop or phone is lost or stolen, remove its device here and it loses access immediately &mdash; no password reset, no waiting on anyone else.</p>
+    <p class="bsw-why-foot">That's the small step when you first connect a device or recover access &mdash; the cost of data sovereignty that survives even a compromised identity provider.</p>
+  </div>
+</div>
+<script>
+function bswOpenWhy(){var o=document.getElementById('bsw-why-overlay');o.classList.add('bsw-open');var m=o.querySelector('.bsw-why-modal');if(m)m.focus();}
+function bswCloseWhy(){document.getElementById('bsw-why-overlay').classList.remove('bsw-open');}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')bswCloseWhy();});
+</script>`
+}
