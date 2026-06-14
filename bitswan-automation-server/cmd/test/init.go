@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -253,6 +255,118 @@ func createBusinessProcess(gitopsURL, secret, workspaceName, name string) ([]str
 	return result.AutomationsCreated, result.DeployTaskID, nil
 }
 
+// maxHostnameLabelLen mirrors gitops' MAX_NAME_LEN (app/services/automation_service.py):
+// workspace_name and automation_name are each capped at 24 chars so the final
+// DNS label fits within the 63-char limit.
+const maxHostnameLabelLen = 24
+
+// sanitizeAutomationNameRE mirrors gitops' sanitize_automation_name
+// (app/utils.py): lowercase, replace every char outside [a-z0-9-] with '-'.
+var sanitizeAutomationNameRE = regexp.MustCompile(`[^a-z0-9-]`)
+
+// sanitizeAutomationName replicates gitops' sanitize_automation_name exactly:
+// lowercase the input, replace each char outside [a-z0-9-] with '-', then trim
+// leading/trailing hyphens. Deploy-id derivation and template scaffolding both
+// depend on this, so the e2e must produce the identical output.
+func sanitizeAutomationName(name string) string {
+	lowered := strings.ToLower(name)
+	replaced := sanitizeAutomationNameRE.ReplaceAllString(lowered, "-")
+	return strings.Trim(replaced, "-")
+}
+
+// shortContextHash replicates gitops' _short_hash
+// (app/services/automation_service.py): the first 4 hex chars of the SHA-256 of
+// the context string. e.g. _short_hash("test") == "9f86".
+func shortContextHash(context string) string {
+	sum := sha256.Sum256([]byte(context))
+	return hex.EncodeToString(sum[:])[:4]
+}
+
+// makeHostnameLabel replicates gitops' make_hostname_label
+// (app/services/automation_service.py). It builds the DNS label from structured
+// components — no string parsing — capping workspace_name and automation_name at
+// 24 chars each:
+//
+//	context && stage -> "<ws>-<an>-<ctxhash>-<stage>"
+//	context only     -> "<ws>-<an>-<ctxhash>"
+//	stage only       -> "<ws>-<an>-<stage>"
+//	neither          -> "<ws>-<an>"
+func makeHostnameLabel(workspaceName, automationName, context, stage string) string {
+	ws := workspaceName
+	if len(ws) > maxHostnameLabelLen {
+		ws = ws[:maxHostnameLabelLen]
+	}
+	an := automationName
+	if len(an) > maxHostnameLabelLen {
+		an = an[:maxHostnameLabelLen]
+	}
+	if context != "" {
+		h := shortContextHash(context)
+		if stage != "" {
+			return fmt.Sprintf("%s-%s-%s-%s", ws, an, h, stage)
+		}
+		return fmt.Sprintf("%s-%s-%s", ws, an, h)
+	}
+	if stage != "" {
+		return fmt.Sprintf("%s-%s-%s", ws, an, stage)
+	}
+	return fmt.Sprintf("%s-%s", ws, an)
+}
+
+// constructFrontendURL reproduces, from structured inputs only, the exact
+// https URL gitops registers for the business process's frontend route — without
+// reading it back from get_automations (whose state/automation_url overlay can
+// lag in CI). It mirrors gitops' generate_workspace_url
+// (app/utils.py) + add_workspace_route_to_ingress, which build the host as
+// "<make_hostname_label(...)>.<BITSWAN_GITOPS_DOMAIN>".
+//
+// The inputs for a main (non-worktree) BP deploy are fixed by gitops itself:
+//   - workspace   = the test workspace name (capped/sanitized below)
+//   - automation  = "frontend" (the exposed automation in the default
+//     business-process template group)
+//   - context     = the sanitized BP name (scan_workspace_sources sets
+//     context = bp_name for non-worktree scans), i.e. sanitize("test")
+//   - stage       = "dev" (routes/processes.py: stage = "dev" when there is no
+//     worktree; "live-dev" only for worktree deploys)
+//
+// The gitops domain is BITSWAN_GITOPS_DOMAIN, which the daemon sets to the
+// workspace's domain (dockercompose.go) and which equals the host of the gitops
+// URL with the leading "<workspace>-gitops." label stripped (workspace_init.go
+// builds GitopsURL as "https://<ws>-gitops.<domain>"). Deriving the domain from
+// gitopsURL this way handles every regime identically — e.g. the --local CI
+// regime where domain == "bs-<workspace>.localhost" (so the constructed host
+// ends in .localhost and resolves through dnsmasq/mkcert just like the gitops
+// URL itself).
+func constructFrontendURL(gitopsURL, workspaceName, bp string) (string, error) {
+	parsed, err := url.Parse(gitopsURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse gitops URL %q: %w", gitopsURL, err)
+	}
+	host := parsed.Host
+	// Strip the "<workspace>-gitops." label to recover BITSWAN_GITOPS_DOMAIN.
+	gitopsLabelPrefix := workspaceName + "-gitops."
+	if !strings.HasPrefix(host, gitopsLabelPrefix) {
+		return "", fmt.Errorf("gitops URL host %q does not start with expected prefix %q", host, gitopsLabelPrefix)
+	}
+	gitopsDomain := strings.TrimPrefix(host, gitopsLabelPrefix)
+	if gitopsDomain == "" {
+		return "", fmt.Errorf("could not derive gitops domain from host %q", host)
+	}
+
+	// Match gitops' deploy-time inputs for the main-BP frontend route.
+	sanitizedWorkspace := sanitizeAutomationName(workspaceName)
+	context := sanitizeAutomationName(bp)
+	const automationName = "frontend"
+	const stage = "dev"
+
+	label := makeHostnameLabel(sanitizedWorkspace, automationName, context, stage)
+	scheme := parsed.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s.%s", scheme, label, gitopsDomain), nil
+}
+
 // waitForFrontendRunning polls gitops' GET /automations/ for the business
 // process's frontend and returns its URL once it's actually serving. The
 // frontend is the automation exposed through Bailey (expose=true) whose
@@ -274,6 +388,17 @@ func createBusinessProcess(gitopsURL, secret, workspaceName, name string) ([]str
 // known we probe it directly; the first signal to fire wins.
 func waitForFrontendRunning(gitopsURL, secret, workspaceName, bp string) (string, error) {
 	maxAttempts := 90 // 3 minutes (90 * 2 seconds)
+
+	// Construct the frontend's URL the same way gitops registers its route, so
+	// the e2e never depends on the get_automations overlay populating
+	// automation_url (it can lag in CI — observed as "Frontend present but no
+	// URL yet"). This is the fallback probe target when the entry has no URL.
+	constructedURL, constructErr := constructFrontendURL(gitopsURL, workspaceName, bp)
+	if constructErr != nil {
+		fmt.Printf("  Warning: could not construct frontend URL (will rely on get_automations): %v\n", constructErr)
+	} else {
+		fmt.Printf("  Constructed frontend URL: %s\n", constructedURL)
+	}
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		reqURL := fmt.Sprintf("%s/automations/", gitopsURL)
@@ -319,29 +444,36 @@ func waitForFrontendRunning(gitopsURL, secret, workspaceName, bp string) (string
 				continue
 			}
 
-			// Resolve the frontend's URL. This is populated from the
-			// route/endpoint metadata independently of the 'state' field, so
-			// it's available before 'state' flips to "running".
+			// Resolve the frontend's URL. Prefer the entry's own
+			// automation_url / endpoint_name (populated from route metadata
+			// independently of 'state'), but fall back to the URL we
+			// constructed ourselves when the entry carries no URL — in CI the
+			// overlay that fills automation_url can lag, leaving the entry with
+			// empty state AND empty url even though the container is serving.
 			endpointURL := a.AutomationURL
 			if endpointURL == "" && a.EndpointName != "" {
 				if parsed, err := url.Parse(gitopsURL); err == nil {
 					endpointURL = fmt.Sprintf("%s://%s/%s", parsed.Scheme, parsed.Host, a.EndpointName)
 				}
 			}
-
-			// Signal (1): get_automations explicitly reports running.
-			if a.State == "running" && endpointURL != "" {
-				fmt.Printf("  Frontend ready (state=running)! URL: %s\n", endpointURL)
-				// Give the shim/vite a moment to fully start serving.
-				time.Sleep(3 * time.Second)
-				return endpointURL, nil
+			if endpointURL == "" {
+				endpointURL = constructedURL
 			}
 
-			// Signal (2): probe the URL directly. If the gate serves the app
-			// shell, the frontend is genuinely up regardless of the lagging
-			// 'state' field.
+			// Signal (1): get_automations explicitly reports running (only a
+			// fast-path when the entry also gave us a URL).
+			if a.State == "running" && a.AutomationURL != "" {
+				fmt.Printf("  Frontend ready (state=running)! URL: %s\n", a.AutomationURL)
+				// Give the shim/vite a moment to fully start serving.
+				time.Sleep(3 * time.Second)
+				return a.AutomationURL, nil
+			}
+
+			// Signal (2): probe the URL directly (entry URL if present, else the
+			// constructed URL). If the gate serves the app shell, the frontend
+			// is genuinely up regardless of the lagging 'state'/overlay fields.
 			if endpointURL != "" && frontendServesAppShell(endpointURL, workspaceName) {
-				fmt.Printf("  Frontend reachable (state=%s, but URL serves the app shell)! URL: %s\n", a.State, endpointURL)
+				fmt.Printf("  Frontend reachable (state=%s, URL serves the app shell)! URL: %s\n", a.State, endpointURL)
 				return endpointURL, nil
 			}
 
