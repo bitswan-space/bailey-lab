@@ -3,10 +3,28 @@ package daemon
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// requireDocker skips the calling test when the `docker` binary isn't on PATH.
+// The server-owner empty-trash path drives RunWorkspaceRemove, which is a
+// docker-orchestration flow: it shells out to `docker compose down` for every
+// known compose project and spawns a background goroutine that calls
+// DetectIngressType()/DeleteTraefikRecordsWithWriter() (more `docker` calls,
+// plus Linux-oriented ingress teardown) while still writing to the test's
+// buffer. On runners without docker (the macOS/Windows CI images) those
+// shell-outs and the trailing goroutine make the test non-hermetic and
+// OS-dependent. Gating on docker keeps it a real exercise on the Linux runner
+// (which has docker) and a clean skip elsewhere.
+func requireDocker(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available; skipping docker-dependent workspace-remove path")
+	}
+}
 
 // mkWorkspaceDir creates $HOME/.config/bitswan/workspaces/<name> (and
 // optionally a deployment subdir) so the trash helpers have a real tree
@@ -87,6 +105,66 @@ func TestRestoreWorkspace_MissingDirsError(t *testing.T) {
 	}
 }
 
+// TestRestoreWorkspace_HappyPath exercises the full restore flow: the
+// deployment dir exists plus the optional dashboard + sub-traefik compose
+// files, so every `docker compose up` branch runs (they're quiet no-ops for
+// this synthetic workspace) and the trash marker is removed at the end.
+// Gated on docker since RestoreWorkspace shells out to `docker compose`.
+func TestRestoreWorkspace_HappyPath(t *testing.T) {
+	requireDocker(t)
+	name := "restore-happy-unique"
+	wsDir := mkWorkspaceDir(t, name, true) // with deployment/
+
+	// Main compose project: a single no-op service so `docker compose up -d`
+	// succeeds (a missing/empty compose file makes compose exit non-zero,
+	// which RestoreWorkspace treats as a hard error).
+	if err := os.WriteFile(filepath.Join(wsDir, "deployment", "docker-compose.yml"),
+		[]byte("services:\n  noop:\n    image: alpine:3\n    command: [\"true\"]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Optional compose files so the dashboard + sub-traefik branches run.
+	if err := os.WriteFile(filepath.Join(wsDir, "deployment", "docker-compose-dashboard.yml"),
+		[]byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	traefikDir := filepath.Join(wsDir, "traefik")
+	if err := os.MkdirAll(traefikDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(traefikDir, "docker-compose.yaml"),
+		[]byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MarkWorkspaceTrashed(name); err != nil {
+		t.Fatal(err)
+	}
+	if !IsWorkspaceTrashed(name) {
+		t.Fatal("workspace not marked trashed")
+	}
+
+	// Tear down the compose projects RestoreWorkspace brings up, whatever
+	// the test's outcome.
+	lc := strings.ToLower(name)
+	t.Cleanup(func() {
+		for _, p := range []string{lc + "-site", lc + "-dashboard", name + "__traefik"} {
+			_ = exec.Command("docker", "compose", "-p", p, "down", "--volumes").Run()
+		}
+	})
+
+	var buf bytes.Buffer
+	if err := RestoreWorkspace(name, &buf); err != nil {
+		t.Fatalf("RestoreWorkspace happy path: %v\nlog:%s", err, buf.String())
+	}
+	// Marker removed on success.
+	if IsWorkspaceTrashed(name) {
+		t.Error("trash marker not removed after restore")
+	}
+	if !strings.Contains(buf.String(), "Workspace restored.") {
+		t.Errorf("restore log missing completion line: %s", buf.String())
+	}
+}
+
 func TestEmptyTrashFor_NoWorkspacesDir(t *testing.T) {
 	// Point HOME at a temp dir with no workspaces subdir → read error.
 	tmp := t.TempDir()
@@ -99,6 +177,7 @@ func TestEmptyTrashFor_NoWorkspacesDir(t *testing.T) {
 }
 
 func TestEmptyTrashFor_ServerOwnerRemovesOwnedEntry(t *testing.T) {
+	requireDocker(t)
 	writeTestConfig(t)
 	name := "etf-zztoremove-unique"
 	wsDir := mkWorkspaceDir(t, name, false)

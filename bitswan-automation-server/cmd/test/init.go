@@ -253,12 +253,25 @@ func createBusinessProcess(gitopsURL, secret, workspaceName, name string) ([]str
 	return result.AutomationsCreated, result.DeployTaskID, nil
 }
 
-// waitForFrontendRunning polls gitops' GET /automations/ until the business
-// process's frontend reports state "running", then returns its URL. The
+// waitForFrontendRunning polls gitops' GET /automations/ for the business
+// process's frontend and returns its URL once it's actually serving. The
 // frontend is the automation exposed through Bailey (expose=true) whose
 // relative_path ends in "/frontend" — identified by explicit data, not a
 // guessed hostname. The per-automation images were already built by the deploy
 // task, so 3 minutes is a generous margin for the container to come up.
+//
+// Readiness is established by EITHER signal:
+//
+//	(1) get_automations reports state=="running", OR
+//	(2) the frontend's own URL is reachable (HTTP 200 + app shell) through the
+//	    gate, even if the get_automations 'state' field still lags.
+//
+// In the dev stage the overlay/label-matching that populates 'state' can lag
+// behind the container actually serving (observed only in CI), so relying on
+// 'state' alone makes this flaky. Probing the real URL keeps the check a true
+// end-to-end assertion — the frontend must genuinely return its HTML — without
+// depending on the lagging state field. Once the frontend's endpoint URL is
+// known we probe it directly; the first signal to fire wins.
 func waitForFrontendRunning(gitopsURL, secret, workspaceName, bp string) (string, error) {
 	maxAttempts := 90 // 3 minutes (90 * 2 seconds)
 
@@ -305,33 +318,73 @@ func waitForFrontendRunning(gitopsURL, secret, workspaceName, bp string) (string
 			if !strings.HasSuffix(rel, bp+"/frontend") {
 				continue
 			}
-			if a.State != "running" {
-				if attempt%5 == 0 {
-					fmt.Printf("  Waiting for frontend... (state=%s, attempt %d/%d)\n", a.State, attempt+1, maxAttempts)
-				}
-				break
-			}
+
+			// Resolve the frontend's URL. This is populated from the
+			// route/endpoint metadata independently of the 'state' field, so
+			// it's available before 'state' flips to "running".
 			endpointURL := a.AutomationURL
 			if endpointURL == "" && a.EndpointName != "" {
 				if parsed, err := url.Parse(gitopsURL); err == nil {
 					endpointURL = fmt.Sprintf("%s://%s/%s", parsed.Scheme, parsed.Host, a.EndpointName)
 				}
 			}
-			if endpointURL != "" {
-				fmt.Printf("  Frontend ready! URL: %s\n", endpointURL)
+
+			// Signal (1): get_automations explicitly reports running.
+			if a.State == "running" && endpointURL != "" {
+				fmt.Printf("  Frontend ready (state=running)! URL: %s\n", endpointURL)
 				// Give the shim/vite a moment to fully start serving.
 				time.Sleep(3 * time.Second)
 				return endpointURL, nil
 			}
-			if attempt%5 == 0 {
-				fmt.Printf("  Frontend running but no URL yet (attempt %d/%d)\n", attempt+1, maxAttempts)
+
+			// Signal (2): probe the URL directly. If the gate serves the app
+			// shell, the frontend is genuinely up regardless of the lagging
+			// 'state' field.
+			if endpointURL != "" && frontendServesAppShell(endpointURL, workspaceName) {
+				fmt.Printf("  Frontend reachable (state=%s, but URL serves the app shell)! URL: %s\n", a.State, endpointURL)
+				return endpointURL, nil
 			}
+
+			if attempt%5 == 0 {
+				if endpointURL == "" {
+					fmt.Printf("  Frontend present but no URL yet (state=%s, attempt %d/%d)\n", a.State, attempt+1, maxAttempts)
+				} else {
+					fmt.Printf("  Waiting for frontend... (state=%s, URL=%s not yet serving, attempt %d/%d)\n", a.State, endpointURL, attempt+1, maxAttempts)
+				}
+			}
+			break
 		}
 
 		time.Sleep(2 * time.Second)
 	}
 
 	return "", fmt.Errorf("frontend did not become ready within timeout")
+}
+
+// frontendServesAppShell probes the frontend URL through the gate (localhost
+// resolution) and reports whether it returns HTTP 200 with the React app shell.
+// This is the same liveness criterion as testFrontendEndpoint, used as the
+// reachability signal in waitForFrontendRunning so the e2e doesn't depend on
+// the (CI-flaky) get_automations 'state' field. Any transport error or non-200
+// is treated as "not ready yet" — the caller retries.
+func frontendServesAppShell(endpointURL, workspaceName string) bool {
+	reqURL := automations.TransformURLForDaemon(endpointURL, workspaceName)
+	req, err := httpReq.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := httpReq.ExecuteRequestWithLocalhostResolution(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	body := string(bodyBytes)
+	lower := strings.ToLower(body)
+	return strings.Contains(body, `id="root"`) || strings.Contains(lower, "<html")
 }
 
 // testFrontendEndpoint fetches the frontend URL and verifies it serves the app
