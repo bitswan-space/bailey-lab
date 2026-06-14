@@ -53,7 +53,7 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		// Replace container home with host home for docker-compose volume paths
 		gitopsPathForVolumes = strings.Replace(config.GitopsPath, homeDir, hostHomeDir, 1)
 	}
-	
+
 	sshDir := gitopsPathForVolumes + "/ssh"
 	gitConfig := os.Getenv("HOME") + "/.gitconfig"
 
@@ -162,7 +162,7 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		}
 		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), gitopsVolumes...)
 	}
-	
+
 	// If this workspace has a local remote repository, mount it so GitOps can access it
 	if config.LocalRemotePath != "" && config.LocalRemoteName != "" {
 		// Mount local repository to /remote-repos/<name> for GitOps to access
@@ -250,6 +250,7 @@ func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
 func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, networks ...string) (string, error) {
 	traefikVolumes := []string{
 		traefikPath + "/traefik.yml:/etc/traefik/traefik.yml:z",
+		traefikPath + "/dynamic.yml:/etc/traefik/dynamic.yml:z",
 		traefikPath + "/certs:/tls:z",
 		traefikPath + "/acme:/acme:z",
 		"/var/run/docker.sock:/var/run/docker.sock:ro",
