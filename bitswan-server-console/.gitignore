@@ -8,3 +8,7 @@ coverage/
 # not committed.
 wireframe/screenshots/
 wireframe/uploads/
+
+# Design reference + test screenshots are not product artifacts.
+wireframe/
+tests/screenshots/
