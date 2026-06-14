@@ -88,7 +88,7 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	}
 
 	// Step 1: Initialize workspace
-	fmt.Println("\n[1/6] Initializing workspace...")
+	fmt.Println("\n[1/7] Initializing workspace...")
 	client, err := daemon.NewClient()
 	if err != nil {
 		return fmt.Errorf("failed to create daemon client: %w", err)
@@ -122,7 +122,7 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	}
 
 	// Step 2: Wait for gitops service to be ready
-	fmt.Println("\n[2/6] Waiting for gitops service to be ready...")
+	fmt.Println("\n[2/7] Waiting for gitops service to be ready...")
 	if err := waitForGitopsReady(metadata.GitopsURL, metadata.GitopsSecret, workspaceName); err != nil {
 		cleanupOnFailure()
 		return fmt.Errorf("gitops service did not become ready: %w", err)
@@ -134,7 +134,7 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	// exposed through Bailey + one private backend worker) into <bp>/ and kicks
 	// off its deploy in the background. This is the real user flow — there is no
 	// standalone template-scaffolding step to test anymore.
-	fmt.Println("\n[3/6] Creating business process...")
+	fmt.Println("\n[3/7] Creating business process...")
 	const bp = "test"
 	automationsCreated, deployTaskID, err := createBusinessProcess(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, bp)
 	if err != nil {
@@ -150,7 +150,7 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	// Step 4: Wait for the BP deploy pipeline to finish. This builds the
 	// frontend + backend images from their image/Dockerfiles, provisions the
 	// backend's Postgres + MinIO, and runs compose up.
-	fmt.Println("\n[4/6] Waiting for business-process deploy to complete...")
+	fmt.Println("\n[4/7] Waiting for business-process deploy to complete...")
 	if err := waitForDeployTask(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, deployTaskID); err != nil {
 		cleanupOnFailure()
 		return fmt.Errorf("business-process deploy did not complete: %w", err)
@@ -160,7 +160,7 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	// Step 5: The frontend is the only part exposed through Bailey. Wait for it
 	// to be running and confirm it serves its app shell — that's "the frontend
 	// is accessible" end to end.
-	fmt.Println("\n[5/6] Waiting for the frontend to be accessible...")
+	fmt.Println("\n[5/7] Waiting for the frontend to be accessible...")
 	frontendURL, err := waitForFrontendRunning(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, bp)
 	if err != nil {
 		cleanupOnFailure()
@@ -175,17 +175,28 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	}
 	fmt.Println("✓ Frontend is accessible")
 
+	// Step 6: The coding-agent CLI must authenticate to gitops from inside the
+	// coding-agent container. This guards the agent-token path end to end:
+	// gitops has to resolve the same BITSWAN_GITOPS_AGENT_SECRET the agent
+	// container was given, or every `bitswan-coding-agent` call 401s.
+	fmt.Println("\n[6/7] Verifying coding-agent CLI authentication...")
+	if err := testCodingAgentCLI(workspaceName); err != nil {
+		cleanupOnFailure()
+		return fmt.Errorf("coding-agent CLI authentication check failed: %w", err)
+	}
+	fmt.Println("✓ Coding-agent CLI authenticated to gitops")
+
 	if noRemove {
-		fmt.Println("\n[6/6] Skipping cleanup (--no-remove flag set)...")
+		fmt.Println("\n[7/7] Skipping cleanup (--no-remove flag set)...")
 		fmt.Printf("Workspace '%s' is still running\n", workspaceName)
 		fmt.Printf("Frontend: %s\n", frontendURL)
 		fmt.Println("\n=== Test Suite: SUCCESS (workspace left running) ===")
 		return nil
 	}
 
-	// Step 6: Tear down the whole workspace (removes the BP's containers,
+	// Step 7: Tear down the whole workspace (removes the BP's containers,
 	// services, and routes along with it).
-	fmt.Println("\n[6/6] Cleaning up...")
+	fmt.Println("\n[7/7] Cleaning up...")
 	if err := cleanupWorkspace(workspaceName); err != nil {
 		return fmt.Errorf("failed to cleanup workspace: %w", err)
 	}
@@ -351,6 +362,52 @@ func testFrontendEndpoint(endpointURL, workspaceName string) error {
 	}
 
 	return nil
+}
+
+// testCodingAgentCLI verifies the bitswan-coding-agent CLI can authenticate to
+// gitops from inside the coding-agent container. `deployments list` hits gitops
+// GET /agent/deployments with the agent token — the same auth path as
+// `vcs commit`, but needs no worktree or staged changes. This guards the
+// agent-token wiring: gitops must resolve the same BITSWAN_GITOPS_AGENT_SECRET
+// the coding-agent container was given, or every agent call 401s.
+func testCodingAgentCLI(workspaceName string) error {
+	container, err := codingAgentContainer(workspaceName)
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command("docker", "exec", container,
+		"bitswan-coding-agent", "deployments", "list")
+	out, runErr := cmd.CombinedOutput()
+	output := strings.TrimSpace(string(out))
+
+	// The specific failure we're guarding against: gitops couldn't resolve the
+	// agent secret, so it rejects the bearer token.
+	if strings.Contains(output, "Invalid agent token") || strings.Contains(output, "HTTP 401") {
+		return fmt.Errorf("gitops rejected the coding-agent token (agent secret not resolved): %s", output)
+	}
+	if runErr != nil {
+		return fmt.Errorf("`bitswan-coding-agent deployments list` failed: %v: %s", runErr, output)
+	}
+	return nil
+}
+
+// codingAgentContainer resolves the coding-agent container name for a workspace.
+// The coding-agent service pins container_name to {workspace}-coding-agent, but
+// resolve by name filter so the check tolerates a compose-default name too.
+func codingAgentContainer(workspaceName string) (string, error) {
+	cmd := exec.Command("docker", "ps",
+		"--filter", "name="+workspaceName+"-coding-agent",
+		"--format", "{{.Names}}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to list coding-agent containers: %w", err)
+	}
+	names := strings.Fields(string(out))
+	if len(names) == 0 {
+		return "", fmt.Errorf("no coding-agent container found for workspace %q", workspaceName)
+	}
+	return names[0], nil
 }
 
 // createAutomationFromTemplate scaffolds an automation from a built-in template
