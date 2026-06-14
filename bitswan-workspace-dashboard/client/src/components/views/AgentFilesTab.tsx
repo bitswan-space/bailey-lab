@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Folder, GitPullRequest, Loader2, MessageSquare, Plus } from 'lucide-react';
+import { Boxes, Folder, GitPullRequest, Loader2, MessageSquare, Plus } from 'lucide-react';
 import { FilesTab } from '@/components/files/FilesTab';
 import { DiffTab } from '@/components/diff/DiffTab';
+import { ContainersPane } from '@/components/agents/ContainersPane';
 import { Button } from '@/components/ui/button';
 import { useSessions } from '@/components/agents/SessionProvider';
 import { useAgentSessions } from '@/hooks/useAgentSessions';
@@ -13,7 +14,7 @@ interface AgentFilesTabProps {
   branch: string;
 }
 
-type Sub = 'chat' | 'files';
+type Sub = 'chat' | 'files' | 'containers';
 
 /**
  * The Agents screen, per the wireframe (Workspace Dashboard → Agents): one
@@ -127,6 +128,12 @@ export function AgentFilesTab({ worktree, bp, branch: _branch }: AgentFilesTabPr
           icon={<Folder className="size-3.5" aria-hidden />}
           label="Files"
         />
+        <SubTab
+          active={sub === 'containers'}
+          onClick={() => setSub('containers')}
+          icon={<Boxes className="size-3.5" aria-hidden />}
+          label="Containers"
+        />
         {sub === 'files' && (
           <Button
             variant={showDiff ? 'default' : 'outline'}
@@ -178,6 +185,12 @@ export function AgentFilesTab({ worktree, bp, branch: _branch }: AgentFilesTabPr
       <div className={cn('min-h-0 flex-1 overflow-hidden', sub !== 'files' && 'hidden')}>
         {showDiff ? <DiffTab worktree={worktree} /> : <FilesTab worktree={worktree} bp={bp} />}
       </div>
+
+      {/* Containers pane — mounted only when active; its LogsPane opens an
+          SSE stream we don't want running in the background. */}
+      {sub === 'containers' && (
+        <ContainersPane bp={bp} worktree={worktree} active={sub === 'containers'} />
+      )}
     </div>
   );
 }
