@@ -34,6 +34,15 @@ export default defineConfig({
     port: VITE_PORT,
     strictPort: true,
     allowedHosts: VITE_ALLOWED_HOSTS,
+    // HMR through the Bailey protected ingress: the browser loads this app on
+    // the inner host over TLS (443), so pin vite's HMR client to the public
+    // wss endpoint (wss://<inner-host>:443/) rather than letting it guess the
+    // dev-server port. The Bailey gate upgrades that websocket and routes it
+    // to this dev server.
+    hmr: {
+      protocol: 'wss',
+      clientPort: Number(process.env.VITE_HMR_CLIENT_PORT ?? 443),
+    },
     proxy: {
       // WebSocket terminal — Vite handles the http→ws upgrade with ws:true.
       '/ws': {
