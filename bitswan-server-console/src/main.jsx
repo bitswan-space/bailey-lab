@@ -22,6 +22,7 @@ window.lucide = { createIcons: () => createIcons({ icons }) };
 // window.WD_SHELL / window.SC_* namespace as a side effect (mirrors the
 // design's ordered <script> tags). console-app sets window.SC_APP.
 import './shell.jsx';
+import './console/api.js';
 import './console/console-data.jsx';
 import './console/console-ui.jsx';
 import './console/views-workspaces.jsx';

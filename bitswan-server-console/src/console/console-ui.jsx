@@ -417,8 +417,43 @@ function AvatarStack({ users, max = 4, size = 26 }) {
   );
 }
 
+// ─── Inline load / error banners (for live-wired views) ─────────────────────
+// A small non-blocking strip rendered above a list when a fetch is in
+// flight or failed — so a failed API call shows context + a Retry,
+// never a blank screen.
+function LoadBanner({ label }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 14px', marginBottom: 14,
+      border: `1px solid ${C.border}`, background: C.surface, borderRadius: 10, fontSize: 12.5, color: C.muted }}>
+      <Icon name="loader" size={14} color={C.mutedFg} />
+      <span>{label || 'Loading…'}</span>
+    </div>
+  );
+}
+
+function ErrorBanner({ message, onRetry }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', marginBottom: 14,
+      border: `1px solid ${C.red}55`, background: C.redSoft, borderRadius: 10 }}>
+      <Icon name="alert-triangle" size={15} color={C.red} style={{ flex: '0 0 auto' }} />
+      <span style={{ flex: 1, fontSize: 12.5, color: C.red, lineHeight: '17px' }}>
+        {message || "Couldn't load this from the server."}
+      </span>
+      {onRetry && <Btn variant="default" size="sm" leftIcon="refresh-cw" onClick={onRetry}>Retry</Btn>}
+    </div>
+  );
+}
+
+// LiveState renders the right banner for a {load,error} pair, or nothing
+// when the list loaded cleanly. status: 'idle'|'loading'|'ok'|'error'.
+function LiveState({ status, error, label, onRetry }) {
+  if (status === 'error') return <ErrorBanner message={error} onRetry={onRetry} />;
+  if (status === 'loading' || status === 'idle') return <LoadBanner label={label} />;
+  return null;
+}
+
 window.SC_UI = {
   Avatar, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRCode,
   Toggle, DeviceIcon, Toast, EmptyState, CopyChip, ProtoHint, Stat,
-  Drawer, Select, AvatarStack,
+  Drawer, Select, AvatarStack, LoadBanner, ErrorBanner, LiveState,
 };

@@ -5,8 +5,9 @@ const { C: DC, Icon: DIcon, Btn: DBtn, Pill: DPill } = window.WD_SHELL;
 const {
   Card: DCard, PageHeader: DPageHeader, Field: DField, Modal: DModal,
   SegmentedCode: DSeg, QRCode: DQR, DeviceIcon: DDeviceIcon, ProtoHint: DProtoHint,
-  CopyChip: DCopyChip, Toggle: DToggle, EmptyState: DEmpty,
+  CopyChip: DCopyChip, Toggle: DToggle, EmptyState: DEmpty, LiveState: DLiveState,
 } = window.SC_UI;
+const { Api: DApi } = window.SC_API;
 const { useState: useD } = React;
 
 const TRUST_BADGE = {
@@ -17,14 +18,23 @@ const TRUST_BADGE = {
 
 // ─── MY DEVICES ─────────────────────────────────────────────────────────────
 function DevicesView({ ctx }) {
-  const { data, setData, toast } = ctx;
+  const { data, setData, toast, refresh } = ctx;
   const [linkOpen, setLinkOpen] = useD(false);
   const [revoke, setRevoke] = useD(null);
+  const [busy, setBusy] = useD(false);
 
-  const doRevoke = (dev) => {
-    setData(d => ({ ...d, myDevices: d.myDevices.filter(x => x.id !== dev.id) }));
-    toast(`${dev.name} signed out and removed`, 'danger');
-    setRevoke(null);
+  // Live: remove the device via POST /bailey/api/devices/remove, then
+  // re-fetch the device list so the UI reflects the backend.
+  const doRevoke = async (dev) => {
+    setBusy(true);
+    try {
+      await DApi.removeDevice(dev.id);
+      toast(`${dev.name} signed out and removed`, 'danger');
+      setRevoke(null);
+      await refresh('devices');
+    } catch (e) {
+      toast(`Couldn't remove device: ${e.message}`, 'danger');
+    } finally { setBusy(false); }
   };
 
   return (
@@ -32,6 +42,15 @@ function DevicesView({ ctx }) {
       <DPageHeader title="Your devices" icon="laptop"
         subtitle="Every device signed in to your account. Trust spreads device-to-device: a device you've already trusted can vouch for a new one — no admin needed."
         actions={<DBtn variant="primary" leftIcon="plus" onClick={() => setLinkOpen(true)}>Link a device</DBtn>} />
+
+      {data.load.devices !== 'ok' && (
+        <DLiveState status={data.load.devices} error={data.error.devices}
+          label="Loading your devices…" onRetry={() => refresh('devices')} />
+      )}
+      {data.load.devices === 'ok' && data.myDevices.length === 0 && (
+        <DCard><DEmpty icon="laptop" title="No trusted devices"
+          text="No devices are currently paired to your account on this server." /></DCard>
+      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {data.myDevices.map(dev => {
@@ -53,15 +72,16 @@ function DevicesView({ ctx }) {
                   {dev.current && <DPill tone="success" size="xs">● This device</DPill>}
                   <DPill tone={badge.tone} size="xs">{badge.label}</DPill>
                 </div>
-                <div style={{ fontSize: 12.5, color: DC.muted, marginTop: 3, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-                  <span>{dev.browser} · {dev.os}</span>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><DIcon name="map-pin" size={12} color={DC.mutedFg} />{dev.location}</span>
-                  <span style={{ fontFamily: 'Geist Mono, monospace' }}>{dev.ip}</span>
-                </div>
+                {(dev.browser || dev.os || dev.location || dev.ip) && (
+                  <div style={{ fontSize: 12.5, color: DC.muted, marginTop: 3, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                    {(dev.browser || dev.os) && <span>{[dev.browser, dev.os].filter(Boolean).join(' · ')}</span>}
+                    {dev.location && <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}><DIcon name="map-pin" size={12} color={DC.mutedFg} />{dev.location}</span>}
+                    {dev.ip && <span style={{ fontFamily: 'Geist Mono, monospace' }}>{dev.ip}</span>}
+                  </div>
+                )}
                 <div style={{ fontSize: 11.5, color: DC.mutedFg, marginTop: 4, display: 'flex', gap: 14, flexWrap: 'wrap' }}>
                   <span>{dev.lastActive}</span>
-                  <span>·</span>
-                  <span>Added {dev.added}</span>
+                  {dev.added && dev.added !== '—' && <><span>·</span><span>Added {dev.added}</span></>}
                   {dev.linkedFrom && <><span>·</span><span>Linked from {dev.linkedFrom}</span></>}
                 </div>
               </div>
@@ -90,7 +110,7 @@ function DevicesView({ ctx }) {
         subtitle="That device will lose trust immediately and must be re-linked to get back in."
         footer={<>
           <DBtn variant="default" onClick={() => setRevoke(null)}>Cancel</DBtn>
-          <DBtn variant="primary" style={{ background: DC.red, borderColor: DC.red }} onClick={() => doRevoke(revoke)}>Sign out device</DBtn>
+          <DBtn variant="primary" disabled={busy} style={{ background: DC.red, borderColor: DC.red }} onClick={() => doRevoke(revoke)}>{busy ? 'Signing out…' : 'Sign out device'}</DBtn>
         </>}>
         {revoke && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 13, padding: 13, background: DC.surface, borderRadius: 10 }}>
@@ -107,6 +127,9 @@ function DevicesView({ ctx }) {
 }
 
 // ─── LINK DEVICE (WhatsApp-style: this trusted device enters the new one's PIN) ─
+// TODO(api): no backend endpoint yet — device-to-device PIN/QR linking is
+// not exposed by bailey_dispatch.go (pairing happens via the gate's
+// /2fa-gate/pending-pair flow + admin approve). Kept on seed/prototype data.
 function LinkDeviceModal({ open, onClose, data, setData, toast }) {
   const [tab, setTab] = useD('pin');       // 'pin' | 'scan'
   const [pin, setPin] = useD('');
@@ -208,6 +231,10 @@ function Step({ n }) {
 }
 
 // ─── SECURITY & RECOVERY ────────────────────────────────────────────────────
+// TODO(api): no backend endpoint yet — TOTP enrolment + recovery codes are
+// not exposed under /bailey/api/* (they live behind the gate at
+// /2fa-gate/account/2fa and /2fa-gate/recovery as HTML pages). This view
+// stays on seed/prototype data.
 function SecurityView({ ctx }) {
   const { data, setData, toast } = ctx;
   const rec = data.recovery;

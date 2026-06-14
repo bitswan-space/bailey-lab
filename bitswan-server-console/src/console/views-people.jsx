@@ -5,13 +5,19 @@ const { C: PC, Icon: PIcon, Btn: PBtn, Pill: PPill } = window.WD_SHELL;
 const {
   Avatar: PAvatar, Card: PCard, PageHeader: PPageHeader, Field: PField, TextInput: PTextInput,
   Modal: PModal, EmptyState: PEmpty, Drawer: PDrawer, Select: PSelect,
-  SegmentedCode: PSeg, DeviceIcon: PDeviceIcon, ProtoHint: PProtoHint,
+  SegmentedCode: PSeg, DeviceIcon: PDeviceIcon, ProtoHint: PProtoHint, LiveState: PLiveState,
 } = window.SC_UI;
+const { Api: PApi, ApiError: PApiError } = window.SC_API;
 const { useState: useP } = React;
 
 const P_ROLE_TONE = { admin: 'primary', auditor: 'info', member: 'neutral', viewer: 'outline' };
 
 // ─── USERS & ROLES ──────────────────────────────────────────────────────────
+// TODO(api): no backend endpoint yet — there is no user/role list, invite,
+// suspend, or role-change route under /bailey/api/* (the admin devices API
+// returns per-user devices but no roles/status). This whole view, plus the
+// per-user device drawer below, stays on seed data. (When wiring the
+// drawer later, /bailey/api/admin/devices/remove is the real revoke route.)
 function UsersView({ ctx }) {
   const { data, setData, toast, go, currentUser } = ctx;
   const [query, setQuery] = useP('');
@@ -258,34 +264,49 @@ function InvitePersonModal({ open, onClose, data, setData, toast }) {
 
 // ─── DEVICE APPROVALS (the trust gate) ──────────────────────────────────────
 function ApprovalsView({ ctx }) {
-  const { data, setData, toast } = ctx;
+  const { data, setData, toast, refresh } = ctx;
   const [focusId, setFocusId] = useP(data.pending[0]?.id || null);
   const [code, setCode] = useP('');
   const [error, setError] = useP(false);
+  const [errMsg, setErrMsg] = useP('');
+  const [busy, setBusy] = useP(false);
 
-  React.useEffect(() => { setCode(''); setError(false); }, [focusId]);
+  React.useEffect(() => { setCode(''); setError(false); setErrMsg(''); }, [focusId]);
+  // Keep a valid focus as the live list changes (mount, refetch).
+  React.useEffect(() => {
+    if (!data.pending.find(p => p.id === focusId)) setFocusId(data.pending[0]?.id || null);
+  }, [data.pending]);
 
   const focus = data.pending.find(p => p.id === focusId) || null;
   const codeNoSep = (s) => s.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-  const matches = focus && codeNoSep(code) === codeNoSep(focus.code);
+  // The backend does NOT send the expected code (the admin reads it off
+  // the user's screen — that's the trust step), so we can't match locally.
+  // We require a full 8-char entry and let the server validate it; a
+  // mismatch comes back as a 401 from /2fa-gate/approve.
+  const codeReady = focus && codeNoSep(code).length >= 8;
 
-  const approve = () => {
-    if (!matches) { setError(true); return; }
-    const dev = focus;
-    setData(d => {
-      const pending = d.pending.filter(p => p.id !== dev.id);
-      // mark the user active if they were invited; bump device count
-      const users = d.users.map(u => u.email === dev.userEmail
-        ? { ...u, status: 'active', devices: u.devices + 1, lastActive: 'now' } : u);
-      return { ...d, pending, users };
-    });
-    toast(`Device trusted for ${dev.userName}`, 'success');
-    const next = data.pending.filter(p => p.id !== dev.id)[0];
-    setFocusId(next ? next.id : null);
+  // Live: POST email+code to the gate's approve handler, then re-fetch the
+  // pending list. On a code mismatch the backend returns 401 → ApiError.
+  const approve = async () => {
+    if (!codeReady || !focus) { setError(true); return; }
+    setBusy(true); setError(false); setErrMsg('');
+    try {
+      await PApi.approvePair(focus.userEmail, code.trim());
+      toast(`Device trusted for ${focus.userName}`, 'success');
+      await Promise.all([refresh('approvals'), refresh('devices')]);
+    } catch (e) {
+      setError(true);
+      setErrMsg(e instanceof PApiError && e.status === 401
+        ? "Code didn't match — check with them and try again."
+        : (e.message || 'Approval failed.'));
+    } finally { setBusy(false); }
   };
+  // TODO(api): no backend endpoint yet — there's no "deny/reject pending
+  // pair" route in bailey_dispatch.go. Pending requests expire on their
+  // own; "Dismiss" only clears it from this view until the next refetch.
   const deny = (p) => {
     setData(d => ({ ...d, pending: d.pending.filter(x => x.id !== p.id) }));
-    toast(`Request from ${p.userName} denied`, 'danger');
+    toast(`Dismissed request from ${p.userName} (it will expire server-side)`, 'info');
     const next = data.pending.filter(x => x.id !== p.id)[0];
     setFocusId(next ? next.id : null);
   };
@@ -301,6 +322,11 @@ function ApprovalsView({ ctx }) {
     <div>
       <PPageHeader title="Device approvals" icon="shield-check"
         subtitle="Keycloak proves who someone is. This step proves which device they're on. A signed-in user reaches the server only after you confirm the code shown on their screen — so a compromised Keycloak account still can't get in." />
+
+      {data.load.approvals !== 'ok' && (
+        <PLiveState status={data.load.approvals} error={data.error.approvals}
+          label="Loading pending approvals…" onRetry={() => refresh('approvals')} />
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: '340px 1fr', gap: 18, alignItems: 'start' }}>
         {/* Left: queue */}
@@ -327,10 +353,9 @@ function ApprovalsView({ ctx }) {
                       <PDeviceIcon kind={p.kind} size={16} color={PC.muted} />
                     </span>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: PC.fg }}>{p.userName}</div>
-                      <div style={{ fontSize: 11.5, color: PC.muted }}>{p.os} · {p.location}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: PC.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.userName}</div>
+                      <div style={{ fontSize: 11.5, color: PC.muted }}>Pending pair · {p.requested}</div>
                     </div>
-                    {p.firstDevice && <PPill tone="info" size="xs">1st</PPill>}
                   </button>
                 );
               })}
@@ -360,13 +385,11 @@ function ApprovalsView({ ctx }) {
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0, padding: '6px 22px 4px' }}>
               <div style={{ paddingRight: 18 }}>
-                {detailRow('Device', `${focus.browser}`)}
-                {detailRow('Operating system', focus.os)}
+                {detailRow('Account', focus.userEmail, true)}
                 {detailRow('Signed in via', focus.oauth)}
               </div>
               <div style={{ paddingLeft: 18, borderLeft: `1px solid ${PC.surface2}` }}>
-                {detailRow('IP address', focus.ip, true)}
-                {detailRow('Location', focus.location)}
+                {detailRow('Requested', focus.requested)}
                 {detailRow('Trust origin', 'Admin approval')}
               </div>
             </div>
@@ -382,15 +405,14 @@ function ApprovalsView({ ctx }) {
                 Ask {focus.userName.split(' ')[0]} to read you the code shown on their device, then type it below. This proves they're physically present.
               </p>
               <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-                <PSeg format={[4, 4]} value={code} onChange={v => { setCode(v); setError(false); }} size="md" auto />
-                <PProtoHint>user is showing&nbsp;<strong style={{ color: PC.fg, fontFamily: 'Geist Mono, monospace' }}>{focus.code}</strong></PProtoHint>
+                <PSeg format={[4, 4]} value={code} onChange={v => { setCode(v); setError(false); setErrMsg(''); }} size="md" auto />
               </div>
               {error && <div style={{ marginTop: 10, fontSize: 12.5, color: PC.red, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <PIcon name="x-circle" size={14} color={PC.red} /> Code doesn't match. Check with {focus.userName.split(' ')[0]} and try again.
+                <PIcon name="x-circle" size={14} color={PC.red} /> {errMsg || `Enter the full code from ${focus.userName.split('@')[0]}'s screen.`}
               </div>}
               <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-                <PBtn variant="primary" leftIcon="shield-check" disabled={codeNoSep(code).length < 8} onClick={approve}>Trust this device</PBtn>
-                <PBtn variant="danger" leftIcon="x" onClick={() => deny(focus)}>Deny</PBtn>
+                <PBtn variant="primary" leftIcon="shield-check" disabled={!codeReady || busy} onClick={approve}>{busy ? 'Approving…' : 'Trust this device'}</PBtn>
+                <PBtn variant="danger" leftIcon="x" disabled={busy} onClick={() => deny(focus)}>Dismiss</PBtn>
               </div>
             </div>
           </PCard>
