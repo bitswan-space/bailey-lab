@@ -23,7 +23,21 @@ if [ "$BITSWAN_AUTOMATION_STAGE" = "live-dev" ]; then
   "$VITE" --config /deps/vite.config.mjs --host 127.0.0.1 --port 5173 &
 else
   echo "Frontend: building production bundle, serving on :5173 + shim on :8080"
+  # Build from a writable copy under /tmp with a freshly-created node_modules
+  # symlink to /deps. The deployed /app is read-only, and in materialized
+  # (non-live-dev) deploys its committed `node_modules -> /deps/node_modules`
+  # symlink isn't reliably resolvable, so Rollup can't find bare imports like
+  # `react/jsx-runtime`. Building against a known-good symlink fixes that
+  # deterministically regardless of how the tree was materialized.
+  BUILD_DIR=/tmp/frontend-build
+  rm -rf "$BUILD_DIR"
+  mkdir -p "$BUILD_DIR"
+  cp -a /app/. "$BUILD_DIR"/
+  rm -rf "$BUILD_DIR/node_modules"
+  ln -s /deps/node_modules "$BUILD_DIR/node_modules"
+  cd "$BUILD_DIR"
   "$VITE" build --config /deps/vite.config.mjs --outDir /tmp/dist --emptyOutDir
+  cd /app
   serve -s /tmp/dist -l 5173 &
 fi
 
