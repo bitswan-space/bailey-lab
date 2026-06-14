@@ -32,8 +32,22 @@ type endpointRecord struct {
 	// membership to (the workspace dashboard for workspace-spawned
 	// endpoints). Empty for top-level endpoints.
 	ParentEndpoint string
-	CreatedAt      string
+	// Kind classifies the endpoint for the Bailey launcher and admin UIs:
+	// "workspace" (a workspace dashboard — a top-level entry), "frontend"
+	// (an exposed business-process app under a workspace), or "service"
+	// (gitops/editor and other infrastructure). Empty when unknown (e.g.
+	// pre-migration rows or routes registered without a kind). It is
+	// explicit data set at registration — never inferred from the hostname.
+	Kind      string
+	CreatedAt string
 }
+
+// Endpoint kinds. Stored verbatim in endpoints.kind.
+const (
+	endpointKindWorkspace = "workspace"
+	endpointKindFrontend  = "frontend"
+	endpointKindService   = "service"
+)
 
 // endpointRole is "owner", "access", or "" (no access).
 type endpointRole string
@@ -68,10 +82,10 @@ func getEndpoint(hostname string) (*endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), created_at
+	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), created_at
 	                    FROM endpoints WHERE hostname = ? COLLATE NOCASE`, hostname)
 	var e endpointRecord
-	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.CreatedAt); err != nil {
+	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -85,7 +99,7 @@ func getEndpoint(hostname string) (*endpointRecord, error) {
 // the workspace dashboard for workspace-spawned endpoints. Idempotent:
 // if the row already exists, returns the existing record without
 // overwriting — the original owner and parent are preserved.
-func registerEndpoint(hostname, ownerEmail, displayName, parentEndpoint string) (*endpointRecord, error) {
+func registerEndpoint(hostname, ownerEmail, displayName, parentEndpoint, kind string) (*endpointRecord, error) {
 	db, err := openBaileyDB()
 	if err != nil {
 		return nil, err
@@ -96,11 +110,21 @@ func registerEndpoint(hostname, ownerEmail, displayName, parentEndpoint string) 
 		return nil, fmt.Errorf("hostname and owner are required")
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = db.Exec(`INSERT OR IGNORE INTO endpoints (hostname, owner_email, display_name, parent_endpoint, created_at)
-	                  VALUES (?, ?, ?, ?, ?)`,
-		hostname, ownerEmail, displayName, parentEndpoint, now)
+	_, err = db.Exec(`INSERT OR IGNORE INTO endpoints (hostname, owner_email, display_name, parent_endpoint, kind, created_at)
+	                  VALUES (?, ?, ?, ?, ?, ?)`,
+		hostname, ownerEmail, displayName, parentEndpoint, kind, now)
 	if err != nil {
 		return nil, err
+	}
+	// A row registered earlier without a kind (or as a plain route, before
+	// its workspace context was known) should pick up an explicit kind once
+	// one is supplied — INSERT OR IGNORE won't update the existing row, so
+	// fill an empty kind in place. Never downgrade a known kind.
+	if kind != "" {
+		if _, err := db.Exec(`UPDATE endpoints SET kind = ? WHERE hostname = ? COLLATE NOCASE AND COALESCE(kind,'') = ''`,
+			kind, hostname); err != nil {
+			return nil, err
+		}
 	}
 	return getEndpoint(hostname)
 }
@@ -328,7 +352,7 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), created_at FROM endpoints`)
+	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), created_at FROM endpoints`)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +360,7 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	var out []endpointRecord
 	for rows.Next() {
 		var e endpointRecord
-		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -356,6 +380,24 @@ func listEndpointsWhereUserCanShare(email string, groups []string) ([]endpointRe
 	for _, e := range endpoints {
 		role, _ := roleFor(e.Hostname, email, groups)
 		if role == roleOwner {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// listAccessibleEndpoints returns every registered endpoint the caller can
+// reach (owner OR access, via email or group), used to build the Bailey
+// launcher. Filtering is the same authority check the gate enforces, so the
+// menu only ever shows endpoints the user could actually open.
+func listAccessibleEndpoints(email string, groups []string) ([]endpointRecord, error) {
+	endpoints, err := listAllEndpoints()
+	if err != nil {
+		return nil, err
+	}
+	var out []endpointRecord
+	for _, e := range endpoints {
+		if role, _ := roleFor(e.Hostname, email, groups); role != roleNone {
 			out = append(out, e)
 		}
 	}

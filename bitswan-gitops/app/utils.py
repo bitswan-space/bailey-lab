@@ -384,8 +384,14 @@ def add_workspace_route_to_ingress(
     # the daemon's parent-delegation in acl.go). State the parent explicitly
     # rather than relying on the daemon's metadata fallback.
     parent_endpoint = f"{workspace_name}-dashboard.{gitops_domain}"
+    # Only exposed automations (frontends) reach this path, so mark the
+    # endpoint as a frontend for the Bailey launcher.
     return add_route_to_ingress(
-        hostname, upstream, workspace_name, parent_endpoint=parent_endpoint
+        hostname,
+        upstream,
+        workspace_name,
+        parent_endpoint=parent_endpoint,
+        kind="frontend",
     )
 
 
@@ -411,7 +417,11 @@ def _ingress_client_and_base() -> tuple:
 
 
 def add_route_to_ingress(
-    hostname: str, upstream: str, workspace_name: str = "", parent_endpoint: str = ""
+    hostname: str,
+    upstream: str,
+    workspace_name: str = "",
+    parent_endpoint: str = "",
+    kind: str = "",
 ) -> bool:
     body = {
         "hostname": hostname,
@@ -420,6 +430,11 @@ def add_route_to_ingress(
     }
     if parent_endpoint:
         body["parent_endpoint"] = parent_endpoint
+    # kind classifies the endpoint for the Bailey launcher ("frontend" for
+    # exposed automations, "service" otherwise). Explicit data — the daemon
+    # never infers it from the hostname.
+    if kind:
+        body["kind"] = kind
     try:
         client, base = _ingress_client_and_base()
         with client:

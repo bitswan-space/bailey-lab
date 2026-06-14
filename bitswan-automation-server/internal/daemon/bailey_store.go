@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS endpoints (
   owner_email     TEXT NOT NULL COLLATE NOCASE,
   display_name    TEXT,
   parent_endpoint TEXT COLLATE NOCASE,
+  -- kind: 'workspace' | 'frontend' | 'service' (explicit launcher class).
+  kind            TEXT,
   created_at      TEXT NOT NULL
 );
 
@@ -125,6 +127,14 @@ func openBaileyDB() (*sql.DB, error) {
 			!strings.Contains(err.Error(), "duplicate column name") {
 			db.Close()
 			baileyDBErr = fmt.Errorf("migrate endpoints.parent_endpoint: %w", err)
+			return
+		}
+		// Migration for databases created before kind existed. kind classifies
+		// endpoints for the Bailey launcher ("workspace"|"frontend"|"service").
+		if _, err := db.Exec(`ALTER TABLE endpoints ADD COLUMN kind TEXT`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate endpoints.kind: %w", err)
 			return
 		}
 		baileyDB = db

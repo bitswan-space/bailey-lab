@@ -63,6 +63,14 @@ type IngressAddRouteRequest struct {
 	// that's the workspace dashboard. When empty, the daemon resolves
 	// it from the workspace's recorded metadata (dashboard-url).
 	ParentEndpoint string `json:"parent_endpoint,omitempty"`
+	// Kind classifies the endpoint for the Bailey launcher: "frontend"
+	// (an exposed business-process app), "service" (gitops/editor and other
+	// infrastructure), or "workspace". Callers pass it as explicit data —
+	// e.g. gitops marks exposed automations "frontend" and everything else
+	// "service". The daemon overrides it to "workspace" for a route that
+	// resolves to a top-level (parentless) dashboard. Empty is treated as
+	// "service" for parented routes.
+	Kind string `json:"kind,omitempty"`
 }
 
 // IngressAddRouteResponse represents the response from adding a route
@@ -833,7 +841,16 @@ func addRouteToIngress(req IngressAddRouteRequest, jwtToken string) error {
 		if display == "" {
 			display = outer
 		}
-		if _, err := registerEndpoint(outer, ownerEmail, display, parent); err != nil {
+		// A parentless route is a workspace dashboard (a top-level launcher
+		// entry); otherwise honour the caller's explicit kind, defaulting a
+		// parented route to "service" when unspecified.
+		kind := req.Kind
+		if parent == "" {
+			kind = endpointKindWorkspace
+		} else if kind == "" {
+			kind = endpointKindService
+		}
+		if _, err := registerEndpoint(outer, ownerEmail, display, parent, kind); err != nil {
 			fmt.Printf("Warning: failed to register Bailey endpoint for %s: %v\n", outer, err)
 		}
 	}

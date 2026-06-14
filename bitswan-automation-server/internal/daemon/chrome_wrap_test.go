@@ -114,7 +114,7 @@ func TestChromeWrap_NoIdentityFallsThrough(t *testing.T) {
 
 func TestChromeWrap_OwnerSeesShareButton(t *testing.T) {
 	host := "wrap-share-owner.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 
