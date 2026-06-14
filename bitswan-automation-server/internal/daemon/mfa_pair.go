@@ -118,8 +118,50 @@ func pendingPairHandler(w http.ResponseWriter, r *http.Request, email string) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// The "Authenticator" self-trust tab is offered ONLY when the user
+	// actually has an authenticator enrolled (opt-in). Otherwise the page
+	// shows admin-approval only, with an "Ask an admin instead" note.
+	rec, _ := loadTOTPRecord(email)
+	totpEnrolled := rec != nil
 	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprint(w, pendingPairHTML(email, e))
+	fmt.Fprint(w, pendingPairHTML(email, e, totpEnrolled, false, ""))
+}
+
+// selfTrustHandler serves /2fa-gate/self-trust — the ApprovalScene
+// "Authenticator" tab. A user who has opted into an authenticator can
+// trust THIS browser immediately with their current 6-digit TOTP, no
+// admin needed. This is the ONLY self-trust path that doesn't require an
+// already-trusted approver, and it's available solely because the user
+// proved possession of their enrolled authenticator secret.
+func selfTrustHandler(w http.ResponseWriter, r *http.Request, email string) {
+	rec, err := loadTOTPRecord(email)
+	if err != nil || rec == nil {
+		// No authenticator enrolled → self-trust isn't available; send
+		// them back to admin approval.
+		http.Redirect(w, r, mfaGatePathPrefix+"/pending-pair", http.StatusSeeOther)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	code := strings.TrimSpace(r.FormValue("code"))
+	if !totp.Validate(code, rec.Secret) {
+		e, _ := generatePendingPair(email)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, pendingPairHTML(email, e, true, true, "That code didn't match — check your authenticator and try again."))
+		return
+	}
+	if _, err := completeNewDevicePairFor(w, r, email, "self via authenticator"); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	originRedirect(w, r)
 }
 
 func pendingPairPollHandler(w http.ResponseWriter, r *http.Request, email string) {
@@ -283,31 +325,68 @@ func originRedirectPath(r *http.Request) string {
 	return "/"
 }
 
+// recoveryHandler serves /2fa-gate/recovery — the RecoveryScene: the user
+// has lost access to every trusted device and recovers with an
+// authenticator code OR a single-use backup code. Both are OPT-IN (set up
+// in the console's Security & recovery); recovery is the ONLY place a TOTP
+// is required, and only if the user actually enrolled one. Either factor,
+// once validated, trusts THIS device.
 func recoveryHandler(w http.ResponseWriter, r *http.Request, email string) {
-	rec, err := loadTOTPRecord(email)
-	if err != nil || rec == nil {
+	rec, _ := loadTOTPRecord(email)
+	totpEnrolled := rec != nil
+	backupEnrolled := dbBackupCodesExist(email)
+	if !totpEnrolled && !backupEnrolled {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprint(w, errorBody(email, "TOTP recovery isn't set up for this account."))
+		fmt.Fprint(w, errorBody(email, "No recovery method is set up for this account. Have an admin approve this device instead."))
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
+		// Default to the authenticator tab when enrolled, else backup; an
+		// explicit ?mode=backup flips to the backup-code input.
+		backupMode := !totpEnrolled || strings.EqualFold(r.URL.Query().Get("mode"), "backup")
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, recoveryFormHTML(email, ""))
+		fmt.Fprint(w, recoveryFormHTML(email, totpEnrolled, backupEnrolled, backupMode, ""))
 	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mode := strings.TrimSpace(r.FormValue("mode"))
+		if mode == "backup" {
+			backup := strings.TrimSpace(r.FormValue("backup"))
+			ok, err := dbConsumeBackupCode(email, backup)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(http.StatusUnauthorized)
+				fmt.Fprint(w, recoveryFormHTML(email, totpEnrolled, backupEnrolled, true, "That doesn't look like a valid backup code."))
+				return
+			}
+			if _, err := completeNewDevicePairFor(w, r, email, "self via backup code"); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			originRedirect(w, r)
+			return
+		}
+		// Authenticator recovery.
+		if !totpEnrolled {
+			http.Error(w, "authenticator not set up for this account", http.StatusForbidden)
 			return
 		}
 		code := strings.TrimSpace(r.FormValue("code"))
 		if !totp.Validate(code, rec.Secret) {
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, recoveryFormHTML(email, "Code didn't match — try again."))
+			fmt.Fprint(w, recoveryFormHTML(email, totpEnrolled, backupEnrolled, false, "Code didn't match — try again."))
 			return
 		}
-		if _, err := completeNewDevicePairFor(w, r, email, "self via TOTP recovery"); err != nil {
+		if _, err := completeNewDevicePairFor(w, r, email, "self via authenticator recovery"); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -320,43 +399,140 @@ func recoveryHandler(w http.ResponseWriter, r *http.Request, email string) {
 func init() {
 	handlePendingPair = pendingPairHandler
 	handlePendingPairPoll = pendingPairPollHandler
+	handleSelfTrust = selfTrustHandler
 	handleApprovePair = approveHandler
 	handleRecovery = recoveryHandler
 }
 
 // --- HTML ---
 
-func pendingPairHTML(email string, e *pairingEntry) string {
-	body := fmt.Sprintf(`
-<div style="text-align:center;padding:64px 24px;">
-  <div style="margin-bottom:32px;">%s</div>
-  <div style="font-size:72px;letter-spacing:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:300;color:#18181B;margin:8px 0;">%s</div>
-  <p style="color:#71717A;font-size:14px;margin:24px 0 4px;">Read this code to an admin to trust this browser.</p>
-  <p style="color:#A1A1AA;font-size:13px;margin:0;" id="status">Waiting for approval…</p>
+// userCheckSVG / keyRoundTabSVG are the small method-tab icons in the
+// ApprovalScene method switch.
+const userCheckSVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/></svg>`
+const keyRoundTabSVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>`
+
+// pendingPairHTML renders the "Trust this device" page (ApprovalScene).
+//
+// Primary path: an admin (or any already-trusted device) approves the
+// displayed 6-digit code — the page polls and redirects on approval.
+//
+// Secondary path, shown ONLY when totpEnrolled: an "Authenticator" tab
+// where the user enters their current 6-digit TOTP to self-trust this
+// browser ("no admin needed"). When no authenticator is enrolled the
+// footer offers "Ask an admin instead" instead of a tab.
+//
+// showTOTP selects which tab is active on load; totpErr is an inline
+// error under the authenticator field.
+func pendingPairHTML(email string, e *pairingEntry, totpEnrolled, showTOTP bool, totpErr string) string {
+	adminActive := !showTOTP
+	// Method switch — only rendered when an authenticator self-trust path
+	// exists; with no authenticator there's nothing to switch to.
+	tabs := ""
+	if totpEnrolled {
+		adminCls, totpCls := "sc-tab", "sc-tab"
+		if adminActive {
+			adminCls += " on"
+		} else {
+			totpCls += " on"
+		}
+		tabs = fmt.Sprintf(`<div class="sc-tabs">
+  <a href="%s/pending-pair" class="%s"><span style="color:%s;display:inline-flex;">%s</span>Admin approval</a>
+  <a href="%s/self-trust" class="%s"><span style="color:%s;display:inline-flex;">%s</span>Authenticator</a>
+</div>`,
+			html.EscapeString(mfaGatePathPrefix), adminCls, scPrimary, userCheckSVG,
+			html.EscapeString(mfaGatePathPrefix), totpCls, scPrimary, keyRoundTabSVG)
+	}
+
+	// Admin-approval panel: the code + a polling status line.
+	adminPanel := fmt.Sprintf(`<div id="sc-admin-panel"%s>
+  <div class="sc-code-label" style="text-align:center;">Read this code to an admin</div>
+  <div class="sc-code" style="text-align:center;font-size:40px;letter-spacing:10px;margin:6px 0 2px;">%s</div>
+  <div class="sc-wait"><span class="sc-spin"></span>Waiting for an admin to approve…</div>
+</div>`, hiddenIf(showTOTP), html.EscapeString(e.Code))
+
+	// Authenticator self-trust panel (only meaningful when enrolled).
+	totpPanel := ""
+	if totpEnrolled {
+		errBlock := ""
+		if totpErr != "" {
+			errBlock = `<div class="sc-err">` + html.EscapeString(totpErr) + `</div>`
+		}
+		totpPanel = fmt.Sprintf(`<div id="sc-totp-panel"%s>
+  <p class="sc-sub" style="margin:0 auto 16px;">Enter the current 6-digit code from your authenticator app to trust this device right away &mdash; no admin needed.</p>
+  <form method="POST" action="%s/self-trust">
+    <input class="sc-input" type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="000000" %srequired>
+    %s
+    <div style="margin-top:16px;"><button type="submit" class="sc-btn">Verify &amp; trust this device</button></div>
+  </form>
+</div>`, hiddenIf(!showTOTP), html.EscapeString(mfaGatePathPrefix), autofocusIf(showTOTP), errBlock)
+	}
+
+	// Card footer: when an authenticator exists, the alternate-method
+	// hint; otherwise the "ask an admin" reassurance.
+	foot := ""
+	if totpEnrolled {
+		altLink := fmt.Sprintf(`<a href="%s/pending-pair" class="sc-link">Ask an admin instead</a>`, html.EscapeString(mfaGatePathPrefix))
+		if !showTOTP {
+			altLink = fmt.Sprintf(`<a href="%s/self-trust" class="sc-link">Use your authenticator</a>`, html.EscapeString(mfaGatePathPrefix))
+		}
+		foot = fmt.Sprintf(`<div class="sc-card-foot" style="justify-content:center;"><span>Trusting on another device? %s</span></div>`, altLink)
+	} else {
+		foot = fmt.Sprintf(`<div class="sc-card-foot" style="justify-content:center;"><span>No authenticator set up? Have an admin approve the code at <span style="font-family:'Geist Mono',monospace;">%s/approve</span>.</span></div>`,
+			html.EscapeString(mfaGatePathPrefix))
+	}
+
+	card := fmt.Sprintf(`<div class="sc-pad">
   %s
+  <h1 class="sc-h1">Trust this device</h1>
+  <p class="sc-sub">You're signed in, but this device isn't trusted yet. Confirm it with your authenticator, or have an admin approve the code.</p>
+  %s
+  %s
+  %s
+  <div style="text-align:center;margin-top:18px;">%s</div>
 </div>
-<script>
-async function poll() {
-  try {
-    const r = await fetch('%s/pending-pair/poll', {credentials:'same-origin'});
-    if (r.status === 200) {
+%s`, sceneSignedInRow(email), tabs, adminPanel, totpPanel, whySoComplicatedHelper(), foot)
+
+	// Polling script + spinner CSS. Only poll while the admin panel is
+	// the active view (self-trust doesn't need it), but it's harmless to
+	// always poll, so we keep it simple and always run it.
+	extraHead := `<style>
+.sc-spin{width:14px;height:14px;border:2px solid #c7d2fe;border-top-color:#093df5;border-radius:9999px;display:inline-block;animation:sc-rot .8s linear infinite;}
+@keyframes sc-rot{to{transform:rotate(360deg);}}
+</style>`
+	extraBody := fmt.Sprintf(`<script>
+async function poll(){
+  try{
+    const r = await fetch('%s/pending-pair/poll',{credentials:'same-origin'});
+    if(r.status===200){
       const d = await r.json();
-      document.getElementById('status').textContent = 'Approved. Redirecting…';
-      setTimeout(() => { window.location = d.redirect_path || '/'; }, 600);
+      var p = document.querySelector('#sc-admin-panel .sc-wait');
+      if(p) p.textContent = 'Approved. Redirecting…';
+      setTimeout(function(){ window.location = d.redirect_path || '/'; }, 600);
       return;
     }
-  } catch (e) {}
+  }catch(e){}
   setTimeout(poll, 2000);
 }
 poll();
-</script>
-<meta http-equiv="refresh" content="%d">`,
-		bitswanLogoSVG, html.EscapeString(e.Code), whySoComplicatedHelper(),
-		html.EscapeString(mfaGatePathPrefix), int(pairingTTL.Seconds()))
-	_ = email
-	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>Trust device</title>%s<style>%s
-body { background:#FAFAFA; }</style></head><body>%s</body></html>`,
-		bitswanFavicon, bitswanPageCSS, body)
+</script>`, html.EscapeString(mfaGatePathPrefix))
+
+	return scenePage("Trust this device", "", scenePillTone{}, card, "", extraHead, extraBody)
+}
+
+// hiddenIf / autofocusIf are tiny attribute helpers for the dual-panel
+// pending-pair markup.
+func hiddenIf(cond bool) string {
+	if cond {
+		return ` style="display:none;"`
+	}
+	return ""
+}
+
+func autofocusIf(cond bool) string {
+	if cond {
+		return "autofocus "
+	}
+	return ""
 }
 
 func approveListHTML(approverEmail string, approverIsAdmin bool, errorForEmail, msgBanner string) string {
@@ -420,35 +596,74 @@ func approveListHTML(approverEmail string, approverIsAdmin bool, errorForEmail, 
 		bitswanFavicon, bitswanPageCSS, body)
 }
 
-func recoveryFormHTML(email, errMsg string) string {
+// recoveryKeySVG is the key-round mark in the RecoveryScene icon chip.
+const recoveryKeySVG = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#18181b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>`
+
+// recoveryFormHTML renders the "Recover access" page (RecoveryScene):
+// authenticator code OR a single-use backup code → trust this device.
+// backupMode selects which input is shown; the footer link toggles
+// between the two when both are available.
+func recoveryFormHTML(email string, totpEnrolled, backupEnrolled, backupMode bool, errMsg string) string {
+	// Can't be in backup mode if no backup codes exist (and vice versa).
+	if backupMode && !backupEnrolled {
+		backupMode = false
+	}
+	if !backupMode && !totpEnrolled {
+		backupMode = true
+	}
 	errBlock := ""
 	if errMsg != "" {
-		errBlock = `<p class="note" style="color:#b00020;"><b>` + html.EscapeString(errMsg) + `</b></p>`
+		errBlock = `<div class="sc-err">` + html.EscapeString(errMsg) + `</div>`
 	}
-	body := fmt.Sprintf(`
-<div class="header">%s<h1>Recover with authenticator</h1></div>
-<div class="card">
-  <p>Signed in as <code>%s</code>. Enter the 6-digit code from your authenticator app:</p>
+
+	var panel string
+	if backupMode {
+		panel = fmt.Sprintf(`<div style="font-size:12.5px;color:%s;margin-bottom:14px;text-align:center;">Enter one of your single-use backup codes</div>
+<form method="POST" action="%s/recovery">
+  <input type="hidden" name="mode" value="backup">
+  <input class="sc-input" type="text" name="backup" autocomplete="off" placeholder="XXXX-XXXX" style="letter-spacing:2px;" autofocus required>
   %s
-  <form method="POST" action="%s/recovery">
-    <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autofocus required style="font-size:18px;letter-spacing:4px;padding:6px 8px;width:120px;">
-    <button type="submit" style="background:#093DF5;color:white;border:0;padding:8px 16px;margin-left:8px;border-radius:4px;font-size:14px;cursor:pointer;">Recover</button>
-  </form>
+  <div style="margin-top:18px;"><button type="submit" class="sc-btn">Use backup code</button></div>
+</form>`, scMuted, html.EscapeString(mfaGatePathPrefix), errBlock)
+	} else {
+		panel = fmt.Sprintf(`<div style="font-size:12.5px;color:%s;margin-bottom:14px;text-align:center;">6-digit code from your authenticator app</div>
+<form method="POST" action="%s/recovery">
+  <input type="hidden" name="mode" value="totp">
+  <input class="sc-input" type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="000000" autofocus required>
   %s
-</div>`,
-		bitswanLogoSVG, html.EscapeString(email), errBlock, html.EscapeString(mfaGatePathPrefix), whySoComplicatedHelper())
-	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>Recovery</title>%s<style>%s</style></head><body>%s</body></html>`,
-		bitswanFavicon, bitswanPageCSS, body)
+  <div style="margin-top:18px;"><button type="submit" class="sc-btn">Verify &amp; trust this device</button></div>
+</form>`, scMuted, html.EscapeString(mfaGatePathPrefix), errBlock)
+	}
+
+	// Footer toggle — only when both methods are available.
+	foot := ""
+	if totpEnrolled && backupEnrolled {
+		if backupMode {
+			foot = fmt.Sprintf(`<div class="sc-card-foot" style="justify-content:center;"><a href="%s/recovery" class="sc-link">Use authenticator app instead</a></div>`, html.EscapeString(mfaGatePathPrefix))
+		} else {
+			foot = fmt.Sprintf(`<div class="sc-card-foot" style="justify-content:center;"><a href="%s/recovery?mode=backup" class="sc-link">Use a backup code instead</a></div>`, html.EscapeString(mfaGatePathPrefix))
+		}
+	}
+
+	card := fmt.Sprintf(`<div class="sc-pad">
+  <div class="sc-icon" style="background:%s;">%s</div>
+  <h1 class="sc-h1">Recover access</h1>
+  <p class="sc-sub">You've lost access to every trusted device. Confirm your identity to trust this device and get back in.</p>
+  %s
+  %s
+  <div style="text-align:center;margin-top:18px;">%s</div>
+</div>
+%s`, scSurface2, recoveryKeySVG, sceneSignedInRow(email), panel, whySoComplicatedHelper(), foot)
+
+	return scenePage("Recover access", "Locked out", scPillDanger, card, "", "", "")
 }
 
 func errorBody(email, msg string) string {
-	body := fmt.Sprintf(`
-<div class="header">%s<h1>Trust device</h1></div>
-<div class="card">
-  <p style="color:#b00020;"><b>%s</b></p>
-  <p>Signed in as <code>%s</code>.</p>
-</div>`,
-		bitswanLogoSVG, html.EscapeString(msg), html.EscapeString(email))
-	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>Error</title>%s<style>%s</style></head><body>%s</body></html>`,
-		bitswanFavicon, bitswanPageCSS, body)
+	card := fmt.Sprintf(`<div class="sc-pad">
+  <h1 class="sc-h1">Trust this device</h1>
+  <p class="sc-sub" style="color:%s;">%s</p>
+  %s
+  <div style="text-align:center;">%s</div>
+</div>`, scRed, html.EscapeString(msg), sceneSignedInRow(email), whySoComplicatedHelper())
+	return scenePage("Trust this device", "", scenePillTone{}, card, "", "", "")
 }

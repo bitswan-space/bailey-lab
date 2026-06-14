@@ -315,33 +315,34 @@ func totpEnrollHTML(email, secret, basePath, errMsg string) string {
 	}
 	errBlock := ""
 	if errMsg != "" {
-		errBlock = `<p class="note" style="color:#b00020;"><b>` + html.EscapeString(errMsg) + `</b></p>`
+		errBlock = `<div class="sc-err">` + html.EscapeString(errMsg) + `</div>`
 	}
-	body := fmt.Sprintf(`
-<div class="header">%s<h1>Set up second factor</h1></div>
-<div class="card">
-  <p>Scan this QR with an authenticator app, or type the secret manually:</p>
-  <div style="display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap;">
-    <img alt="TOTP QR" src="%s" style="width:220px;height:220px;border:1px solid #eee;">
-    <div>
-      <p><b>Account:</b> <code>%s</code></p>
-      <p><b>Secret:</b> <code style="font-size:14px;letter-spacing:1px;">%s</code></p>
-    </div>
+	card := fmt.Sprintf(`<div class="sc-pad">
+  <div class="sc-icon" style="background:%s;">%s</div>
+  <h1 class="sc-h1">Set up an authenticator</h1>
+  <p class="sc-sub">This is optional. An authenticator lets you trust a new device yourself and recover if you lose every trusted device &mdash; it's never required to sign in.</p>
+  <div style="display:flex;justify-content:center;margin-bottom:14px;">
+    <img alt="Authenticator QR" src="%s" style="width:180px;height:180px;border:1px solid %s;border-radius:12px;padding:8px;background:#fff;">
   </div>
-  %s
-  <form method="POST" action="%s%s" style="margin-top:16px;">
-    <label>Enter the 6-digit code your app shows:
-      <input type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autofocus required style="font-size:18px;letter-spacing:4px;padding:6px 8px;width:120px;">
-    </label>
-    <button type="submit" style="background:#093DF5;color:white;border:0;padding:8px 16px;margin-left:8px;border-radius:4px;font-size:14px;cursor:pointer;">Verify &amp; finish</button>
+  <div style="text-align:center;font-size:11.5px;color:%s;margin-bottom:18px;">
+    Or enter this key manually:<br><span style="font-family:'Geist Mono',monospace;font-size:13px;letter-spacing:1px;color:%s;">%s</span>
+  </div>
+  <form method="POST" action="%s%s">
+    <input class="sc-input" type="text" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="000000" autofocus required>
+    %s
+    <div style="margin-top:16px;"><button type="submit" class="sc-btn">Verify &amp; finish</button></div>
   </form>
+  <div style="text-align:center;margin-top:14px;">%s</div>
 </div>`,
-		bitswanLogoSVG, html.EscapeString(qrDataURL),
-		html.EscapeString(email), html.EscapeString(secret),
-		errBlock, html.EscapeString(basePath), enrollPathSuffix)
-	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>Set up second factor</title>%s<style>%s</style></head><body>%s</body></html>`,
-		bitswanFavicon, bitswanPageCSS, body)
+		scPrimarySoft, claimKeySVGDark, html.EscapeString(qrDataURL), scBorder,
+		scMuted, scFg, html.EscapeString(secret),
+		html.EscapeString(basePath), enrollPathSuffix, errBlock, whySoComplicatedHelper())
+	return scenePage("Set up an authenticator", "Optional", scPillWarning, card, "", "", "")
 }
+
+// claimKeySVGDark is the key-round mark for the authenticator-enrol icon
+// chip (drawn in the brand blue on the soft chip, matching the scenes).
+const claimKeySVGDark = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#093df5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>`
 
 func totpChallengeHTML(email, basePath, errMsg string, pair *pairingEntry) string {
 	errBlock := ""

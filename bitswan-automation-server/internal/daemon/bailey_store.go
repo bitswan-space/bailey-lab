@@ -136,6 +136,18 @@ CREATE TABLE IF NOT EXISTS server_settings (
   updated_by TEXT NOT NULL COLLATE NOCASE
 );
 
+-- Single-use backup recovery codes. An opt-in recovery shortcut set up
+-- alongside the authenticator in the console's Security & recovery. Each
+-- row is one hashed code; using it deletes the row (single-use). The
+-- recovery flow accepts a backup code OR a TOTP code to trust a device.
+CREATE TABLE IF NOT EXISTS backup_codes (
+  email      TEXT NOT NULL COLLATE NOCASE,
+  code_hash  TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (email, code_hash)
+);
+CREATE INDEX IF NOT EXISTS backup_codes_email_idx ON backup_codes(email);
+
 -- Per-server singletons (the HMAC signing key for session cookies).
 -- value is a BLOB so the raw 32-byte key round-trips without encoding.
 CREATE TABLE IF NOT EXISTS singletons (

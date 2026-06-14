@@ -364,13 +364,26 @@ func handleGatePath(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, gatePathPrefix+"/request-access/"):
 		handleRequestAccess(w, r, email)
 
-	// --- Stage 2/3 MFA + device pages (assigned in mfa_pair.go /
-	// mfa_account.go init()). Each takes the resolved email. ---
+	// --- Device-trust gate pages (assigned in mfa_pair.go /
+	// mfa_account.go / mfa_claim.go init()). Each takes the resolved
+	// email. ---
+
+	// One-time CLAIM / bootstrap (BootstrapScene). Only works while the
+	// server is unclaimed; claims root admin + TOFU-trusts this device.
+	case r.URL.Path == gatePathPrefix+"/claim":
+		handleClaim(w, r, email)
+
 	case r.URL.Path == gatePathPrefix+"/pending-pair":
 		handlePendingPair(w, r, email)
 
 	case r.URL.Path == gatePathPrefix+"/pending-pair/poll":
 		handlePendingPairPoll(w, r, email)
+
+	// Authenticator self-trust path on the trust-this-device page
+	// (ApprovalScene's "Authenticator" tab): a user with TOTP enrolled
+	// can trust this browser with their current 6-digit code, no admin.
+	case r.URL.Path == gatePathPrefix+"/self-trust":
+		handleSelfTrust(w, r, email)
 
 	case r.URL.Path == gatePathPrefix+"/approve":
 		handleApprovePair(w, r, email)

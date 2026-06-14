@@ -23,10 +23,40 @@ func gateReq(host, path, email string, groups []string) *http.Request {
 	return r
 }
 
+// markServerClaimed records a root admin so serverClaimed() is true
+// regardless of the (shared, package-wide) device table state. Used by
+// gate tests that exercise the post-claim "trust this device" path.
+func markServerClaimed(t *testing.T) {
+	t.Helper()
+	if err := dbSetSetting(settingRootAdmin, "root@example.com", "root@example.com"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// resetClaimState wipes the device table and clears the root-admin
+// setting so the server reads as UNCLAIMED. Used by the claim-redirect
+// test. (The package shares one SQLite DB across tests — see TestMain —
+// so the bootstrap window must be reopened explicitly.)
+func resetClaimState(t *testing.T) {
+	t.Helper()
+	db, err := openBaileyDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM devices`); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbDeleteSetting(settingRootAdmin); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestMFAGate_UntrustedDeviceRedirected is the core security assertion:
-// a non-admin signed-in user with no device cookie must be redirected to
-// the pending-pair page rather than reaching the app.
+// on a CLAIMED server, a signed-in user with no device cookie must be
+// redirected to the "trust this device" (pending-pair) page rather than
+// reaching the app — and NOT to any TOTP enrol/challenge page.
 func TestMFAGate_UntrustedDeviceRedirected(t *testing.T) {
+	markServerClaimed(t)
 	w := httptest.NewRecorder()
 	pass := enforceMFAGate(w, gateReq("app.example.com", "/", "user@example.com", nil))
 	if pass {
@@ -37,6 +67,52 @@ func TestMFAGate_UntrustedDeviceRedirected(t *testing.T) {
 	}
 	if loc := w.Header().Get("Location"); loc != gatePathPrefix+"/pending-pair" {
 		t.Errorf("Location = %q, want %q", loc, gatePathPrefix+"/pending-pair")
+	}
+}
+
+// TestMFAGate_UnclaimedRedirectsToClaim verifies that on a fresh
+// (unclaimed) server an eligible signed-in user is sent to the one-time
+// CLAIM page — NOT a TOTP screen, NOT silently auto-paired.
+func TestMFAGate_UnclaimedRedirectsToClaim(t *testing.T) {
+	resetClaimState(t)
+	w := httptest.NewRecorder()
+	// Admin identity is unambiguously eligible to claim.
+	pass := enforceMFAGate(w, gateReq("bailey.example.com", "/", "admin@example.com", []string{"realm/admin"}))
+	if pass {
+		t.Fatal("unclaimed server passed an untrusted device through the gate")
+	}
+	if loc := w.Header().Get("Location"); loc != gatePathPrefix+"/claim" {
+		t.Errorf("Location = %q, want %q (claim page)", loc, gatePathPrefix+"/claim")
+	}
+	// And the gate must NOT have minted a device cookie (no silent TOFU).
+	for _, c := range w.Result().Cookies() {
+		if c.Name == deviceCookieName && c.Value != "" {
+			t.Error("gate silently paired a device on an unclaimed server; want explicit claim")
+		}
+	}
+}
+
+// TestMFAGate_NeverForcesTOTP asserts no gate path ever redirects an
+// untrusted user to a TOTP enrol/challenge screen (the removed #340 gate).
+func TestMFAGate_NeverForcesTOTP(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(*testing.T)
+		groups []string
+	}{
+		{"unclaimed-admin", resetClaimState, []string{"realm/admin"}},
+		{"claimed-admin", markServerClaimed, []string{"realm/admin"}},
+		{"claimed-user", markServerClaimed, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(t)
+			w := httptest.NewRecorder()
+			enforceMFAGate(w, gateReq("app.example.com", "/", "u@example.com", tc.groups))
+			loc := w.Header().Get("Location")
+			if strings.Contains(loc, enrollPathSuffix) || strings.Contains(loc, challengePathSuffix) {
+				t.Errorf("gate forced a TOTP screen: Location = %q", loc)
+			}
+		})
 	}
 }
 
@@ -100,16 +176,19 @@ func TestMFAGate_TrustedDevicePasses(t *testing.T) {
 	}
 }
 
-// TestMFAGate_AdminWithoutSessionChallenged verifies an admin lacking a
-// TOTP session is sent to the challenge (which itself redirects to enrol
-// if not yet enrolled).
-func TestMFAGate_AdminWithoutSessionChallenged(t *testing.T) {
+// TestMFAGate_AdminOnClaimedServerTrustsLikeAnyone verifies that, post-
+// claim, an admin on an untrusted device is sent to the SAME "trust this
+// device" page as anyone else — there is no admin-only TOTP gate anymore.
+// Device trust is the only gate; the Keycloak admin group only governs
+// WHO can approve others, not a forced second factor.
+func TestMFAGate_AdminOnClaimedServerTrustsLikeAnyone(t *testing.T) {
+	markServerClaimed(t)
 	w := httptest.NewRecorder()
 	pass := enforceMFAGate(w, gateReq("app.example.com", "/", "admin@example.com", []string{"realm/admin"}))
 	if pass {
-		t.Fatal("admin without TOTP session passed the gate; want challenge redirect")
+		t.Fatal("admin on untrusted device passed the gate; want trust-device redirect")
 	}
-	if loc := w.Header().Get("Location"); loc != gatePathPrefix+challengePathSuffix {
-		t.Errorf("Location = %q, want %q", loc, gatePathPrefix+challengePathSuffix)
+	if loc := w.Header().Get("Location"); loc != gatePathPrefix+"/pending-pair" {
+		t.Errorf("Location = %q, want %q", loc, gatePathPrefix+"/pending-pair")
 	}
 }
