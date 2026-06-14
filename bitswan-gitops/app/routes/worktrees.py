@@ -42,11 +42,20 @@ def _worktree_db_name(worktree_name: str) -> str:
     return f"postgres_wt_{safe}"
 
 
-async def _clone_postgres_db(worktree_name: str) -> str | None:
-    """Clone the dev Postgres database for a worktree. Returns the new DB name or None."""
+async def _clone_postgres_db(worktree_name: str) -> str:
+    """Clone the dev Postgres database for a worktree. Returns the new DB name.
+
+    A worktree's live-dev backends are wired to connect to
+    `postgres_wt_<worktree>`, so this database MUST exist for the worktree to
+    work. Any failure here is fatal and raises — never silently skip, or the
+    backend boots against a nonexistent database and dies with an opaque 502.
+    """
     secrets = _get_postgres_secrets("dev")
     if not secrets:
-        return None
+        raise RuntimeError(
+            "Postgres dev secrets unavailable; cannot create the worktree "
+            f"database for '{worktree_name}'"
+        )
 
     user = secrets["POSTGRES_USER"]
     password = secrets["POSTGRES_PASSWORD"]
@@ -71,8 +80,10 @@ async def _clone_postgres_db(worktree_name: str) -> str | None:
             filters={"name": [f"^/{container_name}$"]},
         )
         if not containers:
-            logger.warning("Postgres dev container not found, skipping DB clone")
-            return None
+            raise RuntimeError(
+                f"Postgres dev container '{container_name}' not found; cannot "
+                f"create the worktree database for '{worktree_name}'"
+            )
 
         cid = containers[0]["Id"]
 
@@ -89,21 +100,19 @@ async def _clone_postgres_db(worktree_name: str) -> str | None:
             output = await docker_client.exec_start(exec_id)
             info = await docker_client.exec_inspect(exec_id)
             if info.get("ExitCode", 1) != 0 and "already exists" not in (output or ""):
-                logger.warning(
-                    f"Postgres command failed (exit {info.get('ExitCode')}): {output}"
+                raise RuntimeError(
+                    f"Postgres command failed (exit {info.get('ExitCode')}) while "
+                    f"creating worktree database '{new_db}': {output}"
                 )
-                if "CREATE DATABASE" in sql:
-                    return None
 
         logger.info(
             f"Cloned Postgres DB '{source_db}' -> '{new_db}' for worktree '{worktree_name}'"
         )
         return new_db
-    except Exception as e:
-        logger.warning(
+    except DockerError as e:
+        raise RuntimeError(
             f"Failed to clone Postgres DB for worktree '{worktree_name}': {e}"
-        )
-        return None
+        ) from e
 
 
 async def _drop_postgres_db(worktree_name: str) -> None:
@@ -364,12 +373,15 @@ async def create_worktree(body: CreateWorktreeRequest):
                 detail=f"Failed to create worktree for branch '{body.branch_name}'",
             )
 
-    # Clone Postgres dev database for this worktree (best-effort)
-    cloned_db = await _clone_postgres_db(body.branch_name)
+    # Clone the Postgres dev database for this worktree. The worktree's
+    # live-dev backends connect to this database, so it must exist — a failure
+    # here aborts worktree creation rather than leaving a half-built worktree.
+    try:
+        cloned_db = await _clone_postgres_db(body.branch_name)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    result = {"name": body.branch_name, "path": worktree_path}
-    if cloned_db:
-        result["postgres_db"] = cloned_db
+    result = {"name": body.branch_name, "path": worktree_path, "postgres_db": cloned_db}
 
     # Auto-start live-dev for every automation in the new worktree (a fresh
     # worktree carries all of main's BPs). Best-effort — the worktree was
