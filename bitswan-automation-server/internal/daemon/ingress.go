@@ -358,6 +358,22 @@ func initCaddyIngress(verbose bool) (bool, error) {
 // provider (pointed at the daemon's AOC bridge through HTTPREQ_* env vars in
 // the Traefik container) — used for wildcard certificates, which HTTP-01
 // cannot issue.
+// traefikDynamicConfig is loaded by the file provider (see
+// renderTraefikStaticConfig). It forces the TLS edge to negotiate HTTP/1.1
+// only. The protected-ingress upstream chain (oauth2-proxy -> bailey gate ->
+// app) is HTTP/1.1 and cannot carry RFC 8441 WebSocket-over-HTTP/2, so if the
+// edge offered h2 the browser would open h2 websockets whose upgrade Traefik
+// can't bridge to the h1 chain — breaking the dashboard's coding-agent
+// terminal and the vite HMR sockets. Offering only http/1.1 in ALPN makes
+// browsers use HTTP/1.1 websocket upgrades, which the chain carries. The h2
+// multiplexing given up is irrelevant for these internal dev surfaces.
+const traefikDynamicConfig = `tls:
+  options:
+    default:
+      alpnProtocols:
+        - http/1.1
+`
+
 func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
 	cfg := fmt.Sprintf(`entryPoints:
   web:
@@ -367,6 +383,8 @@ func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
 api:
   insecure: true
 providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
   rest:
     insecure: true
   docker:
@@ -496,10 +514,17 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	if err := os.WriteFile(traefikConfigFilePath, []byte(traefikStaticConfig), 0755); err != nil {
 		return false, fmt.Errorf("failed to write traefik.yml: %w", err)
 	}
+	// Dynamic config (TLS ALPN = http/1.1) loaded by the file provider.
+	if err := os.WriteFile(traefikConfig+"/dynamic.yml", []byte(traefikDynamicConfig), 0644); err != nil {
+		return false, fmt.Errorf("failed to write traefik dynamic.yml: %w", err)
+	}
 	if traefikConfigForCompose != traefikConfig {
 		traefikConfigFilePathHost := traefikConfigForCompose + "/traefik.yml"
 		if err := os.WriteFile(traefikConfigFilePathHost, []byte(traefikStaticConfig), 0755); err != nil {
 			return false, fmt.Errorf("failed to write traefik.yml on host: %w", err)
+		}
+		if err := os.WriteFile(traefikConfigForCompose+"/dynamic.yml", []byte(traefikDynamicConfig), 0644); err != nil {
+			return false, fmt.Errorf("failed to write traefik dynamic.yml on host: %w", err)
 		}
 	}
 
