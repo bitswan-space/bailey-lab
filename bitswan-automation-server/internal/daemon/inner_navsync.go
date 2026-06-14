@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -223,4 +226,22 @@ func (c *capturingWriter) Flush() {
 			f.Flush()
 		}
 	}
+}
+
+// Hijack lets connection-upgrade handlers (WebSocket) take over the raw
+// connection. The reverse proxy performs a 101 upgrade by hijacking the
+// conn and writing the switch-protocols response to it directly, which
+// bypasses this writer's buffering entirely — so an upgrade never
+// exercises the text/html rewrite path above. Without this method the
+// proxy sees a non-Hijacker ResponseWriter and aborts every upgrade with
+// 502, which is what broke the dashboard's terminal/chat WebSocket (and
+// dev-server HMR) on inner hosts.
+func (c *capturingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := c.real.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf(
+			"underlying ResponseWriter (%T) does not implement http.Hijacker", c.real,
+		)
+	}
+	return hj.Hijack()
 }
