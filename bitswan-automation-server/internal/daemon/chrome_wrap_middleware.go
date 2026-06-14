@@ -27,6 +27,18 @@ import (
 func chromeWrapMiddleware(inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := requestEndpointHost(r)
+
+		// The reserved bailey.<domain> host serves the embedded Server Console
+		// SPA directly (no upstream, no iframe wrap). It sits behind the same
+		// oauth2-proxy + gate as everything else, so reaching here means the
+		// request is already authenticated.
+		if isServerConsoleHost(host) {
+			if !strings.HasPrefix(r.URL.Path, "/oauth2/") {
+				serveServerConsole(w, r)
+				return
+			}
+		}
+
 		if isInnerHost(host) {
 			inner.ServeHTTP(w, r)
 			return

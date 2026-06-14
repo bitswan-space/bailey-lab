@@ -263,7 +263,7 @@ func enforceEndpointACL(w http.ResponseWriter, r *http.Request, email string, gr
 	host = toOuterHost(host)
 	if isBaileyHost(host) {
 		if ep, _ := getEndpoint(host); ep == nil {
-			_, _ = registerEndpoint(host, email, "Bailey ("+host+")", "")
+			_, _ = registerEndpoint(host, email, "Bailey ("+host+")", "", "")
 		}
 		return true
 	}
