@@ -307,7 +307,7 @@ function Row({
       )}
       <span className={cn('size-1.5 shrink-0 rounded-full', dot)} title={item.status} />
       {!renaming && (
-        <div className="flex opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="flex opacity-60 transition-opacity group-hover:opacity-100">
           <button
             onClick={onStartRename}
             disabled={busy}
