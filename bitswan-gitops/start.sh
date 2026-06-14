@@ -89,6 +89,15 @@ chown -R 1000 /gitops/gitops/
 mkdir -p /gitops/snapshots
 chown 1000 /gitops/snapshots
 
+# Service secrets (postgres/minio env files, pgadmin config) are written here
+# by the gitops process when it auto-enables a BP's declared infra services.
+# The host dir is created by the daemon as root and bind-mounted in, so the
+# user1000 process can't write into it — auto-enable then fails with EACCES on
+# /gitops/secrets and the backend never gets its DB. Recurse: the daemon may
+# have pre-seeded root-owned files here.
+mkdir -p /gitops/secrets
+chown -R 1000 /gitops/secrets
+
 # Always set up Docker group permissions for user1000
 # This ensures user1000 can access Docker socket even when running as root
 setup_docker_group

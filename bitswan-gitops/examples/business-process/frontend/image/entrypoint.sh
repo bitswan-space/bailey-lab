@@ -11,12 +11,19 @@ export PORT=8080
 cp /app/vite.config.mjs /deps/vite.config.mjs
 cd /app
 
+# Use the project's installed vite (pinned in package.json, installed into
+# /deps at image build), NOT `npx vite`. When npx can't resolve the local vite
+# through the bind-mounted /app/node_modules → /deps symlink it silently
+# fetches the latest vite from the registry, and that newer major fails to
+# resolve `react` during the production build.
+VITE=/deps/node_modules/.bin/vite
+
 if [ "$BITSWAN_AUTOMATION_STAGE" = "live-dev" ]; then
   echo "Frontend: vite (hot reload) on :5173 + shim on :8080"
-  npx vite --config /deps/vite.config.mjs --host 127.0.0.1 --port 5173 &
+  "$VITE" --config /deps/vite.config.mjs --host 127.0.0.1 --port 5173 &
 else
   echo "Frontend: building production bundle, serving on :5173 + shim on :8080"
-  npx vite build --config /deps/vite.config.mjs --outDir /tmp/dist --emptyOutDir
+  "$VITE" build --config /deps/vite.config.mjs --outDir /tmp/dist --emptyOutDir
   serve -s /tmp/dist -l 5173 &
 fi
 
