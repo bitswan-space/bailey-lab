@@ -1,6 +1,16 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
+// Self-hosted fonts (vendored): the app runs behind the Bailey protected
+// ingress whose strict CSP forbids external origins, and Bailey must not leak
+// to a third-party CDN — so Roboto / Roboto Mono are bundled locally instead
+// of loaded from fonts.googleapis.com. (Roboto has no 600 weight; 500/700
+// cover the design.)
+import '@fontsource/roboto/400.css';
+import '@fontsource/roboto/500.css';
+import '@fontsource/roboto/700.css';
+import '@fontsource/roboto-mono/400.css';
+import '@fontsource/roboto-mono/500.css';
 import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 
