@@ -1,0 +1,5 @@
+name = "FastAPI worker"
+short_description = """A private Python FastAPI worker. Not exposed to the
+internet; reached by frontends via /api over the Docker network. Python-native,
+so it suits ML / data workloads. Ships with no infra dependencies by default."""
+icon = """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 2v10l8.5 5"/><circle cx="12" cy="12" r="2"/></svg>"""

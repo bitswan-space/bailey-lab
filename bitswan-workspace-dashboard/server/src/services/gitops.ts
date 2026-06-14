@@ -158,6 +158,65 @@ export class GitopsClient {
   }
 
   /**
+   * `POST /automations/frontend` — scaffold a frontend (the only kind, always
+   * exposed through Bailey) into a business process from the baked template.
+   */
+  async addFrontend(input: {
+    bp: string;
+    name: string;
+    worktree?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson('/automations/frontend', input);
+  }
+
+  /**
+   * `POST /automations/worker` — scaffold a private worker container of the
+   * given `type` (e.g. "go", "fastapi") into a business process.
+   */
+  async addWorker(input: {
+    bp: string;
+    name: string;
+    type: string;
+    worktree?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson('/automations/worker', input);
+  }
+
+  /**
+   * `POST /automations/rename` — rename a frontend or worker within a BP.
+   */
+  async renameAutomation(input: {
+    bp: string;
+    old_name: string;
+    new_name: string;
+    worktree?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson('/automations/rename', input);
+  }
+
+  /** Shared POST-JSON helper for the simple scaffolding endpoints above. */
+  private async postJson(
+    path: string,
+    input: unknown,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(input),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `DELETE /worktrees/{name}` — remove a worktree and its branch. Gitops
    * handles the full teardown (git worktree remove, branch -D, postgres
    * cleanup, privileged rm fallback for files owned by container uids).

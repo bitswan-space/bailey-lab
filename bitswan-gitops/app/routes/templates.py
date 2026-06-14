@@ -111,7 +111,7 @@ async def _broadcast_automations(
 # mapped to the `go-worker` template; more types will slot in here).
 
 FRONTEND_TEMPLATE_ID = "frontend"
-WORKER_TEMPLATE_BY_TYPE = {"go": "go-worker"}
+WORKER_TEMPLATE_BY_TYPE = {"go": "go-worker", "fastapi": "fastapi-worker"}
 
 
 class AddFrontendRequest(BaseModel):

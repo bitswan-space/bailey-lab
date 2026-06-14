@@ -82,4 +82,80 @@ export function registerTemplateRoutes(
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   });
+
+  // Stage 1.5 scaffolding: add a frontend / worker / rename within a BP. Each
+  // proxies straight to the matching gitops endpoint; the dashboard's job here
+  // is the auth boundary + request validation (gitops owns the write path).
+  const relay = async (
+    reply: import('fastify').FastifyReply,
+    label: string,
+    call: () => Promise<{ ok: boolean; status: number; body: unknown }>,
+  ) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
+    try {
+      const r = await call();
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err }, `${label} failed`);
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  };
+
+  app.post<{
+    Body: { bp?: string; name?: string; worktree?: string };
+  }>('/api/automations/frontend', async (req, reply) => {
+    const { bp, name, worktree } = req.body ?? {};
+    if (!bp || !isValidBpId(bp)) return reply.code(400).send({ error: 'invalid bp' });
+    if (!name) return reply.code(400).send({ error: 'name required' });
+    if (worktree !== undefined && !isValidWorktreeName(worktree)) {
+      return reply.code(400).send({ error: 'invalid worktree' });
+    }
+    return relay(reply, 'add-frontend', () =>
+      gitops!.addFrontend({ bp, name, ...(worktree ? { worktree } : {}) }),
+    );
+  });
+
+  app.post<{
+    Body: { bp?: string; name?: string; type?: string; worktree?: string };
+  }>('/api/automations/worker', async (req, reply) => {
+    const { bp, name, type, worktree } = req.body ?? {};
+    if (!bp || !isValidBpId(bp)) return reply.code(400).send({ error: 'invalid bp' });
+    if (!name) return reply.code(400).send({ error: 'name required' });
+    if (!type) return reply.code(400).send({ error: 'type required' });
+    if (worktree !== undefined && !isValidWorktreeName(worktree)) {
+      return reply.code(400).send({ error: 'invalid worktree' });
+    }
+    return relay(reply, 'add-worker', () =>
+      gitops!.addWorker({ bp, name, type, ...(worktree ? { worktree } : {}) }),
+    );
+  });
+
+  app.post<{
+    Body: { bp?: string; old_name?: string; new_name?: string; worktree?: string };
+  }>('/api/automations/rename', async (req, reply) => {
+    const { bp, old_name, new_name, worktree } = req.body ?? {};
+    if (!bp || !isValidBpId(bp)) return reply.code(400).send({ error: 'invalid bp' });
+    if (!old_name || !new_name) {
+      return reply.code(400).send({ error: 'old_name and new_name required' });
+    }
+    if (worktree !== undefined && !isValidWorktreeName(worktree)) {
+      return reply.code(400).send({ error: 'invalid worktree' });
+    }
+    return relay(reply, 'rename-automation', () =>
+      gitops!.renameAutomation({
+        bp,
+        old_name,
+        new_name,
+        ...(worktree ? { worktree } : {}),
+      }),
+    );
+  });
 }

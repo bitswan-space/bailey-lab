@@ -52,6 +52,7 @@ interface Item {
 
 const WORKER_TYPES: { type: string; label: string }[] = [
   { type: 'go', label: 'Go backend' },
+  { type: 'fastapi', label: 'FastAPI (Python)' },
 ];
 
 export function EnvironmentPanel({ bp, worktree }: Props) {
