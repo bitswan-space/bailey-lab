@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS endpoints (
   parent_endpoint TEXT COLLATE NOCASE,
   -- kind: 'workspace' | 'frontend' | 'service' (explicit launcher class).
   kind            TEXT,
+  -- stage: deployment stage of the backing automation ('production',
+  -- 'staging', 'dev', 'live-dev', ...). Explicit data set at registration;
+  -- launcher/admin views filter on it (e.g. only production frontends).
+  stage           TEXT,
   created_at      TEXT NOT NULL
 );
 
@@ -135,6 +139,14 @@ func openBaileyDB() (*sql.DB, error) {
 			!strings.Contains(err.Error(), "duplicate column name") {
 			db.Close()
 			baileyDBErr = fmt.Errorf("migrate endpoints.kind: %w", err)
+			return
+		}
+		// Migration for databases created before stage existed. stage is the
+		// deployment stage of the endpoint's automation; views filter on it.
+		if _, err := db.Exec(`ALTER TABLE endpoints ADD COLUMN stage TEXT`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate endpoints.stage: %w", err)
 			return
 		}
 		baileyDB = db
