@@ -1,6 +1,0 @@
-# A FastAPI worker is a private backend: never exposed to the internet,
-# reachable only by frontends and peer workers on the Docker network.
-# There is no expose_to — exposure is controlled at the frontend by Bailey.
-[deployment]
-expose = false
-port = 8080

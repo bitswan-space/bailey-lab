@@ -262,7 +262,7 @@ export const api = {
 
   // Stage 1.5: scaffold frontends / worker containers into a BP directly from
   // the baked templates (no gallery picker). One frontend kind; workers by
-  // type (only "fastapi" today).
+  // type (only "go" today).
   addFrontend: (body: { bp: string; name: string; worktree?: string }) =>
     postJson<CreateAutomationResponse>('/api/automations/frontend', body),
   addWorker: (body: {

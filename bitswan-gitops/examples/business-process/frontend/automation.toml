@@ -1,7 +1,6 @@
-# A frontend is the only part of a business process exposed through Bailey.
-# It serves static assets and proxies /api to the "backend" worker over the
-# private Docker network (see image/main.go). Access is controlled entirely
-# by the Bailey share button + the workspace ACL — there is no expose_to.
+# The frontend is the only part of the business process exposed through
+# Bailey. It serves the React app (vite) and its Go shim proxies /api to the
+# private backend worker (see image/shim). Access is controlled by the Bailey
+# share button + the workspace ACL — there is no expose_to.
 [deployment]
 expose = true
-port = 8080

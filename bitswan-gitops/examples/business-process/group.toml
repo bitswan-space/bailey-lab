@@ -1,5 +1,10 @@
-name = "Business process"
-short_description = """A starter business process: one frontend exposed
-through Bailey, plus a private FastAPI backend worker it proxies to. Add more
-frontends or workers from the dashboard."""
-icon = """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="8" x="3" y="3" rx="2"/><rect width="8" height="8" x="13" y="13" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/></svg>"""
+name = "Internal app"
+short_description = """
+A starter internal business app: one frontend exposed through Bailey, plus a
+private high-performance Go backend worker it talks to over the Docker network
+(with Postgres + MinIO provisioned per business process). Access is controlled
+by the share button — add more frontends or workers from the dashboard.
+"""
+icon = """
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#61dafb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+"""

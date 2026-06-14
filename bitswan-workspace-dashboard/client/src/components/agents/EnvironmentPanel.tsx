@@ -29,7 +29,7 @@ import { cn } from '@/lib/utils';
  *     button (no public/internal type — all frontends are the same kind).
  *     "Add frontend" scaffolds one directly.
  *   - Worker containers: private backends on the Docker network. "Add worker
- *     container" offers a type (only Python FastAPI wired today).
+ *     container" offers a type (only the Go backend wired today).
  *
  * Full CRUD wired to the gitops endpoints; the automations SSE snapshot
  * drives the list. Rename is an inline input; status is the dot on the
@@ -51,7 +51,7 @@ interface Item {
 }
 
 const WORKER_TYPES: { type: string; label: string }[] = [
-  { type: 'fastapi', label: 'Python FastAPI' },
+  { type: 'go', label: 'Go backend' },
 ];
 
 export function EnvironmentPanel({ bp, worktree }: Props) {

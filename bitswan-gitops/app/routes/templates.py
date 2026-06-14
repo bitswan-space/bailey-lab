@@ -107,11 +107,11 @@ async def _broadcast_automations(
 # Stage 1.5: business processes are built from frontends (exposed through
 # Bailey) and worker containers (private backends). These endpoints scaffold
 # them directly from the baked templates — no gallery picker. There is exactly
-# one kind of frontend; workers have a `type` (only "fastapi" is wired today,
-# mapped to the `fastapi-worker` template; more types will slot in here).
+# one kind of frontend; workers have a `type` (only "go" is wired today,
+# mapped to the `go-worker` template; more types will slot in here).
 
 FRONTEND_TEMPLATE_ID = "frontend"
-WORKER_TEMPLATE_BY_TYPE = {"fastapi": "fastapi-worker"}
+WORKER_TEMPLATE_BY_TYPE = {"go": "go-worker"}
 
 
 class AddFrontendRequest(BaseModel):
@@ -123,7 +123,7 @@ class AddFrontendRequest(BaseModel):
 class AddWorkerRequest(BaseModel):
     bp: str
     name: str
-    type: str = "fastapi"
+    type: str = "go"
     worktree: str | None = None
 
 
