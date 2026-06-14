@@ -28,6 +28,20 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := requestEndpointHost(r)
 
+		// Bailey device-trust gate (phase 1). Runs before the console /
+		// inner / chrome branches so it covers the Server Console, the
+		// chrome wrap, AND the proxied apps (which flow through
+		// inner.ServeHTTP → mux → gateHandler). An un-trusted device is
+		// redirected to /2fa-gate/pending-pair (or auto-paired if it's
+		// the first admin on a fresh server); an admin without a TOTP
+		// session is sent to the challenge. The oauth2 + /2fa-gate paths
+		// are exempt inside enforceMFAGate so the redirect target itself
+		// stays reachable. The per-endpoint ACL is NOT run here — it's
+		// enforced separately in enforceProtectedGate.
+		if !enforceMFAGate(w, r) {
+			return
+		}
+
 		if isInnerHost(host) {
 			// The Server Console's inner host serves the embedded SPA instead
 			// of proxying to an upstream. The outer bailey.<domain> host falls

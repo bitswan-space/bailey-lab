@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"net/http"
+	"os"
+	"strings"
 )
 
 // MFA gate constants + origin-cookie helpers.
@@ -46,6 +48,81 @@ var (
 	handleAccountDevices  mfaGateHandler
 	handleAccountTOTP     mfaGateHandler
 )
+
+// enforceMFAGate runs the Bailey device-trust phase (PHASE 1 only).
+// Returns true if the caller should continue; returns false (and writes
+// a redirect or page) when the gate has handled the request.
+//
+// This is the device-trust + admin-TOTP-challenge + first-admin
+// bootstrap step. It deliberately does NOT run the per-endpoint ACL —
+// that is enforced separately in enforceProtectedGate (protected_gate.go),
+// which the gate's own gateHandler still calls. enforceMFAGate is wired
+// at the top of chromeWrapMiddleware so it covers the Server Console,
+// the chrome wrap, and the proxied apps before any of them render.
+//
+// Behaviour (mirrors PR #340's enforceMFAGate phase 1):
+//   - BAILEY_MFA_GATE_DISABLE=1 → pass through (escape hatch).
+//   - No identity → pass through (upstream OIDC failed; the gate never
+//     invents an identity, and the inner handler will reject).
+//   - Paths the un-trusted user needs in order to BECOME trusted are
+//     exempt (oauth2 + the whole MFA gate-path prefix: pending-pair,
+//     poll, approve, recovery, admin challenge/enrol, account pages).
+//     Without this exemption the redirect target would itself be gated,
+//     producing a redirect loop.
+//   - Admin without a valid TOTP session → remember origin + redirect to
+//     the challenge page (which itself bounces to enrol if not enrolled).
+//   - No trusted device:
+//       · admin && no devices exist yet → bootstrap-TOFU: auto-pair this
+//         browser (addDevice + setDeviceCookie) so the very first admin
+//         on a fresh server isn't locked out.
+//       · otherwise → remember origin + redirect to the pending-pair page.
+//   - Trusted device → touchDevice, then pass through.
+func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
+	if os.Getenv("BAILEY_MFA_GATE_DISABLE") == "1" {
+		return true
+	}
+
+	// Exemptions — paths required to become trusted. Kept inside the
+	// gate so every caller is consistent and no redirect loop forms.
+	// gatePathPrefix == mfaGatePathPrefix ("/2fa-gate").
+	if strings.HasPrefix(r.URL.Path, "/oauth2/") ||
+		strings.HasPrefix(r.URL.Path, gatePathPrefix) {
+		return true
+	}
+
+	email, groups := identityFromHeaders(r)
+	if email == "" {
+		return true // no identity → upstream OIDC failed; let it through
+	}
+	admin := isAdminGroups(groups)
+	if admin && !hasValidSession(r, email) {
+		// Admins must clear a TOTP challenge. The challenge handler
+		// redirects to enrol if the admin hasn't enrolled yet.
+		rememberOrigin(w, r)
+		http.Redirect(w, r, gatePathPrefix+challengePathSuffix, http.StatusSeeOther)
+		return false
+	}
+
+	dev := currentDeviceForRequest(r, email)
+	if dev == nil {
+		// Bootstrap: first admin on an empty server gets TOFU'd.
+		if admin && !anyDevicesExist() {
+			rec, err := addDevice(email, deviceNameFromRequest(r))
+			if err != nil {
+				http.Error(w, "bootstrap pair: "+err.Error(), http.StatusInternalServerError)
+				return false
+			}
+			_ = setDeviceCookie(w, r, email, rec.ID)
+			dev = rec
+		} else {
+			rememberOrigin(w, r)
+			http.Redirect(w, r, gatePathPrefix+"/pending-pair", http.StatusSeeOther)
+			return false
+		}
+	}
+	touchDevice(email, dev.ID)
+	return true
+}
 
 // rememberOrigin stashes the path the user was trying to reach in a
 // short-lived cookie so originRedirect can send them back there once
