@@ -62,7 +62,7 @@ async def create_process(
     to debounce).
 
     Auto-setup (best-effort): the default template group
-    (`BITSWAN_DEFAULT_TEMPLATE_GROUP`, default `BitSwanInternalAppGolang`) is
+    (`BITSWAN_DEFAULT_TEMPLATE_GROUP`, default `business-process`) is
     scaffolded into the new BP, and its deploy is kicked off in the background
     — `dev` stage for a main BP, `live-dev` for a worktree BP. Failures never
     fail the BP creation; they surface in the `setup_error` response field.
@@ -106,8 +106,13 @@ async def create_process(
     deploy_task_id: str | None = None
     setup_error: str | None = None
     try:
+        # The default BP is one frontend + one backend worker (the baked
+        # `business-process` group). There is no internal/external frontend
+        # split anymore — a frontend is reachable through Bailey and access
+        # is controlled by the share button; developers add more frontends or
+        # workers from the dashboard's Environment panel.
         group_id = os.environ.get(
-            "BITSWAN_DEFAULT_TEMPLATE_GROUP", "BitSwanInternalAppGolang"
+            "BITSWAN_DEFAULT_TEMPLATE_GROUP", "business-process"
         )
         workspace_root = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
         created = await template_service.create_automation_from_template(

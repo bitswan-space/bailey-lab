@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 # Workspace-local overrides at <workspace_repo>/templates/ win over both.
 BUILTIN_TEMPLATE_ROOTS = [
     os.environ.get("BITSWAN_TEMPLATES_DIR", "/opt/bitswan/examples"),
+    # Dev mode mounts the gitops source at /src, so the templates ship at
+    # /src/examples — discover them there without needing an env override.
+    "/src/examples",
+    # Legacy: an examples repo bind-mounted by older automation-server builds.
     "/workspace/examples",
 ]
 
