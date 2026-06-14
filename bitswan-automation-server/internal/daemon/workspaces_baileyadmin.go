@@ -242,6 +242,32 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 		writeEvent(map[string]any{"event": "error", "error": initErr.Error()})
 		return
 	}
+
+	// Record ownership in the Bailey ACL so the owner-filtered list
+	// (handleListAccessibleWorkspaces) returns this workspace immediately.
+	//
+	// The init pipeline registers the workspace endpoints via
+	// addRouteToIngress, but that path is best-effort and ingress-coupled
+	// (it early-returns when no ingress proxy is detected and only warns on
+	// a registration failure), so the caller can finish "create" without
+	// any ACL row to their name — the workspace then never shows up in
+	// their list. We make ownership explicit and synchronous here:
+	//
+	//   - the dashboard endpoint is the workspace's membership surface
+	//     (kind=workspace, parentless) — the editor/gitops endpoints
+	//     register it as their ACL parent, so owning the dashboard makes
+	//     roleFor(editor|gitops) resolve to owner via parent delegation.
+	//   - we also register editor + gitops directly with the caller as
+	//     owner so the list (which resolves roleFor on exactly those two
+	//     hosts) returns the workspace as owned even if the dashboard was
+	//     disabled (--no-dashboard) or its row is missing.
+	//
+	// registerEndpoint is idempotent and never downgrades an existing
+	// owner, so re-registering rows the init already created is safe.
+	for _, warn := range recordWorkspaceOwnership(name, domain, email) {
+		writeEvent(map[string]any{"event": "log", "stream": "stderr", "message": warn})
+	}
+
 	_ = recordEvent(email, auditWorkspaceCreate, name)
 	gitopsURL := fmt.Sprintf("https://%s-gitops.%s", name, domain)
 	dashboardURL := fmt.Sprintf("https://%s-dashboard.%s", name, domain)
@@ -252,6 +278,42 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 		"gitops_url":    gitopsURL,
 		"dashboard_url": dashboardURL,
 	})
+}
+
+// recordWorkspaceOwnership registers the new workspace's endpoints in the
+// Bailey ACL with the creating caller as OWNER, so the owner-filtered list
+// (handleListAccessibleWorkspaces) returns the workspace immediately after
+// creation. Returns any non-fatal warning messages (a registration that
+// fails is logged, not fatal — the workspace itself was created).
+//
+// The dashboard endpoint is the workspace's membership surface
+// (kind=workspace, parentless); the editor/gitops endpoints register it as
+// their ACL parent, so owning the dashboard makes roleFor(editor|gitops)
+// resolve to owner via parent delegation. We register editor + gitops
+// directly with the caller as owner too, so the list (which resolves
+// roleFor on exactly those two hosts) returns the workspace as owned even
+// when the dashboard is disabled (--no-dashboard) or its row is missing.
+//
+// registerEndpoint is idempotent and never downgrades an existing owner, so
+// re-registering rows the init pipeline already created is safe.
+func recordWorkspaceOwnership(name, domain, email string) []string {
+	var warnings []string
+	dashboardHost := name + "-dashboard." + domain
+	editorHost := name + "-editor." + domain
+	gitopsHost := name + "-gitops." + domain
+	regs := []struct {
+		host, display, parent, kind string
+	}{
+		{dashboardHost, name + " (dashboard)", "", endpointKindWorkspace},
+		{editorHost, name + " (editor)", dashboardHost, endpointKindService},
+		{gitopsHost, name + " (gitops)", dashboardHost, endpointKindService},
+	}
+	for _, reg := range regs {
+		if _, err := registerEndpoint(reg.host, email, reg.display, reg.parent, reg.kind, ""); err != nil {
+			warnings = append(warnings, "warning: failed to record ownership for "+reg.host+": "+err.Error())
+		}
+	}
+	return warnings
 }
 
 // callerOwnsWorkspace is the auth check for trash + restore + update +

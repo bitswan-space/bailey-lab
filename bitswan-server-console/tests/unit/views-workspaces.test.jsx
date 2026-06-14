@@ -1,6 +1,7 @@
 // views-workspaces.test.jsx — OverviewView + WorkspacesView (+ create modal,
 // manage drawer, empty-trash). Covers loaded/loading/error states, search,
-// create (success + invalid + error), trash/restore/update, member edits.
+// create (success + invalid + error), trash/restore/update. Every workspace is
+// live (from /bailey/api/workspaces) — there is no seed/member-edit UI.
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
@@ -52,19 +53,28 @@ describe('WorkspacesView', () => {
     };
   }
 
-  it('renders list, opens a workspace, opens manage drawer', () => {
+  it('renders a live workspace list, opens it, opens the manage drawer', () => {
     const s = spies();
-    render(<Host View={WorkspacesView} data={makeData()} extra={s} />);
+    const data = makeData({ workspaces: [liveWs()] });
+    render(<Host View={WorkspacesView} data={data} extra={s} />);
     expect(screen.getByText('Workspaces')).toBeTruthy();
-    // seed workspaces have apps + Open buttons
-    fireEvent.click(screen.getAllByText('Open')[0]);
+    fireEvent.click(screen.getByText('Open'));
     expect(s.openUrl).toHaveBeenCalled();
-    fireEvent.click(screen.getAllByTitle('Manage workspace')[0]);
-    expect(screen.getByText('Ownership')).toBeTruthy();
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    // No seed Ownership/Members UI — the drawer shows open links + share note.
+    expect(screen.getByText('You own this workspace')).toBeTruthy();
+    expect(screen.queryByText('Ownership')).toBeNull();
+    expect(screen.queryByText('Transfer ownership')).toBeNull();
+  });
+
+  it('empty workspace list shows the empty state', () => {
+    render(<Host View={WorkspacesView} data={makeData()} />);
+    expect(screen.getByText(/not in any workspace yet/)).toBeTruthy();
   });
 
   it('search filters the list (>3 workspaces)', () => {
-    render(<Host View={WorkspacesView} data={makeData()} />);
+    const many = ['a', 'b', 'c', 'd'].map((n) => liveWs({ id: n, name: n }));
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: many })} />);
     const search = screen.getByPlaceholderText('Search workspaces & apps…');
     fireEvent.change(search, { target: { value: 'zzzznomatch' } });
     expect(screen.getByText('No workspaces match')).toBeTruthy();
@@ -92,7 +102,7 @@ describe('WorkspacesView', () => {
     const s = spies();
     installFetch({ '/bailey/api/workspaces': { ndjson: [{ event: 'start', message: 'go' }, { event: 'log', message: 'step' }, { event: 'done' }] } });
     render(<Host View={WorkspacesView} data={makeData()} extra={s} />);
-    fireEvent.click(screen.getByText('New workspace'));
+    fireEvent.click(screen.getAllByText('New workspace')[0]);
     const name = screen.getByPlaceholderText('e.g. payroll-automation');
     fireEvent.change(name, { target: { value: 'Bad Name!' } });
     expect(screen.getByText(/doesn't match the allowed format/)).toBeTruthy();
@@ -104,7 +114,7 @@ describe('WorkspacesView', () => {
   it('create workspace surfaces a backend error', async () => {
     installFetch({ '/bailey/api/workspaces': { status: 500, json: { error: 'create failed' } } });
     render(<Host View={WorkspacesView} data={makeData()} />);
-    fireEvent.click(screen.getByText('New workspace'));
+    fireEvent.click(screen.getAllByText('New workspace')[0]);
     fireEvent.change(screen.getByPlaceholderText('e.g. payroll-automation'), { target: { value: 'payroll' } });
     fireEvent.click(screen.getByText('Create workspace'));
     await waitFor(() => expect(screen.getByText('create failed')).toBeTruthy());
@@ -142,29 +152,13 @@ describe('WorkspacesView', () => {
     expect(s.openUrl).toHaveBeenCalledTimes(2);
   });
 
-  it('manage drawer (seed): archive, add/remove member, transfer ownership', () => {
+  it('manage drawer (live non-owner): trash/restore disabled, update hidden', () => {
     const s = spies();
-    render(<Host View={WorkspacesView} data={makeData()} extra={s} />);
-    // HR Platform is the first seed card
-    fireEvent.click(screen.getAllByTitle('Manage workspace')[0]);
-    // archive (seed path)
-    fireEvent.click(screen.getByText('Archive'));
-    expect(s.toast).toHaveBeenCalledWith('Workspace archived', 'info');
-    // reopen drawer (status changed → re-render); transfer ownership
-    fireEvent.click(screen.getByText('Transfer ownership'));
-    fireEvent.click(screen.getByText('Transfer'));
-    expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Ownership transferred'), 'success');
-  });
-
-  it('manage drawer (seed): remove a member + add a member + cancel transfer', () => {
-    const s = spies();
-    render(<Host View={WorkspacesView} data={makeData()} extra={s} />);
-    fireEvent.click(screen.getAllByTitle('Manage workspace')[0]);
-    const removeBtns = screen.getAllByTitle('Remove from workspace');
-    fireEvent.click(removeBtns[0]);
-    const addBtns = screen.getAllByText('Add');
-    fireEvent.click(addBtns[0]);
-    fireEvent.click(screen.getByText('Transfer ownership'));
-    fireEvent.click(screen.getByText('Cancel'));
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ isOwner: false })] })} extra={s} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    expect(screen.getByText('Shared with you')).toBeTruthy();
+    expect(screen.queryByText('Update')).toBeNull();
+    const trashBtn = screen.getByText('Trash').closest('button');
+    expect(trashBtn.disabled).toBe(true);
   });
 });

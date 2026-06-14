@@ -1,6 +1,7 @@
 // console-app.test.jsx — drives the App shell (window.SC_APP): gate-state →
-// scene selection, the live-data loaders + adapters, nav routing, the preview
-// scene menu, and the gate-error banner. pickScene/hasRecoverIntent and the
+// scene selection, the live-data loaders + adapters, nav routing, and the
+// gate-error banner. The design-preview scene menu has been removed — scene
+// selection is driven SOLELY by gate-state. pickScene/hasRecoverIntent and the
 // DTO adapters are module-private, so they're exercised through <App/>.
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -11,7 +12,7 @@ const App = SC_APP;
 
 function setLocation({ search = '', pathname = '/' } = {}) {
   Object.defineProperty(window, 'location', {
-    value: { search, pathname, assign: vi.fn(), reload: vi.fn() },
+    value: { search, pathname, hostname: 'bailey.example.test', assign: vi.fn(), reload: vi.fn() },
     configurable: true, writable: true,
   });
 }
@@ -116,20 +117,15 @@ describe('App live-data loading + adapters + routing', () => {
   });
 });
 
-describe('App preview scene menu', () => {
-  it('opens the menu and forces each scene, then returns to console', async () => {
+describe('No design-preview scene menu (removed)', () => {
+  it('the loaded console never renders the "Preview sign-in states" control', async () => {
     installFetch(fullRoutes());
     render(<App />);
     await waitFor(() => expect(screen.getByText('Server overview')).toBeTruthy());
-    fireEvent.click(screen.getByText('Preview sign-in states'));
-    fireEvent.click(screen.getByText('First-admin claim'));
-    await waitFor(() => expect(screen.getByRole('button', { name: /Claim this server/ })).toBeTruthy());
-    // preview bootstrap onClaim → back to console + toast
-    fireEvent.click(screen.getByText('Preview sign-in states'));
-    fireEvent.click(screen.getByText('Awaiting approval'));
-    await waitFor(() => expect(screen.getByText('Trust this device')).toBeTruthy());
-    fireEvent.click(screen.getByText('Preview sign-in states'));
-    fireEvent.click(screen.getByText('Account recovery'));
-    await waitFor(() => expect(screen.getByText('Recover your account')).toBeTruthy());
+    // The wireframe-navigation device must be gone — scene is gate-driven only.
+    expect(screen.queryByText('Preview sign-in states')).toBeNull();
+    expect(screen.queryByText('First-admin claim')).toBeNull();
+    expect(screen.queryByText('Awaiting approval')).toBeNull();
+    expect(screen.queryByText('Account recovery')).toBeNull();
   });
 });

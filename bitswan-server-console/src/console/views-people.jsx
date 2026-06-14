@@ -12,6 +12,19 @@ const { useState: useP } = React;
 
 const P_ROLE_TONE = { admin: 'primary', auditor: 'info', member: 'neutral', viewer: 'outline' };
 
+// Static role legend (reference UI, not user data). Describes what each role
+// can do; the per-person role itself comes live from /bailey/api/people.
+const P_ROLES = [
+  { id: 'admin',   label: 'Admin',   tone: 'primary',
+    desc: 'Approves devices, manages users & workspaces, owns server settings.' },
+  { id: 'auditor', label: 'Auditor', tone: 'info',
+    desc: 'Signs off on deploy promotions. Read access to all workspaces.' },
+  { id: 'member',  label: 'Member',  tone: 'neutral',
+    desc: 'Builds in workspaces they own or are added to.' },
+  { id: 'viewer',  label: 'Viewer',  tone: 'outline',
+    desc: 'Read-only access to assigned workspaces.' },
+];
+
 // ─── USERS & ROLES ──────────────────────────────────────────────────────────
 // Wired to GET /bailey/api/people (admin-only): the roster, per-person role,
 // workspace/device counts, last-active and invited flag all come from
@@ -32,7 +45,7 @@ function UsersView({ ctx }) {
   const [query, setQuery] = useP('');
   const [devicesUserId, setDevicesUserId] = useP(null);
 
-  const ROLES = window.SC_DATA.ROLES;
+  const ROLES = P_ROLES;
   const people = data.people || [];
   const loaded = data.load.people === 'ok';
   const list = people.filter(u =>

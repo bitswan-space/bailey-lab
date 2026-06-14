@@ -126,101 +126,38 @@ function DevicesView({ ctx }) {
   );
 }
 
-// ─── LINK DEVICE (WhatsApp-style: this trusted device enters the new one's PIN) ─
-// TODO(api): no backend endpoint yet — device-to-device PIN/QR linking is
-// not exposed by bailey_dispatch.go (pairing happens via the gate's
-// /2fa-gate/pending-pair flow + admin approve). Kept on seed/prototype data.
+// ─── LINK DEVICE ────────────────────────────────────────────────────────────
+// Device-to-device PIN/QR linking has NO backend endpoint yet — it isn't
+// exposed by bailey_dispatch.go. Trusting a new device today goes through the
+// gate's pending-pair flow (sign in on the new device → admin approves the
+// code, on the Device approvals page), or self-trust with an authenticator.
+// Rather than render a fake PIN/QR and a "Simulate scan" button (mock data),
+// this modal honestly explains the real flow and disables the unbuilt control.
 function LinkDeviceModal({ open, onClose, data, setData, toast }) {
-  const [tab, setTab] = useD('pin');       // 'pin' | 'scan'
-  const [pin, setPin] = useD('');
-  const [error, setError] = useD(false);
-  const [scanning, setScanning] = useD(false);
-  const LINK = window.SC_DATA.LINK_REQUEST;
-  const target = LINK.pin.replace(/\D/g, '');
-
-  React.useEffect(() => { if (open) { setTab('pin'); setPin(''); setError(false); setScanning(false); } }, [open]);
-
-  const addDevice = () => {
-    setData(d => ({ ...d, myDevices: [...d.myDevices, {
-      id: 'd-' + Math.random().toString(36).slice(2, 6), name: `${LINK.os} · ${LINK.browser}`,
-      kind: LINK.kind, current: false, browser: LINK.browser, os: LINK.os, ip: LINK.ip,
-      location: LINK.location, lastActive: 'Active now', trustOrigin: 'linked',
-      linkedFrom: data.myDevices.find(x => x.current)?.name || 'this device', added: 'Just now',
-    }] }));
-    toast('New device linked and trusted', 'success');
-    onClose();
-  };
-  const tryPin = (v) => {
-    const clean = v.replace(/\D/g, '');
-    if (clean.length === 6) {
-      if (clean === target) addDevice();
-      else setError(true);
-    }
-  };
-  const simulateScan = () => {
-    setScanning(true);
-    setTimeout(() => addDevice(), 1300);
-  };
-
-  const TabBtn = ({ id, icon, label }) => (
-    <button onClick={() => setTab(id)} style={{
-      flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 7, height: 36,
-      border: 0, borderBottom: `2px solid ${tab === id ? DC.primary : 'transparent'}`,
-      background: 'transparent', cursor: 'pointer', fontSize: 13, fontWeight: tab === id ? 600 : 500,
-      color: tab === id ? DC.fg : DC.muted }}>
-      <DIcon name={icon} size={15} color={tab === id ? DC.primary : DC.mutedFg} />{label}
-    </button>
-  );
-
   return (
     <DModal open={open} onClose={onClose} icon="smartphone" title="Link a new device" width={520}
-      subtitle="Already-trusted devices can vouch for new ones — just like linking a phone to a chat app.">
-      {/* steps */}
+      subtitle="How to get a new device trusted on this server.">
       <div style={{ display: 'flex', gap: 11, padding: '13px 15px', background: DC.surface, borderRadius: 10, marginBottom: 18 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, color: DC.fg, lineHeight: '17px' }}>
-          <div style={{ display: 'flex', gap: 9 }}><Step n="1" /><span>On the new device, open <strong style={{ fontFamily: 'Geist Mono, monospace' }}>bailey.harmonum.ai</strong> and sign in with Keycloak.</span></div>
-          <div style={{ display: 'flex', gap: 9 }}><Step n="2" /><span>It shows a 6-digit link PIN and a QR code.</span></div>
-          <div style={{ display: 'flex', gap: 9 }}><Step n="3" /><span>Enter that PIN here, or scan its QR with this trusted device.</span></div>
+          <div style={{ display: 'flex', gap: 9 }}><Step n="1" /><span>On the new device, open this server and sign in with Keycloak.</span></div>
+          <div style={{ display: 'flex', gap: 9 }}><Step n="2" /><span>It shows a code. Read that code to an admin, who approves it from the <strong>Device approvals</strong> page — or confirm it yourself with your authenticator app.</span></div>
+          <div style={{ display: 'flex', gap: 9 }}><Step n="3" /><span>Once approved, the new device is trusted and appears in this list.</span></div>
         </div>
       </div>
 
-      <div style={{ display: 'flex', borderBottom: `1px solid ${DC.border}`, marginBottom: 20 }}>
-        <TabBtn id="pin" icon="keyboard" label="Enter PIN" />
-        <TabBtn id="scan" icon="scan-line" label="Scan its QR" />
+      <div style={{ display: 'flex', gap: 9, padding: 12, borderRadius: 10, background: DC.surface, border: `1px solid ${DC.border}` }}>
+        <DIcon name="info" size={15} color={DC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
+        <span style={{ fontSize: 12.5, color: DC.muted, lineHeight: '18px' }}>
+          Direct device-to-device linking (entering a PIN or scanning a QR from a device you already trust) isn't available yet.
+        </span>
       </div>
 
-      {tab === 'pin' ? (
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 13, color: DC.muted, marginBottom: 14 }}>Type the PIN shown on the new device</div>
-          <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}>
-            <DSeg format={[3, 3]} value={pin} onChange={v => { setPin(v); setError(false); tryPin(v); }} size="lg" auto mono />
-            <DProtoHint>new device shows&nbsp;<strong style={{ color: DC.fg, fontFamily: 'Geist Mono, monospace' }}>{LINK.pin}</strong></DProtoHint>
-          </div>
-          {error && <div style={{ marginTop: 14, fontSize: 12.5, color: DC.red, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center' }}>
-            <DIcon name="x-circle" size={14} color={DC.red} /> That PIN doesn't match. Check the new device and re-enter.
-          </div>}
-        </div>
-      ) : (
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 13, color: DC.muted, marginBottom: 16 }}>Point this device's camera at the QR on the new device</div>
-          <div style={{ display: 'inline-block', position: 'relative', padding: 14, border: `1px solid ${DC.border}`, borderRadius: 14, background: '#fff' }}>
-            <div style={{ filter: scanning ? 'none' : 'grayscale(1) opacity(0.4)', transition: 'filter 200ms' }}>
-              <DQR seed="link-new-device" size={172} />
-            </div>
-            {/* scan frame */}
-            <div style={{ position: 'absolute', inset: 14, borderRadius: 10, pointerEvents: 'none',
-              boxShadow: `inset 0 0 0 2px ${scanning ? DC.primary : 'transparent'}`, transition: 'box-shadow 200ms' }} />
-            {scanning && <div style={{ position: 'absolute', left: 14, right: 14, top: 14, height: 2, background: DC.primary,
-              boxShadow: `0 0 12px ${DC.primary}`, animation: 'sc-scan 1.1s ease-in-out infinite' }} />}
-          </div>
-          <div style={{ marginTop: 18 }}>
-            <DBtn variant="primary" leftIcon={scanning ? 'loader' : 'scan-line'} disabled={scanning} onClick={simulateScan}>
-              {scanning ? 'Linking…' : 'Simulate scan'}
-            </DBtn>
-          </div>
-          <div style={{ marginTop: 12 }}><DProtoHint>prototype — real build uses the camera</DProtoHint></div>
-        </div>
-      )}
+      <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <span title="Device-to-device linking isn't available yet." style={{ display: 'inline-flex' }}>
+          <DBtn variant="primary" leftIcon="link" disabled onClick={() => {}}>Link with a PIN</DBtn>
+        </span>
+        <DBtn variant="default" onClick={onClose}>Close</DBtn>
+      </div>
     </DModal>
   );
 }

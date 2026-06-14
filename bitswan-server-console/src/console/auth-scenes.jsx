@@ -54,7 +54,9 @@ function WhyComplicatedLink() {
 
 // shared centered chrome
 function SceneShell({ children, footerNote, badge }) {
-  const S = window.SC_DATA.SERVER;
+  // Real server origin, not a seeded label.
+  let host = '';
+  try { host = window.location.hostname || ''; } catch (e) { host = ''; }
   return (
     <div style={{
       position: 'absolute', inset: 0, background: SC.surface,
@@ -71,7 +73,7 @@ function SceneShell({ children, footerNote, badge }) {
           </div>
           <div style={{ textAlign: 'left' }}>
             <div style={{ fontSize: 15, fontWeight: 700, color: SC.fg, lineHeight: '16px', whiteSpace: 'nowrap' }}>Bailey</div>
-            <div style={{ fontSize: 11.5, color: SC.muted, fontFamily: 'Geist Mono, monospace' }}>{S.host}</div>
+            <div style={{ fontSize: 11.5, color: SC.muted, fontFamily: 'Geist Mono, monospace' }}>{host}</div>
           </div>
           {badge && <span style={{ marginLeft: 6 }}>{badge}</span>}
         </div>
@@ -100,13 +102,11 @@ function OAuthButton({ label, icon, onClick }) {
 // ─── 1. FIRST-ADMIN BOOTSTRAP ───────────────────────────────────────────────
 // POST /bailey/api/claim records the caller as root admin and TOFU-trusts this
 // browser; on ok we follow the (cookie-backed) trusted state into the console.
-// `preview` short-circuits the API for the design-preview menu.
-function BootstrapScene({ onClaim, preview }) {
+function BootstrapScene({ onClaim }) {
   const [claiming, setClaiming] = useSc(false);
   const [error, setError] = useSc('');
   const claim = async () => {
     setClaiming(true); setError('');
-    if (preview) { setTimeout(onClaim, 1100); return; }
     try {
       await SApi.claim();
       followRedirect(null); // reload — now trusted, lands in console
@@ -155,16 +155,14 @@ function BootstrapScene({ onClaim, preview }) {
 //                  then poll GET /pending-pair/poll until {approved:true}.
 //   • Authenticator tab — POST /self-trust {totp} to trust this browser now.
 //                  Shown only when gateState.totp_enrolled.
-// `preview` runs the design-preview menu without touching the backend.
-function ApprovalScene({ onApproved, goConsole, gateState, preview }) {
-  const totpEnrolled = !preview && !!(gateState && gateState.totp_enrolled);
-  // In preview, fall back to the seed code + show the authenticator tab so the
-  // design is fully browsable; live, the tab only appears when enrolled.
-  const showTotpTab = preview ? true : totpEnrolled;
-  const email = (gateState && gateState.email) || (preview ? 'alex@harmonum.ai' : '');
+function ApprovalScene({ onApproved, goConsole, gateState }) {
+  // The authenticator tab appears only when this user actually has TOTP
+  // enrolled (per the real gate-state).
+  const showTotpTab = !!(gateState && gateState.totp_enrolled);
+  const email = (gateState && gateState.email) || '';
 
   const [method, setMethod] = useSc('admin');   // 'admin' | 'totp'
-  const [code, setCode] = useSc(preview ? (window.SC_DATA.PENDING_DEVICES[0]?.code || '4821-7K39') : '');
+  const [code, setCode] = useSc('');
   const [codeErr, setCodeErr] = useSc('');
   const [totp, setTotp] = useSc('');
   const [error, setError] = useSc(false);
@@ -173,9 +171,8 @@ function ApprovalScene({ onApproved, goConsole, gateState, preview }) {
   useScE(() => { const t = setInterval(() => setDots(d => (d % 3) + 1), 500); return () => clearInterval(t); }, []);
   useScE(() => { setTotp(''); setError(false); }, [method]);
 
-  // Fetch the pairing code + poll for admin approval (live only).
+  // Fetch the pairing code + poll for admin approval.
   useScE(() => {
-    if (preview) return;
     let alive = true;
     let timer = null;
     SApi.pendingPair()
@@ -191,11 +188,10 @@ function ApprovalScene({ onApproved, goConsole, gateState, preview }) {
     };
     timer = setTimeout(tick, 2500);
     return () => { alive = false; if (timer) clearTimeout(timer); };
-  }, [preview]);
+  }, []);
 
   const verifyTotp = async () => {
     if (totp.replace(/\D/g, '').length < 6) { setError(true); return; }
-    if (preview) { onApproved(); return; }
     setTrusting(true); setError(false);
     try {
       const r = await SApi.selfTrust(totp);
@@ -299,10 +295,10 @@ function MethodTab({ active, icon, label, onClick }) {
 //   • authenticator  → { totp }
 //   • backup code    → { backup }  (single-use)
 // Tabs reflect which factors the user actually has (gateState.totp_enrolled /
-// backup_codes); default to the authenticator tab. `preview` skips the API.
-function RecoveryScene({ onRecovered, goConsole, gateState, preview }) {
-  const hasTotp = preview ? true : !!(gateState && gateState.totp_enrolled);
-  const hasBackup = preview ? true : !!(gateState && gateState.backup_codes);
+// backup_codes); default to the authenticator tab.
+function RecoveryScene({ onRecovered, goConsole, gateState }) {
+  const hasTotp = !!(gateState && gateState.totp_enrolled);
+  const hasBackup = !!(gateState && gateState.backup_codes);
   const [mode, setMode] = useSc(hasTotp ? 'totp' : 'backup');   // 'totp' | 'backup'
   const [code, setCode] = useSc('');
   const [backup, setBackup] = useSc('');
@@ -310,7 +306,6 @@ function RecoveryScene({ onRecovered, goConsole, gateState, preview }) {
   const [busy, setBusy] = useSc(false);
 
   const recover = async (body) => {
-    if (preview) { onRecovered(); return; }
     setBusy(true); setError(false);
     try {
       const r = await SApi.recover(body);

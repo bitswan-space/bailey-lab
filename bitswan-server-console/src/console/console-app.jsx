@@ -10,40 +10,37 @@ const { BootstrapScene, ApprovalScene, RecoveryScene } = window.SC_SCENES;
 const { Api } = window.SC_API;
 const { useState: useA, useEffect: useAE, useRef: useAR } = React;
 
-// deep-ish clone of the seed data so mutations don't touch the source.
-// Seed still backs the views whose backend endpoint doesn't exist yet
-// (People & roles, recovery/TOTP, per-user device drawer, activity feed,
-// server-identity card). The live-wired views overwrite the relevant
-// slices from the APIs on load — see fetchLive() below.
-function seedData() {
-  const D = window.SC_DATA;
+// initialData() builds the empty app state. NOTHING here is mock/seed data —
+// every list starts empty and is populated only from the live APIs. The views
+// render loading/error/empty states until their endpoint lands; they never
+// fall back to fabricated values (the user must never see mock data).
+function initialData() {
   return {
-    // ── Live-wired slices (populated/overwritten by the APIs) ──
-    workspaces: D.WORKSPACES.map(w => ({ ...w, members: [...w.members] })),
-    myDevices: D.MY_DEVICES.map(d => ({ ...d })),
-    pending: D.PENDING_DEVICES.map(p => ({ ...p })),
-    // ── Seed-only slices (no backend endpoint — see report) ──
-    // TODO(api): no backend endpoint yet — user/role list, invite, suspend.
-    users: D.USERS.map(u => ({ ...u })),
+    // ── Live-wired slices (populated by the APIs on load) ──
+    workspaces: [],      // GET /bailey/api/workspaces
+    myDevices: [],       // GET /bailey/api/devices
+    pending: [],         // GET /bailey/api/approvals
     // Recovery: TOTP enrolment status is synced from gate-state on load;
     // recoveryCodes holds only the plaintext set generated THIS session
     // (the backend stores hashes and returns codes once), so start empty.
-    recovery: { ...D.RECOVERY, totpActive: false, recoveryCodes: [] },
-    // TODO(api): no backend endpoint yet — per-user device drawer (admin
-    // devices API exists but the People view keys devices by seed user id).
-    userDevices: Object.fromEntries(Object.entries(D.USER_DEVICES).map(([k, v]) => [k, v.map(d => ({ ...d }))])),
-    // Live identity + load status, filled by fetchLive().
+    recovery: { totpActive: false, recoveryCodes: [] },
+    // Live identity + load status.
     me: null,            // { email, isAdmin }
     // Live overview (counts + identity card + activity feed) and people
     // roster, fetched from /bailey/api/overview and /bailey/api/people. Null
-    // until loaded; the views render loading/error/empty from load+error and
-    // do NOT fall back to seed.
+    // until loaded; the views render loading/error/empty from load+error.
     overview: null,      // { counts, identity, activity }
     people: null,        // [{ name,email,role,workspaceCount,deviceCount,lastActive,invited }]
     peopleWarning: null, // partial-enumeration `error` string from /people (200 + error)
     load: { devices: 'idle', approvals: 'idle', workspaces: 'idle', whoami: 'idle', overview: 'idle', people: 'idle' },
     error: {},           // { devices, approvals, workspaces, whoami, overview, people }
   };
+}
+
+// serverHost is the hostname the console is actually served from — the real
+// origin, not a seeded label. Used for the sidebar + page headers.
+function serverHost() {
+  try { return window.location.hostname || ''; } catch (e) { return ''; }
 }
 
 // ── Adapters: backend DTO → the shapes the existing components render ──
@@ -231,70 +228,19 @@ function NavItem({ item, active, badge, onClick }) {
   );
 }
 
-function SceneMenu({ onPick }) {
-  const [open, setOpen] = useA(false);
-  const ref = useAR(null);
-  useAE(() => {
-    if (!open) return;
-    const onDown = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
-  const items = [
-    { id: 'bootstrap', label: 'First-admin claim', icon: 'flag', desc: 'Fresh, unclaimed server' },
-    { id: 'approval', label: 'Awaiting approval', icon: 'shield-alert', desc: 'New device, post-login' },
-    { id: 'recovery', label: 'Account recovery', icon: 'key-round', desc: 'Locked out everywhere' },
-  ];
-  return (
-    <div ref={ref} style={{ position: 'relative' }}>
-      <button onClick={() => setOpen(o => !o)} style={{
-        display: 'flex', alignItems: 'center', gap: 8, width: '100%', height: 32, padding: '0 10px',
-        border: `1px dashed ${AC.borderHi}`, borderRadius: 8, background: 'transparent', cursor: 'pointer',
-        fontFamily: 'inherit', fontSize: 12, color: AC.muted, fontWeight: 500 }}>
-        <AIcon name="monitor-play" size={14} color={AC.mutedFg} />
-        <span style={{ flex: 1, textAlign: 'left' }}>Preview sign-in states</span>
-        <AIcon name="chevron-up" size={13} color={AC.mutedFg} />
-      </button>
-      {open && (
-        <div style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 6,
-          background: '#fff', border: `1px solid ${AC.border}`, borderRadius: 10, boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
-          padding: 6, zIndex: 60 }}>
-          <div style={{ fontSize: 10, fontWeight: 600, color: AC.mutedFg, textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 8px 4px' }}>Prototype scenes</div>
-          {items.map(it => (
-            <button key={it.id} onClick={() => { onPick(it.id); setOpen(false); }} style={{
-              display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px', borderRadius: 7,
-              border: 0, background: 'transparent', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit' }}
-              onMouseEnter={e => e.currentTarget.style.background = AC.surface}
-              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-              <AIcon name={it.icon} size={15} color={AC.muted} />
-              <div>
-                <div style={{ fontSize: 12.5, fontWeight: 600, color: AC.fg }}>{it.label}</div>
-                <div style={{ fontSize: 11, color: AC.muted }}>{it.desc}</div>
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Console({ data, setData, toast, scene, setScene, refresh }) {
+function Console({ data, setData, toast, refresh }) {
   const [route, setRoute] = useA('workspaces');
-  // Current user: the live whoami identity when available, otherwise the
-  // seed root admin (so the prototype scenes + seed-backed views still
-  // render before/without the backend).
-  const seedUser = data.users.find(u => u.id === 'tomas');
+  // Current user: the live whoami identity. Until whoami resolves we use a
+  // neutral empty identity — never a fabricated seed user.
   const currentUser = data.me
     ? {
-        ...seedUser,
         id: data.me.email,
         email: data.me.email,
         name: data.me.email,
         role: data.me.isAdmin ? 'admin' : 'member',
         isAdmin: data.me.isAdmin,
       }
-    : seedUser;
+    : { id: '', email: '', name: '', role: 'member', isAdmin: false };
   const openUrl = (url, name) => {
     try { window.open(url, '_blank', 'noopener'); } catch (e) {}
     toast(`Opening ${name || url}…`, 'info');
@@ -318,7 +264,7 @@ function Console({ data, setData, toast, scene, setScene, refresh }) {
             <AIcon name="hexagon" size={18} color="#fff" />
           </div>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: AC.fg, lineHeight: '16px', whiteSpace: 'nowrap' }}>{window.SC_DATA.SERVER.name}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: AC.fg, lineHeight: '16px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{serverHost() || 'Bailey'}</div>
             <div style={{ fontSize: 11, color: AC.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Bailey server</div>
           </div>
         </div>
@@ -340,9 +286,6 @@ function Console({ data, setData, toast, scene, setScene, refresh }) {
           ))}
         </div>
 
-        <div style={{ borderTop: `1px solid ${AC.border}`, padding: 10 }}>
-          <SceneMenu onPick={setScene} />
-        </div>
       </aside>
 
       {/* Main */}
@@ -413,12 +356,9 @@ function WaitingScene() {
 }
 
 function App() {
-  const [data, setData] = useA(seedData);
+  const [data, setData] = useA(initialData);
   // gate: { status:'loading'|'ok'|'error', state, error } from gate-state.
   const [gate, setGate] = useA({ status: 'loading', state: null, error: null });
-  // previewScene overrides the live gate scene for the design-preview menu.
-  // null = follow the real gate-state; otherwise force the chosen scene.
-  const [previewScene, setPreviewScene] = useA(null);
   const [toast, setToastState] = useA(null);
   const toastTimer = useAR(null);
 
@@ -529,18 +469,16 @@ function App() {
   // Resolve the device-trust gate first.
   useAE(() => { loadGate.current(); }, []);
 
-  // The live scene the gate picks (overridden by the preview menu when set).
+  // The scene is driven SOLELY by the real gate-state (plus an explicit
+  // ?recover URL intent) — there is no preview/override path.
   const recoverIntent = hasRecoverIntent();
-  const liveScene = pickScene(gate.state, recoverIntent);
-  const scene = previewScene || liveScene;
+  const scene = pickScene(gate.state, recoverIntent);
 
   // Only load the console data lists once the gate is cleared (trusted) — the
-  // console APIs are gated, so calling them while untrusted would error. When
-  // previewing a scene over a really-trusted session we still load so the
-  // console behind the preview is real.
+  // console APIs are gated, so calling them while untrusted would error.
   useAE(() => {
     if (gate.status !== 'ok') return;
-    if (liveScene !== 'console') return;
+    if (scene !== 'console') return;
     // Reflect real TOTP enrolment from gate-state into the recovery slice so
     // Security & recovery shows the true "Active / Not set up" state. The
     // backup-codes plaintext is only ever returned once (on enroll/regenerate),
@@ -557,15 +495,16 @@ function App() {
     // these views; if they did, the 403 surfaces as the view's error state.
     loadOverview.current();
     loadPeople.current();
-  }, [gate.status, liveScene]);
+  }, [gate.status, scene]);
 
   useALucide();
   useAE(() => { if (window.lucide) window.lucide.createIcons(); });
   useAE(() => { const id = setInterval(() => window.lucide && window.lucide.createIcons(), 400); return () => clearInterval(id); }, []);
 
-  // setScene from the preview menu: 'console' clears the override (back to the
-  // real gate-state); any other id forces that scene for design preview.
-  const setScene = (s) => setPreviewScene(s === 'console' ? null : s);
+  // After a successful claim/approval/recovery the device's trust state has
+  // changed on the backend — re-fetch gate-state so pickScene re-evaluates and
+  // advances to the console. The scene is never set imperatively.
+  const reloadGate = () => loadGate.current();
 
   // While gate-state is loading we show a neutral spinner so we never flash the
   // wrong scene. A gate-state error is treated as "not signed in / not trusted"
@@ -576,8 +515,8 @@ function App() {
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-      <Console data={data} setData={setData} toast={showToast} scene={scene} setScene={setScene} refresh={(w) => refresh.current(w)} />
-      {gate.status === 'error' && previewScene == null && (
+      <Console data={data} setData={setData} toast={showToast} refresh={(w) => refresh.current(w)} />
+      {gate.status === 'error' && (
         <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: '10px 16px', background: AC.red,
           color: '#fff', fontSize: 12.5, textAlign: 'center', zIndex: 90 }}>
           Couldn't load device-trust state: {gate.error}
@@ -585,18 +524,15 @@ function App() {
       )}
       {scene === 'waiting' && <WaitingScene />}
       {scene === 'bootstrap' && <BootstrapScene
-        preview={previewScene === 'bootstrap'}
-        onClaim={() => { setScene('console'); showToast('Server claimed — you are the root admin', 'success'); }} />}
+        onClaim={() => { showToast('Server claimed — you are the root admin', 'success'); reloadGate(); }} />}
       {scene === 'approval' && <ApprovalScene
         gateState={gate.state}
-        preview={previewScene === 'approval'}
-        onApproved={() => { setScene('console'); showToast('Device approved — welcome in', 'success'); }}
-        goConsole={() => setScene('console')} />}
+        onApproved={() => { showToast('Device approved — welcome in', 'success'); reloadGate(); }}
+        goConsole={reloadGate} />}
       {scene === 'recovery' && <RecoveryScene
         gateState={gate.state}
-        preview={previewScene === 'recovery'}
-        onRecovered={() => { setScene('console'); showToast('Recovered — this device is now trusted', 'success'); }}
-        goConsole={() => setScene('console')} />}
+        onRecovered={() => { showToast('Recovered — this device is now trusted', 'success'); reloadGate(); }}
+        goConsole={reloadGate} />}
       <AToast toast={toast} />
     </div>
   );
@@ -604,3 +540,5 @@ function App() {
 
 // main.jsx owns mounting (so window.lucide is configured before first render).
 window.SC_APP = App;
+// Published for the views (real server host, not a seeded label) + tests.
+window.SC_HELPERS = { serverHost, pickScene, initialData };

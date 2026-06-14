@@ -22,6 +22,87 @@ func ownerWorkspace(t *testing.T, name, owner string, withDeployment bool) {
 	mkWorkspaceDir(t, name, withDeployment)
 }
 
+// TestRecordWorkspaceOwnership_CreatorIsOwnerAndListed verifies the FIX 1
+// round-trip: after a create records ownership, GET /bailey/api/workspaces
+// returns the new workspace as owned (is_owner true) for the creator.
+func TestRecordWorkspaceOwnership_CreatorIsOwnerAndListed(t *testing.T) {
+	domain := writeTestConfig(t)
+	creator := "creator@example.com"
+	ws := "freshws"
+	// The workspace directory must exist for GetWorkspaceList to enumerate it.
+	mkWorkspaceDir(t, ws, true)
+
+	if warns := recordWorkspaceOwnership(ws, domain, creator); len(warns) != 0 {
+		t.Fatalf("unexpected ownership warnings: %v", warns)
+	}
+
+	// The dashboard endpoint must be registered as the membership surface.
+	dash, err := getEndpoint(ws + "-dashboard." + domain)
+	if err != nil || dash == nil {
+		t.Fatalf("dashboard endpoint not registered: %v", err)
+	}
+	if dash.OwnerEmail != creator {
+		t.Errorf("dashboard owner = %q, want %q", dash.OwnerEmail, creator)
+	}
+	if dash.Kind != endpointKindWorkspace {
+		t.Errorf("dashboard kind = %q, want %q", dash.Kind, endpointKindWorkspace)
+	}
+
+	// The creator's editor/gitops roles must resolve to owner.
+	if role, _ := roleFor(ws+"-editor."+domain, creator, nil); role != roleOwner {
+		t.Errorf("editor roleFor = %q, want owner", role)
+	}
+	if role, _ := roleFor(ws+"-gitops."+domain, creator, nil); role != roleOwner {
+		t.Errorf("gitops roleFor = %q, want owner", role)
+	}
+
+	// The list must now include the workspace as owned for the creator.
+	w := dispatch(baileyReq(http.MethodGet, "/bailey/api/workspaces", creator))
+	if w.Code != http.StatusOK {
+		t.Fatalf("list = %d", w.Code)
+	}
+	var resp listAccessibleResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	var entry *accessibleWorkspace
+	for i := range resp.Workspaces {
+		if resp.Workspaces[i].Name == ws {
+			entry = &resp.Workspaces[i]
+		}
+	}
+	if entry == nil {
+		t.Fatalf("created workspace not listed: %+v", resp.Workspaces)
+	}
+	if !entry.IsOwner {
+		t.Errorf("created workspace not owned by creator: %+v", entry)
+	}
+}
+
+// TestRecordWorkspaceOwnership_Idempotent verifies re-recording ownership
+// (e.g. when the init pipeline already registered the rows) does not error
+// and does not change the recorded owner.
+func TestRecordWorkspaceOwnership_Idempotent(t *testing.T) {
+	domain := writeTestConfig(t)
+	original := "first@example.com"
+	ws := "idemws"
+	// Pre-register gitops under the original owner with the dashboard parent.
+	if _, err := registerEndpoint(ws+"-gitops."+domain, original, "", ws+"-dashboard."+domain, endpointKindService, ""); err != nil {
+		t.Fatal(err)
+	}
+	// A second create attempt by a different caller must not steal ownership.
+	if warns := recordWorkspaceOwnership(ws, domain, "second@example.com"); len(warns) != 0 {
+		t.Fatalf("unexpected warnings: %v", warns)
+	}
+	ep, err := getEndpoint(ws + "-gitops." + domain)
+	if err != nil || ep == nil {
+		t.Fatalf("gitops endpoint missing: %v", err)
+	}
+	if ep.OwnerEmail != original {
+		t.Errorf("gitops owner changed to %q, want %q (idempotent register must not downgrade)", ep.OwnerEmail, original)
+	}
+}
+
 func TestListAccessibleWorkspaces_OwnerSeesEntry(t *testing.T) {
 	domain := writeTestConfig(t)
 	owner := "lawowner@example.com"

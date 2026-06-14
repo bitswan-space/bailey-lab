@@ -1,20 +1,30 @@
 // ctx.js — builds the `ctx` object the console views read, plus a stateful
 // wrapper so setData actually re-renders the view under test.
+//
+// The console no longer ships any seed/mock data (console-data.jsx is empty),
+// so the test fixtures live HERE — live-API-shaped objects that mirror what
+// App holds once the real lists land. Nothing here is rendered in production;
+// it only feeds the unit tests.
 import React from 'react';
 import { vi } from 'vitest';
-import { SC_DATA } from './harness.js';
+
+// A couple of live-shaped device records (the shape adaptDevice produces).
+export const FIXTURE_DEVICES = [
+  { id: 'd-cur', name: 'This Mac', kind: 'laptop', current: true, browser: '', os: '', ip: '', location: '',
+    lastActive: 'Active now', added: 'Jan 01, 2026', trustOrigin: 'root' },
+  { id: 'd-other', name: 'Other Phone', kind: 'phone', current: false, browser: '', os: '', ip: '', location: '',
+    lastActive: '20m ago', added: 'Jan 02, 2026', trustOrigin: 'linked' },
+];
 
 // A fully-loaded data slice (mirrors what App holds once the live lists land).
+// Every list defaults empty/live-shaped — never seed identities.
 export function makeData(overrides = {}) {
-  const D = SC_DATA;
   return {
-    workspaces: D.WORKSPACES.map((w) => ({ ...w, members: [...w.members] })),
-    myDevices: D.MY_DEVICES.map((d) => ({ ...d })),
-    pending: D.PENDING_DEVICES.map((p) => ({ ...p })),
-    users: D.USERS.map((u) => ({ ...u })),
-    recovery: { ...D.RECOVERY, totpActive: false, recoveryCodes: [] },
-    userDevices: {},
-    me: { email: 'tomas@harmonum.ai', isAdmin: true },
+    workspaces: [],
+    myDevices: FIXTURE_DEVICES.map((d) => ({ ...d })),
+    pending: [],
+    recovery: { totpActive: false, recoveryCodes: [] },
+    me: { email: 'me@example.test', isAdmin: true },
     overview: null,
     people: null,
     peopleWarning: null,
@@ -32,7 +42,8 @@ export function Host({ View, data: initial, extra = {} }) {
   const go = extra.go || (() => {});
   const openUrl = extra.openUrl || (() => {});
   const refresh = extra.refresh || (() => Promise.resolve());
-  const currentUser = extra.currentUser || data.users.find((u) => u.id === 'tomas');
+  const currentUser = extra.currentUser
+    || { id: data.me?.email || '', email: data.me?.email || '', name: data.me?.email || '', role: 'admin', isAdmin: true };
   const ctx = { data, setData, toast, go, openUrl, refresh, currentUser };
   return React.createElement(View, { ctx });
 }

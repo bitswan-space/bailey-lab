@@ -1,10 +1,10 @@
 // views-devices.test.jsx — DevicesView (+ LinkDeviceModal) + SecurityView
-// (+ SetupTotpModal). Covers revoke, link (PIN + scan), TOTP enrolment steps,
-// backup-code regeneration.
+// (+ SetupTotpModal). Covers revoke, the link modal's honest "not available
+// yet" state, TOTP enrolment steps, backup-code regeneration.
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import { SC_DEVICES, SC_DATA, installFetch } from './harness.js';
+import { SC_DEVICES, installFetch } from './harness.js';
 import { makeData, Host, spies } from './ctx.js';
 
 const { DevicesView, SecurityView } = SC_DEVICES;
@@ -51,31 +51,18 @@ describe('DevicesView', () => {
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining("Couldn't remove device"), 'danger'));
   });
 
-  it('link device modal: correct PIN links a device', () => {
+  it('link device modal: shows the honest "not available yet" state with a disabled control', () => {
     const s = spies();
     render(<Host View={DevicesView} data={makeData()} extra={s} />);
     fireEvent.click(screen.getByText('Link a device'));
-    const pin = SC_DATA.LINK_REQUEST.pin.replace(/\D/g, '');
-    fireEvent.change(document.querySelector('input'), { target: { value: pin } });
-    expect(s.toast).toHaveBeenCalledWith('New device linked and trusted', 'success');
-  });
-
-  it('link device modal: wrong PIN shows error', () => {
-    render(<Host View={DevicesView} data={makeData()} />);
-    fireEvent.click(screen.getByText('Link a device'));
-    fireEvent.change(document.querySelector('input'), { target: { value: '000000' } });
-    expect(screen.getByText(/PIN doesn't match/)).toBeTruthy();
-  });
-
-  it('link device modal: scan tab simulates a scan', () => {
-    vi.useFakeTimers();
-    const s = spies();
-    render(<Host View={DevicesView} data={makeData()} extra={s} />);
-    fireEvent.click(screen.getByText('Link a device'));
-    fireEvent.click(screen.getByText('Scan its QR'));
-    fireEvent.click(screen.getByText('Simulate scan'));
-    act(() => vi.advanceTimersByTime(1400));
-    expect(s.toast).toHaveBeenCalledWith('New device linked and trusted', 'success');
+    // No mock PIN/QR/"Simulate scan"; the real flow is explained and the
+    // unbuilt direct-link control is disabled.
+    expect(screen.getByText(/isn't available yet/)).toBeTruthy();
+    expect(screen.queryByText('Simulate scan')).toBeNull();
+    const linkBtn = screen.getByText('Link with a PIN').closest('button');
+    expect(linkBtn.disabled).toBe(true);
+    // No fake device gets added.
+    expect(s.toast).not.toHaveBeenCalledWith('New device linked and trusted', 'success');
   });
 });
 
