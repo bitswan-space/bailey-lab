@@ -1,14 +1,28 @@
+# Build the Bitswan automation-server CLI from this monorepo's source, so the
+# gitops image carries the EXACT in-repo version (not a downloaded upstream
+# release). This makes integration tests exercise the automation-server changes
+# in this same repo. Build context is the repo root (see .dockerignore).
+FROM golang:1.25-bookworm AS bitswan-builder
+WORKDIR /src
+COPY bitswan-automation-server/go.mod bitswan-automation-server/go.sum ./
+RUN go mod download
+COPY bitswan-automation-server/ ./
+RUN CGO_ENABLED=0 go build -ldflags "-w -s" -o /out/bitswan .
+
 FROM python:3.11-bookworm
 WORKDIR /src
 
 ENV VERSION=27.3.1
 RUN wget -qO- https://get.docker.com/ | sh
 
-COPY pyproject.toml .
-COPY LICENSE .
-COPY README.md .
-COPY app/ ./app/
-COPY start.sh .
+COPY bitswan-gitops/pyproject.toml .
+COPY bitswan-gitops/LICENSE .
+COPY bitswan-gitops/README.md .
+COPY bitswan-gitops/app/ ./app/
+# Bake the automation templates into the image so they are version-locked to
+# this gitops build (no external examples repo to clone or mount).
+COPY bitswan-gitops/examples/ /opt/bitswan/examples/
+COPY bitswan-gitops/start.sh .
 
 RUN pip install -e .
 
@@ -26,22 +40,17 @@ RUN git config --global init.defaultBranch main
 
 USER root
 
-# Install Bitswan Automation Server CLI (latest)
-RUN apt-get update && apt-get install -y curl jq tar restic awscli
+# Runtime tooling (snapshots/backups + the oauth2-proxy download below)
+RUN apt-get update && apt-get install -y curl jq tar restic awscli && rm -rf /var/lib/apt/lists/*
 
 # Download oauth2-proxy
 RUN LATEST_VERSION=$(curl -s https://api.github.com/repos/bitswan-space/bitswan-aoc-oauth2/releases/latest | jq -r '.tag_name') \
     && curl -L -o /usr/local/bin/oauth2-proxy https://github.com/bitswan-space/bitswan-aoc-oauth2/releases/download/${LATEST_VERSION}/oauth2-proxy-mqtt \
     && chmod +x /usr/local/bin/oauth2-proxy
 
-RUN set -e; \
-  LATEST_VERSION="$(curl -sL https://api.github.com/repos/bitswan-space/bitswan-automation-server/releases/latest | jq -r .tag_name)"; \
-  TMP_DIR="$(mktemp -d)"; \
-  curl -L "https://github.com/bitswan-space/bitswan-automation-server/releases/download/${LATEST_VERSION}/bitswan-automation-server-${LATEST_VERSION}-linux-amd64.tar.gz" | tar -xz -C "$TMP_DIR"; \
-  BIN_PATH="$(find "$TMP_DIR" -type f -perm -u+x -name 'bitswan*' | head -n1)"; \
-  if [ -z "$BIN_PATH" ]; then echo "Could not locate bitswan binary after extraction" >&2; exit 1; fi; \
-  install -m 0755 "$BIN_PATH" /usr/local/bin/bitswan; \
-  rm -rf "$TMP_DIR"
+# Bitswan Automation Server CLI, built from this repo's source (builder stage).
+COPY --from=bitswan-builder /out/bitswan /usr/local/bin/bitswan
+RUN chmod +x /usr/local/bin/bitswan
 
 ENV BITSWAN_CADDY_HOST=http://caddy:2019
 
