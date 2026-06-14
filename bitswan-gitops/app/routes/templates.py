@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.dependencies import get_automation_service
+from app.deploy_runner import spawn_set_deploy
 from app.event_broadcaster import event_broadcaster
 from app.services import template_service
 from app.services.automation_service import AutomationService
@@ -165,6 +166,33 @@ async def _scaffold_from_template(
         logger.exception("scaffold from template %s failed", template_id)
         raise HTTPException(status_code=500, detail=str(e))
     await _broadcast_automations(automation_service, worktree)
+
+    # Auto-deploy the freshly scaffolded automation(s) so they start running
+    # immediately — same expectation as creating a business process. Deploy
+    # ONLY the just-created members (matched by relative_path); the rest of the
+    # BP is already running and must not be disturbed. Best-effort: a deploy
+    # failure surfaces in the response but never fails the scaffold itself.
+    stage = "live-dev" if worktree else "dev"
+    created_paths = {
+        (c.get("relative_path") or "").rstrip("/") for c in result.get("created", [])
+    }
+    members = [
+        m
+        for m in automation_service.members_for_bp(bp, worktree=worktree, stage=stage)
+        if (m.get("relative_path") or "").rstrip("/") in created_paths
+    ]
+    if members:
+        deploy = await spawn_set_deploy(
+            label=bp,
+            members=members,
+            stage=stage,
+            worktree=worktree,
+            service=automation_service,
+        )
+        if deploy.get("deploy"):
+            result["deploy_task_id"] = deploy["deploy"]["task_id"]
+        elif deploy.get("error"):
+            result["deploy_error"] = deploy["error"]
     return result
 
 

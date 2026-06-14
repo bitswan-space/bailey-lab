@@ -61,6 +61,11 @@ export function EnvironmentPanel({ bp, worktree }: Props) {
   const [busy, setBusy] = useState(false);
   // eslint-disable-next-line no-restricted-syntax -- null = nothing being renamed
   const [renaming, setRenaming] = useState<string | null>(null);
+  // A pending "add" awaiting the user to name it. null = nothing being added.
+  // eslint-disable-next-line no-restricted-syntax -- null = not adding
+  const [adding, setAdding] = useState<
+    { kind: 'frontend' } | { kind: 'worker'; type: string } | null
+  >(null);
 
   const { frontends, workers } = useMemo(() => {
     const prefix = `worktrees/${worktree}/${bp}/`;
@@ -112,17 +117,22 @@ export function EnvironmentPanel({ bp, worktree }: Props) {
     for (let i = 2; ; i++) if (!names.has(`${base}-${i}`)) return `${base}-${i}`;
   };
 
-  const addFrontend = () =>
-    mutate(
-      'Add frontend',
-      api.addFrontend({ bp, name: uniqueName('new-frontend', frontends), worktree }),
-    );
-
-  const addWorker = (type: string) =>
-    mutate(
-      'Add worker',
-      api.addWorker({ bp, name: uniqueName('new-worker', workers), type, worktree }),
-    );
+  // Clicking an "add" button doesn't scaffold immediately — it opens a draft
+  // row so the user names the automation first. commitAdd fires the scaffold
+  // (which now also auto-deploys it) once they confirm a non-empty name.
+  const commitAdd = (
+    draft: { kind: 'frontend' } | { kind: 'worker'; type: string },
+    rawName: string,
+  ) => {
+    setAdding(null);
+    const name = rawName.trim();
+    if (!name) return; // empty / cancelled
+    if (draft.kind === 'frontend') {
+      void mutate('Add frontend', api.addFrontend({ bp, name, worktree }));
+    } else {
+      void mutate('Add worker', api.addWorker({ bp, name, type: draft.type, worktree }));
+    }
+  };
 
   const doRename = (oldName: string, next: string) => {
     setRenaming(null);
@@ -195,7 +205,22 @@ export function EnvironmentPanel({ bp, worktree }: Props) {
               onDelete={() => remove(f, 'frontend')}
             />
           ))}
-          <AddButton onClick={addFrontend} disabled={busy} label="Add frontend" />
+          {adding?.kind === 'frontend' ? (
+            <DraftRow
+              icon={Globe}
+              iconClass="text-blue-500"
+              defaultName={uniqueName('new-frontend', frontends)}
+              busy={busy}
+              onCommit={(name) => commitAdd({ kind: 'frontend' }, name)}
+              onCancel={() => setAdding(null)}
+            />
+          ) : (
+            <AddButton
+              onClick={() => setAdding({ kind: 'frontend' })}
+              disabled={busy}
+              label="Add frontend"
+            />
+          )}
         </Section>
 
         <Section icon={Boxes} title="Worker containers" count={workers.length}>
@@ -214,7 +239,21 @@ export function EnvironmentPanel({ bp, worktree }: Props) {
               onDelete={() => remove(w, 'worker container')}
             />
           ))}
-          <AddWorkerButton onAdd={addWorker} disabled={busy} />
+          {adding?.kind === 'worker' ? (
+            <DraftRow
+              icon={Cog}
+              iconClass="text-muted-foreground"
+              defaultName={uniqueName('new-worker', workers)}
+              busy={busy}
+              onCommit={(name) => commitAdd({ kind: 'worker', type: adding.type }, name)}
+              onCancel={() => setAdding(null)}
+            />
+          ) : (
+            <AddWorkerButton
+              onAdd={(type) => setAdding({ kind: 'worker', type })}
+              disabled={busy}
+            />
+          )}
         </Section>
 
         <DevSecrets />
@@ -388,6 +427,47 @@ function AddWorkerButton({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function DraftRow({
+  icon: Icon,
+  iconClass,
+  defaultName,
+  busy,
+  onCommit,
+  onCancel,
+}: {
+  icon: typeof Globe;
+  iconClass: string;
+  defaultName: string;
+  busy: boolean;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  // Escape cancels; without this guard the resulting blur would still commit.
+  const cancelled = useRef(false);
+  return (
+    <div className="flex items-center gap-1.5 rounded-md px-1.5 py-1">
+      <Icon className={cn('size-3 shrink-0', iconClass)} aria-hidden />
+      <input
+        autoFocus
+        defaultValue={defaultName}
+        disabled={busy}
+        onFocus={(e) => e.target.select()}
+        onBlur={(e) => {
+          if (!cancelled.current) onCommit(e.target.value);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+          if (e.key === 'Escape') {
+            cancelled.current = true;
+            onCancel();
+          }
+        }}
+        className="min-w-0 flex-1 rounded border border-foreground/60 bg-background px-1.5 py-0.5 font-mono text-xs outline-none"
+      />
     </div>
   );
 }
