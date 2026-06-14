@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -359,7 +360,7 @@ func TestTrashMarkerPath_Shape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(p, "somews/"+trashMarkerName) {
+	if !strings.HasSuffix(p, filepath.Join("somews", trashMarkerName)) {
 		t.Errorf("trashMarkerPath = %q", p)
 	}
 }

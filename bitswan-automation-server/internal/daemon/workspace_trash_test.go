@@ -5,22 +5,29 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-// requireDocker skips the calling test when the `docker` binary isn't on PATH.
-// The server-owner empty-trash path drives RunWorkspaceRemove, which is a
-// docker-orchestration flow: it shells out to `docker compose down` for every
-// known compose project and spawns a background goroutine that calls
-// DetectIngressType()/DeleteTraefikRecordsWithWriter() (more `docker` calls,
-// plus Linux-oriented ingress teardown) while still writing to the test's
-// buffer. On runners without docker (the macOS/Windows CI images) those
-// shell-outs and the trailing goroutine make the test non-hermetic and
-// OS-dependent. Gating on docker keeps it a real exercise on the Linux runner
-// (which has docker) and a clean skip elsewhere.
+// requireDocker skips the calling test unless it's running on Linux with the
+// `docker` binary on PATH. The server-owner empty-trash path drives
+// RunWorkspaceRemove, which is a docker-orchestration flow: it shells out to
+// `docker compose down`/`up` for every known compose project and spawns a
+// background goroutine that calls DetectIngressType()/
+// DeleteTraefikRecordsWithWriter() (more `docker` calls, plus Linux-oriented
+// ingress teardown) while still writing to the test's buffer.
+//
+// The macOS CI image has no docker at all; the windows-latest image ships the
+// docker CLI (so a bare LookPath passes) but its daemon can't run our
+// Linux-image compose stacks, so `docker compose up` exits 1. Gate on
+// GOOS=="linux" too — these tests are a real exercise only on the Linux runner
+// and a clean skip everywhere else.
 func requireDocker(t *testing.T) {
 	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("docker-orchestration test only runs on linux (GOOS=%s)", runtime.GOOS)
+	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available; skipping docker-dependent workspace-remove path")
 	}
