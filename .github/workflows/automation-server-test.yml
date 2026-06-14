@@ -132,7 +132,7 @@ jobs:
           # tests exercise this monorepo's code (and talk to the daemon socket,
           # not Caddy directly). Path is absolute because this job inherits the
           # bitswan-automation-server working-directory default.
-          docker build -t bitswan/gitops-local:latest "${{ github.workspace }}/bitswan-gitops"
+          docker build -t bitswan/gitops-local:latest -f "${{ github.workspace }}/bitswan-gitops/Dockerfile" "${{ github.workspace }}"
 
       - name: Initialize daemon
         run: |
@@ -175,7 +175,7 @@ jobs:
         run: |
           echo "=== Testing with Caddy (backward compatibility) ==="
           # Rebuild gitops image (previous test cleanup deletes it)
-          docker build -t bitswan/gitops-local:latest "${{ github.workspace }}/bitswan-gitops"
+          docker build -t bitswan/gitops-local:latest -f "${{ github.workspace }}/bitswan-gitops/Dockerfile" "${{ github.workspace }}"
           # Stop Traefik so a fresh Caddy can be started
           docker rm -f traefik 2>/dev/null || true
           docker compose -p bitswan-traefik down 2>/dev/null || true
@@ -193,7 +193,7 @@ jobs:
         run: |
           echo "=== Testing migration from Caddy to Traefik ==="
           # Rebuild gitops image (previous test cleanup deletes it)
-          docker build -t bitswan/gitops-local:latest "${{ github.workspace }}/bitswan-gitops"
+          docker build -t bitswan/gitops-local:latest -f "${{ github.workspace }}/bitswan-gitops/Dockerfile" "${{ github.workspace }}"
           # Ensure Caddy is running with some routes
           docker rm -f traefik 2>/dev/null || true
           docker compose -p bitswan-traefik down 2>/dev/null || true
