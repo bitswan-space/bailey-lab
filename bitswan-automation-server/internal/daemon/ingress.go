@@ -71,6 +71,10 @@ type IngressAddRouteRequest struct {
 	// resolves to a top-level (parentless) dashboard. Empty is treated as
 	// "service" for parented routes.
 	Kind string `json:"kind,omitempty"`
+	// Stage is the deployment stage of the backing automation ("production",
+	// "staging", "dev", "live-dev"). Explicit data — stored on the endpoint so
+	// launcher/admin views can filter (e.g. only production frontends).
+	Stage string `json:"stage,omitempty"`
 }
 
 // IngressAddRouteResponse represents the response from adding a route
@@ -850,7 +854,7 @@ func addRouteToIngress(req IngressAddRouteRequest, jwtToken string) error {
 		} else if kind == "" {
 			kind = endpointKindService
 		}
-		if _, err := registerEndpoint(outer, ownerEmail, display, parent, kind); err != nil {
+		if _, err := registerEndpoint(outer, ownerEmail, display, parent, kind, req.Stage); err != nil {
 			fmt.Printf("Warning: failed to register Bailey endpoint for %s: %v\n", outer, err)
 		}
 	}

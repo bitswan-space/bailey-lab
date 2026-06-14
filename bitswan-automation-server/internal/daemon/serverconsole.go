@@ -41,21 +41,31 @@ func isServerConsoleHost(host string) bool {
 // deep link or reload of a client-side view still loads the app.
 func serveServerConsole(w http.ResponseWriter, r *http.Request) {
 	p := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
-	if p == "" {
-		p = "index.html"
-	}
-	if _, err := fs.Stat(serverConsoleRoot, p); err != nil {
-		p = "index.html" // SPA fallback
+
+	// Decide what FileServer should serve. The root and any unknown path
+	// (a client-side SPA route) resolve to "/" — FileServer returns
+	// index.html with 200 for a directory path. Never serve "/index.html"
+	// explicitly: FileServer 301-redirects that to "./", which loops.
+	serve := r.URL.Path
+	if p == "" || p == "index.html" {
+		serve = "/"
+	} else if _, err := fs.Stat(serverConsoleRoot, p); err != nil {
+		serve = "/" // SPA fallback → index.html
 	}
 
 	// The console is a self-contained bundle: same-origin scripts/fonts, with
-	// an inline <style> in index.html. It talks to no third party.
+	// an inline <style> in index.html. It talks to no third party. It's served
+	// on the inner host and framed by the outer chrome wrap, so frame-ancestors
+	// must allow that outer origin (and no X-Frame-Options, which would block
+	// the cross-origin frame) — mirroring strictInnerCSP for proxied apps.
+	outer := toOuterHost(requestEndpointHost(r))
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "+
-			"img-src 'self' data:; font-src 'self' data:; connect-src 'self'")
-	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+			"img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "+
+			"frame-ancestors 'self' https://"+outer)
+	w.Header().Del("X-Frame-Options")
 
 	r2 := r.Clone(r.Context())
-	r2.URL.Path = "/" + p
+	r2.URL.Path = serve
 	http.FileServer(http.FS(serverConsoleRoot)).ServeHTTP(w, r2)
 }

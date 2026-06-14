@@ -38,7 +38,12 @@ type endpointRecord struct {
 	// (gitops/editor and other infrastructure). Empty when unknown (e.g.
 	// pre-migration rows or routes registered without a kind). It is
 	// explicit data set at registration — never inferred from the hostname.
-	Kind      string
+	Kind string
+	// Stage is the deployment stage of the backing automation ("production",
+	// "staging", "dev", "live-dev", ...). Explicit data set at registration;
+	// launcher/admin views filter on it (e.g. only production frontends).
+	// Empty for endpoints with no stage (workspace dashboards, services).
+	Stage     string
 	CreatedAt string
 }
 
@@ -82,10 +87,10 @@ func getEndpoint(hostname string) (*endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), created_at
+	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), created_at
 	                    FROM endpoints WHERE hostname = ? COLLATE NOCASE`, hostname)
 	var e endpointRecord
-	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.CreatedAt); err != nil {
+	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -99,7 +104,7 @@ func getEndpoint(hostname string) (*endpointRecord, error) {
 // the workspace dashboard for workspace-spawned endpoints. Idempotent:
 // if the row already exists, returns the existing record without
 // overwriting — the original owner and parent are preserved.
-func registerEndpoint(hostname, ownerEmail, displayName, parentEndpoint, kind string) (*endpointRecord, error) {
+func registerEndpoint(hostname, ownerEmail, displayName, parentEndpoint, kind, stage string) (*endpointRecord, error) {
 	db, err := openBaileyDB()
 	if err != nil {
 		return nil, err
@@ -110,19 +115,25 @@ func registerEndpoint(hostname, ownerEmail, displayName, parentEndpoint, kind st
 		return nil, fmt.Errorf("hostname and owner are required")
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = db.Exec(`INSERT OR IGNORE INTO endpoints (hostname, owner_email, display_name, parent_endpoint, kind, created_at)
-	                  VALUES (?, ?, ?, ?, ?, ?)`,
-		hostname, ownerEmail, displayName, parentEndpoint, kind, now)
+	_, err = db.Exec(`INSERT OR IGNORE INTO endpoints (hostname, owner_email, display_name, parent_endpoint, kind, stage, created_at)
+	                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		hostname, ownerEmail, displayName, parentEndpoint, kind, stage, now)
 	if err != nil {
 		return nil, err
 	}
-	// A row registered earlier without a kind (or as a plain route, before
-	// its workspace context was known) should pick up an explicit kind once
-	// one is supplied — INSERT OR IGNORE won't update the existing row, so
-	// fill an empty kind in place. Never downgrade a known kind.
+	// A row registered earlier without a kind/stage (or as a plain route,
+	// before its workspace context was known) should pick up the explicit
+	// values once supplied — INSERT OR IGNORE won't update the existing row,
+	// so fill empty columns in place. Never downgrade a known value.
 	if kind != "" {
 		if _, err := db.Exec(`UPDATE endpoints SET kind = ? WHERE hostname = ? COLLATE NOCASE AND COALESCE(kind,'') = ''`,
 			kind, hostname); err != nil {
+			return nil, err
+		}
+	}
+	if stage != "" {
+		if _, err := db.Exec(`UPDATE endpoints SET stage = ? WHERE hostname = ? COLLATE NOCASE AND COALESCE(stage,'') = ''`,
+			stage, hostname); err != nil {
 			return nil, err
 		}
 	}
@@ -352,7 +363,7 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), created_at FROM endpoints`)
+	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), created_at FROM endpoints`)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +371,7 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	var out []endpointRecord
 	for rows.Next() {
 		var e endpointRecord
-		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

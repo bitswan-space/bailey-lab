@@ -85,7 +85,9 @@ func baileyLauncherData(email string, groups []string) launcherData {
 		}
 	}
 	for _, e := range eps {
-		if e.Kind == endpointKindFrontend && e.ParentEndpoint != "" {
+		// Only production frontends belong in the launcher — dev/staging/
+		// live-dev are working copies, surfaced in the workspace dashboard.
+		if e.Kind == endpointKindFrontend && e.ParentEndpoint != "" && e.Stage == "production" {
 			g := ensureGroup(e.ParentEndpoint)
 			name := e.DisplayName
 			if name == "" {

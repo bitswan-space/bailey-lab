@@ -32,7 +32,7 @@ func TestEnforceEndpointACL_UnregisteredHostIsOpen(t *testing.T) {
 
 func TestEnforceEndpointACL_OwnerPasses(t *testing.T) {
 	host := "gate-owner.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
@@ -44,7 +44,7 @@ func TestEnforceEndpointACL_OwnerPasses(t *testing.T) {
 
 func TestEnforceEndpointACL_StrangerDeniedAndRequestRecorded(t *testing.T) {
 	host := "gate-stranger.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
@@ -77,7 +77,7 @@ func TestEnforceEndpointACL_StrangerDeniedAndRequestRecorded(t *testing.T) {
 
 func TestEnforceEndpointACL_InnerHostUsesOuterACL(t *testing.T) {
 	host := "gate-inner.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
@@ -89,7 +89,7 @@ func TestEnforceEndpointACL_InnerHostUsesOuterACL(t *testing.T) {
 
 func TestEnforceEndpointACL_GroupGrantPasses(t *testing.T) {
 	host := "gate-group.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addGrant(host, "group", "/Acme/devs", "access", "owner@example.com"); err != nil {
@@ -134,7 +134,7 @@ func TestEnforceProtectedGate_NoIdentityPassesThrough(t *testing.T) {
 	// through so the upstream's own 401 surfaces instead of a confusing
 	// gate page.
 	host := "gate-noident.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
@@ -146,7 +146,7 @@ func TestEnforceProtectedGate_NoIdentityPassesThrough(t *testing.T) {
 
 func TestEnforceProtectedGate_DisableEnv(t *testing.T) {
 	host := "gate-disabled.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("BAILEY_GATE_DISABLE", "1")
