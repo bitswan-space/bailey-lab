@@ -65,6 +65,40 @@ func stripForwardedIdentityHeaders(r *http.Request) {
 	}
 }
 
+// baileyAuthCookieNames are the cookies that carry Bailey's own auth/session
+// state. They are meaningful only to the gate and the Bailey daemon; an
+// upstream app must never receive them.
+var baileyAuthCookieNames = map[string]bool{
+	deviceCookieName: true, // _bailey_device — the replayable device-trust credential
+	gateOriginCookie: true, // _bailey_origin — the gate's return-path stash
+}
+
+// stripBaileyAuthCookies rewrites r's Cookie header to drop Bailey's auth
+// cookies while preserving any cookies the app set for itself. The gate calls
+// this before proxying to an app upstream so a malicious/compromised app can
+// never read or replay the device-trust credential — it can only ever see the
+// request the gate already authorized, not the credential behind it.
+func stripBaileyAuthCookies(r *http.Request) {
+	cookies := r.Cookies()
+	hadBailey := false
+	for _, c := range cookies {
+		if baileyAuthCookieNames[c.Name] {
+			hadBailey = true
+			break
+		}
+	}
+	if !hadBailey {
+		return
+	}
+	r.Header.Del("Cookie")
+	for _, c := range cookies {
+		if baileyAuthCookieNames[c.Name] {
+			continue
+		}
+		r.AddCookie(c)
+	}
+}
+
 // identityFromHeaders extracts the authenticated user from the
 // oauth2-proxy-forwarded headers. Returns ("", nil) when there is no
 // identity on the request (e.g. before the OIDC handshake has run, or

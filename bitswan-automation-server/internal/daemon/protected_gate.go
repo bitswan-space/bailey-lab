@@ -162,6 +162,17 @@ func startProtectedGate() error {
 				if len(groups) > 0 {
 					r.Header.Set("X-Forwarded-Groups", strings.Join(groups, ","))
 				}
+			} else {
+				// App upstream (user-controlled, possibly untrusted code).
+				// Strip Bailey's auth cookies so a malicious or compromised
+				// workspace app can never read — and then replay — the
+				// device-trust credential. The browser sends _bailey_device to
+				// the gate so the gate can enforce trust on every protected
+				// host, but it MUST NOT reach an upstream app: the gate has
+				// already enforced trust by this point, so the app needs the
+				// request, never the credential. This is what keeps the cookie
+				// un-stealable by the apps running behind Bailey.
+				stripBaileyAuthCookies(r)
 			}
 		},
 		// Flush immediately after every chunk so streaming upstream
