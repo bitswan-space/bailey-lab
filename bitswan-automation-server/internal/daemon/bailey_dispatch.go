@@ -79,7 +79,26 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- Routes open to any signed-in user ---
+	// DEVICE-TRUST BACKSTOP (security-critical). Every /bailey/api route
+	// below this point exposes or mutates management data, so it requires a
+	// TRUSTED device — a valid OAuth login is never sufficient on its own.
+	// That is the entire point of the device-trust gate: a phished credential
+	// or a stolen-but-signed-in browser must not reach the console's data.
+	//
+	// enforceMFAGate exempts /bailey/api wholesale so the pre-trust bootstrap
+	// flow (handleGateAPI, above) can run on an untrusted device; this is
+	// where the data endpoints earn their gate back. The ONLY things an
+	// untrusted device may touch are the gate/bootstrap APIs above (how a
+	// device becomes trusted) and the public favicon/static/whoami/signout
+	// handled earlier. Enforcing it HERE — at the data handler, not at a host-
+	// or SPA-dependent layer — means the data is unreachable from an untrusted
+	// device no matter which host the request hit or what the client renders.
+	if currentDeviceForRequest(r, email) == nil {
+		writeJSONError(w, "device not trusted", http.StatusUnauthorized)
+		return
+	}
+
+	// --- Routes open to any signed-in user (on a trusted device) ---
 	switch r.URL.Path {
 	case "/bailey/api/notifications-count":
 		if r.Method == http.MethodGet {

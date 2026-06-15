@@ -128,6 +128,7 @@ func TestDispatch_WorkspaceNameTraversalRejected(t *testing.T) {
 		r.URL.Path = "/bailey/api/workspaces/" + name + "/restore"
 		r.Host = "bailey.example.com"
 		r.Header.Set("X-Forwarded-Email", "owner@example.com")
+		ensureTrustedDeviceForReq(r) // trusted device; the 400 must come from name validation, not the backstop
 		w := httptest.NewRecorder()
 		(&Server{}).handleBailey(w, r)
 		if w.Code != http.StatusBadRequest {

@@ -12,6 +12,7 @@ import (
 // dispatchSrv runs the real router against a Server with version/startTime
 // set, so handlers that read those fields (overview) work.
 func dispatchSrv(r *http.Request) *httptest.ResponseRecorder {
+	ensureTrustedDeviceForReq(r)
 	w := httptest.NewRecorder()
 	(&Server{version: "test-1.2.3", startTime: time.Now().Add(-time.Minute)}).handleBailey(w, r)
 	return w

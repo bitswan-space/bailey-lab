@@ -158,6 +158,7 @@ func TestListAccessibleWorkspaces_ServerOwnerAuditView(t *testing.T) {
 	}
 	r := baileyReq(http.MethodGet, "/bailey/api/workspaces", "lawsrv@example.com")
 	r.Host = host
+	ensureTrustedDeviceForReq(r)
 	w := httptest.NewRecorder()
 	(&Server{}).handleBailey(w, r)
 	var resp listAccessibleResponse

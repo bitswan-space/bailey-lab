@@ -155,6 +155,7 @@ func TestEndpoints_ServerOwnerSeesViewerRows(t *testing.T) {
 	}
 	r := baileyReq(http.MethodGet, "/bailey/api/endpoints", "srvowner@example.com")
 	r.Host = host
+	ensureTrustedDeviceForReq(r)
 	w := httptest.NewRecorder()
 	(&Server{}).handleBailey(w, r)
 	if w.Code != http.StatusOK {

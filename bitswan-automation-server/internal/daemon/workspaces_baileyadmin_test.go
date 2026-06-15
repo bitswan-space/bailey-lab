@@ -20,6 +20,26 @@ func baileyReqBody(method, path, email, body string) *http.Request {
 	return r
 }
 
+// withTrustedDevice attaches a valid trusted-device cookie for email to r so
+// it clears handleBailey's device-trust backstop (every /bailey/api data
+// endpoint requires a trusted device). Tests exercising data-endpoint logic
+// must look like they came from a trusted browser.
+func withTrustedDevice(t *testing.T, r *http.Request, email string) *http.Request {
+	t.Helper()
+	rec, err := addDevice(email, "test-trusted-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w0 := httptest.NewRecorder()
+	if err := setDeviceCookie(w0, httptest.NewRequest(http.MethodGet, "https://bailey.example.com/", nil), email, rec.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range w0.Result().Cookies() {
+		r.AddCookie(c)
+	}
+	return r
+}
+
 // --- callerOwnsWorkspace (the auth check) -------------------------------
 
 func TestCallerOwnsWorkspace_ServerOwnerOverride(t *testing.T) {
@@ -54,7 +74,7 @@ func TestWorkspaceAction_InvalidNameRejected(t *testing.T) {
 		r.URL.Path = "/bailey/api/workspaces/" + name + "/trash"
 		r.Header.Set("X-Forwarded-Email", "u@example.com")
 		w := httptest.NewRecorder()
-		(&Server{}).handleBailey(w, r)
+		(&Server{}).handleBailey(w, withTrustedDevice(t, r, "u@example.com"))
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("trash %q = %d, want 400", name, w.Code)
 		}
@@ -69,7 +89,7 @@ func TestWorkspaceAction_NonOwnerForbidden(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, action := range []string{"trash", "restore", "update"} {
-		w := dispatch(baileyReq(http.MethodPost, "/bailey/api/workspaces/"+ws+"/"+action, "intruder@example.com"))
+		w := dispatch(withTrustedDevice(t, baileyReq(http.MethodPost, "/bailey/api/workspaces/"+ws+"/"+action, "intruder@example.com"), "intruder@example.com"))
 		if w.Code != http.StatusForbidden {
 			t.Errorf("%s by non-owner = %d, want 403; body=%s", action, w.Code, w.Body.String())
 		}
@@ -78,13 +98,13 @@ func TestWorkspaceAction_NonOwnerForbidden(t *testing.T) {
 
 func TestWorkspaceCreate_InvalidNameAndNoDomain(t *testing.T) {
 	// Bad JSON body → 400.
-	rBad := baileyReqBody(http.MethodPost, "/bailey/api/workspaces", "u@example.com", "{not json")
+	rBad := withTrustedDevice(t, baileyReqBody(http.MethodPost, "/bailey/api/workspaces", "u@example.com", "{not json"), "u@example.com")
 	if w := dispatch(rBad); w.Code != http.StatusBadRequest {
 		t.Errorf("bad body create = %d, want 400", w.Code)
 	}
 	// Valid JSON but invalid name → 400.
 	writeTestConfig(t)
-	rName := baileyReqBody(http.MethodPost, "/bailey/api/workspaces", "u@example.com", `{"name":"Bad Name"}`)
+	rName := withTrustedDevice(t, baileyReqBody(http.MethodPost, "/bailey/api/workspaces", "u@example.com", `{"name":"Bad Name"}`), "u@example.com")
 	if w := dispatch(rName); w.Code != http.StatusBadRequest {
 		t.Errorf("invalid name create = %d, want 400", w.Code)
 	}
@@ -93,12 +113,12 @@ func TestWorkspaceCreate_InvalidNameAndNoDomain(t *testing.T) {
 func TestEmptyTrash_ConfirmationGuard(t *testing.T) {
 	writeTestConfig(t)
 	// Wrong confirmation → 400, no streaming.
-	r := baileyReqBody(http.MethodPost, "/bailey/api/workspaces/empty-trash", "u@example.com", `{"confirmation":"nope"}`)
+	r := withTrustedDevice(t, baileyReqBody(http.MethodPost, "/bailey/api/workspaces/empty-trash", "u@example.com", `{"confirmation":"nope"}`), "u@example.com")
 	if w := dispatch(r); w.Code != http.StatusBadRequest {
 		t.Errorf("wrong confirmation = %d, want 400", w.Code)
 	}
 	// Bad body → 400.
-	rBad := baileyReqBody(http.MethodPost, "/bailey/api/workspaces/empty-trash", "u@example.com", "{")
+	rBad := withTrustedDevice(t, baileyReqBody(http.MethodPost, "/bailey/api/workspaces/empty-trash", "u@example.com", "{"), "u@example.com")
 	if w := dispatch(rBad); w.Code != http.StatusBadRequest {
 		t.Errorf("bad body empty-trash = %d, want 400", w.Code)
 	}
@@ -106,7 +126,7 @@ func TestEmptyTrash_ConfirmationGuard(t *testing.T) {
 
 func TestListAccessibleWorkspaces_OKShape(t *testing.T) {
 	writeTestConfig(t)
-	w := dispatch(baileyReq(http.MethodGet, "/bailey/api/workspaces", "lw@example.com"))
+	w := dispatch(withTrustedDevice(t, baileyReq(http.MethodGet, "/bailey/api/workspaces", "lw@example.com"), "lw@example.com"))
 	if w.Code != http.StatusOK {
 		t.Fatalf("list workspaces = %d; body=%s", w.Code, w.Body.String())
 	}
@@ -120,10 +140,10 @@ func TestListAccessibleWorkspaces_OKShape(t *testing.T) {
 }
 
 func TestWorkspaces_MethodGuard(t *testing.T) {
-	if w := dispatch(baileyReq(http.MethodDelete, "/bailey/api/workspaces", "u@example.com")); w.Code != http.StatusMethodNotAllowed {
+	if w := dispatch(withTrustedDevice(t, baileyReq(http.MethodDelete, "/bailey/api/workspaces", "u@example.com"), "u@example.com")); w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("DELETE workspaces = %d, want 405", w.Code)
 	}
-	if w := dispatch(baileyReq(http.MethodGet, "/bailey/api/workspaces/empty-trash", "u@example.com")); w.Code != http.StatusMethodNotAllowed {
+	if w := dispatch(withTrustedDevice(t, baileyReq(http.MethodGet, "/bailey/api/workspaces/empty-trash", "u@example.com"), "u@example.com")); w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET empty-trash = %d, want 405", w.Code)
 	}
 }

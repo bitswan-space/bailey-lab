@@ -44,10 +44,64 @@ const adminGrp = "/Example Org/admin"
 // dispatch runs the real router against a zero-value Server. The routes
 // under test (whoami, devices, approvals, endpoints, admin/*, and the
 // GET side of workspaces) don't touch Server fields.
+//
+// It first makes the request look like it came from a TRUSTED device, since
+// handleBailey's device-trust backstop requires one for every data endpoint.
+// That lets these tests exercise their own logic (admin checks, validation,
+// ACL) rather than tripping the backstop. The backstop itself is covered
+// directly by TestHandleBailey_DeviceTrustBackstop; tests that need the
+// untrusted path build requests without going through dispatch.
 func dispatch(r *http.Request) *httptest.ResponseRecorder {
+	ensureTrustedDeviceForReq(r)
 	w := httptest.NewRecorder()
 	(&Server{}).handleBailey(w, r)
 	return w
+}
+
+// ensureTrustedDeviceForReq attaches a valid trusted-device cookie for the
+// request's forwarded identity. Best-effort and idempotent: no-ops when there
+// is no identity (so no-identity tests still hit the backstop / admin checks)
+// or a device cookie is already present.
+func ensureTrustedDeviceForReq(r *http.Request) {
+	email := r.Header.Get("X-Forwarded-Email")
+	if email == "" {
+		return
+	}
+	// The gate/bootstrap APIs (handleGateAPI) and the public whoami run BEFORE
+	// the device-trust backstop and are exactly the routes an untrusted device
+	// must reach to become trusted — auto-trusting them would mask the very
+	// state those tests assert. Leave them untrusted.
+	switch p := r.URL.Path; {
+	case p == "/bailey/api/whoami",
+		p == "/bailey/api/gate-state",
+		p == "/bailey/api/claim",
+		p == "/bailey/api/self-trust",
+		p == "/bailey/api/recover",
+		p == "/bailey/api/backup-codes/regenerate",
+		strings.HasPrefix(p, "/bailey/api/pending-pair"),
+		strings.HasPrefix(p, "/bailey/api/totp/"):
+		return
+	}
+	if c, _ := r.Cookie(deviceCookieName); c != nil {
+		return
+	}
+	// Reuse an existing device for this email when there is one, so we don't
+	// pollute device-list/count assertions; only mint a fresh device if the
+	// caller has none.
+	id := ""
+	if devs, _ := dbListDevices(email); len(devs) > 0 {
+		id = devs[0].ID
+	} else if rec, err := addDevice(email, "test-trusted-device"); err == nil {
+		id = rec.ID
+	} else {
+		return
+	}
+	w0 := httptest.NewRecorder()
+	if setDeviceCookie(w0, httptest.NewRequest(http.MethodGet, "https://bailey.example.com/", nil), email, id) == nil {
+		for _, c := range w0.Result().Cookies() {
+			r.AddCookie(c)
+		}
+	}
 }
 
 // --- whoami / identity --------------------------------------------------
@@ -97,10 +151,16 @@ func TestBaileyDispatch_Favicon(t *testing.T) {
 }
 
 func TestBaileyDispatch_NotificationsCount(t *testing.T) {
-	// Open to any signed-in user; an identity-less request reports 0.
-	w := dispatch(baileyReq(http.MethodGet, "/bailey/api/notifications-count", ""))
+	// notifications-count is part of the trusted console surface, so an
+	// identity-less (hence un-trustable) request is rejected by the
+	// device-trust backstop rather than answered with a count.
+	if w := dispatch(baileyReq(http.MethodGet, "/bailey/api/notifications-count", "")); w.Code != http.StatusUnauthorized {
+		t.Fatalf("no-identity status = %d, want 401", w.Code)
+	}
+	// A trusted, signed-in user gets a count (0 with nothing pending).
+	w := dispatch(baileyReq(http.MethodGet, "/bailey/api/notifications-count", "nc-user@example.com"))
 	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", w.Code)
+		t.Fatalf("trusted status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	var got struct {
 		Count int `json:"count"`
@@ -109,7 +169,42 @@ func TestBaileyDispatch_NotificationsCount(t *testing.T) {
 		t.Fatalf("decode: %v\n%s", err, w.Body.String())
 	}
 	if got.Count != 0 {
-		t.Errorf("no-identity notifications count = %d, want 0", got.Count)
+		t.Errorf("trusted notifications count = %d, want 0", got.Count)
+	}
+}
+
+// TestHandleBailey_DeviceTrustBackstop is the security invariant: a console
+// DATA endpoint is unreachable from an UNtrusted device (no valid device
+// cookie), even with a valid OAuth identity — while the same request from a
+// trusted device gets through. This is what makes "untrusted device reads
+// console data" architecturally impossible, independent of host or client.
+func TestHandleBailey_DeviceTrustBackstop(t *testing.T) {
+	writeTestConfig(t)
+	email := "backstop@example.com"
+
+	// UNtrusted: identity present, no device cookie → 401 on a data endpoint.
+	rUntrusted := baileyReq(http.MethodGet, "/bailey/api/workspaces", email)
+	wU := httptest.NewRecorder()
+	(&Server{}).handleBailey(wU, rUntrusted)
+	if wU.Code != http.StatusUnauthorized {
+		t.Fatalf("untrusted data request = %d, want 401; body=%s", wU.Code, wU.Body.String())
+	}
+
+	// A gate/bootstrap API stays reachable while untrusted (it's how you
+	// become trusted).
+	wGate := httptest.NewRecorder()
+	(&Server{}).handleBailey(wGate, baileyReq(http.MethodGet, "/bailey/api/gate-state", email))
+	if wGate.Code != http.StatusOK {
+		t.Fatalf("untrusted gate-state = %d, want 200", wGate.Code)
+	}
+
+	// Trusted: same data endpoint now passes the backstop.
+	rTrusted := baileyReq(http.MethodGet, "/bailey/api/workspaces", email)
+	ensureTrustedDeviceForReq(rTrusted)
+	wT := httptest.NewRecorder()
+	(&Server{}).handleBailey(wT, rTrusted)
+	if wT.Code != http.StatusOK {
+		t.Fatalf("trusted data request = %d, want 200; body=%s", wT.Code, wT.Body.String())
 	}
 }
 
@@ -139,14 +234,20 @@ func TestBaileyDevices_ListAndRemoveRoundTrip(t *testing.T) {
 	if len(listed.Devices) != 2 {
 		t.Fatalf("listed %d devices, want 2: %+v", len(listed.Devices), listed.Devices)
 	}
-	// No device cookie on the request → none flagged current.
+	// Listing requires a trusted device (dispatch attaches one for the
+	// caller), so exactly one device — the caller's current browser — is
+	// flagged current.
+	currents := 0
 	for _, d := range listed.Devices {
 		if d.IsCurrent {
-			t.Errorf("device %s flagged current without a device cookie", d.ID)
+			currents++
 		}
 		if d.Name == "" || d.PairedAt == "" {
 			t.Errorf("device DTO missing fields: %+v", d)
 		}
+	}
+	if currents != 1 {
+		t.Errorf("want exactly one current device, got %d: %+v", currents, listed.Devices)
 	}
 
 	// Remove d1.
@@ -364,10 +465,11 @@ func TestBaileyAdmin_NonAdminGets403(t *testing.T) {
 }
 
 func TestBaileyAdmin_NoIdentityGets403(t *testing.T) {
-	// No forwarded identity → isAdmin false → 403, never reaches handler.
+	// No forwarded identity → it can't be a trusted device, so the
+	// device-trust backstop rejects it with 401 before any admin check.
 	w := dispatch(baileyReq(http.MethodGet, "/bailey/api/admin/devices", ""))
-	if w.Code != http.StatusForbidden {
-		t.Errorf("no-identity admin route: status = %d, want 403", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("no-identity admin route: status = %d, want 401", w.Code)
 	}
 }
 

@@ -97,6 +97,7 @@ func TestHandleBailey_AdminRouteForbiddenForNonAdmin(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "https://bailey.example.com/bailey/api/overview", nil)
 	r.Host = "bailey.example.com"
 	r.Header.Set("X-Forwarded-Email", "nobody@example.com")
+	ensureTrustedDeviceForReq(r) // trusted device; the 403 must come from the admin check, not the backstop
 	w := httptest.NewRecorder()
 	(&Server{}).handleBailey(w, r)
 	if w.Code != http.StatusForbidden {
