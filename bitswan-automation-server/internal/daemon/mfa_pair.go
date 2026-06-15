@@ -322,7 +322,7 @@ func originRedirectPath(r *http.Request) string {
 	if c, err := r.Cookie(gateOriginCookie); err == nil && c.Value != "" {
 		return safeOriginTarget(c.Value)
 	}
-	return "/"
+	return safeOriginTarget("") // no stashed origin → the console root
 }
 
 // recoveryHandler serves /2fa-gate/recovery — the RecoveryScene: the user

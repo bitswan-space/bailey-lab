@@ -80,16 +80,6 @@ func isTopLevelHTMLGet(r *http.Request) bool {
 		strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
-// onConsoleHost reports whether the request hit the Server Console host
-// (its inner OR outer hostname). The console host is where the SPA's
-// assets (/assets/*) and APIs (/bailey/api/*) actually resolve to the
-// daemon, so it's the only host where we can serve the SPA inline; on an
-// app host those paths would be proxied to the upstream app instead.
-func onConsoleHost(r *http.Request) bool {
-	host := requestEndpointHost(r)
-	return isServerConsoleHost(toOuterHost(host))
-}
-
 // enforceMFAGate runs the Bailey DEVICE-TRUST phase. Returns true if the
 // caller should continue; returns false (and writes a scene/redirect/error)
 // when the gate has handled the request.
@@ -141,43 +131,47 @@ func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
 		return true // no identity → upstream OIDC failed; let it through
 	}
 
+	// The PUBLIC onboarding host (bailey-onboard.<domain>) is device-trust
+	// EXEMPT — it's the external half of the two-endpoint split. It serves the
+	// gate SPA + the bootstrap APIs that let an untrusted device BECOME trusted
+	// (claim / pending-pair / self-trust / recover). It deliberately exposes no
+	// console data: handleBailey's device-trust backstop still 401s the data
+	// APIs here, so an untrusted device can render the scene but read nothing.
+	if onOnboardHost(r) {
+		return true
+	}
+
 	if dev := currentDeviceForRequest(r, email); dev != nil {
 		touchDevice(email, dev.ID)
 		return true
 	}
 
-	// Untrusted device. The React SPA decides which scene to show from
-	// /bailey/api/gate-state; the gate's only job is to make sure the SPA
-	// HTML document is what an untrusted top-level navigation receives.
+	// Untrusted device on a TRUST-REQUIRED host (the console or an app). We do
+	// NOT serve any console/app surface here — the console is the internal half
+	// of the split and only trusted devices reach it. Send the browser to the
+	// public onboarding host, which renders the device-trust scene and, once
+	// the device is trusted, bounces back to the saved origin. A subresource /
+	// XHR / non-GET can't be meaningfully redirected, so it gets a clean 401.
 	if !isTopLevelHTMLGet(r) {
-		// Subresource / XHR / non-GET on an app host: never hand back an
-		// HTML scene. A clean 401 lets the caller's JS react.
 		http.Error(w, "device not trusted", http.StatusUnauthorized)
 		return false
 	}
-
-	if onConsoleHost(r) {
-		// The SPA's assets and APIs resolve to the daemon here, so render
-		// it inline. It reads gate-state and picks the scene.
-		serveServerConsole(w, r)
-		return false
-	}
-
-	// App host top-level navigation: the SPA can't run here (its /assets
-	// and /bailey/api would proxy to the upstream app). Send the browser
-	// to the console host, where the SPA renders the gate scene, and have
-	// it return here once the device is trusted.
 	rememberOrigin(w, r)
-	http.Redirect(w, r, consoleGateURL(r), http.StatusSeeOther)
+	http.Redirect(w, r, onboardGateURL(r), http.StatusSeeOther)
 	return false
 }
 
-// consoleGateURL builds an absolute URL to the Server Console host root
-// carrying a same-origin return path, so after the SPA clears the gate it
-// can bounce the user back to the app they were trying to reach. Falls
-// back to "/" (relative) if no protected domain is configured, which keeps
-// behaviour sane in tests / bootstrap.
-func consoleGateURL(r *http.Request) string {
+// onOnboardHost reports whether the request hit the public device-trust
+// onboarding host (its outer hostname; it has no inner/iframe form).
+func onOnboardHost(r *http.Request) bool {
+	return isServerConsoleOnboardHost(toOuterHost(requestEndpointHost(r)))
+}
+
+// onboardGateURL builds an absolute URL to the onboarding host root carrying a
+// same-origin return path, so once the SPA clears the device-trust gate it can
+// bounce the user back to the console/app they were trying to reach. Falls back
+// to "/" when no protected domain is configured (tests / bootstrap).
+func onboardGateURL(r *http.Request) string {
 	dom := protectedHostnameDomain()
 	if dom == "" {
 		return "/"
@@ -186,8 +180,9 @@ func consoleGateURL(r *http.Request) string {
 	if r.URL.RawQuery != "" {
 		ret += "?" + r.URL.RawQuery
 	}
-	return "https://" + serverConsoleHost(dom) + "/?return=" + url.QueryEscape(originForHost(r)+ret)
+	return "https://" + serverConsoleOnboardHost(dom) + "/?return=" + url.QueryEscape(originForHost(r)+ret)
 }
+
 
 // originForHost reconstructs the outer scheme://host the untrusted request
 // hit, so the return path the console hands back can rebuild a full URL to
@@ -200,47 +195,78 @@ func originForHost(r *http.Request) string {
 	return scheme + "://" + toOuterHost(requestEndpointHost(r))
 }
 
-// rememberOrigin stashes the path the user was trying to reach in a
-// short-lived cookie so originRedirect can send them back there once
-// they clear the gate (TOTP challenge, device pairing, etc.).
+// rememberOrigin stashes the ABSOLUTE URL the user was trying to reach in a
+// short-lived cookie so originRedirect/originRedirectPath can send them back
+// once they clear the gate. It stores a full scheme://host/path (not a bare
+// path) and is scoped to the parent protected domain, because the device-trust
+// gate now lives on a SEPARATE host (bailey-onboard.<domain>): the user is
+// redirected console/app → onboarding host, becomes trusted there, and must be
+// returned to the ORIGINAL host. A bare path couldn't express that cross-host
+// hop. safeOriginTarget keeps it same-site, so this can't become an open
+// redirect even though the cookie is now domain-scoped.
 func rememberOrigin(w http.ResponseWriter, r *http.Request) {
-	origin := r.URL.Path
+	origin := originForHost(r) + r.URL.Path
 	if r.URL.RawQuery != "" {
 		origin += "?" + r.URL.RawQuery
 	}
-	http.SetCookie(w, &http.Cookie{
+	c := &http.Cookie{
 		Name: gateOriginCookie, Value: origin, Path: "/",
 		MaxAge: 600, HttpOnly: true,
 		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
 		SameSite: http.SameSiteLaxMode,
-	})
+	}
+	if dom := cookieDomainForProtected(); dom != "" {
+		c.Domain = dom
+	}
+	http.SetCookie(w, c)
 }
 
-// safeOriginTarget validates a stashed redirect target and returns a
-// guaranteed same-origin absolute path. The _bailey_origin cookie is
-// scoped to the whole protected domain (cookieDomainForProtected
-// returns ".<domain>"), so any sibling host under that domain — e.g. a
-// user-controlled workspace app — can plant it. Without validation an
-// attacker plants _bailey_origin=//evil.example (or /\evil.example) and
-// the victim is bounced off-domain (open redirect / post-auth phishing)
-// the next time they clear the gate, since http.Redirect forwards a
-// protocol-relative target unchanged.
+// safeOriginTarget validates a stashed redirect target. The _bailey_origin
+// cookie is scoped to the whole protected domain, so any sibling host under it
+// — e.g. a user-controlled workspace app — can plant it. Without validation an
+// attacker plants _bailey_origin=//evil.example (or https://evil.example) and
+// the victim is bounced off-domain (open redirect / post-auth phishing) the
+// next time they clear the gate, since http.Redirect / window.location forward
+// the target unchanged.
 //
-// Only a strict same-origin absolute path is allowed: a single leading
-// '/', not '//' and not '/\'. Anything else collapses to "/".
+// Two shapes are allowed:
+//   - a strict same-origin absolute PATH (single leading '/', not '//' / '/\'); or
+//   - an absolute https URL whose host is the protected domain or a subdomain
+//     of it (same-site), which is what the cross-host onboarding return needs.
+//
+// Anything else collapses to the console root (an always-safe in-site target),
+// never the caller's current host (which could be the onboarding host).
 func safeOriginTarget(target string) string {
-	if target == "" || target[0] != '/' ||
-		strings.HasPrefix(target, "//") ||
-		strings.HasPrefix(target, "/\\") {
-		return "/"
+	dom := protectedHostnameDomain()
+	fallback := "/"
+	if dom != "" {
+		fallback = "https://" + serverConsoleHost(dom) + "/"
+	}
+	if target == "" {
+		return fallback
+	}
+	if target[0] == '/' {
+		if strings.HasPrefix(target, "//") || strings.HasPrefix(target, "/\\") {
+			return fallback
+		}
+		return target
+	}
+	u, err := url.Parse(target)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return fallback
+	}
+	h := strings.ToLower(u.Hostname())
+	d := strings.ToLower(dom)
+	if d == "" || (h != d && !strings.HasSuffix(h, "."+d)) {
+		return fallback
 	}
 	return target
 }
 
-// originRedirect sends the user back to the path stashed by
-// rememberOrigin (defaulting to "/"), clearing the cookie on the way.
+// originRedirect sends the user back to the URL stashed by rememberOrigin
+// (defaulting to the console root), clearing the cookie on the way.
 func originRedirect(w http.ResponseWriter, r *http.Request) {
-	target := "/"
+	target := ""
 	if c, err := r.Cookie(gateOriginCookie); err == nil && c.Value != "" {
 		target = c.Value
 	}

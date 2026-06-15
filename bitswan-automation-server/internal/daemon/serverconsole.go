@@ -36,6 +36,22 @@ func isServerConsoleHost(host string) bool {
 	return strings.EqualFold(host, serverConsoleHost(dom))
 }
 
+// isServerConsoleOnboardHost reports whether host is the reserved PUBLIC
+// device-trust onboarding host (bailey-onboard.<domain>). The onboarding host
+// serves the same embedded SPA, but it is device-trust exempt (see
+// enforceMFAGate) so an untrusted device can render the gate scene and pair.
+func isServerConsoleOnboardHost(host string) bool {
+	cfg, err := config.NewAutomationServerConfig().LoadConfig()
+	if err != nil || cfg == nil {
+		return false
+	}
+	dom := cfg.ProtectedHostnameDomain()
+	if dom == "" {
+		return false
+	}
+	return strings.EqualFold(host, serverConsoleOnboardHost(dom))
+}
+
 // serveServerConsole serves the embedded SPA. Real files (index.html,
 // assets/*) are served as-is; any other path falls back to index.html so a
 // deep link or reload of a client-side view still loads the app.

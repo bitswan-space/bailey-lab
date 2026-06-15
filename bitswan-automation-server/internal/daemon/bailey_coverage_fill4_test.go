@@ -42,23 +42,23 @@ func TestGateSelfTrust_FormCodeFallbackSuccess(t *testing.T) {
 
 // --- mfa_gate.go query-string branches ---------------------------------
 
-func TestConsoleGateURL_WithQuery(t *testing.T) {
+func TestOnboardGateURL_WithQuery(t *testing.T) {
 	writeTestConfig(t)
 	r := httptest.NewRequest(http.MethodGet, "https://app.test.example.com/path?a=1&b=2", nil)
 	r.Host = "app.test.example.com"
-	got := consoleGateURL(r)
-	if !strings.Contains(got, "return=") || !strings.Contains(got, "bailey.test.example.com") {
-		t.Errorf("consoleGateURL = %q", got)
+	got := onboardGateURL(r)
+	if !strings.Contains(got, "return=") || !strings.Contains(got, "bailey-onboard.test.example.com") {
+		t.Errorf("onboardGateURL = %q", got)
 	}
 }
 
-func TestConsoleGateURL_NoDomain(t *testing.T) {
+func TestOnboardGateURL_NoDomain(t *testing.T) {
 	// With no config, protectedHostnameDomain() == "" → "/".
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SUDO_USER", "")
 	r := httptest.NewRequest(http.MethodGet, "https://app.example.com/x", nil)
-	if got := consoleGateURL(r); got != "/" {
-		t.Errorf("consoleGateURL no-domain = %q, want /", got)
+	if got := onboardGateURL(r); got != "/" {
+		t.Errorf("onboardGateURL no-domain = %q, want /", got)
 	}
 }
 

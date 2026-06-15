@@ -58,6 +58,13 @@ func consoleHost(t *testing.T) string {
 	return serverConsoleHost(writeTestConfig(t))
 }
 
+// onboardHost returns the public device-trust onboarding hostname for the test
+// config domain (→ "bailey-onboard.test.example.com").
+func onboardHost(t *testing.T) string {
+	t.Helper()
+	return serverConsoleOnboardHost(writeTestConfig(t))
+}
+
 // bodyLooksLikeSPA reports whether the recorder captured the embedded
 // React console index.html (the SPA shell) rather than a Go gate page.
 // The Go scene pages carry the "sc-pad"/scenePage markup; index.html does
@@ -67,35 +74,68 @@ func bodyLooksLikeSPA(w *httptest.ResponseRecorder) bool {
 	return strings.Contains(b, "<div id=\"root\"") || strings.Contains(b, "/assets/")
 }
 
-// TestMFAGate_UntrustedServesSPA is the core assertion of the new
-// contract: on a CLAIMED server, a signed-in user with no device cookie
-// making a top-level HTML GET on the CONSOLE host gets the React console
-// SPA served INLINE (so it can render ApprovalScene) — NOT a 303 to any
-// Go gate page (pending-pair / claim / recovery / TOTP).
-func TestMFAGate_UntrustedServesSPA(t *testing.T) {
+// TestMFAGate_UntrustedConsoleRedirectsToOnboard is the core assertion of the
+// two-endpoint contract: on a CLAIMED server, a signed-in user with no device
+// cookie making a top-level HTML GET on the CONSOLE host is 303'd to the public
+// onboarding host (NOT served any console surface, NOT sent to a Go gate page,
+// NOT silently paired).
+func TestMFAGate_UntrustedConsoleRedirectsToOnboard(t *testing.T) {
 	markServerClaimed(t)
-	host := consoleHost(t)
+	domain := writeTestConfig(t)
 	w := httptest.NewRecorder()
-	pass := enforceMFAGate(w, gateReq(host, "/", "user@example.com", nil))
+	pass := enforceMFAGate(w, gateReq(serverConsoleHost(domain), "/", "user@example.com", nil))
 	if pass {
-		t.Fatal("untrusted device passed the gate; want SPA served")
+		t.Fatal("untrusted device passed the gate on the console host")
 	}
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200 (inline SPA)", w.Code)
+	if w.Code != http.StatusSeeOther {
+		t.Errorf("status = %d, want 303", w.Code)
 	}
-	if loc := w.Header().Get("Location"); loc != "" {
-		t.Errorf("gate redirected to %q; want inline SPA, no redirect to a Go page", loc)
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, "https://"+serverConsoleOnboardHost(domain)+"/") {
+		t.Errorf("Location = %q, want redirect to the onboarding host", loc)
 	}
-	if !bodyLooksLikeSPA(w) {
-		t.Errorf("served body doesn't look like the console SPA shell:\n%s", w.Body.String())
+	if strings.Contains(loc, gatePathPrefix) {
+		t.Errorf("Location = %q must NOT point at a Go gate page", loc)
+	}
+	if !strings.Contains(loc, "return=") {
+		t.Errorf("Location = %q missing return param", loc)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == deviceCookieName && c.Value != "" {
+			t.Error("gate silently paired a device; want explicit onboarding")
+		}
 	}
 }
 
-// TestMFAGate_UntrustedAppHostRedirectsToConsole verifies that an
-// untrusted top-level HTML GET on an APP host (where the SPA's assets/APIs
-// can't resolve) is 303'd to the CONSOLE host root with a return param —
-// NOT to a Go gate page.
-func TestMFAGate_UntrustedAppHostRedirectsToConsole(t *testing.T) {
+// TestMFAGate_OnboardServesSPA verifies the onboarding host is device-trust
+// EXEMPT: an untrusted device gets the React SPA served inline (so it can
+// render the device-trust scene), with no redirect.
+func TestMFAGate_OnboardServesSPA(t *testing.T) {
+	markServerClaimed(t)
+	w := httptest.NewRecorder()
+	pass := enforceMFAGate(w, gateReq(onboardHost(t), "/", "user@example.com", nil))
+	if !pass {
+		t.Fatalf("onboarding host did not pass the gate (status=%d, loc=%q)", w.Code, w.Header().Get("Location"))
+	}
+}
+
+// TestMFAGate_OnboardAssetsServed verifies the onboarding host serves the SPA's
+// static subresources (its /assets/* bundle) to an untrusted device — the
+// device-trust scene can't render without its own JS/CSS.
+func TestMFAGate_OnboardAssetsServed(t *testing.T) {
+	markServerClaimed(t)
+	req := gateReq(onboardHost(t), "/assets/app.css", "user@example.com", nil)
+	req.Header.Set("Accept", "text/css,*/*;q=0.1")
+	w := httptest.NewRecorder()
+	if !enforceMFAGate(w, req) {
+		t.Fatalf("onboarding asset request didn't pass the gate (status=%d)", w.Code)
+	}
+}
+
+// TestMFAGate_UntrustedAppHostRedirectsToOnboard verifies that an untrusted
+// top-level HTML GET on an APP host is 303'd to the public ONBOARDING host root
+// with a return param — NOT to the console and NOT to a Go gate page.
+func TestMFAGate_UntrustedAppHostRedirectsToOnboard(t *testing.T) {
 	markServerClaimed(t)
 	domain := writeTestConfig(t)
 	w := httptest.NewRecorder()
@@ -107,8 +147,8 @@ func TestMFAGate_UntrustedAppHostRedirectsToConsole(t *testing.T) {
 		t.Errorf("status = %d, want 303", w.Code)
 	}
 	loc := w.Header().Get("Location")
-	if !strings.HasPrefix(loc, "https://"+serverConsoleHost(domain)+"/") {
-		t.Errorf("Location = %q, want redirect to console host root", loc)
+	if !strings.HasPrefix(loc, "https://"+serverConsoleOnboardHost(domain)+"/") {
+		t.Errorf("Location = %q, want redirect to the onboarding host root", loc)
 	}
 	if strings.Contains(loc, gatePathPrefix) {
 		t.Errorf("Location = %q must NOT point at a Go gate page", loc)
@@ -146,23 +186,22 @@ func TestMFAGate_UntrustedNonHTMLGets401(t *testing.T) {
 	}
 }
 
-// TestMFAGate_UnclaimedServesSPA verifies that on a fresh (unclaimed)
-// server an eligible signed-in user on the console host gets the SPA
-// (which reads gate-state can_claim and renders BootstrapScene) — NOT a
-// 303 to the Go claim page, and NOT silently auto-paired.
-func TestMFAGate_UnclaimedServesSPA(t *testing.T) {
+// TestMFAGate_UnclaimedRedirectsToOnboard verifies that on a fresh (unclaimed)
+// server an eligible signed-in user on the console host is 303'd to the
+// onboarding host (where the SPA reads gate-state can_claim and renders
+// BootstrapScene) — NOT served the console inline, NOT sent to a Go claim page,
+// and NOT silently auto-paired.
+func TestMFAGate_UnclaimedRedirectsToOnboard(t *testing.T) {
 	resetClaimState(t)
-	host := consoleHost(t)
+	domain := writeTestConfig(t)
 	w := httptest.NewRecorder()
-	pass := enforceMFAGate(w, gateReq(host, "/", "admin@example.com", []string{"realm/admin"}))
+	pass := enforceMFAGate(w, gateReq(serverConsoleHost(domain), "/", "admin@example.com", []string{"realm/admin"}))
 	if pass {
 		t.Fatal("unclaimed server passed an untrusted device through the gate")
 	}
-	if loc := w.Header().Get("Location"); loc != "" {
-		t.Errorf("gate redirected to %q; want inline SPA", loc)
-	}
-	if !bodyLooksLikeSPA(w) {
-		t.Errorf("served body doesn't look like the console SPA shell")
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, "https://"+serverConsoleOnboardHost(domain)+"/") {
+		t.Errorf("Location = %q, want redirect to the onboarding host", loc)
 	}
 	// And the gate must NOT have minted a device cookie (no silent TOFU).
 	for _, c := range w.Result().Cookies() {
@@ -276,16 +315,16 @@ func TestMFAGate_TrustedDevicePasses(t *testing.T) {
 // others (the SPA's gate-state reports is_admin), not a forced factor.
 func TestMFAGate_AdminOnClaimedServerTrustsLikeAnyone(t *testing.T) {
 	markServerClaimed(t)
-	host := consoleHost(t)
+	domain := writeTestConfig(t)
 	w := httptest.NewRecorder()
-	pass := enforceMFAGate(w, gateReq(host, "/", "admin@example.com", []string{"realm/admin"}))
+	pass := enforceMFAGate(w, gateReq(serverConsoleHost(domain), "/", "admin@example.com", []string{"realm/admin"}))
 	if pass {
-		t.Fatal("admin on untrusted device passed the gate; want SPA served")
+		t.Fatal("admin on untrusted device passed the gate; want redirect to onboarding")
 	}
-	if loc := w.Header().Get("Location"); loc != "" {
-		t.Errorf("admin redirected to %q; want inline SPA like any user", loc)
-	}
-	if !bodyLooksLikeSPA(w) {
-		t.Errorf("admin not served the console SPA shell")
+	// An admin is NOT special: an untrusted admin device is redirected to the
+	// onboarding host exactly like any other user.
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, "https://"+serverConsoleOnboardHost(domain)+"/") {
+		t.Errorf("admin Location = %q, want redirect to the onboarding host", loc)
 	}
 }

@@ -236,6 +236,17 @@ func serverConsoleHost(domain string) string {
 	return "bailey." + strings.TrimPrefix(domain, ".")
 }
 
+// serverConsoleOnboardHost returns the reserved hostname for the PUBLIC
+// device-trust onboarding endpoint (e.g. bailey-onboard.acme.bswn.io). It is
+// the external/public half of the two-endpoint split: device-trust is NOT
+// required here, so an authenticated user on an untrusted device can reach it
+// to pair / claim / recover. The console host (serverConsoleHost) is the
+// internal half — device-trust IS required there, and untrusted devices are
+// redirected to this onboarding host. Both sit behind the same oauth2-proxy.
+func serverConsoleOnboardHost(domain string) string {
+	return "bailey-onboard." + strings.TrimPrefix(domain, ".")
+}
+
 func launcherItem(icon, label, url, cls string) string {
 	return fmt.Sprintf(`<a class="%s" href="%s" target="_top" role="menuitem"><span class="ico">%s</span><span class="lbl">%s</span></a>`,
 		cls, html.EscapeString(url), icon, html.EscapeString(label))

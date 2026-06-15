@@ -47,6 +47,15 @@ const (
 // wrong.
 func upstreamForHost(host string) *url.URL {
 	host = strings.ToLower(host)
+	// The onboarding host is served on its OUTER hostname (no inner/iframe
+	// split), so resolve it to the daemon directly — its bootstrap/data API
+	// calls (proxied via chromeWrapMiddleware) need an upstream even though
+	// it isn't an inner host. The SPA shell itself is served in-process by
+	// serveServerConsole and never reaches here.
+	if isServerConsoleOnboardHost(toOuterHost(host)) {
+		u, _ := url.Parse("http://" + upstreamDaemonHost() + ":8080")
+		return u
+	}
 	if !isInnerHost(host) {
 		return nil
 	}
@@ -101,11 +110,17 @@ func workspaceFromLabel(label string) string {
 	return ""
 }
 
-// isBaileyHost matches both the outer (bailey.<domain>) and inner
-// (bailey--inner.<domain>) subdomains of the management surface.
+// isBaileyHost matches the daemon-served management hosts: the console outer
+// (bailey.<domain>) and inner (bailey--inner.<domain>) subdomains, plus the
+// public device-trust onboarding host (bailey-onboard.<domain>). All three are
+// served by the daemon itself (SPA + bootstrap/data APIs), so they get the ACL
+// free pass, receive the gate-resolved identity, and keep their Bailey auth
+// cookies (which an app upstream would have stripped).
 func isBaileyHost(host string) bool {
 	h := strings.ToLower(host)
-	return strings.HasPrefix(h, "bailey.") || strings.HasPrefix(h, "bailey"+innerHostSuffix+".")
+	return strings.HasPrefix(h, "bailey.") ||
+		strings.HasPrefix(h, "bailey"+innerHostSuffix+".") ||
+		strings.HasPrefix(h, "bailey-onboard.")
 }
 
 // startProtectedGate boots the gate's HTTP listener. Called from
@@ -255,6 +270,19 @@ func setupBaileyRoutes() {
 		if err := traefikapi.AddRouteWithTLSDomains(h, "bitswan-protected-proxy:80", "", resolver, tlsDomains); err != nil {
 			fmt.Printf("Warning: register platform route for %s: %v\n", h, err)
 		}
+	}
+
+	// Public device-trust onboarding host (the external half of the
+	// two-endpoint split). It has no inner/iframe form — the SPA is served
+	// directly on this single outer hostname — so only one route is needed.
+	// Same oauth2-proxy in front; its OAuth callback URI is registered too.
+	onboard := serverConsoleOnboardHost(domain)
+	if err := registerProtectedRedirectURI(onboard); err != nil {
+		fmt.Printf("Warning: AOC didn't accept protected-client redirect URIs for %s: %v\n", onboard, err)
+	}
+	oResolver, oTLSDomains := certResolverForHostname(onboard)
+	if err := traefikapi.AddRouteWithTLSDomains(onboard, "bitswan-protected-proxy:80", "", oResolver, oTLSDomains); err != nil {
+		fmt.Printf("Warning: register platform route for %s: %v\n", onboard, err)
 	}
 }
 

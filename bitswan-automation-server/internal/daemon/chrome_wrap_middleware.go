@@ -42,6 +42,22 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 			return
 		}
 
+		// Public device-trust onboarding host (bailey-onboard.<domain>): the
+		// external half of the two-endpoint split. It serves the gate SPA
+		// DIRECTLY — no chrome wrap, no iframe, no launcher (an untrusted
+		// device must not see any of that). Its bootstrap/data APIs and the
+		// legacy /2fa-gate pages route to the daemon (inner → gateHandler);
+		// everything else is the SPA shell + its static assets, which render
+		// the device-trust scene and, once trusted, redirect to ?return=.
+		if isServerConsoleOnboardHost(toOuterHost(host)) {
+			if strings.HasPrefix(r.URL.Path, "/oauth2/") || isBaileyDataPath(r.URL.Path) {
+				inner.ServeHTTP(w, r)
+				return
+			}
+			serveServerConsole(w, r)
+			return
+		}
+
 		if isInnerHost(host) {
 			// The Server Console's inner host serves the embedded SPA instead
 			// of proxying to an upstream. The outer bailey.<domain> host falls
