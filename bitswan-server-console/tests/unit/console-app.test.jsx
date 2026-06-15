@@ -24,7 +24,7 @@ function fullRoutes(extra = {}) {
     '/bailey/api/whoami': { json: { is_admin: true, headers: { 'X-Forwarded-Email': 'tomas@h' } } },
     '/bailey/api/devices': { json: { devices: [{ id: 'd1', name: 'Mac', is_current: true, last_seen: '2026-01-01T00:00:00Z', paired_at: '2026-01-01T00:00:00Z' }] } },
     '/bailey/api/approvals': { json: { pending: [{ email: 'a@h', age_seconds: 120 }] } },
-    '/bailey/api/workspaces': { json: { caller_email: 'tomas@h', workspaces: [{ name: 'ws1', is_owner: true, editor_url: 'http://e', gitops_url: 'http://g', is_trashed: false }] } },
+    '/bailey/api/workspaces': { json: { caller_email: 'tomas@h', workspaces: [{ name: 'ws1', is_owner: true, dashboard_url: 'http://d', editor_url: 'http://e', gitops_url: 'http://g', is_trashed: false }] } },
     '/bailey/api/overview': { json: {
       counts: { workspaces: 1, people: 2, trusted_devices: 1, pending_approvals: 1 },
       identity: { claimed_by: 'tomas@h', claimed_at: '2026-01-01T00:00:00Z', version: 'v1', online: true, region: 'eu', uptime_sec: 90061, start_time: 's' },

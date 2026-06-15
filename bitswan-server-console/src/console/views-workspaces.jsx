@@ -280,7 +280,7 @@ function WorkspacesView({ ctx }) {
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     {!archived && (
-                      <WBtn variant="primary" size="sm" leftIcon="external-link" onClick={() => openUrl(w.gitopsUrl || w.dashboard, `${w.name} dashboard`)}>Open</WBtn>
+                      <WBtn variant="primary" size="sm" leftIcon="external-link" onClick={() => openUrl(w.dashboard || w.gitopsUrl, `${w.name} dashboard`)}>Open</WBtn>
                     )}
                     <button onClick={() => setManageId(w.id)} title="Manage workspace" style={{ width: 32, height: 32, border: `1px solid ${WC.border}`, background: '#fff', borderRadius: 8, cursor: 'pointer', color: WC.muted, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                       onMouseEnter={e => { e.currentTarget.style.background = WC.surface2; e.currentTarget.style.color = WC.fg; }}

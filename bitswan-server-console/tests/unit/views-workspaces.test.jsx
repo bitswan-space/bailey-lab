@@ -53,6 +53,14 @@ describe('WorkspacesView', () => {
     };
   }
 
+  it('Open launches the workspace dashboard, not gitops', () => {
+    const s = spies();
+    const data = makeData({ workspaces: [liveWs({ dashboard: 'http://dash', gitopsUrl: 'http://g' })] });
+    render(<Host View={WorkspacesView} data={data} extra={s} />);
+    fireEvent.click(screen.getByText('Open'));
+    expect(s.openUrl).toHaveBeenCalledWith('http://dash', expect.anything());
+  });
+
   it('renders a live workspace list, opens it, opens the manage drawer', () => {
     const s = spies();
     const data = makeData({ workspaces: [liveWs()] });

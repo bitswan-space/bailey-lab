@@ -21,13 +21,15 @@ import (
 // endpoints.
 
 type accessibleWorkspace struct {
-	Name       string `json:"name"`
-	EditorURL  string `json:"editor_url"`
-	GitopsURL  string `json:"gitops_url"`
-	EditorRole string `json:"editor_role,omitempty"` // owner | access | none
-	GitopsRole string `json:"gitops_role,omitempty"`
-	IsOwner    bool   `json:"is_owner"`
-	IsTrashed  bool   `json:"is_trashed,omitempty"`
+	Name          string `json:"name"`
+	DashboardURL  string `json:"dashboard_url"` // the workspace's primary UI — what "Open" launches
+	EditorURL     string `json:"editor_url"`
+	GitopsURL     string `json:"gitops_url"`
+	DashboardRole string `json:"dashboard_role,omitempty"` // owner | access | none
+	EditorRole    string `json:"editor_role,omitempty"`
+	GitopsRole    string `json:"gitops_role,omitempty"`
+	IsOwner       bool   `json:"is_owner"`
+	IsTrashed     bool   `json:"is_trashed,omitempty"`
 }
 
 type listAccessibleResponse struct {
@@ -61,24 +63,29 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 	if full != nil {
 		for _, ws := range full.Workspaces {
 			name := ws.Name
+			dashboardHost := name + "-dashboard." + domain
 			editorHost := name + "-editor." + domain
 			gitopsHost := name + "-gitops." + domain
+			dashboardRole, _ := roleFor(dashboardHost, email, groups)
 			editorRole, _ := roleFor(editorHost, email, groups)
 			gitopsRole, _ := roleFor(gitopsHost, email, groups)
-			isOwner := editorRole == roleOwner || gitopsRole == roleOwner
-			// Visible to: caller with any role on either endpoint, OR
-			// the server owner (audit view).
-			if editorRole == roleNone && gitopsRole == roleNone && !serverOwner {
+			isOwner := dashboardRole == roleOwner || editorRole == roleOwner || gitopsRole == roleOwner
+			// Visible to: caller with any role on the dashboard (the
+			// membership surface) or either sub-endpoint, OR the server
+			// owner (audit view).
+			if dashboardRole == roleNone && editorRole == roleNone && gitopsRole == roleNone && !serverOwner {
 				continue
 			}
 			entry := accessibleWorkspace{
-				Name:       name,
-				EditorURL:  "https://" + editorHost,
-				GitopsURL:  "https://" + gitopsHost,
-				EditorRole: string(editorRole),
-				GitopsRole: string(gitopsRole),
-				IsOwner:    isOwner,
-				IsTrashed:  IsWorkspaceTrashed(name),
+				Name:          name,
+				DashboardURL:  "https://" + dashboardHost,
+				EditorURL:     "https://" + editorHost,
+				GitopsURL:     "https://" + gitopsHost,
+				DashboardRole: string(dashboardRole),
+				EditorRole:    string(editorRole),
+				GitopsRole:    string(gitopsRole),
+				IsOwner:       isOwner,
+				IsTrashed:     IsWorkspaceTrashed(name),
 			}
 			out.Workspaces = append(out.Workspaces, entry)
 		}

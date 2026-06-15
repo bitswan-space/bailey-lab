@@ -132,6 +132,10 @@ func TestListAccessibleWorkspaces_OwnerSeesEntry(t *testing.T) {
 	if !entry.IsOwner || entry.EditorRole != "owner" {
 		t.Errorf("entry roles wrong: %+v", entry)
 	}
+	// The primary "Open" target is the workspace dashboard, not gitops.
+	if want := "https://" + ws + "-dashboard." + domain; entry.DashboardURL != want {
+		t.Errorf("DashboardURL = %q, want %q", entry.DashboardURL, want)
+	}
 	if !entry.IsTrashed && IsWorkspaceTrashed(ws) {
 		t.Error("IsTrashed flag not reflecting marker")
 	}

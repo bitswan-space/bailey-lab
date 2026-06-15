@@ -81,21 +81,22 @@ function adaptApproval(p) {
   };
 }
 
-// /bailey/api/workspaces → { caller_email, workspaces:[{name,editor_url,
-//   gitops_url,editor_role,gitops_role,is_owner,is_trashed}] }
+// /bailey/api/workspaces → { caller_email, workspaces:[{name,dashboard_url,
+//   editor_url,gitops_url,dashboard_role,editor_role,gitops_role,is_owner,
+//   is_trashed}] }
 // Maps onto the workspace-card shape. Members/processes/automations/apps
 // aren't exposed by this endpoint, so they're empty; ownership comes from
-// is_owner, and the "open" links use the gitops/editor URLs.
+// is_owner, and the primary "open" link is the workspace dashboard.
 function adaptWorkspace(w, callerEmail) {
   return {
     id: w.name,
     name: w.name,
-    owner: w.is_owner ? callerEmail : (w.editor_role || w.gitops_role || ''),
+    owner: w.is_owner ? callerEmail : (w.dashboard_role || w.editor_role || w.gitops_role || ''),
     members: [], // TODO(api): membership list not exposed by /workspaces
     processes: 0, automations: 0,
     created: '', activity: '',
     status: w.is_trashed ? 'archived' : 'active',
-    dashboard: w.gitops_url || w.editor_url || '#',
+    dashboard: w.dashboard_url || w.gitops_url || w.editor_url || '#',
     editorUrl: w.editor_url, gitopsUrl: w.gitops_url,
     isOwner: !!w.is_owner,
     isTrashed: !!w.is_trashed,
