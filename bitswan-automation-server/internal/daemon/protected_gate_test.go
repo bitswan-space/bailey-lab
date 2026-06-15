@@ -56,8 +56,13 @@ func TestEnforceEndpointACL_StrangerDeniedAndRequestRecorded(t *testing.T) {
 		t.Errorf("status = %d, want 403", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "owner@example.com") || !strings.Contains(body, "Request access") {
-		t.Errorf("denied page missing owner / request button:\n%s", body)
+	// The page must be generic — it must NOT leak the endpoint hostname,
+	// its owner, or offer a request-access affordance to an outsider.
+	if !strings.Contains(body, "not a member of this organization") {
+		t.Errorf("denied page missing the generic message:\n%s", body)
+	}
+	if strings.Contains(body, "owner@example.com") || strings.Contains(body, host) || strings.Contains(body, "Request access") {
+		t.Errorf("denied page leaks endpoint/owner or offers request-access:\n%s", body)
 	}
 	// The attempt is recorded so the owner sees it in the share dialog.
 	reqs, err := listAccessRequests(host)

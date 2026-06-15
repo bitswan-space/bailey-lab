@@ -80,11 +80,23 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		if email, _ := identityFromHeaders(r); email == "" {
+		email, groups := identityFromHeaders(r)
+		if email == "" {
 			// Should be impossible — oauth2-proxy upstream sets the
 			// header. If we get here without it, oauth failed; fall
 			// through and let the inner handler reject.
 			inner.ServeHTTP(w, r)
+			return
+		}
+		// Per-endpoint ACL on the OUTER host. A signed-in user with no
+		// role gets the standalone denial page rendered HERE rather than
+		// the chrome wrap. Two reasons it must be the outer host, not the
+		// iframe: (1) the inner host's 403 isn't frameable, so wrapping it
+		// would show a blank frame; (2) the wrap carries the launcher and
+		// "signed in as" bar, which would leak reachable endpoints to
+		// someone with no access. enforceEndpointACL keys on the outer
+		// host and passes bailey.<domain> and unregistered hosts through.
+		if !enforceEndpointACL(w, r, email, groups) {
 			return
 		}
 		serveBaileyChrome(w, r)

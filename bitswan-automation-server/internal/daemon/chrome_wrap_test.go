@@ -133,13 +133,32 @@ func TestChromeWrap_OwnerSeesShareButton(t *testing.T) {
 		t.Error("owner wrap missing the Share button")
 	}
 
-	// Non-owner doesn't. (They're past the gate here only because the
-	// test bypasses enforceProtectedGate; the wrap independently hides
-	// the button.)
+	// An access-role member passes the outer-host ACL and gets the wrap,
+	// but without the Share button (only owners manage sharing).
+	if err := addGrant(host, "email", "viewer@example.com", string(roleAccess), "owner@example.com"); err != nil {
+		t.Fatal(err)
+	}
 	w2 := httptest.NewRecorder()
 	wrappedHandler(t).ServeHTTP(w2, browserGet(host, "/", "viewer@example.com"))
+	if !strings.Contains(w2.Body.String(), "bailey-footer") {
+		t.Error("access-role member didn't get the wrap")
+	}
 	if strings.Contains(w2.Body.String(), "__baileyShareOpen") {
 		t.Error("non-owner wrap shows the Share button")
+	}
+
+	// A user with no role at all is denied at the outer host — no wrap,
+	// and the generic denial page (no leak of host/owner).
+	w3 := httptest.NewRecorder()
+	wrappedHandler(t).ServeHTTP(w3, browserGet(host, "/", "stranger@example.com"))
+	if w3.Code != http.StatusForbidden {
+		t.Errorf("stranger on outer host: status = %d, want 403", w3.Code)
+	}
+	if strings.Contains(w3.Body.String(), "bailey-footer") || strings.Contains(w3.Body.String(), host) {
+		t.Errorf("stranger got the wrap or saw the endpoint host:\n%s", w3.Body.String())
+	}
+	if !strings.Contains(w3.Body.String(), "not a member of this organization") {
+		t.Errorf("stranger denial page missing generic message:\n%s", w3.Body.String())
 	}
 }
 

@@ -320,11 +320,12 @@ func enforceEndpointACL(w http.ResponseWriter, r *http.Request, email string, gr
 	}
 	if role == roleNone {
 		// Record the attempt so the owner sees it as a pending request
-		// in the share dialog, then explain the situation.
+		// in their approvals view, then show a generic denial that leaks
+		// nothing about the endpoint or its owner (accessDeniedHTML).
 		_ = addAccessRequest(host, email)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprint(w, accessDeniedHTML(host, ep, email))
+		fmt.Fprint(w, accessDeniedHTML(email))
 		return false
 	}
 	return true
