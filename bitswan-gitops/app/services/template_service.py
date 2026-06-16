@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 def _copies_dir() -> str:
     return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
 
+
 # Built-in templates are baked into the gitops image at /opt/bitswan/examples
 # (Dockerfile `COPY examples/`), so they are version-locked to the gitops
 # build. BITSWAN_TEMPLATES_DIR overrides the baked path (used in dev when the

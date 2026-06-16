@@ -435,7 +435,13 @@ async def merge_worktree(name: str):
 
     # main must be an ancestor of the branch tip (fast-forward only).
     _, _, ff_rc = await call_git_command_with_output(
-        "git", "-C", bare, "merge-base", "--is-ancestor", "refs/heads/main", f"refs/heads/{name}"
+        "git",
+        "-C",
+        bare,
+        "merge-base",
+        "--is-ancestor",
+        "refs/heads/main",
+        f"refs/heads/{name}",
     )
     if ff_rc != 0:
         raise HTTPException(
@@ -451,7 +457,8 @@ async def merge_worktree(name: str):
     )
     if rc != 0:
         raise HTTPException(
-            status_code=500, detail=f"Failed to fast-forward main: {(err or out).strip()}"
+            status_code=500,
+            detail=f"Failed to fast-forward main: {(err or out).strip()}",
         )
 
     return {
@@ -523,7 +530,14 @@ async def _rm_rf_as_root_in_container(path: str) -> bool:
         return False
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", "--user", "0", container_id, "rm", "-rf", path,
+            "docker",
+            "exec",
+            "--user",
+            "0",
+            container_id,
+            "rm",
+            "-rf",
+            path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -531,7 +545,9 @@ async def _rm_rf_as_root_in_container(path: str) -> bool:
         if proc.returncode != 0:
             logger.warning(
                 "rm -rf %s via docker exec failed (%s): %s",
-                path, proc.returncode, stderr.decode(errors="replace").strip(),
+                path,
+                proc.returncode,
+                stderr.decode(errors="replace").strip(),
             )
             return False
         return True
@@ -710,6 +726,8 @@ async def get_worktree_diff(name: str, path: str | None = Query(None)):
 
     stdout, stderr, rc = await call_git_command_with_output(*git_args, cwd=copy_path)
     if rc != 0:
-        raise HTTPException(status_code=500, detail=f"Failed to get diff: {stderr.strip()}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get diff: {stderr.strip()}"
+        )
 
     return {"diff": stdout}

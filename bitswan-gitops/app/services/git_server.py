@@ -49,7 +49,7 @@ def _install_pre_receive_hook(repo_path: str) -> None:
         dst_content = (
             "#!/bin/sh\n"
             "set -eu\n"
-            "is_zero() { case \"$1\" in *[!0]*) return 1 ;; *) return 0 ;; esac }\n"
+            'is_zero() { case "$1" in *[!0]*) return 1 ;; *) return 0 ;; esac }\n'
             "while read -r oldrev newrev refname; do\n"
             '  if is_zero "$newrev"; then\n'
             '    echo "remote: rejected $refname: deleting refs is not allowed" >&2; exit 1\n'

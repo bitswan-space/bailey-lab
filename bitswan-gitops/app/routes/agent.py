@@ -10,7 +10,6 @@ from pydantic import BaseModel
 
 from app.async_docker import get_async_docker_client, DockerError
 from app.dependencies import get_automation_service
-from app.deploy_runner import spawn_set_deploy
 from app.services.automation_service import (
     AutomationService,
     make_hostname_label,

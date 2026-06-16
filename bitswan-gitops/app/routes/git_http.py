@@ -170,6 +170,4 @@ async def git_http(path: str, request: Request):
                 if stderr.strip():
                     logger.warning("git-http-backend stderr: %s", stderr.strip())
 
-    return StreamingResponse(
-        body_stream(), status_code=status_code, headers=headers
-    )
+    return StreamingResponse(body_stream(), status_code=status_code, headers=headers)
