@@ -60,6 +60,16 @@ describe('OverviewView', () => {
     render(<Host View={OverviewView} data={makeData({ overview: { ...overview, systemError: 'no /proc' } })} />);
     expect(screen.getByText(/Couldn't read host stats: no \/proc/)).toBeTruthy();
   });
+  it('region is editable: save persists via the API and refreshes', async () => {
+    const s = spies();
+    installFetch({ '/bailey/api/admin/region': { json: { ok: true, region: 'us-east' } } });
+    render(<Host View={OverviewView} data={makeData({ overview })} extra={s} />);
+    fireEvent.click(screen.getByTitle('Set region'));      // 'eu' → edit mode
+    fireEvent.change(screen.getByPlaceholderText('e.g. eu-west'), { target: { value: 'us-east' } });
+    fireEvent.click(screen.getByText('Save'));
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Region set to us-east'), 'success'));
+    expect(s.refresh).toHaveBeenCalledWith('overview');
+  });
 });
 
 describe('WorkspacesView', () => {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
@@ -102,13 +103,58 @@ func (s *Server) handleBaileyOverview(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// serverRegion returns the operator-declared region for the identity
-// card, or "" when none is configured. There is no dedicated region
-// field in the automation-server config today, so we read the optional
-// BITSWAN_REGION env var (set by the operator at deploy time) and degrade
-// to empty otherwise — we do NOT misrepresent the AOC domain as a region.
+// settingRegion is the server_settings key holding the operator/admin-declared
+// region label shown on the overview identity card.
+const settingRegion = "region"
+
+// serverRegion returns the declared region for the identity card. The locally
+// stored setting (set by an admin in the console or via the CLI) is
+// authoritative; if none is set we fall back to the BITSWAN_REGION env var the
+// operator may have set at deploy time, and "" otherwise. We never
+// misrepresent the AOC domain as a region.
 func serverRegion() string {
-	return os.Getenv("BITSWAN_REGION")
+	if v, _ := dbGetSetting(settingRegion); strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	return strings.TrimSpace(os.Getenv("BITSWAN_REGION"))
+}
+
+// setServerRegion stores the region label locally (authoritative). An empty
+// value clears the override, reverting to the env-var/none behaviour. Shared
+// by the admin API and the CLI.
+func setServerRegion(region, by string) error {
+	return dbSetSetting(settingRegion, strings.TrimSpace(region), by)
+}
+
+// SetRegion sets the server region label in the local bailey.db. Exported for
+// the CLI (`automation-server-daemon region <value>`); the daemon reads the
+// value live on each overview request, so no restart is needed.
+func SetRegion(region string) error { return setServerRegion(region, "cli") }
+
+// Region returns the currently configured region label ("" if none).
+func Region() string { return serverRegion() }
+
+// handleSetRegion sets the server region (admin-only; the caller is already
+// gated in handleBailey). POST {region}. An empty region clears the override.
+func handleSetRegion(w http.ResponseWriter, r *http.Request, by string) {
+	var req struct {
+		Region string `json:"region"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	region := strings.TrimSpace(req.Region)
+	if len(region) > 64 {
+		writeJSONError(w, "region must be 64 characters or fewer", http.StatusBadRequest)
+		return
+	}
+	if err := setServerRegion(region, by); err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "region": region})
 }
 
 // configuredProtectedDomain is a small shared helper for the domain

@@ -57,8 +57,53 @@ function AppLaunchTile({ app, onOpen }) {
 // "Recent security activity" feed all come from that endpoint's adapted
 // response (data.overview). No seed fallback — a failed fetch shows the error
 // UI; an empty activity feed shows an empty state.
+// EditableRegionRow — the overview identity card's Region field, editable
+// in place (admin-only view). Persists via the admin region API; empty clears
+// it. The daemon reads the value live, so a refresh reflects it immediately.
+function EditableRegionRow({ region, toast, refresh }) {
+  const [editing, setEditing] = useWS(false);
+  const [val, setVal] = useWS(region || '');
+  const [busy, setBusy] = useWS(false);
+  React.useEffect(() => { setVal(region || ''); }, [region]);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const v = val.trim();
+      await WApi.setRegion(v);
+      toast(v ? `Region set to ${v}` : 'Region cleared', 'success');
+      setEditing(false);
+      refresh && refresh('overview');
+    } catch (e) { toast(`Couldn't set region: ${e.message}`, 'danger'); }
+    finally { setBusy(false); }
+  };
+  const ROW = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '9px 0', borderBottom: `1px solid ${WC.surface2}` };
+  if (editing) {
+    return (
+      <div style={ROW}>
+        <span style={{ fontSize: 12.5, color: WC.muted, whiteSpace: 'nowrap' }}>Region</span>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flex: 1, justifyContent: 'flex-end' }}>
+          <div style={{ maxWidth: 150 }}><WTextInput value={val} onChange={setVal} placeholder="e.g. eu-west" /></div>
+          <WBtn variant="primary" size="sm" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save'}</WBtn>
+          <WBtn variant="default" size="sm" disabled={busy} onClick={() => { setEditing(false); setVal(region || ''); }}>Cancel</WBtn>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={ROW}>
+      <span style={{ fontSize: 12.5, color: WC.muted, whiteSpace: 'nowrap' }}>Region</span>
+      <button onClick={() => setEditing(true)} title="Set region" style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6, border: 0, background: 'transparent',
+        cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, fontWeight: 500, color: WC.fg }}>
+        {region || '—'}
+        <WIcon name="pencil" size={12} color={WC.mutedFg} />
+      </button>
+    </div>
+  );
+}
+
 function OverviewView({ ctx }) {
-  const { data, go, refresh } = ctx;
+  const { data, go, refresh, toast } = ctx;
   const ov = data.overview;
   const loaded = data.load.overview === 'ok' && ov;
   // The server host stays in the page header; it's the real SPA origin
@@ -160,7 +205,7 @@ function OverviewView({ ctx }) {
               )}
             </div>
             <div style={{ padding: '4px 20px 14px' }}>
-              {idRow('Region', ov.identity.region)}
+              <EditableRegionRow region={ov.identity.region} toast={toast} refresh={refresh} />
               {idRow('Version', ov.identity.version, true)}
               {idRow('Claimed by', ov.identity.claimedBy, true)}
               {idRow('Claimed', ov.identity.claimedAt)}

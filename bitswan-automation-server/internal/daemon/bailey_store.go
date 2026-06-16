@@ -276,6 +276,23 @@ func openBaileyDB() (*sql.DB, error) {
 			baileyDBErr = fmt.Errorf("migrate pending_pairs.user_agent: %w", err)
 			return
 		}
+		// Backfill claimed_at for servers whose root admin was recorded without
+		// the claim flow stamping a time (older installs, or a seeded root
+		// admin). The root-origin device was, by definition, minted at the
+		// bootstrap — so its paired_at IS the claim time. This is the real
+		// bootstrap moment recovered from device data, not a fabricated value;
+		// only runs when claimed_at is absent and a root device exists.
+		if _, err := db.Exec(`INSERT INTO server_settings(key, value, updated_at, updated_by)
+			SELECT 'claimed_at', d.paired_at, d.paired_at, 'backfill'
+			FROM devices d
+			WHERE d.origin='root'
+			  AND NOT EXISTS (SELECT 1 FROM server_settings WHERE key='claimed_at')
+			ORDER BY d.paired_at ASC
+			LIMIT 1`); err != nil {
+			db.Close()
+			baileyDBErr = fmt.Errorf("backfill claimed_at: %w", err)
+			return
+		}
 		baileyDB = db
 	})
 	return baileyDB, baileyDBErr

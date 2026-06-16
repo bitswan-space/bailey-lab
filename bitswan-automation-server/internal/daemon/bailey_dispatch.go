@@ -233,6 +233,11 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleSetUserRole(w, r, email)
 			return
 		}
+	case "/bailey/api/admin/region":
+		if r.Method == http.MethodPost {
+			handleSetRegion(w, r, email)
+			return
+		}
 	case "/bailey/api/admin/devices":
 		if r.Method == http.MethodGet {
 			handleAdminDevicesAPI(w, r)

@@ -209,6 +209,8 @@ export const Api = {
   // Admin-only (403 for non-admins).
   // Server overview: counts + server-identity card + recent-activity feed.
   overview: () => getJSON('/bailey/api/overview'),
+  // Set the server's region label (admin-only). Empty string clears it.
+  setRegion: (region) => postJSON('/bailey/api/admin/region', { region }),
   // People roster: every identity the daemon persists, with role/workspace/
   // device counts. Degrades to a 200 with an `error` field on partial
   // enumeration failure (the view surfaces it without dropping the roster).
