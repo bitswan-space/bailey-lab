@@ -100,7 +100,7 @@ describe('App live-data loading + adapters + routing', () => {
     fireEvent.click(screen.getByText('Security & recovery'));
     await waitFor(() => expect(screen.getByText(/Authenticator app/)).toBeTruthy());
     // approvals route
-    fireEvent.click(screen.getByText('Device approvals'));
+    fireEvent.click(screen.getByText('New user approvals'));
     await waitFor(() => expect(screen.getByText('Awaiting approval')).toBeTruthy());
   });
 

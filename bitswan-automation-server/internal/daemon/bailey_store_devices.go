@@ -44,7 +44,7 @@ func dbListDevices(email string) ([]deviceRecord, error) {
 		return nil, err
 	}
 	rows, err := db.Query(
-		`SELECT id, name, paired_at, COALESCE(last_seen, '') FROM devices WHERE email = ? COLLATE NOCASE ORDER BY paired_at`,
+		`SELECT id, name, paired_at, COALESCE(last_seen, ''), COALESCE(origin, '') FROM devices WHERE email = ? COLLATE NOCASE ORDER BY paired_at`,
 		email)
 	if err != nil {
 		return nil, err
@@ -53,7 +53,7 @@ func dbListDevices(email string) ([]deviceRecord, error) {
 	var out []deviceRecord
 	for rows.Next() {
 		var d deviceRecord
-		if err := rows.Scan(&d.ID, &d.Name, &d.PairedAt, &d.LastSeen); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.PairedAt, &d.LastSeen, &d.Origin); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -61,7 +61,7 @@ func dbListDevices(email string) ([]deviceRecord, error) {
 	return out, rows.Err()
 }
 
-func dbAddDevice(email, name string) (*deviceRecord, error) {
+func dbAddDevice(email, name, origin string) (*deviceRecord, error) {
 	db, err := openBaileyDB()
 	if err != nil {
 		return nil, err
@@ -77,10 +77,11 @@ func dbAddDevice(email, name string) (*deviceRecord, error) {
 		ID:       hex.EncodeToString(idBytes),
 		Name:     name,
 		PairedAt: time.Now().UTC().Format(time.RFC3339),
+		Origin:   origin,
 	}
 	if _, err := db.Exec(
-		`INSERT INTO devices(id, email, name, paired_at) VALUES (?, ?, ?, ?)`,
-		rec.ID, email, rec.Name, rec.PairedAt); err != nil {
+		`INSERT INTO devices(id, email, name, paired_at, origin) VALUES (?, ?, ?, ?, ?)`,
+		rec.ID, email, rec.Name, rec.PairedAt, rec.Origin); err != nil {
 		return nil, err
 	}
 	return &rec, nil

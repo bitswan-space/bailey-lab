@@ -1,5 +1,5 @@
 import React from 'react';
-// views-people.jsx — Users & roles + Device approvals (admin types the code)
+// views-people.jsx — Users & roles + New user approvals (admin types the code)
 
 const { C: PC, Icon: PIcon, Btn: PBtn, Pill: PPill } = window.WD_SHELL;
 const {
@@ -172,7 +172,7 @@ function UserDevicesDrawer({ userId, onClose, ctx }) {
       </div>
 
       <PEmpty icon="laptop" title="Per-person device list isn't wired yet"
-        text="The admin devices API isn't yet correlated to these identities, so individual devices and revoke can't be shown here. Manage devices from Device approvals for now." />
+        text="The admin devices API isn't yet correlated to these identities, so individual devices and revoke can't be shown here. Manage devices from New user approvals for now." />
     </PDrawer>
   );
 }
@@ -235,7 +235,7 @@ function ApprovalsView({ ctx }) {
 
   return (
     <div>
-      <PPageHeader title="Device approvals" icon="shield-check"
+      <PPageHeader title="New user approvals" icon="shield-check"
         subtitle="Keycloak proves who someone is. This step proves which device they're on. A signed-in user reaches the server only after you confirm the code shown on their screen — so a compromised Keycloak account still can't get in." />
 
       {data.load.approvals !== 'ok' && (

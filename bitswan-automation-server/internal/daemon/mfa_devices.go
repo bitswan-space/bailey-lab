@@ -42,15 +42,31 @@ type deviceRecord struct {
 	Name     string `json:"name"`
 	PairedAt string `json:"paired_at"`
 	LastSeen string `json:"last_seen,omitempty"`
+	Origin   string `json:"origin,omitempty"` // "root" (claim/TOFU) | "linked" (approved/self-trust)
 }
+
+// Device trust origins (devices.origin). Recorded at creation so the device
+// list can show an honest per-device badge instead of guessing from "current".
+const (
+	deviceOriginRoot   = "root"   // the claim/TOFU bootstrap device
+	deviceOriginLinked = "linked" // trusted later via approval or self-trust
+)
 
 // Thin wrappers that route through the SQLite store. Kept as
 // separate functions so callers don't have to know about the store.
-func anyDevicesExist() bool                               { return dbAnyDevicesExist() }
-func listAllDevices() ([]deviceRecord, error)             { return dbListAllDevices() }
-func loadDevices(email string) ([]deviceRecord, error)    { return dbListDevices(email) }
+func anyDevicesExist() bool                            { return dbAnyDevicesExist() }
+func listAllDevices() ([]deviceRecord, error)          { return dbListAllDevices() }
+func loadDevices(email string) ([]deviceRecord, error) { return dbListDevices(email) }
+
+// addDevice trusts a device via the ordinary "linked" path (approval or
+// self-trust). The one-time claim/TOFU bootstrap uses addDeviceWithOrigin to
+// record "root" instead.
 func addDevice(email, name string) (*deviceRecord, error) {
-	rec, err := dbAddDevice(email, name)
+	return addDeviceWithOrigin(email, name, deviceOriginLinked)
+}
+
+func addDeviceWithOrigin(email, name, origin string) (*deviceRecord, error) {
+	rec, err := dbAddDevice(email, name, origin)
 	if err == nil && rec != nil {
 		// A device became trusted (pair-approve claim, self-trust, or
 		// claim TOFU all funnel through here). Audit best-effort.

@@ -18,6 +18,7 @@ type baileyDeviceDTO struct {
 	PairedAt  string `json:"paired_at"`
 	LastSeen  string `json:"last_seen"`
 	IsCurrent bool   `json:"is_current"`
+	Origin    string `json:"origin"` // "root" | "linked" — how the device was trusted (NOT whether it's current)
 }
 
 func handleBaileyDevicesAPI(w http.ResponseWriter, r *http.Request, email string) {
@@ -35,6 +36,7 @@ func handleBaileyDevicesAPI(w http.ResponseWriter, r *http.Request, email string
 			PairedAt:  d.PairedAt,
 			LastSeen:  d.LastSeen,
 			IsCurrent: current != nil && current.ID == d.ID,
+			Origin:    d.Origin,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

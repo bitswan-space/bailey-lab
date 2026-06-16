@@ -151,7 +151,7 @@ func claimHandler(w http.ResponseWriter, r *http.Request, email string) {
 				return
 			}
 		}
-		rec, err := addDevice(email, deviceNameFromRequest(r))
+		rec, err := addDeviceWithOrigin(email, deviceNameFromRequest(r), deviceOriginRoot)
 		if err != nil {
 			http.Error(w, "claim (trust device): "+err.Error(), http.StatusInternalServerError)
 			return

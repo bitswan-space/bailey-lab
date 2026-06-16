@@ -45,20 +45,24 @@ function serverHost() {
 
 // ── Adapters: backend DTO → the shapes the existing components render ──
 
-// /bailey/api/devices → { devices:[{id,name,paired_at,last_seen,is_current}] }
+// /bailey/api/devices → { devices:[{id,name,paired_at,last_seen,is_current,origin}] }
 // The device cards want kind/browser/os/location/ip/lastActive/added; the
-// backend only tracks id/name/timestamps, so the cosmetic fields are
+// backend only tracks id/name/timestamps/origin, so the cosmetic fields are
 // derived/blank rather than invented.
 function adaptDevice(d) {
   return {
     id: d.id,
     name: d.name || 'Unnamed device',
     kind: 'laptop',
-    current: !!d.is_current,
+    current: !!d.is_current,            // is THIS the device I'm viewing from
     browser: '', os: '', ip: '', location: '',
     lastActive: d.last_seen ? `Last seen ${formatWhen(d.last_seen)}` : '—',
     added: d.paired_at ? formatWhen(d.paired_at) : '—',
-    trustOrigin: d.is_current ? 'root' : 'linked',
+    // How the device became trusted — a SEPARATE axis from `current`. Comes
+    // from the real backend `origin` ("root" = claim/TOFU; "linked" = approved/
+    // self-trusted). Defaults to "linked" for legacy rows with no recorded
+    // origin. Never derive this from is_current.
+    trustOrigin: d.origin === 'root' ? 'root' : 'linked',
   };
 }
 
@@ -206,7 +210,7 @@ const NAV = [
   { group: 'Admin', items: [
     { id: 'overview',  label: 'Server overview',  icon: 'gauge' },
     { id: 'users',     label: 'People & roles',   icon: 'users' },
-    { id: 'approvals', label: 'Device approvals', icon: 'shield-check', badge: 'pending' },
+    { id: 'approvals', label: 'New user approvals', icon: 'shield-check', badge: 'pending' },
   ]},
 ];
 

@@ -230,6 +230,28 @@ func openBaileyDB() (*sql.DB, error) {
 			baileyDBErr = fmt.Errorf("migrate endpoints.stage: %w", err)
 			return
 		}
+		// Migration for databases created before devices.origin existed. origin
+		// records HOW a device became trusted ("root" = the claim/TOFU
+		// bootstrap device; "linked" = approved/self-trusted later). The device
+		// list uses it for the per-device badge — it must NOT be inferred from
+		// "is this the current device", which is a different axis entirely.
+		if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN origin TEXT NOT NULL DEFAULT ''`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate devices.origin: %w", err)
+			return
+		}
+		// Backfill: the root admin's earliest device is, by definition, the one
+		// minted during claim — mark it "root" so pre-existing installs show the
+		// right badge. No-op on a fresh/unclaimed server (subselect is empty).
+		if _, err := db.Exec(`UPDATE devices SET origin='root' WHERE origin='' AND id = (
+			SELECT id FROM devices
+			WHERE email = (SELECT value FROM server_settings WHERE key='root_admin_email')
+			ORDER BY paired_at ASC LIMIT 1)`); err != nil {
+			db.Close()
+			baileyDBErr = fmt.Errorf("backfill devices.origin: %w", err)
+			return
+		}
 		baileyDB = db
 	})
 	return baileyDB, baileyDBErr

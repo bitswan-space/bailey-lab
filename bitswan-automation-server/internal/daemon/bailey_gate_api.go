@@ -172,7 +172,7 @@ func handleGateClaim(w http.ResponseWriter, r *http.Request, email string, group
 			return
 		}
 	}
-	rec, err := addDevice(email, deviceNameFromRequest(r))
+	rec, err := addDeviceWithOrigin(email, deviceNameFromRequest(r), deviceOriginRoot)
 	if err != nil {
 		writeJSONError(w, "claim (trust device): "+err.Error(), http.StatusInternalServerError)
 		return

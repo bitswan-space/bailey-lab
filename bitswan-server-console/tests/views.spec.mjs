@@ -42,7 +42,7 @@ const VIEWS = [
     landmark: 'Everyone with access to this server',
   },
   {
-    id: 'approvals', navLabel: 'Device approvals', heading: 'Device approvals',
+    id: 'approvals', navLabel: 'New user approvals', heading: 'New user approvals',
     landmark: 'Keycloak proves who someone is',
   },
   {

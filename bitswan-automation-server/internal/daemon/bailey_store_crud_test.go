@@ -102,16 +102,16 @@ func TestStoreAudit_ListDefaultLimit(t *testing.T) {
 func TestStoreDevices_CRUD(t *testing.T) {
 	email := "devuser@example.com"
 
-	d, err := dbAddDevice(email, "Laptop")
+	d, err := dbAddDevice(email, "Laptop", deviceOriginLinked)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.ID == "" || d.Name != "Laptop" {
+	if d.ID == "" || d.Name != "Laptop" || d.Origin != deviceOriginLinked {
 		t.Fatalf("addDevice = %+v", d)
 	}
 
 	// Default name when blank.
-	d2, err := dbAddDevice(email, "  ")
+	d2, err := dbAddDevice(email, "  ", deviceOriginRoot)
 	if err != nil {
 		t.Fatal(err)
 	}

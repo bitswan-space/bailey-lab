@@ -60,7 +60,7 @@ describe('ApprovalsView', () => {
 
   it('renders the queue and selects between pending devices', () => {
     render(<Host View={ApprovalsView} data={withPending()} />);
-    expect(screen.getByText('Device approvals')).toBeTruthy();
+    expect(screen.getByText('New user approvals')).toBeTruthy();
     fireEvent.click(screen.getByText('Martin Kral'));
     expect(screen.getAllByText(/Martin Kral/).length).toBeGreaterThan(0);
   });
