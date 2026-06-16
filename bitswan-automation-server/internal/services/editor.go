@@ -90,7 +90,9 @@ func (e *EditorService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswa
 			"BITSWAN_WORKSPACE_NAME=" + workspaceName,
 		},
 		"volumes": []interface{}{
-			wsVolume("workspace", "/workspace/workspace", false),
+			// The editor works in the `main` copy — an independent clone of the
+			// canonical repo, also the main-branch live-dev source.
+			wsVolume("copies/main", "/workspace/workspace", false),
 			wsVolume("secrets", "/workspace/secrets", false),
 			wsVolume("coder-home", "/home/coder", false),
 			wsVolume("ssh", "/workspace/.ssh", true),
@@ -185,7 +187,8 @@ func (e *EditorService) Enable(gitopsSecretToken, bitswanEditorImage, domain str
 
 	hostOsTmp := runtime.GOOS
 	secretsDir := filepath.Join(e.WorkspacePath, "secrets")
-	gitopsWorkspace := filepath.Join(e.WorkspacePath, "workspace")
+	// The editor's working tree is the `main` copy.
+	gitopsWorkspace := filepath.Join(e.WorkspacePath, "copies", "main")
 
 	if hostOsTmp == "linux" {
 		// Change ownership for Linux

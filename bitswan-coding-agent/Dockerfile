@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y \
     openssh-server \
     curl \
     wget \
+    git \
     python3 \
     python3-pip \
     python3-venv \
@@ -56,7 +57,7 @@ RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
     && echo "ForceCommand /usr/local/bin/agent-session-wrapper" >> /etc/ssh/sshd_config
 
 # Create workspace directories
-RUN mkdir -p /workspace/worktrees /var/log/agent-sessions \
+RUN mkdir -p /workspace/copies /var/log/agent-sessions \
     && chown -R agent:agent /workspace /var/log/agent-sessions
 
 # Copy session wrapper script

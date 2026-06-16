@@ -150,6 +150,16 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	}
 	fmt.Println("✓ Gitops service ready")
 
+	// Step 2.5: Verify the embedded fast-forward-only git server: clone the
+	// canonical repo, push a fast-forward (succeeds), and attempt a history
+	// rewrite / force-push (must be rejected by the pre-receive hook).
+	fmt.Println("\nVerifying fast-forward-only git server...")
+	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret); err != nil {
+		cleanupOnFailure()
+		return fmt.Errorf("git server verification failed: %w", err)
+	}
+	fmt.Println("✓ Git server: clone + fast-forward push OK; force-push rejected")
+
 	// Step 3: Create a business process. Gitops scaffolds the default template
 	// group (BITSWAN_DEFAULT_TEMPLATE_GROUP, "business-process": one frontend
 	// exposed through Bailey + one private backend worker) into <bp>/ and kicks
@@ -1679,4 +1689,61 @@ func cleanupWorkspace(workspaceName string) error {
 	}
 
 	return client.WorkspaceRemove(workspaceName)
+}
+
+// verifyGitServer exercises the workspace's embedded fast-forward-only git
+// server: it clones the canonical repo over smart-HTTP, fast-forward-pushes a
+// commit (must succeed), then rewrites history and force-pushes (must be
+// rejected by the pre-receive hook). Credentials are the gitops secret, which
+// the git server accepts via HTTP Basic.
+func verifyGitServer(gitopsURL, secret string) error {
+	u, err := url.Parse(gitopsURL)
+	if err != nil {
+		return fmt.Errorf("parse gitops url: %w", err)
+	}
+	u.User = url.UserPassword("x", secret)
+	u.Path = "/git/repo.git"
+	gitURL := u.String()
+
+	tmp, err := os.MkdirTemp("", "gitsrv-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	work := filepath.Join(tmp, "work")
+
+	runGit := func(args ...string) (string, error) {
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(),
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@bitswan.local",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@bitswan.local",
+		)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	if out, err := runGit("clone", gitURL, work); err != nil {
+		return fmt.Errorf("clone failed: %w: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(work, "git-server-test.txt"), []byte("ok\n"), 0644); err != nil {
+		return err
+	}
+	if out, err := runGit("-C", work, "add", "-A"); err != nil {
+		return fmt.Errorf("git add: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "commit", "-m", "git server ff test"); err != nil {
+		return fmt.Errorf("git commit: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "push", "origin", "HEAD:refs/heads/main"); err != nil {
+		return fmt.Errorf("fast-forward push was rejected unexpectedly: %w: %s", err, out)
+	}
+	// Rewrite the just-pushed commit and force-push — the server must reject it.
+	if out, err := runGit("-C", work, "commit", "--amend", "-m", "rewritten"); err != nil {
+		return fmt.Errorf("git amend: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "push", "-f", "origin", "HEAD:refs/heads/main"); err == nil {
+		return fmt.Errorf("force-push was accepted but must be rejected (fast-forward-only): %s", out)
+	}
+	return nil
 }

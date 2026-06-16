@@ -21,6 +21,10 @@ from .routes.worktrees import refresh_worktrees
 logger = logging.getLogger(__name__)
 
 
+def _copies_dir() -> str:
+    return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
+
+
 async def _broadcast_processes() -> None:
     """Push the current `processes` snapshot over the SSE feed.
 
@@ -181,10 +185,12 @@ class WorktreeChangeHandler(FileSystemEventHandler):
     _GIT_STATE_SUFFIXES = ("/.git/HEAD", "/.git/index", "/.git/ORIG_HEAD")
     _GIT_REFS_SEGMENT = "/.git/refs/heads/"
 
-    def __init__(self, event_loop, worktrees_root: str):
+    def __init__(self, event_loop, copies_root: str):
         super().__init__()
         self.event_loop = event_loop
-        self.worktrees_root = os.path.realpath(worktrees_root)
+        # Root of the per-copy clones (${BITSWAN_COPIES_DIR}, default /copies).
+        # The `main` copy is the default-branch / main scope (keyed None).
+        self.worktrees_root = os.path.realpath(copies_root)
         # Per-worktree debounce timers, one set per refresh pipeline.
         self._process_tasks: dict[str | None, asyncio.Task] = {}
         self._automation_tasks: dict[str | None, asyncio.Task] = {}
@@ -192,9 +198,9 @@ class WorktreeChangeHandler(FileSystemEventHandler):
         self._wt_ping_task: asyncio.Task | None = None
 
     def _worktree_from_path(self, path: str) -> str | None:
-        """Return the name of the worktree containing `path`, or None when
-        the event is at the worktrees root (e.g. a worktree being added /
-        removed)."""
+        """Return the name of the copy containing `path`, or None when the
+        event is at the copies root (e.g. a copy being added / removed) or
+        within the `main` copy (the main scope is keyed None everywhere)."""
         try:
             rel = os.path.relpath(os.path.realpath(path), self.worktrees_root)
         except ValueError:
@@ -205,6 +211,9 @@ class WorktreeChangeHandler(FileSystemEventHandler):
         if len(parts) <= 1:
             return None
         first = parts[0]
+        # The `main` copy is the unprefixed/None scope.
+        if first == "main":
+            return None
         return first or None
 
     def _is_git_state_change(self, path: str) -> bool:
@@ -432,6 +441,15 @@ async def lifespan(app: FastAPI):
 
     scheduler = AsyncIOScheduler(timezone="UTC")
 
+    # Ensure the canonical bare repo exists and is fast-forward-only before the
+    # smart-HTTP git server starts serving clones/pushes. Idempotent.
+    try:
+        from app.services.git_server import ensure_bare_repo
+
+        await ensure_bare_repo()
+    except Exception as e:
+        logger.warning("Failed to ensure canonical bare repo: %s", e)
+
     # Warm the ProcessService cache so the first `_broadcast_processes`
     # (SSE) read finds it populated.
     process_service.refresh_all()
@@ -460,24 +478,24 @@ async def lifespan(app: FastAPI):
         observer.start()
         print(f"Started watching workspace directory: {workspace_dir}")
 
-        # Watch worktree directories for file changes → SSE push.
-        # Create the directory first so a fresh workspace (where worktrees/
-        # doesn't exist yet) still gets a watcher attached. Without this the
-        # first `POST /worktrees/create` has no listener, the cache stays
-        # empty, and `GET /worktrees/` keeps returning [] until gitops
-        # restarts. The recursive watcher on `workspace_dir` doesn't help —
+        # Watch the per-copy clones for file changes → SSE push.
+        # Create the directory first so a fresh deployment (where the copies
+        # dir doesn't exist yet) still gets a watcher attached. Without this
+        # the first copy created has no listener, the cache stays empty, and
+        # `GET /worktrees/` keeps returning [] until gitops restarts. The
+        # recursive watcher on `workspace_dir` doesn't help —
         # `WorkspaceChangeHandler` only refreshes automations/processes, not
         # the worktrees list cache.
         # Guarded by the workspace-dir check: this used to live behind the
         # MQTT-connected branch, so it was skipped where there's no workspace
         # repo (e.g. tests); keep that behaviour now that MQTT is gone.
-        worktrees_dir = os.path.join(workspace_dir, "worktrees")
-        os.makedirs(worktrees_dir, exist_ok=True)
-        wt_handler = WorktreeChangeHandler(asyncio.get_event_loop(), worktrees_dir)
+        copies_dir = _copies_dir()
+        os.makedirs(copies_dir, exist_ok=True)
+        wt_handler = WorktreeChangeHandler(asyncio.get_event_loop(), copies_dir)
         worktree_observer = Observer()
-        worktree_observer.schedule(wt_handler, worktrees_dir, recursive=True)
+        worktree_observer.schedule(wt_handler, copies_dir, recursive=True)
         worktree_observer.start()
-        print(f"Started watching worktrees directory: {worktrees_dir}")
+        print(f"Started watching copies directory: {copies_dir}")
     else:
         print(f"Workspace directory does not exist: {workspace_dir}")
 

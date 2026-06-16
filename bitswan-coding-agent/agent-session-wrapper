@@ -53,12 +53,12 @@ SESSION_DIR="/var/log/agent-sessions"
 
 # Determine working directory. When SSH_BP is set (dashboard) land in the BP
 # directory; otherwise fall back to the worktree root (editor behaviour).
-if [ -n "$BP" ] && [ -d "/workspace/worktrees/${WORKTREE}/${BP}" ]; then
-    cd "/workspace/worktrees/${WORKTREE}/${BP}"
-elif [ -d "/workspace/worktrees/${WORKTREE}" ]; then
-    cd "/workspace/worktrees/${WORKTREE}"
+if [ -n "$BP" ] && [ -d "/workspace/copies/${WORKTREE}/${BP}" ]; then
+    cd "/workspace/copies/${WORKTREE}/${BP}"
+elif [ -d "/workspace/copies/${WORKTREE}" ]; then
+    cd "/workspace/copies/${WORKTREE}"
 elif [ "$WORKTREE" = "default" ]; then
-    cd /workspace/worktrees
+    cd /workspace/copies
 fi
 
 # If SSH_ORIGINAL_COMMAND is set (non-interactive), just run it

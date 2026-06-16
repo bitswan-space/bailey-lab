@@ -105,7 +105,14 @@ def update_automation_toml_image(toml_path: str, new_image_value: str) -> None:
 
 
 # Directories never considered as automation sources during workspace scans.
-_SCAN_SKIP_DIRS = {"templates", "worktrees", ".git"}
+_SCAN_SKIP_DIRS = {"templates", ".git"}
+
+
+def _copies_dir() -> str:
+    """Base directory (inside the gitops container) holding the per-copy
+    checkouts. Each copy is an independent clone of the canonical repo; the
+    `main` copy is the editor's working tree and the default-branch scope."""
+    return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
 
 
 def scan_workspace_sources(
@@ -113,25 +120,27 @@ def scan_workspace_sources(
 ) -> list[dict]:
     """Walk the filesystem for automation sources marked by `automation.toml`.
 
-    Scans the main workspace when `worktree` is None, or the named worktree's
-    subtree otherwise. Returns one dict per automation directory with enough
-    metadata for both deploy-time use and dashboard discovery.
+    Scans the `main` copy when `worktree` is None, or the named copy otherwise.
+    (`worktree` is the legacy parameter name; it now carries the copy name.)
+    Returns one dict per automation directory with enough metadata for both
+    deploy-time use and dashboard discovery.
 
     Each entry:
         deployment_id  — id matching the editor's existing live-dev format
         automation_name — sanitized basename
         display_name    — original directory name (unsanitized)
-        context         — BP name (or "wt-{worktree}-{bp}" for worktree scans)
+        context         — BP name (or "copy-{name}-{bp}" for non-main copies)
         stage           — always "live-dev" (caller may override)
-        relative_path   — workspace-relative path (with "worktrees/<wt>/" prefix
-                          for worktree scans)
+        relative_path   — volume-relative path under the workspace, always
+                          "copies/<copy>/<rel>" (copy is "main" for the default)
         source_path     — absolute filesystem path
-        worktree        — the worktree name or None
+        worktree        — the copy name (None for the main copy)
+
+    `workspace_root` is accepted for backwards compatibility but no longer used
+    to locate sources — copies live under BITSWAN_COPIES_DIR.
     """
-    if worktree:
-        scan_root = os.path.join(workspace_root, "worktrees", worktree)
-    else:
-        scan_root = workspace_root
+    copy = worktree or "main"
+    scan_root = os.path.join(_copies_dir(), copy)
     if not os.path.isdir(scan_root):
         return []
 
@@ -151,13 +160,14 @@ def scan_workspace_sources(
 
         if worktree:
             bp_suffix = f"-{bp_name}" if bp_name else ""
-            context = f"wt-{worktree}{bp_suffix}"
+            context = f"copy-{worktree}{bp_suffix}"
             deployment_id = f"{sanitized}-{context}-live-dev"
-            relative_path = f"worktrees/{worktree}/{rel_path}"
+            relative_path = f"copies/{worktree}/{rel_path}"
         else:
+            # main copy: unprefixed, matching legacy main-repo deployment ids.
             context = bp_name
             deployment_id = f"{sanitized}-{bp_prefix}live-dev"
-            relative_path = rel_path
+            relative_path = f"copies/main/{rel_path}"
 
         if deployment_id in seen_ids:
             continue
@@ -304,17 +314,20 @@ class AutomationService:
     def _yaml_scope(self, relative_path: str | None) -> str | None:
         """Classify a `bitswan.yaml` deployment into a cache scope.
 
-        Main scope = `None` (everything not under `worktrees/`).
-        Worktree scope = the worktree's name, parsed out of the path.
+        Main scope = `None` — paths not under `copies/`, or under the `main`
+        copy (`copies/main/...`).
+        Copy scope = the copy's name, parsed out of `copies/<copy>/...`.
         """
         if not relative_path:
             return None
         norm = relative_path.replace("\\", "/").lstrip("/")
-        if not norm.startswith("worktrees/"):
+        if not norm.startswith("copies/"):
             return None
-        rest = norm[len("worktrees/") :]
-        wt = rest.split("/", 1)[0]
-        return wt or None
+        rest = norm[len("copies/") :]
+        copy = rest.split("/", 1)[0]
+        if not copy or copy == "main":
+            return None
+        return copy
 
     def _build_static_entries(
         self, scope: str | None, bs_yaml: dict | None
@@ -415,22 +428,25 @@ class AutomationService:
         return entries
 
     async def refresh_all(self) -> None:
-        """Refresh main + every worktree on disk; drop stale scope keys."""
+        """Refresh main + every other copy on disk; drop stale scope keys."""
         bs_yaml = read_bitswan_yaml(self.gitops_dir) or {"deployments": {}}
         self._cache[None] = self._build_static_entries(None, bs_yaml)
 
-        worktrees_root = os.path.join(self.workspace_repo_dir, "worktrees")
+        copies_root = _copies_dir()
         live: set[str] = set()
-        if os.path.isdir(worktrees_root):
-            for entry in os.listdir(worktrees_root):
+        if os.path.isdir(copies_root):
+            for entry in os.listdir(copies_root):
                 if entry.startswith("."):
                     continue
-                if not os.path.isdir(os.path.join(worktrees_root, entry)):
+                # The `main` copy is the None scope, refreshed above.
+                if entry == "main":
+                    continue
+                if not os.path.isdir(os.path.join(copies_root, entry)):
                     continue
                 live.add(entry)
                 self._cache[entry] = self._build_static_entries(entry, bs_yaml)
 
-        # Forget worktree scopes that have disappeared since the last refresh.
+        # Forget copy scopes that have disappeared since the last refresh.
         for stale in [k for k in self._cache.keys() if k is not None and k not in live]:
             self._cache.pop(stale, None)
 
@@ -855,7 +871,7 @@ class AutomationService:
         """Scan for every automation source under one business process.
 
         BP membership = automations whose first path segment (after stripping
-        any `worktrees/<wt>/` prefix) matches `bp`. Comparison is done through
+        the `copies/<copy>/` prefix) matches `bp`. Comparison is done through
         `sanitize_automation_name` on both sides so a raw directory name and
         its sanitized form both match. Returns the scanner dicts (same shape
         as `scan_workspace_sources`).
@@ -868,8 +884,8 @@ class AutomationService:
         out: list[dict] = []
         for s in sources:
             parts = (s.get("relative_path") or "").replace("\\", "/").split("/")
-            if len(parts) >= 2 and parts[0] == "worktrees":
-                parts = parts[2:]  # drop "worktrees/<wt>"
+            if len(parts) >= 2 and parts[0] == "copies":
+                parts = parts[2:]  # drop "copies/<copy>" (incl. the main copy)
             if parts and sanitize_automation_name(parts[0]) == bp_key:
                 out.append(s)
         return out
@@ -909,10 +925,10 @@ class AutomationService:
         for m in members:
             deployment_id = m["deployment_id"]
 
-            # Clean up old-format worktree entries for the same automation
+            # Clean up old-format copy entries for the same automation
             # (same logic as deploy_automation's per-deployment cleanup).
             if (
-                "-wt-" in deployment_id
+                "-copy-" in deployment_id
                 and m.get("stage") == "live-dev"
                 and m.get("relative_path")
             ):
@@ -920,7 +936,7 @@ class AutomationService:
                     k
                     for k, v in deployments.items()
                     if k != deployment_id
-                    and "-wt-" in k
+                    and "-copy-" in k
                     and k.endswith("-live-dev")
                     and (v or {}).get("relative_path") == m["relative_path"]
                 ]
@@ -1239,8 +1255,12 @@ class AutomationService:
                 continue
             rel = (conf.get("relative_path") or "").replace("\\", "/")
             parts = [p for p in rel.split("/") if p]
-            if parts and parts[0] == "worktrees":
-                continue  # worktree live-dev trees never source promotions
+            if len(parts) >= 2 and parts[0] == "copies":
+                # Non-main copy live-dev trees never source promotions; the
+                # main copy is the canonical (unprefixed) scope.
+                if parts[1] != "main":
+                    continue
+                parts = parts[2:]  # drop "copies/main"
             in_bp = bool(parts) and sanitize_automation_name(parts[0]) == bp_key
             if not in_bp:
                 ctx = conf.get("context") or ""
@@ -2077,16 +2097,16 @@ fi
         if has_updates:
             deployments = bs_yaml.setdefault("deployments", {})
 
-            # Clean up old-format worktree entries for the same automation.
+            # Clean up old-format copy entries for the same automation.
             # When the deployment ID format changes, old entries linger in
-            # bitswan.yaml alongside the new ones.  Remove any other -wt-
+            # bitswan.yaml alongside the new ones.  Remove any other -copy-
             # live-dev entry that shares the same relative_path.
-            if "-wt-" in deployment_id and stage == "live-dev" and relative_path:
+            if "-copy-" in deployment_id and stage == "live-dev" and relative_path:
                 stale = [
                     k
                     for k, v in deployments.items()
                     if k != deployment_id
-                    and "-wt-" in k
+                    and "-copy-" in k
                     and k.endswith("-live-dev")
                     and (v or {}).get("relative_path") == relative_path
                 ]
@@ -3166,19 +3186,20 @@ fi
             if self.gitops_domain:
                 entry["environment"]["BITSWAN_GITOPS_DOMAIN"] = self.gitops_domain
             # Deployment context for service discovery.
-            # Context = {bp}-wt-{wt}-{stage} or {bp}-{stage} or {bp} (production)
+            # Context = {bp}-copy-{copy}-{stage} or {bp}-{stage} or {bp} (production)
             # URL template lets automations find each other by substituting {name}.
             # Deployment ID format: {automationName}-{context}
             deployment_context = conf.get("deployment_context", "")
-            # relative_path is like "Test/backend" or "worktrees/bar/Test/backend"
+            # relative_path is like "copies/main/Test/backend" or
+            # "copies/bar/Test/backend"; wt_name is the copy context ("" for main).
             bp_sanitized, wt_name = derive_bp_and_worktree(relative_path)
             if not deployment_context:
-                wt_part = f"-wt-{wt_name}" if wt_name else ""
+                wt_part = f"-copy-{wt_name}" if wt_name else ""
                 stage_suffix = f"-{stage}" if stage and stage != "production" else ""
                 if bp_sanitized:
                     deployment_context = f"{bp_sanitized}{wt_part}{stage_suffix}"
                 elif wt_name:
-                    deployment_context = f"wt-{wt_name}{stage_suffix}"
+                    deployment_context = f"copy-{wt_name}{stage_suffix}"
                 else:
                     deployment_context = (
                         stage if stage and stage != "production" else ""
@@ -3199,11 +3220,11 @@ fi
                 entry["environment"]["COUCHDB_DB_PREFIX"] = bp_names["couchdb_prefix"]
                 entry["environment"]["MINIO_BUCKET"] = bp_names["minio_bucket"]
 
-            # For worktree live-devs, override POSTGRES_DB to use the cloned
-            # database. Ordering is load-bearing: this MUST come after the
-            # per-BP injection above so the worktree clone wins.
+            # For non-main copy live-devs, override POSTGRES_DB to use the
+            # cloned database. Ordering is load-bearing: this MUST come after
+            # the per-BP injection above so the copy clone wins.
             if wt_name and stage == "live-dev":
-                wt_db = "postgres_wt_" + re.sub(r"[^a-z0-9_]", "_", wt_name.lower())
+                wt_db = "postgres_copy_" + re.sub(r"[^a-z0-9_]", "_", wt_name.lower())
                 entry["environment"]["POSTGRES_DB"] = wt_db
 
             if self.workspace_name and self.gitops_domain:
@@ -3450,8 +3471,10 @@ fi
 
             if stage == "live-dev" and relative_path:
                 if bitswan_volume_name:
+                    # relative_path is "copies/<copy>/<rel>", so the volume
+                    # subpath is workspaces/<ws>/copies/<copy>/<rel>.
                     subpath = _normalize_subpath(
-                        f"workspaces/{bitswan_workspace_name}/workspace/{relative_path}"
+                        f"workspaces/{bitswan_workspace_name}/{relative_path}"
                     )
                     entry["volumes"].append(
                         {

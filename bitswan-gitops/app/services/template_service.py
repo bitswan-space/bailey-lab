@@ -27,6 +27,10 @@ from app.utils import (
 
 logger = logging.getLogger(__name__)
 
+
+def _copies_dir() -> str:
+    return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
+
 # Built-in templates are baked into the gitops image at /opt/bitswan/examples
 # (Dockerfile `COPY examples/`), so they are version-locked to the gitops
 # build. BITSWAN_TEMPLATES_DIR overrides the baked path (used in dev when the
@@ -284,9 +288,15 @@ def _ensure_automation_id(target_dir: str) -> None:
 def _bp_destination(
     workspace_root: str, bp: str, worktree: Optional[str]
 ) -> tuple[str, str]:
-    """Returns `(bp_full_path, bp_relative_path)`."""
-    rel = os.path.join("worktrees", worktree, bp) if worktree else bp
-    return os.path.join(workspace_root, rel), rel
+    """Returns `(bp_full_path, bp_relative_path)`.
+
+    A copy (worktree name) scaffolds into `${BITSWAN_COPIES_DIR}/<copy>/<bp>`;
+    the main scope (worktree None) into `${BITSWAN_COPIES_DIR}/main/<bp>`. The
+    relative path uses the deployment `copies/<copy>/<bp>` form.
+    """
+    copy = worktree or "main"
+    rel = os.path.join("copies", copy, bp)
+    return os.path.join(_copies_dir(), copy, bp), rel
 
 
 async def _commit(
@@ -346,11 +356,7 @@ async def rename_automation(
         )
     os.rename(src, dest)
 
-    commit_cwd = (
-        os.path.join(workspace_root, "worktrees", worktree)
-        if worktree
-        else workspace_root
-    )
+    commit_cwd = os.path.join(_copies_dir(), worktree or "main")
     try:
         await _commit(commit_cwd, f"Rename automation {old_san} → {new_san}")
     except Exception as e:  # noqa: BLE001 — surface but don't undo the rename
@@ -445,11 +451,7 @@ async def create_automation_from_template(
 
     # Commit in the workspace root (or worktree). `git` finds the right worktree
     # from the cwd, so commits land on the right branch automatically.
-    commit_cwd = (
-        os.path.join(workspace_root, "worktrees", worktree)
-        if worktree
-        else workspace_root
-    )
+    commit_cwd = os.path.join(_copies_dir(), worktree or "main")
     try:
         await _commit(commit_cwd, message)
     except Exception as e:  # noqa: BLE001 — surface commit failures but don't undo the copy

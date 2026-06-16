@@ -55,8 +55,9 @@ async def create_process(
 ) -> dict:
     """Create a new business-process directory with auto-setup.
 
-    Scaffolds `process.toml` + `README.md` under either `<workspace_repo>/<name>/`
-    or `<workspace_repo>/worktrees/<worktree>/<name>/`. The new BP surfaces
+    Scaffolds `process.toml` + `README.md` under the main copy
+    (`${BITSWAN_COPIES_DIR}/main/<name>/`) or a specific copy
+    (`${BITSWAN_COPIES_DIR}/<copy>/<name>/`). The new BP surfaces
     over the SSE feed within the same response (this route refreshes the
     cache + broadcasts inline instead of waiting for the filesystem watcher
     to debounce).

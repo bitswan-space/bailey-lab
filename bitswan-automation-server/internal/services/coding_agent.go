@@ -82,13 +82,17 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 		"BITSWAN_GITOPS_URL=" + fmt.Sprintf("http://%s-gitops:8079", workspaceName),
 		"BITSWAN_GITOPS_AGENT_SECRET=" + gitopsAgentSecret,
 		"BITSWAN_WORKSPACE_NAME=" + workspaceName,
+		// Canonical repo URL the agent uses as `origin` in each copy. The agent
+		// authenticates with HTTP Basic where the password is the agent secret.
+		"BITSWAN_GIT_REMOTE=" + fmt.Sprintf("http://%s-gitops:8079/git/repo.git", workspaceName),
 	}
 	if sshPubKey != "" {
 		envVars = append(envVars, "EDITOR_SSH_PUBLIC_KEY="+sshPubKey)
 	}
 
 	volumes := []interface{}{
-		wsVolume("workspace/worktrees", "/workspace/worktrees"),
+		// Each agent session works in its own copy at /workspace/copies/<name>.
+		wsVolume("copies", "/workspace/copies"),
 		wsVolume("coding-agent-home", "/home/agent"),
 		wsVolume("coding-agent-sessions", "/var/log/agent-sessions"),
 	}

@@ -11,6 +11,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _copies_dir() -> str:
+    return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
+
+
 class ProcessService:
     def __init__(self):
         self.bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
@@ -26,10 +30,14 @@ class ProcessService:
         self._cache: Dict[Optional[str], Dict[str, ProcessInfo]] = {}
 
     def _scope_root(self, worktree: Optional[str] = None) -> str:
-        """Filesystem root for a discovery scope."""
+        """Filesystem root for a discovery scope.
+
+        A copy (worktree name) maps to `${BITSWAN_COPIES_DIR}/<copy>`; the
+        main scope (worktree None) maps to `${BITSWAN_COPIES_DIR}/main`.
+        """
         if worktree:
-            return os.path.join(self.workspace_repo_dir, "worktrees", worktree)
-        return self.workspace_repo_dir
+            return os.path.join(_copies_dir(), worktree)
+        return os.path.join(_copies_dir(), "main")
 
     def discover_processes(
         self, worktree: Optional[str] = None
@@ -46,9 +54,6 @@ class ProcessService:
             return processes
 
         for item in os.listdir(root):
-            # Never descend into the worktrees tree when scanning the main repo.
-            if worktree is None and item == "worktrees":
-                continue
             process_path = os.path.join(root, item)
             if not os.path.isdir(process_path):
                 continue
@@ -93,24 +98,27 @@ class ProcessService:
         return result
 
     def refresh_all(self) -> None:
-        """Warm the cache from scratch: main repo + every worktree on disk."""
+        """Warm the cache from scratch: main copy + every other copy on disk."""
         self.refresh(None)
-        worktrees_root = os.path.join(self.workspace_repo_dir, "worktrees")
-        if not os.path.isdir(worktrees_root):
-            # Drop any stale worktree entries (e.g. all worktrees removed).
+        copies_root = _copies_dir()
+        if not os.path.isdir(copies_root):
+            # Drop any stale copy entries (e.g. all copies removed).
             for key in [k for k in self._cache.keys() if k is not None]:
                 self._cache.pop(key, None)
             return
         live = set()
-        for entry in os.listdir(worktrees_root):
+        for entry in os.listdir(copies_root):
             if entry.startswith("."):
                 continue
-            full = os.path.join(worktrees_root, entry)
+            # "main" is the None scope, refreshed separately above.
+            if entry == "main":
+                continue
+            full = os.path.join(copies_root, entry)
             if not os.path.isdir(full):
                 continue
             live.add(entry)
             self.refresh(entry)
-        # Forget worktrees that have disappeared since the last refresh.
+        # Forget copies that have disappeared since the last refresh.
         for stale in [k for k in self._cache.keys() if k and k not in live]:
             self._cache.pop(stale, None)
 
@@ -392,11 +400,11 @@ class ProcessService:
             raise ValueError("process name is empty or invalid")
 
         if worktree:
-            scope_root = os.path.join(self.workspace_repo_dir, "worktrees", worktree)
+            scope_root = os.path.join(_copies_dir(), worktree)
             if not os.path.isdir(scope_root):
                 raise FileNotFoundError(f"worktree '{worktree}' does not exist")
         else:
-            scope_root = self.workspace_repo_dir
+            scope_root = os.path.join(_copies_dir(), "main")
 
         process_dir = os.path.join(scope_root, clean)
         if os.path.exists(process_dir):

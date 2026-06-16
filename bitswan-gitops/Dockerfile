@@ -22,6 +22,8 @@ COPY bitswan-gitops/app/ ./app/
 # Bake the automation templates into the image so they are version-locked to
 # this gitops build (no external examples repo to clone or mount).
 COPY bitswan-gitops/examples/ /opt/bitswan/examples/
+# Fast-forward-only hook installed into each workspace's canonical bare repo.
+COPY bitswan-gitops/git-hooks/ /opt/bitswan/git-hooks/
 COPY bitswan-gitops/start.sh .
 
 RUN pip install -e .

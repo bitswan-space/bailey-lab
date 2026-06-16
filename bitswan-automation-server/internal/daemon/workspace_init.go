@@ -482,6 +482,14 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 	fmt.Println("Ownership fixed successfully!")
 
+	// Set up the canonical bare repo (served fast-forward-only over smart-HTTP)
+	// and the `main` copy — the editor's working tree and main-branch live-dev
+	// source. This is the new working-tree model; the gitops worktree above
+	// remains the promoted-deployment state repo.
+	if err := setupCanonicalRepoAndMainCopy(workspaceName, gitopsConfig, gitopsWorkspace, *verbose); err != nil {
+		return fmt.Errorf("failed to set up canonical git repo: %w", err)
+	}
+
 	// Create secrets directory
 	secretsDir := gitopsConfig + "/secrets"
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
@@ -1131,4 +1139,58 @@ func createSSHConfig(workspacePath, workspaceName string, repoInfo *RepositoryIn
 	}
 
 	return configPath, nil
+}
+
+// setupCanonicalRepoAndMainCopy creates the workspace's canonical bare repo
+// (repo.git) and the `main` copy. The bare repo is what the embedded smart-HTTP
+// git server serves (fast-forward-only); each agent and the editor work in an
+// independent clone ("copy") whose origin points back at it. The `main` copy is
+// the editor's working tree and the default-branch live-dev source. `seedTree`
+// is the freshly initialised/cloned workspace tree used to seed `main`.
+func setupCanonicalRepoAndMainCopy(workspaceName, gitopsConfig, seedTree string, verbose bool) error {
+	runU := func(cmd string) error {
+		c := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", cmd) //nolint:gosec
+		return util.RunCommandVerbose(c, verbose)
+	}
+	bareRepo := filepath.Join(gitopsConfig, "repo.git")
+	copiesDir := filepath.Join(gitopsConfig, "copies")
+	mainCopy := filepath.Join(copiesDir, "main")
+
+	// Put the seed tree on `main` with at least one commit.
+	_ = runU(fmt.Sprintf("git -C %q checkout -B main", seedTree))
+	check := exec.Command("su", "-s", "/bin/sh", "user1000", "-c",
+		fmt.Sprintf("git -C %q rev-parse --verify HEAD", seedTree)) //nolint:gosec
+	if check.Run() != nil {
+		if err := runU(fmt.Sprintf("git -C %q commit --allow-empty -m 'Initial commit'", seedTree)); err != nil {
+			return fmt.Errorf("initial commit: %w", err)
+		}
+	}
+
+	// Canonical bare repo, seeded with `main` via a local push (the gitops
+	// service installs the fast-forward-only pre-receive hook on startup).
+	if err := runU(fmt.Sprintf("git init --bare --initial-branch=main %q", bareRepo)); err != nil {
+		return fmt.Errorf("init bare repo: %w", err)
+	}
+	if err := runU(fmt.Sprintf("git -C %q push %q main:main", seedTree, bareRepo)); err != nil {
+		return fmt.Errorf("seed canonical repo: %w", err)
+	}
+
+	// The `main` copy — an independent clone; origin points at the smart-HTTP
+	// git server for runtime use by the editor.
+	if err := runU(fmt.Sprintf("mkdir -p %q", copiesDir)); err != nil {
+		return fmt.Errorf("create copies dir: %w", err)
+	}
+	if err := runU(fmt.Sprintf("git clone %q %q", bareRepo, mainCopy)); err != nil {
+		return fmt.Errorf("clone main copy: %w", err)
+	}
+	remoteURL := fmt.Sprintf("http://%s-gitops:8079/git/repo.git", workspaceName)
+	_ = runU(fmt.Sprintf("git -C %q remote set-url origin %q", mainCopy, remoteURL))
+
+	// gitops/editor containers run as user1000.
+	for _, d := range []string{bareRepo, copiesDir} {
+		if err := exec.Command("chown", "-R", "1000:1000", d).Run(); err != nil {
+			return fmt.Errorf("chown %s: %w", d, err)
+		}
+	}
+	return nil
 }

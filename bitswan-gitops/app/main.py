@@ -13,6 +13,7 @@ from app.routes.events import router as events_router
 from app.routes.processes import router as processes_router
 from app.routes.worktrees import router as worktrees_router
 from app.routes.agent import router as agent_router
+from app.routes.git_http import router as git_http_router
 from app.routes.backups import router as backups_router
 from app.routes.snapshots import router as snapshots_router
 from app.routes.templates import router as templates_router
@@ -63,11 +64,20 @@ app.include_router(jupyter_router, dependencies=[Depends(verify_token)])
 app.include_router(services_router, dependencies=[Depends(verify_token)])
 app.include_router(events_router, dependencies=[Depends(verify_token)])
 app.include_router(processes_router, dependencies=[Depends(verify_token)])
-app.include_router(worktrees_router, dependencies=[Depends(verify_token)])
+# Copy management is served under /copies (canonical) and /worktrees
+# (deprecated alias kept so the existing dashboard keeps working).
+app.include_router(
+    worktrees_router, prefix="/copies", dependencies=[Depends(verify_token)]
+)
+app.include_router(
+    worktrees_router, prefix="/worktrees", dependencies=[Depends(verify_token)]
+)
 # Docs router is public - no auth required
 app.include_router(docs_router)
 # Agent router uses its own verify_agent_token dependency (per-route)
 app.include_router(agent_router)
+# Smart-HTTP git server — does its own bearer/basic auth against the agent secret
+app.include_router(git_http_router)
 # Backups router - protected by main auth
 app.include_router(backups_router, dependencies=[Depends(verify_token)])
 # Per-BP stage snapshots - protected by main auth

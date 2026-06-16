@@ -114,6 +114,12 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 			// this (+ BITSWAN_WORKSPACE_NAME) to mount business-process containers
 			// off the volume via subpaths instead of host bind paths.
 			"BITSWAN_VOLUME_NAME=bitswan",
+			// Canonical bare repo (served over smart-HTTP, fast-forward only)
+			// and the per-copy checkouts. The `main` copy is the default scope.
+			"BITSWAN_GIT_REPOS_DIR=/git",
+			"BITSWAN_COPIES_DIR=/copies",
+			"BITSWAN_WORKSPACE_REPO_DIR=/copies/main",
+			"BITSWAN_GIT_REMOTE=http://" + config.WorkspaceName + "-gitops:8079/git/repo.git",
 		},
 	}
 
@@ -158,30 +164,17 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), caEnvVars...)
 	}
 
-	// Add workspace directory mount (named-volume subpath) and rewrite git path for all OS
-	workspaceDir := wsVolume("workspace", "/workspace-repo")
+	// Mount the canonical bare repo (served over smart-HTTP) and the per-copy
+	// checkouts (the deploy unit). These replace the old shared workspace
+	// working-tree mount + gitops orphan-worktree gitdir rewrite.
+	gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
+		wsVolume("repo.git", "/git/repo.git"),
+		wsVolume("copies", "/copies"),
+	)
 	if hostOs == WindowsMac {
 		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
 			gitConfig+":/root/.gitconfig:z",
-			workspaceDir,
 		)
-	} else if hostOs == Linux {
-		// For Linux, also mount workspace directory
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}), workspaceDir)
-	}
-
-	// If this workspace has a local remote repository, mount it so GitOps can access it
-	if config.LocalRemotePath != "" && config.LocalRemoteName != "" {
-		// Mount local repository to /remote-repos/<name> for GitOps to access
-		// The mount name is used to construct the mount point path
-		localRemoteMount := config.LocalRemotePath + ":/remote-repos/" + config.LocalRemoteName + ":ro"
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}), localRemoteMount)
-	}
-
-	// Rewrite .git in worktree for all OS to use container path
-	gitdir := "gitdir: /workspace-repo/.git/worktrees/gitops"
-	if err := os.WriteFile(config.GitopsPath+"/gitops/.git", []byte(gitdir), 0644); err != nil {
-		return "", "", fmt.Errorf("failed to rewrite gitops worktree .git file: %w", err)
 	}
 
 	// Construct the docker-compose data structure

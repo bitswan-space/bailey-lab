@@ -17,9 +17,11 @@ import (
 // missing newer dirs (e.g. snapshots, worktrees), so we ensure the full set
 // exists before (re)generating a workspace's deployment.
 var workspaceVolumeSubdirs = []string{
-	"workspace",
-	"workspace/worktrees",
-	"gitops",
+	"workspace",       // legacy shared working tree (kept for the gitops state worktree)
+	"gitops",          // promoted-deployment materialization/state
+	"repo.git",        // canonical bare repo (real content created by init/migration)
+	"copies",          // per-copy checkouts base
+	"copies/main",     // the main copy (editor working tree / main live-dev source)
 	"secrets",
 	"snapshots",
 	"ssh",
@@ -60,7 +62,11 @@ func (s *Server) migrateWorkspaceDeploymentsToVolumes() {
 	home := os.Getenv("HOME")
 	for _, ws := range list.Workspaces {
 		wsDir := filepath.Join(home, ".config", "bitswan", "workspaces", ws.Name)
-		marker := filepath.Join(wsDir, ".volume-migrated")
+		// `.gitserver-migrated` covers both the bind→volume move and the
+		// worktree→copy / canonical-repo move, so workspaces already volume-
+		// migrated under the old marker are reprocessed once to gain repo.git +
+		// copies (otherwise their regenerated gitops compose can't mount them).
+		marker := filepath.Join(wsDir, ".gitserver-migrated")
 		if _, err := os.Stat(marker); err == nil {
 			continue // already migrated
 		}
@@ -69,9 +75,20 @@ func (s *Server) migrateWorkspaceDeploymentsToVolumes() {
 			continue
 		}
 
-		fmt.Printf("Migrating workspace %q deployment to docker volume mounts...\n", ws.Name)
+		fmt.Printf("Migrating workspace %q to docker volumes + git server...\n", ws.Name)
 		// Guarantee every subpath the compose will mount exists in the volume.
 		ensureWorkspaceVolumeDirs(ws.Name)
+		// Create the canonical bare repo + main copy from the legacy working
+		// tree if they don't exist yet (idempotent — skipped once repo.git is a
+		// real bare repo). Leaves the legacy workspace/ + worktrees as backup.
+		if _, err := os.Stat(filepath.Join(wsDir, "repo.git", "objects")); err != nil {
+			if err := setupCanonicalRepoAndMainCopy(
+				ws.Name, wsDir, filepath.Join(wsDir, "workspace"), false,
+			); err != nil {
+				fmt.Printf("Warning: failed to set up canonical repo for %q (will retry): %v\n", ws.Name, err)
+				continue
+			}
+		}
 		if err := s.runWorkspaceUpdate([]string{ws.Name}); err != nil {
 			fmt.Printf("Warning: failed to migrate workspace %q to volume mounts (will retry on next start): %v\n", ws.Name, err)
 			continue

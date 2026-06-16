@@ -1,0 +1,45 @@
+#!/bin/sh
+#
+# Fast-forward-only gatekeeper for the canonical workspace repo.
+#
+# Coding agents (and the editor) push to this repo over smart-HTTP using normal
+# git. To let them use git safely we make published history append-only: a ref
+# may be created or fast-forwarded, but never deleted, force-updated, or
+# rewritten. Anything else is rejected so already-committed history can't be
+# changed out from under another copy.
+#
+# stdin: one line per ref update — "<old-sha> <new-sha> <ref-name>".
+
+set -eu
+
+# all-zeros object id (works for both sha1 (40) and sha256 (64) repos)
+is_zero() {
+    case "$1" in
+        *[!0]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+while read -r oldrev newrev refname; do
+    # Reject ref deletion.
+    if is_zero "$newrev"; then
+        echo "remote: rejected $refname: deleting refs is not allowed" >&2
+        exit 1
+    fi
+
+    # Brand-new ref (branch/tag creation) — allowed.
+    if is_zero "$oldrev"; then
+        continue
+    fi
+
+    # Existing ref: require a fast-forward, i.e. the old tip must be an
+    # ancestor of the new tip. This rejects force-pushes and rebases of
+    # already-published commits.
+    if ! git merge-base --is-ancestor "$oldrev" "$newrev"; then
+        echo "remote: rejected $refname: non-fast-forward update (force-push or history rewrite) is not allowed" >&2
+        echo "remote: pull and rebase your work onto the latest $refname, then push again" >&2
+        exit 1
+    fi
+done
+
+exit 0

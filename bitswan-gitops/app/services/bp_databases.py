@@ -94,20 +94,28 @@ def bp_resource_names(bp_slug: str) -> dict:
 
 
 def derive_bp_and_worktree(relative_path: str | None) -> tuple[str, str]:
-    """Derive (bp_slug, worktree_name) from a deployment's relative_path.
+    """Derive (bp_slug, copy_name) from a deployment's relative_path.
 
-    relative_path looks like "Test/backend" or "worktrees/bar/Test/backend".
-    Returns ("", "") when the path has no BP segment (top-level automation).
+    relative_path looks like "copies/main/Test/backend" (the main copy) or
+    "copies/bar/Test/backend" (a non-main copy). The second return value is the
+    *copy context*: empty for the main copy (so its deployments stay unprefixed,
+    matching legacy `main`), or the copy name for any other copy. Returns
+    ("", "") when the path has no BP segment (top-level automation).
+
     Single source of truth shared by `generate_docker_compose`'s deployment-
     context derivation and the provisioning hooks — both must agree on what
-    "the BP of a deployment" means.
+    "the BP of a deployment" means. (The variable is still called wt_name for
+    historical reasons; it now carries the copy context.)
     """
     bp_name = ""
     wt_name = ""
     if relative_path:
         parts = relative_path.replace("\\", "/").split("/")
-        if len(parts) >= 2 and parts[0] == "worktrees":
-            wt_name = parts[1]
+        if len(parts) >= 2 and parts[0] == "copies":
+            copy_name = parts[1]
+            # The main copy is the unprefixed scope (like the old shared repo);
+            # only non-main copies carry a copy context.
+            wt_name = "" if copy_name == "main" else copy_name
             parts = parts[2:]
         if len(parts) >= 2:
             bp_name = parts[0]
@@ -504,7 +512,9 @@ def _bp_display_name(relative_path: str | None) -> str:
     if not relative_path:
         return ""
     parts = relative_path.replace("\\", "/").split("/")
-    if len(parts) >= 2 and parts[0] == "worktrees":
+    if len(parts) >= 2 and parts[0] == "copies":
+        # Drop the "copies/<copy>" prefix; the main copy and any other copy
+        # are treated the same for the purpose of the BP folder name.
         parts = parts[2:]
     return parts[0] if len(parts) >= 2 else ""
 
