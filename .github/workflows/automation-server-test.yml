@@ -21,7 +21,11 @@ jobs:
     strategy:
       matrix:
         go-version: [1.25.x]
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The automation-server daemon only ever runs on Linux (it reads
+        # /proc + statfs and ships as a Linux container). macOS stays for
+        # general cross-Unix portability; Windows is dropped — it can't build
+        # the Unix-only syscalls and is not a supported runtime.
+        os: [ubuntu-latest, macos-latest]
 
     runs-on: ${{ matrix.os }}
 
