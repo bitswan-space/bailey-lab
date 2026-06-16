@@ -10,19 +10,19 @@ const {
 const { Api: PApi, ApiError: PApiError } = window.SC_API;
 const { useState: useP, useEffect: usePE } = React;
 
-const P_ROLE_TONE = { admin: 'primary', auditor: 'info', member: 'neutral', viewer: 'outline' };
+const P_ROLE_TONE = { admin: 'primary', auditor: 'info', member: 'neutral', user: 'outline' };
 
 // Static role legend (reference UI, not user data). Describes what each role
 // can do; the per-person role itself comes live from /bailey/api/people.
 const P_ROLES = [
   { id: 'admin',   label: 'Admin',   tone: 'primary',
-    desc: 'Approves devices, manages users & workspaces, owns server settings.' },
+    desc: 'Manages users, server settings, and device approvals. Still sees only workspaces they own or were granted — not everyone’s.' },
   { id: 'auditor', label: 'Auditor', tone: 'info',
-    desc: 'Signs off on deploy promotions. Read access to all workspaces.' },
+    desc: 'Reviews security activity and signs off on deploy promotions. No automatic access to others’ workspace data.' },
   { id: 'member',  label: 'Member',  tone: 'neutral',
-    desc: 'Builds in workspaces they own or are added to.' },
-  { id: 'viewer',  label: 'Viewer',  tone: 'outline',
-    desc: 'Read-only access to assigned workspaces.' },
+    desc: 'Builds in workspaces they own or were added to.' },
+  { id: 'user',    label: 'User',    tone: 'outline',
+    desc: 'A signed-in identity with no elevated role; sees only workspaces they own or are added to.' },
 ];
 
 // ─── USERS & ROLES ──────────────────────────────────────────────────────────
@@ -59,6 +59,16 @@ function UsersView({ ctx }) {
     <div>
       <PPageHeader title="People &amp; roles"
         subtitle="Everyone with access to this server. Roles govern what they can do; devices govern where they can do it from." />
+
+      {/* Least-trust principle — even an admin can't see everyone's data. */}
+      <div style={{ display: 'flex', gap: 10, padding: '11px 14px', marginBottom: 14,
+        border: `1px solid ${PC.border}`, borderRadius: 10, background: PC.surface }}>
+        <PIcon name="shield" size={15} color={PC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
+        <span style={{ fontSize: 12.5, color: PC.muted, lineHeight: '18px' }}>
+          Least-trust access: a role grants <em>capabilities</em>, never blanket data access. Even an admin only reaches
+          workspaces they created or were granted — so each person controls who sees their own data.
+        </span>
+      </div>
 
       {/* role legend */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 18 }}>
