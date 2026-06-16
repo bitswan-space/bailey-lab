@@ -29,9 +29,13 @@ def _git(*args, cwd=None, check=True):
 
 @pytest.fixture()
 def bare_repo(tmp_path, monkeypatch):
-    monkeypatch.setenv("BITSWAN_GIT_REPOS_DIR", str(tmp_path / "git"))
+    # GIT_REPOS_DIR / HOOKS_SRC_DIR are module-level constants read at import,
+    # so patch the attributes directly rather than the environment.
+    monkeypatch.setattr(git_server, "GIT_REPOS_DIR", str(tmp_path / "git"))
     # Force the inline-hook fallback (the shipped hook path won't exist in CI).
-    monkeypatch.setenv("BITSWAN_GIT_HOOKS_DIR", str(tmp_path / "nonexistent-hooks"))
+    monkeypatch.setattr(
+        git_server, "HOOKS_SRC_DIR", str(tmp_path / "nonexistent-hooks")
+    )
     repo = asyncio.run(git_server.ensure_bare_repo())
     return repo
 

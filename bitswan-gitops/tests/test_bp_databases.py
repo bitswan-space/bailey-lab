@@ -65,15 +65,17 @@ def test_validate_bp_slug_rejects(bad):
 
 
 def test_derive_bp_and_worktree():
-    assert derive_bp_and_worktree("Test BP/backend") == ("test-bp", "")
-    assert derive_bp_and_worktree("worktrees/bar/Test BP/backend") == (
+    # main copy: unprefixed scope (no copy context).
+    assert derive_bp_and_worktree("copies/main/Test BP/backend") == ("test-bp", "")
+    # non-main copy: carries the copy name as context.
+    assert derive_bp_and_worktree("copies/bar/Test BP/backend") == (
         "test-bp",
         "bar",
     )
     # Top-level automation: no BP segment.
     assert derive_bp_and_worktree("standalone") == ("", "")
-    # Worktree root automation: worktree but no BP.
-    assert derive_bp_and_worktree("worktrees/bar/standalone") == ("", "bar")
+    # Copy-root automation: copy but no BP.
+    assert derive_bp_and_worktree("copies/bar/standalone") == ("", "bar")
     assert derive_bp_and_worktree(None) == ("", "")
     assert derive_bp_and_worktree("") == ("", "")
 
@@ -360,7 +362,7 @@ def test_worktree_members_never_register(gitops_home):
         {"deployments": {}},
         [
             {
-                "relative_path": "worktrees/foo/New BP/backend",
+                "relative_path": "copies/foo/New BP/backend",
                 "stage": "live-dev",
             }
         ],
@@ -375,7 +377,7 @@ def test_worktree_deployments_do_not_block_registration(gitops_home):
         "deployments": {
             "backend-wt-foo-new-bp-live-dev": {
                 "stage": "live-dev",
-                "relative_path": "worktrees/foo/New BP/backend",
+                "relative_path": "copies/foo/New BP/backend",
             }
         }
     }
@@ -498,11 +500,11 @@ def test_worktree_override_wins_over_bp_injection(gitops_home, automation_servic
 
     bs_yaml = {
         "deployments": {
-            "backend-wt-foo-my-bp-live-dev": {
+            "backend-copy-foo-my-bp-live-dev": {
                 "stage": "live-dev",
-                "relative_path": "worktrees/foo/My BP/backend",
+                "relative_path": "copies/foo/My BP/backend",
                 "automation_name": "backend",
-                "context": "wt-foo-my-bp",
+                "context": "copy-foo-my-bp",
             }
         }
     }
@@ -510,8 +512,8 @@ def test_worktree_override_wins_over_bp_injection(gitops_home, automation_servic
     dc = yaml.safe_load(dc_yaml)
     (service_name,) = [s for s in dc["services"]]
     env = dc["services"][service_name]["environment"]
-    assert env["POSTGRES_DB"] == "postgres_wt_foo"
-    # CouchDB/MinIO names aren't worktree-cloned; they share the BP namespace.
+    assert env["POSTGRES_DB"] == "postgres_copy_foo"
+    # CouchDB/MinIO names aren't copy-cloned; they share the BP namespace.
     assert env["COUCHDB_DB_PREFIX"] == "bp-my-bp-"
     assert env["MINIO_BUCKET"] == "bp-my-bp"
 
