@@ -48,23 +48,25 @@ func newInitCmd() *cobra.Command {
 	var noRemove bool
 	var gitopsImage string
 	var editorImage string
+	var codingAgentImage string
 
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Test workspace initialization and business-process deployment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTestInit(noRemove, gitopsImage, editorImage)
+			return runTestInit(noRemove, gitopsImage, editorImage, codingAgentImage)
 		},
 	}
 
 	cmd.Flags().BoolVar(&noRemove, "no-remove", false, "Leave workspace and deployment running (skip cleanup)")
 	cmd.Flags().StringVar(&gitopsImage, "gitops-image", "", "Custom GitOps image to use (default: production image)")
 	cmd.Flags().StringVar(&editorImage, "editor-image", "", "Custom editor image to use (default: production image)")
+	cmd.Flags().StringVar(&codingAgentImage, "coding-agent-image", "", "Custom coding-agent image to use (default: production image)")
 
 	return cmd
 }
 
-func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
+func runTestInit(noRemove bool, gitopsImage, editorImage, codingAgentImage string) error {
 	fmt.Println("=== BitSwan Test Suite: Init ===")
 	fmt.Println()
 
@@ -126,6 +128,9 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	}
 	if editorImage != "" {
 		initArgs = append(initArgs, "--editor-image", editorImage)
+	}
+	if codingAgentImage != "" {
+		initArgs = append(initArgs, "--coding-agent-image", codingAgentImage)
 	}
 	initArgs = append(initArgs, workspaceName)
 

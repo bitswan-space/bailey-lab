@@ -178,11 +178,18 @@ jobs:
           # bitswan-automation-server.
           docker build -t bitswan/gitops-local:latest -f "${{ github.workspace }}/bitswan-gitops/Dockerfile" "${{ github.workspace }}"
 
+      - name: Build coding-agent image from source
+        run: |
+          # Build the in-repo coding-agent so the e2e exercises this branch's
+          # CLI (e.g. the `--copy` flag / `?copy=` gitops calls), not a
+          # published image that may lag the gitops/daemon API.
+          docker build -t bitswan/coding-agent-local:latest -f "${{ github.workspace }}/bitswan-coding-agent/Dockerfile" "${{ github.workspace }}/bitswan-coding-agent"
+
       - name: "E2E: create a business process and reach its frontend"
         timeout-minutes: 15
         run: |
           echo "=== Creating a business process and verifying the frontend ==="
-          ./bitswan _test init --gitops-image bitswan/gitops-local:latest --no-remove || exit 1
+          ./bitswan _test init --gitops-image bitswan/gitops-local:latest --coding-agent-image bitswan/coding-agent-local:latest --no-remove || exit 1
           ./bitswan _test cleanup || true
 
       - name: "Diagnostics on E2E failure"
