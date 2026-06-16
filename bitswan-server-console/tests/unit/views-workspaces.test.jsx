@@ -60,6 +60,43 @@ describe('OverviewView', () => {
     render(<Host View={OverviewView} data={makeData({ overview: { ...overview, systemError: 'no /proc' } })} />);
     expect(screen.getByText(/Couldn't read host stats: no \/proc/)).toBeTruthy();
   });
+  it('SIEM card: starts disconnected, configures an ingestor, shows connected', async () => {
+    const s = spies();
+    let saved = null;
+    installFetch({
+      '/bailey/api/admin/siem': (url, init) => {
+        if (init && init.method === 'POST') { saved = JSON.parse(init.body); return { json: { enabled: true, protocol: 'otlp-http', endpoint: saved.endpoint, has_auth_token: true, connected: true, last_event_at: '2026-06-16T10:00:00Z' } }; }
+        return { json: { enabled: false, protocol: 'otlp-http', endpoint: '', has_auth_token: false, connected: false } };
+      },
+    });
+    render(<Host View={OverviewView} data={makeData({ overview })} extra={s} />);
+    // Starts disconnected with a Configure affordance.
+    await waitFor(() => expect(screen.getByText('SIEM forwarding')).toBeTruthy());
+    expect(screen.getByText('○ Disconnected')).toBeTruthy();
+    fireEvent.click(screen.getByText('Configure ingestor'));
+    fireEvent.change(screen.getByPlaceholderText('https://collector.example.com'), { target: { value: 'https://collector.acme.test' } });
+    fireEvent.change(screen.getByPlaceholderText('e.g. 4318'), { target: { value: '4318' } });
+    fireEvent.click(screen.getByText('Save & connect'));
+    await waitFor(() => expect(screen.getByText('● Connected')).toBeTruthy());
+    expect(saved).toMatchObject({ enabled: true, protocol: 'otlp-http', endpoint: 'https://collector.acme.test', port: 4318 });
+    expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('connected'), 'success');
+  });
+
+  it('SIEM card: surfaces a connectivity failure without claiming connected', async () => {
+    const s = spies();
+    installFetch({
+      '/bailey/api/admin/siem': (url, init) => (init && init.method === 'POST')
+        ? { json: { enabled: true, protocol: 'otlp-http', endpoint: 'http://x', has_auth_token: false, connected: false, last_error: 'connection refused' } }
+        : { json: { enabled: false, protocol: 'otlp-http', endpoint: '', has_auth_token: false, connected: false } },
+    });
+    render(<Host View={OverviewView} data={makeData({ overview })} extra={s} />);
+    await waitFor(() => expect(screen.getByText('Configure ingestor')).toBeTruthy());
+    fireEvent.click(screen.getByText('Configure ingestor'));
+    fireEvent.change(screen.getByPlaceholderText('https://collector.example.com'), { target: { value: 'http://x' } });
+    fireEvent.click(screen.getByText('Save & connect'));
+    await waitFor(() => expect(screen.getByText(/connection refused/)).toBeTruthy());
+  });
+
   it('region is editable: save persists via the API and refreshes', async () => {
     const s = spies();
     installFetch({ '/bailey/api/admin/region': { json: { ok: true, region: 'us-east' } } });

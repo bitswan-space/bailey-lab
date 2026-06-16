@@ -37,9 +37,14 @@ func recordEvent(actor, action, target string) error {
 	if err != nil {
 		return err
 	}
+	ts := time.Now().UTC().Format(time.RFC3339)
 	_, err = db.Exec(
 		`INSERT INTO events(ts, actor, action, target) VALUES (?, ?, ?, ?)`,
-		time.Now().UTC().Format(time.RFC3339), actor, action, target)
+		ts, actor, action, target)
+	// Mirror the event to the configured SIEM ingestor (OpenTelemetry). This
+	// is best-effort and asynchronous, so it never blocks or fails the audit
+	// write — same contract as the recordEvent caller relies on.
+	siemForwardEvent(eventRecord{TS: ts, Actor: actor, Action: action, Target: target})
 	return err
 }
 

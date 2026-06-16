@@ -102,6 +102,152 @@ function EditableRegionRow({ region, toast, refresh }) {
   );
 }
 
+// SiemCard — configure OpenTelemetry forwarding of the security audit log to
+// an external SIEM. Starts disconnected; an admin sets protocol + URL + an
+// optional port and bearer token. Saving with "enabled" runs a synchronous
+// connectivity test on the backend so the card shows a truthful state.
+function SiemCard({ toast }) {
+  const [cfg, setCfg] = useWS(null);   // null = loading
+  const [err, setErr] = useWS('');
+  const [editing, setEditing] = useWS(false);
+  const [busy, setBusy] = useWS(false);
+  const [saveErr, setSaveErr] = useWS('');
+  const [form, setForm] = useWS({ protocol: 'otlp-http', endpoint: '', port: '', auth_token: '' });
+
+  const load = () => {
+    setErr('');
+    WApi.siem().then(setCfg).catch((e) => { setErr(e.message || 'Could not load SIEM settings.'); });
+  };
+  React.useEffect(() => { load(); }, []);
+
+  const setF = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+  const openEdit = () => {
+    setForm({
+      protocol: (cfg && cfg.protocol) || 'otlp-http',
+      endpoint: (cfg && cfg.endpoint) || '',
+      port: (cfg && cfg.port) ? String(cfg.port) : '',
+      auth_token: '',
+    });
+    setSaveErr('');
+    setEditing(true);
+  };
+
+  const save = async (enabled) => {
+    setBusy(true); setSaveErr('');
+    try {
+      const body = { enabled, protocol: form.protocol, endpoint: form.endpoint.trim(), port: form.port ? Number(form.port) : 0 };
+      if (form.auth_token.trim()) body.auth_token = form.auth_token.trim(); // omitted = keep stored token
+      const next = await WApi.setSiem(body);
+      setCfg(next);
+      if (enabled && !next.connected) {
+        setSaveErr(next.last_error || "Saved, but couldn't reach the ingestor.");
+        toast("SIEM saved, but the ingestor couldn't be reached", 'danger');
+      } else {
+        setEditing(false);
+        toast(enabled ? 'SIEM forwarding connected' : 'SIEM forwarding disabled', enabled ? 'success' : 'info');
+      }
+    } catch (e) { setSaveErr(e.message || 'Save failed.'); }
+    finally { setBusy(false); }
+  };
+  const disable = async () => {
+    setBusy(true);
+    try {
+      const next = await WApi.setSiem({ enabled: false, protocol: (cfg && cfg.protocol) || 'otlp-http', endpoint: (cfg && cfg.endpoint) || '' });
+      setCfg(next); toast('SIEM forwarding disabled', 'info');
+    } catch (e) { toast(`Couldn't disable: ${e.message}`, 'danger'); }
+    finally { setBusy(false); }
+  };
+
+  const connected = !!(cfg && cfg.connected);
+  const enabled = !!(cfg && cfg.enabled);
+  const statusPill = connected
+    ? <WPill tone="success" size="xs">● Connected</WPill>
+    : <WPill tone={enabled ? 'danger' : 'neutral'} size="xs">○ Disconnected</WPill>;
+
+  const labelStyle = { fontSize: 11.5, fontWeight: 600, color: WC.muted, display: 'block', marginBottom: 5 };
+  const FIELD = { marginBottom: 11 };
+
+  return (
+    <WCard pad={0}>
+      <div style={{ padding: '14px 20px', borderBottom: `1px solid ${WC.border}`, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <WIcon name="radio-tower" size={16} color={WC.muted} />
+        <span style={{ fontSize: 13, fontWeight: 600, color: WC.fg }}>SIEM forwarding</span>
+        <span style={{ marginLeft: 'auto' }}>{statusPill}</span>
+      </div>
+      <div style={{ padding: '14px 20px' }}>
+        {!cfg && !err && <div style={{ fontSize: 12.5, color: WC.muted }}>Loading…</div>}
+        {err && (
+          <div style={{ fontSize: 12.5, color: WC.red }}>{err} <button onClick={load} style={{ border: 0, background: 'transparent', color: WC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Retry</button></div>
+        )}
+
+        {cfg && !editing && (
+          <>
+            <p style={{ margin: '0 0 12px', fontSize: 12.5, color: WC.muted, lineHeight: '18px' }}>
+              Stream this server's security audit log to your SIEM over OpenTelemetry (OTLP). The same events shown in Recent security activity are forwarded as they happen.
+            </p>
+            {enabled ? (
+              <div style={{ fontSize: 12.5, color: WC.fg }}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
+                  <span style={{ color: WC.muted }}>Endpoint</span>
+                  <span style={{ fontFamily: 'Geist Mono, monospace', wordBreak: 'break-all' }}>{cfg.endpoint}{cfg.port ? `:${cfg.port}` : ''}</span>
+                </div>
+                {connected && cfg.last_event_at && (
+                  <div style={{ color: WC.muted, fontSize: 11.5 }}>Last delivered {new Date(cfg.last_event_at).toLocaleString()}</div>
+                )}
+                {!connected && cfg.last_error && (
+                  <div style={{ color: WC.red, fontSize: 11.5, marginTop: 2 }}>Last error: {cfg.last_error}</div>
+                )}
+                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                  <WBtn variant="default" size="sm" leftIcon="settings-2" onClick={openEdit}>Edit</WBtn>
+                  <WBtn variant="default" size="sm" disabled={busy} onClick={disable}>Disable</WBtn>
+                </div>
+              </div>
+            ) : (
+              <WBtn variant="primary" size="sm" leftIcon="plug" onClick={openEdit}>Configure ingestor</WBtn>
+            )}
+          </>
+        )}
+
+        {cfg && editing && (
+          <div>
+            <div style={FIELD}>
+              <label style={labelStyle}>Protocol</label>
+              <select value={form.protocol} onChange={(e) => setF('protocol')(e.target.value)}
+                style={{ width: '100%', height: 34, padding: '0 9px', borderRadius: 8, border: `1px solid ${WC.border}`, background: '#fff', fontFamily: 'inherit', fontSize: 13, color: WC.fg }}>
+                <option value="otlp-http">OTLP / HTTP</option>
+              </select>
+            </div>
+            <div style={FIELD}>
+              <label style={labelStyle}>Ingestor URL</label>
+              <WTextInput value={form.endpoint} onChange={setF('endpoint')} placeholder="https://collector.example.com" />
+            </div>
+            <div style={FIELD}>
+              <label style={labelStyle}>Port <span style={{ fontWeight: 400, color: WC.mutedFg }}>(optional)</span></label>
+              <WTextInput value={form.port} onChange={setF('port')} placeholder="e.g. 4318" />
+            </div>
+            <div style={FIELD}>
+              <label style={labelStyle}>Auth token <span style={{ fontWeight: 400, color: WC.mutedFg }}>(optional, sent as Bearer)</span></label>
+              <WTextInput value={form.auth_token} onChange={setF('auth_token')} type="password"
+                placeholder={cfg.has_auth_token ? '•••••••• (leave blank to keep)' : 'optional bearer token'} />
+            </div>
+            {saveErr && (
+              <div style={{ fontSize: 12, color: WC.red, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <WIcon name="alert-triangle" size={13} color={WC.red} />{saveErr}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <WBtn variant="primary" size="sm" leftIcon="plug" disabled={busy || !form.endpoint.trim()} onClick={() => save(true)}>
+                {busy ? 'Testing…' : 'Save & connect'}
+              </WBtn>
+              <WBtn variant="default" size="sm" disabled={busy} onClick={() => { setEditing(false); setSaveErr(''); }}>Cancel</WBtn>
+            </div>
+          </div>
+        )}
+      </div>
+    </WCard>
+  );
+}
+
 function OverviewView({ ctx }) {
   const { data, go, refresh, toast } = ctx;
   const ov = data.overview;
@@ -253,6 +399,9 @@ function OverviewView({ ctx }) {
               )}
             </div>
           </WCard>
+
+          {/* SIEM / OpenTelemetry audit-log forwarding. */}
+          <SiemCard toast={toast} />
         </div>
 
         {/* Right: activity feed */}

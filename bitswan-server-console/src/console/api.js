@@ -211,6 +211,12 @@ export const Api = {
   overview: () => getJSON('/bailey/api/overview'),
   // Set the server's region label (admin-only). Empty string clears it.
   setRegion: (region) => postJSON('/bailey/api/admin/region', { region }),
+  // SIEM / OpenTelemetry audit-log forwarding (admin-only). GET returns the
+  // current config with the token redacted (has_auth_token) + live connection
+  // status; POST saves it and, when enabling, runs a synchronous connectivity
+  // test so the response reports connected/last_error truthfully.
+  siem: () => getJSON('/bailey/api/admin/siem'),
+  setSiem: (body) => postJSON('/bailey/api/admin/siem', body),
   // People roster: every identity the daemon persists, with role/workspace/
   // device counts. Degrades to a 200 with an `error` field on partial
   // enumeration failure (the view surfaces it without dropping the roster).
