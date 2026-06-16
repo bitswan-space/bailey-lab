@@ -155,33 +155,19 @@ jobs:
           # Verify daemon is running
           ./bitswan automation-server-daemon status || exit 1
 
-      # Ingress lifecycle (inherited from the protected-ingress branch): Caddy
-      # init + Caddy→Traefik migration. The business-process deploy e2e below
-      # then exercises this branch's templates on top of Traefik.
-      - name: "Ingress: Caddy init (backward compat)"
+      # Bring up Traefik ingress (Caddy is deprecated and no longer tested).
+      # The business-process deploy e2e below then exercises this branch's
+      # templates on top of Traefik.
+      - name: "Ingress: Traefik init"
         timeout-minutes: 10
         run: |
-          echo "=== Caddy ingress init ==="
+          echo "=== Traefik ingress init ==="
           docker rm -f traefik 2>/dev/null || true
           docker compose -p bitswan-traefik down 2>/dev/null || true
           sudo rm -rf ~/.config/bitswan/traefik
-          ./bitswan ingress init --type caddy -v || exit 1
-          docker ps | grep caddy || { echo "ERROR: Caddy not running"; exit 1; }
-
-      - name: "Ingress: migrate Caddy to Traefik"
-        timeout-minutes: 10
-        run: |
-          echo "=== Caddy → Traefik migration ==="
-          # Add a test route to Caddy to verify it survives migration
-          ./bitswan ingress add-route migration-test.bitswan.localhost localhost:9999 || true
-          echo "Routes before migration:"
-          ./bitswan ingress list-routes || true
-          ./bitswan ingress migrate -v || exit 1
-          if ! docker ps | grep -q traefik; then
-            echo "ERROR: Traefik should be running after migration"
-            exit 1
-          fi
-          echo "Routes after migration:"
+          ./bitswan ingress init --type traefik -v || exit 1
+          docker ps | grep traefik || { echo "ERROR: Traefik not running"; exit 1; }
+          echo "Routes:"
           ./bitswan ingress list-routes || true
 
       - name: Build gitops image from source
