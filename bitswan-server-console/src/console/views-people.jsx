@@ -519,6 +519,17 @@ function EndpointAccessView({ ctx }) {
     );
   };
 
+  // Endpoint hostnames are live URLs — make them clickable (new tab).
+  const HostLink = ({ host }) => (
+    <a href={`https://${host}`} target="_blank" rel="noopener noreferrer"
+      style={{ fontSize: 13.5, fontWeight: 600, color: PC.primary, fontFamily: 'Geist Mono, monospace', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 5 }}
+      onMouseEnter={ev => { ev.currentTarget.style.textDecoration = 'underline'; }}
+      onMouseLeave={ev => { ev.currentTarget.style.textDecoration = 'none'; }}>
+      {host}
+      <PIcon name="external-link" size={12} color={PC.primary} />
+    </a>
+  );
+
   const Node = ({ e, depth }) => {
     const kids = (childrenOf[e.hostname] || []).slice().sort((a, b) => a.hostname.localeCompare(b.hostname));
     const k = KIND[e.kind] || { icon: 'globe', label: e.kind || 'Endpoint' };
@@ -527,7 +538,7 @@ function EndpointAccessView({ ctx }) {
         <div style={{ border: `1px solid ${PC.border}`, borderRadius: 10, background: '#fff', padding: '12px 14px', marginBottom: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <PIcon name={k.icon} size={16} color={PC.muted} />
-            <span style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg, fontFamily: 'Geist Mono, monospace' }}>{e.hostname}</span>
+            <HostLink host={e.hostname} />
             <PPill tone="neutral" size="xs">{k.label}</PPill>
             {e.stage && <PPill tone="outline" size="xs">{e.stage}</PPill>}
           </div>
@@ -543,7 +554,7 @@ function EndpointAccessView({ ctx }) {
     <div style={{ border: `1px solid ${PC.border}`, borderRadius: 10, background: '#fff', padding: '12px 14px', marginBottom: 8 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <PIcon name={icon} size={16} color={PC.muted} />
-        <span style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg, fontFamily: 'Geist Mono, monospace' }}>{e.hostname}</span>
+        <HostLink host={e.hostname} />
       </div>
       <div style={{ fontSize: 12, color: PC.muted, marginTop: 6, lineHeight: '17px' }}>{note}</div>
     </div>
@@ -553,7 +564,17 @@ function EndpointAccessView({ ctx }) {
   return (
     <div>
       <PPageHeader title="Endpoint access" icon="git-fork"
-        subtitle="Every endpoint this server routes and who can reach it. Read-only — access is changed by each endpoint's owner from its share dialog." />
+        subtitle="Every endpoint this server routes and who can reach it." />
+      <div style={{ display: 'flex', gap: 11, padding: '13px 15px', borderRadius: 10, background: PC.primarySoft || '#EEF2FF', border: `1px solid ${PC.border}`, marginBottom: 18 }}>
+        <PIcon name="shield-check" size={17} color={PC.primary} style={{ marginTop: 1, flex: '0 0 auto' }} />
+        <div style={{ fontSize: 12.5, color: PC.fg, lineHeight: '19px' }}>
+          This list is read-only — it's here for auditing, not for changing access. Bailey
+          follows the principle of <b>least privilege</b>: each endpoint's owner manages who can
+          reach it, from that endpoint's own share dialog. There is deliberately <b>no god-mode
+          admin</b> who can grant themselves into everything — removing that single point of
+          compromise reduces risk and makes the server easier to keep compliant.
+        </div>
+      </div>
       {tree === null && !err && <div style={{ fontSize: 13, color: PC.muted }}>Loading endpoints…</div>}
       {err && (
         <PLiveState status="error" error={err} label="Couldn't load endpoint access" onRetry={() => setNonce(n => n + 1)} />

@@ -52,9 +52,16 @@ func serveBaileyChrome(w http.ResponseWriter, r *http.Request) {
 	// authority to change sharing rules, so the button would be a dead
 	// end. roleFor returns "" if the endpoint isn't registered yet;
 	// treat that as "no Share button". ACL is keyed by the outer host.
+	//
+	// The Server Console host (bailey.<domain>) and the public onboarding
+	// host are reachable by every verified user by design — there's no
+	// per-endpoint access to grant or revoke, so no Share button belongs
+	// here even for whoever happens to own the endpoint record.
 	isOwner := false
-	if role, _ := roleFor(host, email, groups); role == roleOwner {
-		isOwner = true
+	if !isServerConsoleHost(host) && !isServerConsoleOnboardHost(host) {
+		if role, _ := roleFor(host, email, groups); role == roleOwner {
+			isOwner = true
+		}
 	}
 
 	// CSP pins the iframe to exactly the paired inner subdomain.

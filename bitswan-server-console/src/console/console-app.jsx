@@ -102,6 +102,12 @@ function adaptWorkspace(w, callerEmail) {
     status: w.is_trashed ? 'archived' : 'active',
     dashboard: w.dashboard_url || w.gitops_url || w.editor_url || '#',
     editorUrl: w.editor_url, gitopsUrl: w.gitops_url,
+    ownerEmail: w.owner_email || '',
+    // True membership-surface ownership: roleFor(dashboard)==='owner', which
+    // is exactly what the owner-only share API enforces. Distinct from
+    // is_owner, which is parent-delegated (a dashboard MEMBER counts as owner
+    // of the editor/gitops sub-endpoints) and so over-reports ownership here.
+    dashboardRole: w.dashboard_role || '',
     isOwner: !!w.is_owner,
     isTrashed: !!w.is_trashed,
     apps: [],
@@ -151,6 +157,10 @@ function adaptOverview(o) {
       startTime: id.start_time || '',
     },
     activity: (o.activity || []).map(adaptActivity),
+    // Live host resource snapshot — passed through as-is (snake_case),
+    // or null with an error string when the daemon couldn't read it.
+    system: o.system || null,
+    systemError: o.system_error || '',
   };
 }
 
@@ -548,6 +558,32 @@ function App() {
     // these views; if they did, the 403 surfaces as the view's error state.
     loadOverview.current();
     loadPeople.current();
+  }, [gate.status, scene]);
+
+  // Keep the volatile lists fresh without a manual reload. Device approvals
+  // happen out-of-band (an admin approves from another device, or the user
+  // approves their own pending device elsewhere), so a console left open
+  // otherwise shows an already-handled request until the page is refreshed.
+  // Poll the approval-driven lists periodically, and re-sync immediately
+  // whenever the tab regains focus (the common "I just approved it on my
+  // phone" case). Workspace/people rosters change rarely, so they're left to
+  // explicit refresh after a mutation.
+  useAE(() => {
+    if (gate.status !== 'ok' || scene !== 'console') return undefined;
+    const syncVolatile = () => {
+      refresh.current('approvals');
+      refresh.current('devices');
+      refresh.current('overview');
+    };
+    const id = setInterval(syncVolatile, 20000);
+    const onVisible = () => { if (document.visibilityState === 'visible') syncVolatile(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', syncVolatile);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', syncVolatile);
+    };
   }, [gate.status, scene]);
 
   useALucide();

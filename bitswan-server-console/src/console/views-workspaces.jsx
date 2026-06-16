@@ -76,6 +76,35 @@ function OverviewView({ ctx }) {
   const counts = loaded ? ov.counts : { workspaces: 0, people: 0, trustedDevices: 0, pendingApprovals: 0 };
   const pending = counts.pendingApprovals;
 
+  // Human byte size (binary units — what `df`/`free -h` show).
+  const fmtBytes = (n) => {
+    if (!n && n !== 0) return '—';
+    const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let v = n, i = 0;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    const s = (v >= 100 || i === 0) ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, '');
+    return `${s} ${u[i]}`;
+  };
+  // One labelled usage bar (free shown alongside used, so "free X" is explicit).
+  const ResourceBar = ({ icon, label, pct, detail }) => {
+    const p = Math.max(0, Math.min(100, pct || 0));
+    const tone = p >= 90 ? WC.red : p >= 75 ? WC.amber : WC.primary;
+    return (
+      <div style={{ padding: '10px 0', borderBottom: `1px solid ${WC.surface2}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 7 }}>
+          <WIcon name={icon} size={14} color={WC.muted} />
+          <span style={{ fontSize: 12.5, color: WC.fg, fontWeight: 500 }}>{label}</span>
+          <span style={{ marginLeft: 'auto', fontSize: 12, color: WC.muted }}>{detail}</span>
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: tone, minWidth: 38, textAlign: 'right' }}>{p.toFixed(0)}%</span>
+        </div>
+        <div style={{ height: 6, borderRadius: 4, background: WC.surface2, overflow: 'hidden' }}>
+          <div style={{ width: `${p}%`, height: '100%', background: tone, borderRadius: 4, transition: 'width .3s' }} />
+        </div>
+      </div>
+    );
+  };
+  const sys = loaded ? ov.system : null;
+
   return (
     <div>
       <WPageHeader title="Server overview"
@@ -139,6 +168,44 @@ function OverviewView({ ctx }) {
                 <span style={{ fontSize: 12.5, color: WC.muted }}>Uptime</span>
                 <span style={{ fontSize: 13, fontWeight: 500, color: WC.fg }}>{ov.identity.uptime || '—'}</span>
               </div>
+            </div>
+          </WCard>
+
+          {/* System resources — live host memory / disk / CPU. */}
+          <WCard pad={0}>
+            <div style={{ padding: '14px 20px', borderBottom: `1px solid ${WC.border}`, fontSize: 13, fontWeight: 600, color: WC.fg }}>
+              System resources
+            </div>
+            <div style={{ padding: '4px 20px 14px' }}>
+              {ov.systemError ? (
+                <div style={{ fontSize: 12.5, color: WC.red, padding: '10px 0' }}>
+                  Couldn't read host stats: {ov.systemError}
+                </div>
+              ) : sys ? (
+                <>
+                  <ResourceBar icon="memory-stick" label="Memory" pct={sys.mem_used_pct}
+                    detail={`${fmtBytes(sys.mem_free_bytes)} free of ${fmtBytes(sys.mem_total_bytes)}`} />
+                  <ResourceBar icon="hard-drive" label="Disk" pct={sys.disk_used_pct}
+                    detail={`${fmtBytes(sys.disk_free_bytes)} free of ${fmtBytes(sys.disk_total_bytes)}`} />
+                  <div style={{ padding: '10px 0 0' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 7 }}>
+                      <WIcon name="cpu" size={14} color={WC.muted} />
+                      <span style={{ fontSize: 12.5, color: WC.fg, fontWeight: 500 }}>CPU</span>
+                      <span style={{ marginLeft: 'auto', fontSize: 12, color: WC.muted }}>
+                        {sys.cpu_count} core{sys.cpu_count === 1 ? '' : 's'} · load {sys.load1}
+                      </span>
+                      <span style={{ fontSize: 12.5, fontWeight: 600, color: (sys.cpu_used_pct >= 90 ? WC.red : sys.cpu_used_pct >= 75 ? WC.amber : WC.primary), minWidth: 38, textAlign: 'right' }}>
+                        {Math.round(sys.cpu_used_pct)}%
+                      </span>
+                    </div>
+                    <div style={{ height: 6, borderRadius: 4, background: WC.surface2, overflow: 'hidden' }}>
+                      <div style={{ width: `${Math.max(0, Math.min(100, sys.cpu_used_pct))}%`, height: '100%', background: (sys.cpu_used_pct >= 90 ? WC.red : sys.cpu_used_pct >= 75 ? WC.amber : WC.primary), borderRadius: 4, transition: 'width .3s' }} />
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 12.5, color: WC.muted, padding: '10px 0' }}>No stats available.</div>
+              )}
             </div>
           </WCard>
         </div>
@@ -273,10 +340,10 @@ function WorkspacesView({ ctx }) {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {list.map(w => {
-            // Ownership comes straight from the backend (is_owner). The
-            // /workspaces endpoint doesn't expose a member roster, so there
-            // are no member avatars to show.
-            const isOwner = !!w.isOwner;
+            // "Owner" reflects TRUE ownership of the membership surface
+            // (the dashboard endpoint), not the parent-delegated is_owner —
+            // a workspace member must not be labelled owner.
+            const isOwner = w.dashboardRole === 'owner';
             const archived = w.status === 'archived';
             return (
               <WCard key={w.id} pad={0} hover={!archived} style={{ opacity: archived ? 0.7 : 1 }}>
@@ -456,9 +523,19 @@ function ManageWorkspaceDrawer({ ws, onClose, toast }) {
   const [busy, setBusy] = useWS('');        // '' | 'add' | <principal being removed>
 
   const dashHost = ws ? hostFromUrl(ws.dashboard) : '';
+  // Managing members (add/remove) is only allowed for the TRUE owner of the
+  // dashboard endpoint — exactly what the owner-only share API enforces. We
+  // deliberately don't use ws.isOwner here: it's parent-delegated, so a mere
+  // member of the dashboard reads as "owner" of the sub-endpoints and would
+  // otherwise be shown management controls the backend then 403s.
+  const canManage = ws ? ws.dashboardRole === 'owner' : false;
+  const ownerEmail = ws ? ws.ownerEmail : '';
 
   React.useEffect(() => {
-    if (!ws || !ws.isOwner) { setShare(null); setErr(''); return undefined; }
+    // Only owners can read the live share state (the API is owner-only).
+    // Non-owners render from the workspace DTO (owner_email + members), which
+    // the backend computes for every member — no privileged call needed.
+    if (!ws || !canManage) { setShare(null); setErr(''); return undefined; }
     let alive = true;
     setShare(null); setErr(''); setAddEmail('');
     WApi.workspaceMembers(dashHost)
@@ -468,7 +545,13 @@ function ManageWorkspaceDrawer({ ws, onClose, toast }) {
   }, [ws && ws.id]);
 
   if (!ws) return null;
-  const members = share ? (share.grants || []).filter(g => g.role === 'access') : [];
+  // Members list: owners get the live, removable grant list; everyone else
+  // gets the DTO's member roster minus the owner (read-only).
+  const members = canManage
+    ? (share ? (share.grants || []).filter(g => g.role === 'access') : [])
+    : (ws.members || [])
+        .filter(m => m && m.toLowerCase() !== (ownerEmail || '').toLowerCase())
+        .map(m => ({ principal_type: 'email', principal_value: m, role: 'access' }));
   const SECTION = { fontSize: 11, fontWeight: 600, color: WC.muted, textTransform: 'uppercase', letterSpacing: 0.4 };
 
   const addMember = async () => {
@@ -493,63 +576,60 @@ function ManageWorkspaceDrawer({ ws, onClose, toast }) {
 
   return (
     <WDrawer open={!!ws} onClose={onClose} icon="layout-grid" title={ws.name}
-      subtitle={ws.isOwner ? 'You own this workspace' : 'Shared with you'}
+      subtitle={canManage ? 'You own this workspace' : "You're a member of this workspace"}
       footer={<WBtn variant="primary" onClick={onClose}>Done</WBtn>}>
-      {!ws.isOwner ? (
-        <div style={{ display: 'flex', gap: 9, padding: 13, borderRadius: 10, background: WC.surface, border: `1px solid ${WC.border}` }}>
-          <WIcon name="info" size={15} color={WC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
-          <span style={{ fontSize: 12.5, color: WC.muted, lineHeight: '18px' }}>
-            You're a member of this workspace. Only its owner can manage ownership and members.
-          </span>
+      {/* Ownership — shown to everyone; only the owner can act on it. */}
+      <div style={{ ...SECTION, marginBottom: 10 }}>Ownership</div>
+      <div style={{ border: `1px solid ${WC.border}`, borderRadius: 10, padding: 14, marginBottom: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+          <WAvatar user={{ name: ownerEmail || ws.name }} size={36} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg, display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'Geist Mono, monospace' }}>
+              {ownerEmail || 'No owner recorded'} <WPill tone="primary" size="xs">Owner</WPill>
+            </div>
+          </div>
         </div>
-      ) : (
+        {canManage && (
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 9 }}>
+            <span title="Transferring ownership isn't supported yet." style={{ display: 'inline-flex' }}>
+              <WBtn variant="default" size="sm" leftIcon="arrow-left-right" disabled>Transfer ownership</WBtn>
+            </span>
+            <span style={{ fontSize: 11.5, color: WC.mutedFg }}>Not available yet.</span>
+          </div>
+        )}
+      </div>
+
+      {/* Members */}
+      <div style={{ ...SECTION, margin: '20px 0 10px', display: 'flex', justifyContent: 'space-between' }}>
+        <span>Members</span><span>{(canManage && !share) ? '' : members.length}</span>
+      </div>
+      {err && <div style={{ fontSize: 12.5, color: WC.red, marginBottom: 8 }}>{err}</div>}
+      {canManage && !share && !err && <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>Loading members…</div>}
+      {(!canManage || share) && members.length === 0 && !err && (
+        <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>No members yet — only the owner has access.</div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {members.map(g => (
+          <div key={g.principal_value} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 6px', borderRadius: 8 }}>
+            <WAvatar user={{ name: g.principal_value }} size={30} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: WC.fg, fontFamily: 'Geist Mono, monospace' }}>{g.principal_value}</div>
+              <div style={{ fontSize: 11, color: WC.muted }}>{g.principal_type === 'group' ? 'Group' : 'Member'}</div>
+            </div>
+            {canManage && (
+              <button onClick={() => removeMember(g)} disabled={busy === g.principal_value} title="Remove from workspace" style={{
+                width: 28, height: 28, border: 0, background: 'transparent', borderRadius: 6, cursor: 'pointer',
+                color: WC.mutedFg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <WIcon name="user-minus" size={15} />
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Add member — owner only. Members can see who's in but not change it. */}
+      {canManage ? (
         <>
-          {/* Ownership */}
-          <div style={{ ...SECTION, marginBottom: 10 }}>Ownership</div>
-          <div style={{ border: `1px solid ${WC.border}`, borderRadius: 10, padding: 14, marginBottom: 8 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-              <WAvatar user={{ name: share?.owner_email || ws.name }} size={36} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg, display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'Geist Mono, monospace' }}>
-                  {share ? (share.owner_email || 'Unknown') : 'Loading…'} <WPill tone="primary" size="xs">Owner</WPill>
-                </div>
-              </div>
-            </div>
-            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 9 }}>
-              <span title="Transferring ownership isn't supported yet." style={{ display: 'inline-flex' }}>
-                <WBtn variant="default" size="sm" leftIcon="arrow-left-right" disabled>Transfer ownership</WBtn>
-              </span>
-              <span style={{ fontSize: 11.5, color: WC.mutedFg }}>Not available yet.</span>
-            </div>
-          </div>
-
-          {/* Members */}
-          <div style={{ ...SECTION, margin: '20px 0 10px', display: 'flex', justifyContent: 'space-between' }}>
-            <span>Members</span><span>{share ? members.length : ''}</span>
-          </div>
-          {err && <div style={{ fontSize: 12.5, color: WC.red, marginBottom: 8 }}>{err}</div>}
-          {!share && !err && <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>Loading members…</div>}
-          {share && members.length === 0 && !err && (
-            <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>No members yet — only the owner has access.</div>
-          )}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {members.map(g => (
-              <div key={g.principal_value} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 6px', borderRadius: 8 }}>
-                <WAvatar user={{ name: g.principal_value }} size={30} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: WC.fg, fontFamily: 'Geist Mono, monospace' }}>{g.principal_value}</div>
-                  <div style={{ fontSize: 11, color: WC.muted }}>{g.principal_type === 'group' ? 'Group' : 'Member'}</div>
-                </div>
-                <button onClick={() => removeMember(g)} disabled={busy === g.principal_value} title="Remove from workspace" style={{
-                  width: 28, height: 28, border: 0, background: 'transparent', borderRadius: 6, cursor: 'pointer',
-                  color: WC.mutedFg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <WIcon name="user-minus" size={15} />
-                </button>
-              </div>
-            ))}
-          </div>
-
-          {/* Add member */}
           <div style={{ ...SECTION, margin: '20px 0 10px' }}>Add a member</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <div style={{ flex: 1 }}>
@@ -563,6 +643,13 @@ function ManageWorkspaceDrawer({ ws, onClose, toast }) {
             Grants this person access by email; they'll still trust a device of their own to get in.
           </div>
         </>
+      ) : (
+        <div style={{ display: 'flex', gap: 9, padding: 13, borderRadius: 10, background: WC.surface, border: `1px solid ${WC.border}`, marginTop: 20 }}>
+          <WIcon name="info" size={15} color={WC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
+          <span style={{ fontSize: 12.5, color: WC.muted, lineHeight: '18px' }}>
+            You're a member of this workspace. Only its owner can add or remove members.
+          </span>
+        </div>
       )}
     </WDrawer>
   );

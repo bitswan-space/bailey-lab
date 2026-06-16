@@ -42,6 +42,24 @@ describe('OverviewView', () => {
     expect(screen.getByText('No activity yet')).toBeTruthy();
     expect(screen.getByText('All clear')).toBeTruthy();
   });
+  it('renders the live system-resources panel (memory / disk / CPU)', () => {
+    const sys = {
+      mem_total_bytes: 16 * 1024 ** 3, mem_used_bytes: 8 * 1024 ** 3, mem_free_bytes: 8 * 1024 ** 3, mem_used_pct: 50,
+      disk_total_bytes: 100 * 1024 ** 3, disk_used_bytes: 40 * 1024 ** 3, disk_free_bytes: 60 * 1024 ** 3, disk_used_pct: 40, disk_path: '/host',
+      cpu_count: 4, cpu_used_pct: 12.5, load1: 0.7,
+    };
+    render(<Host View={OverviewView} data={makeData({ overview: { ...overview, system: sys } })} />);
+    expect(screen.getByText('System resources')).toBeTruthy();
+    expect(screen.getByText('Memory')).toBeTruthy();
+    expect(screen.getByText('Disk')).toBeTruthy();
+    expect(screen.getByText('CPU')).toBeTruthy();
+    expect(screen.getByText(/8 GiB free of 16 GiB/)).toBeTruthy();
+    expect(screen.getByText(/4 cores · load 0.7/)).toBeTruthy();
+  });
+  it('shows an honest error when host stats are unavailable', () => {
+    render(<Host View={OverviewView} data={makeData({ overview: { ...overview, systemError: 'no /proc' } })} />);
+    expect(screen.getByText(/Couldn't read host stats: no \/proc/)).toBeTruthy();
+  });
 });
 
 describe('WorkspacesView', () => {
@@ -49,7 +67,10 @@ describe('WorkspacesView', () => {
     return {
       id: 'demo', name: 'demo', owner: 'tomas@harmonum.ai', members: [], processes: 0, automations: 0,
       created: '', activity: '', status: 'active', dashboard: '#', editorUrl: 'http://e', gitopsUrl: 'http://g',
-      isOwner: true, isTrashed: false, apps: [], live: true, ...over,
+      // True dashboard ownership drives the manage controls (matches the
+      // owner-only share API). ownerEmail is shown to every member.
+      isOwner: true, dashboardRole: 'owner', ownerEmail: 'me@example.test',
+      isTrashed: false, apps: [], live: true, ...over,
     };
   }
 
@@ -146,13 +167,22 @@ describe('WorkspacesView', () => {
     await waitFor(() => expect(screen.getByText('new@x')).toBeTruthy());
   });
 
-  it('manage drawer (non-owner): read-only note, no member management', () => {
+  it('manage drawer (non-owner): sees owner + members read-only, no add box', () => {
     const s = spies();
-    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ isOwner: false, dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({
+      isOwner: false, dashboardRole: 'access', ownerEmail: 'owner@x',
+      members: ['owner@x', 'mate@x'], dashboard: 'https://dash.example.test/',
+    })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    expect(screen.getByText('Shared with you')).toBeTruthy();
-    expect(screen.getByText(/Only its owner can manage/)).toBeTruthy();
-    expect(screen.queryByText('Ownership')).toBeNull();
+    // Members can SEE who owns it and who's in it…
+    expect(screen.getByText("You're a member of this workspace")).toBeTruthy();
+    expect(screen.getByText('Ownership')).toBeTruthy();
+    expect(screen.getByText('owner@x')).toBeTruthy();        // the owner
+    expect(screen.getByText('mate@x')).toBeTruthy();         // a fellow member
+    expect(screen.getByText(/Only its owner can add or remove/)).toBeTruthy();
+    // …but get no controls to change membership.
+    expect(screen.queryByPlaceholderText('person@example.com')).toBeNull();
+    expect(screen.queryByText('Add')).toBeNull();
   });
 
   it('workspace card shows member avatars (initials from emails)', () => {

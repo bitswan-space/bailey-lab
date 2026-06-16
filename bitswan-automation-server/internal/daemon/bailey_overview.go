@@ -45,9 +45,11 @@ type overviewIdentity struct {
 }
 
 type overviewResponse struct {
-	Counts   overviewCounts   `json:"counts"`
-	Identity overviewIdentity `json:"identity"`
-	Activity []eventRecord    `json:"activity"`
+	Counts      overviewCounts   `json:"counts"`
+	Identity    overviewIdentity `json:"identity"`
+	Activity    []eventRecord    `json:"activity"`
+	System      *systemStats     `json:"system,omitempty"`       // live host resource snapshot
+	SystemError string           `json:"system_error,omitempty"` // set when stats couldn't be read (no fabrication)
 }
 
 // overviewActivityLimit caps the recent-activity feed. The console shows
@@ -79,6 +81,14 @@ func (s *Server) handleBaileyOverview(w http.ResponseWriter, r *http.Request) {
 		Region:    serverRegion(),
 		StartTime: s.startTime.UTC().Format(time.RFC3339),
 		UptimeSec: int64(time.Since(s.startTime).Seconds()),
+	}
+
+	// --- live host resource stats (memory / disk / CPU) ---
+	if stats, err := gatherSystemStats(); err == nil {
+		resp.System = stats
+	} else {
+		// Surface the failure honestly rather than reporting fake zeros.
+		resp.SystemError = err.Error()
 	}
 
 	// --- recent security activity ---

@@ -30,7 +30,8 @@ type accessibleWorkspace struct {
 	GitopsRole    string   `json:"gitops_role,omitempty"`
 	IsOwner       bool     `json:"is_owner"`
 	IsTrashed     bool     `json:"is_trashed,omitempty"`
-	Members       []string `json:"members"` // owner + access-grantee emails on the dashboard endpoint
+	OwnerEmail    string   `json:"owner_email,omitempty"` // recorded owner of the dashboard (membership) endpoint
+	Members       []string `json:"members"`               // owner + access-grantee emails on the dashboard endpoint
 }
 
 type listAccessibleResponse struct {
@@ -87,6 +88,7 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 				GitopsRole:    string(gitopsRole),
 				IsOwner:       isOwner,
 				IsTrashed:     IsWorkspaceTrashed(name),
+				OwnerEmail:    workspaceOwnerEmail(dashboardHost, editorHost, gitopsHost),
 				Members:       workspaceMemberEmails(dashboardHost),
 			}
 			out.Workspaces = append(out.Workspaces, entry)
@@ -125,6 +127,21 @@ func workspaceMemberEmails(dashboardHost string) []string {
 		}
 	}
 	return out
+}
+
+// workspaceOwnerEmail returns the recorded owner of the workspace's
+// membership surface. The dashboard endpoint is the canonical surface; if
+// it has no owner recorded (e.g. --no-dashboard), fall back to the editor
+// then gitops endpoint so a real owner is still surfaced. This is the
+// authoritative owner shown to every member (owners and non-owners alike),
+// independent of the parent-delegated is_owner capability.
+func workspaceOwnerEmail(dashboardHost, editorHost, gitopsHost string) string {
+	for _, host := range []string{dashboardHost, editorHost, gitopsHost} {
+		if ep, _ := getEndpoint(host); ep != nil && strings.TrimSpace(ep.OwnerEmail) != "" {
+			return ep.OwnerEmail
+		}
+	}
+	return ""
 }
 
 type createWorkspaceRequest struct {
