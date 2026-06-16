@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -52,13 +53,21 @@ func (p otlpReceived) firstRecord(t *testing.T) (body string, attrs map[string]s
 func startOTLPReceiver(t *testing.T) (*httptest.Server, <-chan otlpReceived, func() string) {
 	t.Helper()
 	bodies := make(chan otlpReceived, 8)
-	var lastAuth string
+	// lastAuth is written from each request's handler goroutine and read by the
+	// returned accessor; multiple test sends can be in flight at once, so guard
+	// it with a mutex (otherwise -race flags concurrent handler writes).
+	var (
+		mu       sync.Mutex
+		lastAuth string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/logs" {
 			http.NotFound(w, r)
 			return
 		}
+		mu.Lock()
 		lastAuth = r.Header.Get("Authorization")
+		mu.Unlock()
 		raw, _ := io.ReadAll(r.Body)
 		var p otlpReceived
 		if err := json.Unmarshal(raw, &p); err == nil {
@@ -67,7 +76,11 @@ func startOTLPReceiver(t *testing.T) (*httptest.Server, <-chan otlpReceived, fun
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
-	return srv, bodies, func() string { return lastAuth }
+	return srv, bodies, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return lastAuth
+	}
 }
 
 func resetSIEM(t *testing.T) {
