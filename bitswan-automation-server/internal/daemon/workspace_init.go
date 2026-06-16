@@ -146,6 +146,14 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		return fmt.Errorf("failed to create GitOps directory: %w", err)
 	}
 
+	// Pre-create the workspace's standard data subdirectories. The compose
+	// mounts them as named-volume subpaths, which Docker requires to exist
+	// before the container starts (unlike bind mounts, which auto-create the
+	// source). Created before the recursive chown below so they inherit
+	// user1000 ownership. (e.g. secrets, snapshots — missing these makes the
+	// gitops container fail to start with "cannot access path .../snapshots".)
+	ensureWorkspaceVolumeDirs(workspaceName)
+
 	// Ensure user1000 exists (create if it doesn't)
 	checkUserCmd := exec.Command("id", "-u", "1000")
 	if checkUserCmd.Run() != nil {
