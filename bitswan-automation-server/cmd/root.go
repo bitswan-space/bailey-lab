@@ -53,17 +53,18 @@ func newRootCmd(version string) *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(newVersionCmd(version))                                    // version subcommand
-	cmd.AddCommand(newWorkspaceCmd())                                         // workspace subcommand
-	cmd.AddCommand(newRegisterCmd())                                          // register subcommand
-	cmd.AddCommand(newDisconnectFromAOCCmd())                                 // disconnect-from-aoc subcommand
-	cmd.AddCommand(ingress.NewIngressCmd())                                   // ingress subcommand
-	cmd.AddCommand(caddy.NewCaddyCmd())                                       // caddy subcommand (deprecated)
-	cmd.AddCommand(certauthority.NewCertAuthorityCmd())                       // certificate authority subcommand
-	cmd.AddCommand(automationserverdaemon.NewAutomationServerDaemonCmd())     // automation server daemon subcommand
-	cmd.AddCommand(automation.NewAutomationCmd())                             // automation subcommand
-	cmd.AddCommand(test.NewTestCmd())                                         // _test subcommand (hidden)
-	cmd.AddCommand(newCompletionCmd())                                        // completion subcommand
+	cmd.AddCommand(newVersionCmd(version))                                // version subcommand
+	cmd.AddCommand(newWorkspaceCmd())                                     // workspace subcommand
+	cmd.AddCommand(newRegisterCmd())                                      // register subcommand
+	cmd.AddCommand(newDisconnectFromAOCCmd())                             // disconnect-from-aoc subcommand
+	cmd.AddCommand(ingress.NewIngressCmd())                               // ingress subcommand
+	cmd.AddCommand(caddy.NewCaddyCmd())                                   // caddy subcommand (deprecated)
+	cmd.AddCommand(certauthority.NewCertAuthorityCmd())                   // certificate authority subcommand
+	cmd.AddCommand(automationserverdaemon.NewAutomationServerDaemonCmd()) // automation server daemon subcommand
+	cmd.AddCommand(automation.NewAutomationCmd())                         // automation subcommand
+	cmd.AddCommand(newBaileyCmd())                                        // bailey subcommand (device trust)
+	cmd.AddCommand(test.NewTestCmd())                                     // _test subcommand (hidden)
+	cmd.AddCommand(newCompletionCmd())                                    // completion subcommand
 
 	// Set the version for the daemon server
 	automationserverdaemon.SetVersion(version)

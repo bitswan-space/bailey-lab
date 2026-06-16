@@ -91,6 +91,29 @@ func approvePendingPair(email, code, approverEmail string, approverIsAdmin bool)
 	return e
 }
 
+// approvePendingPairByCode approves a pending device-pair by its 6-digit code
+// alone, as a trusted admin. It backs the daemon's socket API (the
+// `bitswan bailey devices approve` CLI): a caller that reached the Unix socket
+// is already root-trusted on the host, so — unlike the browser approveHandler,
+// which requires the approver's own second-factor-cleared device — this needs
+// only the code. Returns the approved entry, or nil if no live (unexpired)
+// pending pair has that code.
+func approvePendingPairByCode(code, approverEmail string) *pairingEntry {
+	e, err := dbLoadPendingPairByCode(code)
+	if err != nil || e == nil {
+		return nil
+	}
+	if time.Now().After(e.ExpiresAt) {
+		return nil
+	}
+	e.ApprovedBy = approverEmail
+	e.ApproverInfo = approverEmail + " (admin via CLI)"
+	if err := dbUpsertPendingPair(e); err != nil {
+		return nil
+	}
+	return e
+}
+
 func claimPendingPair(email string) *pairingEntry {
 	e, err := dbLoadPendingPairByEmail(email)
 	if err != nil || e == nil {

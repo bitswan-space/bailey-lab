@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -451,6 +452,177 @@ func (c *Client) SelectWorkspace(workspace string) error {
 	}
 
 	return nil
+}
+
+// ApproveDevice approves a pending "trust this device" request by its 6-digit
+// code, optionally restricted to a specific user's request. Returns the email
+// whose device was approved.
+func (c *Client) ApproveDevice(code, email string) (string, error) {
+	bodyBytes, err := json.Marshal(map[string]string{"code": code, "email": email})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "http://unix/bailey/devices/approve", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return "", fmt.Errorf("%s", errResp.Error)
+		}
+		return "", fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+	return result.Email, nil
+}
+
+// PendingDeviceInfo mirrors the daemon's PendingDevice for the CLI list.
+type PendingDeviceInfo struct {
+	Email     string `json:"email"`
+	Code      string `json:"code"`
+	UserAgent string `json:"user_agent"`
+	AgeSec    int    `json:"age_sec"`
+	Approved  bool   `json:"approved"`
+}
+
+// ListPendingDevices returns the live pending device-trust requests.
+func (c *Client) ListPendingDevices() ([]PendingDeviceInfo, error) {
+	req, err := http.NewRequest("GET", "http://unix/bailey/devices/pending", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("%s", errResp.Error)
+		}
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Pending []PendingDeviceInfo `json:"pending"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return result.Pending, nil
+}
+
+// AccessGrant describes one ACL grant on an endpoint.
+type AccessGrant struct {
+	Hostname       string `json:"hostname"`
+	PrincipalType  string `json:"principal_type"`
+	PrincipalValue string `json:"principal_value"`
+	Role           string `json:"role"`
+	GrantedAt      string `json:"granted_at"`
+	GrantedBy      string `json:"granted_by"`
+}
+
+// AccessListResult is the response of ListAccess.
+type AccessListResult struct {
+	Host       string        `json:"host"`
+	OwnerEmail string        `json:"owner_email"`
+	Grants     []AccessGrant `json:"grants"`
+}
+
+// postAccess is the shared POST helper for grant/revoke.
+func (c *Client) postAccess(path, host, principal, principalType, role string) error {
+	bodyBytes, err := json.Marshal(map[string]string{
+		"host": host, "principal": principal,
+		"principal_type": principalType, "role": role,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", "http://unix"+path, strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// GrantAccess grants a principal access (or owner) on an endpoint host.
+func (c *Client) GrantAccess(host, principal, principalType, role string) error {
+	return c.postAccess("/bailey/access/grant", host, principal, principalType, role)
+}
+
+// RevokeAccess removes a principal's grant on an endpoint host.
+func (c *Client) RevokeAccess(host, principal, principalType, role string) error {
+	return c.postAccess("/bailey/access/revoke", host, principal, principalType, role)
+}
+
+// ListAccess lists the grants on an endpoint host.
+func (c *Client) ListAccess(host string) (*AccessListResult, error) {
+	req, err := http.NewRequest("GET", "http://unix/bailey/access/list?host="+url.QueryEscape(host), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("%s", errResp.Error)
+		}
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	var result AccessListResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &result, nil
 }
 
 // ListWorkspaces returns the list of workspaces and the active workspace

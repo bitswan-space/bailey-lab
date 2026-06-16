@@ -156,6 +156,19 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	mux.HandleFunc("/jobs", s.authMiddleware(s.handleJobs))
 	mux.HandleFunc("/jobs/", s.authMiddleware(s.handleJobs))
 
+	// Bailey device-trust admin (authenticated; socket-trusted). Backs the
+	// `bitswan bailey devices` CLI — approve a pending "trust this device"
+	// request by code, or list the pending requests.
+	mux.HandleFunc("/bailey/devices/approve", s.authMiddleware(s.handleDeviceApprove))
+	mux.HandleFunc("/bailey/devices/pending", s.authMiddleware(s.handleDevicesPending))
+
+	// Bailey endpoint access grants (authenticated; socket-trusted, CLI-only —
+	// deliberately not exposed on the public gate mux to keep the share UI
+	// least-privileged). Backs `bitswan bailey access {grant,revoke,list}`.
+	mux.HandleFunc("/bailey/access/grant", s.authMiddleware(s.handleAccessGrant))
+	mux.HandleFunc("/bailey/access/revoke", s.authMiddleware(s.handleAccessRevoke))
+	mux.HandleFunc("/bailey/access/list", s.authMiddleware(s.handleAccessList))
+
 	// Docs endpoint (unauthenticated - public access)
 	mux.HandleFunc("/api-docs", s.handleDocs)
 
