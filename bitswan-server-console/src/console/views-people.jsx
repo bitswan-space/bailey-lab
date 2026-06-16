@@ -41,9 +41,11 @@ const P_ROLES = [
 // API isn't keyed by these identities yet) and is only reachable when the
 // backend reports a device count.
 function UsersView({ ctx }) {
-  const { data, toast, go } = ctx;
+  const { data, toast, go, navigate, routeParam } = ctx;
   const [query, setQuery] = useP('');
-  const [devicesUserId, setDevicesUserId] = useP(null);
+  // The person whose devices are open lives in the URL (/users/:email) so the
+  // drawer survives refresh and is shareable.
+  const devicesUserId = routeParam;
 
   const ROLES = P_ROLES;
   const people = data.people || [];
@@ -121,7 +123,7 @@ function UsersView({ ctx }) {
               <PPill tone={P_ROLE_TONE[u.role] || 'neutral'} size="xs">{u.role}</PPill>
             </div>
             <span style={{ fontSize: 13, color: PC.fg }}>{u.workspaceCount}</span>
-            <button onClick={() => u.deviceCount > 0 && setDevicesUserId(u.id)} title={u.deviceCount ? 'Manage devices' : 'No devices'}
+            <button onClick={() => u.deviceCount > 0 && navigate('users', u.id)} title={u.deviceCount ? 'Manage devices' : 'No devices'}
               style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 9px', borderRadius: 7,
                 border: `1px solid ${u.deviceCount ? PC.border : 'transparent'}`, background: u.deviceCount ? '#fff' : 'transparent',
                 cursor: u.deviceCount ? 'pointer' : 'default', fontFamily: 'inherit', fontSize: 13, color: u.deviceCount ? PC.fg : PC.mutedFg, fontWeight: 500, width: 'fit-content' }}
@@ -137,7 +139,7 @@ function UsersView({ ctx }) {
       )}
       </>)}
 
-      <UserDevicesDrawer userId={devicesUserId} onClose={() => setDevicesUserId(null)} ctx={ctx} />
+      <UserDevicesDrawer userId={devicesUserId} onClose={() => navigate('users')} ctx={ctx} />
     </div>
   );
 }

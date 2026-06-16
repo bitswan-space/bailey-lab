@@ -38,13 +38,17 @@ export function makeData(overrides = {}) {
 // re-renders. Exposes the spies for assertions.
 export function Host({ View, data: initial, extra = {} }) {
   const [data, setData] = React.useState(initial);
+  // Mirror the real router: route + open-drawer param live in state so the
+  // views' URL-driven drawers (ctx.routeParam / ctx.navigate) work in tests.
+  const [loc, setLoc] = React.useState({ route: extra.route || 'workspaces', param: extra.routeParam ?? null });
   const toast = extra.toast || (() => {});
-  const go = extra.go || (() => {});
+  const navigate = extra.navigate || ((r, p) => setLoc({ route: r, param: p ?? null }));
+  const go = extra.go || ((r) => navigate(r));
   const openUrl = extra.openUrl || (() => {});
   const refresh = extra.refresh || (() => Promise.resolve());
   const currentUser = extra.currentUser
     || { id: data.me?.email || '', email: data.me?.email || '', name: data.me?.email || '', role: 'admin', isAdmin: true };
-  const ctx = { data, setData, toast, go, openUrl, refresh, currentUser };
+  const ctx = { data, setData, toast, go, openUrl, refresh, currentUser, navigate, route: loc.route, routeParam: loc.param };
   return React.createElement(View, { ctx });
 }
 

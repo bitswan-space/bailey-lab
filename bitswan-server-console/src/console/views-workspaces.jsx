@@ -179,14 +179,15 @@ function OverviewView({ ctx }) {
 
 // ─── WORKSPACES — workspace cards with launch + live apps + management ──────
 function WorkspacesView({ ctx }) {
-  const { data, setData, toast, currentUser, openUrl, go, refresh } = ctx;
+  const { data, setData, toast, currentUser, openUrl, go, refresh, navigate, routeParam } = ctx;
   const [query, setQuery] = useWS('');
   const [createOpen, setCreateOpen] = useWS(false);
-  const [manageId, setManageId] = useWS(null);
   const [emptyOpen, setEmptyOpen] = useWS(false);
   const [emptyBusy, setEmptyBusy] = useWS(false);
 
-  const manageWs = data.workspaces.find(w => w.id === manageId);
+  // The managed workspace lives in the URL (/workspaces/:name) so the drawer
+  // survives refresh and is shareable.
+  const manageWs = data.workspaces.find(w => w.id === routeParam);
   const noTotp = !data.recovery.totpActive;
   const trashedCount = data.workspaces.filter(w => w.isTrashed).length;
 
@@ -282,7 +283,7 @@ function WorkspacesView({ ctx }) {
                     {!archived && (
                       <WBtn variant="primary" size="sm" leftIcon="external-link" onClick={() => openUrl(w.dashboard || w.gitopsUrl, `${w.name} dashboard`)}>Open</WBtn>
                     )}
-                    <button onClick={() => setManageId(w.id)} title="Manage workspace" style={{ width: 32, height: 32, border: `1px solid ${WC.border}`, background: '#fff', borderRadius: 8, cursor: 'pointer', color: WC.muted, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                    <button onClick={() => navigate('workspaces', w.id)} title="Manage workspace" style={{ width: 32, height: 32, border: `1px solid ${WC.border}`, background: '#fff', borderRadius: 8, cursor: 'pointer', color: WC.muted, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                       onMouseEnter={e => { e.currentTarget.style.background = WC.surface2; e.currentTarget.style.color = WC.fg; }}
                       onMouseLeave={e => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.color = WC.muted; }}>
                       <WIcon name="settings-2" size={15} />
@@ -305,7 +306,7 @@ function WorkspacesView({ ctx }) {
       )}
 
       <CreateWorkspaceModal open={createOpen} onClose={() => setCreateOpen(false)} data={data} setData={setData} toast={toast} currentUser={currentUser} refresh={refresh} />
-      <ManageWorkspaceDrawer ws={manageWs} onClose={() => setManageId(null)} data={data} setData={setData} toast={toast} openUrl={openUrl} refresh={refresh} />
+      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} data={data} setData={setData} toast={toast} openUrl={openUrl} refresh={refresh} />
 
       <WModal open={emptyOpen} onClose={emptyBusy ? () => {} : () => setEmptyOpen(false)} icon="trash-2" title="Empty trash?"
         subtitle="This permanently deletes every trashed workspace you own — containers and data. This can't be undone."

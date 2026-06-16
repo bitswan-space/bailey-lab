@@ -214,6 +214,27 @@ const NAV = [
   ]},
 ];
 
+// ─── URL ROUTING ─────────────────────────────────────────────────────────────
+// Every console state has a unique URL so refresh / a shared link / a second
+// browser all land on the same place. The console runs inside the chrome-wrap
+// iframe; nav-sync mirrors the iframe's path to the outer address bar (and the
+// wrap rebuilds the iframe from that path on reload), so plain path-based
+// routing works end-to-end. A second path segment carries a view's open
+// "drawer" (the workspace being managed, the person whose devices you're
+// viewing) — e.g. /workspaces/acme, /users/jane@x.
+const ROUTES = ['workspaces', 'overview', 'users', 'approvals', 'devices', 'security'];
+
+function parseLocation() {
+  const segs = (window.location.pathname || '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+  const route = ROUTES.includes(segs[0]) ? segs[0] : 'workspaces';
+  const param = segs[1] != null && segs[1] !== '' ? decodeURIComponent(segs[1]) : null;
+  return { route, param };
+}
+
+function canonicalPath(loc) {
+  return '/' + loc.route + (loc.param ? '/' + encodeURIComponent(loc.param) : '');
+}
+
 function NavItem({ item, active, badge, onClick }) {
   const [h, setH] = useA(false);
   return (
@@ -234,7 +255,33 @@ function NavItem({ item, active, badge, onClick }) {
 }
 
 function Console({ data, setData, toast, refresh }) {
-  const [route, setRoute] = useA('workspaces');
+  // Route + open-drawer param come from the URL (see ROUTES/parseLocation).
+  const [loc, setLoc] = useA(parseLocation);
+  const route = loc.route;
+  const routeParam = loc.param;
+  // Browser back/forward (within the iframe's own history) re-derives state.
+  useAE(() => {
+    const onPop = () => setLoc(parseLocation());
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+  // Canonicalize on first mount so even "/" gets an explicit path in the bar.
+  useAE(() => {
+    const want = canonicalPath(loc);
+    if (window.location.pathname !== want) {
+      try { window.history.replaceState({}, '', want); } catch (e) { /* noop */ }
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // navigate(route[, param]) pushes a new URL and updates state. ctx.go is the
+  // back-compat single-arg form used by views to switch top-level sections.
+  const navigate = (toRoute, param) => {
+    const next = { route: ROUTES.includes(toRoute) ? toRoute : 'workspaces', param: param || null };
+    const want = canonicalPath(next);
+    if (window.location.pathname !== want) {
+      try { window.history.pushState({}, '', want); } catch (e) { /* noop */ }
+    }
+    setLoc(next);
+  };
   // Current user: the live whoami identity. Until whoami resolves we use a
   // neutral empty identity — never a fabricated seed user.
   const currentUser = data.me
@@ -250,7 +297,7 @@ function Console({ data, setData, toast, refresh }) {
     try { window.open(url, '_blank', 'noopener'); } catch (e) {}
     toast(`Opening ${name || url}…`, 'info');
   };
-  const ctx = { data, setData, toast, go: setRoute, currentUser, openUrl, refresh };
+  const ctx = { data, setData, toast, go: (r) => navigate(r), navigate, route, routeParam, currentUser, openUrl, refresh };
   const pendingCount = data.pending.length;
 
   const views = {
@@ -284,7 +331,7 @@ function Console({ data, setData, toast, refresh }) {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                 {sec.items.map(it => (
                   <NavItem key={it.id} item={it} active={route === it.id}
-                    badge={it.badge === 'pending' ? pendingCount : 0} onClick={() => setRoute(it.id)} />
+                    badge={it.badge === 'pending' ? pendingCount : 0} onClick={() => navigate(it.id)} />
                 ))}
               </div>
             </div>

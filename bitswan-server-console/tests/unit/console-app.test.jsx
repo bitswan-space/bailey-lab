@@ -104,6 +104,35 @@ describe('App live-data loading + adapters + routing', () => {
     await waitFor(() => expect(screen.getByText('Awaiting approval')).toBeTruthy());
   });
 
+  it('derives the initial view from the URL (/devices → devices view)', async () => {
+    setLocation({ pathname: '/devices' });
+    installFetch(fullRoutes());
+    render(<App />);
+    // No nav click: the URL alone selects the view (so refresh / a shared link
+    // lands here).
+    await waitFor(() => expect(screen.getByText(/Trust spreads device-to-device/)).toBeTruthy());
+  });
+
+  it('opens a workspace drawer straight from the URL (/workspaces/:name)', async () => {
+    setLocation({ pathname: '/workspaces/ws1' });
+    installFetch(fullRoutes());
+    render(<App />);
+    // The manage drawer for ws1 is open on load — no click needed. "Open
+    // editor" only exists inside the drawer.
+    await waitFor(() => expect(screen.getByText('Open editor')).toBeTruthy());
+  });
+
+  it('navigation pushes a canonical URL', async () => {
+    setLocation({ pathname: '/' });
+    const push = vi.spyOn(window.history, 'pushState');
+    installFetch(fullRoutes());
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('Your devices')).toBeTruthy());
+    fireEvent.click(screen.getByText('Your devices'));
+    await waitFor(() => expect(push).toHaveBeenCalledWith(expect.anything(), '', '/devices'));
+    push.mockRestore();
+  });
+
   it('non-admin whoami hides the Admin nav section', async () => {
     installFetch(fullRoutes({
       '/bailey/api/whoami': { json: { is_admin: false, headers: {} } },
