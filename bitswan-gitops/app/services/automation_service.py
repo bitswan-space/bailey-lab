@@ -3430,15 +3430,63 @@ fi
             # deployment dir. Each template is configured to write its
             # scratch files to writable image layers (e.g. `/deps`, `/tmp`,
             # `$PYTHONPYCACHEPREFIX`) rather than into the source tree.
+            #
+            # When BITSWAN_VOLUME_NAME is set, workspace data lives in a named
+            # Docker volume (each workspace at `workspaces/<ws>/...`) and the BP
+            # source is mounted via a compose long-form volume+subpath dict
+            # instead of a host bind path. When it is unset, fall back to the
+            # legacy host-bind-string behavior.
+            bitswan_volume_name = os.environ.get("BITSWAN_VOLUME_NAME")
+            bitswan_workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME")
+
+            def _normalize_subpath(p):
+                # Collapse leading "./" / "/" so the subpath is volume-relative.
+                while p.startswith("./") or p.startswith("/"):
+                    if p.startswith("./"):
+                        p = p[2:]
+                    else:
+                        p = p[1:]
+                return p
+
             if stage == "live-dev" and relative_path:
-                source_mount_path = os.path.join(self.workspace_dir_host, relative_path)
-                entry["volumes"].append(
-                    f"{source_mount_path}:{automation_config.mount_path}:ro"
-                )
+                if bitswan_volume_name:
+                    subpath = _normalize_subpath(
+                        f"workspaces/{bitswan_workspace_name}/workspace/{relative_path}"
+                    )
+                    entry["volumes"].append(
+                        {
+                            "type": "volume",
+                            "source": bitswan_volume_name,
+                            "target": automation_config.mount_path,
+                            "read_only": True,
+                            "volume": {"subpath": subpath},
+                        }
+                    )
+                else:
+                    source_mount_path = os.path.join(
+                        self.workspace_dir_host, relative_path
+                    )
+                    entry["volumes"].append(
+                        f"{source_mount_path}:{automation_config.mount_path}:ro"
+                    )
             else:
-                entry["volumes"].append(
-                    f"{deployment_dir}:{automation_config.mount_path}:ro"
-                )
+                if bitswan_volume_name:
+                    subpath = _normalize_subpath(
+                        f"workspaces/{bitswan_workspace_name}/gitops/{source}"
+                    )
+                    entry["volumes"].append(
+                        {
+                            "type": "volume",
+                            "source": bitswan_volume_name,
+                            "target": automation_config.mount_path,
+                            "read_only": True,
+                            "volume": {"subpath": subpath},
+                        }
+                    )
+                else:
+                    entry["volumes"].append(
+                        f"{deployment_dir}:{automation_config.mount_path}:ro"
+                    )
 
             if conf.get("enabled", True):
                 dc["services"][service_name] = entry
@@ -3456,6 +3504,15 @@ fi
                 dc["networks"][network] = {"driver": "bridge"}
             else:
                 dc["networks"][network] = {"external": True}
+
+        # Declare the external named volume at the top level whenever workspace
+        # data is sourced from it (BITSWAN_VOLUME_NAME set). Merge so we don't
+        # clobber any volumes already declared on the compose dict.
+        bitswan_volume_name = os.environ.get("BITSWAN_VOLUME_NAME")
+        if bitswan_volume_name:
+            dc.setdefault("volumes", {})
+            dc["volumes"][bitswan_volume_name] = {"external": True}
+
         dc_yaml = yaml.dump(dc)
         return dc_yaml, infra_service_names
 

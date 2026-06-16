@@ -110,6 +110,10 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 			"BITSWAN_GITOPS_DOMAIN=" + config.Domain,
 			"BITSWAN_WORKSPACE_NAME=" + config.WorkspaceName,
 			"BITSWAN_CERTS_DIR=" + homeDir + "/.config/bitswan/certauthorities",
+			// The named Docker volume that backs all workspace data. gitops uses
+			// this (+ BITSWAN_WORKSPACE_NAME) to mount business-process containers
+			// off the volume via subpaths instead of host bind paths.
+			"BITSWAN_VOLUME_NAME=bitswan",
 		},
 	}
 

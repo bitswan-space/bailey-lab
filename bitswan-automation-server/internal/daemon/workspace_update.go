@@ -126,6 +126,14 @@ func updateServices(workspaceName, editorImage, dashboardImage, kafkaImage, zook
 		fmt.Println("Dashboard service updated successfully!")
 	}
 
+	// Always try to update the coding-agent service if enabled
+	fmt.Println("Checking coding-agent service...")
+	if err := updateCodingAgentService(workspaceName); err != nil {
+		fmt.Printf("Warning: failed to update coding-agent service: %v\n", err)
+	} else {
+		fmt.Println("Coding-agent service updated successfully!")
+	}
+
 	// Always try to update Kafka service if enabled
 	fmt.Println("Checking Kafka service...")
 	if err := updateKafkaService(workspaceName, kafkaImage, zookeeperImage); err != nil {
@@ -142,6 +150,42 @@ func updateServices(workspaceName, editorImage, dashboardImage, kafkaImage, zook
 		fmt.Println("CouchDB service updated successfully!")
 	}
 
+	return nil
+}
+
+// updateCodingAgentService regenerates and restarts the coding-agent service
+// for a workspace if it's enabled. The coding-agent has no RegenerateDockerCompose
+// helper, so we re-create the compose from the persisted secret/domain and
+// restart — this is what moves its containers onto the named-volume mounts.
+func updateCodingAgentService(workspaceName string) error {
+	svc, err := services.NewCodingAgentService(workspaceName)
+	if err != nil {
+		return fmt.Errorf("failed to create coding-agent service: %w", err)
+	}
+	if !svc.IsEnabled() {
+		fmt.Printf("Coding-agent service is not enabled for workspace '%s', skipping update\n", workspaceName)
+		return nil
+	}
+	md, err := svc.GetMetadata()
+	if err != nil {
+		return fmt.Errorf("failed to read workspace metadata: %w", err)
+	}
+	fmt.Println("Stopping current coding-agent container...")
+	if err := svc.StopContainer(); err != nil {
+		return fmt.Errorf("failed to stop coding-agent container: %w", err)
+	}
+	fmt.Println("Regenerating coding-agent docker-compose configuration...")
+	content, err := svc.CreateDockerCompose(md.CodingAgentSecret, "", md.Domain)
+	if err != nil {
+		return fmt.Errorf("failed to regenerate coding-agent docker-compose: %w", err)
+	}
+	if err := svc.SaveDockerCompose(content); err != nil {
+		return fmt.Errorf("failed to save coding-agent docker-compose: %w", err)
+	}
+	fmt.Println("Starting coding-agent container...")
+	if err := svc.StartContainer(); err != nil {
+		return fmt.Errorf("failed to start coding-agent container: %w", err)
+	}
 	return nil
 }
 
