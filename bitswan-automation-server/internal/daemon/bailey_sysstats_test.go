@@ -1,10 +1,17 @@
 package daemon
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
-// gatherSystemStats reads the live kernel — on the Linux CI/runtime host
-// /proc and statfs are always present, so it must return real, sane values.
+// gatherSystemStats reads /proc + statfs, which only exist on Linux — the only
+// OS the daemon ever runs on. The CI test matrix also runs on macOS/Windows,
+// where /proc is absent, so skip there rather than assert a Linux-only path.
 func TestGatherSystemStats(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("system stats read /proc; Linux-only")
+	}
 	s, err := gatherSystemStats()
 	if err != nil {
 		t.Fatalf("gatherSystemStats: %v", err)
@@ -38,6 +45,9 @@ func TestGatherSystemStats(t *testing.T) {
 }
 
 func TestReadMemInfo(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc/meminfo is Linux-only")
+	}
 	total, avail, err := readMemInfo()
 	if err != nil {
 		t.Fatalf("readMemInfo: %v", err)
