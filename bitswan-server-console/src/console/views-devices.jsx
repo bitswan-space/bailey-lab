@@ -3,7 +3,7 @@ import React from 'react';
 
 const { C: DC, Icon: DIcon, Btn: DBtn, Pill: DPill } = window.WD_SHELL;
 const {
-  Card: DCard, PageHeader: DPageHeader, TextInput: DTextInput, Modal: DModal,
+  Card: DCard, PageHeader: DPageHeader, Modal: DModal,
   SegmentedCode: DSeg, QRCode: DQR, QRImage: DQRImage, DeviceIcon: DDeviceIcon, ProtoHint: DProtoHint,
   CopyChip: DCopyChip, Toggle: DToggle, EmptyState: DEmpty, LiveState: DLiveState,
 } = window.SC_UI;
@@ -182,11 +182,8 @@ function PendingDeviceRow({ email, onLinked, toast }) {
         <div style={{ fontSize: 12.5, color: DC.muted, marginTop: 2 }}>
           A new browser signed in as {email}. Enter the code it shows to trust it — no admin needed.
         </div>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 10 }}>
-          <div style={{ width: 160 }}>
-            <DTextInput value={code} mono autoFocus placeholder="000000"
-              onChange={(v) => { setCode(v); setErr(''); }} />
-          </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 10, flexWrap: 'wrap' }}>
+          <DSeg format={[3, 3]} value={code} onChange={(v) => { setCode(v); setErr(''); }} size="md" auto />
           <DBtn variant="primary" leftIcon="link" disabled={busy || code.replace(/[^A-Za-z0-9]/g, '').length < 6} onClick={submit}>
             {busy ? 'Linking…' : 'Link device'}
           </DBtn>

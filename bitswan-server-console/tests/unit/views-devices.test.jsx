@@ -66,7 +66,7 @@ describe('DevicesView', () => {
     expect(screen.getByText('New device waiting to be linked')).toBeTruthy();
     expect(screen.queryByText('Simulate scan')).toBeNull();
     // Enter the 6-digit code shown on the new device and link it.
-    fireEvent.change(screen.getByPlaceholderText('000000'), { target: { value: '497722' } });
+    fireEvent.change(document.querySelector('input'), { target: { value: '497722' } });
     fireEvent.click(screen.getByText('Link device'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith('New device linked and trusted', 'success'));
     expect(s.refresh).toHaveBeenCalledWith('devices');
@@ -77,7 +77,7 @@ describe('DevicesView', () => {
     installFetch({ '/2fa-gate/approve': { status: 401, text: "Code didn't match — ask them to read it back." } });
     const data = makeData({ pending: [{ id: 'me@example.test', userEmail: 'me@example.test', userName: 'me@example.test' }] });
     render(<Host View={DevicesView} data={data} extra={s} />);
-    fireEvent.change(screen.getByPlaceholderText('000000'), { target: { value: '000000' } });
+    fireEvent.change(document.querySelector('input'), { target: { value: '000000' } });
     fireEvent.click(screen.getByText('Link device'));
     await waitFor(() => expect(screen.getByText(/didn't match/)).toBeTruthy());
     expect(s.toast).not.toHaveBeenCalledWith('New device linked and trusted', 'success');
