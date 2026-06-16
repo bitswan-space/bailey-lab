@@ -101,7 +101,7 @@ export function TopNav({
                 onClick={() => !disabled && onTab(step.id)}
                 disabled={disabled}
                 title={
-                  disabled ? 'Create or select a worktree first' : step.label
+                  disabled ? 'Create or select a copy first' : step.label
                 }
                 className={cn(
                   'inline-flex h-[34px] items-center gap-1.5 rounded-lg px-3 text-[13px] transition-colors',

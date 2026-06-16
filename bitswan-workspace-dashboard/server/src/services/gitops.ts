@@ -60,6 +60,25 @@ export class GitopsClient {
   }
 
   /**
+   * Whether a copy (worktree) with this name is present in the latest cached
+   * `worktrees` snapshot. Lets `/api/me` skip a redundant create when the
+   * user's copy already exists. Returns false when no snapshot has arrived yet
+   * — the caller then attempts an idempotent create (gitops 409s if present).
+   */
+  hasWorktree(name: string): boolean {
+    const wts = this.lastByEvent.get('worktrees');
+    return (
+      Array.isArray(wts) &&
+      wts.some(
+        (w) =>
+          !!w &&
+          typeof w === 'object' &&
+          (w as { name?: unknown }).name === name,
+      )
+    );
+  }
+
+  /**
    * `POST /automations/{id}/(start|stop|restart)`. gitops accepts an empty
    * JSON body; the status code is forwarded so the route handler can surface
    * 502s on upstream failure.

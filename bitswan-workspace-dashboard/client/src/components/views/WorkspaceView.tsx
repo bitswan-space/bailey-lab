@@ -143,7 +143,7 @@ function WorktreeGate({
     return (
       <CenteredNote
         icon={<GitBranch className="size-5 text-primary" aria-hidden />}
-        title="No worktree yet"
+        title="No copy yet"
         body={`Create a worktree (top-right switcher) to ${what}.`}
       />
     );

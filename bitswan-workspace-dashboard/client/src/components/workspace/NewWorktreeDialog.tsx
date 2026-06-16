@@ -44,7 +44,7 @@ export function NewWorktreeDialog({
     validationError =
       'Use letters, digits and hyphens only. Must start with a letter or digit.';
   } else if (existingNames.includes(trimmed)) {
-    validationError = `A worktree named "${trimmed}" already exists.`;
+    validationError = `A copy named "${trimmed}" already exists.`;
   }
   const canSubmit = trimmed.length > 0 && !validationError && !submitting;
 
@@ -60,12 +60,12 @@ export function NewWorktreeDialog({
       setSubmitting(true);
       const work = api.createWorktree({ branch_name: trimmed });
       toast.promise(work, {
-        loading: `Creating worktree "${trimmed}"…`,
-        success: `Worktree "${trimmed}" created`,
+        loading: `Creating copy "${trimmed}"…`,
+        success: `Copy "${trimmed}" created`,
         error: (err: unknown) =>
           isTransientNetworkError(err)
-            ? `Worktree "${trimmed}" created`
-            : `Failed to create worktree: ${String(err)}`,
+            ? `Copy "${trimmed}" created`
+            : `Failed to create copy: ${String(err)}`,
       });
       try {
         const res = await work;
@@ -82,7 +82,7 @@ export function NewWorktreeDialog({
         } else if (res.deploy_task_id) {
           void watchDeployTask(res.deploy_task_id, `wt-deploy-${trimmed}`, {
             loading: `Starting automations in ${trimmed}…`,
-            success: `Worktree ${trimmed} automations started`,
+            success: `Copy ${trimmed} automations started`,
             failurePrefix: `Failed to start automations in ${trimmed}`,
           });
         }
@@ -105,9 +105,9 @@ export function NewWorktreeDialog({
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>New worktree</DialogTitle>
+          <DialogTitle>New copy</DialogTitle>
           <DialogDescription>
-            Creates a new git worktree under <code>worktrees/</code> with a
+            Creates a new copy (an independent checkout) with a
             branch of the same name, branched off the current main HEAD.
           </DialogDescription>
         </DialogHeader>

@@ -92,7 +92,7 @@ export function FilesTab({ worktree, bp }: Props) {
       try {
         const r = await api.worktreeFiles.upload(worktree, dest, accepted);
         const count = r.written.length;
-        const where = dest ? `/${dest}` : ' the worktree root';
+        const where = dest ? `/${dest}` : ' the copy root';
         toast.success(
           `Uploaded ${count} file${count === 1 ? '' : 's'} to${where}`,
         );
@@ -143,7 +143,7 @@ export function FilesTab({ worktree, bp }: Props) {
   };
 
   const dropOverlayTarget = dragHoverFolder || rootDir;
-  const uploadButtonTitle = `Upload to ${uploadDir ? '/' + uploadDir : 'worktree root'}`;
+  const uploadButtonTitle = `Upload to ${uploadDir ? '/' + uploadDir : 'copy root'}`;
 
   return (
     <div className="flex h-full overflow-hidden bg-background">
@@ -162,7 +162,7 @@ export function FilesTab({ worktree, bp }: Props) {
                 type="button"
                 onClick={() => setShowFullTree(true)}
                 className="group inline-flex min-w-0 items-center gap-1 rounded px-1 py-0.5 font-mono text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
-                title="Show whole worktree"
+                title="Show whole copy"
               >
                 <ArrowUp className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
                 <span className="truncate">/{rootDir}</span>
@@ -197,7 +197,7 @@ export function FilesTab({ worktree, bp }: Props) {
             <div className="px-3 py-6 text-center text-xs text-muted-foreground">
               {rootDir
                 ? `No files in /${rootDir} yet.`
-                : 'No files in this worktree.'}
+                : 'No files in this copy.'}
             </div>
           ) : (
             <FileTree

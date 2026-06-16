@@ -54,7 +54,7 @@ export function WorktreeSwitcher({
     if (!worktree) return;
     setDeleting(true);
     try {
-      const wtPrefix = `worktrees/${worktree}/`;
+      const wtPrefix = `copies/${worktree}/`;
       const liveDev = raw.filter((a) => {
         const rel = a.relative_path ?? '';
         return (
@@ -70,12 +70,12 @@ export function WorktreeSwitcher({
       );
       const work = api.deleteWorktree(worktree);
       toast.promise(work, {
-        loading: `Deleting worktree "${worktree}"…`,
-        success: `Worktree "${worktree}" deleted`,
+        loading: `Deleting copy "${worktree}"…`,
+        success: `Copy "${worktree}" deleted`,
         error: (err: unknown) =>
           isTransientNetworkError(err)
-            ? `Worktree "${worktree}" deleted`
-            : `Failed to delete worktree: ${String(err)}`,
+            ? `Copy "${worktree}" deleted`
+            : `Failed to delete copy: ${String(err)}`,
       });
       try {
         await work;
@@ -96,7 +96,7 @@ export function WorktreeSwitcher({
         <PopoverTrigger asChild>
           <button
             type="button"
-            title="Switch worktree"
+            title="Switch copy"
             className={cn(
               'inline-flex h-[34px] items-center gap-2 rounded-lg border bg-background py-0 pl-3 pr-2.5 transition-colors hover:bg-muted/60',
               active ? 'border-primary' : 'border-border',
@@ -111,7 +111,7 @@ export function WorktreeSwitcher({
               aria-hidden
             />
             <span className="mr-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Worktree
+              Copy
             </span>
             <span className="max-w-48 truncate font-mono text-[13px] font-semibold text-foreground">
               {active?.name ?? '—'}
@@ -133,7 +133,7 @@ export function WorktreeSwitcher({
           <div className="max-h-72 space-y-0.5 overflow-auto p-1.5">
             {worktrees.length === 0 ? (
               <div className="px-2.5 py-2 text-xs text-muted-foreground">
-                No worktrees yet — create one to start coding.
+                Setting up your copy…
               </div>
             ) : (
               worktrees.map((w) => {
@@ -186,7 +186,7 @@ export function WorktreeSwitcher({
               className="flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
             >
               <Plus className="size-3.5" aria-hidden />
-              New worktree
+              New copy
             </button>
             <button
               type="button"
@@ -203,7 +203,7 @@ export function WorktreeSwitcher({
               )}
             >
               <Trash2 className="size-3.5" aria-hidden />
-              Delete worktree{worktree ? ` "${worktree}"` : ''}
+              Delete copy{worktree ? ` "${worktree}"` : ''}
             </button>
           </div>
         </PopoverContent>
@@ -223,13 +223,13 @@ export function WorktreeSwitcher({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Delete worktree &quot;{worktree}&quot;?
+              Delete copy &quot;{worktree}&quot;?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This force-removes the worktree directory and the{' '}
+              This force-removes the copy and the{' '}
               <code>{active?.branch ?? worktree}</code> branch, and drops the
-              worktree&apos;s postgres database. Any live-dev deployments under
-              this worktree will be stopped first. Uncommitted changes are{' '}
+              copy&apos;s postgres database. Any live-dev deployments under
+              this copy will be stopped first. Uncommitted changes are{' '}
               <strong>lost</strong>.
             </AlertDialogDescription>
           </AlertDialogHeader>

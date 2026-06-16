@@ -90,7 +90,7 @@ export function InspectModal({
             </DialogTitle>
             <div className="text-xs text-muted-foreground">
               {mode === 'liveDev'
-                ? 'Local container — logs and details for this worktree'
+                ? 'Local container — logs and details for this copy'
                 : 'Container details and logs — per stage'}
             </div>
           </div>

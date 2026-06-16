@@ -636,7 +636,7 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
           {agg.health === 'empty' ? (
             <p className="mt-3 border-t border-border pt-3 text-sm text-muted-foreground">
               {selectedStage === 'dev'
-                ? 'Nothing deployed yet — deploy from a worktree via the Sync & Deploy tab.'
+                ? 'Nothing deployed yet — deploy from a copy via the Sync & Deploy tab.'
                 : `Nothing deployed yet — promote from ${
                     selectedStage === 'staging' ? 'Development' : 'Staging'
                   }.`}
