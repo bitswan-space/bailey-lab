@@ -5,46 +5,46 @@ import { toast } from 'sonner';
 import { api, type ChangedKind } from '@/lib/api';
 import { useFileContent } from '@/hooks/useFileContent';
 import { useFileTree } from '@/hooks/useFileTree';
-import { useWorktreeStatus } from '@/hooks/useWorktreeStatus';
+import { useCopyStatus } from '@/hooks/useCopyStatus';
 import { FileTree } from './FileTree';
 import { FileViewer } from './FileViewer';
 
 interface Props {
-  worktree: string;
+  copy: string;
   /**
    * Currently-selected business process. When set, the explorer "cd"s
    * into that folder: only its contents render, uploads default to it,
-   * and a breadcrumb points it out. Falsy → show the whole worktree.
+   * and a breadcrumb points it out. Falsy → show the whole copy.
    */
   bp?: string | null;
 }
 
 /**
- * Worktree file explorer: 280 px tree on the left, content viewer on the
+ * Copy file explorer: 280 px tree on the left, content viewer on the
  * right. Status badges on the tree come from the same `/status` endpoint
  * the Diff tab uses, merged in by path. The tree pane doubles as a drop
  * target for file uploads.
  */
-export function FilesTab({ worktree, bp }: Props) {
-  const { tree, loading: treeLoading, refresh: refreshTree } = useFileTree(worktree);
-  const { changed, refresh: refreshStatus } = useWorktreeStatus(worktree);
+export function FilesTab({ copy, bp }: Props) {
+  const { tree, loading: treeLoading, refresh: refreshTree } = useFileTree(copy);
+  const { changed, refresh: refreshStatus } = useCopyStatus(copy);
   const [openPath, setOpenPath] = useState<string | null>(null);
   const {
     data,
     loading: contentLoading,
     refresh: refreshContent,
     setRefetchPaused,
-  } = useFileContent(worktree, openPath);
+  } = useFileContent(copy, openPath);
 
-  // Lets the user pop out of BP scope back to the full worktree view
+  // Lets the user pop out of BP scope back to the full copy view
   // without having to deselect the BP in the sidebar. Reset whenever
-  // the user navigates to a different BP / worktree so each cd starts
+  // the user navigates to a different BP / copy so each cd starts
   // scoped again.
   const [showFullTree, setShowFullTree] = useState(false);
   useEffect(() => {
     setShowFullTree(false);
     setOpenPath(null);
-  }, [bp, worktree]);
+  }, [bp, copy]);
 
   // Resolve the BP folder in the current tree. If the BP doesn't exist
   // as a top-level folder yet (e.g. brand-new BP with no files), or the
@@ -65,7 +65,7 @@ export function FilesTab({ worktree, bp }: Props) {
 
   // Upload target for the **click** path (the Upload button → OS picker)
   // is the directory the currently-open file lives in, or — when no file
-  // is open — the scoped root (BP folder when cd'd in, worktree root
+  // is open — the scoped root (BP folder when cd'd in, copy root
   // otherwise). The **drag-drop** path uses whatever folder the user is
   // hovering over instead — see `dragHoverFolder` below.
   const uploadDir = useMemo(() => {
@@ -90,7 +90,7 @@ export function FilesTab({ worktree, bp }: Props) {
   const performUpload = useCallback(
     async (accepted: File[], dest: string) => {
       try {
-        const r = await api.worktreeFiles.upload(worktree, dest, accepted);
+        const r = await api.copyFiles.upload(copy, dest, accepted);
         const count = r.written.length;
         const where = dest ? `/${dest}` : ' the copy root';
         toast.success(
@@ -103,7 +103,7 @@ export function FilesTab({ worktree, bp }: Props) {
         toast.error(`Upload failed: ${message}`);
       }
     },
-    [worktree, refreshTree, refreshStatus],
+    [copy, refreshTree, refreshStatus],
   );
 
   const onDrop = useCallback(
@@ -201,12 +201,12 @@ export function FilesTab({ worktree, bp }: Props) {
             </div>
           ) : (
             <FileTree
-              // Re-key on the active scope (worktree + BP + escape-hatch
+              // Re-key on the active scope (copy + BP + escape-hatch
               // toggle) so each navigation re-runs the rows' initial
               // `open` state — otherwise rows mounted under a previous
               // scope would hold onto their toggled state and the
               // explorer wouldn't follow the user's selection.
-              key={`${worktree}::${rootDir || ''}`}
+              key={`${copy}::${rootDir || ''}`}
               tree={displayTree}
               openPath={openPath}
               statusByPath={statusByPath}
@@ -238,7 +238,7 @@ export function FilesTab({ worktree, bp }: Props) {
       </aside>
       <main className="flex-1 overflow-hidden">
         <FileViewer
-          worktree={worktree}
+          copy={copy}
           path={openPath}
           data={data}
           loading={contentLoading}

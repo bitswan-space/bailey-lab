@@ -38,7 +38,7 @@ import { cn } from '@/lib/utils';
 
 interface Props {
   bp: string;
-  worktree: string;
+  copy: string;
 }
 
 type Status = 'running' | 'failed' | 'stopped';
@@ -55,7 +55,7 @@ const WORKER_TYPES: { type: string; label: string }[] = [
   { type: 'fastapi', label: 'FastAPI (Python)' },
 ];
 
-export function EnvironmentPanel({ bp, worktree }: Props) {
+export function EnvironmentPanel({ bp, copy }: Props) {
   const { automations } = useAutomations();
   const [collapsed, setCollapsed] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -68,7 +68,7 @@ export function EnvironmentPanel({ bp, worktree }: Props) {
   >(null);
 
   const { frontends, workers } = useMemo(() => {
-    const prefix = `worktrees/${worktree}/${bp}/`;
+    const prefix = `copies/${copy}/${bp}/`;
     const byName = new Map<string, Item>();
     for (const a of automations) {
       const rel = a.relative_path ?? '';
@@ -95,7 +95,7 @@ export function EnvironmentPanel({ bp, worktree }: Props) {
       frontends: all.filter((i) => i.expose).sort(byNameAsc),
       workers: all.filter((i) => !i.expose).sort(byNameAsc),
     };
-  }, [automations, bp, worktree]);
+  }, [automations, bp, copy]);
 
   const mutate = async (label: string, work: Promise<unknown>) => {
     setBusy(true);
@@ -128,9 +128,9 @@ export function EnvironmentPanel({ bp, worktree }: Props) {
     const name = rawName.trim();
     if (!name) return; // empty / cancelled
     if (draft.kind === 'frontend') {
-      void mutate('Add frontend', api.addFrontend({ bp, name, worktree }));
+      void mutate('Add frontend', api.addFrontend({ bp, name, copy }));
     } else {
-      void mutate('Add worker', api.addWorker({ bp, name, type: draft.type, worktree }));
+      void mutate('Add worker', api.addWorker({ bp, name, type: draft.type, copy }));
     }
   };
 
@@ -140,7 +140,7 @@ export function EnvironmentPanel({ bp, worktree }: Props) {
     if (!clean || clean === oldName) return;
     void mutate(
       'Rename',
-      api.renameAutomation({ bp, old_name: oldName, new_name: clean, worktree }),
+      api.renameAutomation({ bp, old_name: oldName, new_name: clean, copy }),
     );
   };
 
@@ -495,11 +495,11 @@ function DevSecrets() {
       {open ? (
         <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-[12px] text-muted-foreground">
           Secret editing isn’t wired up yet — env vars &amp; API keys for this
-          worktree will live here.
+          copy will live here.
         </div>
       ) : (
         <div className="text-[11px] text-muted-foreground">
-          Environment variables &amp; API keys for this worktree. Click to edit.
+          Environment variables &amp; API keys for this copy. Click to edit.
         </div>
       )}
     </div>

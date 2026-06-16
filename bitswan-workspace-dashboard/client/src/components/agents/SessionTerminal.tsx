@@ -2,8 +2,8 @@ import { useMemo } from 'react';
 import { Terminal } from '@/components/terminal/Terminal';
 
 interface Props {
-  worktree: string;
-  /** Null for worktree-level sync sessions; the WS route handles missing bp. */
+  copy: string;
+  /** Null for copy-level sync sessions; the WS route handles missing bp. */
   bp: string | null;
   kind: 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
   /** Requirement id when kind === 'requirement'. The server reads the description from the TOML. */
@@ -22,7 +22,7 @@ interface Props {
  * connected — the WebSocket and the upstream ssh process keep running.
  */
 export function SessionTerminal({
-  worktree,
+  copy,
   bp,
   kind,
   requirementId,
@@ -35,14 +35,14 @@ export function SessionTerminal({
   // so we keep it derived from the immutable session inputs.
   const wsUrl = useMemo(() => {
     const params = new URLSearchParams({
-      worktree,
+      copy,
       kind,
       ...(bp ? { bp } : {}),
       ...(requirementId ? { requirement_id: requirementId } : {}),
       ...(resume ? { resume: sessionId } : { session_id: sessionId }),
     });
     return `/ws/coding-agent?${params.toString()}`;
-  }, [worktree, bp, kind, requirementId, sessionId, resume]);
+  }, [copy, bp, kind, requirementId, sessionId, resume]);
 
   return (
     <div className="h-full w-full" style={{ display: hidden ? 'none' : 'block' }}>

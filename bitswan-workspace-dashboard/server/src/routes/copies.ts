@@ -1,22 +1,22 @@
 import type { FastifyInstance } from 'fastify';
 import type { GitopsClient } from '../services/gitops.js';
 
-export interface WorktreeRoutesOptions {
+export interface CopyRoutesOptions {
   gitops: GitopsClient | null;
 }
 
 /**
- * Worktree creation. The listing itself flows over the `/api/events` SSE
- * feed (gitops broadcasts a `worktrees` event), so this file only carries
+ * Copy creation. The listing itself flows over the `/api/events` SSE
+ * feed (gitops broadcasts a `copies` event), so this file only carries
  * mutating endpoints. Validation of the branch name is delegated to
  * gitops, which has the canonical regex.
  */
-export function registerWorktreeRoutes(
+export function registerCopyRoutes(
   app: FastifyInstance,
-  { gitops }: WorktreeRoutesOptions,
+  { gitops }: CopyRoutesOptions,
 ): void {
   app.delete<{ Params: { name: string } }>(
-    '/api/worktrees/:name',
+    '/api/copies/:name',
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
       if (!gitops) {
@@ -27,7 +27,7 @@ export function registerWorktreeRoutes(
         return reply.code(400).send({ error: 'name is required' });
       }
       try {
-        const r = await gitops.deleteWorktree(name);
+        const r = await gitops.deleteCopy(name);
         if (!r.ok) {
           return reply
             .code(r.status >= 400 && r.status < 500 ? r.status : 502)
@@ -35,7 +35,7 @@ export function registerWorktreeRoutes(
         }
         return r.body ?? { ok: true };
       } catch (err) {
-        app.log.warn({ err, name }, 'worktree delete failed');
+        app.log.warn({ err, name }, 'copy delete failed');
         return reply.code(502).send({ error: 'gitops unreachable' });
       }
     },
@@ -43,7 +43,7 @@ export function registerWorktreeRoutes(
 
   app.post<{
     Body: { branch_name?: string; base_branch?: string };
-  }>('/api/worktrees', async (req, reply) => {
+  }>('/api/copies', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) {
       return reply.code(503).send({ error: 'gitops not configured' });
@@ -53,7 +53,7 @@ export function registerWorktreeRoutes(
       return reply.code(400).send({ error: 'branch_name is required' });
     }
     try {
-      const r = await gitops.createWorktree({
+      const r = await gitops.createCopy({
         branch_name,
         ...(base_branch ? { base_branch } : {}),
       });
@@ -64,7 +64,7 @@ export function registerWorktreeRoutes(
       }
       return r.body;
     } catch (err) {
-      app.log.warn({ err, branch_name }, 'worktree create failed');
+      app.log.warn({ err, branch_name }, 'copy create failed');
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   });

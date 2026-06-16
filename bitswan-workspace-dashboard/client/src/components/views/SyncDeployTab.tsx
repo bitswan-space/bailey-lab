@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { useSessions } from '@/components/agents/SessionProvider';
-import type { AutomationStage, BusinessProcess, DeployedAutomation, Worktree } from '@/types';
+import type { AutomationStage, BusinessProcess, DeployedAutomation, Copy } from '@/types';
 import { AutomationCard } from '@/components/automations/AutomationCard';
 import { InspectModal, type InspectStage } from '@/components/automations/InspectModal';
 import {
@@ -43,7 +43,7 @@ interface CardEntry {
 
 interface SyncDeployTabProps {
   bp: BusinessProcess;
-  wt: Worktree;
+  wt: Copy;
   /** Flips the shell to the Coding Agent tab (the sync session runs there). */
   onShowAgents: () => void;
 }
@@ -51,17 +51,17 @@ interface SyncDeployTabProps {
 /**
  * The Sync & Deploy tab — the old worktree Overview, reshaped per the design:
  * an explainer header with ONE primary "Sync & Deploy" action (today's sync
- * flow: rebases the worktree onto main; gitops then auto-deploys changed
- * automations to dev), plus the worktree's live-dev automation cards.
- * The Specification/README moved to the Description tab; Delete worktree
- * moved to the worktree switcher.
+ * flow: rebases the copy onto main; gitops then auto-deploys changed
+ * automations to dev), plus the copy's live-dev automation cards.
+ * The Specification/README moved to the Description tab; Delete copy
+ * moved to the copy switcher.
  */
 export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
   const { automations: raw, status } = useAutomations();
   // Whole-BP live-dev deploy in flight — blocks the Deploy button until the
   // polled deploy task reaches a terminal state.
   const [bpDeploying, setBpDeploying] = useState(false);
-  const prefix = `worktrees/${wt.name}/${bp.name}`;
+  const prefix = `copies/${wt.name}/${bp.name}`;
   // eslint-disable-next-line no-restricted-syntax -- null = modal closed
   const [inspectName, setInspectName] = useState<string | null>(null);
   // Busy stays set from request fire until the SSE feed confirms the
@@ -75,7 +75,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
     (RemoveTarget & { automationName: string }) | null
   >(null);
 
-  // Group worktree automations by name. Both deployed (stage='live-dev') and
+  // Group copy automations by name. Both deployed (stage='live-dev') and
   // discoverable (stage=null) entries contribute so the card grid shows
   // automations that exist on disk but haven't been started yet.
   const byName = useMemo(() => {
@@ -180,7 +180,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
       const outcome = await deployBpWithToast({
         bp: bp.name,
         stage: 'live-dev',
-        worktree: wt.name,
+        copy: wt.name,
         loading: `Starting ${bp.name} in ${wt.name}…`,
         success: `${bp.name} started in ${wt.name}`,
         failurePrefix: `Failed to start ${bp.name}`,
@@ -269,7 +269,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
               Automations · live-dev
             </div>
             <div className="mt-0.5 text-sm text-muted-foreground">
-              Each automation runs locally with hot-reload. Sync the worktree to
+              Each automation runs locally with hot-reload. Sync the copy to
               deploy.
             </div>
           </div>
@@ -298,7 +298,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
         {status === 'connecting' && sorted.length === 0 ? (
           <EmptyState message="Loading automations…" />
         ) : sorted.length === 0 ? (
-          <EmptyState message="No live-dev automations for this worktree." />
+          <EmptyState message="No live-dev automations for this copy." />
         ) : (
           <div className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(320px,1fr))]">
             {sorted.map(([name, entry]) => (
@@ -344,7 +344,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
         name={inspectName ?? ''}
         stages={inspectStages}
         mode="liveDev"
-        worktree={wt.name}
+        copy={wt.name}
         actionBusy={inspectName ? !!busy[inspectName] : false}
         onRemove={(deploymentId) => {
           if (!inspectName) return;
@@ -372,7 +372,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
         open={newAutomationOpen}
         onOpenChange={setNewAutomationOpen}
         bpId={bp.id}
-        worktree={wt.name}
+        copy={wt.name}
         existingNames={sorted.map(([n]) => n)}
       />
 
@@ -380,10 +380,10 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Sync worktree &quot;{wt.name}&quot; with main?
+              Sync copy &quot;{wt.name}&quot; with main?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Opens a coding-agent session at the worktree root that runs the{' '}
+              Opens a coding-agent session at the copy root that runs the{' '}
               <code>bitswan-coding-agent vcs sync</code> flow. Uncommitted
               changes are committed as <code>pre-sync-commit</code> first; if
               merge conflicts occur the agent will walk you through resolving
@@ -408,7 +408,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
                 // Pre-select for the current BP scope so flipping to the
                 // Coding Agent tab lands on the new sync terminal without an
                 // extra click.
-                setSelectedFor({ worktree: wt.name, bp: bp.name }, id);
+                setSelectedFor({ copy: wt.name, bp: bp.name }, id);
                 onShowAgents();
               }}
             >

@@ -24,7 +24,7 @@ export type AgentStatus = 'idle' | 'pending' | 'ready' | 'failed';
  * rendered at the SessionProvider level (not inside AgentsTab), and the
  * provider visually positions the rendering over whichever AgentsTab pane
  * is currently bound. That way users can switch between Deployments / a
- * different worktree / a different BP without losing their live agent
+ * different copy / a different BP without losing their live agent
  * sessions — there is no remount.
  */
 export type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
@@ -39,8 +39,8 @@ export type BpSessionKind = 'claude' | 'write-tests' | 'automation';
 export interface ActiveSession {
   /** Stable ID — doubles as the Claude session UUID we pass via SSH. */
   id: string;
-  worktree: string;
-  /** BP-scoped sessions set this; worktree-level (sync) sessions leave it null. */
+  copy: string;
+  /** BP-scoped sessions set this; copy-level (sync) sessions leave it null. */
   bp: string | null;
   kind: SessionKind;
   /**
@@ -56,12 +56,12 @@ export interface ActiveSession {
 }
 
 interface Scope {
-  worktree: string;
+  copy: string;
   bp: string;
 }
 
 interface SessionsContextValue {
-  /** All sessions across every (worktree, bp) — the AgentsTab filters by scope. */
+  /** All sessions across every (copy, bp) — the AgentsTab filters by scope. */
   sessions: ActiveSession[];
 
   /**
@@ -69,26 +69,26 @@ interface SessionsContextValue {
    * 'write-tests' / 'automation' run the same way but with the matching
    * canned prompt embedded by the server.
    */
-  startSession(worktree: string, bp: string, kind?: BpSessionKind): string;
+  startSession(copy: string, bp: string, kind?: BpSessionKind): string;
   /**
-   * Start a worktree-level git-sync session. No BP — the auto-cmd cd's to
-   * the worktree root and runs the bitswan-coding-agent vcs sync flow.
+   * Start a copy-level git-sync session. No BP — the auto-cmd cd's to
+   * the copy root and runs the bitswan-coding-agent vcs sync flow.
    */
-  startSyncSession(worktree: string): string;
+  startSyncSession(copy: string): string;
   /**
    * Start a focused session against a single requirement. The server reads
    * the requirement's description from the BP's testable-requirements.toml
    * and embeds it in Claude's prompt.
    */
-  startRequirementSession(worktree: string, bp: string, requirementId: string): string;
-  resumeSession(worktree: string, bp: string | null, claudeSessionId: string, kind: SessionKind): string;
+  startRequirementSession(copy: string, bp: string, requirementId: string): string;
+  resumeSession(copy: string, bp: string | null, claudeSessionId: string, kind: SessionKind): string;
   /** Called by SessionTerminal when its WS closes. */
   markExited(id: string): void;
   /** Subscribed-to by hooks that want to invalidate caches when a session ends. */
   onExit(handler: (session: ActiveSession) => void): () => void;
 
   /**
-   * Which (worktree, bp) is currently being viewed. The provider shows
+   * Which (copy, bp) is currently being viewed. The provider shows
    * sessions in this scope on top of the bound pane; everything else stays
    * mounted but hidden.
    */
@@ -137,7 +137,7 @@ function newSessionId(): string {
 }
 
 function scopeKey(s: Scope): string {
-  return `${s.worktree} ${s.bp}`;
+  return `${s.copy} ${s.bp}`;
 }
 
 interface PaneRect {
@@ -173,7 +173,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // (WorkspaceView keeps it mounted across tab switches). The hidden pane
   // has display:none and so a
   // zero-sized rect; only fire when the pane has real dimensions. Without
-  // this, a fresh worktree visit would silently cold-start the coding-agent
+  // this, a fresh copy visit would silently cold-start the coding-agent
   // container, Traefik would reconfigure mid-session, and Vite's HMR client
   // would reload the page from under the user.
   useEffect(() => {
@@ -194,13 +194,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const startSession = useCallback(
-    (worktree: string, bp: string, kind: BpSessionKind = 'claude') => {
+    (copy: string, bp: string, kind: BpSessionKind = 'claude') => {
       const id = newSessionId();
       setSessions((prev) => [
         ...prev,
         {
           id,
-          worktree,
+          copy,
           bp,
           kind,
           startedAt: Date.now(),
@@ -208,20 +208,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           resume: false,
         },
       ]);
-      setSelectedFor({ worktree, bp }, id);
+      setSelectedFor({ copy, bp }, id);
       return id;
     },
     [setSelectedFor],
   );
 
   const startSyncSession = useCallback(
-    (worktree: string) => {
+    (copy: string) => {
       const id = newSessionId();
       setSessions((prev) => [
         ...prev,
         {
           id,
-          worktree,
+          copy,
           bp: null,
           kind: 'sync',
           startedAt: Date.now(),
@@ -229,10 +229,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           resume: false,
         },
       ]);
-      // Sync sessions show up in every BP's Agents tab inside the worktree;
+      // Sync sessions show up in every BP's Agents tab inside the copy;
       // we don't select them per-scope automatically — the user will click
       // the sync row when they want to look at it. (If they were just
-      // navigated to a fresh worktree without a BP, there's nothing to
+      // navigated to a fresh copy without a BP, there's nothing to
       // select against either way.)
       return id;
     },
@@ -240,13 +240,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const startRequirementSession = useCallback(
-    (worktree: string, bp: string, requirementId: string) => {
+    (copy: string, bp: string, requirementId: string) => {
       const id = newSessionId();
       setSessions((prev) => [
         ...prev,
         {
           id,
-          worktree,
+          copy,
           bp,
           kind: 'requirement',
           requirementId,
@@ -257,20 +257,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       ]);
       // Pre-select for the BP scope so flipping to the Agents tab lands on
       // the new session immediately.
-      setSelectedFor({ worktree, bp }, id);
+      setSelectedFor({ copy, bp }, id);
       return id;
     },
     [setSelectedFor],
   );
 
   const resumeSession = useCallback(
-    (worktree: string, bp: string | null, claudeSessionId: string, kind: SessionKind) => {
+    (copy: string, bp: string | null, claudeSessionId: string, kind: SessionKind) => {
       setSessions((prev) => {
         const live = prev.find(
           (s) =>
             s.id === claudeSessionId &&
             !s.exited &&
-            s.worktree === worktree &&
+            s.copy === copy &&
             (s.bp ?? null) === bp,
         );
         if (live) return prev;
@@ -278,7 +278,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           ...prev,
           {
             id: claudeSessionId,
-            worktree,
+            copy,
             bp,
             kind,
             startedAt: Date.now(),
@@ -287,7 +287,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           },
         ];
       });
-      if (bp) setSelectedFor({ worktree, bp }, claudeSessionId);
+      if (bp) setSelectedFor({ copy, bp }, claudeSessionId);
       return claudeSessionId;
     },
     [setSelectedFor],
@@ -442,14 +442,14 @@ function SessionsLayer({
         .filter((s) => !s.exited)
         .map((s) => {
           // A session is "in scope" for the currently-viewed AgentsTab if
-          // (a) it's a BP-scoped claude session matching this exact (worktree, bp), or
-          // (b) it's a worktree-level sync session whose worktree matches —
-          //     those surface in any BP's Agents tab inside the same worktree.
+          // (a) it's a BP-scoped claude session matching this exact (copy, bp), or
+          // (b) it's a copy-level sync session whose copy matches —
+          //     those surface in any BP's Agents tab inside the same copy.
           const inScope =
             !!currentScope &&
-            currentScope.worktree === s.worktree &&
+            currentScope.copy === s.copy &&
             (s.kind === 'sync' || currentScope.bp === s.bp);
-          // Selection is per (worktree, bp) so switching BPs preserves what
+          // Selection is per (copy, bp) so switching BPs preserves what
           // the user had selected in each. We always look up against the
           // *current* scope (not the session's intrinsic scope) — that lets
           // a user click a sync session while viewing BP-A and have it show
@@ -468,7 +468,7 @@ function SessionsLayer({
               }}
             >
               <SessionTerminal
-                worktree={s.worktree}
+                copy={s.copy}
                 bp={s.bp}
                 sessionId={s.id}
                 kind={s.kind}

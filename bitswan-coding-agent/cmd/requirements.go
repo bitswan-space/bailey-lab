@@ -30,13 +30,13 @@ var requirementsCmd = &cobra.Command{
 // process.toml, either from the flag or by walking up from cwd.
 func resolveRequirementsDir(flag string) (string, error) {
 	if flag != "" {
-		// Flag is relative to the worktree root
+		// Flag is relative to the copy root
 		cwd, err := os.Getwd()
 		if err != nil {
 			return "", err
 		}
-		// Find the worktree root
-		for _, base := range []string{"/workspace/worktrees"} {
+		// Find the copy root
+		for _, base := range []string{"/workspace/copies"} {
 			if strings.HasPrefix(cwd, base+"/") {
 				rest := cwd[len(base)+1:]
 				parts := strings.SplitN(rest, "/", 2)

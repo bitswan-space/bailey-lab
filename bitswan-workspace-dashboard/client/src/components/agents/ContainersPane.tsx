@@ -19,7 +19,7 @@ import { cn } from '@/lib/utils';
  */
 interface Props {
   bp: string;
-  worktree: string;
+  copy: string;
   active: boolean;
 }
 
@@ -32,11 +32,11 @@ interface Container {
 
 type Detail = 'overview' | 'logs';
 
-export function ContainersPane({ bp, worktree, active }: Props) {
+export function ContainersPane({ bp, copy, active }: Props) {
   const { automations } = useAutomations();
 
   const containers = useMemo<Container[]>(() => {
-    const prefix = `worktrees/${worktree}/${bp}/`;
+    const prefix = `copies/${copy}/${bp}/`;
     const byName = new Map<string, Container>();
     for (const a of automations) {
       const rel = a.relative_path ?? '';
@@ -58,7 +58,7 @@ export function ContainersPane({ bp, worktree, active }: Props) {
       });
     }
     return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-  }, [automations, bp, worktree]);
+  }, [automations, bp, copy]);
 
   // eslint-disable-next-line no-restricted-syntax -- null = nothing selected
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -149,7 +149,7 @@ export function ContainersPane({ bp, worktree, active }: Props) {
                   Inspect {selected.name}
                 </div>
                 <div className="text-xs text-muted-foreground">
-                  Local container — logs &amp; details for this worktree
+                  Local container — logs &amp; details for this copy
                 </div>
               </div>
               <div className="ml-auto flex items-center gap-2">

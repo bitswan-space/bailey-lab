@@ -22,21 +22,21 @@ var deploymentsCmd = &cobra.Command{
 
 var deploymentsListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List all deployments for the current worktree (running and not started)",
+	Short: "List all deployments for the current copy (running and not started)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		worktree, err := detectWorktreeOrFlag(worktreeFlag)
+		copy, err := detectCopyOrFlag(copyFlag)
 		if err != nil {
-			return fmt.Errorf("cannot detect worktree: %w", err)
+			return fmt.Errorf("cannot detect copy: %w", err)
 		}
 
 		var result []deployment
-		path := fmt.Sprintf("/deployments?worktree=%s", worktree)
+		path := fmt.Sprintf("/deployments?copy=%s", copy)
 		if err := agentRequestJSON("GET", path, nil, &result); err != nil {
 			return err
 		}
 
 		if len(result) == 0 {
-			fmt.Println("No automations found in this worktree.")
+			fmt.Println("No automations found in this copy.")
 			return nil
 		}
 
@@ -58,13 +58,13 @@ var deploymentsStartCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		deploymentID := args[0]
 
-		worktree, err := detectWorktreeOrFlag(worktreeFlag)
+		copy, err := detectCopyOrFlag(copyFlag)
 		if err != nil {
-			return fmt.Errorf("cannot detect worktree: %w", err)
+			return fmt.Errorf("cannot detect copy: %w", err)
 		}
 
 		body := map[string]string{"deployment_id": deploymentID}
-		path := fmt.Sprintf("/deployments/start?worktree=%s", worktree)
+		path := fmt.Sprintf("/deployments/start?copy=%s", copy)
 
 		var result map[string]interface{}
 		if err := agentRequestJSON("POST", path, body, &result); err != nil {
@@ -76,11 +76,11 @@ var deploymentsStartCmd = &cobra.Command{
 	},
 }
 
-var worktreeFlag string
+var copyFlag string
 
 func init() {
-	deploymentsListCmd.Flags().StringVar(&worktreeFlag, "worktree", "", "Worktree name (auto-detected from $PWD if omitted)")
-	deploymentsStartCmd.Flags().StringVar(&worktreeFlag, "worktree", "", "Worktree name (auto-detected from $PWD if omitted)")
+	deploymentsListCmd.Flags().StringVar(&copyFlag, "copy", "", "Copy name (auto-detected from $PWD if omitted)")
+	deploymentsStartCmd.Flags().StringVar(&copyFlag, "copy", "", "Copy name (auto-detected from $PWD if omitted)")
 	deploymentsCmd.AddCommand(deploymentsListCmd)
 	deploymentsCmd.AddCommand(deploymentsStartCmd)
 	deploymentsCmd.AddCommand(deploymentsExecCmd)

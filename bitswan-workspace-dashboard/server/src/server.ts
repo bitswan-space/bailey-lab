@@ -12,8 +12,8 @@ import { registerEventRoutes } from './routes/events.js';
 import { registerTemplateRoutes } from './routes/templates.js';
 import { registerCodingAgentRoutes } from './routes/coding-agent.js';
 import { registerSnapshotRoutes } from './routes/snapshots.js';
-import { registerWorktreeRoutes } from './routes/worktrees.js';
-import { registerWorktreeFilesRoutes } from './routes/worktree-files.js';
+import { registerCopyRoutes } from './routes/copies.js';
+import { registerCopyFilesRoutes } from './routes/copy-files.js';
 import { registerMeRoutes } from './routes/me.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -45,7 +45,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   }
 
   await app.register(fastifyWebsocket);
-  // Multipart for the file-upload endpoint in routes/worktree-files.ts.
+  // Multipart for the file-upload endpoint in routes/copy-files.ts.
   // Limit per-file size to 5 MiB and total per-request to 16 files; users
   // doing larger drops should be using the editor or shell anyway.
   await app.register(fastifyMultipart, {
@@ -59,8 +59,8 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerMeRoutes(app, { gitops });
   registerCodingAgentRoutes(app, { gitops });
   registerBusinessProcessRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
-  registerWorktreeRoutes(app, { gitops });
-  registerWorktreeFilesRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
+  registerCopyRoutes(app, { gitops });
+  registerCopyFilesRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
   registerTemplateRoutes(app, { gitops });
   registerAutomationRoutes(app, { gitops });
   registerSnapshotRoutes(app, { gitops });

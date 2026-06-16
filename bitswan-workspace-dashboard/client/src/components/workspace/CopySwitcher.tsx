@@ -16,45 +16,45 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover';
-import { NewWorktreeDialog } from '@/components/workspace/NewWorktreeDialog';
+import { NewCopyDialog } from '@/components/workspace/NewCopyDialog';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { api, isTransientNetworkError } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import type { Worktree } from '@/types';
+import type { Copy } from '@/types';
 
-interface WorktreeSwitcherProps {
-  // eslint-disable-next-line no-restricted-syntax -- null = no worktree selected
-  worktree: string | null;
-  worktrees: Worktree[];
+interface CopySwitcherProps {
+  // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
+  copy: string | null;
+  copies: Copy[];
   onSelect: (name: string) => void;
 }
 
 /**
- * Top-bar worktree switcher: flat worktree list with sync dots, plus
- * "New worktree" and "Delete worktree" (for the selected one) in the footer.
+ * Top-bar copy switcher: flat copy list with sync dots, plus
+ * "New copy" and "Delete copy" (for the selected one) in the footer.
  */
-export function WorktreeSwitcher({
-  worktree,
-  worktrees,
+export function CopySwitcher({
+  copy,
+  copies,
   onSelect,
-}: WorktreeSwitcherProps) {
+}: CopySwitcherProps) {
   const { automations: raw } = useAutomations();
   const [open, setOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  const active = worktrees.find((w) => w.name === worktree);
+  const active = copies.find((w) => w.name === copy);
 
   // Editor-parity flow (moved from the old WorktreeView): best-effort stop
-  // every live-dev deployment in the worktree before asking gitops to remove
+  // every live-dev deployment in the copy before asking gitops to remove
   // the directory — running containers pointing at a deleted bind-mount would
   // otherwise be stranded.
-  const runDeleteWorktree = useCallback(async () => {
-    if (!worktree) return;
+  const runDeleteCopy = useCallback(async () => {
+    if (!copy) return;
     setDeleting(true);
     try {
-      const wtPrefix = `copies/${worktree}/`;
+      const wtPrefix = `copies/${copy}/`;
       const liveDev = raw.filter((a) => {
         const rel = a.relative_path ?? '';
         return (
@@ -68,19 +68,19 @@ export function WorktreeSwitcher({
             : Promise.resolve(),
         ),
       );
-      const work = api.deleteWorktree(worktree);
+      const work = api.deleteCopy(copy);
       toast.promise(work, {
-        loading: `Deleting copy "${worktree}"…`,
-        success: `Copy "${worktree}" deleted`,
+        loading: `Deleting copy "${copy}"…`,
+        success: `Copy "${copy}" deleted`,
         error: (err: unknown) =>
           isTransientNetworkError(err)
-            ? `Copy "${worktree}" deleted`
+            ? `Copy "${copy}" deleted`
             : `Failed to delete copy: ${String(err)}`,
       });
       try {
         await work;
-        // The worktrees SSE snapshot drops the entry; the App-level effect
-        // re-selects the next available worktree (or clears).
+        // The copies SSE snapshot drops the entry; the App-level effect
+        // re-selects the next available copy (or clears).
       } catch {
         // toast handled the surfacing
       }
@@ -88,7 +88,7 @@ export function WorktreeSwitcher({
       setDeleting(false);
       setDeleteOpen(false);
     }
-  }, [raw, worktree]);
+  }, [raw, copy]);
 
   return (
     <>
@@ -131,13 +131,13 @@ export function WorktreeSwitcher({
         </PopoverTrigger>
         <PopoverContent align="end" sideOffset={6} className="w-80 p-0">
           <div className="max-h-72 space-y-0.5 overflow-auto p-1.5">
-            {worktrees.length === 0 ? (
+            {copies.length === 0 ? (
               <div className="px-2.5 py-2 text-xs text-muted-foreground">
                 Setting up your copy…
               </div>
             ) : (
-              worktrees.map((w) => {
-                const isActive = w.name === worktree;
+              copies.map((w) => {
+                const isActive = w.name === copy;
                 return (
                   <button
                     key={w.name}
@@ -190,29 +190,29 @@ export function WorktreeSwitcher({
             </button>
             <button
               type="button"
-              disabled={!worktree}
+              disabled={!copy}
               onClick={() => {
                 setOpen(false);
                 setDeleteOpen(true);
               }}
               className={cn(
                 'flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-xs font-medium transition-colors',
-                worktree
+                copy
                   ? 'text-destructive hover:bg-destructive/10'
                   : 'cursor-not-allowed text-muted-foreground/50',
               )}
             >
               <Trash2 className="size-3.5" aria-hidden />
-              Delete copy{worktree ? ` "${worktree}"` : ''}
+              Delete copy{copy ? ` "${copy}"` : ''}
             </button>
           </div>
         </PopoverContent>
       </Popover>
 
-      <NewWorktreeDialog
+      <NewCopyDialog
         open={newOpen}
         onOpenChange={setNewOpen}
-        existingNames={worktrees.map((w) => w.name)}
+        existingNames={copies.map((w) => w.name)}
         onCreated={(name) => onSelect(name)}
       />
 
@@ -223,11 +223,11 @@ export function WorktreeSwitcher({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Delete copy &quot;{worktree}&quot;?
+              Delete copy &quot;{copy}&quot;?
             </AlertDialogTitle>
             <AlertDialogDescription>
               This force-removes the copy and the{' '}
-              <code>{active?.branch ?? worktree}</code> branch, and drops the
+              <code>{active?.branch ?? copy}</code> branch, and drops the
               copy&apos;s postgres database. Any live-dev deployments under
               this copy will be stopped first. Uncommitted changes are{' '}
               <strong>lost</strong>.
@@ -241,7 +241,7 @@ export function WorktreeSwitcher({
                 // Block AlertDialog's default close-on-action so the dialog
                 // stays up while the async delete runs; we close it ourselves.
                 e.preventDefault();
-                void runDeleteWorktree();
+                void runDeleteCopy();
               }}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >

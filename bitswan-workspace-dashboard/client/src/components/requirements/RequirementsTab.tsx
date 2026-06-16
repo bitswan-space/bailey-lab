@@ -20,7 +20,7 @@ import { RequirementsTable } from './RequirementsTable';
 import type { Requirement, ReqStatus } from '@/lib/api';
 
 interface Props {
-  worktree: string;
+  copy: string;
   bp: string;
   /** Caller-controlled handler to flip the workspace to the Coding Agent tab. */
   onShowAgents: () => void;
@@ -31,19 +31,19 @@ type Filter = 'all' | ReqStatus;
 const FILTERS: Filter[] = ['all', 'pending', 'pass', 'fail', 'retest', 'proposed'];
 
 /**
- * Per-(worktree, bp) testable requirements view. Reads/writes the same
+ * Per-(copy, bp) testable requirements view. Reads/writes the same
  * `testable-requirements.toml` the agent CLI uses, so flipping a status
  * here is visible from `bitswan-coding-agent requirements list` and
  * vice-versa.
  */
-export function RequirementsTab({ worktree, bp, onShowAgents }: Props) {
+export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   const {
     requirements,
     loading,
     add,
     update,
     remove,
-  } = useRequirements(worktree, bp);
+  } = useRequirements(copy, bp);
   const {
     startSession,
     startRequirementSession,
@@ -126,8 +126,8 @@ export function RequirementsTab({ worktree, bp, onShowAgents }: Props) {
         // surfaces via agentStatus; the session will still attempt to spawn
       }
     }
-    const id = startRequirementSession(worktree, bp, r.id);
-    setSelectedFor({ worktree, bp }, id);
+    const id = startRequirementSession(copy, bp, r.id);
+    setSelectedFor({ copy, bp }, id);
     onShowAgents();
   };
 
@@ -142,7 +142,7 @@ export function RequirementsTab({ worktree, bp, onShowAgents }: Props) {
         // surfaces via agentStatus; the session will still attempt to spawn
       }
     }
-    startSession(worktree, bp, kind);
+    startSession(copy, bp, kind);
     onShowAgents();
   };
 

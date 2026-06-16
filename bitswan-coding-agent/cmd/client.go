@@ -23,36 +23,36 @@ func getAgentSecret() string {
 	return os.Getenv("BITSWAN_GITOPS_AGENT_SECRET")
 }
 
-// detectWorktree detects the current worktree name from the working directory.
-// It looks for the path pattern /workspace/worktrees/{name}/...
-func detectWorktree() (string, error) {
+// detectCopy detects the current copy name from the working directory.
+// It looks for the path pattern /workspace/copies/{name}/...
+func detectCopy() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	// Look for /workspace/worktrees/{name} in the path
-	prefix := "/workspace/worktrees/"
+	// Look for /workspace/copies/{name} in the path
+	prefix := "/workspace/copies/"
 	idx := strings.Index(cwd, prefix)
 	if idx == -1 {
-		return "", fmt.Errorf("not inside a worktree directory (expected path containing %s)", prefix)
+		return "", fmt.Errorf("not inside a copy directory (expected path containing %s)", prefix)
 	}
 
 	rest := cwd[idx+len(prefix):]
 	parts := strings.SplitN(rest, "/", 2)
 	if len(parts) == 0 || parts[0] == "" {
-		return "", fmt.Errorf("could not detect worktree name from path: %s", cwd)
+		return "", fmt.Errorf("could not detect copy name from path: %s", cwd)
 	}
 
 	return parts[0], nil
 }
 
-// detectWorktreeOrFlag returns the worktree name from the flag or auto-detects it.
-func detectWorktreeOrFlag(flag string) (string, error) {
+// detectCopyOrFlag returns the copy name from the flag or auto-detects it.
+func detectCopyOrFlag(flag string) (string, error) {
 	if flag != "" {
 		return flag, nil
 	}
-	return detectWorktree()
+	return detectCopy()
 }
 
 func agentRequest(method, path string, body interface{}) (*http.Response, error) {
@@ -106,7 +106,7 @@ func agentRequestJSON(method, path string, body interface{}, result interface{})
 	return nil
 }
 
-// requirementsFilePath returns the path to the requirements file for a worktree.
-func requirementsFilePath(worktree string) string {
-	return filepath.Join("/workspace/worktrees", worktree, ".requirements.json")
+// requirementsFilePath returns the path to the requirements file for a copy.
+func requirementsFilePath(copy string) string {
+	return filepath.Join("/workspace/copies", copy, ".requirements.json")
 }

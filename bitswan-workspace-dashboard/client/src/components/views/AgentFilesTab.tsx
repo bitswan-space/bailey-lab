@@ -9,7 +9,7 @@ import { useAgentSessions } from '@/hooks/useAgentSessions';
 import { cn } from '@/lib/utils';
 
 interface AgentFilesTabProps {
-  worktree: string;
+  copy: string;
   bp: string;
   branch: string;
 }
@@ -25,12 +25,12 @@ type Sub = 'chat' | 'files' | 'containers';
  *   - Chat  → the live coding-agent terminal. It renders in SessionProvider's
  *     portal layer over this pane, so it must stay mounted (we hide it, not
  *     unmount it, when Files is active) or the running terminal is torn down.
- *   - Files → the worktree file browser with a Diff toggle.
+ *   - Files → the copy file browser with a Diff toggle.
  *
  * (Plan, Notes, and the Playwright Browser pane from the wireframe are
  * intentionally not built.)
  */
-export function AgentFilesTab({ worktree, bp, branch: _branch }: AgentFilesTabProps) {
+export function AgentFilesTab({ copy, bp, branch: _branch }: AgentFilesTabProps) {
   const {
     sessions: allSessions,
     startSession,
@@ -41,46 +41,46 @@ export function AgentFilesTab({ worktree, bp, branch: _branch }: AgentFilesTabPr
     agentStatus,
     ensureAgent,
   } = useSessions();
-  const { sessions: past } = useAgentSessions(worktree, bp);
+  const { sessions: past } = useAgentSessions(copy, bp);
 
   const [sub, setSub] = useState<Sub>('chat');
   const [showDiff, setShowDiff] = useState(false);
   useEffect(() => {
     setShowDiff(false);
-  }, [sub, worktree]);
+  }, [sub, copy]);
 
   // Bind this BP as the active scope and hand the provider the Chat pane so
   // it can portal the terminal over it. Cleanup unbinds so terminals stay
   // alive (just hidden) when the user navigates away.
   const paneRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
-    setCurrentScope({ worktree, bp });
+    setCurrentScope({ copy, bp });
     return () => setCurrentScope(null);
-  }, [worktree, bp, setCurrentScope]);
+  }, [copy, bp, setCurrentScope]);
   useEffect(() => {
     setPaneEl(paneRef.current);
     return () => setPaneEl(null);
   }, [setPaneEl]);
 
   // The BP's live sessions. One agent per BP: the selected active session, or
-  // the first running one. Sync sessions are worktree-level and bp-less.
+  // the first running one. Sync sessions are copy-level and bp-less.
   const active = useMemo(
     () =>
       allSessions.filter(
-        (s) => !s.exited && s.worktree === worktree && (s.kind === 'sync' || s.bp === bp),
+        (s) => !s.exited && s.copy === copy && (s.kind === 'sync' || s.bp === bp),
       ),
-    [allSessions, worktree, bp],
+    [allSessions, copy, bp],
   );
-  const selectedId = selectedFor({ worktree, bp });
+  const selectedId = selectedFor({ copy, bp });
   const agent = active.find((s) => s.id === selectedId) ?? active[0];
 
   // Keep the scope selection pointed at the live agent so the provider shows
   // the right terminal.
   useEffect(() => {
     if (agent && agent.id !== selectedId) {
-      setSelectedFor({ worktree, bp }, agent.id);
+      setSelectedFor({ copy, bp }, agent.id);
     }
-  }, [agent, selectedId, setSelectedFor, worktree, bp]);
+  }, [agent, selectedId, setSelectedFor, copy, bp]);
 
   // A friendly name for the agent chip: the conversation title once the poll
   // has one, else a stable fallback.
@@ -98,8 +98,8 @@ export function AgentFilesTab({ worktree, bp, branch: _branch }: AgentFilesTabPr
         // ensureAgent surfaces failure via agentStatus.
       }
     }
-    startSession(worktree, bp);
-  }, [agentStatus, ensureAgent, startSession, worktree, bp]);
+    startSession(copy, bp);
+  }, [agentStatus, ensureAgent, startSession, copy, bp]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -183,13 +183,13 @@ export function AgentFilesTab({ worktree, bp, branch: _branch }: AgentFilesTabPr
       {/* Files pane — mounted alongside so toggling back to Chat doesn't
           remount (and re-fetch) the tree. */}
       <div className={cn('min-h-0 flex-1 overflow-hidden', sub !== 'files' && 'hidden')}>
-        {showDiff ? <DiffTab worktree={worktree} /> : <FilesTab worktree={worktree} bp={bp} />}
+        {showDiff ? <DiffTab copy={copy} /> : <FilesTab copy={copy} bp={bp} />}
       </div>
 
       {/* Containers pane — mounted only when active; its LogsPane opens an
           SSE stream we don't want running in the background. */}
       {sub === 'containers' && (
-        <ContainersPane bp={bp} worktree={worktree} active={sub === 'containers'} />
+        <ContainersPane bp={bp} copy={copy} active={sub === 'containers'} />
       )}
     </div>
   );

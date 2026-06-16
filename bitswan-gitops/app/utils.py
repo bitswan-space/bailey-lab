@@ -697,7 +697,7 @@ async def update_git(
     )
 
     # Resolve the current branch so we can push/pull explicitly even when no
-    # upstream is configured (e.g. on freshly-created worktree branches).
+    # upstream is configured (e.g. on freshly-created copy branches).
     current_branch = None
     if has_remote:
         stdout, _, rc = await call_git_command_with_output(
@@ -710,7 +710,7 @@ async def update_git(
     async with GitLockContext(timeout=10.0):
         # Pull latest changes if we have a remote and the remote tracking
         # branch exists. Skip the pull for branches that only live locally
-        # (e.g. new worktree branches that have never been pushed).
+        # (e.g. new copy branches that have never been pushed).
         if has_remote and current_branch:
             await call_git_command(
                 "git", "fetch", "origin", current_branch, cwd=bitswan_dir

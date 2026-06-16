@@ -29,7 +29,7 @@ const REPLAYABLE_EVENTS = new Set([
   'automations',
   'images',
   'processes',
-  'worktrees',
+  'copies',
 ]);
 
 export class GitopsClient {
@@ -60,13 +60,13 @@ export class GitopsClient {
   }
 
   /**
-   * Whether a copy (worktree) with this name is present in the latest cached
-   * `worktrees` snapshot. Lets `/api/me` skip a redundant create when the
+   * Whether a copy with this name is present in the latest cached
+   * `copies` snapshot. Lets `/api/me` skip a redundant create when the
    * user's copy already exists. Returns false when no snapshot has arrived yet
    * — the caller then attempts an idempotent create (gitops 409s if present).
    */
-  hasWorktree(name: string): boolean {
-    const wts = this.lastByEvent.get('worktrees');
+  hasCopy(name: string): boolean {
+    const wts = this.lastByEvent.get('copies');
     return (
       Array.isArray(wts) &&
       wts.some(
@@ -103,14 +103,14 @@ export class GitopsClient {
 
   /**
    * `POST /processes/` — create a new business-process directory in the
-   * main repo or a specific worktree. Gitops scaffolds `process.toml` +
+   * main repo or a specific copy. Gitops scaffolds `process.toml` +
    * `README.md`, refreshes its in-memory cache, and broadcasts the new
    * `processes` snapshot over SSE so the dashboard sidebar updates
    * automatically.
    */
   async createProcess(input: {
     name: string;
-    worktree?: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/processes/`, {
       method: 'POST',
@@ -157,7 +157,7 @@ export class GitopsClient {
     group_id?: string;
     name?: string;
     bp: string;
-    worktree?: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/automations/from-template`, {
       method: 'POST',
@@ -183,7 +183,7 @@ export class GitopsClient {
   async addFrontend(input: {
     bp: string;
     name: string;
-    worktree?: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     return this.postJson('/automations/frontend', input);
   }
@@ -196,7 +196,7 @@ export class GitopsClient {
     bp: string;
     name: string;
     type: string;
-    worktree?: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     return this.postJson('/automations/worker', input);
   }
@@ -208,7 +208,7 @@ export class GitopsClient {
     bp: string;
     old_name: string;
     new_name: string;
-    worktree?: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     return this.postJson('/automations/rename', input);
   }
@@ -236,15 +236,15 @@ export class GitopsClient {
   }
 
   /**
-   * `DELETE /worktrees/{name}` — remove a worktree and its branch. Gitops
-   * handles the full teardown (git worktree remove, branch -D, postgres
+   * `DELETE /copies/{name}` — remove a copy and its branch. Gitops
+   * handles the full teardown (clone removal, branch -D, postgres
    * cleanup, privileged rm fallback for files owned by container uids).
    */
-  async deleteWorktree(
+  async deleteCopy(
     name: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
-      `${this.baseUrl}/worktrees/${encodeURIComponent(name)}`,
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}`,
       {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${this.secret}` },
@@ -260,15 +260,15 @@ export class GitopsClient {
   }
 
   /**
-   * `GET /worktrees/{name}/status` — per-file change list for a worktree
+   * `GET /copies/{name}/status` — per-file change list for a copy
    * (path + A/M/D kind + +adds/-dels). Drives the dashboard's Diff +
    * Files tabs.
    */
-  async worktreeStatus(
+  async copyStatus(
     name: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
-      `${this.baseUrl}/worktrees/${encodeURIComponent(name)}/status`,
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/status`,
       { headers: { Authorization: `Bearer ${this.secret}` } },
     );
     let body: unknown = null;
@@ -281,17 +281,17 @@ export class GitopsClient {
   }
 
   /**
-   * `GET /worktrees/{name}/diff[?path=<rel>]` — unified diff of the
-   * worktree's working tree vs. its own HEAD. Optional path filter
+   * `GET /copies/{name}/diff[?path=<rel>]` — unified diff of the
+   * copy's working tree vs. its own HEAD. Optional path filter
    * narrows the diff to one file. Drives the dashboard's Diff tab.
    */
-  async worktreeDiff(
+  async copyDiff(
     name: string,
     path?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const qs = path ? `?path=${encodeURIComponent(path)}` : '';
     const r = await fetch(
-      `${this.baseUrl}/worktrees/${encodeURIComponent(name)}/diff${qs}`,
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/diff${qs}`,
       { headers: { Authorization: `Bearer ${this.secret}` } },
     );
     let body: unknown = null;
@@ -304,16 +304,16 @@ export class GitopsClient {
   }
 
   /**
-   * `POST /worktrees/create` — create a new git worktree under the
-   * workspace's `worktrees/` directory and check out a branch into it.
-   * The new worktree is picked up by gitops's filesystem watcher and
-   * surfaces in the `worktrees` SSE event without a follow-up REST call.
+   * `POST /copies/create` — create a new git clone under the
+   * workspace's `copies/` directory and check out a branch into it.
+   * The new copy is picked up by gitops's filesystem watcher and
+   * surfaces in the `copies` SSE event without a follow-up REST call.
    */
-  async createWorktree(input: {
+  async createCopy(input: {
     branch_name: string;
     base_branch?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
-    const r = await fetch(`${this.baseUrl}/worktrees/create`, {
+    const r = await fetch(`${this.baseUrl}/copies/create`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.secret}`,
@@ -332,14 +332,14 @@ export class GitopsClient {
 
   /**
    * `POST /automations/start-deploy` — workspace-bind-mount deploy. Body is
-   * `{ relative_path, stage, worktree? }`. Gitops resolves the source under
+   * `{ relative_path, stage, copy? }`. Gitops resolves the source under
    * `/workspace-repo`, merges `bitswan_lib`, computes the checksum, and
    * spawns the deploy in the background.
    */
   async startDeploy(input: {
     relative_path: string;
     stage: 'dev' | 'live-dev';
-    worktree?: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/automations/start-deploy`, {
       method: 'POST',
@@ -360,14 +360,14 @@ export class GitopsClient {
 
   /**
    * `POST /automations/deploy-bp` — deploy every automation under one business
-   * process as a single unit. Body is `{ bp, stage, worktree? }`. Gitops
+   * process as a single unit. Body is `{ bp, stage, copy? }`. Gitops
    * enumerates the BP's members, reserves them atomically, and runs one
    * batched deploy in the background under a single BP-level deploy task.
    */
   async deployBusinessProcess(input: {
     bp: string;
     stage: 'dev' | 'live-dev';
-    worktree?: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/automations/deploy-bp`, {
       method: 'POST',

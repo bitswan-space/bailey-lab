@@ -4,7 +4,7 @@ export interface AgentSession {
   id: string;
   timestamp: string;
   userEmail: string;
-  worktree: string;
+  copy: string;
   bp: string | null;
   castFile: string;
   logged: boolean;
@@ -25,12 +25,12 @@ interface Result {
 const POLL_MS = 5000;
 
 /**
- * Poll `/api/coding-agent/sessions?worktree=…&bp=…` every 5s, and on window
+ * Poll `/api/coding-agent/sessions?copy=…&bp=…` every 5s, and on window
  * focus. Returns the merged list and a `refresh()` for forced fetches —
  * SessionTerminal uses that when its WebSocket closes so the just-ended
  * session shows up immediately without waiting for the next tick.
  */
-export function useAgentSessions(worktree: string, bp: string): Result {
+export function useAgentSessions(copy: string, bp: string): Result {
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [loading, setLoading] = useState(true);
   const aliveRef = useRef(true);
@@ -38,7 +38,7 @@ export function useAgentSessions(worktree: string, bp: string): Result {
   const fetchNow = useCallback(async () => {
     try {
       const r = await fetch(
-        `/api/coding-agent/sessions?worktree=${encodeURIComponent(worktree)}&bp=${encodeURIComponent(bp)}`,
+        `/api/coding-agent/sessions?copy=${encodeURIComponent(copy)}&bp=${encodeURIComponent(bp)}`,
         { credentials: 'include', cache: 'no-store' },
       );
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -49,7 +49,7 @@ export function useAgentSessions(worktree: string, bp: string): Result {
     } finally {
       if (aliveRef.current) setLoading(false);
     }
-  }, [worktree, bp]);
+  }, [copy, bp]);
 
   useEffect(() => {
     aliveRef.current = true;

@@ -4,7 +4,7 @@ import { TopNav } from '@/components/workspace/TopNav';
 import {
   WorkspaceProvider,
   useProcesses,
-  useWorktrees,
+  useCopies,
 } from '@/components/workspace/WorkspaceProvider';
 import { SessionProvider } from '@/components/agents/SessionProvider';
 import { Toaster } from '@/components/ui/sonner';
@@ -25,12 +25,12 @@ export function App() {
   );
 }
 
-// Keys for sessionStorage. We persist the selected BP, worktree and tab so
+// Keys for sessionStorage. We persist the selected BP, copy and tab so
 // the user lands back on the same view after a page reload — chiefly the
 // cold-start reload that Vite HMR triggers in dev when gitops reconfigures
 // Traefik while spinning up the coding-agent container.
 const BP_STORAGE_KEY = 'dashboard.bpId';
-const WT_STORAGE_KEY = 'dashboard.worktree';
+const WT_STORAGE_KEY = 'dashboard.copy';
 const TAB_STORAGE_KEY = 'dashboard.flowTab';
 
 const FLOW_TABS: FlowTab[] = [
@@ -52,7 +52,7 @@ function readPersistedBpId(): string | null {
 }
 
 // eslint-disable-next-line no-restricted-syntax -- null = no persisted choice
-function readPersistedWorktree(): string | null {
+function readPersistedCopy(): string | null {
   try {
     return sessionStorage.getItem(WT_STORAGE_KEY);
   } catch {
@@ -72,17 +72,17 @@ function readPersistedTab(): FlowTab {
 
 function Shell() {
   const { processes } = useProcesses();
-  const { worktrees: worktreesSnapshot } = useWorktrees();
+  const { copies: copiesSnapshot } = useCopies();
   // Memoise the empty-array fallback so the array identity is stable.
   const allBps = useMemo(() => processes ?? [], [processes]);
-  const worktrees = useMemo(() => worktreesSnapshot ?? [], [worktreesSnapshot]);
+  const copies = useMemo(() => copiesSnapshot ?? [], [copiesSnapshot]);
   // eslint-disable-next-line no-restricted-syntax -- null = "not yet selected"
   const [bpId, setBpId] = useState<string | null>(readPersistedBpId);
-  // eslint-disable-next-line no-restricted-syntax -- null = no worktree selected
-  const [worktree, setWorktree] = useState<string | null>(readPersistedWorktree);
+  // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
+  const [copy, setCopy] = useState<string | null>(readPersistedCopy);
   const [tab, setTab] = useState<FlowTab>(readPersistedTab);
   // The logged-in user's own copy, created on first login by GET /api/me and
-  // auto-selected below. null until resolved; `myCopyResolved` gates worktree
+  // auto-selected below. null until resolved; `myCopyResolved` gates copy
   // auto-selection so we don't briefly land on someone else's copy first.
   // eslint-disable-next-line no-restricted-syntax -- null = not yet resolved
   const [myCopy, setMyCopy] = useState<string | null>(null);
@@ -97,7 +97,7 @@ function Shell() {
         if (!cancelled) setMyCopy(me?.copy ?? null);
       })
       .catch(() => {
-        // No identity / gitops down — fall back to default worktree selection.
+        // No identity / gitops down — fall back to default copy selection.
       })
       .finally(() => {
         if (!cancelled) setMyCopyResolved(true);
@@ -111,7 +111,7 @@ function Shell() {
   useEffect(() => {
     try {
       sessionStorage.removeItem('dashboard.scope');
-      sessionStorage.removeItem('dashboard.worktreeTab');
+      sessionStorage.removeItem('dashboard.copyTab');
     } catch {
       // ignore
     }
@@ -128,12 +128,12 @@ function Shell() {
   }, [bpId]);
   useEffect(() => {
     try {
-      if (worktree) sessionStorage.setItem(WT_STORAGE_KEY, worktree);
+      if (copy) sessionStorage.setItem(WT_STORAGE_KEY, copy);
       else sessionStorage.removeItem(WT_STORAGE_KEY);
     } catch {
       // ignore
     }
-  }, [worktree]);
+  }, [copy]);
   useEffect(() => {
     try {
       sessionStorage.setItem(TAB_STORAGE_KEY, tab);
@@ -142,7 +142,7 @@ function Shell() {
     }
   }, [tab]);
 
-  // The BP switcher lists every BP (main + worktrees; the processes feed is
+  // The BP switcher lists every BP (main + copies; the processes feed is
   // already deduped by name). Keep `bpId` consistent: when the current BP
   // disappears, fall back to the first available — or clear if none.
   useEffect(() => {
@@ -151,31 +151,31 @@ function Shell() {
     setBpId(allBps[0]?.id ?? null);
   }, [processes, allBps, bpId]);
 
-  // Keep `worktree` consistent with the snapshot, defaulting to the user's
+  // Keep `copy` consistent with the snapshot, defaulting to the user's
   // OWN copy. Waits until `myCopy` is resolved before auto-selecting so a new
   // user doesn't briefly land on another user's copy. An optimistic selection
   // (the current value, or the user's own copy while it's still being created
   // and not yet in the snapshot) survives until the SSE feed delivers it.
   useEffect(() => {
-    if (worktreesSnapshot === null) return;
+    if (copiesSnapshot === null) return;
     if (!myCopyResolved) return;
-    setWorktree((cur) => {
-      if (cur && (worktreesSnapshot.some((w) => w.name === cur) || cur === myCopy))
+    setCopy((cur) => {
+      if (cur && (copiesSnapshot.some((w) => w.name === cur) || cur === myCopy))
         return cur;
       // Prefer the user's own copy (even before it appears in the snapshot, so
       // first-login selection sticks); otherwise fall back to the first copy.
       if (myCopy) return myCopy;
-      return worktreesSnapshot[0]?.name ?? null;
+      return copiesSnapshot[0]?.name ?? null;
     });
-  }, [worktreesSnapshot, myCopy, myCopyResolved]);
+  }, [copiesSnapshot, myCopy, myCopyResolved]);
 
   const bp = useMemo(
     () => allBps.find((b) => b.id === bpId) ?? null,
     [allBps, bpId],
   );
   const wt = useMemo(
-    () => (worktree ? worktrees.find((w) => w.name === worktree) ?? null : null),
-    [worktree, worktrees],
+    () => (copy ? copies.find((w) => w.name === copy) ?? null : null),
+    [copy, copies],
   );
 
   const isLoading = processes === null;
@@ -186,9 +186,9 @@ function Shell() {
         bps={allBps}
         activeBpId={bpId}
         onSelectBp={setBpId}
-        worktree={worktree}
-        worktrees={worktrees}
-        onSelectWorktree={setWorktree}
+        copy={copy}
+        copies={copies}
+        onSelectCopy={setCopy}
         tab={tab}
         onTab={setTab}
       />

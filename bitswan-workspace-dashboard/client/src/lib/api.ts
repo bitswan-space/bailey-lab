@@ -110,7 +110,7 @@ export function isTransientNetworkError(err: unknown): boolean {
 export interface DeployRequest {
   relative_path: string;
   stage: 'dev' | 'live-dev';
-  worktree?: string;
+  copy?: string;
 }
 
 export interface DeployResponse {
@@ -125,7 +125,7 @@ export interface DeployBPRequest {
   /** Business-process directory name. */
   bp: string;
   stage: 'dev' | 'live-dev';
-  worktree?: string;
+  copy?: string;
 }
 
 export interface DeployBPResponse {
@@ -167,15 +167,15 @@ export interface PromoteRequest {
 
 export interface CreateBusinessProcessRequest {
   name: string;
-  worktree?: string;
+  copy?: string;
 }
 
 export interface CreateBusinessProcessResponse {
   id: string;
   name: string;
   in_main: boolean;
-  worktrees: string[];
-  has_worktrees: boolean;
+  copies: string[];
+  has_copies: boolean;
   /** Automations scaffolded from the default template group (auto-setup). */
   automations_created?: string[];
   /** Deploy task for the auto-deploy of the scaffolded automations. */
@@ -184,17 +184,17 @@ export interface CreateBusinessProcessResponse {
   setup_error?: string | null;
 }
 
-/** Gitops `POST /worktrees/create` response (plus auto-deploy fields). */
-export interface CreateWorktreeResponse {
+/** Gitops `POST /copies/create` response (plus auto-deploy fields). */
+export interface CreateCopyResponse {
   name: string;
   path: string;
   postgres_db?: string;
-  /** Deploy task for the auto live-dev of the worktree's automations. */
+  /** Deploy task for the auto live-dev of the copy's automations. */
   deploy_task_id?: string | null;
   deploy_error?: string | null;
 }
 
-export interface CreateWorktreeRequest {
+export interface CreateCopyRequest {
   branch_name: string;
   base_branch?: string;
 }
@@ -220,7 +220,7 @@ export interface CreateAutomationRequest {
   group_id?: string;
   name?: string;
   bp: string;
-  worktree?: string;
+  copy?: string;
 }
 
 export interface CreateAutomationResponse {
@@ -237,10 +237,10 @@ export const api = {
   createBusinessProcess: (body: CreateBusinessProcessRequest) =>
     postJson<CreateBusinessProcessResponse>('/api/business-processes', body),
 
-  createWorktree: (body: CreateWorktreeRequest) =>
-    postJson<CreateWorktreeResponse>('/api/worktrees', body),
-  deleteWorktree: (name: string) =>
-    deleteEmpty(`/api/worktrees/${encodeURIComponent(name)}`),
+  createCopy: (body: CreateCopyRequest) =>
+    postJson<CreateCopyResponse>('/api/copies', body),
+  deleteCopy: (name: string) =>
+    deleteEmpty(`/api/copies/${encodeURIComponent(name)}`),
 
   templates: () => getJson<TemplatesResponse>('/api/templates'),
   createAutomationFromTemplate: (body: CreateAutomationRequest) =>
@@ -269,38 +269,38 @@ export const api = {
   // Stage 1.5: scaffold frontends / worker containers into a BP directly from
   // the baked templates (no gallery picker). One frontend kind; workers by
   // type (only "go" today).
-  addFrontend: (body: { bp: string; name: string; worktree?: string }) =>
+  addFrontend: (body: { bp: string; name: string; copy?: string }) =>
     postJson<CreateAutomationResponse>('/api/automations/frontend', body),
   addWorker: (body: {
     bp: string;
     name: string;
     type: string;
-    worktree?: string;
+    copy?: string;
   }) => postJson<CreateAutomationResponse>('/api/automations/worker', body),
   renameAutomation: (body: {
     bp: string;
     old_name: string;
     new_name: string;
-    worktree?: string;
+    copy?: string;
   }) => postJson<CreateAutomationResponse>('/api/automations/rename', body),
 
   inspectAutomation: (id: string) =>
     getJson<DockerInspect[]>(`/api/automations/${encodeURIComponent(id)}/inspect`),
 
-  readme: async (bpId: string, worktree?: string): Promise<string | null> => {
-    const qs = worktree ? `?worktree=${encodeURIComponent(worktree)}` : '';
+  readme: async (bpId: string, copy?: string): Promise<string | null> => {
+    const qs = copy ? `?copy=${encodeURIComponent(copy)}` : '';
     const { content } = await getJson<{ content: string | null }>(
       `/api/business-processes/${encodeURIComponent(bpId)}/readme${qs}`,
     );
     return content;
   },
 
-  worktreeFiles: {
+  copyFiles: {
     tree: (name: string) =>
-      getJson<FileTreeNode[]>(`/api/worktrees/${encodeURIComponent(name)}/files`),
+      getJson<FileTreeNode[]>(`/api/copies/${encodeURIComponent(name)}/files`),
     content: (name: string, p: string) =>
       getJson<FileContentResponse>(
-        `/api/worktrees/${encodeURIComponent(name)}/files/content?path=${encodeURIComponent(p)}`,
+        `/api/copies/${encodeURIComponent(name)}/files/content?path=${encodeURIComponent(p)}`,
       ),
     save: (
       name: string,
@@ -308,31 +308,31 @@ export const api = {
       body: { content: string; etag?: FileEtag },
     ) =>
       putJsonAllow4xx<FileSaveResponse>(
-        `/api/worktrees/${encodeURIComponent(name)}/files/content?path=${encodeURIComponent(p)}`,
+        `/api/copies/${encodeURIComponent(name)}/files/content?path=${encodeURIComponent(p)}`,
         body,
       ),
     upload: (name: string, p: string, files: File[]) => {
       const form = new FormData();
       for (const f of files) form.append('files', f, f.name);
       return postMultipart<FileUploadResponse>(
-        `/api/worktrees/${encodeURIComponent(name)}/files/upload?path=${encodeURIComponent(p)}`,
+        `/api/copies/${encodeURIComponent(name)}/files/upload?path=${encodeURIComponent(p)}`,
         form,
       );
     },
     remove: (name: string, p: string) =>
       deleteEmpty(
-        `/api/worktrees/${encodeURIComponent(name)}/files?path=${encodeURIComponent(p)}`,
+        `/api/copies/${encodeURIComponent(name)}/files?path=${encodeURIComponent(p)}`,
       ),
     /** URL that streams a file's raw bytes (downloads, binary attachments). */
     rawUrl: (name: string, p: string) =>
-      `/api/worktrees/${encodeURIComponent(name)}/files/raw?path=${encodeURIComponent(p)}`,
+      `/api/copies/${encodeURIComponent(name)}/files/raw?path=${encodeURIComponent(p)}`,
     status: (name: string) =>
       getJson<{ changed: ChangedFile[] }>(
-        `/api/worktrees/${encodeURIComponent(name)}/status`,
+        `/api/copies/${encodeURIComponent(name)}/status`,
       ),
     diff: (name: string, p?: string) =>
       getJson<{ diff: string }>(
-        `/api/worktrees/${encodeURIComponent(name)}/diff${p ? `?path=${encodeURIComponent(p)}` : ''}`,
+        `/api/copies/${encodeURIComponent(name)}/diff${p ? `?path=${encodeURIComponent(p)}` : ''}`,
       ),
   },
 
@@ -391,28 +391,28 @@ export const api = {
   },
 
   requirements: {
-    list: (bpId: string, worktree: string) =>
+    list: (bpId: string, copy: string) =>
       getJson<Requirement[]>(
-        `/api/business-processes/${encodeURIComponent(bpId)}/requirements?worktree=${encodeURIComponent(worktree)}`,
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements?copy=${encodeURIComponent(copy)}`,
       ),
-    add: (bpId: string, worktree: string, body: AddRequirementRequest) =>
+    add: (bpId: string, copy: string, body: AddRequirementRequest) =>
       postJson<Requirement>(
-        `/api/business-processes/${encodeURIComponent(bpId)}/requirements?worktree=${encodeURIComponent(worktree)}`,
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements?copy=${encodeURIComponent(copy)}`,
         body,
       ),
     update: (
       bpId: string,
-      worktree: string,
+      copy: string,
       id: string,
       patch: UpdateRequirementRequest,
     ) =>
       patchJson<Requirement>(
-        `/api/business-processes/${encodeURIComponent(bpId)}/requirements/${encodeURIComponent(id)}?worktree=${encodeURIComponent(worktree)}`,
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements/${encodeURIComponent(id)}?copy=${encodeURIComponent(copy)}`,
         patch,
       ),
-    remove: (bpId: string, worktree: string, id: string) =>
+    remove: (bpId: string, copy: string, id: string) =>
       deleteEmpty(
-        `/api/business-processes/${encodeURIComponent(bpId)}/requirements/${encodeURIComponent(id)}?worktree=${encodeURIComponent(worktree)}`,
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements/${encodeURIComponent(id)}?copy=${encodeURIComponent(copy)}`,
       ),
   },
 };
@@ -420,7 +420,7 @@ export const api = {
 export interface FileTreeNode {
   name: string;
   kind: 'file' | 'folder';
-  /** Workspace-relative path (without the `worktrees/<name>/` prefix). */
+  /** Workspace-relative path (without the `copies/<name>/` prefix). */
   path: string;
   children?: FileTreeNode[];
 }

@@ -10,19 +10,19 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { BpSwitcher } from '@/components/workspace/BpSwitcher';
-import { WorktreeSwitcher } from '@/components/workspace/WorktreeSwitcher';
+import { CopySwitcher } from '@/components/workspace/CopySwitcher';
 import { cn } from '@/lib/utils';
-import type { BusinessProcess, FlowTab, Worktree } from '@/types';
+import type { BusinessProcess, FlowTab, Copy } from '@/types';
 
 interface TopNavProps {
   bps: BusinessProcess[];
   // eslint-disable-next-line no-restricted-syntax -- null = no BP selected yet
   activeBpId: string | null;
   onSelectBp: (id: string) => void;
-  // eslint-disable-next-line no-restricted-syntax -- null = no worktree selected
-  worktree: string | null;
-  worktrees: Worktree[];
-  onSelectWorktree: (name: string) => void;
+  // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
+  copy: string | null;
+  copies: Copy[];
+  onSelectCopy: (name: string) => void;
   tab: FlowTab;
   onTab: (t: FlowTab) => void;
 }
@@ -31,34 +31,34 @@ const FLOW_STEPS: {
   id: FlowTab;
   label: string;
   Icon: LucideIcon;
-  /** Requires a selected worktree to be usable. */
-  needsWorktree: boolean;
+  /** Requires a selected copy to be usable. */
+  needsCopy: boolean;
 }[] = [
-  { id: 'description', label: 'Description', Icon: FileText, needsWorktree: false },
-  { id: 'agent', label: 'Coding Agent', Icon: Bot, needsWorktree: true },
+  { id: 'description', label: 'Description', Icon: FileText, needsCopy: false },
+  { id: 'agent', label: 'Coding Agent', Icon: Bot, needsCopy: true },
   {
     id: 'requirements',
     label: 'Requirements & tests',
     Icon: CheckSquare,
-    needsWorktree: true,
+    needsCopy: true,
   },
-  { id: 'sync-deploy', label: 'Sync & Deploy', Icon: Rocket, needsWorktree: true },
-  { id: 'deployments', label: 'Deployments', Icon: Server, needsWorktree: false },
-  { id: 'snapshots', label: 'Snapshots', Icon: Camera, needsWorktree: false },
+  { id: 'sync-deploy', label: 'Sync & Deploy', Icon: Rocket, needsCopy: true },
+  { id: 'deployments', label: 'Deployments', Icon: Server, needsCopy: false },
+  { id: 'snapshots', label: 'Snapshots', Icon: Camera, needsCopy: false },
 ];
 
 /**
  * The single top bar of the redesigned shell:
  * BP switcher | Description › Coding Agent ↻ Requirements & tests ›
- * Sync & Deploy › Deployments | worktree switcher.
+ * Sync & Deploy › Deployments | copy switcher.
  */
 export function TopNav({
   bps,
   activeBpId,
   onSelectBp,
-  worktree,
-  worktrees,
-  onSelectWorktree,
+  copy,
+  copies,
+  onSelectCopy,
   tab,
   onTab,
 }: TopNavProps) {
@@ -74,7 +74,7 @@ export function TopNav({
           onSelectBp(name);
           onTab('description');
         }}
-        worktree={worktree}
+        copy={copy}
       />
 
       <div className="mx-3 h-6 w-px shrink-0 bg-border" aria-hidden />
@@ -82,7 +82,7 @@ export function TopNav({
       <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
         {FLOW_STEPS.map((step, i) => {
           const active = tab === step.id;
-          const disabled = step.needsWorktree && worktree === null;
+          const disabled = step.needsCopy && copy === null;
           return (
             <div key={step.id} className="flex shrink-0 items-center gap-1">
               {i > 0 &&
@@ -120,10 +120,10 @@ export function TopNav({
       </div>
 
       <div className="ml-auto shrink-0 pl-3">
-        <WorktreeSwitcher
-          worktree={worktree}
-          worktrees={worktrees}
-          onSelect={onSelectWorktree}
+        <CopySwitcher
+          copy={copy}
+          copies={copies}
+          onSelect={onSelectCopy}
         />
       </div>
     </div>

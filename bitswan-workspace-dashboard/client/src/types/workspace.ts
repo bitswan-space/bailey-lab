@@ -1,7 +1,7 @@
-// Workspace-shaped types: business processes, worktrees, and the
+// Workspace-shaped types: business processes, copies, and the
 // top-bar flow tab.
-// Worktree shape mirrors gitops's GET /worktrees/ (see
-// bitswan-gitops/app/routes/worktrees.py — list_worktrees).
+// Copy shape mirrors gitops's GET /copies/ (see
+// bitswan-gitops/app/routes/copies.py — list_copies).
 
 export interface BusinessProcess {
   /** Directory name — also the value used in `/api/business-processes/:id/readme`. */
@@ -10,13 +10,13 @@ export interface BusinessProcess {
   path: string;
   /** True when the BP exists in the main repo. */
   inMain: boolean;
-  /** Worktrees that also carry this BP (by directory name). */
-  worktrees: string[];
-  /** Convenience: `worktrees.length > 0`. */
-  hasWorktrees: boolean;
+  /** Copies that also carry this BP (by directory name). */
+  copies: string[];
+  /** Convenience: `copies.length > 0`. */
+  hasCopies: boolean;
 }
 
-export interface Worktree {
+export interface Copy {
   name: string;
   branch: string;
   commit_hash: string;
@@ -26,8 +26,8 @@ export interface Worktree {
 }
 
 /** The top-bar flow tabs. Description, Deployments and Snapshots work
- *  without a worktree (both are always main-scoped); the other three follow
- *  the selected worktree. */
+ *  without a copy (both are always main-scoped); the other three follow
+ *  the selected copy. */
 export type FlowTab =
   | 'description'
   | 'agent'

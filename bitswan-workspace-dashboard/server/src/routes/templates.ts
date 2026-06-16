@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { isValidBpId, isValidWorktreeName } from '../services/workspace.js';
+import { isValidBpId, isValidCopyName } from '../services/workspace.js';
 import type { GitopsClient } from '../services/gitops.js';
 
 export interface TemplateRoutesOptions {
@@ -41,19 +41,19 @@ export function registerTemplateRoutes(
       group_id?: string;
       name?: string;
       bp?: string;
-      worktree?: string;
+      copy?: string;
     };
   }>('/api/automations/from-template', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) {
       return reply.code(503).send({ error: 'gitops not configured' });
     }
-    const { template_id, group_id, name, bp, worktree } = req.body ?? {};
+    const { template_id, group_id, name, bp, copy } = req.body ?? {};
     if (!bp || !isValidBpId(bp)) {
       return reply.code(400).send({ error: 'invalid bp' });
     }
-    if (worktree !== undefined && !isValidWorktreeName(worktree)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (copy !== undefined && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     if (!template_id && !group_id) {
       return reply.code(400).send({ error: 'template_id or group_id required' });
@@ -69,7 +69,7 @@ export function registerTemplateRoutes(
         ...(group_id ? { group_id } : {}),
         ...(name !== undefined ? { name } : {}),
         bp,
-        ...(worktree ? { worktree } : {}),
+        ...(copy ? { copy } : {}),
       });
       if (!r.ok) {
         return reply
@@ -110,51 +110,51 @@ export function registerTemplateRoutes(
   };
 
   app.post<{
-    Body: { bp?: string; name?: string; worktree?: string };
+    Body: { bp?: string; name?: string; copy?: string };
   }>('/api/automations/frontend', async (req, reply) => {
-    const { bp, name, worktree } = req.body ?? {};
+    const { bp, name, copy } = req.body ?? {};
     if (!bp || !isValidBpId(bp)) return reply.code(400).send({ error: 'invalid bp' });
     if (!name) return reply.code(400).send({ error: 'name required' });
-    if (worktree !== undefined && !isValidWorktreeName(worktree)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (copy !== undefined && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     return relay(reply, 'add-frontend', () =>
-      gitops!.addFrontend({ bp, name, ...(worktree ? { worktree } : {}) }),
+      gitops!.addFrontend({ bp, name, ...(copy ? { copy } : {}) }),
     );
   });
 
   app.post<{
-    Body: { bp?: string; name?: string; type?: string; worktree?: string };
+    Body: { bp?: string; name?: string; type?: string; copy?: string };
   }>('/api/automations/worker', async (req, reply) => {
-    const { bp, name, type, worktree } = req.body ?? {};
+    const { bp, name, type, copy } = req.body ?? {};
     if (!bp || !isValidBpId(bp)) return reply.code(400).send({ error: 'invalid bp' });
     if (!name) return reply.code(400).send({ error: 'name required' });
     if (!type) return reply.code(400).send({ error: 'type required' });
-    if (worktree !== undefined && !isValidWorktreeName(worktree)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (copy !== undefined && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     return relay(reply, 'add-worker', () =>
-      gitops!.addWorker({ bp, name, type, ...(worktree ? { worktree } : {}) }),
+      gitops!.addWorker({ bp, name, type, ...(copy ? { copy } : {}) }),
     );
   });
 
   app.post<{
-    Body: { bp?: string; old_name?: string; new_name?: string; worktree?: string };
+    Body: { bp?: string; old_name?: string; new_name?: string; copy?: string };
   }>('/api/automations/rename', async (req, reply) => {
-    const { bp, old_name, new_name, worktree } = req.body ?? {};
+    const { bp, old_name, new_name, copy } = req.body ?? {};
     if (!bp || !isValidBpId(bp)) return reply.code(400).send({ error: 'invalid bp' });
     if (!old_name || !new_name) {
       return reply.code(400).send({ error: 'old_name and new_name required' });
     }
-    if (worktree !== undefined && !isValidWorktreeName(worktree)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (copy !== undefined && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     return relay(reply, 'rename-automation', () =>
       gitops!.renameAutomation({
         bp,
         old_name,
         new_name,
-        ...(worktree ? { worktree } : {}),
+        ...(copy ? { copy } : {}),
       }),
     );
   });

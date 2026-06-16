@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { spawnPty } from '../services/pty.js';
 import { handleTerminalConnection } from '../services/terminal-session.js';
 import type { GitopsClient } from '../services/gitops.js';
-import { isValidBpId, isValidWorktreeName } from '../services/workspace.js';
+import { isValidBpId, isValidCopyName } from '../services/workspace.js';
 import { castStream, findSessionOwnerEmail, listSessions } from '../services/agent-sessions.js';
 import {
   BUILD_AUTOMATION_PROMPT,
@@ -82,36 +82,36 @@ type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automati
  */
 function defaultSessionName(opts: {
   kind: SessionKind;
-  worktree: string;
+  copy: string;
   bp?: string;
   requirement?: Requirement;
 }): string {
   switch (opts.kind) {
     case 'sync':
-      return `Sync · ${opts.worktree}`;
+      return `Sync · ${opts.copy}`;
     case 'requirement': {
       const id = opts.requirement?.id ?? 'requirement';
       return opts.bp
-        ? `Req ${id} · ${opts.worktree}/${opts.bp}`
-        : `Req ${id} · ${opts.worktree}`;
+        ? `Req ${id} · ${opts.copy}/${opts.bp}`
+        : `Req ${id} · ${opts.copy}`;
     }
     case 'write-tests':
       return opts.bp
-        ? `Write tests · ${opts.worktree}/${opts.bp}`
-        : `Write tests · ${opts.worktree}`;
+        ? `Write tests · ${opts.copy}/${opts.bp}`
+        : `Write tests · ${opts.copy}`;
     case 'automation':
       return opts.bp
-        ? `Build automation · ${opts.worktree}/${opts.bp}`
-        : `Build automation · ${opts.worktree}`;
+        ? `Build automation · ${opts.copy}/${opts.bp}`
+        : `Build automation · ${opts.copy}`;
     default:
       return opts.bp
-        ? `Claude · ${opts.worktree}/${opts.bp}`
-        : `Claude · ${opts.worktree}`;
+        ? `Claude · ${opts.copy}/${opts.bp}`
+        : `Claude · ${opts.copy}`;
   }
 }
 
 function buildAutoCmd(opts: {
-  worktree: string;
+  copy: string;
   bp?: string;
   sessionId: string;
   resume: boolean;
@@ -119,12 +119,12 @@ function buildAutoCmd(opts: {
   /** Requirement to focus the agent on. Required when kind === 'requirement'. */
   requirement?: Requirement;
 }): string {
-  // Sync sessions cd to the worktree root (no BP); regular claude and
+  // Sync sessions cd to the copy root (no BP); regular claude and
   // requirement sessions cd into the BP directory.
   const cd =
     opts.kind === 'sync'
-      ? `/workspace/worktrees/${opts.worktree}`
-      : `/workspace/worktrees/${opts.worktree}/${opts.bp}`;
+      ? `/workspace/copies/${opts.copy}`
+      : `/workspace/copies/${opts.copy}/${opts.bp}`;
   let prompt: string;
   if (opts.kind === 'sync') prompt = SYNC_PROMPT;
   else if (opts.kind === 'requirement' && opts.requirement) {
@@ -147,7 +147,7 @@ function buildAutoCmd(opts: {
   const safeName = bashSingleQuoteEscape(
     defaultSessionName({
       kind: opts.kind,
-      worktree: opts.worktree,
+      copy: opts.copy,
       ...(opts.bp ? { bp: opts.bp } : {}),
       ...(opts.requirement ? { requirement: opts.requirement } : {}),
     }),
@@ -163,7 +163,7 @@ function buildAutoCmd(opts: {
   // directory (in `projects[<cwd>].hasTrustDialogAccepted`) and is NOT
   // skipped by --dangerously-skip-permissions in an interactive (TTY)
   // session, so without this the agent hangs on the trust prompt the first
-  // time it enters any worktree/BP folder. Setting the global onboarding
+  // time it enters any copy/BP folder. Setting the global onboarding
   // flags too makes a freshly-provisioned coding-agent container start
   // straight into the session (no theme picker / welcome flow). JS uses only
   // double quotes so the whole node -e stays safely single-quoted for the
@@ -223,11 +223,11 @@ async function waitForAgentDns(host: string, attempts = 15, delayMs = 1000): Pro
 /**
  * WebSocket + REST surface for the dashboard's Agents tab.
  *
- *   - `/ws/coding-agent?worktree=…&bp=…` opens an SSH session to the
- *     `${WS}-coding-agent` container, scoped to a (worktree, bp) pair, and
+ *   - `/ws/coding-agent?copy=…&bp=…` opens an SSH session to the
+ *     `${WS}-coding-agent` container, scoped to a (copy, bp) pair, and
  *     always runs Claude. The wrapper inside the agent container handles
  *     cd + asciinema + the launched command.
- *   - `/api/coding-agent/sessions` lists past sessions for one (worktree, bp).
+ *   - `/api/coding-agent/sessions` lists past sessions for one (copy, bp).
  *   - `/api/coding-agent/sessions/:cast/content` streams a .cast file for
  *     asciinema playback.
  */
@@ -237,7 +237,7 @@ export function registerCodingAgentRoutes(
 ): void {
   app.get<{
     Querystring: {
-      worktree?: string;
+      copy?: string;
       bp?: string;
       session_id?: string;
       resume?: string;
@@ -245,10 +245,10 @@ export function registerCodingAgentRoutes(
       requirement_id?: string;
     };
   }>('/ws/coding-agent', { websocket: true }, async (socket, req) => {
-    const { worktree, bp, session_id, resume, kind: kindRaw, requirement_id } = req.query;
-    if (!worktree || !isValidWorktreeName(worktree)) {
-      socket.send(JSON.stringify({ type: 'error', message: 'invalid worktree' }));
-      socket.close(1008, 'invalid worktree');
+    const { copy, bp, session_id, resume, kind: kindRaw, requirement_id } = req.query;
+    if (!copy || !isValidCopyName(copy)) {
+      socket.send(JSON.stringify({ type: 'error', message: 'invalid copy' }));
+      socket.close(1008, 'invalid copy');
       return;
     }
     const kind: SessionKind =
@@ -259,7 +259,7 @@ export function registerCodingAgentRoutes(
         ? kindRaw
         : 'claude';
     // `bp` is required for regular claude sessions and requirement sessions;
-    // optional (and ignored) for worktree-level sync sessions.
+    // optional (and ignored) for copy-level sync sessions.
     if (kind !== 'sync') {
       if (!bp || !isValidBpId(bp)) {
         socket.send(JSON.stringify({ type: 'error', message: 'invalid bp' }));
@@ -282,7 +282,7 @@ export function registerCodingAgentRoutes(
       try {
         const reqs = await listRequirements({
           workspaceRoot: process.env.WORKSPACE_ROOT ?? '/workspace/workspace',
-          worktree,
+          copy,
           bp: bp!,
         });
         requirement = reqs.find((r) => r.id === requirement_id);
@@ -326,7 +326,7 @@ export function registerCodingAgentRoutes(
     const email = emailFromRequest(req);
 
     const autoCmd = buildAutoCmd({
-      worktree,
+      copy,
       ...(kind !== 'sync' && bp ? { bp } : {}),
       sessionId: claudeSessionId,
       resume: isResume,
@@ -378,7 +378,7 @@ export function registerCodingAgentRoutes(
     }
 
     // Block resuming another user's session. The session list returns every
-    // session for the (worktree, bp), so a malicious user could grab another
+    // session for the (copy, bp), so a malicious user could grab another
     // user's claude session UUID and pass it as `resume`. Without this gate
     // they'd attach to the still-running dtach socket
     // (/tmp/.claude-dtach-<UUID>.sock) and end up driving Claude under the
@@ -463,9 +463,9 @@ export function registerCodingAgentRoutes(
         extraEnv: {
           SSH_USER_EMAIL: email,
           SSH_LOGGED: 'true',
-          SSH_WORKTREE: worktree,
+          SSH_WORKTREE: copy,
           // SSH_BP is only set for BP-scoped sessions. Empty/missing tells
-          // the wrapper to cd to the worktree root (which is what we want
+          // the wrapper to cd to the copy root (which is what we want
           // for sync sessions).
           ...(kind !== 'sync' && bp ? { SSH_BP: bp } : {}),
           SSH_CLAUDE_SESSION_ID: claudeSessionId,
@@ -485,22 +485,22 @@ export function registerCodingAgentRoutes(
   });
 
   app.get<{
-    Querystring: { worktree?: string; bp?: string };
+    Querystring: { copy?: string; bp?: string };
   }>('/api/coding-agent/sessions', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    const { worktree, bp } = req.query;
-    if (!worktree || !isValidWorktreeName(worktree)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    const { copy, bp } = req.query;
+    if (!copy || !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     if (!bp || !isValidBpId(bp)) {
       return reply.code(400).send({ error: 'invalid bp' });
     }
     const userEmail = emailFromRequest(req);
     try {
-      const sessions = await listSessions({ worktree, bp, userEmail });
+      const sessions = await listSessions({ copy, bp, userEmail });
       return sessions;
     } catch (err) {
-      app.log.warn({ err, worktree, bp }, 'list sessions failed');
+      app.log.warn({ err, copy, bp }, 'list sessions failed');
       return reply.code(500).send({ error: 'list failed' });
     }
   });

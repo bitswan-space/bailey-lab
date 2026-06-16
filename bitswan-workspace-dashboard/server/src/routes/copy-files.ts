@@ -1,43 +1,43 @@
 import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { isValidWorktreeName } from '../services/workspace.js';
+import { isValidCopyName } from '../services/workspace.js';
 import {
-  deleteWorktreeFile,
-  ensureWorktreeDir,
-  readWorktreeFile,
-  readWorktreeTree,
-  statWorktreeFile,
-  writeWorktreeFile,
+  deleteCopyFile,
+  ensureCopyDir,
+  readCopyFile,
+  readCopyTree,
+  statCopyFile,
+  writeCopyFile,
   type FileEtag,
-} from '../services/worktree-files.js';
+} from '../services/copy-files.js';
 import type { GitopsClient } from '../services/gitops.js';
 
-export interface WorktreeFilesRoutesOptions {
+export interface CopyFilesRoutesOptions {
   workspaceRoot: string;
   gitops: GitopsClient | null;
 }
 
 /**
- * Read-only worktree introspection for the dashboard's Files / Diff
+ * Read-only copy introspection for the dashboard's Files / Diff
  * tabs. File-tree + content come straight from the bind-mounted
  * workspace; status + diff proxy to gitops (which runs git inside the
  * repo).
  */
-export function registerWorktreeFilesRoutes(
+export function registerCopyFilesRoutes(
   app: FastifyInstance,
-  { workspaceRoot, gitops }: WorktreeFilesRoutesOptions,
+  { workspaceRoot, gitops }: CopyFilesRoutesOptions,
 ): void {
   app.get<{ Params: { name: string } }>(
-    '/api/worktrees/:name/files',
+    '/api/copies/:name/files',
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
-      if (!isValidWorktreeName(req.params.name)) {
-        return reply.code(400).send({ error: 'invalid worktree' });
+      if (!isValidCopyName(req.params.name)) {
+        return reply.code(400).send({ error: 'invalid copy' });
       }
       try {
-        return await readWorktreeTree({
-          worktree: req.params.name,
+        return await readCopyTree({
+          copy: req.params.name,
           workspaceRoot,
         });
       } catch (err) {
@@ -50,18 +50,18 @@ export function registerWorktreeFilesRoutes(
   app.get<{
     Params: { name: string };
     Querystring: { path?: string };
-  }>('/api/worktrees/:name/files/content', async (req, reply) => {
+  }>('/api/copies/:name/files/content', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    if (!isValidWorktreeName(req.params.name)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (!isValidCopyName(req.params.name)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     const p = req.query.path;
     if (!p || typeof p !== 'string') {
       return reply.code(400).send({ error: 'path is required' });
     }
     try {
-      const r = await readWorktreeFile({
-        worktree: req.params.name,
+      const r = await readCopyFile({
+        copy: req.params.name,
         path: p,
         workspaceRoot,
       });
@@ -81,10 +81,10 @@ export function registerWorktreeFilesRoutes(
     Params: { name: string };
     Querystring: { path?: string };
     Body: { content?: unknown; etag?: unknown };
-  }>('/api/worktrees/:name/files/content', async (req, reply) => {
+  }>('/api/copies/:name/files/content', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    if (!isValidWorktreeName(req.params.name)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (!isValidCopyName(req.params.name)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     const p = req.query.path;
     if (!p || typeof p !== 'string') {
@@ -105,8 +105,8 @@ export function registerWorktreeFilesRoutes(
       expectedEtag = { mtimeMs: e.mtimeMs, size: e.size };
     }
     try {
-      const r = await writeWorktreeFile({
-        worktree: req.params.name,
+      const r = await writeCopyFile({
+        copy: req.params.name,
         path: p,
         workspaceRoot,
         content: body.content,
@@ -134,16 +134,16 @@ export function registerWorktreeFilesRoutes(
   app.post<{
     Params: { name: string };
     Querystring: { path?: string };
-  }>('/api/worktrees/:name/files/upload', async (req, reply) => {
+  }>('/api/copies/:name/files/upload', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    if (!isValidWorktreeName(req.params.name)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (!isValidCopyName(req.params.name)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     const targetRel = req.query.path ?? '';
     let targetDir: string;
     try {
-      targetDir = await ensureWorktreeDir({
-        worktree: req.params.name,
+      targetDir = await ensureCopyDir({
+        copy: req.params.name,
         path: targetRel,
         workspaceRoot,
       });
@@ -187,18 +187,18 @@ export function registerWorktreeFilesRoutes(
   app.delete<{
     Params: { name: string };
     Querystring: { path?: string };
-  }>('/api/worktrees/:name/files', async (req, reply) => {
+  }>('/api/copies/:name/files', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    if (!isValidWorktreeName(req.params.name)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (!isValidCopyName(req.params.name)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     const p = req.query.path;
     if (!p || typeof p !== 'string') {
       return reply.code(400).send({ error: 'path is required' });
     }
     try {
-      const r = await deleteWorktreeFile({
-        worktree: req.params.name,
+      const r = await deleteCopyFile({
+        copy: req.params.name,
         path: p,
         workspaceRoot,
       });
@@ -213,18 +213,18 @@ export function registerWorktreeFilesRoutes(
   app.get<{
     Params: { name: string };
     Querystring: { path?: string };
-  }>('/api/worktrees/:name/files/raw', async (req, reply) => {
+  }>('/api/copies/:name/files/raw', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    if (!isValidWorktreeName(req.params.name)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (!isValidCopyName(req.params.name)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     const p = req.query.path;
     if (!p || typeof p !== 'string') {
       return reply.code(400).send({ error: 'path is required' });
     }
     try {
-      const r = await statWorktreeFile({
-        worktree: req.params.name,
+      const r = await statCopyFile({
+        copy: req.params.name,
         path: p,
         workspaceRoot,
       });
@@ -248,17 +248,17 @@ export function registerWorktreeFilesRoutes(
   });
 
   app.get<{ Params: { name: string } }>(
-    '/api/worktrees/:name/status',
+    '/api/copies/:name/status',
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
-      if (!isValidWorktreeName(req.params.name)) {
-        return reply.code(400).send({ error: 'invalid worktree' });
+      if (!isValidCopyName(req.params.name)) {
+        return reply.code(400).send({ error: 'invalid copy' });
       }
       if (!gitops) {
         return reply.code(503).send({ error: 'gitops not configured' });
       }
       try {
-        const r = await gitops.worktreeStatus(req.params.name);
+        const r = await gitops.copyStatus(req.params.name);
         if (!r.ok) {
           return reply
             .code(r.status >= 400 && r.status < 500 ? r.status : 502)
@@ -275,16 +275,16 @@ export function registerWorktreeFilesRoutes(
   app.get<{
     Params: { name: string };
     Querystring: { path?: string };
-  }>('/api/worktrees/:name/diff', async (req, reply) => {
+  }>('/api/copies/:name/diff', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    if (!isValidWorktreeName(req.params.name)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (!isValidCopyName(req.params.name)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     if (!gitops) {
       return reply.code(503).send({ error: 'gitops not configured' });
     }
     try {
-      const r = await gitops.worktreeDiff(req.params.name, req.query.path);
+      const r = await gitops.copyDiff(req.params.name, req.query.path);
       if (!r.ok) {
         return reply
           .code(r.status >= 400 && r.status < 500 ? r.status : 502)

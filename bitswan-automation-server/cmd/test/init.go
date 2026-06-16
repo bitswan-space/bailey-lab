@@ -349,14 +349,14 @@ func makeHostnameLabel(workspaceName, automationName, context, stage string) str
 // (app/utils.py) + add_workspace_route_to_ingress, which build the host as
 // "<make_hostname_label(...)>.<BITSWAN_GITOPS_DOMAIN>".
 //
-// The inputs for a main (non-worktree) BP deploy are fixed by gitops itself:
+// The inputs for a main (non-copy) BP deploy are fixed by gitops itself:
 //   - workspace   = the test workspace name (capped/sanitized below)
 //   - automation  = "frontend" (the exposed automation in the default
 //     business-process template group)
 //   - context     = the sanitized BP name (scan_workspace_sources sets
-//     context = bp_name for non-worktree scans), i.e. sanitize("test")
+//     context = bp_name for non-copy scans), i.e. sanitize("test")
 //   - stage       = "dev" (routes/processes.py: stage = "dev" when there is no
-//     worktree; "live-dev" only for worktree deploys)
+//     copy; "live-dev" only for copy deploys)
 //
 // The gitops domain is BITSWAN_GITOPS_DOMAIN, which the daemon sets to the
 // workspace's domain (dockercompose.go) and which equals the host of the gitops
@@ -585,12 +585,12 @@ func testFrontendEndpoint(endpointURL, workspaceName string) error {
 // BITSWAN_GITOPS_AGENT_SECRET the coding-agent container was given, or every
 // agent call 401s.
 //
-// We pass --worktree explicitly. Without it the CLI tries to auto-detect the
-// worktree from $PWD and fails client-side ("cannot detect worktree") before
+// We pass --copy explicitly. Without it the CLI tries to auto-detect the
+// copy from $PWD and fails client-side ("cannot detect copy") before
 // ever contacting gitops — so it can't test auth for this e2e, which deploys a
-// main (non-worktree) BP and therefore has no worktree on disk. With the flag
+// main (non-copy) BP and therefore has no copy on disk. With the flag
 // the request reaches the handler: gitops runs verify_agent_token first, so a
-// good token yields HTTP 200 (an empty list for a worktree that doesn't exist —
+// good token yields HTTP 200 (an empty list for a copy that doesn't exist —
 // scan_workspace_sources returns [] for a missing dir) while a bad token yields
 // 401. Either way the listed contents are irrelevant; the not-401 round-trip is
 // the signal we want.
@@ -601,7 +601,7 @@ func testCodingAgentCLI(workspaceName string) error {
 	}
 
 	cmd := exec.Command("docker", "exec", container,
-		"bitswan-coding-agent", "deployments", "list", "--worktree", workspaceName)
+		"bitswan-coding-agent", "deployments", "list", "--copy", workspaceName)
 	out, runErr := cmd.CombinedOutput()
 	output := strings.TrimSpace(string(out))
 

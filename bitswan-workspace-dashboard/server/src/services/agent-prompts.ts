@@ -11,10 +11,10 @@ export const DEFAULT_PROMPT =
   'Read the BP\'s README.md, process.toml, and bitswan.yaml to orient yourself before ' +
   'making changes. Ask for clarification when the user\'s request is ambiguous.';
 
-/** Worktree-level sync flow. Mirrors bitswan-editor's syncWorktree prompt. */
+/** Copy-level sync flow. Mirrors bitswan-editor's syncWorktree prompt. */
 export const SYNC_PROMPT =
   'IMPORTANT: git is not installed. Use ONLY bitswan-coding-agent commands. ' +
-  'Sync this worktree with main: 1) bitswan-coding-agent vcs commit -m pre-sync-commit ' +
+  'Sync this copy with main: 1) bitswan-coding-agent vcs commit -m pre-sync-commit ' +
   '2) bitswan-coding-agent vcs sync 3) If conflicts, resolve and run bitswan-coding-agent vcs sync-continue. ' +
   'Tell me when sync is complete.';
 

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import {
   isValidBpId,
-  isValidWorktreeName,
+  isValidCopyName,
   readReadme,
 } from '../services/workspace.js';
 import {
@@ -26,30 +26,30 @@ export interface BusinessProcessRoutesOptions {
  * lookup, which still needs direct filesystem access via the workspace
  * bind-mount.
  *
- * The README endpoint accepts an optional `?worktree=<name>` query so the
- * dashboard can show the worktree's copy of the spec when the user is in
- * a worktree scope (READMEs frequently diverge between main and a
- * worktree mid-development).
+ * The README endpoint accepts an optional `?copy=<name>` query so the
+ * dashboard can show the copy's version of the spec when the user is in
+ * a copy scope (READMEs frequently diverge between main and a
+ * copy mid-development).
  */
 export function registerBusinessProcessRoutes(
   app: FastifyInstance,
   { workspaceRoot, gitops }: BusinessProcessRoutesOptions,
 ): void {
   app.post<{
-    Body: { name?: string; worktree?: string };
+    Body: { name?: string; copy?: string };
   }>('/api/business-processes', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) {
       return reply.code(503).send({ error: 'gitops not configured' });
     }
-    const { name, worktree } = req.body ?? {};
+    const { name, copy } = req.body ?? {};
     if (!name || typeof name !== 'string') {
       return reply.code(400).send({ error: 'name is required' });
     }
     try {
       const r = await gitops.createProcess({
         name,
-        ...(worktree ? { worktree } : {}),
+        ...(copy ? { copy } : {}),
       });
       if (!r.ok) {
         return reply
@@ -58,52 +58,52 @@ export function registerBusinessProcessRoutes(
       }
       return r.body;
     } catch (err) {
-      app.log.warn({ err, name, worktree }, 'BP create failed');
+      app.log.warn({ err, name, copy }, 'BP create failed');
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   });
 
   app.get<{
     Params: { id: string };
-    Querystring: { worktree?: string };
+    Querystring: { copy?: string };
   }>('/api/business-processes/:id/readme', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!isValidBpId(req.params.id)) {
       return reply.code(400).send({ error: 'invalid bp id' });
     }
-    const worktree = req.query.worktree;
-    if (worktree !== undefined && !isValidWorktreeName(worktree)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    const copy = req.query.copy;
+    if (copy !== undefined && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
-    const content = await readReadme(req.params.id, workspaceRoot, worktree);
+    const content = await readReadme(req.params.id, workspaceRoot, copy);
     return { content };
   });
 
   // ---- Testable requirements ------------------------------------------
   //
-  // Worktree-only. The TOML file lives at
-  //   <workspaceRoot>/worktrees/<worktree>/<bp>/testable-requirements.toml
+  // Copy-only. The TOML file lives at
+  //   <workspaceRoot>/copies/<copy>/<bp>/testable-requirements.toml
   // and is shared with `bitswan-coding-agent requirements …` — both write
   // the same schema. See server/src/services/requirements.ts.
 
-  function validateBpWorktree(bp: string, worktree?: string): string | null {
+  function validateBpCopy(bp: string, copy?: string): string | null {
     if (!isValidBpId(bp)) return 'invalid bp id';
-    if (!worktree) return 'worktree is required';
-    if (!isValidWorktreeName(worktree)) return 'invalid worktree';
+    if (!copy) return 'copy is required';
+    if (!isValidCopyName(copy)) return 'invalid copy';
     return null;
   }
 
   app.get<{
     Params: { id: string };
-    Querystring: { worktree?: string };
+    Querystring: { copy?: string };
   }>('/api/business-processes/:id/requirements', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    const err = validateBpWorktree(req.params.id, req.query.worktree);
+    const err = validateBpCopy(req.params.id, req.query.copy);
     if (err) return reply.code(400).send({ error: err });
     try {
       return await listRequirements({
         workspaceRoot,
-        worktree: req.query.worktree!,
+        copy: req.query.copy!,
         bp: req.params.id,
       });
     } catch (e) {
@@ -115,11 +115,11 @@ export function registerBusinessProcessRoutes(
 
   app.post<{
     Params: { id: string };
-    Querystring: { worktree?: string };
+    Querystring: { copy?: string };
     Body: { text?: string; parent?: string; status?: string };
   }>('/api/business-processes/:id/requirements', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    const err = validateBpWorktree(req.params.id, req.query.worktree);
+    const err = validateBpCopy(req.params.id, req.query.copy);
     if (err) return reply.code(400).send({ error: err });
     const { text, parent, status } = req.body ?? {};
     if (text !== undefined && typeof text !== 'string') {
@@ -131,7 +131,7 @@ export function registerBusinessProcessRoutes(
     try {
       return await addRequirement({
         workspaceRoot,
-        worktree: req.query.worktree!,
+        copy: req.query.copy!,
         bp: req.params.id,
         text: text ?? '',
         ...(parent ? { parent } : {}),
@@ -146,11 +146,11 @@ export function registerBusinessProcessRoutes(
 
   app.patch<{
     Params: { id: string; reqId: string };
-    Querystring: { worktree?: string };
+    Querystring: { copy?: string };
     Body: { description?: string; status?: string };
   }>('/api/business-processes/:id/requirements/:reqId', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    const err = validateBpWorktree(req.params.id, req.query.worktree);
+    const err = validateBpCopy(req.params.id, req.query.copy);
     if (err) return reply.code(400).send({ error: err });
     const { description, status } = req.body ?? {};
     if (status !== undefined && !isReqStatus(status)) {
@@ -162,7 +162,7 @@ export function registerBusinessProcessRoutes(
     try {
       return await updateRequirement({
         workspaceRoot,
-        worktree: req.query.worktree!,
+        copy: req.query.copy!,
         bp: req.params.id,
         id: req.params.reqId,
         patch: {
@@ -179,15 +179,15 @@ export function registerBusinessProcessRoutes(
 
   app.delete<{
     Params: { id: string; reqId: string };
-    Querystring: { worktree?: string };
+    Querystring: { copy?: string };
   }>('/api/business-processes/:id/requirements/:reqId', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    const err = validateBpWorktree(req.params.id, req.query.worktree);
+    const err = validateBpCopy(req.params.id, req.query.copy);
     if (err) return reply.code(400).send({ error: err });
     try {
       await removeRequirement({
         workspaceRoot,
-        worktree: req.query.worktree!,
+        copy: req.query.copy!,
         bp: req.params.id,
         id: req.params.reqId,
       });

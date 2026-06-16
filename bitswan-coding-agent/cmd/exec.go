@@ -10,7 +10,7 @@ import (
 var deploymentsExecCmd = &cobra.Command{
 	Use:   "exec DEPLOYMENT_ID -- command [args...]",
 	Short: "Execute a command in a live-dev container",
-	Long:  "Run a command inside a worktree-specific live-dev deployment container.",
+	Long:  "Run a command inside a copy-specific live-dev deployment container.",
 	Args:  cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		deploymentID := args[0]

@@ -24,7 +24,7 @@ export interface DeployToastCopy {
  * Resolves with the terminal outcome.
  *
  * Used both by `deployBpWithToast` (explicit BP deploys) and by the
- * create-BP / create-worktree flows, whose responses carry a
+ * create-BP / create-copy flows, whose responses carry a
  * `deploy_task_id` for the server-side auto-deploy.
  *
  * Progress comes from polling gitops's `deploy-status/{task_id}` endpoint
@@ -88,13 +88,13 @@ export async function watchDeployTask(
 export async function deployBpWithToast(opts: {
   bp: string;
   stage: 'dev' | 'live-dev';
-  worktree?: string;
+  copy?: string;
   /** Toast copy. */
   loading: string;
   success: string;
   failurePrefix: string;
 }): Promise<BpDeployOutcome> {
-  const toastId = `bp-deploy-${opts.worktree ?? 'main'}-${opts.bp}`;
+  const toastId = `bp-deploy-${opts.copy ?? 'main'}-${opts.bp}`;
   toast.loading(opts.loading, { id: toastId, duration: Infinity });
 
   let taskId: string;
@@ -102,7 +102,7 @@ export async function deployBpWithToast(opts: {
     const res = await api.deployBusinessProcess({
       bp: opts.bp,
       stage: opts.stage,
-      ...(opts.worktree ? { worktree: opts.worktree } : {}),
+      ...(opts.copy ? { copy: opts.copy } : {}),
     });
     taskId = res.task_id;
     if (!taskId) throw new Error('gitops returned no task_id');

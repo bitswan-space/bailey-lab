@@ -8,9 +8,7 @@ Each copy's ``origin`` points at the embedded smart-HTTP git server so agents
 push/pull with normal git (fast-forward only).
 
 This replaces the old shared-``.git`` worktree model. The router is served under
-both ``/copies`` (canonical) and ``/worktrees`` (deprecated alias kept so the
-existing dashboard keeps working); module and function names are preserved for
-the same reason.
+``/copies``.
 """
 
 import asyncio
@@ -30,8 +28,7 @@ from app.utils import call_git_command, call_git_command_with_output
 
 logger = logging.getLogger(__name__)
 
-# No prefix here — main.py includes this router under both /copies and
-# /worktrees so the dashboard's existing /worktrees calls keep working.
+# No prefix here — main.py includes this router under /copies.
 router = APIRouter(tags=["copies"])
 
 
@@ -236,13 +233,13 @@ def _resolve_copy_path(name: str) -> str:
     return candidate
 
 
-class CreateWorktreeRequest(BaseModel):
+class CreateCopyRequest(BaseModel):
     branch_name: str
     base_branch: str = None  # defaults to main
 
 
 @router.post("/create")
-async def create_worktree(body: CreateWorktreeRequest):
+async def create_copy(body: CreateCopyRequest):
     """Create a new copy: an independent clone of the canonical repo on its own
     branch, with origin set to the smart-HTTP git server."""
     _validate_copy_name(body.branch_name)
@@ -301,12 +298,12 @@ async def create_worktree(body: CreateWorktreeRequest):
 
     # Auto-start live-dev for every automation in the new copy (best-effort).
     try:
-        members = scan_workspace_sources(_copies_dir(), worktree=name)
+        members = scan_workspace_sources(_copies_dir(), copy=name)
         res = await spawn_set_deploy(
             label=f"copy:{name}",
             members=members,
             stage="live-dev",
-            worktree=name,
+            copy=name,
         )
         if res.get("deploy"):
             result["deploy_task_id"] = res["deploy"]["task_id"]
@@ -321,7 +318,7 @@ async def create_worktree(body: CreateWorktreeRequest):
 
 # In-memory cache for the copy list, refreshed by the filesystem watcher in
 # lifespan.py and broadcast over SSE. None = never computed yet.
-_worktrees_cache: list[dict] | None = None
+_copies_cache: list[dict] | None = None
 
 
 async def _git_state(copy_path: str, name: str) -> dict:
@@ -372,7 +369,7 @@ async def _git_state(copy_path: str, name: str) -> dict:
     }
 
 
-async def _compute_worktrees() -> list[dict]:
+async def _compute_copies() -> list[dict]:
     """Enumerate the copies directory and assemble the listing.
 
     Each copy is an independent clone with its own .git, so state is read
@@ -397,33 +394,33 @@ async def _compute_worktrees() -> list[dict]:
     return result
 
 
-async def get_cached_worktrees() -> list[dict]:
+async def get_cached_copies() -> list[dict]:
     """Return the cached copy list, computing on first call."""
-    global _worktrees_cache
-    if _worktrees_cache is None:
-        _worktrees_cache = await _compute_worktrees()
-    return _worktrees_cache
+    global _copies_cache
+    if _copies_cache is None:
+        _copies_cache = await _compute_copies()
+    return _copies_cache
 
 
-async def refresh_worktrees() -> list[dict]:
+async def refresh_copies() -> list[dict]:
     """Re-run the copy scan and update the cache (called by the watcher)."""
-    global _worktrees_cache
-    _worktrees_cache = await _compute_worktrees()
-    return _worktrees_cache
+    global _copies_cache
+    _copies_cache = await _compute_copies()
+    return _copies_cache
 
 
 @router.get("/")
-async def list_worktrees():
-    return await get_cached_worktrees()
+async def list_copies():
+    return await get_cached_copies()
 
 
-class MergeWorktreeResponse(BaseModel):
+class MergeCopyResponse(BaseModel):
     status: str
     message: str
 
 
 @router.post("/{name}/merge")
-async def merge_worktree(name: str):
+async def merge_copy(name: str):
     """Fast-forward `main` to the copy's branch tip in the canonical repo.
 
     Append-only: this only succeeds when `main` is an ancestor of the copy's
@@ -565,15 +562,15 @@ async def _rm_rf_as_root_in_container(path: str) -> bool:
 
 class CommitRequest(BaseModel):
     message: str
-    worktree: str | None = None  # None = the main copy
+    copy: str | None = None  # None = the main copy
     paths: list[str] | None = None  # None/empty = stage all changes (-A)
 
 
 @router.post("/commit")
 async def commit_changes(body: CommitRequest):
-    """Stage and commit changes in a copy (or the main copy when worktree is
+    """Stage and commit changes in a copy (or the main copy when copy is
     None). Used by the editor UI to record filesystem changes it just made."""
-    copy = body.worktree or "main"
+    copy = body.copy or "main"
     repo_path = _resolve_copy_path(copy)
     if not os.path.exists(repo_path):
         raise HTTPException(status_code=404, detail=f"Copy '{copy}' not found")
@@ -613,7 +610,7 @@ async def commit_changes(body: CommitRequest):
 
 
 @router.delete("/{name}")
-async def delete_worktree(name: str):
+async def delete_copy(name: str):
     """Delete a copy: remove its checkout and drop its Postgres database. The
     published branch in the canonical repo is left intact (append-only)."""
     copy_path = _resolve_copy_path(name)
@@ -664,7 +661,7 @@ def _porcelain_to_kind(code: str) -> str | None:
 
 
 @router.get("/{name}/status")
-async def get_worktree_status(name: str):
+async def get_copy_status(name: str):
     """Per-file change list for a copy (status --porcelain + diff --numstat)."""
     copy_path = _resolve_copy_path(name)
     if not os.path.exists(copy_path):
@@ -717,7 +714,7 @@ async def get_worktree_status(name: str):
 
 
 @router.get("/{name}/diff")
-async def get_worktree_diff(name: str, path: str | None = Query(None)):
+async def get_copy_diff(name: str, path: str | None = Query(None)):
     """Unified diff of the copy against its own HEAD. Optional `?path=` filter."""
     copy_path = _resolve_copy_path(name)
     if not os.path.exists(copy_path):

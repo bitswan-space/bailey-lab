@@ -24,8 +24,8 @@ interface InspectModalProps {
   mode: 'deployments' | 'liveDev';
   /** Stage tab to open on. Defaults to the first stage (dev) when unset. */
   initialStageId?: AutomationStage;
-  /** Worktree the source lives in (live-dev deploys only). */
-  worktree?: string;
+  /** Copy the source lives in (live-dev deploys only). */
+  copy?: string;
   /** Parent-tracked in-flight state for the stage actions (e.g. a confirmed
    *  Remove waiting for the SSE snapshot to reflect it). */
   actionBusy?: boolean;
@@ -41,7 +41,7 @@ export function InspectModal({
   stages,
   mode,
   initialStageId,
-  worktree,
+  copy,
   actionBusy,
   onRemove,
 }: InspectModalProps) {
@@ -98,7 +98,7 @@ export function InspectModal({
             name={name}
             stage={stage}
             mode={mode}
-            worktree={worktree}
+            copy={copy}
             busy={actionBusy}
             onRemove={onRemove}
           />

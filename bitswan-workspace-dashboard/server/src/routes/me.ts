@@ -14,7 +14,7 @@ export interface MeRoutesOptions {
  * Creation is kicked off in the BACKGROUND and not awaited: building a copy
  * (clone + Postgres + live-dev deploys) can take many seconds on a busy
  * workspace, and the dashboard must not block on it. The copy surfaces over
- * the `worktrees` SSE feed when ready; the client shows a "setting up" state
+ * the `copies` SSE feed when ready; the client shows a "setting up" state
  * until then. Creation is idempotent — gitops returns 409 when the copy
  * already exists (the normal returning-user case).
  */
@@ -31,11 +31,11 @@ export function registerMeRoutes(
     }
     const copy = copyNameForEmail(email);
 
-    if (gitops && !gitops.hasWorktree(copy)) {
+    if (gitops && !gitops.hasCopy(copy)) {
       // Fire-and-forget: don't block the response on the (potentially slow)
       // create. A 409 means it already exists (a race or stale cache) — fine.
       void gitops
-        .createWorktree({ branch_name: copy })
+        .createCopy({ branch_name: copy })
         .then((r) => {
           if (!r.ok && r.status !== 409) {
             app.log.warn(

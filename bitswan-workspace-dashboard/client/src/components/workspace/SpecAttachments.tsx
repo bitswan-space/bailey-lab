@@ -19,12 +19,12 @@ import { cn } from '@/lib/utils';
 interface SpecAttachmentsProps {
   /** BP directory name — attachments live at `<bp>/attachments/`. */
   bpId: string;
-  worktree: string;
+  copy: string;
 }
 
 export interface AttachmentRow {
   name: string;
-  /** Worktree-relative path, e.g. `my-bp/attachments/diagram.png`. */
+  /** Copy-relative path, e.g. `my-bp/attachments/diagram.png`. */
   path: string;
 }
 
@@ -41,12 +41,12 @@ function findFolder(nodes: FileTreeNode[], folderPath: string): FileTreeNode | u
   return undefined;
 }
 
-/** List the files under `<bp>/attachments/` in a worktree (sorted by name). */
+/** List the files under `<bp>/attachments/` in a copy (sorted by name). */
 export async function listSpecAttachments(
-  worktree: string,
+  copy: string,
   bpId: string,
 ): Promise<AttachmentRow[]> {
-  const tree = await api.worktreeFiles.tree(worktree);
+  const tree = await api.copyFiles.tree(copy);
   const folder = findFolder(tree, `${bpId}/attachments`);
   return (folder?.children ?? [])
     .filter((n) => n.kind === 'file')
@@ -56,11 +56,11 @@ export async function listSpecAttachments(
 
 /**
  * Attachments for a BP's specification. Files are stored as plain files
- * at `<bp>/attachments/` inside the worktree — the same directory the
- * coding agent works in — via the worktree-files HTTP API, so the agent
+ * at `<bp>/attachments/` inside the copy — the same directory the
+ * coding agent works in — via the copy-files HTTP API, so the agent
  * (and git) see them with no extra plumbing.
  */
-export function SpecAttachments({ bpId, worktree }: SpecAttachmentsProps) {
+export function SpecAttachments({ bpId, copy }: SpecAttachmentsProps) {
   const attachmentsDir = `${bpId}/attachments`;
   const [files, setFiles] = useState<AttachmentRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -69,14 +69,14 @@ export function SpecAttachments({ bpId, worktree }: SpecAttachmentsProps) {
 
   const refresh = useCallback(async () => {
     try {
-      setFiles(await listSpecAttachments(worktree, bpId));
+      setFiles(await listSpecAttachments(copy, bpId));
     } catch {
       // Tree fetch failures surface in the Files tab too; keep the panel
       // quiet and just show what we last had.
     } finally {
       setLoading(false);
     }
-  }, [worktree, bpId]);
+  }, [copy, bpId]);
 
   useEffect(() => {
     setLoading(true);
@@ -89,7 +89,7 @@ export function SpecAttachments({ bpId, worktree }: SpecAttachmentsProps) {
       if (accepted.length === 0) return;
       setUploading(true);
       try {
-        const r = await api.worktreeFiles.upload(worktree, attachmentsDir, accepted);
+        const r = await api.copyFiles.upload(copy, attachmentsDir, accepted);
         toast.success(
           r.written.length === 1
             ? `Uploaded ${r.written[0]?.name}`
@@ -104,7 +104,7 @@ export function SpecAttachments({ bpId, worktree }: SpecAttachmentsProps) {
         setUploading(false);
       }
     },
-    [worktree, attachmentsDir, refresh],
+    [copy, attachmentsDir, refresh],
   );
 
   const handleDelete = useCallback(async () => {
@@ -112,7 +112,7 @@ export function SpecAttachments({ bpId, worktree }: SpecAttachmentsProps) {
     if (!target) return;
     setDeleteTarget(undefined);
     try {
-      await api.worktreeFiles.remove(worktree, target.path);
+      await api.copyFiles.remove(copy, target.path);
       toast.success(`Deleted ${target.name}`);
       await refresh();
     } catch (err) {
@@ -120,7 +120,7 @@ export function SpecAttachments({ bpId, worktree }: SpecAttachmentsProps) {
         description: err instanceof Error ? err.message : String(err),
       });
     }
-  }, [deleteTarget, worktree, refresh]);
+  }, [deleteTarget, copy, refresh]);
 
   const { getRootProps, getInputProps, open, isDragActive } = useDropzone({
     onDrop: (accepted) => void handleUpload(accepted),
@@ -171,7 +171,7 @@ export function SpecAttachments({ bpId, worktree }: SpecAttachmentsProps) {
               <Paperclip className="size-3 shrink-0 text-muted-foreground" aria-hidden />
               <span className="min-w-0 flex-1 truncate">{f.name}</span>
               <a
-                href={api.worktreeFiles.rawUrl(worktree, f.path)}
+                href={api.copyFiles.rawUrl(copy, f.path)}
                 download={f.name}
                 title={`Download ${f.name}`}
                 className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
@@ -199,7 +199,7 @@ export function SpecAttachments({ bpId, worktree }: SpecAttachmentsProps) {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete “{deleteTarget?.name}”?</AlertDialogTitle>
             <AlertDialogDescription>
-              The file is removed from the worktree&apos;s attachments/ folder.
+              The file is removed from the copy&apos;s attachments/ folder.
               Anything referencing it (the spec, the coding agent) will no
               longer find it.
             </AlertDialogDescription>

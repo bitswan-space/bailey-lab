@@ -93,7 +93,7 @@ def bp_resource_names(bp_slug: str) -> dict:
     }
 
 
-def derive_bp_and_worktree(relative_path: str | None) -> tuple[str, str]:
+def derive_bp_and_copy(relative_path: str | None) -> tuple[str, str]:
     """Derive (bp_slug, copy_name) from a deployment's relative_path.
 
     relative_path looks like "copies/main/Test/backend" (the main copy) or
@@ -127,7 +127,7 @@ def get_service_secrets(service_type: str, stage: str) -> dict | None:
     """Read a service's connection info from its secrets env-file.
 
     Generalisation of the Postgres-only helper that used to live in
-    `app/routes/worktrees.py`. Returns the parsed KEY=VALUE dict, or None
+    `app/routes/copies.py`. Returns the parsed KEY=VALUE dict, or None
     when the file is missing (service not enabled at that stage).
     """
     bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
@@ -452,7 +452,7 @@ def _bp_has_existing_deployment_at_realm(
     have live data on the shared default DB and must NOT be auto-migrated."""
     for conf in ((bs_yaml or {}).get("deployments") or {}).values():
         conf = conf or {}
-        dep_slug, wt = derive_bp_and_worktree(conf.get("relative_path"))
+        dep_slug, wt = derive_bp_and_copy(conf.get("relative_path"))
         if wt or dep_slug != bp_slug:
             continue
         dep_stage = conf.get("stage") or "production"
@@ -481,7 +481,7 @@ def register_new_bps_for_members(
         for m in members:
             relative_path = m.get("relative_path")
             stage = m.get("stage") or "production"
-            bp_slug, wt = derive_bp_and_worktree(relative_path)
+            bp_slug, wt = derive_bp_and_copy(relative_path)
             if not bp_slug or wt:
                 continue
             realm = stage_for_deployment(stage if stage != "" else "production")
@@ -534,7 +534,7 @@ async def provision_for_deployments(
         seen: set[tuple[str, str]] = set()
         for dep_id in deployment_ids:
             conf = deployments.get(dep_id) or {}
-            bp_slug, wt = derive_bp_and_worktree(conf.get("relative_path"))
+            bp_slug, wt = derive_bp_and_copy(conf.get("relative_path"))
             if not bp_slug or wt:
                 continue
             dep_stage = conf.get("stage") or "production"

@@ -1,10 +1,10 @@
 """
 Shared "deploy a set of automation sources under one task" runner.
 
-Used by the auto-deploy hooks (BP creation, worktree creation, worktree sync)
+Used by the auto-deploy hooks (BP creation, copy creation, copy sync)
 and the manual `/automations/deploy-changed` endpoint. Lives in its own leaf
 module — `routes/automations.py` imports from `routes/agent.py`, so a helper
-shared by both (plus `routes/processes.py` and `routes/worktrees.py`) must not
+shared by both (plus `routes/processes.py` and `routes/copies.py`) must not
 live in either route module. Imports only leaf modules; the AutomationService
 singleton is resolved lazily inside `spawn_set_deploy`.
 
@@ -41,7 +41,7 @@ async def _run_set_deploy_with_progress(
     deployment_ids: list[str],
     service,
     stage: str,
-    worktree: str | None,
+    copy: str | None,
     commit_subject: str | None,
 ):
     """Background coroutine driving `deploy_source_set` with progress
@@ -80,7 +80,7 @@ async def _run_set_deploy_with_progress(
             label=label,
             members=members,
             stage=stage,
-            worktree=worktree,
+            copy=copy,
             commit_subject=commit_subject,
             progress_callback=progress_callback,
         )
@@ -110,7 +110,7 @@ async def spawn_set_deploy(
     label: str,
     members: list[dict],
     stage: str,
-    worktree: str | None = None,
+    copy: str | None = None,
     commit_subject: str | None = None,
     service=None,
 ) -> dict:
@@ -179,7 +179,7 @@ async def spawn_set_deploy(
                 ids_f,
                 service,
                 stage,
-                worktree,
+                copy,
                 commit_subject,
             )
         )

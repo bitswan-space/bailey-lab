@@ -13,25 +13,25 @@ import { Input } from '@/components/ui/input';
 import { api, isTransientNetworkError } from '@/lib/api';
 import { watchDeployTask } from '@/lib/deployBp';
 
-// Gitops's worktree-name allowlist (mirrors `_WORKTREE_NAME_RE` in
-// bitswan-gitops/app/routes/worktrees.py:_WORKTREE_NAME_RE). Kept here so we
+// Gitops's copy-name allowlist (mirrors `_COPY_NAME_RE` in
+// bitswan-gitops/app/routes/copies.py:_COPY_NAME_RE). Kept here so we
 // can give the user immediate feedback in the dialog rather than waiting
 // for a 400 round-trip.
-const WORKTREE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
+const COPY_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
 
-export interface NewWorktreeDialogProps {
+export interface NewCopyDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   existingNames: string[];
   onCreated: (name: string) => void;
 }
 
-export function NewWorktreeDialog({
+export function NewCopyDialog({
   open,
   onOpenChange,
   existingNames,
   onCreated,
-}: NewWorktreeDialogProps) {
+}: NewCopyDialogProps) {
   const [name, setName] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -40,7 +40,7 @@ export function NewWorktreeDialog({
   let validationError: string | null = null;
   if (trimmed.length === 0) {
     validationError = null; // empty input is just "not ready yet"
-  } else if (!WORKTREE_NAME_RE.test(trimmed)) {
+  } else if (!COPY_NAME_RE.test(trimmed)) {
     validationError =
       'Use letters, digits and hyphens only. Must start with a letter or digit.';
   } else if (existingNames.includes(trimmed)) {
@@ -58,7 +58,7 @@ export function NewWorktreeDialog({
       e?.preventDefault();
       if (!canSubmit) return;
       setSubmitting(true);
-      const work = api.createWorktree({ branch_name: trimmed });
+      const work = api.createCopy({ branch_name: trimmed });
       toast.promise(work, {
         loading: `Creating copy "${trimmed}"…`,
         success: `Copy "${trimmed}" created`,
@@ -73,7 +73,7 @@ export function NewWorktreeDialog({
         reset();
         onCreated(trimmed);
         // Server-side auto-deploy: gitops starts live-dev for every BP
-        // automation in the new worktree — watch its task with a second
+        // automation in the new copy — watch its task with a second
         // toast (fire-and-forget).
         if (res.deploy_error) {
           toast.error(
@@ -112,11 +112,11 @@ export function NewWorktreeDialog({
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="flex flex-col gap-2">
-          <label htmlFor="new-worktree-name" className="text-sm font-medium">
+          <label htmlFor="new-copy-name" className="text-sm font-medium">
             Branch name
           </label>
           <Input
-            id="new-worktree-name"
+            id="new-copy-name"
             autoFocus
             placeholder="my-feature"
             value={name}

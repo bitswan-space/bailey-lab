@@ -7,22 +7,22 @@ interface Result {
   refresh: () => Promise<void>;
 }
 
-/** Per-worktree change list (paths + A/M/D + +adds/-dels). Focus refetch. */
-export function useWorktreeStatus(worktree: string): Result {
+/** Per-copy change list (paths + A/M/D + +adds/-dels). Focus refetch. */
+export function useCopyStatus(copy: string): Result {
   const [changed, setChanged] = useState<ChangedFile[]>([]);
   const [loading, setLoading] = useState(true);
   const aliveRef = useRef(true);
 
   const refresh = useCallback(async () => {
     try {
-      const r = await api.worktreeFiles.status(worktree);
+      const r = await api.copyFiles.status(copy);
       if (aliveRef.current) setChanged(r.changed);
     } catch {
       // non-fatal
     } finally {
       if (aliveRef.current) setLoading(false);
     }
-  }, [worktree]);
+  }, [copy]);
 
   useEffect(() => {
     aliveRef.current = true;

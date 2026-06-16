@@ -287,17 +287,17 @@ def _ensure_automation_id(target_dir: str) -> None:
 
 
 def _bp_destination(
-    workspace_root: str, bp: str, worktree: Optional[str]
+    workspace_root: str, bp: str, copy: Optional[str]
 ) -> tuple[str, str]:
     """Returns `(bp_full_path, bp_relative_path)`.
 
-    A copy (worktree name) scaffolds into `${BITSWAN_COPIES_DIR}/<copy>/<bp>`;
-    the main scope (worktree None) into `${BITSWAN_COPIES_DIR}/main/<bp>`. The
+    A copy (copy name) scaffolds into `${BITSWAN_COPIES_DIR}/<copy>/<bp>`;
+    the main scope (copy None) into `${BITSWAN_COPIES_DIR}/main/<bp>`. The
     relative path uses the deployment `copies/<copy>/<bp>` form.
     """
-    copy = worktree or "main"
-    rel = os.path.join("copies", copy, bp)
-    return os.path.join(_copies_dir(), copy, bp), rel
+    scope = copy or "main"
+    rel = os.path.join("copies", scope, bp)
+    return os.path.join(_copies_dir(), scope, bp), rel
 
 
 async def _commit(
@@ -331,16 +331,16 @@ async def rename_automation(
     bp: str,
     old_name: str,
     new_name: str,
-    worktree: Optional[str] = None,
+    copy: Optional[str] = None,
 ) -> dict:
     """Rename an automation directory within a BP and commit. Returns
     `{ "name", "relative_path" }` for the new location.
 
     The directory name is the automation's identity on disk; deployed
     containers keep their existing deployment_id until the next deploy.
-    Validation of `bp`/`worktree` shape happens at the route layer.
+    Validation of `bp`/`copy` shape happens at the route layer.
     """
-    bp_full, bp_rel = _bp_destination(workspace_root, bp, worktree)
+    bp_full, bp_rel = _bp_destination(workspace_root, bp, copy)
     old_san = sanitize_automation_name(old_name or "")
     new_san = sanitize_automation_name(new_name or "")
     if not new_san or not _AUTOMATION_NAME_RE.match(new_san):
@@ -357,7 +357,7 @@ async def rename_automation(
         )
     os.rename(src, dest)
 
-    commit_cwd = os.path.join(_copies_dir(), worktree or "main")
+    commit_cwd = os.path.join(_copies_dir(), copy or "main")
     try:
         await _commit(commit_cwd, f"Rename automation {old_san} → {new_san}")
     except Exception as e:  # noqa: BLE001 — surface but don't undo the rename
@@ -373,12 +373,12 @@ async def create_automation_from_template(
     template_id: Optional[str] = None,
     group_id: Optional[str] = None,
     name: Optional[str] = None,
-    worktree: Optional[str] = None,
+    copy: Optional[str] = None,
 ) -> dict:
     """Copy a template (or every automation in a group) into the BP directory
     and commit. Returns `{ "created": [ { "name", "relative_path" } ] }`.
 
-    Validation of `bp`/`worktree` shape is expected to happen at the route layer.
+    Validation of `bp`/`copy` shape is expected to happen at the route layer.
     """
     if not bp:
         raise ValueError("bp is required")
@@ -387,7 +387,7 @@ async def create_automation_from_template(
     if template_id and group_id:
         raise ValueError("template_id and group_id are mutually exclusive")
 
-    bp_full, bp_rel = _bp_destination(workspace_root, bp, worktree)
+    bp_full, bp_rel = _bp_destination(workspace_root, bp, copy)
     os.makedirs(bp_full, exist_ok=True)
 
     created: list[dict] = []
@@ -450,9 +450,10 @@ async def create_automation_from_template(
         names = ", ".join(c["name"] for c in created)
         message = f"Add automations: {names}"
 
-    # Commit in the workspace root (or worktree). `git` finds the right worktree
-    # from the cwd, so commits land on the right branch automatically.
-    commit_cwd = os.path.join(_copies_dir(), worktree or "main")
+    # Commit in the copy's checkout (main copy when copy is None). `git` finds
+    # the right repo from the cwd, so commits land on the right branch
+    # automatically.
+    commit_cwd = os.path.join(_copies_dir(), copy or "main")
     try:
         await _commit(commit_cwd, message)
     except Exception as e:  # noqa: BLE001 — surface commit failures but don't undo the copy

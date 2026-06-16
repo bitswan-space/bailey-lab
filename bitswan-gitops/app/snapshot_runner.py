@@ -68,13 +68,13 @@ def _bp_deploy_in_flight(service, bp: str, stages: list[str]) -> str | None:
     """Return a deployment_id of `bp` currently deploying at any of `stages`,
     or None. Restoring under a mid-deploy container swap would race."""
     from app.services.infra_service import stage_for_deployment
-    from app.services.bp_databases import derive_bp_and_worktree
+    from app.services.bp_databases import derive_bp_and_copy
     from app.utils import read_bitswan_yaml
 
     bs_yaml = read_bitswan_yaml(service.gitops_dir) or {}
     for dep_id, conf in (bs_yaml.get("deployments") or {}).items():
         conf = conf or {}
-        dep_slug, wt = derive_bp_and_worktree(conf.get("relative_path"))
+        dep_slug, wt = derive_bp_and_copy(conf.get("relative_path"))
         if wt or dep_slug != bp:
             continue
         realm = stage_for_deployment(conf.get("stage") or "production")

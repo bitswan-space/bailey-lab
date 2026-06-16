@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 
-// Module-level cache keyed by `${bpId}|${worktree ?? ''}`. Storing the
+// Module-level cache keyed by `${bpId}|${copy ?? ''}`. Storing the
 // in-flight Promise (rather than the resolved value) makes concurrent
 // callers for the same target share a single fetch. READMEs rarely change
 // during a session — call `invalidateReadme(...)` after edits if that ever
@@ -13,12 +13,12 @@ const cache = new Map<string, Promise<string | null>>();
 // eslint-disable-next-line no-restricted-syntax -- same
 const resolved = new Map<string, string | null>();
 
-const cacheKey = (bpId: string, worktree?: string) =>
-  `${bpId}|${worktree ?? ''}`;
+const cacheKey = (bpId: string, copy?: string) =>
+  `${bpId}|${copy ?? ''}`;
 
-/** Drop the cached entry for `(bpId, worktree)` so the next consumer refetches. */
-export function invalidateReadme(bpId: string, worktree?: string): void {
-  const k = cacheKey(bpId, worktree);
+/** Drop the cached entry for `(bpId, copy)` so the next consumer refetches. */
+export function invalidateReadme(bpId: string, copy?: string): void {
+  const k = cacheKey(bpId, copy);
   cache.delete(k);
   resolved.delete(k);
 }
@@ -27,22 +27,22 @@ export function invalidateReadme(bpId: string, worktree?: string): void {
  * Fetch a BP's `README.md` over `/api/business-processes/:id/readme`.
  * Resolves to `null` when the file is missing or the request fails.
  *
- * When `worktree` is given, reads the worktree's copy of the README
- * (`worktrees/<wt>/<bp>/README.md`); otherwise reads the main repo's
- * copy. Results are cached per-(bp, worktree) so view switches don't
- * refetch and the deployments / worktree scopes get their own cached
+ * When `copy` is given, reads the copy's copy of the README
+ * (`copies/<wt>/<bp>/README.md`); otherwise reads the main repo's
+ * copy. Results are cached per-(bp, copy) so view switches don't
+ * refetch and the deployments / copy scopes get their own cached
  * snapshots.
  */
 export function useReadme(
   // eslint-disable-next-line no-restricted-syntax -- null = "no README" / "no BP selected"
   bpId: string | null | undefined,
-  worktree?: string,
+  copy?: string,
 ): {
   // eslint-disable-next-line no-restricted-syntax -- null = "no README" / "no BP selected"
   content: string | null;
   loading: boolean;
 } {
-  const key = bpId ? cacheKey(bpId, worktree) : null;
+  const key = bpId ? cacheKey(bpId, copy) : null;
   // eslint-disable-next-line no-restricted-syntax -- mirrors cache shape
   const [content, setContent] = useState<string | null>(() =>
     key ? resolved.get(key) ?? null : null,
@@ -65,7 +65,7 @@ export function useReadme(
     let cancelled = false;
     let promise = cache.get(key);
     if (!promise) {
-      promise = api.readme(bpId, worktree).catch(() => null);
+      promise = api.readme(bpId, copy).catch(() => null);
       cache.set(key, promise);
       promise.then((c) => resolved.set(key, c));
     }
@@ -78,7 +78,7 @@ export function useReadme(
     return () => {
       cancelled = true;
     };
-  }, [bpId, worktree, key]);
+  }, [bpId, copy, key]);
 
   return { content, loading };
 }

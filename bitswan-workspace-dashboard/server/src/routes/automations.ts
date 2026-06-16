@@ -18,11 +18,11 @@ export function registerAutomationRoutes(
 ): void {
   // Deploy from the bind-mounted workspace (no asset upload).
   app.post<{
-    Body: { relative_path?: string; stage?: string; worktree?: string };
+    Body: { relative_path?: string; stage?: string; copy?: string };
   }>('/api/automations/deploy', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-    const { relative_path, stage, worktree } = req.body ?? {};
+    const { relative_path, stage, copy } = req.body ?? {};
     if (!relative_path || typeof relative_path !== 'string') {
       return reply.code(400).send({ error: 'relative_path is required' });
     }
@@ -35,7 +35,7 @@ export function registerAutomationRoutes(
       const r = await gitops.startDeploy({
         relative_path,
         stage,
-        ...(worktree ? { worktree } : {}),
+        ...(copy ? { copy } : {}),
       });
       if (!r.ok) {
         return reply
@@ -51,11 +51,11 @@ export function registerAutomationRoutes(
 
   // Deploy a whole business process (all member automations) as one unit.
   app.post<{
-    Body: { bp?: string; stage?: string; worktree?: string };
+    Body: { bp?: string; stage?: string; copy?: string };
   }>('/api/automations/deploy-bp', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-    const { bp, stage, worktree } = req.body ?? {};
+    const { bp, stage, copy } = req.body ?? {};
     if (!bp || typeof bp !== 'string') {
       return reply.code(400).send({ error: 'bp is required' });
     }
@@ -68,7 +68,7 @@ export function registerAutomationRoutes(
       const r = await gitops.deployBusinessProcess({
         bp,
         stage,
-        ...(worktree ? { worktree } : {}),
+        ...(copy ? { copy } : {}),
       });
       if (!r.ok) {
         return reply

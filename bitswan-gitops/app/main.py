@@ -11,7 +11,7 @@ from app.routes.services import router as services_router
 from app.routes.docs import router as docs_router
 from app.routes.events import router as events_router
 from app.routes.processes import router as processes_router
-from app.routes.worktrees import router as worktrees_router
+from app.routes.copies import router as copies_router
 from app.routes.agent import router as agent_router
 from app.routes.git_http import router as git_http_router
 from app.routes.backups import router as backups_router
@@ -64,13 +64,9 @@ app.include_router(jupyter_router, dependencies=[Depends(verify_token)])
 app.include_router(services_router, dependencies=[Depends(verify_token)])
 app.include_router(events_router, dependencies=[Depends(verify_token)])
 app.include_router(processes_router, dependencies=[Depends(verify_token)])
-# Copy management is served under /copies (canonical) and /worktrees
-# (deprecated alias kept so the existing dashboard keeps working).
+# Copy management is served under /copies.
 app.include_router(
-    worktrees_router, prefix="/copies", dependencies=[Depends(verify_token)]
-)
-app.include_router(
-    worktrees_router, prefix="/worktrees", dependencies=[Depends(verify_token)]
+    copies_router, prefix="/copies", dependencies=[Depends(verify_token)]
 )
 # Docs router is public - no auth required
 app.include_router(docs_router)

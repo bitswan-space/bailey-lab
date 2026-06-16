@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["templates"])
 
-# Same shape as the dashboard server uses for BP / worktree names.
+# Same shape as the dashboard server uses for BP / copy names.
 _BP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_WORKTREE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
+_COPY_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
 
 
 def _workspace_root() -> str:
@@ -43,7 +43,7 @@ class CreateFromTemplateRequest(BaseModel):
     group_id: str | None = None
     name: str | None = None
     bp: str
-    worktree: str | None = None
+    copy: str | None = None
 
 
 @router.post("/automations/from-template")
@@ -57,8 +57,8 @@ async def create_from_template(
     """
     if not body.bp or not _BP_NAME_RE.match(body.bp):
         raise HTTPException(status_code=400, detail="Invalid bp")
-    if body.worktree is not None and not _WORKTREE_NAME_RE.match(body.worktree):
-        raise HTTPException(status_code=400, detail="Invalid worktree name")
+    if body.copy is not None and not _COPY_NAME_RE.match(body.copy):
+        raise HTTPException(status_code=400, detail="Invalid copy name")
     if bool(body.template_id) == bool(body.group_id):
         raise HTTPException(
             status_code=400,
@@ -72,7 +72,7 @@ async def create_from_template(
             template_id=body.template_id,
             group_id=body.group_id,
             name=body.name,
-            worktree=body.worktree,
+            copy=body.copy,
         )
     except FileExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -82,17 +82,17 @@ async def create_from_template(
         logger.exception("create_automation_from_template failed")
         raise HTTPException(status_code=500, detail=str(e))
 
-    await _broadcast_automations(automation_service, body.worktree)
+    await _broadcast_automations(automation_service, body.copy)
     return result
 
 
 async def _broadcast_automations(
-    automation_service: AutomationService, worktree: str | None
+    automation_service: AutomationService, copy: str | None
 ) -> None:
     """Refresh the affected scope's cache and broadcast the fresh automations
     snapshot so the dashboard updates without waiting for the FS watcher."""
     try:
-        await automation_service.refresh(worktree)
+        await automation_service.refresh(copy)
         automations = await automation_service.get_automations()
         data = [
             a.model_dump(mode="json") if hasattr(a, "model_dump") else a
@@ -118,28 +118,28 @@ WORKER_TEMPLATE_BY_TYPE = {"go": "go-worker", "fastapi": "fastapi-worker"}
 class AddFrontendRequest(BaseModel):
     bp: str
     name: str
-    worktree: str | None = None
+    copy: str | None = None
 
 
 class AddWorkerRequest(BaseModel):
     bp: str
     name: str
     type: str = "go"
-    worktree: str | None = None
+    copy: str | None = None
 
 
 class RenameAutomationRequest(BaseModel):
     bp: str
     old_name: str
     new_name: str
-    worktree: str | None = None
+    copy: str | None = None
 
 
-def _validate_scope(bp: str, worktree: str | None) -> None:
+def _validate_scope(bp: str, copy: str | None) -> None:
     if not bp or not _BP_NAME_RE.match(bp):
         raise HTTPException(status_code=400, detail="Invalid bp")
-    if worktree is not None and not _WORKTREE_NAME_RE.match(worktree):
-        raise HTTPException(status_code=400, detail="Invalid worktree name")
+    if copy is not None and not _COPY_NAME_RE.match(copy):
+        raise HTTPException(status_code=400, detail="Invalid copy name")
 
 
 async def _scaffold_from_template(
@@ -148,7 +148,7 @@ async def _scaffold_from_template(
     bp: str,
     template_id: str,
     name: str,
-    worktree: str | None,
+    copy: str | None,
 ) -> dict:
     try:
         result = await template_service.create_automation_from_template(
@@ -156,7 +156,7 @@ async def _scaffold_from_template(
             bp=bp,
             template_id=template_id,
             name=name,
-            worktree=worktree,
+            copy=copy,
         )
     except FileExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -165,20 +165,20 @@ async def _scaffold_from_template(
     except Exception as e:
         logger.exception("scaffold from template %s failed", template_id)
         raise HTTPException(status_code=500, detail=str(e))
-    await _broadcast_automations(automation_service, worktree)
+    await _broadcast_automations(automation_service, copy)
 
     # Auto-deploy the freshly scaffolded automation(s) so they start running
     # immediately — same expectation as creating a business process. Deploy
     # ONLY the just-created members (matched by relative_path); the rest of the
     # BP is already running and must not be disturbed. Best-effort: a deploy
     # failure surfaces in the response but never fails the scaffold itself.
-    stage = "live-dev" if worktree else "dev"
+    stage = "live-dev" if copy else "dev"
     created_paths = {
         (c.get("relative_path") or "").rstrip("/") for c in result.get("created", [])
     }
     members = [
         m
-        for m in automation_service.members_for_bp(bp, worktree=worktree, stage=stage)
+        for m in automation_service.members_for_bp(bp, copy=copy, stage=stage)
         if (m.get("relative_path") or "").rstrip("/") in created_paths
     ]
     if members:
@@ -186,7 +186,7 @@ async def _scaffold_from_template(
             label=bp,
             members=members,
             stage=stage,
-            worktree=worktree,
+            copy=copy,
             service=automation_service,
         )
         if deploy.get("deploy"):
@@ -202,13 +202,13 @@ async def add_frontend(
     automation_service: AutomationService = Depends(get_automation_service),
 ) -> dict:
     """Add a frontend (the only kind) to a business process."""
-    _validate_scope(body.bp, body.worktree)
+    _validate_scope(body.bp, body.copy)
     return await _scaffold_from_template(
         automation_service,
         bp=body.bp,
         template_id=FRONTEND_TEMPLATE_ID,
         name=body.name,
-        worktree=body.worktree,
+        copy=body.copy,
     )
 
 
@@ -218,7 +218,7 @@ async def add_worker(
     automation_service: AutomationService = Depends(get_automation_service),
 ) -> dict:
     """Add a worker container of the given type to a business process."""
-    _validate_scope(body.bp, body.worktree)
+    _validate_scope(body.bp, body.copy)
     template_id = WORKER_TEMPLATE_BY_TYPE.get(body.type)
     if not template_id:
         raise HTTPException(
@@ -231,7 +231,7 @@ async def add_worker(
         bp=body.bp,
         template_id=template_id,
         name=body.name,
-        worktree=body.worktree,
+        copy=body.copy,
     )
 
 
@@ -241,14 +241,14 @@ async def rename_automation_route(
     automation_service: AutomationService = Depends(get_automation_service),
 ) -> dict:
     """Rename a frontend or worker within a business process."""
-    _validate_scope(body.bp, body.worktree)
+    _validate_scope(body.bp, body.copy)
     try:
         result = await template_service.rename_automation(
             workspace_root=_workspace_root(),
             bp=body.bp,
             old_name=body.old_name,
             new_name=body.new_name,
-            worktree=body.worktree,
+            copy=body.copy,
         )
     except FileExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -257,5 +257,5 @@ async def rename_automation_route(
     except Exception as e:
         logger.exception("rename_automation failed")
         raise HTTPException(status_code=500, detail=str(e))
-    await _broadcast_automations(automation_service, body.worktree)
+    await _broadcast_automations(automation_service, body.copy)
     return result

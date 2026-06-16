@@ -116,12 +116,11 @@ def _copies_dir() -> str:
 
 
 def scan_workspace_sources(
-    workspace_root: str, worktree: str | None = None
+    workspace_root: str, copy: str | None = None
 ) -> list[dict]:
     """Walk the filesystem for automation sources marked by `automation.toml`.
 
-    Scans the `main` copy when `worktree` is None, or the named copy otherwise.
-    (`worktree` is the legacy parameter name; it now carries the copy name.)
+    Scans the `main` copy when `copy` is None, or the named copy otherwise.
     Returns one dict per automation directory with enough metadata for both
     deploy-time use and dashboard discovery.
 
@@ -134,13 +133,13 @@ def scan_workspace_sources(
         relative_path   — volume-relative path under the workspace, always
                           "copies/<copy>/<rel>" (copy is "main" for the default)
         source_path     — absolute filesystem path
-        worktree        — the copy name (None for the main copy)
+        copy            — the copy name (None for the main copy)
 
     `workspace_root` is accepted for backwards compatibility but no longer used
     to locate sources — copies live under BITSWAN_COPIES_DIR.
     """
-    copy = worktree or "main"
-    scan_root = os.path.join(_copies_dir(), copy)
+    scope = copy or "main"
+    scan_root = os.path.join(_copies_dir(), scope)
     if not os.path.isdir(scan_root):
         return []
 
@@ -158,11 +157,11 @@ def scan_workspace_sources(
         bp_name = sanitize_automation_name(rel_parts[0]) if len(rel_parts) >= 2 else ""
         bp_prefix = f"{bp_name}-" if bp_name else ""
 
-        if worktree:
+        if copy:
             bp_suffix = f"-{bp_name}" if bp_name else ""
-            context = f"copy-{worktree}{bp_suffix}"
+            context = f"copy-{copy}{bp_suffix}"
             deployment_id = f"{sanitized}-{context}-live-dev"
-            relative_path = f"copies/{worktree}/{rel_path}"
+            relative_path = f"copies/{copy}/{rel_path}"
         else:
             # main copy: unprefixed, matching legacy main-repo deployment ids.
             context = bp_name
@@ -181,7 +180,7 @@ def scan_workspace_sources(
                 "stage": "live-dev",
                 "relative_path": relative_path,
                 "source_path": root,
-                "worktree": worktree,
+                "copy": copy,
             }
         )
     return results
@@ -237,7 +236,7 @@ class AutomationService:
         )
         # Cache full history per deployment_id: {deployment_id: (commit_hash, [entries])}
         self._history_cache: dict[str, tuple[str, list]] = {}
-        # Scope-keyed cache mirroring ProcessService._cache. Key = worktree
+        # Scope-keyed cache mirroring ProcessService._cache. Key = copy
         # name, or None for main. Holds STATIC entries (yaml + filesystem
         # scan); Docker container state is overlaid live by get_automations()
         # so we don't have to couple this cache to Docker events. Refreshed
@@ -393,7 +392,7 @@ class AutomationService:
             for d in deployed
         }
         discoverable: list[DeployedAutomation] = []
-        for src in scan_workspace_sources(self.workspace_repo_dir, worktree=scope):
+        for src in scan_workspace_sources(self.workspace_repo_dir, copy=scope):
             key = (src["automation_name"], src["relative_path"].rstrip("/"))
             if key in deployed_keys:
                 continue
@@ -420,11 +419,11 @@ class AutomationService:
 
         return deployed + discoverable
 
-    async def refresh(self, worktree: str | None = None) -> list[DeployedAutomation]:
+    async def refresh(self, copy: str | None = None) -> list[DeployedAutomation]:
         """Recompute one scope's static automation list and cache it."""
         bs_yaml = read_bitswan_yaml(self.gitops_dir) or {"deployments": {}}
-        entries = self._build_static_entries(worktree, bs_yaml)
-        self._cache[worktree] = entries
+        entries = self._build_static_entries(copy, bs_yaml)
+        self._cache[copy] = entries
         return entries
 
     async def refresh_all(self) -> None:
@@ -450,8 +449,8 @@ class AutomationService:
         for stale in [k for k in self._cache.keys() if k is not None and k not in live]:
             self._cache.pop(stale, None)
 
-    def forget_worktree(self, worktree: str) -> None:
-        self._cache.pop(worktree, None)
+    def forget_copy(self, copy: str) -> None:
+        self._cache.pop(copy, None)
 
     def _apply_docker_overlay(
         self,
@@ -735,7 +734,7 @@ class AutomationService:
         self,
         relative_path: str,
         stage: str,
-        worktree: str | None = None,
+        copy: str | None = None,
     ) -> dict:
         """Build + materialize one automation source, ready for deployment.
 
@@ -759,15 +758,15 @@ class AutomationService:
                 detail=f"Unsupported stage '{stage}' (allowed: dev, live-dev)",
             )
 
-        # For dev stage we scan from the main workspace (no worktree); for
-        # live-dev we honour `worktree`.
-        scan_worktree = worktree if stage == "live-dev" else None
+        # For dev stage we scan from the main workspace (no copy); for
+        # live-dev we honour `copy`.
+        scan_copy = copy if stage == "live-dev" else None
         sources = scan_workspace_sources(
-            self.workspace_repo_dir, worktree=scan_worktree
+            self.workspace_repo_dir, copy=scan_copy
         )
         source = next((s for s in sources if s["relative_path"] == relative_path), None)
         if not source:
-            ctx = f" in worktree '{worktree}'" if worktree else ""
+            ctx = f" in copy '{copy}'" if copy else ""
             raise HTTPException(
                 status_code=404,
                 detail=f"No automation source at '{relative_path}'{ctx}",
@@ -826,7 +825,7 @@ class AutomationService:
         self,
         relative_path: str,
         stage: str,
-        worktree: str | None = None,
+        copy: str | None = None,
     ) -> dict:
         """Deploy a single automation directly from the bind-mounted workspace.
 
@@ -838,7 +837,7 @@ class AutomationService:
         `stage="live-dev"` skips materialization and uses the literal
         "live-dev" checksum, matching the existing `start-live-dev` endpoint.
         """
-        prep = await self.prep_deploy_source(relative_path, stage, worktree)
+        prep = await self.prep_deploy_source(relative_path, stage, copy)
         deployment_id = prep["deployment_id"]
 
         task = await deploy_manager.create_task(deployment_id)
@@ -866,7 +865,7 @@ class AutomationService:
         }
 
     def members_for_bp(
-        self, bp: str, worktree: str | None = None, stage: str = "dev"
+        self, bp: str, copy: str | None = None, stage: str = "dev"
     ) -> list[dict]:
         """Scan for every automation source under one business process.
 
@@ -876,9 +875,9 @@ class AutomationService:
         its sanitized form both match. Returns the scanner dicts (same shape
         as `scan_workspace_sources`).
         """
-        scan_worktree = worktree if stage == "live-dev" else None
+        scan_copy = copy if stage == "live-dev" else None
         sources = scan_workspace_sources(
-            self.workspace_repo_dir, worktree=scan_worktree
+            self.workspace_repo_dir, copy=scan_copy
         )
         bp_key = sanitize_automation_name(bp)
         out: list[dict] = []
@@ -1116,7 +1115,7 @@ class AutomationService:
         label: str,
         members: list[dict],
         stage: str,
-        worktree: str | None = None,
+        copy: str | None = None,
         deployed_by: str | None = None,
         commit_subject: str | None = None,
         progress_callback: Callable[..., Any] | None = None,
@@ -1156,7 +1155,7 @@ class AutomationService:
                 f"Preparing {i}/{total}: {src.get('display_name', src['relative_path'])}",
                 current=i - 1,
             )
-            prep = await self.prep_deploy_source(src["relative_path"], stage, worktree)
+            prep = await self.prep_deploy_source(src["relative_path"], stage, copy)
             prepped.append(prep)
 
         await _report(
@@ -1185,7 +1184,7 @@ class AutomationService:
         self,
         bp: str,
         stage: str,
-        worktree: str | None = None,
+        copy: str | None = None,
         members: list[dict] | None = None,
         deployed_by: str | None = None,
         progress_callback: Callable[..., Any] | None = None,
@@ -1202,7 +1201,7 @@ class AutomationService:
             )
 
         if members is None:
-            members = self.members_for_bp(bp, worktree, stage)
+            members = self.members_for_bp(bp, copy, stage)
         if not members:
             raise HTTPException(
                 status_code=404,
@@ -1213,7 +1212,7 @@ class AutomationService:
             label=bp,
             members=members,
             stage=stage,
-            worktree=worktree,
+            copy=copy,
             deployed_by=deployed_by,
             commit_subject=f"deploy business process {bp}",
             progress_callback=progress_callback,
@@ -1381,7 +1380,7 @@ class AutomationService:
         because prep's image-tag rewrite is idempotent and persisted in the
         workspace source.
         """
-        sources = scan_workspace_sources(self.workspace_repo_dir, worktree=None)
+        sources = scan_workspace_sources(self.workspace_repo_dir, copy=None)
         bs_yaml = read_bitswan_yaml(self.gitops_dir) or {"deployments": {}}
         deployments = bs_yaml.get("deployments", {}) or {}
         bitswan_lib = os.path.join(self.workspace_repo_dir, "bitswan_lib")
@@ -3050,7 +3049,7 @@ fi
     def generate_docker_compose(self, bs_yaml: dict):
         from app.services.bp_databases import (
             bp_resource_names,
-            derive_bp_and_worktree,
+            derive_bp_and_copy,
             is_registered,
             load_registry,
         )
@@ -3192,7 +3191,7 @@ fi
             deployment_context = conf.get("deployment_context", "")
             # relative_path is like "copies/main/Test/backend" or
             # "copies/bar/Test/backend"; wt_name is the copy context ("" for main).
-            bp_sanitized, wt_name = derive_bp_and_worktree(relative_path)
+            bp_sanitized, wt_name = derive_bp_and_copy(relative_path)
             if not deployment_context:
                 wt_part = f"-copy-{wt_name}" if wt_name else ""
                 stage_suffix = f"-{stage}" if stage and stage != "production" else ""
@@ -3447,7 +3446,7 @@ fi
                 entry["labels"]["gitops.certs.enabled"] = "true"
 
             # Source mount is always read-only: live-dev binds the workspace
-            # worktree directly, other stages bind the checksum-extracted
+            # copy directly, other stages bind the checksum-extracted
             # deployment dir. Each template is configured to write its
             # scratch files to writable image layers (e.g. `/deps`, `/tmp`,
             # `$PYTHONPYCACHEPREFIX`) rather than into the source tree.

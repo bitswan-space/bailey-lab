@@ -46,19 +46,19 @@ async def get_automations(
 
 class StartLiveDevRequest(BaseModel):
     relative_path: str
-    worktree: str | None = None
+    copy: str | None = None
 
 
 class StartDeployRequest(BaseModel):
     relative_path: str
     stage: str  # "dev" or "live-dev"
-    worktree: str | None = None
+    copy: str | None = None
 
 
 class DeployBPRequest(BaseModel):
     bp: str
     stage: str  # "dev" or "live-dev"
-    worktree: str | None = None
+    copy: str | None = None
 
 
 class PromoteBPRequest(BaseModel):
@@ -75,7 +75,7 @@ async def start_deploy(
 
     Replaces the editor's upload+deploy flow for environments where the
     workspace is co-located with gitops. The body is intentionally minimal
-    (relative_path, stage, worktree?) — gitops reads the automation source
+    (relative_path, stage, copy?) — gitops reads the automation source
     directly from `/workspace-repo`, merges `bitswan_lib` if present,
     computes the merged-tree checksum, materialises `<checksum>/` if needed,
     and kicks off the existing deploy pipeline.
@@ -83,7 +83,7 @@ async def start_deploy(
     prep = await automation_service.start_deploy_from_workspace(
         relative_path=body.relative_path,
         stage=body.stage,
-        worktree=body.worktree,
+        copy=body.copy,
     )
 
     _spawn_bg(
@@ -140,10 +140,10 @@ async def deploy_bp(
         )
 
     members = automation_service.members_for_bp(
-        body.bp, worktree=body.worktree, stage=body.stage
+        body.bp, copy=body.copy, stage=body.stage
     )
     if not members:
-        ctx = f" in worktree '{body.worktree}'" if body.worktree else ""
+        ctx = f" in copy '{body.copy}'" if body.copy else ""
         raise HTTPException(
             status_code=404,
             detail=f"No deployable automations under BP '{body.bp}'{ctx}",
@@ -167,7 +167,7 @@ async def deploy_bp(
             deployment_ids,
             automation_service,
             stage=body.stage,
-            worktree=body.worktree,
+            copy=body.copy,
             members=members,
         )
     )
@@ -247,7 +247,7 @@ async def deploy_changed(
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """Deploy every main automation whose source differs from (or has no)
-    deployed dev checksum — the same changed+new set the worktree-sync hook
+    deployed dev checksum — the same changed+new set the copy-sync hook
     deploys automatically. Members already being deployed are skipped.
     """
     members = await automation_service.changed_dev_members()
@@ -294,12 +294,12 @@ async def start_live_dev(
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """Start a live-dev deployment. Server constructs the deployment ID."""
-    sources = _scan_automations(body.worktree)
+    sources = _scan_automations(body.copy)
     source = next(
         (s for s in sources if s["relative_path"] == body.relative_path), None
     )
     if not source:
-        ctx = f" in worktree '{body.worktree}'" if body.worktree else ""
+        ctx = f" in copy '{body.copy}'" if body.copy else ""
         raise HTTPException(
             status_code=404,
             detail=f"No automation source at '{body.relative_path}'{ctx}",
@@ -437,7 +437,7 @@ async def _run_bp_deploy_with_progress(
     deployment_ids: list[str],
     automation_service: AutomationService,
     stage: str,
-    worktree: str | None,
+    copy: str | None,
     members: list[dict],
 ):
     """Background coroutine running a BP deploy with progress broadcasting.
@@ -476,7 +476,7 @@ async def _run_bp_deploy_with_progress(
         await automation_service.deploy_business_process(
             bp=bp,
             stage=stage,
-            worktree=worktree,
+            copy=copy,
             members=members,
             progress_callback=progress_callback,
         )

@@ -2,7 +2,7 @@
 REST surface over the workspace's business processes.
 
 Reads the in-memory cache maintained by `ProcessService`; the cache is kept
-fresh by the workspace + worktree file-system watchers in `lifespan.py`.
+fresh by the workspace + copy file-system watchers in `lifespan.py`.
 Same data is broadcast over `/events/stream` as a `processes` event for
 push-style consumers (the workspace dashboard).
 """
@@ -28,22 +28,22 @@ router = APIRouter(prefix="/processes", tags=["processes"])
 # Mirrors the dashboard-side validation, kept tight enough that the name can
 # also stand in for a deployment_id segment without surprises.
 _PROCESS_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-# Matches the canonical worktree-name constraint used by /worktrees and /templates.
-_WORKTREE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
+# Matches the canonical copy-name constraint used by /copies and /templates.
+_COPY_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
 
 
 class CreateProcessRequest(BaseModel):
     name: str
-    worktree: str | None = None
+    copy: str | None = None
 
 
 @router.get("/")
 async def get_processes() -> list[dict]:
-    """Return all business processes across main repo and every worktree.
+    """Return all business processes across main repo and every copy.
 
-    Each entry is deduplicated by directory name; the `worktrees` list says
-    which worktrees the same BP also lives in (empty when only in main).
-    A BP that exists *only* in a worktree comes back with `in_main: false`.
+    Each entry is deduplicated by directory name; the `copies` list says
+    which copies the same BP also lives in (empty when only in main).
+    A BP that exists *only* in a copy comes back with `in_main: false`.
     """
     return process_service.get_all_processes()
 
@@ -65,7 +65,7 @@ async def create_process(
     Auto-setup (best-effort): the default template group
     (`BITSWAN_DEFAULT_TEMPLATE_GROUP`, default `business-process`) is
     scaffolded into the new BP, and its deploy is kicked off in the background
-    — `dev` stage for a main BP, `live-dev` for a worktree BP. Failures never
+    — `dev` stage for a main BP, `live-dev` for a copy BP. Failures never
     fail the BP creation; they surface in the `setup_error` response field.
     """
     name = (body.name or "").strip()
@@ -77,12 +77,12 @@ async def create_process(
                 "contain only letters, digits, underscores, dashes, and dots."
             ),
         )
-    if body.worktree is not None and not _WORKTREE_NAME_RE.match(body.worktree):
-        raise HTTPException(status_code=400, detail="Invalid worktree name")
+    if body.copy is not None and not _COPY_NAME_RE.match(body.copy):
+        raise HTTPException(status_code=400, detail="Invalid copy name")
 
     try:
         entry = process_service.create_business_process(
-            name=name, worktree=body.worktree
+            name=name, copy=body.copy
         )
     except FileExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -118,14 +118,14 @@ async def create_process(
             workspace_root=workspace_root,
             bp=name,
             group_id=group_id,
-            worktree=body.worktree,
+            copy=body.copy,
         )
         automations_created = [c["name"] for c in created.get("created", [])]
 
         # Inline cache refresh + broadcast (mirrors routes/templates.py) so
         # the new automation cards appear without waiting for the FS watcher.
         try:
-            await automation_service.refresh(body.worktree)
+            await automation_service.refresh(body.copy)
             automations = await automation_service.get_automations()
             data = [
                 a.model_dump(mode="json") if hasattr(a, "model_dump") else a
@@ -135,15 +135,15 @@ async def create_process(
         except Exception:
             logger.exception("Failed to broadcast automations after BP scaffold")
 
-        stage = "live-dev" if body.worktree else "dev"
+        stage = "live-dev" if body.copy else "dev"
         members = automation_service.members_for_bp(
-            name, worktree=body.worktree, stage=stage
+            name, copy=body.copy, stage=stage
         )
         res = await spawn_set_deploy(
             label=name,
             members=members,
             stage=stage,
-            worktree=body.worktree,
+            copy=body.copy,
             service=automation_service,
         )
         if res.get("deploy"):

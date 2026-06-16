@@ -105,7 +105,7 @@ def _validate_deployment_id(deployment_id: str):
     if not LIVE_DEV_PATTERN.match(deployment_id):
         raise HTTPException(
             status_code=403,
-            detail=f"Deployment '{deployment_id}' is not a valid live-dev worktree deployment",
+            detail=f"Deployment '{deployment_id}' is not a valid live-dev copy deployment",
         )
 
 
@@ -117,26 +117,26 @@ def _get_workspace_dir() -> str:
 # --- Deployment endpoints ---
 
 
-def _scan_automations(worktree: str | None = None) -> list[dict]:
+def _scan_automations(copy: str | None = None) -> list[dict]:
     """Scan the filesystem for automation sources (automation.toml).
 
     Thin wrapper over `scan_workspace_sources` that keeps the existing
     `_get_workspace_dir()` resolution behaviour.
     """
-    return scan_workspace_sources(_get_workspace_dir(), worktree)
+    return scan_workspace_sources(_get_workspace_dir(), copy)
 
 
 @router.get("/deployments")
 async def list_agent_deployments(
-    worktree: str = Query(None),
+    copy: str = Query(None),
     _token=Depends(verify_agent_token),
 ):
-    """List deployments for a worktree, including those not yet started."""
-    if not worktree:
-        raise HTTPException(status_code=400, detail="worktree parameter is required")
+    """List deployments for a copy, including those not yet started."""
+    if not copy:
+        raise HTTPException(status_code=400, detail="copy parameter is required")
 
-    # Scan filesystem for all automation sources in this worktree
-    sources = _scan_automations(worktree)
+    # Scan filesystem for all automation sources in this copy
+    sources = _scan_automations(copy)
 
     # Query running containers to get their state
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
@@ -152,7 +152,7 @@ async def list_agent_deployments(
         for container in containers:
             labels = container.get("Labels", {})
             dep_id = labels.get("gitops.deployment_id", "")
-            if f"-copy-{worktree}" in dep_id and dep_id.endswith("-live-dev"):
+            if f"-copy-{copy}" in dep_id and dep_id.endswith("-live-dev"):
                 running_states[dep_id] = container.get("State", "unknown")
     except DockerError:
         pass  # If Docker query fails, we still show sources as "not deployed"
@@ -178,7 +178,7 @@ async def list_agent_deployments(
                 "context": src["context"],
                 "stage": src["stage"],
                 "relative_path": src["relative_path"],
-                "worktree": src["worktree"],
+                "copy": src["copy"],
                 "url": _make_url(src),
             }
         )
@@ -194,7 +194,7 @@ async def list_agent_deployments(
                 "context": "",
                 "stage": "live-dev",
                 "relative_path": None,
-                "worktree": worktree,
+                "copy": copy,
                 "url": _make_url(orphan),
             }
         )
@@ -204,7 +204,7 @@ async def list_agent_deployments(
 
 class StartDeploymentRequest(BaseModel):
     relative_path: str
-    worktree: str | None = None
+    copy: str | None = None
 
 
 @router.post("/deployments/start")
@@ -214,12 +214,12 @@ async def start_agent_deployment(
     _token=Depends(verify_agent_token),
 ):
     """Start a live-dev deployment for an automation."""
-    sources = _scan_automations(body.worktree)
+    sources = _scan_automations(body.copy)
     source = next(
         (s for s in sources if s["relative_path"] == body.relative_path), None
     )
     if not source:
-        ctx = f" in worktree '{body.worktree}'" if body.worktree else ""
+        ctx = f" in copy '{body.copy}'" if body.copy else ""
         raise HTTPException(
             status_code=404,
             detail=f"No automation source at '{body.relative_path}'{ctx}",

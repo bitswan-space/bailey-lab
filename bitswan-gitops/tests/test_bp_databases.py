@@ -14,7 +14,7 @@ import yaml
 from app.services import bp_databases
 from app.services.bp_databases import (
     bp_resource_names,
-    derive_bp_and_worktree,
+    derive_bp_and_copy,
     ensure_bp_databases,
     get_service_secrets,
     is_registered,
@@ -64,20 +64,20 @@ def test_validate_bp_slug_rejects(bad):
         validate_bp_slug(bad)
 
 
-def test_derive_bp_and_worktree():
+def test_derive_bp_and_copy():
     # main copy: unprefixed scope (no copy context).
-    assert derive_bp_and_worktree("copies/main/Test BP/backend") == ("test-bp", "")
+    assert derive_bp_and_copy("copies/main/Test BP/backend") == ("test-bp", "")
     # non-main copy: carries the copy name as context.
-    assert derive_bp_and_worktree("copies/bar/Test BP/backend") == (
+    assert derive_bp_and_copy("copies/bar/Test BP/backend") == (
         "test-bp",
         "bar",
     )
     # Top-level automation: no BP segment.
-    assert derive_bp_and_worktree("standalone") == ("", "")
+    assert derive_bp_and_copy("standalone") == ("", "")
     # Copy-root automation: copy but no BP.
-    assert derive_bp_and_worktree("copies/bar/standalone") == ("", "bar")
-    assert derive_bp_and_worktree(None) == ("", "")
-    assert derive_bp_and_worktree("") == ("", "")
+    assert derive_bp_and_copy("copies/bar/standalone") == ("", "bar")
+    assert derive_bp_and_copy(None) == ("", "")
+    assert derive_bp_and_copy("") == ("", "")
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +357,7 @@ def test_live_dev_maps_to_dev_realm(gitops_home):
     assert out == []
 
 
-def test_worktree_members_never_register(gitops_home):
+def test_copy_members_never_register(gitops_home):
     out = register_new_bps_for_members(
         {"deployments": {}},
         [
@@ -371,8 +371,8 @@ def test_worktree_members_never_register(gitops_home):
     assert load_registry()["bps"] == {}
 
 
-def test_worktree_deployments_do_not_block_registration(gitops_home):
-    # Only non-worktree deployments count as "the BP already exists here".
+def test_copy_deployments_do_not_block_registration(gitops_home):
+    # Only non-copy deployments count as "the BP already exists here".
     bs_yaml = {
         "deployments": {
             "backend-wt-foo-new-bp-live-dev": {
@@ -491,8 +491,8 @@ def test_compose_injection_gated_per_realm(gitops_home, automation_service):
     assert "POSTGRES_DB" not in env
 
 
-def test_worktree_override_wins_over_bp_injection(gitops_home, automation_service):
-    """Ordering is load-bearing: worktree live-dev keeps its cloned DB even
+def test_copy_override_wins_over_bp_injection(gitops_home, automation_service):
+    """Ordering is load-bearing: copy live-dev keeps its cloned DB even
     when the BP is registered (live-dev maps to the dev realm)."""
     reg = load_registry()
     register_bp_stage(reg, "my-bp", "My BP", "dev")
@@ -519,7 +519,7 @@ def test_worktree_override_wins_over_bp_injection(gitops_home, automation_servic
 
 
 def test_compose_live_dev_main_injects(gitops_home, automation_service):
-    # Main (non-worktree) live-dev shares the dev realm → injected.
+    # Main (non-copy) live-dev shares the dev realm → injected.
     reg = load_registry()
     register_bp_stage(reg, "my-bp", "My BP", "dev")
     save_registry(reg)

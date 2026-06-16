@@ -3,7 +3,7 @@
 Covers provisioning (`ensure_bare_repo`) and the append-only guarantee of the
 `pre-receive` hook (ff accepted, force-push / delete rejected, new branch
 allowed), plus the copies-aware relative_path parsing in
-`derive_bp_and_worktree`.
+`derive_bp_and_copy`.
 """
 
 import asyncio
@@ -13,7 +13,7 @@ import subprocess
 import pytest
 
 from app.services import git_server
-from app.services.bp_databases import derive_bp_and_worktree
+from app.services.bp_databases import derive_bp_and_copy
 
 
 def _git(*args, cwd=None, check=True):
@@ -90,11 +90,11 @@ def test_fast_forward_only_enforcement(bare_repo, tmp_path):
 
 def test_derive_bp_and_copy_parsing():
     # main copy -> no copy context (stays unprefixed, like legacy main)
-    assert derive_bp_and_worktree("copies/main/Test/backend") == ("test", "")
+    assert derive_bp_and_copy("copies/main/Test/backend") == ("test", "")
     # non-main copy -> copy context is the copy name
-    assert derive_bp_and_worktree("copies/feature1/Test/backend") == (
+    assert derive_bp_and_copy("copies/feature1/Test/backend") == (
         "test",
         "feature1",
     )
     # top-level automation (no BP segment)
-    assert derive_bp_and_worktree("copies/main/solo") == ("", "")
+    assert derive_bp_and_copy("copies/main/solo") == ("", "")

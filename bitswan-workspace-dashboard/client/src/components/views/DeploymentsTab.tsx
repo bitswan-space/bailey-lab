@@ -49,7 +49,7 @@ import { STATUS_META, stateToDisplay, type DisplayStatus } from '@/lib/status';
 import { cn } from '@/lib/utils';
 
 // The three promotion stages, in pipeline order. Live-dev never appears here
-// (its deployments live under `worktrees/` and are filtered out below).
+// (its deployments live under `copies/` and are filtered out below).
 const STAGES = [
   { id: 'dev', label: 'Development', icon: Code2 },
   { id: 'staging', label: 'Staging', icon: FlaskConical },
@@ -220,7 +220,7 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
     for (const a of raw) {
       const rel = a.relative_path ?? '';
       if (!rel.startsWith(bp.name)) continue;
-      if (rel.includes('/worktrees/') || rel.startsWith('worktrees/')) continue;
+      if (rel.includes('/copies/') || rel.startsWith('copies/')) continue;
       const key = a.automation_name ?? a.name;
       const entry = ensure(key, rel);
       const stage = a.stage;

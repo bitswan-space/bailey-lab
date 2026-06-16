@@ -1,9 +1,9 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { isValidWorktreeName } from './workspace.js';
+import { isValidCopyName } from './workspace.js';
 
 /**
- * Read-only views of a worktree's filesystem (tree + file content) for
+ * Read-only views of a copy's filesystem (tree + file content) for
  * the dashboard's Files / Diff tabs. We deliberately walk the bind-
  * mounted workspace directly instead of round-tripping through gitops:
  * the workspace is already mounted into the dashboard container (the
@@ -14,7 +14,7 @@ import { isValidWorktreeName } from './workspace.js';
 export interface FileTreeNode {
   name: string;
   kind: 'file' | 'folder';
-  /** Workspace-relative path (without the `worktrees/<name>/` prefix). */
+  /** Workspace-relative path (without the `copies/<name>/` prefix). */
   path: string;
   /** Only set on folders. Empty array on an empty folder. */
   children?: FileTreeNode[];
@@ -34,41 +34,41 @@ const HIDDEN_NAMES: ReadonlySet<string> = new Set([
   '.venv',
 ]);
 
-/** Files larger than this won't be returned by `readWorktreeFile`. */
+/** Files larger than this won't be returned by `readCopyFile`. */
 const FILE_SIZE_LIMIT = 1024 * 1024; // 1 MiB
 
 /** Heuristic: the first N bytes of a file. If we see a NUL, call it binary. */
 const BINARY_PROBE_BYTES = 8 * 1024;
 
-function worktreeRoot(opts: { workspaceRoot: string; worktree: string }): string {
-  if (!isValidWorktreeName(opts.worktree)) {
-    throw new Error('invalid worktree name');
+function copyRoot(opts: { workspaceRoot: string; copy: string }): string {
+  if (!isValidCopyName(opts.copy)) {
+    throw new Error('invalid copy name');
   }
   // Always realpath the root so the containment check below works even
   // when symlinks are in play.
-  return path.join(opts.workspaceRoot, 'worktrees', opts.worktree);
+  return path.join(opts.workspaceRoot, 'copies', opts.copy);
 }
 
 /**
  * Belt-and-suspenders containment check. The caller is expected to also
  * pass `path` through their route-layer validator, but a service-level
  * check means a future caller forgetting that doesn't get to escape the
- * worktree.
+ * copy.
  */
-function resolveInsideWorktree(root: string, relPath: string): string {
+function resolveInsideCopy(root: string, relPath: string): string {
   const resolved = path.resolve(root, relPath);
   const rootResolved = path.resolve(root);
   if (resolved !== rootResolved && !resolved.startsWith(rootResolved + path.sep)) {
-    throw new Error('path escapes worktree');
+    throw new Error('path escapes copy');
   }
   return resolved;
 }
 
-export async function readWorktreeTree(opts: {
-  worktree: string;
+export async function readCopyTree(opts: {
+  copy: string;
   workspaceRoot: string;
 }): Promise<FileTreeNode[]> {
-  const root = worktreeRoot(opts);
+  const root = copyRoot(opts);
   return readChildren(root, root);
 }
 
@@ -128,15 +128,15 @@ export type FileReadResult =
   | { content: string; truncated: boolean; etag: FileEtag }
   | { error: 'binary' | 'too-large' | 'not-found' };
 
-export async function readWorktreeFile(opts: {
-  worktree: string;
+export async function readCopyFile(opts: {
+  copy: string;
   path: string;
   workspaceRoot: string;
 }): Promise<FileReadResult> {
-  const root = worktreeRoot(opts);
+  const root = copyRoot(opts);
   let abs: string;
   try {
-    abs = resolveInsideWorktree(root, opts.path);
+    abs = resolveInsideCopy(root, opts.path);
   } catch {
     return { error: 'not-found' };
   }
@@ -186,7 +186,7 @@ export type FileWriteResult =
   | { error: 'binary' | 'too-large' | 'conflict' | 'not-found'; expected?: FileEtag; actual?: FileEtag };
 
 /**
- * Atomic write into the worktree. Optional `expectedEtag` enforces a
+ * Atomic write into the copy. Optional `expectedEtag` enforces a
  * compare-and-set: the file's current mtime/size must match what the
  * caller last read, otherwise we return `conflict` and the caller can
  * surface a "agent edited this file — reload to merge" prompt.
@@ -194,8 +194,8 @@ export type FileWriteResult =
  * Writes use the tmp-then-rename pattern (same as services/requirements.ts)
  * so a crash mid-write leaves the original intact.
  */
-export async function writeWorktreeFile(opts: {
-  worktree: string;
+export async function writeCopyFile(opts: {
+  copy: string;
   path: string;
   workspaceRoot: string;
   content: string;
@@ -204,10 +204,10 @@ export async function writeWorktreeFile(opts: {
   /** Allow creating the file if it doesn't exist. Defaults to true. */
   createIfMissing?: boolean;
 }): Promise<FileWriteResult> {
-  const root = worktreeRoot(opts);
+  const root = copyRoot(opts);
   let abs: string;
   try {
-    abs = resolveInsideWorktree(root, opts.path);
+    abs = resolveInsideCopy(root, opts.path);
   } catch {
     return { error: 'not-found' };
   }
@@ -269,19 +269,19 @@ export async function writeWorktreeFile(opts: {
 export type FileDeleteResult = { ok: true } | { error: 'not-found' };
 
 /**
- * Delete a single file inside a worktree. Directories are refused (the
+ * Delete a single file inside a copy. Directories are refused (the
  * dashboard only ever deletes files, e.g. spec attachments) — a missing
  * or non-file target reports `not-found`.
  */
-export async function deleteWorktreeFile(opts: {
-  worktree: string;
+export async function deleteCopyFile(opts: {
+  copy: string;
   path: string;
   workspaceRoot: string;
 }): Promise<FileDeleteResult> {
-  const root = worktreeRoot(opts);
+  const root = copyRoot(opts);
   let abs: string;
   try {
-    abs = resolveInsideWorktree(root, opts.path);
+    abs = resolveInsideCopy(root, opts.path);
   } catch {
     return { error: 'not-found' };
   }
@@ -304,19 +304,19 @@ export type FileStatResult =
   | { error: 'not-found' };
 
 /**
- * Resolve + stat a file inside a worktree for raw streaming (downloads,
- * binary attachments). Unlike {@link readWorktreeFile} this places no
+ * Resolve + stat a file inside a copy for raw streaming (downloads,
+ * binary attachments). Unlike {@link readCopyFile} this places no
  * size or text-ness constraints — the route layer streams the bytes.
  */
-export async function statWorktreeFile(opts: {
-  worktree: string;
+export async function statCopyFile(opts: {
+  copy: string;
   path: string;
   workspaceRoot: string;
 }): Promise<FileStatResult> {
-  const root = worktreeRoot(opts);
+  const root = copyRoot(opts);
   let abs: string;
   try {
-    abs = resolveInsideWorktree(root, opts.path);
+    abs = resolveInsideCopy(root, opts.path);
   } catch {
     return { error: 'not-found' };
   }
@@ -334,19 +334,18 @@ export async function statWorktreeFile(opts: {
 }
 
 /**
- * Resolve a workspace-relative directory path inside a worktree (for
+ * Resolve a workspace-relative directory path inside a copy (for
  * upload targets). Creates the directory if it doesn't exist. The empty
- * string resolves to the worktree root.
+ * string resolves to the copy root.
  */
-export async function ensureWorktreeDir(opts: {
-  worktree: string;
+export async function ensureCopyDir(opts: {
+  copy: string;
   path: string;
   workspaceRoot: string;
 }): Promise<string> {
-  const root = worktreeRoot(opts);
+  const root = copyRoot(opts);
   const rel = opts.path && opts.path !== '/' ? opts.path : '';
-  const abs = rel ? resolveInsideWorktree(root, rel) : root;
+  const abs = rel ? resolveInsideCopy(root, rel) : root;
   await fs.mkdir(abs, { recursive: true });
   return abs;
 }
-

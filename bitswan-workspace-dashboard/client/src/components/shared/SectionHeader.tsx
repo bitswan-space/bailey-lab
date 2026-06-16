@@ -9,7 +9,7 @@ interface SectionHeaderProps {
 
 /**
  * The "eyebrow + title + helper" header that prefaces each section in the
- * Deployments / Worktree / README views. Optional `right` slot for inline
+ * Deployments / Copy / README views. Optional `right` slot for inline
  * actions.
  */
 export function SectionHeader({ eyebrow, title, helper, right }: SectionHeaderProps) {

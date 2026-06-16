@@ -18,7 +18,7 @@ const BP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 export interface NewBusinessProcessDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  worktree?: string;
+  copy?: string;
   existingNames: string[];
   onCreated: (name: string) => void;
 }
@@ -26,7 +26,7 @@ export interface NewBusinessProcessDialogProps {
 export function NewBusinessProcessDialog({
   open,
   onOpenChange,
-  worktree,
+  copy,
   existingNames,
   onCreated,
 }: NewBusinessProcessDialogProps) {
@@ -56,10 +56,10 @@ export function NewBusinessProcessDialog({
       e?.preventDefault();
       if (!canSubmit) return;
       setSubmitting(true);
-      const target = worktree ? `worktree "${worktree}"` : 'main';
+      const target = copy ? `copy "${copy}"` : 'main';
       const work = api.createBusinessProcess({
         name: trimmed,
-        ...(worktree ? { worktree } : {}),
+        ...(copy ? { copy } : {}),
       });
       toast.promise(work, {
         loading: `Creating "${trimmed}" in ${target}…`,
@@ -82,7 +82,7 @@ export function NewBusinessProcessDialog({
         } else if (res.deploy_task_id) {
           void watchDeployTask(
             res.deploy_task_id,
-            `bp-deploy-${worktree ?? 'main'}-${trimmed}`,
+            `bp-deploy-${copy ?? 'main'}-${trimmed}`,
             {
               loading: `Setting up ${trimmed}…`,
               success: `${trimmed} ready`,
@@ -96,7 +96,7 @@ export function NewBusinessProcessDialog({
         setSubmitting(false);
       }
     },
-    [canSubmit, trimmed, worktree, onOpenChange, onCreated, reset],
+    [canSubmit, trimmed, copy, onOpenChange, onCreated, reset],
   );
 
   return (
@@ -111,8 +111,8 @@ export function NewBusinessProcessDialog({
         <DialogHeader>
           <DialogTitle>New business process</DialogTitle>
           <DialogDescription>
-            {worktree
-              ? `Creates a new business-process directory under worktrees/${worktree}/ with a process.toml and a starter README.`
+            {copy
+              ? `Creates a new business-process directory under copies/${copy}/ with a process.toml and a starter README.`
               : 'Creates a new business-process directory in the main workspace with a process.toml and a starter README.'}
           </DialogDescription>
         </DialogHeader>
