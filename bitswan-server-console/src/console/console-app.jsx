@@ -485,24 +485,30 @@ function App() {
     } catch (e) { setLoad('whoami', 'error'); setErr('whoami', e.message); }
   };
 
+  // A "background" refresh (the focus/interval poll) keeps the last-good data
+  // and status on screen while it refetches, so the view never drops to its
+  // full-page loading state and unmounts — that flicker reads as a page reload.
+  // Only the initial/explicit load shows the loading state and surfaces errors.
   const loadDevices = useAR();
-  loadDevices.current = async () => {
-    setLoad('devices', 'loading');
+  loadDevices.current = async (opts) => {
+    const bg = opts && opts.background;
+    if (!bg) setLoad('devices', 'loading');
     try {
       const r = await Api.devices();
       setData(d => ({ ...d, myDevices: (r.devices || []).map(adaptDevice) }));
       setLoad('devices', 'ok'); setErr('devices', null);
-    } catch (e) { setLoad('devices', 'error'); setErr('devices', e.message); }
+    } catch (e) { if (!bg) { setLoad('devices', 'error'); setErr('devices', e.message); } }
   };
 
   const loadApprovals = useAR();
-  loadApprovals.current = async () => {
-    setLoad('approvals', 'loading');
+  loadApprovals.current = async (opts) => {
+    const bg = opts && opts.background;
+    if (!bg) setLoad('approvals', 'loading');
     try {
       const r = await Api.approvals();
       setData(d => ({ ...d, pending: (r.pending || []).map(adaptApproval) }));
       setLoad('approvals', 'ok'); setErr('approvals', null);
-    } catch (e) { setLoad('approvals', 'error'); setErr('approvals', e.message); }
+    } catch (e) { if (!bg) { setLoad('approvals', 'error'); setErr('approvals', e.message); } }
   };
 
   const loadWorkspaces = useAR();
@@ -517,13 +523,14 @@ function App() {
   };
 
   const loadOverview = useAR();
-  loadOverview.current = async () => {
-    setLoad('overview', 'loading');
+  loadOverview.current = async (opts) => {
+    const bg = opts && opts.background;
+    if (!bg) setLoad('overview', 'loading');
     try {
       const r = await Api.overview();
       setData(d => ({ ...d, overview: adaptOverview(r) }));
       setLoad('overview', 'ok'); setErr('overview', null);
-    } catch (e) { setLoad('overview', 'error'); setErr('overview', e.message); }
+    } catch (e) { if (!bg) { setLoad('overview', 'error'); setErr('overview', e.message); } }
   };
 
   const loadPeople = useAR();
@@ -546,10 +553,10 @@ function App() {
   // refresh(list) re-fetches one (or all) live lists. Passed through ctx
   // so a view's mutation handler can sync after writing to the backend.
   const refresh = useAR();
-  refresh.current = (which) => {
+  refresh.current = (which, opts) => {
     const all = { devices: loadDevices, approvals: loadApprovals, workspaces: loadWorkspaces, whoami: loadWhoami, overview: loadOverview, people: loadPeople };
-    if (which && all[which]) return all[which].current();
-    return Promise.all(Object.values(all).map(r => r.current()));
+    if (which && all[which]) return all[which].current(opts);
+    return Promise.all(Object.values(all).map(r => r.current(opts)));
   };
 
   // Resolve the device-trust gate first.
@@ -593,10 +600,12 @@ function App() {
   // explicit refresh after a mutation.
   useAE(() => {
     if (gate.status !== 'ok' || scene !== 'console') return undefined;
+    // Background refresh: refetch in place without dropping to the loading
+    // state (which would unmount the view and look like a page reload).
     const syncVolatile = () => {
-      refresh.current('approvals');
-      refresh.current('devices');
-      refresh.current('overview');
+      refresh.current('approvals', { background: true });
+      refresh.current('devices', { background: true });
+      refresh.current('overview', { background: true });
     };
     const id = setInterval(syncVolatile, 20000);
     const onVisible = () => { if (document.visibilityState === 'visible') syncVolatile(); };

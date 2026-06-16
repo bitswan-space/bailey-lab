@@ -106,6 +106,20 @@ describe('App live-data loading + adapters + routing', () => {
     await waitFor(() => expect(screen.getByText('Device awaiting approval')).toBeTruthy());
   });
 
+  it('focusing the tab refreshes in the background without reloading the overview', async () => {
+    setLocation({ pathname: '/overview' });
+    installFetch(fullRoutes({
+      '/bailey/api/admin/siem': { json: { enabled: false, protocol: 'otlp-http', endpoint: '', has_auth_token: false, connected: false } },
+    }));
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('Recent security activity')).toBeTruthy());
+    // A tab focus fires the background poll. The overview must NOT drop to its
+    // loading state — doing so unmounts the content and reads as a page reload.
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    expect(screen.queryByText('Loading server overview…')).toBeNull();
+    expect(screen.getByText('Recent security activity')).toBeTruthy();
+  });
+
   it('derives the initial view from the URL (/devices → devices view)', async () => {
     setLocation({ pathname: '/devices' });
     installFetch(fullRoutes());
