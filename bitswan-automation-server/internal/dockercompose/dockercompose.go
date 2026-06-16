@@ -260,11 +260,28 @@ func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
 // configure lego's httpreq DNS-01 provider for wildcard certificates).
 // networks parameter is optional - if provided, adds those networks along with bitswan_network.
 func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, networks ...string) (string, error) {
-	traefikVolumes := []string{
-		traefikPath + "/traefik.yml:/etc/traefik/traefik.yml:z",
-		traefikPath + "/dynamic.yml:/etc/traefik/dynamic.yml:z",
-		traefikPath + "/certs:/tls:z",
-		traefikPath + "/acme:/acme:z",
+	// Traefik's config lives in the daemon's config volume at
+	// <volume>/traefik/... (the daemon mounts the `bitswan` volume at
+	// /root/.config/bitswan). Mount those files into Traefik as named-volume
+	// subpaths rather than host bind paths — with the config in the volume there
+	// is no host file to bind, and Docker would otherwise auto-create the missing
+	// source as an empty directory (Traefik then fails: "traefik.yml is a
+	// directory"). The docker socket stays a bind.
+	tVolume := func(subpath, target string) map[string]interface{} {
+		return map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": target,
+			"volume": map[string]interface{}{
+				"subpath": "traefik/" + subpath,
+			},
+		}
+	}
+	traefikVolumes := []interface{}{
+		tVolume("traefik.yml", "/etc/traefik/traefik.yml"),
+		tVolume("dynamic.yml", "/etc/traefik/dynamic.yml"),
+		tVolume("certs", "/tls"),
+		tVolume("acme", "/acme"),
 		"/var/run/docker.sock:/var/run/docker.sock:ro",
 	}
 
@@ -311,6 +328,11 @@ func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, n
 			"traefik": traefikService,
 		},
 		"networks": networksMap,
+		"volumes": map[string]interface{}{
+			"bitswan": map[string]interface{}{
+				"external": true,
+			},
+		},
 	}
 
 	var buf bytes.Buffer
@@ -332,8 +354,18 @@ func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, n
 // per-hostname HTTP-01 certificates.
 // networks: list of additional networks (bitswan_network is always included)
 func CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikPath, domain, wildcardResolver string, networks []string) (string, error) {
-	traefikVolumes := []string{
-		traefikPath + "/traefik.yml:/etc/traefik/traefik.yml:z",
+	// The sub-traefik config lives in the `bitswan` volume at
+	// workspaces/<ws>/traefik/traefik.yml — mount it as a volume subpath, not a
+	// host bind (see CreateTraefikDockerComposeFile for why).
+	traefikVolumes := []interface{}{
+		map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": "/etc/traefik/traefik.yml",
+			"volume": map[string]interface{}{
+				"subpath": "workspaces/" + workspaceName + "/traefik/traefik.yml",
+			},
+		},
 	}
 
 	traefikNetworks := []string{"bitswan_network"}
@@ -397,6 +429,11 @@ func CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikPath, domain,
 			"traefik": serviceMap,
 		},
 		"networks": networksMap,
+		"volumes": map[string]interface{}{
+			"bitswan": map[string]interface{}{
+				"external": true,
+			},
+		},
 	}
 
 	var buf bytes.Buffer
