@@ -13,15 +13,28 @@ const people = [
 ];
 
 describe('UsersView', () => {
-  it('renders the roster, legend, search, and opens the devices drawer', () => {
-    render(<Host View={UsersView} data={makeData({ people })} />);
+  it('renders the roster, opens the devices drawer with REAL devices, and revokes one', async () => {
+    const s = spies();
+    installFetch({
+      '/bailey/api/admin/devices': { json: { users: [{ email: 'tomas@h', devices: [
+        { id: 'dev1', name: 'Tomas Laptop', paired_at: '2026-01-01', last_seen: 'now', is_current: true, origin: 'root' },
+        { id: 'dev2', name: 'Tomas Phone', paired_at: '2026-01-02', last_seen: 'yesterday', is_current: false, origin: 'linked' },
+      ] }] } },
+      '/bailey/api/admin/devices/remove': { json: { ok: true } },
+    });
+    render(<Host View={UsersView} data={makeData({ people })} extra={s} />);
     expect(screen.getByText('People & roles')).toBeTruthy();
-    expect(screen.getByText('Tomas')).toBeTruthy();
     expect(screen.getByText('Invited')).toBeTruthy();
-    // open the drawer for the person with device_count > 0 (button shows the count)
+    // No invite button.
+    expect(screen.queryByText('Invite person')).toBeNull();
+    // Open the drawer; it loads the person's REAL devices (no seed).
     fireEvent.click(screen.getByTitle('Manage devices'));
     expect(screen.getByText("Tomas's devices")).toBeTruthy();
-    fireEvent.click(screen.getByTitle('Close'));
+    await waitFor(() => expect(screen.getByText('Tomas Laptop')).toBeTruthy());
+    expect(screen.getByText('Tomas Phone')).toBeTruthy();
+    // Revoke a device → admin remove endpoint + toast.
+    fireEvent.click(screen.getAllByText('Sign out')[0]);
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Signed out'), 'danger'));
   });
 
   it('search filters to empty state', () => {

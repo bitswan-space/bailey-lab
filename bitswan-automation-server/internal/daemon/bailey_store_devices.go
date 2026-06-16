@@ -22,7 +22,7 @@ func dbListAllDevices() ([]deviceRecord, error) {
 		return nil, err
 	}
 	rows, err := db.Query(
-		`SELECT email, id, name, paired_at, COALESCE(last_seen, '') FROM devices ORDER BY email COLLATE NOCASE, paired_at`)
+		`SELECT email, id, name, paired_at, COALESCE(last_seen, ''), COALESCE(origin, '') FROM devices ORDER BY email COLLATE NOCASE, paired_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +30,7 @@ func dbListAllDevices() ([]deviceRecord, error) {
 	var out []deviceRecord
 	for rows.Next() {
 		var d deviceRecord
-		if err := rows.Scan(&d.Email, &d.ID, &d.Name, &d.PairedAt, &d.LastSeen); err != nil {
+		if err := rows.Scan(&d.Email, &d.ID, &d.Name, &d.PairedAt, &d.LastSeen, &d.Origin); err != nil {
 			return nil, err
 		}
 		out = append(out, d)

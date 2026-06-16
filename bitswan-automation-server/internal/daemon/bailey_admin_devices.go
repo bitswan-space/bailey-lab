@@ -18,6 +18,7 @@ type adminUserDevice struct {
 	PairedAt  string `json:"paired_at"`
 	LastSeen  string `json:"last_seen"`
 	IsCurrent bool   `json:"is_current"`
+	Origin    string `json:"origin"` // "root" | "linked"
 }
 
 type adminUserRow struct {
@@ -80,6 +81,7 @@ func handleAdminDevicesAPI(w http.ResponseWriter, r *http.Request) {
 			PairedAt:  d.PairedAt,
 			LastSeen:  d.LastSeen,
 			IsCurrent: d.ID == currentDevID,
+			Origin:    d.Origin,
 		})
 	}
 	// Attach pending pair to the matching user row; collect orphans.

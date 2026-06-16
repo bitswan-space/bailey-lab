@@ -8,7 +8,7 @@ const {
   SegmentedCode: PSeg, DeviceIcon: PDeviceIcon, ProtoHint: PProtoHint, LiveState: PLiveState,
 } = window.SC_UI;
 const { Api: PApi, ApiError: PApiError } = window.SC_API;
-const { useState: useP } = React;
+const { useState: useP, useEffect: usePE } = React;
 
 const P_ROLE_TONE = { admin: 'primary', auditor: 'info', member: 'neutral', viewer: 'outline' };
 
@@ -33,10 +33,10 @@ const P_ROLES = [
 // (200 + error) shows a non-fatal warning above the still-rendered roster.
 //
 // Controls the backend doesn't expose yet are disabled (not faked):
-//   • Invite — POST /people/invite returns 501 (no Keycloak admin client),
-//     so the button is disabled with a tooltip rather than calling it.
 //   • Role change & suspend — no role-write / suspend route exists, so the
 //     role pill is read-only and the suspend control is omitted.
+// (There is no Invite button: there's no Keycloak admin client to create
+// users, and people appear here as they sign in / get access anyway.)
 // The per-user device drawer still uses seed device data (the admin devices
 // API isn't keyed by these identities yet) and is only reachable when the
 // backend reports a device count.
@@ -51,18 +51,12 @@ function UsersView({ ctx }) {
   const list = people.filter(u =>
     u.name.toLowerCase().includes(query.toLowerCase()) || u.email.toLowerCase().includes(query.toLowerCase()));
 
-  const INVITE_DISABLED = "Invites aren't wired up yet — the backend has no Keycloak admin client (POST /people/invite returns 501).";
   const ROLE_DISABLED = "Role changes aren't wired up yet — the backend has no role-write endpoint.";
 
   return (
     <div>
       <PPageHeader title="People &amp; roles"
-        subtitle="Everyone with access to this server. Roles govern what they can do; devices govern where they can do it from."
-        actions={
-          <span title={INVITE_DISABLED} style={{ display: 'inline-flex' }}>
-            <PBtn variant="primary" leftIcon="user-plus" disabled onClick={() => {}}>Invite person</PBtn>
-          </span>
-        } />
+        subtitle="Everyone with access to this server. Roles govern what they can do; devices govern where they can do it from." />
 
       {/* role legend */}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 18 }}>
@@ -149,30 +143,81 @@ function UsersView({ ctx }) {
 }
 
 // ─── ADMIN: view & revoke another user's devices ────────────────────────────
-// TODO(api): the People roster is keyed by email (from /people), but the admin
-// devices API (/bailey/api/admin/devices) isn't yet correlated to these
-// identities, so this drawer can't list a person's real devices. It is only
-// reachable when /people reports device_count > 0; until the device API is
-// wired here, revoke is disabled and the drawer explains why rather than
-// faking a revoke against seed data.
+// The People roster is keyed by email; the admin devices API
+// (/bailey/api/admin/devices) returns devices grouped by that same email, so
+// this drawer lists the person's real devices and revokes them admin-side
+// (POST /bailey/api/admin/devices/remove). No seed data.
 function UserDevicesDrawer({ userId, onClose, ctx }) {
-  const { data } = ctx;
+  const { data, toast, refresh } = ctx;
   const u = (data.people || []).find(x => x.id === userId);
+  const [devices, setDevices] = useP(null); // null = loading, [] = none
+  const [err, setErr] = useP('');
+  const [busyId, setBusyId] = useP('');
+
+  const load = async (email) => {
+    setErr(''); setDevices(null);
+    try {
+      const r = await PApi.adminDevices();
+      const row = (r.users || []).find(x => (x.email || '').toLowerCase() === email.toLowerCase());
+      setDevices((row && row.devices) || []);
+    } catch (e) {
+      setErr(e.message || 'Could not load this person’s devices.');
+      setDevices([]);
+    }
+  };
+  usePE(() => { if (userId && u) load(u.email); }, [userId]);
+
+  const revoke = async (d) => {
+    setBusyId(d.id);
+    try {
+      await PApi.adminRemoveDevice(u.email, d.id);
+      toast(`Signed out ${d.name}`, 'danger');
+      await load(u.email);
+      refresh && refresh('people'); // device counts in the roster
+    } catch (e) {
+      toast(`Couldn't remove device: ${e.message}`, 'danger');
+    } finally { setBusyId(''); }
+  };
+
   if (!u) return null;
   const firstName = (u.name || u.email).split(/[ @]/)[0];
+  const list = devices || [];
 
   return (
     <PDrawer open={!!userId} onClose={onClose} icon="laptop" title={`${firstName}'s devices`}
-      subtitle={`${u.deviceCount} trusted device${u.deviceCount !== 1 ? 's' : ''} · ${u.email}`}>
-      <div style={{ display: 'flex', gap: 10, padding: 13, background: PC.surface, borderRadius: 10, border: `1px solid ${PC.border}`, marginBottom: 16 }}>
-        <PIcon name="shield-alert" size={15} color={PC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
-        <span style={{ fontSize: 12, color: PC.muted, lineHeight: '17px' }}>
-          The backend reports {firstName} has {u.deviceCount} trusted device{u.deviceCount !== 1 ? 's' : ''} on this server.
-        </span>
-      </div>
-
-      <PEmpty icon="laptop" title="Per-person device list isn't wired yet"
-        text="The admin devices API isn't yet correlated to these identities, so individual devices and revoke can't be shown here. Manage devices from New user approvals for now." />
+      subtitle={`${u.email}`}>
+      {devices === null && !err && (
+        <div style={{ fontSize: 13, color: PC.muted, padding: '8px 2px' }}>Loading devices…</div>
+      )}
+      {err && (
+        <div style={{ display: 'flex', gap: 10, padding: 13, background: PC.surface, borderRadius: 10, border: `1px solid ${PC.border}`, marginBottom: 12 }}>
+          <PIcon name="shield-alert" size={15} color={PC.red} style={{ marginTop: 1, flex: '0 0 auto' }} />
+          <span style={{ fontSize: 12.5, color: PC.fg, lineHeight: '17px' }}>{err} <button onClick={() => load(u.email)} style={{ border: 0, background: 'transparent', color: PC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Retry</button></span>
+        </div>
+      )}
+      {devices !== null && !err && list.length === 0 && (
+        <PEmpty icon="laptop" title="No trusted devices"
+          text={`${firstName} has no trusted devices on this server yet.`} />
+      )}
+      {list.map(d => (
+        <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 13px', border: `1px solid ${PC.border}`, borderRadius: 11, background: '#fff', marginBottom: 8 }}>
+          <PDeviceIcon kind="laptop" size={20} color={PC.fg} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg }}>{d.name}</span>
+              {d.origin === 'root' && <PPill tone="primary" size="xs">Root device</PPill>}
+              {d.is_current && <PPill tone="success" size="xs">● This device</PPill>}
+            </div>
+            <div style={{ fontSize: 11.5, color: PC.muted, marginTop: 2 }}>
+              {d.last_seen ? `Last seen ${d.last_seen}` : 'Not seen yet'}{d.paired_at ? ` · Added ${d.paired_at}` : ''}
+            </div>
+          </div>
+          <PBtn variant="default" size="sm" leftIcon="log-out" disabled={busyId === d.id}
+            style={{ color: PC.red, borderColor: PC.red }} onClick={() => revoke(d)}>
+            {busyId === d.id ? 'Signing out…' : 'Sign out'}
+          </PBtn>
+        </div>
+      ))}
     </PDrawer>
   );
 }
