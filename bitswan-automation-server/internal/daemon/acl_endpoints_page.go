@@ -26,6 +26,8 @@ type endpointListEntry struct {
 	Hostname    string          `json:"hostname"`
 	OwnerEmail  string          `json:"owner_email"`
 	DisplayName string          `json:"display_name"`
+	Kind        string          `json:"kind"`  // workspace | frontend | service
+	Stage       string          `json:"stage"` // production | staging | dev | live-dev | ""
 	CreatedAt   string          `json:"created_at"`
 	CallerRole  string          `json:"caller_role"`      // owner | access | viewer (server owner) | none
 	Grants      []endpointGrant `json:"grants,omitempty"` // populated for owner/server-owner views
@@ -105,6 +107,8 @@ func buildEndpointListing(callerEmail string, callerGroups []string, r *http.Req
 			Hostname:    ep.Hostname,
 			OwnerEmail:  ep.OwnerEmail,
 			DisplayName: ep.DisplayName,
+			Kind:        ep.Kind,
+			Stage:       ep.Stage,
 			CreatedAt:   ep.CreatedAt,
 		}
 		role, err := roleFor(ep.Hostname, callerEmail, callerGroups)

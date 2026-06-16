@@ -188,6 +188,22 @@ function WorkspacesView({ ctx }) {
   // The managed workspace lives in the URL (/workspaces/:name) so the drawer
   // survives refresh and is shareable.
   const manageWs = data.workspaces.find(w => w.id === routeParam);
+
+  // Accessible apps: live frontends the caller can reach (GET /bailey/api/
+  // endpoints, kind=frontend), so even a User with no workspaces sees links to
+  // the apps shared with them. Fetched here; the list API doesn't carry apps.
+  const [appsRaw, setAppsRaw] = useWS(null);
+  React.useEffect(() => {
+    let alive = true;
+    WApi.endpoints()
+      .then(r => { if (alive) setAppsRaw((r.endpoints || []).filter(e => e.kind === 'frontend')); })
+      .catch(() => { if (alive) setAppsRaw([]); });
+    return () => { alive = false; };
+  }, []);
+  const accessibleApps = (appsRaw || []).map(e => ({
+    id: e.hostname, name: e.display_name || e.hostname, host: e.hostname,
+    url: 'https://' + e.hostname, stage: e.stage,
+  }));
   const noTotp = !data.recovery.totpActive;
   const trashedCount = data.workspaces.filter(w => w.isTrashed).length;
 
@@ -302,6 +318,39 @@ function WorkspacesView({ ctx }) {
               </WCard>
             );
           })}
+        </div>
+      )}
+
+      {/* Apps you can access — live frontends you've been granted, even if you
+          aren't a member of (or can't create) the owning workspace. Sourced
+          from the accessible-endpoints API so a User-role person still has
+          direct links to their apps here. */}
+      {accessibleApps.length > 0 && (
+        <div style={{ marginTop: 28 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: WC.fg, marginBottom: 4 }}>Apps you can access</div>
+          <div style={{ fontSize: 12.5, color: WC.muted, marginBottom: 14 }}>Live apps shared with you across this server — open them directly.</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
+            {accessibleApps.map(a => (
+              <button key={a.id} onClick={() => openUrl(a.url, a.name)} style={{
+                display: 'flex', alignItems: 'center', gap: 11, padding: '13px 14px', textAlign: 'left',
+                border: `1px solid ${WC.border}`, borderRadius: 11, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}
+                onMouseEnter={e => { e.currentTarget.style.background = WC.surface; e.currentTarget.style.borderColor = WC.borderHi; }}
+                onMouseLeave={e => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.borderColor = WC.border; }}>
+                <span style={{ width: 34, height: 34, borderRadius: 9, flex: '0 0 auto', background: WC.primarySoft,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <WIcon name="app-window" size={17} color={WC.primary} />
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                    <span style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.name}</span>
+                    {a.stage && a.stage !== 'production' && <WPill tone="outline" size="xs">{a.stage}</WPill>}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: WC.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.host}</div>
+                </div>
+                <WIcon name="external-link" size={14} color={WC.mutedFg} />
+              </button>
+            ))}
+          </div>
         </div>
       )}
 

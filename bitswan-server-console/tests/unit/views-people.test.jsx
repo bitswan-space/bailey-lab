@@ -60,13 +60,15 @@ describe('UsersView', () => {
     expect(screen.getByText(/kc down/)).toBeTruthy();
   });
 
-  it('role is a dropdown; changing it explains it is not wired yet (no fake change)', () => {
+  it('role is a styled dropdown; picking a new role explains it is not wired yet', () => {
     const s = spies();
     render(<Host View={UsersView} data={makeData({ people })} extra={s} />);
-    // A real <select> of roles (Admin/Auditor/Member/User), not a static pill.
-    const roleSelect = screen.getAllByRole('combobox')[0];
-    expect(roleSelect).toBeTruthy();
-    fireEvent.change(roleSelect, { target: { value: 'auditor' } });
+    // Open the first row's role menu (tomas = admin).
+    fireEvent.click(screen.getAllByTitle('Change role')[0]);
+    // Pick a different role from the open menu (the last 'User' is the menu item;
+    // the earlier one is the static legend).
+    const userOpts = screen.getAllByText('User');
+    fireEvent.click(userOpts[userOpts.length - 1]);
     expect(s.toast).toHaveBeenCalledWith(expect.stringContaining("isn't available yet"), 'info');
   });
 });

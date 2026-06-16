@@ -154,4 +154,18 @@ describe('WorkspacesView', () => {
     expect(screen.getByText(/Only its owner can manage/)).toBeTruthy();
     expect(screen.queryByText('Ownership')).toBeNull();
   });
+
+  it('shows "Apps you can access" from accessible frontends (links, services excluded)', async () => {
+    const s = spies();
+    installFetch({ '/bailey/api/endpoints': { json: { endpoints: [
+      { hostname: 'shiny-app.d', display_name: 'Shiny App', kind: 'frontend', stage: 'production', caller_role: 'access' },
+      { hostname: 'svc.d', display_name: 'gitops', kind: 'service', stage: '', caller_role: 'access' },
+    ] } } });
+    render(<Host View={WorkspacesView} data={makeData()} extra={s} />);
+    await waitFor(() => expect(screen.getByText('Apps you can access')).toBeTruthy());
+    expect(screen.getByText('Shiny App')).toBeTruthy();
+    expect(screen.queryByText('gitops')).toBeNull(); // services aren't listed as apps
+    fireEvent.click(screen.getByText('Shiny App'));
+    expect(s.openUrl).toHaveBeenCalled();
+  });
 });

@@ -4,11 +4,59 @@ import React from 'react';
 const { C: PC, Icon: PIcon, Btn: PBtn, Pill: PPill } = window.WD_SHELL;
 const {
   Avatar: PAvatar, Card: PCard, PageHeader: PPageHeader, Field: PField, TextInput: PTextInput,
-  Modal: PModal, EmptyState: PEmpty, Drawer: PDrawer, Select: PSelect,
+  Modal: PModal, EmptyState: PEmpty, Drawer: PDrawer,
   SegmentedCode: PSeg, DeviceIcon: PDeviceIcon, ProtoHint: PProtoHint, LiveState: PLiveState,
 } = window.SC_UI;
 const { Api: PApi, ApiError: PApiError } = window.SC_API;
-const { useState: useP, useEffect: usePE } = React;
+const { useState: useP, useEffect: usePE, useRef: usePR } = React;
+
+// RoleSelect — a styled role picker: a pill-shaped trigger showing the current
+// role, opening a menu of roles with their descriptions. onPick(roleId) fires
+// when a (different) role is chosen.
+function RoleSelect({ role, onPick }) {
+  const [open, setOpen] = useP(false);
+  const ref = usePR(null);
+  usePE(() => {
+    if (!open) return undefined;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  const meta = P_ROLES.find(r => r.id === role) || { id: role, label: role || '—', tone: 'neutral' };
+  return (
+    <div ref={ref} style={{ position: 'relative', width: 'fit-content' }}>
+      <button onClick={() => setOpen(o => !o)} title="Change role" style={{
+        display: 'inline-flex', alignItems: 'center', gap: 7, height: 30, padding: '0 8px 0 9px',
+        border: `1px solid ${open ? PC.primary : PC.border}`, borderRadius: 8, background: '#fff',
+        cursor: 'pointer', fontFamily: 'inherit', boxShadow: open ? `0 0 0 3px ${PC.primarySoft}` : 'none', transition: 'border-color 120ms, box-shadow 120ms' }}
+        onMouseEnter={e => { if (!open) e.currentTarget.style.borderColor = PC.borderHi; }}
+        onMouseLeave={e => { if (!open) e.currentTarget.style.borderColor = PC.border; }}>
+        <PPill tone={meta.tone} size="xs">{meta.label}</PPill>
+        <PIcon name="chevron-down" size={13} color={PC.mutedFg} />
+      </button>
+      {open && (
+        <div style={{ position: 'absolute', top: 36, left: 0, zIndex: 30, width: 264,
+          background: '#fff', border: `1px solid ${PC.border}`, borderRadius: 11,
+          boxShadow: '0 10px 30px rgba(0,0,0,0.12)', padding: 6 }}>
+          {P_ROLES.map(r => {
+            const on = r.id === role;
+            return (
+              <button key={r.id} onClick={() => { setOpen(false); if (!on) onPick(r.id); }} style={{
+                display: 'flex', alignItems: 'flex-start', gap: 9, width: '100%', padding: '8px 9px', textAlign: 'left',
+                border: 0, borderRadius: 8, cursor: 'pointer', background: on ? PC.surface2 : 'transparent', fontFamily: 'inherit' }}
+                onMouseEnter={e => { if (!on) e.currentTarget.style.background = PC.surface; }}
+                onMouseLeave={e => { if (!on) e.currentTarget.style.background = 'transparent'; }}>
+                <span style={{ marginTop: 1 }}><PPill tone={r.tone} size="xs">{r.label}</PPill></span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, color: PC.muted, lineHeight: '15px' }}>{r.desc}</span>
+                {on && <PIcon name="check" size={14} color={PC.primary} style={{ marginTop: 2, flex: '0 0 auto' }} />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const P_ROLE_TONE = { admin: 'primary', auditor: 'info', member: 'neutral', user: 'outline' };
 
@@ -129,18 +177,10 @@ function UsersView({ ctx }) {
                 <div style={{ fontSize: 11.5, color: PC.muted, fontFamily: 'Geist Mono, monospace' }}>{u.email}</div>
               </div>
             </div>
-            {/* Role is a dropdown (Admin can change roles) — but there's no
-                role-write backend yet, so picking a new role explains that and
-                doesn't persist. The current role still comes live from /people. */}
-            <div title={ROLE_DISABLED} style={{ width: 138 }}>
-              <PSelect value={u.role}
-                options={(() => {
-                  const o = P_ROLES.map(r => ({ value: r.id, label: r.label }));
-                  if (!o.some(x => x.value === u.role)) o.unshift({ value: u.role, label: u.role });
-                  return o;
-                })()}
-                onChange={() => toast(ROLE_DISABLED, 'info')} />
-            </div>
+            {/* Role is a styled dropdown (Admin can change roles) — but there's
+                no role-write backend yet, so picking a new role explains that
+                and doesn't persist. The current role comes live from /people. */}
+            <RoleSelect role={u.role} onPick={() => toast(ROLE_DISABLED, 'info')} />
             <span style={{ fontSize: 13, color: PC.fg }}>{u.workspaceCount}</span>
             <button onClick={() => u.deviceCount > 0 && navigate('users', u.id)} title={u.deviceCount ? 'Manage devices' : 'No devices'}
               style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 9px', borderRadius: 7,
