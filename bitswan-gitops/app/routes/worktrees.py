@@ -36,85 +36,33 @@ def _get_postgres_secrets(stage: str = "dev") -> dict | None:
     return None
 
 
-def _worktree_db_name(worktree_name: str) -> str:
-    """Generate a Postgres database name for a worktree."""
-    safe = re.sub(r"[^a-z0-9_]", "_", worktree_name.lower())
-    return f"postgres_wt_{safe}"
+async def _clone_postgres_db(worktree_name: str) -> str:
+    """Ensure a worktree's dev Postgres database exists. Returns its name.
 
+    A worktree's live-dev backends are wired to connect to
+    `postgres_wt_<worktree>`, so this database MUST exist for the worktree to
+    work. Failure is fatal here (the caller maps it to HTTP 500) — never
+    silently skip, or the backend boots against a nonexistent database and dies
+    with an opaque 502. Delegates to the shared idempotent ensure helper, which
+    also backstops redeploys of an already-existing worktree.
+    """
+    from app.services.bp_databases import ensure_worktree_postgres_db
 
-async def _clone_postgres_db(worktree_name: str) -> str | None:
-    """Clone the dev Postgres database for a worktree. Returns the new DB name or None."""
-    secrets = _get_postgres_secrets("dev")
-    if not secrets:
-        return None
-
-    user = secrets["POSTGRES_USER"]
-    password = secrets["POSTGRES_PASSWORD"]
-    source_db = secrets.get("POSTGRES_DB", "postgres")
-    new_db = _worktree_db_name(worktree_name)
-
-    docker_client = get_async_docker_client()
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-    container_name = f"{workspace_name}__postgres-dev"
-
-    try:
-        # Terminate connections to the source DB so TEMPLATE works
-        terminate_sql = (
-            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            f"WHERE datname = '{source_db}' AND pid <> pg_backend_pid();"
-        )
-        # Clone the database using CREATE DATABASE ... WITH TEMPLATE
-        clone_sql = f'CREATE DATABASE "{new_db}" WITH TEMPLATE "{source_db}";'
-
-        containers = await docker_client.list_containers(
-            all=False,
-            filters={"name": [f"^/{container_name}$"]},
-        )
-        if not containers:
-            logger.warning("Postgres dev container not found, skipping DB clone")
-            return None
-
-        cid = containers[0]["Id"]
-
-        for sql in [terminate_sql, clone_sql]:
-            # exec_create doesn't support environment, so pass PGPASSWORD via sh -c
-            exec_id = await docker_client.exec_create(
-                cid,
-                [
-                    "sh",
-                    "-c",
-                    f"PGPASSWORD='{password}' psql -U {user} -d postgres -c \"{sql}\"",
-                ],
-            )
-            output = await docker_client.exec_start(exec_id)
-            info = await docker_client.exec_inspect(exec_id)
-            if info.get("ExitCode", 1) != 0 and "already exists" not in (output or ""):
-                logger.warning(
-                    f"Postgres command failed (exit {info.get('ExitCode')}): {output}"
-                )
-                if "CREATE DATABASE" in sql:
-                    return None
-
-        logger.info(
-            f"Cloned Postgres DB '{source_db}' -> '{new_db}' for worktree '{worktree_name}'"
-        )
-        return new_db
-    except Exception as e:
-        logger.warning(
-            f"Failed to clone Postgres DB for worktree '{worktree_name}': {e}"
-        )
-        return None
+    return await ensure_worktree_postgres_db(workspace_name, worktree_name)
 
 
 async def _drop_postgres_db(worktree_name: str) -> None:
     """Drop the worktree's Postgres database."""
+    from app.services.bp_databases import worktree_db_name
+
     secrets = _get_postgres_secrets("dev")
     if not secrets:
         return
 
     user = secrets["POSTGRES_USER"]
     password = secrets["POSTGRES_PASSWORD"]
-    new_db = _worktree_db_name(worktree_name)
+    new_db = worktree_db_name(worktree_name)
 
     docker_client = get_async_docker_client()
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
@@ -364,12 +312,15 @@ async def create_worktree(body: CreateWorktreeRequest):
                 detail=f"Failed to create worktree for branch '{body.branch_name}'",
             )
 
-    # Clone Postgres dev database for this worktree (best-effort)
-    cloned_db = await _clone_postgres_db(body.branch_name)
+    # Clone the Postgres dev database for this worktree. The worktree's
+    # live-dev backends connect to this database, so it must exist — a failure
+    # here aborts worktree creation rather than leaving a half-built worktree.
+    try:
+        cloned_db = await _clone_postgres_db(body.branch_name)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    result = {"name": body.branch_name, "path": worktree_path}
-    if cloned_db:
-        result["postgres_db"] = cloned_db
+    result = {"name": body.branch_name, "path": worktree_path, "postgres_db": cloned_db}
 
     # Auto-start live-dev for every automation in the new worktree (a fresh
     # worktree carries all of main's BPs). Best-effort — the worktree was

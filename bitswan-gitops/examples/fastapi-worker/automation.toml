@@ -1,0 +1,8 @@
+# A private FastAPI worker: never exposed to the internet, reached only by the
+# frontend's shim over the Docker network (/api → this worker) and by peer
+# workers. Python-native, so it suits ML / data workloads that aren't a good
+# fit for the Go worker. Ships with no infrastructure dependencies — add
+# [services.postgres] / [services.minio] here if the workload needs them.
+[deployment]
+expose = false
+port = 8080

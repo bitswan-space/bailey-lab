@@ -20,6 +20,10 @@ export interface DeployedAutomation {
   context: string | null;
   version_hash: string | null;
   replicas: number;
+  // True for frontends (exposed through Bailey), false for worker containers
+  // (private backends). Drives the Environment panel's Frontends vs Worker
+  // containers split. Optional for back-compat with older gitops payloads.
+  expose?: boolean;
 }
 
 export type AutomationState =

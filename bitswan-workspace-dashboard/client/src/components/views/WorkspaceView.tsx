@@ -1,5 +1,6 @@
 import { GitBranch, GitMerge, Rocket } from 'lucide-react';
 import { AgentFilesTab } from '@/components/views/AgentFilesTab';
+import { EnvironmentPanel } from '@/components/agents/EnvironmentPanel';
 import { DeploymentsTab } from '@/components/views/DeploymentsTab';
 import { SnapshotsTab } from '@/components/views/SnapshotsTab';
 import { SyncDeployTab } from '@/components/views/SyncDeployTab';
@@ -46,13 +47,16 @@ export function WorkspaceView({ bp, wt, tab, onTab }: WorkspaceViewProps) {
     <div className="flex min-h-0 flex-1 flex-col">
       {agentMounted && (
         <div
-          className={cn('flex min-h-0 flex-1 flex-col', tab !== 'agent' && 'hidden')}
+          className={cn('flex min-h-0 flex-1 flex-row', tab !== 'agent' && 'hidden')}
         >
-          <AgentFilesTab
-            worktree={wt.name}
-            bp={bp.name}
-            branch={wt.branch || wt.name}
-          />
+          <div className="flex min-h-0 flex-1 flex-col">
+            <AgentFilesTab
+              worktree={wt.name}
+              bp={bp.name}
+              branch={wt.branch || wt.name}
+            />
+          </div>
+          <EnvironmentPanel bp={bp.name} worktree={wt.name} />
         </div>
       )}
 

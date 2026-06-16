@@ -1,0 +1,11 @@
+# The Go backend is a private worker: never exposed to the internet, reached
+# only by the frontend's shim over the Docker network (and by peer workers).
+# Its postgres + minio dependencies are provisioned per business process.
+[deployment]
+expose = false
+
+[services.postgres]
+enabled = true
+
+[services.minio]
+enabled = true

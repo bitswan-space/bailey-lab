@@ -68,6 +68,12 @@ export function TopNav({
         bps={bps}
         activeBpId={activeBpId}
         onSelect={onSelectBp}
+        onCreated={(name) => {
+          // Select the new BP and focus its Description tab so the user
+          // lands on the spec editor to describe what they're building.
+          onSelectBp(name);
+          onTab('description');
+        }}
         worktree={worktree}
       />
 

@@ -46,6 +46,11 @@ class DeployedAutomation(BaseModel):
     context: str | None = None
     version_hash: str | None = None
     replicas: int = 1
+    # True for frontends (exposed through Bailey), False for worker
+    # containers (private backends). Read from the automation's
+    # [deployment] expose; drives the dashboard's Frontends vs Worker
+    # containers split.
+    expose: bool = False
 
 
 class JupyterServer(BaseModel):

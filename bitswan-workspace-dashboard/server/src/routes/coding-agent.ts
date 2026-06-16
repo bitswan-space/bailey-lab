@@ -157,10 +157,30 @@ function buildAutoCmd(opts: {
     : `--dangerously-skip-permissions --session-id ${opts.sessionId} -n '${safeName}' '${safePrompt}'`;
   // Inline the Claude settings stub so the agent doesn't re-prompt on every
   // session for dangerous-mode confirmation. Same shape the editor uses.
+  //
+  // Pre-trust the working directory and mark onboarding complete in
+  // ~/.claude.json. Claude's "trust this folder" dialog is tracked PER
+  // directory (in `projects[<cwd>].hasTrustDialogAccepted`) and is NOT
+  // skipped by --dangerously-skip-permissions in an interactive (TTY)
+  // session, so without this the agent hangs on the trust prompt the first
+  // time it enters any worktree/BP folder. Setting the global onboarding
+  // flags too makes a freshly-provisioned coding-agent container start
+  // straight into the session (no theme picker / welcome flow). JS uses only
+  // double quotes so the whole node -e stays safely single-quoted for the
+  // shell + SSH_AUTO_CMD transport.
+  const trustCmd =
+    `node -e 'const fs=require("fs"),os=require("os"),p=os.homedir()+"/.claude.json";` +
+    `let d={};try{d=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){}` +
+    `Object.assign(d,{hasCompletedOnboarding:true,bypassPermissionsModeAccepted:true,hasTrustDialogAccepted:true});` +
+    `if(!d.theme)d.theme="dark";` +
+    `d.projects=d.projects||{};` +
+    `d.projects[process.cwd()]=Object.assign({},d.projects[process.cwd()],{hasTrustDialogAccepted:true});` +
+    `fs.writeFileSync(p,JSON.stringify(d))'`;
   return (
     `cd ${cd} && ` +
     `mkdir -p ~/.claude && ` +
     `echo '{"skipDangerousModePermissionPrompt":true}' > ~/.claude/settings.json && ` +
+    `${trustCmd} && ` +
     `exec claude ${claudeArgs}`
   );
 }

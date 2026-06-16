@@ -74,9 +74,6 @@ func (e *EditorService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswa
 	
 	workspaceName := e.WorkspaceName
 
-	// Also convert bitswan-src path for examples mount
-	bitswanSrcPath := filepath.Dir(filepath.Dir(gitopsPath)) + "/bitswan-src"
-
 	bitswanEditor := map[string]interface{}{
 		"image":    bitswanEditorImage,
 		"restart":  "always",
@@ -93,7 +90,6 @@ func (e *EditorService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswa
 			gitopsPath + "/secrets:/workspace/secrets:z",
 			gitopsPath + "/coder-home:/home/coder:z",
 			gitopsPath + "/ssh:/workspace/.ssh:ro",
-			bitswanSrcPath + "/examples:/workspace/examples:ro",
 			gitopsPath + "/coding-agent-sessions:/workspace/agent-sessions:ro",
 		},
 	}
