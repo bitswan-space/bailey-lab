@@ -37,6 +37,17 @@ jobs:
         with:
           node-version: '20'
 
+      # The daemon embeds the Server Console via go:embed; its build output is
+      # not committed. Build the SPA first so the backend serve tests run
+      # against the real assets.
+      - name: Build Server Console (embedded SPA)
+        run: |
+          npm --prefix bitswan-server-console install --no-audit --no-fund
+          npm --prefix bitswan-server-console run build
+          rm -rf bitswan-automation-server/internal/daemon/serverconsole_dist
+          mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
+          cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
+
       # ── Backend: aggregate statement coverage over the new daemon files ──
       # scripts/coverage-backend.sh runs `go test` and prints the aggregate %
       # on stdout; FAIL_UNDER makes it exit non-zero below the threshold.
