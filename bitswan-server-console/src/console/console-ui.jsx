@@ -7,16 +7,29 @@ const { C, Icon, Btn, Pill, useLucide } = window.WD_SHELL;
 const { useState: useS, useRef: useR, useEffect: useE } = React;
 
 // ─── Avatar (initials chip) ─────────────────────────────────────────────────
+// avatarColor derives a stable, distinct colour from a name/email so avatars
+// without an explicit colour (e.g. ones built from just an email) still render
+// a filled circle instead of an invisible white-on-nothing blank.
+function avatarColor(s) {
+  let h = 0;
+  for (let i = 0; i < (s || '').length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360} 52% 45%)`;
+}
+
 function Avatar({ user, size = 28, ring }) {
   if (!user) return null;
-  const initials = user.name.split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+  const name = user.name || '';
+  // Split on spaces AND email/handle separators so "jane@acme.com" → "JA".
+  const initials = name.split(/[\s@._-]+/).filter(Boolean).map(w => w[0]).slice(0, 2).join('').toUpperCase()
+    || (name[0] || '?').toUpperCase();
+  const color = user.color || avatarColor(name);
   return (
     <span style={{
       width: size, height: size, borderRadius: 9999, flex: '0 0 auto',
-      background: user.color, color: '#fff',
+      background: color, color: '#fff',
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
       fontSize: size * 0.4, fontWeight: 600, letterSpacing: 0.2,
-      boxShadow: ring ? `0 0 0 2px #fff, 0 0 0 ${2 + (ring === true ? 1 : ring)}px ${user.color}55` : 'none',
+      boxShadow: ring ? `0 0 0 2px #fff, 0 0 0 ${2 + (ring === true ? 1 : ring)}px ${color}55` : 'none',
       userSelect: 'none',
     }}>{initials}</span>
   );
