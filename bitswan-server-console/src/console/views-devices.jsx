@@ -104,7 +104,7 @@ function DevicesView({ ctx }) {
         </span>
       </div>
 
-      <LinkDeviceModal open={linkOpen} onClose={() => setLinkOpen(false)} data={data} setData={setData} toast={toast} />
+      <LinkDeviceModal open={linkOpen} onClose={() => setLinkOpen(false)} />
 
       <DModal open={!!revoke} onClose={() => setRevoke(null)} icon="log-out" title={`Sign out ${revoke?.name}?`}
         subtitle="That device will lose trust immediately and must be re-linked to get back in."
@@ -127,17 +127,17 @@ function DevicesView({ ctx }) {
 }
 
 // ─── LINK DEVICE ────────────────────────────────────────────────────────────
-// Device-to-device PIN/QR linking has NO backend endpoint yet — it isn't
-// exposed by bailey_dispatch.go. Trusting a new device today goes through the
-// gate's pending-pair flow (sign in on the new device → admin approves the
-// code, on the Device approvals page), or self-trust with an authenticator.
-// Rather than render a fake PIN/QR and a "Simulate scan" button (mock data),
-// this modal honestly explains the real flow and disables the unbuilt control.
-function LinkDeviceModal({ open, onClose, data, setData, toast }) {
+// There is ONE way to trust a new device, by design: the new device signs in
+// and presents a pairing code, which an already-trusted device approves on the
+// Device approvals page (or the user confirms with their own authenticator).
+// We deliberately do NOT offer the reverse direction (a trusted device minting
+// a PIN/QR for the new device to enter) — it's not a feature, so this modal
+// just explains the supported flow rather than teasing an unbuilt control.
+function LinkDeviceModal({ open, onClose }) {
   return (
     <DModal open={open} onClose={onClose} icon="smartphone" title="Link a new device" width={520}
       subtitle="How to get a new device trusted on this server.">
-      <div style={{ display: 'flex', gap: 11, padding: '13px 15px', background: DC.surface, borderRadius: 10, marginBottom: 18 }}>
+      <div style={{ display: 'flex', gap: 11, padding: '13px 15px', background: DC.surface, borderRadius: 10 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, color: DC.fg, lineHeight: '17px' }}>
           <div style={{ display: 'flex', gap: 9 }}><Step n="1" /><span>On the new device, open this server and sign in with Keycloak.</span></div>
           <div style={{ display: 'flex', gap: 9 }}><Step n="2" /><span>It shows a code. Read that code to an admin, who approves it from the <strong>Device approvals</strong> page — or confirm it yourself with your authenticator app.</span></div>
@@ -145,18 +145,8 @@ function LinkDeviceModal({ open, onClose, data, setData, toast }) {
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: 9, padding: 12, borderRadius: 10, background: DC.surface, border: `1px solid ${DC.border}` }}>
-        <DIcon name="info" size={15} color={DC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
-        <span style={{ fontSize: 12.5, color: DC.muted, lineHeight: '18px' }}>
-          Direct device-to-device linking (entering a PIN or scanning a QR from a device you already trust) isn't available yet.
-        </span>
-      </div>
-
-      <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-        <span title="Device-to-device linking isn't available yet." style={{ display: 'inline-flex' }}>
-          <DBtn variant="primary" leftIcon="link" disabled onClick={() => {}}>Link with a PIN</DBtn>
-        </span>
-        <DBtn variant="default" onClick={onClose}>Close</DBtn>
+      <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end' }}>
+        <DBtn variant="primary" onClick={onClose}>Got it</DBtn>
       </div>
     </DModal>
   );

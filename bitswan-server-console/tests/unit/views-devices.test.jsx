@@ -51,16 +51,17 @@ describe('DevicesView', () => {
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining("Couldn't remove device"), 'danger'));
   });
 
-  it('link device modal: shows the honest "not available yet" state with a disabled control', () => {
+  it('link device modal: explains the single supported approval flow, no PIN/QR stub', () => {
     const s = spies();
     render(<Host View={DevicesView} data={makeData()} extra={s} />);
     fireEvent.click(screen.getByText('Link a device'));
-    // No mock PIN/QR/"Simulate scan"; the real flow is explained and the
-    // unbuilt direct-link control is disabled.
-    expect(screen.getByText(/isn't available yet/)).toBeTruthy();
+    // The one supported direction is explained: new device shows a code, a
+    // trusted device approves it. No mock PIN/QR, no "Simulate scan", and no
+    // teaser for the reverse direction (it's intentionally not a feature).
+    expect(screen.getByText(/Device approvals/)).toBeTruthy();
     expect(screen.queryByText('Simulate scan')).toBeNull();
-    const linkBtn = screen.getByText('Link with a PIN').closest('button');
-    expect(linkBtn.disabled).toBe(true);
+    expect(screen.queryByText('Link with a PIN')).toBeNull();
+    expect(screen.queryByText(/isn't available yet/)).toBeNull();
     // No fake device gets added.
     expect(s.toast).not.toHaveBeenCalledWith('New device linked and trusted', 'success');
   });
