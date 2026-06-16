@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/dchest/uniuri"
 )
 
 const (
@@ -182,12 +183,22 @@ func formatDuration(d time.Duration) string {
 
 // Run starts the HTTP server listening on the Unix socket
 func (s *Server) Run() error {
-	// Load the authentication token
+	// Load the authentication token. The daemon owns this token now that its
+	// config lives in a Docker volume (not a host bind the CLI also writes):
+	// generate + persist one if absent, so a fresh install is self-sufficient.
 	token, err := LoadToken()
-	if err != nil {
-		return fmt.Errorf("failed to load authentication token: %w", err)
+	if err != nil || strings.TrimSpace(token) == "" {
+		token = uniuri.NewLen(64)
+		if serr := config.NewAutomationServerConfig().SetLocalServerToken(token); serr != nil {
+			return fmt.Errorf("failed to initialize authentication token: %w", serr)
+		}
+		fmt.Println("Generated a new automation-server authentication token")
 	}
 	s.token = token
+
+	// One-time: migrate existing workspaces' compose from host bind mounts to
+	// the named-volume subpath mounts (after the daemon's data volume migration).
+	go s.migrateWorkspaceDeploymentsToVolumes()
 
 	// Install all certificates from the registry into the daemon's certificate store
 	if err := installAllCertificatesInDaemon(); err != nil {

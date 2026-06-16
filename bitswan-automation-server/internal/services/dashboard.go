@@ -54,18 +54,26 @@ func (d *DashboardService) CreateDockerCompose(gitopsSecretToken, bitswanDashboa
 
 // CreateDockerComposeWithDevMode generates the dashboard's docker-compose file with optional dev-mode mount.
 func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, trustCA bool, devConfig *DashboardDevConfig) (string, error) {
-	homeDir := os.Getenv("HOME")
-	hostHomeDir := os.Getenv("HOST_HOME")
-	if hostHomeDir == "" {
-		hostHomeDir = homeDir
-	}
-
-	gitopsPath := d.WorkspacePath
-	if homeDir != hostHomeDir && strings.HasPrefix(gitopsPath, homeDir) {
-		gitopsPath = strings.Replace(gitopsPath, homeDir, hostHomeDir, 1)
-	}
-
 	workspaceName := d.WorkspaceName
+
+	// Workspace data lives inside the named `bitswan` Docker volume at
+	// workspaces/<name>/... — mounted via compose long-form volume + subpath.
+	// The host docker daemon resolves the named volume directly, so there's no
+	// container→host path translation to apply here anymore.
+	wsVolume := func(subdir, target string, readOnly bool) map[string]interface{} {
+		entry := map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": target,
+			"volume": map[string]interface{}{
+				"subpath": "workspaces/" + workspaceName + "/" + subdir,
+			},
+		}
+		if readOnly {
+			entry["read_only"] = true
+		}
+		return entry
+	}
 
 	bitswanDashboard := map[string]interface{}{
 		"image":    bitswanDashboardImage,
@@ -79,23 +87,23 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			"PORT=8080",
 			"INTERNAL_PORT=8081",
 		},
-		"volumes": []string{
-			gitopsPath + "/workspace:/workspace/workspace:z",
+		"volumes": []interface{}{
+			wsVolume("workspace", "/workspace/workspace", false),
 			// SSH key for connecting to the coding-agent container. Shared
 			// with bitswan-editor — the dashboard authenticates as the same
 			// principal that's already in the agent's authorized_keys.
-			gitopsPath + "/ssh:/workspace/.ssh:ro",
+			wsVolume("ssh", "/workspace/.ssh", true),
 			// Read-only view of session transcripts (.meta.json + .cast)
 			// written by the coding-agent wrapper, for the dashboard's
 			// session list + asciinema playback.
-			gitopsPath + "/coding-agent-sessions:/workspace/agent-sessions:ro",
+			wsVolume("coding-agent-sessions", "/workspace/agent-sessions", true),
 			// Read-only view of the coding-agent's $HOME so the dashboard can
 			// resolve per-user Claude transcripts (`.claude_<slug>/projects/...`)
 			// as well as the legacy shared `.claude/projects/...` for session
 			// titles. Mounting the whole home rather than just `.claude` lets
 			// the dashboard see every user's config dir without us hard-coding
 			// the slug set.
-			gitopsPath + "/coding-agent-home:/workspace/agent-home:ro",
+			wsVolume("coding-agent-home", "/workspace/agent-home", true),
 		},
 	}
 
@@ -109,7 +117,9 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 
 	caVolumes, caEnvVars := certauthority.GetCACertMountConfig(trustCA)
 	if len(caVolumes) > 0 {
-		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]string), caVolumes...)
+		for _, v := range caVolumes {
+			bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}), v)
+		}
 		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string), caEnvVars...)
 	}
 
@@ -117,7 +127,7 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 	// entrypoint run `npm install` + `npm run dev` instead of the pre-built bundle.
 	if devConfig != nil && devConfig.SourceDir != "" {
 		dashboardDevContainerPath := "/workspace/dashboard-src"
-		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]string),
+		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
 			devConfig.SourceDir+":"+dashboardDevContainerPath+":z")
 		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string),
 			"BITSWAN_DEV_MODE=true",
@@ -132,6 +142,11 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
+				"external": true,
+			},
+		},
+		"volumes": map[string]interface{}{
+			"bitswan": map[string]interface{}{
 				"external": true,
 			},
 		},

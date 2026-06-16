@@ -2,18 +2,13 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
+	"strings"
 
+	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
-
-type MetadataOpen struct {
-	EditorURL *string `yaml:"editor-url,omitempty"`
-}
 
 func newOpenCmd() *cobra.Command {
 	return &cobra.Command{
@@ -27,34 +22,28 @@ func newOpenCmd() *cobra.Command {
 }
 
 func runOpenCmd(cmd *cobra.Command, args []string) error {
-	workspacePath := filepath.Join(os.Getenv("HOME"), ".config/bitswan/workspaces", args[0])
-	metadataPath := filepath.Join(workspacePath, "metadata.yaml")
-
-	metadata, err := loadMetadata(metadataPath)
+	// Workspace data now lives in a Docker volume the host CLI can't read
+	// directly, so ask the daemon for the workspace's editor URL.
+	client, err := daemon.NewClient()
 	if err != nil {
-		return err
+		return fmt.Errorf("automation server daemon is not available: %w", err)
 	}
-
-	if metadata.EditorURL == nil {
-		return fmt.Errorf("no editor URL found in metadata.yaml")
-	}
-
-	fmt.Printf("Opening editor at: %s\n", *metadata.EditorURL)
-	return openURL(*metadata.EditorURL)
-}
-
-func loadMetadata(metadataPath string) (*MetadataOpen, error) {
-	data, err := os.ReadFile(metadataPath)
+	resp, err := client.ListWorkspaces(false, false)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read metadata file: %w", err)
+		return fmt.Errorf("failed to list workspaces: %w", err)
 	}
 
-	var metadata MetadataOpen
-	if err := yaml.Unmarshal(data, &metadata); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata file: %w", err)
+	name := args[0]
+	for _, ws := range resp.Workspaces {
+		if ws.Name == name {
+			if strings.TrimSpace(ws.EditorURL) == "" {
+				return fmt.Errorf("workspace %q has no editor URL", name)
+			}
+			fmt.Printf("Opening editor at: %s\n", ws.EditorURL)
+			return openURL(ws.EditorURL)
+		}
 	}
-
-	return &metadata, nil
+	return fmt.Errorf("workspace %q not found", name)
 }
 
 func openURL(url string) error {

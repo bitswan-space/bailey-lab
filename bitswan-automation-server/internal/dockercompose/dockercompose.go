@@ -43,17 +43,28 @@ func (config *DockerComposeConfig) CreateDockerComposeFile() (string, string, er
 
 // CreateDockerComposeFileWithSecret creates a docker-compose YAML content with an optional existing secret
 func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSecret string) (string, string, error) {
-	// Convert container path to host path for volume mounts (docker-compose runs on host)
-	// But use container path for file operations
-	gitopsPathForVolumes := config.GitopsPath
+	// Workspace data lives inside the named `bitswan` Docker volume at
+	// workspaces/<name>/... — mounted via compose long-form volume + subpath.
+	// The host docker daemon resolves the named volume directly, so there's no
+	// container→host path translation to apply here anymore.
 	homeDir := os.Getenv("HOME")
-	hostHomeDir := os.Getenv("HOST_HOME")
-	if hostHomeDir != "" && homeDir != hostHomeDir && strings.HasPrefix(config.GitopsPath, homeDir) {
-		// Replace container home with host home for docker-compose volume paths
-		gitopsPathForVolumes = strings.Replace(config.GitopsPath, homeDir, hostHomeDir, 1)
+
+	// wsVolume builds a long-form named-volume subpath mount entry for this
+	// workspace's data subtree inside the external `bitswan` volume.
+	wsSubpath := func(subdir string) string {
+		return "workspaces/" + config.WorkspaceName + "/" + subdir
+	}
+	wsVolume := func(subdir, target string) map[string]interface{} {
+		return map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": target,
+			"volume": map[string]interface{}{
+				"subpath": wsSubpath(subdir),
+			},
+		}
 	}
 
-	sshDir := gitopsPathForVolumes + "/ssh"
 	gitConfig := os.Getenv("HOME") + "/.gitconfig"
 
 	hostOsTmp := runtime.GOOS
@@ -81,20 +92,20 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		"restart":  "always",
 		"hostname": config.WorkspaceName + "-gitops",
 		"networks": []string{"bitswan_network"},
-		"volumes": []string{
-			gitopsPathForVolumes + "/gitops:/gitops/gitops:z",
-			gitopsPathForVolumes + "/secrets:/gitops/secrets:z",
+		"volumes": []interface{}{
+			wsVolume("gitops", "/gitops/gitops"),
+			wsVolume("secrets", "/gitops/secrets"),
 			// Per-BP stage snapshots (app/services/snapshot_service.py).
 			// /gitops itself is the container's writable layer, so anything
 			// not bind-mounted there is lost on container recreation.
-			gitopsPathForVolumes + "/snapshots:/gitops/snapshots:z",
-			sshDir + ":/home/user1000/.ssh:z",
+			wsVolume("snapshots", "/gitops/snapshots"),
+			wsVolume("ssh", "/home/user1000/.ssh"),
 			"/var/run/docker.sock:/var/run/docker.sock",
 			"/var/run/bitswan:/var/run/bitswan",
 		},
 		"environment": []string{
 			"BITSWAN_GITOPS_DIR=/gitops",
-			"BITSWAN_GITOPS_DIR_HOST=" + gitopsPathForVolumes,
+			"BITSWAN_GITOPS_DIR_HOST=" + config.GitopsPath,
 			"BITSWAN_GITOPS_SECRET=" + gitopsSecretToken,
 			"BITSWAN_GITOPS_DOMAIN=" + config.Domain,
 			"BITSWAN_WORKSPACE_NAME=" + config.WorkspaceName,
@@ -130,31 +141,29 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 
 	// Add dev source directory volume mount and DEBUG env var if provided
 	if config.GitopsDevSourceDir != "" {
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), config.GitopsDevSourceDir+":/src:z")
+		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}), config.GitopsDevSourceDir+":/src:z")
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), "DEBUG=true")
 	}
 
 	// Mount certificate authorities if specified
 	caVolumes, caEnvVars := certauthority.GetCACertMountConfig(config.TrustCA)
 	if len(caVolumes) > 0 {
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), caVolumes...)
+		for _, v := range caVolumes {
+			gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}), v)
+		}
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), caEnvVars...)
 	}
 
-	// Add workspace directory mount and rewrite git path for all OS
-	workspaceDir := gitopsPathForVolumes + "/workspace/:/workspace-repo/:z"
+	// Add workspace directory mount (named-volume subpath) and rewrite git path for all OS
+	workspaceDir := wsVolume("workspace", "/workspace-repo")
 	if hostOs == WindowsMac {
-		gitopsVolumes := []string{
-			gitConfig + ":/root/.gitconfig:z",
+		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
+			gitConfig+":/root/.gitconfig:z",
 			workspaceDir,
-		}
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), gitopsVolumes...)
+		)
 	} else if hostOs == Linux {
 		// For Linux, also mount workspace directory
-		gitopsVolumes := []string{
-			workspaceDir,
-		}
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), gitopsVolumes...)
+		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}), workspaceDir)
 	}
 
 	// If this workspace has a local remote repository, mount it so GitOps can access it
@@ -162,7 +171,7 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		// Mount local repository to /remote-repos/<name> for GitOps to access
 		// The mount name is used to construct the mount point path
 		localRemoteMount := config.LocalRemotePath + ":/remote-repos/" + config.LocalRemoteName + ":ro"
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), localRemoteMount)
+		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}), localRemoteMount)
 	}
 
 	// Rewrite .git in worktree for all OS to use container path
@@ -179,6 +188,11 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
+				"external": true,
+			},
+		},
+		"volumes": map[string]interface{}{
+			"bitswan": map[string]interface{}{
 				"external": true,
 			},
 		},

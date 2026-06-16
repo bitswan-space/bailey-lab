@@ -42,10 +42,11 @@ func NewClient() (*Client, error) {
 
 // NewClientWithSocket creates a new daemon client with a custom socket path and verifies the daemon is running
 func NewClientWithSocket(socketPath string) (*Client, error) {
-	token, err := LoadToken()
-	if err != nil {
-		return nil, fmt.Errorf("automation server daemon is not initialized: %w", err)
-	}
+	// The token authenticates HTTP requests, but requests over the trusted Unix
+	// socket skip token verification (see server.authMiddleware). The daemon's
+	// config now lives in a Docker volume the host CLI can't read, so a missing
+	// token is no longer fatal — fall back to empty and rely on socket trust.
+	token, _ := LoadToken()
 
 	client := &Client{
 		socketPath: socketPath,
