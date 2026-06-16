@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
 	"github.com/bitswan-space/bitswan-workspaces/internal/certauthority"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
@@ -47,13 +46,8 @@ type DashboardDevConfig struct {
 	SourceDir string
 }
 
-// CreateDockerCompose generates docker-compose-dashboard.yml content.
-func (d *DashboardService) CreateDockerCompose(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, trustCA bool) (string, error) {
-	return d.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain, oauthConfig, trustCA, nil)
-}
-
 // CreateDockerComposeWithDevMode generates the dashboard's docker-compose file with optional dev-mode mount.
-func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, trustCA bool, devConfig *DashboardDevConfig) (string, error) {
+func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage string, trustCA bool, devConfig *DashboardDevConfig) (string, error) {
 	workspaceName := d.WorkspaceName
 
 	// Workspace data lives inside the named `bitswan` Docker volume at
@@ -88,7 +82,12 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			"INTERNAL_PORT=8081",
 		},
 		"volumes": []interface{}{
-			wsVolume("workspace", "/workspace/workspace", false),
+			// The dashboard reads and writes business-process files in the
+			// per-user copies (copies/<copy>/<bp>/…). The file routes resolve
+			// them under WORKSPACE_ROOT as `<root>/copies/<copy>/…`, so mount
+			// the workspace's copies tree at /workspace/workspace/copies. (The
+			// old shared `workspace/` working tree is gone in the copy model.)
+			wsVolume("copies", "/workspace/workspace/copies", false),
 			// SSH key for connecting to the coding-agent container. Shared
 			// with bitswan-editor — the dashboard authenticates as the same
 			// principal that's already in the agent's authorized_keys.
@@ -107,12 +106,29 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		},
 	}
 
-	if oauthConfig != nil {
-		dashboardOAuthEnvVars := oauth.CreateOAuthEnvVars(oauthConfig, "dashboard", workspaceName, domain)
-		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string), dashboardOAuthEnvVars...)
-		if extraHosts := oauth.BuildExtraHosts(oauthConfig); len(extraHosts) > 0 {
-			bitswanDashboard["extra_hosts"] = extraHosts
-		}
+	// The dashboard deliberately runs NO oauth2-proxy of its own. It is only
+	// ever reached inside the Bailey chrome-wrap iframe, on the workspace's
+	// protected (inner) host, which the platform protected-proxy
+	// (bitswan-protected-proxy) already authenticates. A second, per-container
+	// oauth2-proxy here was the cause of the SPA's /api/* XHRs being 302'd to
+	// Keycloak (a redirect the cross-origin iframe can't follow under the inner
+	// CSP, and whose callback 403s on the outer host). Like the business-process
+	// frontend shim, the dashboard relies solely on the platform proxy for auth
+	// — OAUTH_ENABLED stays unset and the app listens directly on PORT.
+	//
+	// Because the gate strips forwarded-identity request headers from app
+	// upstreams, the dashboard learns the user the same way a BP frontend does:
+	// the SPA pulls the access token from the platform proxy's /oauth2/auth and
+	// the backend validates it against Keycloak's userinfo endpoint. That needs
+	// the realm (issuer) URL, which we read from the saved OAuth config and pass
+	// in as BITSWAN_OIDC_ISSUER_URL. This is token-validation config, NOT an
+	// oauth2-proxy.
+	if oauthConfig, err := oauth.GetOauthConfig(d.WorkspaceName); err == nil &&
+		oauthConfig != nil && oauthConfig.IssuerUrl != "" {
+		bitswanDashboard["environment"] = append(
+			bitswanDashboard["environment"].([]string),
+			"BITSWAN_OIDC_ISSUER_URL="+oauthConfig.IssuerUrl,
+		)
 	}
 
 	caVolumes, caEnvVars := certauthority.GetCACertMountConfig(trustCA)
@@ -175,8 +191,8 @@ func (d *DashboardService) SaveDockerCompose(content string) error {
 	return nil
 }
 
-// Enable generates docker-compose-dashboard.yml from metadata + the supplied image and OAuth config.
-func (d *DashboardService) Enable(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, trustCA bool) error {
+// Enable generates docker-compose-dashboard.yml from metadata + the supplied image.
+func (d *DashboardService) Enable(gitopsSecretToken, bitswanDashboardImage string, trustCA bool) error {
 	if d.IsEnabled() {
 		return fmt.Errorf("Dashboard service is already enabled for workspace '%s'", d.WorkspaceName)
 	}
@@ -190,7 +206,7 @@ func (d *DashboardService) Enable(gitopsSecretToken, bitswanDashboardImage, doma
 		fmt.Printf("Dashboard dev mode enabled (source: %q)\n", devConfig.SourceDir)
 	}
 
-	content, err := d.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain, oauthConfig, trustCA, devConfig)
+	content, err := d.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, trustCA, devConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create docker-compose content: %w", err)
 	}
@@ -326,27 +342,6 @@ func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, stagin
 		}
 	}
 
-	oauthConfig, oauthErr := oauth.GetOauthConfig(d.WorkspaceName)
-	if oauthErr != nil {
-		if metadata.WorkspaceId != nil && *metadata.WorkspaceId != "" {
-			fmt.Printf("OAuth config not found locally for dashboard, attempting AOC fetch for workspace '%s'...\n", d.WorkspaceName)
-			if aocClient, aocErr := aoc.NewAOCClient(); aocErr == nil {
-				if fetched, fErr := aocClient.GetOAuthConfig(*metadata.WorkspaceId); fErr == nil {
-					oauthConfig = fetched
-					if saveErr := oauth.SaveOauthConfig(d.WorkspaceName, oauthConfig); saveErr != nil {
-						fmt.Printf("Warning: failed to save OAuth config to disk: %v\n", saveErr)
-					}
-				} else {
-					oauthConfig = nil
-				}
-			} else {
-				oauthConfig = nil
-			}
-		} else {
-			oauthConfig = nil
-		}
-	}
-
 	var devConfig *DashboardDevConfig
 	if metadata.DashboardDevSourceDir != nil && *metadata.DashboardDevSourceDir != "" {
 		devConfig = &DashboardDevConfig{SourceDir: *metadata.DashboardDevSourceDir}
@@ -356,8 +351,6 @@ func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, stagin
 	content, err := d.CreateDockerComposeWithDevMode(
 		metadata.GitopsSecret,
 		bitswanDashboardImage,
-		metadata.Domain,
-		oauthConfig,
 		trustCA,
 		devConfig,
 	)

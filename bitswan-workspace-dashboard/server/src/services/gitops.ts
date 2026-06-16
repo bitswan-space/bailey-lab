@@ -236,30 +236,6 @@ export class GitopsClient {
   }
 
   /**
-   * `DELETE /copies/{name}` — remove a copy and its branch. Gitops
-   * handles the full teardown (clone removal, branch -D, postgres
-   * cleanup, privileged rm fallback for files owned by container uids).
-   */
-  async deleteCopy(
-    name: string,
-  ): Promise<{ ok: boolean; status: number; body: unknown }> {
-    const r = await fetch(
-      `${this.baseUrl}/copies/${encodeURIComponent(name)}`,
-      {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.secret}` },
-      },
-    );
-    let body: unknown = null;
-    try {
-      body = await r.json();
-    } catch {
-      // ignore
-    }
-    return { ok: r.ok, status: r.status, body };
-  }
-
-  /**
    * `GET /copies/{name}/status` — per-file change list for a copy
    * (path + A/M/D kind + +adds/-dels). Drives the dashboard's Diff +
    * Files tabs.

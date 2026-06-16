@@ -25,7 +25,7 @@ export function registerMeRoutes(
   app.get('/api/me', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
 
-    const email = emailFromRequest(req);
+    const email = await emailFromRequest(req, app.log);
     if (!email) {
       return reply.code(401).send({ error: 'not authenticated' });
     }

@@ -28,19 +28,19 @@ var stderrMutex sync.Mutex
 
 // ServiceEnableRequest represents the request to enable a service
 type ServiceEnableRequest struct {
-	ServiceType    string                 `json:"service_type"` // "editor", "kafka", "couchdb", "postgres", "minio"
-	Workspace      string                 `json:"workspace"`
-	Stage          string                 `json:"stage,omitempty"`
-	EditorImage    string                 `json:"editor_image,omitempty"`
-	DashboardImage string                 `json:"dashboard_image,omitempty"`
-	OAuthConfig    map[string]interface{} `json:"oauth_config,omitempty"` // OAuth config as JSON object
-	TrustCA        bool                   `json:"trust_ca,omitempty"`
-	KafkaImage     string                 `json:"kafka_image,omitempty"`
-	UIImage        string                 `json:"ui_image,omitempty"`
-	ZookeeperImage string                 `json:"zookeeper_image,omitempty"`
-	CouchDBImage   string                 `json:"couchdb_image,omitempty"`
-	PostgresImage  string                 `json:"postgres_image,omitempty"`
-	PgAdminImage   string                 `json:"pgadmin_image,omitempty"`
+	ServiceType      string                 `json:"service_type"` // "editor", "kafka", "couchdb", "postgres", "minio"
+	Workspace        string                 `json:"workspace"`
+	Stage            string                 `json:"stage,omitempty"`
+	EditorImage      string                 `json:"editor_image,omitempty"`
+	DashboardImage   string                 `json:"dashboard_image,omitempty"`
+	OAuthConfig      map[string]interface{} `json:"oauth_config,omitempty"` // OAuth config as JSON object
+	TrustCA          bool                   `json:"trust_ca,omitempty"`
+	KafkaImage       string                 `json:"kafka_image,omitempty"`
+	UIImage          string                 `json:"ui_image,omitempty"`
+	ZookeeperImage   string                 `json:"zookeeper_image,omitempty"`
+	CouchDBImage     string                 `json:"couchdb_image,omitempty"`
+	PostgresImage    string                 `json:"postgres_image,omitempty"`
+	PgAdminImage     string                 `json:"pgadmin_image,omitempty"`
 	MinioImage       string                 `json:"minio_image,omitempty"`
 	CodingAgentImage string                 `json:"coding_agent_image,omitempty"`
 	Staging          bool                   `json:"staging,omitempty"`
@@ -50,9 +50,9 @@ type ServiceEnableRequest struct {
 
 // ServiceDisableRequest represents the request to disable a service
 type ServiceDisableRequest struct {
-	ServiceType  string `json:"service_type"`
-	Workspace    string `json:"workspace"`
-	Stage string `json:"stage,omitempty"`
+	ServiceType string `json:"service_type"`
+	Workspace   string `json:"workspace"`
+	Stage       string `json:"stage,omitempty"`
 }
 
 // ServiceStatusRequest represents the request to get service status
@@ -65,16 +65,16 @@ type ServiceStatusRequest struct {
 
 // ServiceStartRequest represents the request to start a service
 type ServiceStartRequest struct {
-	ServiceType  string `json:"service_type"`
-	Workspace    string `json:"workspace"`
-	Stage string `json:"stage,omitempty"`
+	ServiceType string `json:"service_type"`
+	Workspace   string `json:"workspace"`
+	Stage       string `json:"stage,omitempty"`
 }
 
 // ServiceStopRequest represents the request to stop a service
 type ServiceStopRequest struct {
-	ServiceType  string `json:"service_type"`
-	Workspace    string `json:"workspace"`
-	Stage string `json:"stage,omitempty"`
+	ServiceType string `json:"service_type"`
+	Workspace   string `json:"workspace"`
+	Stage       string `json:"stage,omitempty"`
 }
 
 // ServiceUpdateRequest represents the request to update a service
@@ -97,17 +97,17 @@ type ServiceUpdateRequest struct {
 
 // ServiceBackupRequest represents the request to backup CouchDB
 type ServiceBackupRequest struct {
-	Workspace    string `json:"workspace"`
-	BackupPath   string `json:"backup_path"`
-	Stage string `json:"stage,omitempty"`
+	Workspace  string `json:"workspace"`
+	BackupPath string `json:"backup_path"`
+	Stage      string `json:"stage,omitempty"`
 }
 
 // ServiceRestoreRequest represents the request to restore CouchDB
 type ServiceRestoreRequest struct {
-	Workspace    string `json:"workspace"`
-	BackupPath   string `json:"backup_path"`
-	Force        bool   `json:"force"`
-	Stage string `json:"stage,omitempty"`
+	Workspace  string `json:"workspace"`
+	BackupPath string `json:"backup_path"`
+	Force      bool   `json:"force"`
+	Stage      string `json:"stage,omitempty"`
 }
 
 // ServiceClearRequest represents the request to clear all data from a service
@@ -1276,25 +1276,16 @@ func (s *Server) enableDashboardService(req ServiceEnableRequest) error {
 	}
 
 	gitopsSecretToken := metadata.GitopsSecret
-	domain := metadata.Domain
 
 	bitswanDashboardImage := req.DashboardImage
 	if bitswanDashboardImage == "" {
 		bitswanDashboardImage = "bitswan/workspace-dashboard:latest"
 	}
 
-	var oauthConfig *oauth.Config
-	if req.OAuthConfig != nil {
-		oauthJSON, err := json.Marshal(req.OAuthConfig)
-		if err != nil {
-			return fmt.Errorf("failed to marshal OAuth config: %w", err)
-		}
-		if err := json.Unmarshal(oauthJSON, &oauthConfig); err != nil {
-			return fmt.Errorf("failed to parse OAuth config: %w", err)
-		}
-	}
-
-	if err := dashboardService.Enable(gitopsSecretToken, bitswanDashboardImage, domain, oauthConfig, req.TrustCA); err != nil {
+	// The dashboard runs no oauth2-proxy of its own — it's authenticated by the
+	// platform protected-proxy inside the Bailey iframe — so req.OAuthConfig is
+	// intentionally not consumed here.
+	if err := dashboardService.Enable(gitopsSecretToken, bitswanDashboardImage, req.TrustCA); err != nil {
 		return err
 	}
 	if err := dashboardService.StartContainer(); err != nil {

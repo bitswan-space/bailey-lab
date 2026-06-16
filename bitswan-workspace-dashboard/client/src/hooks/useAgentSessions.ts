@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { authHeader, clearAccessToken } from '@/lib/auth-token';
 
 export interface AgentSession {
   id: string;
@@ -37,10 +38,14 @@ export function useAgentSessions(copy: string, bp: string): Result {
 
   const fetchNow = useCallback(async () => {
     try {
-      const r = await fetch(
-        `/api/coding-agent/sessions?copy=${encodeURIComponent(copy)}&bp=${encodeURIComponent(bp)}`,
-        { credentials: 'include', cache: 'no-store' },
-      );
+      const url = `/api/coding-agent/sessions?copy=${encodeURIComponent(copy)}&bp=${encodeURIComponent(bp)}`;
+      const r = await fetch(url, {
+        credentials: 'include',
+        cache: 'no-store',
+        headers: await authHeader(),
+      });
+      // Token may have expired — drop the cache so the next poll re-fetches it.
+      if (r.status === 401) clearAccessToken();
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = (await r.json()) as AgentSession[];
       if (aliveRef.current) setSessions(data);

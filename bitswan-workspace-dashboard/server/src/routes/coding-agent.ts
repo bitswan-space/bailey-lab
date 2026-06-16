@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { promises as dns } from 'node:dns';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import { spawnPty } from '../services/pty.js';
 import { handleTerminalConnection } from '../services/terminal-session.js';
 import type { GitopsClient } from '../services/gitops.js';
@@ -13,6 +13,7 @@ import {
   WRITE_TESTS_PROMPT,
 } from '../services/agent-prompts.js';
 import { listRequirements, type Requirement } from '../services/requirements.js';
+import { emailFromRequest } from '../lib/user.js';
 
 export interface CodingAgentRoutesOptions {
   gitops: GitopsClient | null;
@@ -56,18 +57,6 @@ function agentHost(): string {
   if (override) return override;
   const ws = process.env.BITSWAN_WORKSPACE_NAME ?? 'default';
   return `${ws}-coding-agent`;
-}
-
-function emailFromRequest(req: FastifyRequest): string {
-  // oauth2-proxy fronts the dashboard and forwards the authenticated email.
-  // `x-forwarded-email` is on by default (`--pass-user-headers`);
-  // `x-auth-request-email` requires `--set-xauthrequest=true` and isn't
-  // enabled in our default config. Check both so we work either way.
-  const headers = req.headers;
-  const raw = headers['x-auth-request-email'] ?? headers['x-forwarded-email'];
-  if (typeof raw === 'string' && raw) return raw;
-  if (Array.isArray(raw) && raw[0]) return raw[0];
-  return 'unknown';
 }
 
 type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
@@ -323,7 +312,12 @@ export function registerCodingAgentRoutes(
     }
     const isResume = Boolean(resumeId);
 
-    const email = emailFromRequest(req);
+    const email = await emailFromRequest(req, app.log);
+    if (!email) {
+      socket.send(JSON.stringify({ type: 'error', message: 'not authenticated' }));
+      socket.close(1008, 'not authenticated');
+      return;
+    }
 
     const autoCmd = buildAutoCmd({
       copy,
@@ -495,7 +489,10 @@ export function registerCodingAgentRoutes(
     if (!bp || !isValidBpId(bp)) {
       return reply.code(400).send({ error: 'invalid bp' });
     }
-    const userEmail = emailFromRequest(req);
+    const userEmail = await emailFromRequest(req, app.log);
+    if (!userEmail) {
+      return reply.code(401).send({ error: 'not authenticated' });
+    }
     try {
       const sessions = await listSessions({ copy, bp, userEmail });
       return sessions;

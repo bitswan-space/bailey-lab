@@ -5,9 +5,23 @@ import type {
   SnapshotStage,
   SnapshotTask,
 } from '@/types';
+import { authHeader, clearAccessToken } from './auth-token';
 
 async function getJson<T>(url: string): Promise<T> {
-  const r = await fetch(url, { credentials: 'include', cache: 'no-store' });
+  let r = await fetch(url, {
+    credentials: 'include',
+    cache: 'no-store',
+    headers: await authHeader(),
+  });
+  if (r.status === 401) {
+    // Token may have expired — refetch from /oauth2/auth and retry once.
+    clearAccessToken();
+    r = await fetch(url, {
+      credentials: 'include',
+      cache: 'no-store',
+      headers: await authHeader(),
+    });
+  }
   if (!r.ok) throw new Error(`${url} returned ${r.status}`);
   return (await r.json()) as T;
 }
@@ -19,13 +33,21 @@ async function getJson<T>(url: string): Promise<T> {
 // usually succeeded. A short backoff is enough for the new connection to be
 // ready.
 async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+  let refreshedToken = false;
   for (let attempt = 0; ; attempt++) {
     try {
       const r = await fetch(url, {
         credentials: 'include',
         cache: 'no-store',
         ...init,
+        headers: { ...(init.headers as Record<string, string>), ...(await authHeader()) },
       });
+      if (r.status === 401 && !refreshedToken) {
+        // Token may have expired — refetch from /oauth2/auth and retry once.
+        refreshedToken = true;
+        clearAccessToken();
+        continue;
+      }
       if (!r.ok) throw new Error(`${url} returned ${r.status}`);
       return r;
     } catch (err) {
@@ -71,7 +93,7 @@ async function putJsonAllow4xx<T>(url: string, body: unknown): Promise<T> {
     method: 'PUT',
     credentials: 'include',
     cache: 'no-store',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
     body: JSON.stringify(body),
   });
   // Parse JSON regardless of status — the body carries the structured
@@ -88,6 +110,7 @@ async function postMultipart<T>(url: string, form: FormData): Promise<T> {
     method: 'POST',
     credentials: 'include',
     cache: 'no-store',
+    headers: await authHeader(),
     body: form,
   });
   if (!r.ok) throw new Error(`${url} returned ${r.status}`);
@@ -239,8 +262,8 @@ export const api = {
 
   createCopy: (body: CreateCopyRequest) =>
     postJson<CreateCopyResponse>('/api/copies', body),
-  deleteCopy: (name: string) =>
-    deleteEmpty(`/api/copies/${encodeURIComponent(name)}`),
+  // No deleteCopy: deleting a copy (one's own or another user's) is not a
+  // user-facing action — the dashboard never exposes it.
 
   templates: () => getJson<TemplatesResponse>('/api/templates'),
   createAutomationFromTemplate: (body: CreateAutomationRequest) =>

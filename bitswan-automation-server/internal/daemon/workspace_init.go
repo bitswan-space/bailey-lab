@@ -794,7 +794,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			return fmt.Errorf("failed to create dashboard service: %w", err)
 		}
 
-		if err := dashboardService.Enable(token, bitswanDashboardImage, *domain, oauthConfig, true); err != nil {
+		if err := dashboardService.Enable(token, bitswanDashboardImage, true); err != nil {
 			return fmt.Errorf("failed to enable dashboard service: %w", err)
 		}
 

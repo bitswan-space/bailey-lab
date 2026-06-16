@@ -1,24 +1,11 @@
-import { useCallback, useState } from 'react';
-import { Check, ChevronsUpDown, GitBranch, Plus, Trash2 } from 'lucide-react';
-import { toast } from 'sonner';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
+import { useState } from 'react';
+import { Check, ChevronsUpDown, GitBranch, Plus } from 'lucide-react';
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover';
 import { NewCopyDialog } from '@/components/workspace/NewCopyDialog';
-import { useAutomations } from '@/components/workspace/WorkspaceProvider';
-import { api, isTransientNetworkError } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { Copy } from '@/types';
 
@@ -30,65 +17,19 @@ interface CopySwitcherProps {
 }
 
 /**
- * Top-bar copy switcher: flat copy list with sync dots, plus
- * "New copy" and "Delete copy" (for the selected one) in the footer.
+ * Top-bar copy switcher: flat copy list with sync dots, plus "New copy" in
+ * the footer.
+ *
+ * There is deliberately NO "Delete copy" action. A copy is the user's personal
+ * working environment; the dashboard must never let a user delete their own
+ * copy — and listing other users' copies here must never expose a delete
+ * either. Copy cleanup is an operator-only concern, handled out-of-band.
  */
-export function CopySwitcher({
-  copy,
-  copies,
-  onSelect,
-}: CopySwitcherProps) {
-  const { automations: raw } = useAutomations();
+export function CopySwitcher({ copy, copies, onSelect }: CopySwitcherProps) {
   const [open, setOpen] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleting, setDeleting] = useState(false);
 
   const active = copies.find((w) => w.name === copy);
-
-  // Editor-parity flow (moved from the old WorktreeView): best-effort stop
-  // every live-dev deployment in the copy before asking gitops to remove
-  // the directory — running containers pointing at a deleted bind-mount would
-  // otherwise be stranded.
-  const runDeleteCopy = useCallback(async () => {
-    if (!copy) return;
-    setDeleting(true);
-    try {
-      const wtPrefix = `copies/${copy}/`;
-      const liveDev = raw.filter((a) => {
-        const rel = a.relative_path ?? '';
-        return (
-          rel.startsWith(wtPrefix) && a.deployment_id && a.stage === 'live-dev'
-        );
-      });
-      await Promise.allSettled(
-        liveDev.map((a) =>
-          a.deployment_id
-            ? api.removeAutomation(a.deployment_id)
-            : Promise.resolve(),
-        ),
-      );
-      const work = api.deleteCopy(copy);
-      toast.promise(work, {
-        loading: `Deleting copy "${copy}"…`,
-        success: `Copy "${copy}" deleted`,
-        error: (err: unknown) =>
-          isTransientNetworkError(err)
-            ? `Copy "${copy}" deleted`
-            : `Failed to delete copy: ${String(err)}`,
-      });
-      try {
-        await work;
-        // The copies SSE snapshot drops the entry; the App-level effect
-        // re-selects the next available copy (or clears).
-      } catch {
-        // toast handled the surfacing
-      }
-    } finally {
-      setDeleting(false);
-      setDeleteOpen(false);
-    }
-  }, [raw, copy]);
 
   return (
     <>
@@ -188,23 +129,6 @@ export function CopySwitcher({
               <Plus className="size-3.5" aria-hidden />
               New copy
             </button>
-            <button
-              type="button"
-              disabled={!copy}
-              onClick={() => {
-                setOpen(false);
-                setDeleteOpen(true);
-              }}
-              className={cn(
-                'flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-xs font-medium transition-colors',
-                copy
-                  ? 'text-destructive hover:bg-destructive/10'
-                  : 'cursor-not-allowed text-muted-foreground/50',
-              )}
-            >
-              <Trash2 className="size-3.5" aria-hidden />
-              Delete copy{copy ? ` "${copy}"` : ''}
-            </button>
           </div>
         </PopoverContent>
       </Popover>
@@ -215,41 +139,6 @@ export function CopySwitcher({
         existingNames={copies.map((w) => w.name)}
         onCreated={(name) => onSelect(name)}
       />
-
-      <AlertDialog
-        open={deleteOpen}
-        onOpenChange={(o) => !deleting && setDeleteOpen(o)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Delete copy &quot;{copy}&quot;?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              This force-removes the copy and the{' '}
-              <code>{active?.branch ?? copy}</code> branch, and drops the
-              copy&apos;s postgres database. Any live-dev deployments under
-              this copy will be stopped first. Uncommitted changes are{' '}
-              <strong>lost</strong>.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={deleting}
-              onClick={(e) => {
-                // Block AlertDialog's default close-on-action so the dialog
-                // stays up while the async delete runs; we close it ourselves.
-                e.preventDefault();
-                void runDeleteCopy();
-              }}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </>
   );
 }
