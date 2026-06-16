@@ -239,11 +239,12 @@ function ApprovalsView({ ctx }) {
 
   const focus = data.pending.find(p => p.id === focusId) || null;
   const codeNoSep = (s) => s.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-  // The backend does NOT send the expected code (the admin reads it off
-  // the user's screen — that's the trust step), so we can't match locally.
-  // We require a full 8-char entry and let the server validate it; a
-  // mismatch comes back as a 401 from /2fa-gate/approve.
-  const codeReady = focus && codeNoSep(code).length >= 8;
+  // The backend does NOT send the expected code (the admin reads it off the
+  // user's screen — that's the trust step), so we can't match locally. The
+  // pairing code is 6 digits (generatePendingPair, "%06d"); require a full
+  // 6-char entry and let the server validate it — a mismatch comes back as a
+  // 401 from /2fa-gate/approve.
+  const codeReady = focus && codeNoSep(code).length >= 6;
 
   // Live: POST email+code to the gate's approve handler, then re-fetch the
   // pending list. On a code mismatch the backend returns 401 → ApiError.
@@ -251,7 +252,7 @@ function ApprovalsView({ ctx }) {
     if (!codeReady || !focus) { setError(true); return; }
     setBusy(true); setError(false); setErrMsg('');
     try {
-      await PApi.approvePair(focus.userEmail, code.trim());
+      await PApi.approvePair(focus.userEmail, codeNoSep(code));
       toast(`Device trusted for ${focus.userName}`, 'success');
       await Promise.all([refresh('approvals'), refresh('devices')]);
     } catch (e) {
@@ -365,7 +366,7 @@ function ApprovalsView({ ctx }) {
                 Ask {focus.userName.split(' ')[0]} to read you the code shown on their device, then type it below. This proves they're physically present.
               </p>
               <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-                <PSeg format={[4, 4]} value={code} onChange={v => { setCode(v); setError(false); setErrMsg(''); }} size="md" auto />
+                <PSeg format={[3, 3]} value={code} onChange={v => { setCode(v); setError(false); setErrMsg(''); }} size="md" auto />
               </div>
               {error && <div style={{ marginTop: 10, fontSize: 12.5, color: PC.red, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <PIcon name="x-circle" size={14} color={PC.red} /> {errMsg || `Enter the full code from ${focus.userName.split('@')[0]}'s screen.`}

@@ -89,7 +89,7 @@ describe('ApprovalsView', () => {
     installFetch({ '/2fa-gate/approve': { status: 200, text: 'ok' } });
     render(<Host View={ApprovalsView} data={withPending()} extra={s} />);
     const codeInput = document.querySelector('input');
-    fireEvent.change(codeInput, { target: { value: 'ABCD1234' } });
+    fireEvent.change(codeInput, { target: { value: '123456' } });
     fireEvent.click(screen.getByText('Trust this device'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Device trusted'), 'success'));
     expect(s.refresh).toHaveBeenCalledWith('approvals');
@@ -99,7 +99,7 @@ describe('ApprovalsView', () => {
   it('approve 401 shows mismatch message', async () => {
     installFetch({ '/2fa-gate/approve': { status: 401, text: 'unauthorized' } });
     render(<Host View={ApprovalsView} data={withPending()} />);
-    fireEvent.change(document.querySelector('input'), { target: { value: 'ABCD1234' } });
+    fireEvent.change(document.querySelector('input'), { target: { value: '123456' } });
     fireEvent.click(screen.getByText('Trust this device'));
     await waitFor(() => expect(screen.getByText(/Code didn't match/)).toBeTruthy());
   });
@@ -107,7 +107,7 @@ describe('ApprovalsView', () => {
   it('approve non-401 error shows the generic message', async () => {
     installFetch({ '/2fa-gate/approve': { status: 500, json: { error: 'server boom' } } });
     render(<Host View={ApprovalsView} data={withPending()} />);
-    fireEvent.change(document.querySelector('input'), { target: { value: 'ABCD1234' } });
+    fireEvent.change(document.querySelector('input'), { target: { value: '123456' } });
     fireEvent.click(screen.getByText('Trust this device'));
     await waitFor(() => expect(screen.getByText('server boom')).toBeTruthy());
   });

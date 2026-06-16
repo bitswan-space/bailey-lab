@@ -141,7 +141,7 @@ function LinkDeviceModal({ open, onClose, ctx }) {
   const [err, setErr] = useD('');
 
   const submit = async () => {
-    const c = code.trim();
+    const c = code.replace(/[^A-Za-z0-9]/g, '');
     if (!c) { setErr('Enter the code shown on the new device.'); return; }
     setBusy(true); setErr('');
     try {
