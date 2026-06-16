@@ -95,8 +95,8 @@ describe('App live-data loading + adapters + routing', () => {
     await waitFor(() => expect(screen.getByText(/couldn't be enumerated/)).toBeTruthy());
     // devices + security routes
     fireEvent.click(screen.getByText('Your devices'));
-    // "Link a device" is unique to the loaded Devices view (not the nav).
-    await waitFor(() => expect(screen.getByText('Link a device')).toBeTruthy());
+    // The page-header subtitle is unique to the loaded Devices view (not the nav).
+    await waitFor(() => expect(screen.getByText(/Trust spreads device-to-device/)).toBeTruthy());
     fireEvent.click(screen.getByText('Security & recovery'));
     await waitFor(() => expect(screen.getByText(/Authenticator app/)).toBeTruthy());
     // approvals route

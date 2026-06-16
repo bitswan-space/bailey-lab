@@ -51,31 +51,42 @@ describe('DevicesView', () => {
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining("Couldn't remove device"), 'danger'));
   });
 
-  it('link device: enter the code from the new device → self-approve, no admin/PIN/QR stub', async () => {
+  it('no "Link a device" button; no pending device → no link row', () => {
+    render(<Host View={DevicesView} data={makeData({ pending: [] })} />);
+    expect(screen.queryByText('Link a device')).toBeNull();
+    expect(screen.queryByText('New device waiting to be linked')).toBeNull();
+  });
+
+  it('a pending device shows an inline row; entering its code self-approves (no admin)', async () => {
     const s = spies();
     installFetch({ '/2fa-gate/approve': { status: 200, text: 'ok' } });
-    render(<Host View={DevicesView} data={makeData()} extra={s} />);
-    fireEvent.click(screen.getByText('Link a device'));
-    // No PIN/QR stub, no "ask an admin" framing — the user enters the code.
-    expect(screen.queryByText('Link with a PIN')).toBeNull();
+    // A new browser signed in as the current user → pending pair for them.
+    const data = makeData({ pending: [{ id: 'me@example.test', userEmail: 'me@example.test', userName: 'me@example.test' }] });
+    render(<Host View={DevicesView} data={data} extra={s} />);
+    expect(screen.getByText('New device waiting to be linked')).toBeTruthy();
     expect(screen.queryByText('Simulate scan')).toBeNull();
-    expect(screen.queryByText(/isn't available yet/)).toBeNull();
-    // Enter the code shown on the new device and submit.
+    // Enter the 6-digit code shown on the new device and link it.
     fireEvent.change(screen.getByPlaceholderText('000000'), { target: { value: '497722' } });
     fireEvent.click(screen.getByText('Link device'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith('New device linked and trusted', 'success'));
     expect(s.refresh).toHaveBeenCalledWith('devices');
   });
 
-  it('link device: a bad code surfaces the backend error, no device added', async () => {
+  it('a bad pending-device code surfaces the backend error', async () => {
     const s = spies();
     installFetch({ '/2fa-gate/approve': { status: 401, text: "Code didn't match — ask them to read it back." } });
-    render(<Host View={DevicesView} data={makeData()} extra={s} />);
-    fireEvent.click(screen.getByText('Link a device'));
+    const data = makeData({ pending: [{ id: 'me@example.test', userEmail: 'me@example.test', userName: 'me@example.test' }] });
+    render(<Host View={DevicesView} data={data} extra={s} />);
     fireEvent.change(screen.getByPlaceholderText('000000'), { target: { value: '000000' } });
     fireEvent.click(screen.getByText('Link device'));
     await waitFor(() => expect(screen.getByText(/didn't match/)).toBeTruthy());
     expect(s.toast).not.toHaveBeenCalledWith('New device linked and trusted', 'success');
+  });
+
+  it("does not show another user's pending device", () => {
+    const data = makeData({ pending: [{ id: 'someone@else', userEmail: 'someone@else', userName: 'someone@else' }] });
+    render(<Host View={DevicesView} data={data} />);
+    expect(screen.queryByText('New device waiting to be linked')).toBeNull();
   });
 });
 

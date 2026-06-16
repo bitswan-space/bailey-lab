@@ -3,7 +3,7 @@ import React from 'react';
 
 const { C: DC, Icon: DIcon, Btn: DBtn, Pill: DPill } = window.WD_SHELL;
 const {
-  Card: DCard, PageHeader: DPageHeader, Field: DField, TextInput: DTextInput, Modal: DModal,
+  Card: DCard, PageHeader: DPageHeader, TextInput: DTextInput, Modal: DModal,
   SegmentedCode: DSeg, QRCode: DQR, QRImage: DQRImage, DeviceIcon: DDeviceIcon, ProtoHint: DProtoHint,
   CopyChip: DCopyChip, Toggle: DToggle, EmptyState: DEmpty, LiveState: DLiveState,
 } = window.SC_UI;
@@ -18,10 +18,24 @@ const TRUST_BADGE = {
 
 // ─── MY DEVICES ─────────────────────────────────────────────────────────────
 function DevicesView({ ctx }) {
-  const { data, setData, toast, refresh } = ctx;
-  const [linkOpen, setLinkOpen] = useD(false);
+  const { data, toast, refresh, currentUser } = ctx;
   const [revoke, setRevoke] = useD(null);
   const [busy, setBusy] = useD(false);
+
+  // Poll for newly signed-in devices (which create a pending-pair) and for the
+  // device list itself, so a new device shows up to be linked — and the linked
+  // device appears — without a manual refresh while sitting on this page.
+  useDE(() => {
+    refresh('approvals');
+    const t = setInterval(() => { refresh('approvals'); refresh('devices'); }, 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Pending devices waiting to be trusted FOR THIS USER. A non-admin only ever
+  // sees their own; an admin's other-user pending pairs belong on New user
+  // approvals, so filter to the signed-in identity either way.
+  const myPending = (data.pending || []).filter(
+    p => (p.userEmail || '').toLowerCase() === (currentUser.email || '').toLowerCase());
 
   // Live: remove the device via POST /bailey/api/devices/remove, then
   // re-fetch the device list so the UI reflects the backend.
@@ -40,19 +54,22 @@ function DevicesView({ ctx }) {
   return (
     <div>
       <DPageHeader title="Your devices" icon="laptop"
-        subtitle="Every device signed in to your account. Trust spreads device-to-device: a device you've already trusted can vouch for a new one — no admin needed."
-        actions={<DBtn variant="primary" leftIcon="plus" onClick={() => setLinkOpen(true)}>Link a device</DBtn>} />
+        subtitle="Every device signed in to your account. Trust spreads device-to-device: a device you've already trusted can vouch for a new one — no admin needed." />
 
       {data.load.devices !== 'ok' && (
         <DLiveState status={data.load.devices} error={data.error.devices}
           label="Loading your devices…" onRetry={() => refresh('devices')} />
       )}
-      {data.load.devices === 'ok' && data.myDevices.length === 0 && (
+      {data.load.devices === 'ok' && data.myDevices.length === 0 && myPending.length === 0 && (
         <DCard><DEmpty icon="laptop" title="No trusted devices"
           text="No devices are currently paired to your account on this server." /></DCard>
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {myPending.map(p => (
+          <PendingDeviceRow key={p.id} email={currentUser.email} toast={toast}
+            onLinked={() => Promise.all([refresh('devices'), refresh('approvals')])} />
+        ))}
         {data.myDevices.map(dev => {
           const badge = TRUST_BADGE[dev.trustOrigin] || TRUST_BADGE.linked;
           return (
@@ -104,8 +121,6 @@ function DevicesView({ ctx }) {
         </span>
       </div>
 
-      <LinkDeviceModal open={linkOpen} onClose={() => setLinkOpen(false)} ctx={ctx} />
-
       <DModal open={!!revoke} onClose={() => setRevoke(null)} icon="log-out" title={`Sign out ${revoke?.name}?`}
         subtitle="That device will lose trust immediately and must be re-linked to get back in."
         footer={<>
@@ -126,63 +141,60 @@ function DevicesView({ ctx }) {
   );
 }
 
-// ─── LINK DEVICE ────────────────────────────────────────────────────────────
-// Trust spreads device-to-device with NO admin: the new device signs in and
-// shows a short code; the user enters that code HERE, on a device they already
-// trust, and the new device is trusted immediately. This posts the code to the
-// same approval endpoint the gate uses (/2fa-gate/approve) for the caller's own
-// account — approverIsTrusted gates it to a trusted browser, and a non-admin
-// may only approve their OWN pending code, so a user links their own devices
-// without involving an admin.
-function LinkDeviceModal({ open, onClose, ctx }) {
-  const { currentUser, toast, refresh } = ctx;
+// ─── PENDING DEVICE (inline link) ───────────────────────────────────────────
+// When a new device signs in it creates a pending-pair; on a device the user
+// already trusts it surfaces HERE as a skeleton row in the device list, with a
+// box to enter the code the new device shows. Submitting posts to the same
+// approval endpoint the gate uses (/2fa-gate/approve) for the caller's own
+// account — approverIsTrusted gates it to a trusted browser and a non-admin may
+// only approve their OWN pending code, so the user links their own device with
+// no admin and no modal.
+function PendingDeviceRow({ email, onLinked, toast }) {
   const [code, setCode] = useD('');
   const [busy, setBusy] = useD(false);
   const [err, setErr] = useD('');
 
   const submit = async () => {
     const c = code.replace(/[^A-Za-z0-9]/g, '');
-    if (!c) { setErr('Enter the code shown on the new device.'); return; }
+    if (c.length < 6) { setErr('Enter the 6-digit code shown on the new device.'); return; }
     setBusy(true); setErr('');
     try {
-      await DApi.approvePair(currentUser.email, c);
+      await DApi.approvePair(email, c);
       toast('New device linked and trusted', 'success');
       setCode('');
-      await refresh('devices');
-      onClose();
+      await onLinked();
     } catch (e) {
       setErr(e.message || "That code didn't match — check it and try again.");
     } finally { setBusy(false); }
   };
 
   return (
-    <DModal open={open} onClose={() => { setCode(''); setErr(''); onClose(); }} icon="smartphone" title="Link a new device" width={520}
-      subtitle="Trust a new device from this one — no admin needed."
-      footer={<>
-        <DBtn variant="default" onClick={() => { setCode(''); setErr(''); onClose(); }}>Cancel</DBtn>
-        <DBtn variant="primary" leftIcon="link" disabled={busy || !code.trim()} onClick={submit}>{busy ? 'Linking…' : 'Link device'}</DBtn>
-      </>}>
-      <div style={{ display: 'flex', gap: 11, padding: '13px 15px', background: DC.surface, borderRadius: 10, marginBottom: 16 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, color: DC.fg, lineHeight: '17px' }}>
-          <div style={{ display: 'flex', gap: 9 }}><Step n="1" /><span>On the new device, open this server and sign in. It shows a short code.</span></div>
-          <div style={{ display: 'flex', gap: 9 }}><Step n="2" /><span>Enter that code below to trust the new device — it'll be let in straight away.</span></div>
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 16, padding: '16px 18px',
+      border: `1px dashed ${DC.primary}`, borderRadius: 12, background: DC.primarySoft,
+    }}>
+      <span style={{ width: 46, height: 46, borderRadius: 11, flex: '0 0 auto', background: '#fff',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', border: `1px dashed ${DC.primary}` }}>
+        <DDeviceIcon kind="smartphone" size={22} color={DC.primary} />
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14.5, fontWeight: 600, color: DC.fg }}>New device waiting to be linked</div>
+        <div style={{ fontSize: 12.5, color: DC.muted, marginTop: 2 }}>
+          A new browser signed in as {email}. Enter the code it shows to trust it — no admin needed.
         </div>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 10 }}>
+          <div style={{ width: 160 }}>
+            <DTextInput value={code} mono autoFocus placeholder="000000"
+              onChange={(v) => { setCode(v); setErr(''); }} />
+          </div>
+          <DBtn variant="primary" leftIcon="link" disabled={busy || code.replace(/[^A-Za-z0-9]/g, '').length < 6} onClick={submit}>
+            {busy ? 'Linking…' : 'Link device'}
+          </DBtn>
+        </div>
+        {err && <div style={{ marginTop: 8, fontSize: 12.5, color: DC.red }}>{err}</div>}
       </div>
-
-      <DField label="Code from the new device">
-        <DTextInput value={code} mono autoFocus placeholder="000000"
-          onChange={(v) => { setCode(v); setErr(''); }} />
-      </DField>
-      {err && (
-        <div style={{ marginTop: 10, fontSize: 12.5, color: DC.red }}>{err}</div>
-      )}
-    </DModal>
+    </div>
   );
-}
-
-function Step({ n }) {
-  return <span style={{ width: 20, height: 20, borderRadius: 9999, flex: '0 0 auto', background: DC.primary, color: '#fff',
-    fontSize: 11, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{n}</span>;
 }
 
 // ─── SECURITY & RECOVERY ────────────────────────────────────────────────────
