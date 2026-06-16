@@ -42,6 +42,9 @@ func TestAdminACLTree_ListsEndpointsOwnerAndGrants(t *testing.T) {
 	if dash.OwnerEmail != "owner@example.com" || dash.Kind != endpointKindWorkspace {
 		t.Errorf("dashboard owner/kind wrong: %+v", dash)
 	}
+	if dash.Access != "owned" {
+		t.Errorf("workspace dashboard access = %q, want owned", dash.Access)
+	}
 	foundGrant := false
 	for _, g := range dash.Grants {
 		if g.PrincipalValue == "member@example.com" && g.Role == string(roleAccess) {

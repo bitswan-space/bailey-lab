@@ -425,8 +425,14 @@ function EndpointAccessView({ ctx }) {
     return () => { alive = false; };
   }, [nonce]);
 
-  // Build parent → children. Roots = endpoints with no (or unknown) parent.
-  const eps = tree || [];
+  const all = tree || [];
+  // Special endpoints get their own sections; the rest form the owned tree.
+  const publicEps = all.filter(e => e.access === 'public').sort((a, b) => a.hostname.localeCompare(b.hostname));
+  const allUsersEps = all.filter(e => e.access === 'all-users').sort((a, b) => a.hostname.localeCompare(b.hostname));
+  const eps = all.filter(e => !e.access || e.access === 'owned');
+
+  // Build parent → children for the OWNED endpoints. Roots = owned endpoints
+  // with no (or unknown) owned parent.
   const byHost = {};
   eps.forEach(e => { byHost[e.hostname] = e; });
   const childrenOf = {};
@@ -484,19 +490,51 @@ function EndpointAccessView({ ctx }) {
     );
   };
 
+  const SECTION = { fontSize: 11, fontWeight: 600, color: PC.muted, textTransform: 'uppercase', letterSpacing: 0.4, margin: '4px 0 10px' };
+  const SpecialCard = ({ e, icon, note }) => (
+    <div style={{ border: `1px solid ${PC.border}`, borderRadius: 10, background: '#fff', padding: '12px 14px', marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <PIcon name={icon} size={16} color={PC.muted} />
+        <span style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg, fontFamily: 'Geist Mono, monospace' }}>{e.hostname}</span>
+      </div>
+      <div style={{ fontSize: 12, color: PC.muted, marginTop: 6, lineHeight: '17px' }}>{note}</div>
+    </div>
+  );
+  const nothing = tree !== null && !err && publicEps.length === 0 && allUsersEps.length === 0 && roots.length === 0;
+
   return (
     <div>
       <PPageHeader title="Endpoint access" icon="git-fork"
-        subtitle="Every endpoint this server routes, with its owner and who's been granted access. Read-only — a server-wide view of who can reach what; access is changed by each endpoint's owner from its share dialog." />
+        subtitle="Every endpoint this server routes and who can reach it. Read-only — access is changed by each endpoint's owner from its share dialog." />
       {tree === null && !err && <div style={{ fontSize: 13, color: PC.muted }}>Loading endpoints…</div>}
       {err && (
         <PLiveState status="error" error={err} label="Couldn't load endpoint access" onRetry={() => setNonce(n => n + 1)} />
       )}
-      {tree !== null && !err && roots.length === 0 && (
+      {nothing && (
         <PEmpty icon="git-fork" title="No endpoints registered yet"
           text="Endpoints appear here as workspaces and apps are created on this server." />
       )}
-      {roots.map(e => <Node key={e.hostname} e={e} depth={0} />)}
+
+      {publicEps.length > 0 && (
+        <>
+          <div style={SECTION}>Public endpoints</div>
+          {publicEps.map(e => <SpecialCard key={e.hostname} e={e} icon="globe"
+            note="Public — any signed-in user reaches this without a per-endpoint grant. It's how a new device gets trusted (the onboarding flow)." />)}
+        </>
+      )}
+      {allUsersEps.length > 0 && (
+        <>
+          <div style={{ ...SECTION, marginTop: 18 }}>Available to all signed-in users</div>
+          {allUsersEps.map(e => <SpecialCard key={e.hostname} e={e} icon="users"
+            note="Every verified user can reach this — e.g. the Server Console, so anyone can manage their own devices. Not restricted to its owner." />)}
+        </>
+      )}
+      {roots.length > 0 && (
+        <>
+          <div style={{ ...SECTION, marginTop: 18 }}>Workspaces &amp; apps</div>
+          {roots.map(e => <Node key={e.hostname} e={e} depth={0} />)}
+        </>
+      )}
     </div>
   );
 }

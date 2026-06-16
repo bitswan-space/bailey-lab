@@ -26,6 +26,15 @@ type aclTreeEndpoint struct {
 	Parent      string         `json:"parent"`
 	OwnerEmail  string         `json:"owner_email"`
 	Grants      []aclTreeGrant `json:"grants"`
+	// Access classifies how the endpoint is reached, NOT just its grants:
+	//   "public"    — the onboarding host; any signed-in user reaches it
+	//                 (device-trust exempt) so a new device can become trusted.
+	//   "all-users" — the Server Console; every verified user can reach it
+	//                 (the gate free-pass) so they can manage their own devices.
+	//   "owned"     — a normal endpoint gated by its per-endpoint ACL (owner +
+	//                 grants). The owner registration on public/all-users hosts
+	//                 is incidental bookkeeping, not an access restriction.
+	Access string `json:"access"`
 }
 
 // handleAdminACLTree (GET /bailey/api/admin/acl) returns all endpoints with
@@ -47,6 +56,13 @@ func handleAdminACLTree(w http.ResponseWriter, r *http.Request) {
 				Role:           string(gr.Role),
 			})
 		}
+		access := "owned"
+		switch {
+		case isServerConsoleOnboardHost(e.Hostname):
+			access = "public"
+		case isBaileyHost(toOuterHost(e.Hostname)):
+			access = "all-users"
+		}
 		out = append(out, aclTreeEndpoint{
 			Hostname:    e.Hostname,
 			DisplayName: e.DisplayName,
@@ -55,6 +71,7 @@ func handleAdminACLTree(w http.ResponseWriter, r *http.Request) {
 			Parent:      e.ParentEndpoint,
 			OwnerEmail:  e.OwnerEmail,
 			Grants:      g,
+			Access:      access,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

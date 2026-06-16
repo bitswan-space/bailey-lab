@@ -150,4 +150,19 @@ describe('EndpointAccessView', () => {
     render(<Host View={EndpointAccessView} data={makeData()} />);
     await waitFor(() => expect(screen.getByText('acl boom')).toBeTruthy());
   });
+
+  it('groups public and all-users endpoints into their own sections', async () => {
+    installFetch({ '/bailey/api/admin/acl': { json: { endpoints: [
+      { hostname: 'bailey-onboard.d', kind: '', stage: '', parent: '', owner_email: 'x@y', grants: [], access: 'public' },
+      { hostname: 'bailey.d', kind: '', stage: '', parent: '', owner_email: 'admin@y', grants: [], access: 'all-users' },
+      { hostname: 'acme-dashboard.d', kind: 'workspace', stage: '', parent: '', owner_email: 'jane@x', grants: [], access: 'owned' },
+    ] } } });
+    render(<Host View={EndpointAccessView} data={makeData()} />);
+    await waitFor(() => expect(screen.getByText('Public endpoints')).toBeTruthy());
+    expect(screen.getByText('Available to all signed-in users')).toBeTruthy();
+    expect(screen.getByText('Workspaces & apps')).toBeTruthy();
+    expect(screen.getByText('bailey-onboard.d')).toBeTruthy();
+    expect(screen.getByText('bailey.d')).toBeTruthy();
+    expect(screen.getByText('acme-dashboard.d')).toBeTruthy();
+  });
 });
