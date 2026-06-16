@@ -120,7 +120,8 @@ CREATE TABLE IF NOT EXISTS pending_pairs (
   issued_at     TEXT NOT NULL,
   expires_at    TEXT NOT NULL,
   approved_by   TEXT,
-  approver_info TEXT
+  approver_info TEXT,
+  user_agent    TEXT
 );
 CREATE INDEX IF NOT EXISTS pending_pairs_code_idx ON pending_pairs(code);
 
@@ -262,6 +263,17 @@ func openBaileyDB() (*sql.DB, error) {
 			ORDER BY paired_at ASC LIMIT 1)`); err != nil {
 			db.Close()
 			baileyDBErr = fmt.Errorf("backfill devices.origin: %w", err)
+			return
+		}
+		// Migration for databases created before pending_pairs.user_agent
+		// existed. It records the requesting device's self-reported User-Agent
+		// so the approver can see what kind of device/browser is asking — real
+		// data captured at pairing time, not inferred. Old rows simply have no
+		// UA (the approval UI shows "Unknown device").
+		if _, err := db.Exec(`ALTER TABLE pending_pairs ADD COLUMN user_agent TEXT`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate pending_pairs.user_agent: %w", err)
 			return
 		}
 		baileyDB = db

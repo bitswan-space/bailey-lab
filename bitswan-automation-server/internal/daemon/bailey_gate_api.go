@@ -195,7 +195,7 @@ func handleGatePendingPair(w http.ResponseWriter, r *http.Request, email string)
 	if !requireIdentity(w, email) {
 		return
 	}
-	e, err := generatePendingPair(email)
+	e, err := generatePendingPairUA(email, r.UserAgent())
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return

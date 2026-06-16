@@ -37,10 +37,21 @@ function initialData() {
   };
 }
 
-// serverHost is the hostname the console is actually served from — the real
-// origin, not a seeded label. Used for the sidebar + page headers.
+// serverHost is the PUBLIC hostname the user visits — the real origin, not a
+// seeded label. Used for the sidebar + page headers. The console runs inside
+// the chrome-wrap iframe, where window.location.hostname is the paired inner
+// subdomain (bailey--inner.<domain>); strip the "--inner" suffix from the
+// leftmost label so we show the public host (mirrors the daemon's toOuterHost).
 function serverHost() {
-  try { return window.location.hostname || ''; } catch (e) { return ''; }
+  try {
+    const h = window.location.hostname || '';
+    const dot = h.indexOf('.');
+    const label = dot === -1 ? h : h.slice(0, dot);
+    if (label.endsWith('--inner')) {
+      return label.slice(0, -'--inner'.length) + (dot === -1 ? '' : h.slice(dot));
+    }
+    return h;
+  } catch (e) { return ''; }
 }
 
 // ── Adapters: backend DTO → the shapes the existing components render ──
@@ -77,8 +88,13 @@ function adaptApproval(p) {
     userName: p.email,
     userEmail: p.email,
     firstDevice: true,
-    kind: 'laptop',
-    browser: '', os: '', ip: '', location: '',
+    // Device kind/browser/os come from the requesting device's User-Agent,
+    // captured at pairing time (backend parseUserAgent). Honest "unknown" when
+    // the UA wasn't recognizable — never fabricated.
+    kind: p.device_kind || 'unknown',
+    browser: p.browser || '', os: p.os || '',
+    deviceLabel: p.device_label || '',
+    ip: '', location: '',
     requested: ageLabel(p.age_seconds),
     oauth: 'Your identity provider',
     code: '', // not provided by backend — admin enters it from the user's screen

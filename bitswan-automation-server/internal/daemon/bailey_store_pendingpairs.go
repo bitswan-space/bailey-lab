@@ -12,19 +12,23 @@ func dbUpsertPendingPair(e *pairingEntry) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`INSERT INTO pending_pairs(email, code, issued_at, expires_at, approved_by, approver_info)
-		VALUES (?, ?, ?, ?, ?, ?)
+	_, err = db.Exec(`INSERT INTO pending_pairs(email, code, issued_at, expires_at, approved_by, approver_info, user_agent)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(email) DO UPDATE SET
 		  code          = excluded.code,
 		  issued_at     = excluded.issued_at,
 		  expires_at    = excluded.expires_at,
 		  approved_by   = excluded.approved_by,
-		  approver_info = excluded.approver_info`,
+		  approver_info = excluded.approver_info,
+		  -- Preserve a previously-captured UA when this refresh has none, so a
+		  -- later no-UA re-mint of the same pending entry doesn't erase it.
+		  user_agent    = COALESCE(NULLIF(excluded.user_agent, ''), pending_pairs.user_agent)`,
 		e.Email, e.Code,
 		e.IssuedAt.UTC().Format(time.RFC3339Nano),
 		e.ExpiresAt.UTC().Format(time.RFC3339Nano),
 		nullableString(e.ApprovedBy),
 		nullableString(e.ApproverInfo),
+		nullableString(e.UserAgent),
 	)
 	return err
 }
@@ -34,7 +38,7 @@ func dbLoadPendingPairByCode(code string) (*pairingEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	row := db.QueryRow(`SELECT email, code, issued_at, expires_at, COALESCE(approved_by,''), COALESCE(approver_info,'')
+	row := db.QueryRow(`SELECT email, code, issued_at, expires_at, COALESCE(approved_by,''), COALESCE(approver_info,''), COALESCE(user_agent,'')
 		FROM pending_pairs WHERE code = ?`, code)
 	return scanPendingPair(row)
 }
@@ -44,7 +48,7 @@ func dbLoadPendingPairByEmail(email string) (*pairingEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	row := db.QueryRow(`SELECT email, code, issued_at, expires_at, COALESCE(approved_by,''), COALESCE(approver_info,'')
+	row := db.QueryRow(`SELECT email, code, issued_at, expires_at, COALESCE(approved_by,''), COALESCE(approver_info,''), COALESCE(user_agent,'')
 		FROM pending_pairs WHERE email = ? COLLATE NOCASE`, email)
 	return scanPendingPair(row)
 }
@@ -75,7 +79,7 @@ func dbListPendingPairs() ([]*pairingEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT email, code, issued_at, expires_at, COALESCE(approved_by,''), COALESCE(approver_info,'')
+	rows, err := db.Query(`SELECT email, code, issued_at, expires_at, COALESCE(approved_by,''), COALESCE(approver_info,''), COALESCE(user_agent,'')
 		FROM pending_pairs`)
 	if err != nil {
 		return nil, err
@@ -85,7 +89,7 @@ func dbListPendingPairs() ([]*pairingEntry, error) {
 	for rows.Next() {
 		var e pairingEntry
 		var issued, expires string
-		if err := rows.Scan(&e.Email, &e.Code, &issued, &expires, &e.ApprovedBy, &e.ApproverInfo); err != nil {
+		if err := rows.Scan(&e.Email, &e.Code, &issued, &expires, &e.ApprovedBy, &e.ApproverInfo, &e.UserAgent); err != nil {
 			return nil, err
 		}
 		e.IssuedAt, _ = time.Parse(time.RFC3339Nano, issued)
@@ -102,7 +106,7 @@ type pendingPairRow interface {
 func scanPendingPair(row pendingPairRow) (*pairingEntry, error) {
 	var e pairingEntry
 	var issued, expires string
-	err := row.Scan(&e.Email, &e.Code, &issued, &expires, &e.ApprovedBy, &e.ApproverInfo)
+	err := row.Scan(&e.Email, &e.Code, &issued, &expires, &e.ApprovedBy, &e.ApproverInfo, &e.UserAgent)
 	if err != nil {
 		return nil, nil // not found, no error — callers treat nil as "no row"
 	}

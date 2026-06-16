@@ -65,16 +65,29 @@ type baileyApprovalDTO struct {
 	Email      string `json:"email"`
 	IssuedAt   string `json:"issued_at"`
 	AgeSeconds int    `json:"age_seconds"`
+	// Requesting device, derived from its self-reported User-Agent at pairing
+	// time. device_kind is phone|tablet|laptop|unknown; browser/os are "" when
+	// not recognizable; device_label is a ready-to-show "Browser on OS" ("" if
+	// unknown). Real captured data — never inferred when absent.
+	DeviceKind  string `json:"device_kind"`
+	Browser     string `json:"browser,omitempty"`
+	OS          string `json:"os,omitempty"`
+	DeviceLabel string `json:"device_label,omitempty"`
 }
 
 func handleBaileyApprovalsAPI(w http.ResponseWriter, r *http.Request, email string, isAdmin bool) {
 	pending := visiblePendingRequests(email, isAdmin)
 	out := make([]baileyApprovalDTO, 0, len(pending))
 	for _, p := range pending {
+		kind, browser, os := parseUserAgent(p.UserAgent)
 		out = append(out, baileyApprovalDTO{
-			Email:      p.Email,
-			IssuedAt:   p.IssuedAt.UTC().Format(time.RFC3339),
-			AgeSeconds: int(time.Since(p.IssuedAt).Seconds()),
+			Email:       p.Email,
+			IssuedAt:    p.IssuedAt.UTC().Format(time.RFC3339),
+			AgeSeconds:  int(time.Since(p.IssuedAt).Seconds()),
+			DeviceKind:  kind,
+			Browser:     browser,
+			OS:          os,
+			DeviceLabel: userAgentLabel(p.UserAgent),
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

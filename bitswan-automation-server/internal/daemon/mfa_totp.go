@@ -272,7 +272,7 @@ func handleChallengeGET(w http.ResponseWriter, r *http.Request, basePath, email 
 	// path: enter the code on an already-trusted browser instead of
 	// typing TOTP here. generatePendingPair is idempotent on email —
 	// reloading the page reuses the existing pending entry.
-	pair, _ := generatePendingPair(email)
+	pair, _ := generatePendingPairUA(email, r.UserAgent())
 	w.Header().Set("Content-Type", "text/html")
 	fmt.Fprint(w, totpChallengeHTML(email, basePath, "", pair))
 }
@@ -291,7 +291,7 @@ func handleChallengePOST(w http.ResponseWriter, r *http.Request, basePath, email
 	if !totp.Validate(code, rec.Secret) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusUnauthorized)
-		pair, _ := generatePendingPair(email)
+		pair, _ := generatePendingPairUA(email, r.UserAgent())
 		fmt.Fprint(w, totpChallengeHTML(email, basePath, "Code didn't match — try again.", pair))
 		return
 	}

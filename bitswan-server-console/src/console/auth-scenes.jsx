@@ -54,9 +54,15 @@ function WhyComplicatedLink() {
 
 // shared centered chrome
 function SceneShell({ children, footerNote, badge }) {
-  // Real server origin, not a seeded label.
+  // Public server origin, not a seeded label. Strip the chrome-wrap "--inner"
+  // suffix so we never surface the internal subdomain (matches serverHost()).
   let host = '';
-  try { host = window.location.hostname || ''; } catch (e) { host = ''; }
+  try {
+    const h = window.location.hostname || '';
+    const dot = h.indexOf('.');
+    const label = dot === -1 ? h : h.slice(0, dot);
+    host = label.endsWith('--inner') ? label.slice(0, -'--inner'.length) + (dot === -1 ? '' : h.slice(dot)) : h;
+  } catch (e) { host = ''; }
   return (
     <div style={{
       position: 'absolute', inset: 0, background: SC.surface,

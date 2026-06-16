@@ -130,7 +130,10 @@ function PendingApprovalBar({ req, person, ctx }) {
             {isAdditional ? <PPill tone="neutral" size="xs">Additional device</PPill> : <PPill tone="info" size="xs">First device</PPill>}
             <PPill tone="warning" size="xs">⏱ {req.requested}</PPill>
           </div>
-          <div style={{ fontSize: 11.5, color: PC.muted, marginTop: 2 }}>
+          <div style={{ fontSize: 12, color: PC.fg, fontWeight: 500, marginTop: 3 }}>
+            {req.deviceLabel || 'Unknown device'}
+          </div>
+          <div style={{ fontSize: 11.5, color: PC.muted, marginTop: 1 }}>
             {isAdditional
               ? `${firstName} already has ${existingDevices} trusted device${existingDevices > 1 ? 's' : ''} — this would add another.`
               : `This is ${firstName}'s first device on this server — no other trusted devices yet.`}

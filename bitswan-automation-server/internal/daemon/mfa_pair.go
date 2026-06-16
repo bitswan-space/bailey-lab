@@ -28,6 +28,7 @@ type pairingEntry struct {
 	ExpiresAt    time.Time
 	ApprovedBy   string
 	ApproverInfo string
+	UserAgent    string // requesting device's self-reported User-Agent ("" if unknown)
 }
 
 const pairingTTL = 5 * time.Minute
@@ -36,7 +37,19 @@ const pairingTTL = 5 * time.Minute
 // (it's still used by other handlers in this file).
 var _ = sync.Mutex{}
 
+// generatePendingPair mints (or refreshes) a pairing code for email with no
+// captured device info. Most call sites that don't hold the requesting
+// device's request use this; the device-facing handlers use
+// generatePendingPairUA to record the User-Agent.
 func generatePendingPair(email string) (*pairingEntry, error) {
+	return generatePendingPairUA(email, "")
+}
+
+// generatePendingPairUA is generatePendingPair plus the requesting device's
+// self-reported User-Agent, so the approver can see what device/browser is
+// asking. The upsert preserves a previously-captured UA when userAgent is
+// empty, so a later no-UA refresh of the same pending entry won't erase it.
+func generatePendingPairUA(email, userAgent string) (*pairingEntry, error) {
 	if err := dbPurgeExpiredPendingPairs(); err != nil {
 		return nil, err
 	}
@@ -50,6 +63,7 @@ func generatePendingPair(email string) (*pairingEntry, error) {
 		Code:      fmt.Sprintf("%06d", codeInt.Int64()),
 		IssuedAt:  now,
 		ExpiresAt: now.Add(pairingTTL),
+		UserAgent: userAgent,
 	}
 	if err := dbUpsertPendingPair(e); err != nil {
 		return nil, err
@@ -113,7 +127,7 @@ func pendingPairHandler(w http.ResponseWriter, r *http.Request, email string) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	e, err := generatePendingPair(email)
+	e, err := generatePendingPairUA(email, r.UserAgent())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -151,7 +165,7 @@ func selfTrustHandler(w http.ResponseWriter, r *http.Request, email string) {
 	}
 	code := strings.TrimSpace(r.FormValue("code"))
 	if !totp.Validate(code, rec.Secret) {
-		e, _ := generatePendingPair(email)
+		e, _ := generatePendingPairUA(email, r.UserAgent())
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusUnauthorized)
 		fmt.Fprint(w, pendingPairHTML(email, e, true, true, "That code didn't match — check your authenticator and try again."))

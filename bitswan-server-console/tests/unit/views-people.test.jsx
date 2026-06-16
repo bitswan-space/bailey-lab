@@ -86,7 +86,7 @@ describe('UsersView — device approvals', () => {
     return makeData({
       people,
       pending: [
-        { id: 'alex@h', userName: 'Alex', userEmail: 'alex@h', firstDevice: true, kind: 'laptop', requested: '4m ago', oauth: 'Keycloak SSO', code: '' },
+        { id: 'alex@h', userName: 'Alex', userEmail: 'alex@h', firstDevice: true, kind: 'laptop', deviceLabel: 'Chrome on macOS', requested: '4m ago', oauth: 'Keycloak SSO', code: '' },
         ...extraPending,
       ],
     });
@@ -97,8 +97,17 @@ describe('UsersView — device approvals', () => {
     expect(screen.getByText(/1 device awaiting approval/)).toBeTruthy();
     expect(screen.getByText('Device awaiting approval')).toBeTruthy();
     expect(screen.getByText('Trust this device')).toBeTruthy();
+    // The device type + browser (from the User-Agent) is shown.
+    expect(screen.getByText('Chrome on macOS')).toBeTruthy();
     // alex has no existing devices → framed as their first device.
     expect(screen.getByText(/first device on this server/)).toBeTruthy();
+  });
+
+  it('shows "Unknown device" when the User-Agent is unrecognized', () => {
+    render(<Host View={UsersView} data={makeData({ people, pending: [
+      { id: 'alex@h', userName: 'Alex', userEmail: 'alex@h', firstDevice: true, kind: 'unknown', deviceLabel: '', requested: '1m ago', oauth: 'sso', code: '' },
+    ] })} />);
+    expect(screen.getByText('Unknown device')).toBeTruthy();
   });
 
   it('frames an additional device when the person already has devices', () => {
