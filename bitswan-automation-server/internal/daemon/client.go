@@ -1064,28 +1064,7 @@ func (c *Client) WorkspaceConnectToAOC(aocUrl, automationServerId, accessToken s
 	return err
 }
 
-// ReconnectMQTT tells the daemon to reinitialize its MQTT connection using the current config.
-func (c *Client) ReconnectMQTT() error {
-	req, err := http.NewRequest("POST", "http://unix/mqtt/reinitialize", nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := c.doRequest(req)
-	if err != nil {
-		return fmt.Errorf("failed to connect to daemon: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("MQTT reinitialization failed: %s", string(body))
-	}
-
-	return nil
-}
-
-// DisconnectFromAOC tells the daemon to disconnect from AOC, cleaning up MQTT, OAuth, and workspace metadata.
+// DisconnectFromAOC tells the daemon to disconnect from AOC, cleaning up OAuth and workspace metadata.
 func (c *Client) DisconnectFromAOC() error {
 	req, err := http.NewRequest("POST", "http://unix/workspace/disconnect-from-aoc", nil)
 	if err != nil {

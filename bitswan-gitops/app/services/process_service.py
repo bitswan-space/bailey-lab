@@ -1,40 +1,14 @@
 import os
-import json
 import toml
-import re
-import base64
-import asyncio
 import uuid
-from typing import Dict, Any, Optional, Match, Coroutine
-from paho.mqtt import client as mqtt_client
+from typing import Dict, Any, Optional
 
-from .models import (
-    ProcessList,
-    ProcessInfo,
-    ProcessMarkdown,
-    encode_pydantic_model,
-)
-from .utils import read_bitswan_yaml
+from ..models import ProcessInfo
+from ..utils import read_bitswan_yaml
 
 import logging
 
 logger = logging.getLogger(__name__)
-
-# MQTT topics this service must always be subscribed to.
-# Centralized so `on_connect` can re-subscribe after reconnects.
-PROCESS_SUBSCRIPTION_TOPICS: tuple[str, ...] = (
-    "/processes/c/+/attachments/c/+/gitops-req",
-    "/processes/c/+/attachments/c/+/set",
-    "/processes/c/+/gitops-req",
-    "/processes/c/+/set",
-    "/processes/c/+/create",
-)
-
-
-def subscribe_process_topics(client: mqtt_client.Client) -> None:
-    """(Re)subscribe to all process-related topics."""
-    for topic in PROCESS_SUBSCRIPTION_TOPICS:
-        client.subscribe(topic)
 
 
 class ProcessService:
@@ -63,8 +37,7 @@ class ProcessService:
         """Discover business processes in the main repo or a single worktree.
 
         A directory qualifies as a BP when it contains both `process.toml`
-        and `README.md`, and the toml declares a `process-id` (matches the
-        existing MQTT contract).
+        and `README.md`, and the toml declares a `process-id`.
         """
         processes: Dict[str, ProcessInfo] = {}
         root = self._scope_root(worktree)
@@ -401,21 +374,6 @@ class ProcessService:
             pass
         return False
 
-    def create_process(self, process_id: str, process_name: str) -> bool:
-        """Create a new process (MQTT-callable, main-repo only).
-
-        Thin wrapper around `create_business_process` kept for backwards
-        compatibility with the existing MQTT handler.
-        """
-        try:
-            self.create_business_process(
-                name=process_name, worktree=None, process_id=process_id
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Error creating process {process_name}: {e}")
-            return False
-
     def create_business_process(
         self,
         name: str,
@@ -428,8 +386,7 @@ class ProcessService:
         Returns the entry as it appears in `get_all_processes()`.
         """
         # Strip + basename to defend against path traversal. The HTTP route
-        # additionally validates the input against a regex, but this keeps
-        # the MQTT call path safe too.
+        # additionally validates the input against a regex.
         clean = os.path.basename((name or "").strip())
         if not clean:
             raise ValueError("process name is empty or invalid")
@@ -473,238 +430,3 @@ class ProcessService:
 
 # Global process service instance
 process_service = ProcessService()
-
-# Store the event loop reference for running async functions from MQTT callbacks
-_event_loop = None
-
-
-def set_event_loop(loop: asyncio.AbstractEventLoop):
-    """Set the asyncio event loop for running coroutines from MQTT callbacks."""
-    global _event_loop
-    _event_loop = loop
-
-
-def run_coroutine_safe(coro: Coroutine):
-    """Run a coroutine safely from a non-asyncio thread."""
-    if _event_loop is None:
-        logger.error("Event loop not set. Cannot run coroutine.")
-        return
-
-    future = asyncio.run_coroutine_threadsafe(coro, _event_loop)
-
-    def log_exception(fut):
-        """Log any exceptions from the coroutine."""
-        try:
-            # This will raise the exception if one occurred
-            fut.result()
-        except Exception as e:
-            logger.error(f"Unhandled exception in coroutine: {e}", exc_info=True)
-
-    # Add callback to log exceptions when the future completes
-    future.add_done_callback(log_exception)
-
-
-# MQTT topic patterns for process-related operations
-TOPIC_PATTERNS = {
-    # Process-level operations
-    "process_gitops_req": re.compile(r"^/processes/c/([^/]+)/gitops-req$"),
-    "process_set": re.compile(r"^/processes/c/([^/]+)/set$"),
-    "process_create": re.compile(r"^/processes/c/([^/]+)/create$"),
-    # Attachment operations
-    "attachment_gitops_req": re.compile(
-        r"^/processes/c/([^/]+)/attachments/c/([^/]+)/gitops-req$"
-    ),
-    "attachment_set": re.compile(r"^/processes/c/([^/]+)/attachments/c/([^/]+)/set$"),
-}
-
-
-def match_topic(topic: str) -> tuple[str, Match[str] | None]:
-    """
-    Match a topic against known patterns and return the pattern name and match object.
-
-    Returns:
-        tuple: (pattern_name, match_object) or ("unknown", None) if no match
-    """
-    for pattern_name, pattern in TOPIC_PATTERNS.items():
-        match = pattern.match(topic)
-        if match:
-            return pattern_name, match
-    return "unknown", None
-
-
-async def publish_processes(client: mqtt_client.Client) -> ProcessList:
-    """Publish the list of (main-repo) processes to MQTT.
-
-    Driven by the cached main-repo entry — `WorkspaceChangeHandler` refreshes
-    that entry before invoking us. Worktree processes are not (yet) published
-    via this MQTT topic; they're surfaced over the new SSE `processes` event
-    for the dashboard.
-    """
-    topic = "/processes/list"
-    processes = process_service._cache.get(None)
-    if processes is None:
-        processes = process_service.refresh(None)
-
-    process_list = ProcessList(processes=processes)
-
-    client.publish(
-        topic,
-        payload=encode_pydantic_model(process_list),
-        qos=1,
-        retain=True,
-    )
-
-    return process_list
-
-
-async def setup_mqtt_subscriptions(client: mqtt_client.Client):
-    """Set up MQTT subscriptions for process-related topics."""
-
-    # Store the current event loop
-    set_event_loop(asyncio.get_event_loop())
-
-    # Store the original on_message callback if it exists
-    original_on_message = getattr(client, "on_message", None)
-
-    def on_message(client, userdata, msg):
-        topic = msg.topic
-
-        # Handle process-related topics
-        if topic.startswith("/processes/"):
-            try:
-                payload = json.loads(msg.payload.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                logger.error(f"Invalid JSON payload on topic {topic}")
-                return
-
-            # Match topic pattern and handle accordingly
-            pattern_name, match = match_topic(topic)
-
-            match pattern_name:
-                case "process_gitops_req":
-                    process_id = match.group(1)
-                    run_coroutine_safe(
-                        handle_process_request(client, process_id, payload)
-                    )
-
-                case "process_set":
-                    process_id = match.group(1)
-                    run_coroutine_safe(handle_process_set(client, process_id, payload))
-
-                case "attachment_gitops_req":
-                    process_id = match.group(1)
-                    filename = match.group(2)
-                    run_coroutine_safe(
-                        handle_attachment_request(client, process_id, filename, payload)
-                    )
-
-                case "attachment_set":
-                    process_id = match.group(1)
-                    filename = match.group(2)
-                    run_coroutine_safe(
-                        handle_attachment_set(client, process_id, filename, payload)
-                    )
-
-                case "process_create":
-                    process_id = match.group(1)
-                    run_coroutine_safe(
-                        handle_process_create(client, process_id, payload)
-                    )
-
-                case "unknown":
-                    logger.error(f"Unknown process topic pattern: {topic}")
-
-        else:
-            # Call original callback for non-process topics
-            if original_on_message:
-                original_on_message(client, userdata, msg)
-
-    client.on_message = on_message
-
-
-async def handle_attachment_request(
-    client: mqtt_client.Client, process_id: str, filename: str, payload: dict
-):
-    """Handle attachment get/delete requests."""
-    action = payload.get("action")
-
-    if action == "get":
-        content = process_service.get_attachment_content(process_id, filename)
-        if content is not None:
-            content_topic = (
-                f"/processes/c/{process_id}/attachments/c/{filename}/contents"
-            )
-            client.publish(content_topic, payload=content, qos=1)
-    elif action == "delete":
-        success = process_service.delete_attachment(process_id, filename)
-        if not success:
-            logger.error(
-                f"Failed to delete attachment {filename} for process {process_id}"
-            )
-
-
-async def handle_attachment_set(
-    client: mqtt_client.Client, process_id: str, filename: str, payload: dict
-):
-    """Handle attachment content setting."""
-    if not payload.get("content"):
-        logger.error(
-            f"Failed to set attachment {filename} for process {process_id}: no content"
-        )
-        return
-
-    content = base64.b64decode(payload.get("content"))
-    success = process_service.set_attachment_content(process_id, filename, content)
-    if not success:
-        logger.error(f"Failed to set attachment {filename} for process {process_id}")
-
-
-async def handle_process_request(
-    client: mqtt_client.Client, process_id: str, payload: dict
-):
-    """Handle process get/delete requests."""
-    action = payload.get("action")
-
-    if action == "delete":
-        success = process_service.delete_process(process_id)
-        if not success:
-            logger.error(f"Failed to delete process {process_id}")
-
-    elif action == "get":
-        content = process_service.get_process_markdown(process_id)
-        if content is not None:
-            content_topic = f"/processes/c/{process_id}/contents"
-            client.publish(
-                content_topic,
-                payload=encode_pydantic_model(ProcessMarkdown(content=content)),
-                qos=1,
-            )
-        else:
-            logger.error(f"Failed to get process markdown for process {process_id}")
-    else:
-        logger.error(f"Unknown action {action} for process {process_id}")
-
-
-async def handle_process_set(
-    client: mqtt_client.Client, process_id: str, payload: dict
-):
-    """Handle process markdown setting."""
-    content = payload.get("content", "")
-    success = process_service.set_process_markdown(process_id, content)
-    if not success:
-        logger.error(
-            f"Failed to set process markdown for process {process_id}: {content}"
-        )
-
-
-async def handle_process_create(
-    client: mqtt_client.Client, process_id: str, payload: dict
-):
-    """Handle process creation."""
-    process_name = payload.get("name")
-    if not process_name:
-        logger.error(f"Failed to create process {process_id}: process name is missing")
-        return
-    success = process_service.create_process(process_id, process_name)
-    if not success:
-        logger.error(f"Failed to create process {process_id}: {process_name}")

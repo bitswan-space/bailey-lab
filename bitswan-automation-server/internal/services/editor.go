@@ -51,12 +51,12 @@ type EditorDevConfig struct {
 }
 
 // CreateDockerCompose generates a docker-compose-editor.yml file for Editor
-func (e *EditorService) CreateDockerCompose(gitopsSecretToken, bitswanEditorImage, domain string, oauthConfig *oauth.Config, mqttEnvVars []string, trustCA bool) (string, error) {
-	return e.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanEditorImage, domain, oauthConfig, mqttEnvVars, trustCA, nil)
+func (e *EditorService) CreateDockerCompose(gitopsSecretToken, bitswanEditorImage, domain string, oauthConfig *oauth.Config, trustCA bool) (string, error) {
+	return e.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanEditorImage, domain, oauthConfig, trustCA, nil)
 }
 
 // CreateDockerComposeWithDevMode generates a docker-compose-editor.yml file for Editor with optional dev mode support
-func (e *EditorService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanEditorImage, domain string, oauthConfig *oauth.Config, mqttEnvVars []string, trustCA bool, devConfig *EditorDevConfig) (string, error) {
+func (e *EditorService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanEditorImage, domain string, oauthConfig *oauth.Config, trustCA bool, devConfig *EditorDevConfig) (string, error) {
 	// For docker-compose files, use HOST_HOME if available (docker-compose runs on host)
 	// Convert container path to host path for volume mounts
 	homeDir := os.Getenv("HOME")
@@ -100,11 +100,6 @@ func (e *EditorService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswa
 		if extraHosts := oauth.BuildExtraHosts(oauthConfig); len(extraHosts) > 0 {
 			bitswanEditor["extra_hosts"] = extraHosts
 		}
-	}
-
-	// Append MQTT env variables when workspace is connected to AOC
-	if len(mqttEnvVars) > 0 {
-		bitswanEditor["environment"] = append(bitswanEditor["environment"].([]string), mqttEnvVars...)
 	}
 
 	// Mount certificate authorities if specified
@@ -213,24 +208,7 @@ func (e *EditorService) Enable(gitopsSecretToken, bitswanEditorImage, domain str
 		}
 	}
 
-	// Read metadata to get MQTT environment variables
-	var mqttEnvVars []string
-	metadata, err := e.GetMetadata()
-	if err == nil && metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PASSWORD="+*metadata.MqttPassword)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "MQTT_TOPIC="+*metadata.MqttTopic)
-	}
-
-	if oauthConfig != nil && metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_ALLOWED_GROUPS_TOPIC=/groups")
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PASSWORD="+*metadata.MqttPassword)
-	}
+	metadata, _ := e.GetMetadata()
 
 	// Dev mode is implied by a non-empty editor source dir in metadata.
 	var devConfig *EditorDevConfig
@@ -240,7 +218,7 @@ func (e *EditorService) Enable(gitopsSecretToken, bitswanEditorImage, domain str
 	}
 
 	// Generate docker-compose content
-	dockerComposeContent, err := e.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanEditorImage, domain, oauthConfig, mqttEnvVars, trustCA, devConfig)
+	dockerComposeContent, err := e.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanEditorImage, domain, oauthConfig, trustCA, devConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create docker-compose content: %w", err)
 	}
@@ -652,16 +630,6 @@ func (e *EditorService) RegenerateDockerCompose(editorImage string, staging bool
 		}
 	}
 
-	// Prepare MQTT environment variables from metadata
-	var mqttEnvVars []string
-	if metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PASSWORD="+*metadata.MqttPassword)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "MQTT_TOPIC="+*metadata.MqttTopic)
-	}
-
 	// Get OAuth config if it exists
 	var oauthConfig *oauth.Config
 	oauthConfig, err = oauth.GetOauthConfig(e.WorkspaceName)
@@ -695,15 +663,6 @@ func (e *EditorService) RegenerateDockerCompose(editorImage string, staging bool
 		}
 	}
 
-	// Add OAuth-related MQTT env vars if both OAuth and MQTT are configured
-	if oauthConfig != nil && metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_ALLOWED_GROUPS_TOPIC=/groups")
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PASSWORD="+*metadata.MqttPassword)
-	}
-
 	// Dev mode is implied by a non-empty editor source dir in metadata.
 	var devConfig *EditorDevConfig
 	if metadata.EditorDevSourceDir != nil && *metadata.EditorDevSourceDir != "" {
@@ -717,7 +676,6 @@ func (e *EditorService) RegenerateDockerCompose(editorImage string, staging bool
 		bitswanEditorImage,
 		metadata.Domain,
 		oauthConfig,
-		mqttEnvVars,
 		trustCA,
 		devConfig,
 	)

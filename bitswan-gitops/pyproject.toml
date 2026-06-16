@@ -17,7 +17,6 @@ dependencies = [
  "dockerfile-parse",
  "docker",
  "apscheduler",
- "paho-mqtt",
  "humanize",
  "toml",
  "watchdog",

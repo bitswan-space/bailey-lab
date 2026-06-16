@@ -199,8 +199,7 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	}
 	fmt.Fprintln(writer, "Entries removed from /etc/hosts successfully.")
 
-	// Note: Workspace list sync to AOC is done by the MQTT handler AFTER publishing the result
-	// This ensures the frontend receives the result before any potential connection issues from sync
+	// Note: Workspace list sync to AOC is handled separately after the result is reported.
 
 	fmt.Fprintln(writer, "Workspace removal completed.")
 	return nil

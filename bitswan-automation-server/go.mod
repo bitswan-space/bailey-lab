@@ -6,9 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.3.2
 	github.com/daixiang0/gci v0.13.6
 	github.com/dchest/uniuri v1.2.0
-	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/go-critic/go-critic v0.11.0
-	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/golangci/golangci-lint v1.56.1
 	github.com/google/uuid v1.6.0
 	github.com/gotesttools/gotestfmt/v2 v2.5.0
@@ -96,7 +94,6 @@ require (
 	github.com/golangci/unconvert v0.0.0-20180507085042-28b1c447d1f4 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/gordonklaus/ineffassign v0.1.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/gostaticanalysis/analysisutil v0.7.1 // indirect
 	github.com/gostaticanalysis/comment v1.4.2 // indirect
 	github.com/gostaticanalysis/forcetypeassert v0.1.0 // indirect

@@ -151,9 +151,6 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	mux.HandleFunc("/service", s.authMiddleware(s.handleService))
 	mux.HandleFunc("/service/", s.authMiddleware(s.handleService))
 
-	// MQTT endpoints (authenticated)
-	mux.HandleFunc("/mqtt/reinitialize", s.authMiddleware(s.handleMQTTReinitialize))
-
 	// Job endpoints for interactive operations (authenticated)
 	mux.HandleFunc("/jobs", s.authMiddleware(s.handleJobs))
 	mux.HandleFunc("/jobs/", s.authMiddleware(s.handleJobs))
@@ -196,11 +193,6 @@ func (s *Server) Run() error {
 	if err := installAllCertificatesInDaemon(); err != nil {
 		fmt.Printf("Warning: Failed to install certificates in daemon: %v\n", err)
 	}
-
-	// Initialize MQTT publisher if AOC is configured (non-blocking, will retry on failure)
-	// This ensures MQTT publisher is set up even if AOC wasn't configured at first
-	// Pass server reference so MQTT handlers can call internal functions
-	initializeMQTTPublisherWithServer(s)
 
 	// Ensure the socket directory exists
 	if err := os.MkdirAll(SocketDir, 0755); err != nil {

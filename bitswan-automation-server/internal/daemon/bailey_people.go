@@ -19,7 +19,7 @@ import (
 // Keycloak admin-API client in this repo or in PR #340 (grepped the
 // monorepo + the #340 tree for admin/realms / KeycloakAdmin / user
 // listing — none exist), and the AOC client (internal/aoc) exposes
-// workspace/MQTT/cert operations only, no user enumeration. So a live
+// workspace/cert operations only, no user enumeration. So a live
 // "list every user in the realm and map their groups to roles" query is
 // NOT feasible in this build without first adding that client.
 //

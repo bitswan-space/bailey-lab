@@ -13,12 +13,7 @@ import (
 
 // runDisconnectFromAOC disconnects from AOC by cleaning up all AOC-related config
 func (s *Server) runDisconnectFromAOC() error {
-	// 1. Stop MQTT monitor and disconnect
-	stopMQTTMonitor()
-	publisher := GetMQTTPublisher()
-	publisher.Disconnect()
-
-	// 2. Clean up workspace metadata and OAuth configs, collect deployable workspace names
+	// 1. Clean up workspace metadata and OAuth configs, collect deployable workspace names
 	workspaceNames, err := cleanupWorkspaceAOCConfig()
 	if err != nil {
 		fmt.Printf("Warning: Failed to clean up some workspace configs: %v\n", err)
@@ -87,7 +82,7 @@ func restartWorkspace(workspaceName string) error {
 	return nil
 }
 
-// cleanupWorkspaceAOCConfig removes OAuth config files and clears MQTT metadata from all workspaces.
+// cleanupWorkspaceAOCConfig removes OAuth config files and clears AOC metadata from all workspaces.
 // Returns the list of workspace names that have a full deployment (metadata.yaml + deployment dir)
 // and should be restarted.
 func cleanupWorkspaceAOCConfig() ([]string, error) {
@@ -121,7 +116,7 @@ func cleanupWorkspaceAOCConfig() ([]string, error) {
 			}
 		}
 
-		// Clear MQTT and workspace_id fields from metadata.yaml
+		// Clear workspace_id and other AOC fields from metadata.yaml
 		if err := clearWorkspaceAOCMetadata(metadataPath); err != nil {
 			continue
 		}
@@ -151,11 +146,6 @@ func clearWorkspaceAOCMetadata(metadataPath string) error {
 	}
 
 	metadata.WorkspaceId = nil
-	metadata.MqttUsername = nil
-	metadata.MqttPassword = nil
-	metadata.MqttBroker = nil
-	metadata.MqttPort = nil
-	metadata.MqttTopic = nil
 
 	return metadata.SaveToFile(metadataPath)
 }

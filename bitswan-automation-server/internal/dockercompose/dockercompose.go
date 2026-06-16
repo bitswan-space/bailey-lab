@@ -26,7 +26,6 @@ type DockerComposeConfig struct {
 	WorkspaceName      string
 	GitopsImage        string
 	Domain             string
-	MqttEnvVars        []string
 	AocEnvVars         []string
 	OAuthEnvVars       []string
 	GitopsDevSourceDir string
@@ -122,11 +121,6 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	// Append AOC env variables when workspace is registered as an automation server
 	if len(config.AocEnvVars) > 0 {
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), config.AocEnvVars...)
-	}
-
-	// Append MQTT env variables when workspace is registered as an automation server
-	if len(config.MqttEnvVars) > 0 {
-		gitopsService["environment"] = append(gitopsService["environment"].([]string), config.MqttEnvVars...)
 	}
 
 	// Append OAuth env variables when OAuth is configured

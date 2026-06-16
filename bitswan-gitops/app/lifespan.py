@@ -2,7 +2,6 @@ import asyncio
 from contextlib import asynccontextmanager
 import logging
 import os
-import functools
 import threading
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -16,13 +15,7 @@ from .dependencies import get_automation_service
 from .deploy_manager import deploy_manager
 from .snapshot_manager import snapshot_manager
 from .event_broadcaster import event_broadcaster
-from .mqtt import mqtt_resource
-from .mqtt_publish_automations import publish_automations
-from .mqtt_processes import (
-    process_service,
-    publish_processes,
-    setup_mqtt_subscriptions,
-)
+from .services.process_service import process_service
 from .routes.worktrees import refresh_worktrees
 
 logger = logging.getLogger(__name__)
@@ -89,9 +82,8 @@ class WorkspaceChangeHandler(FileSystemEventHandler):
     a python file inside an automation doesn't fire either refresh.
     """
 
-    def __init__(self, client, event_loop):
+    def __init__(self, event_loop):
         super().__init__()
-        self.client = client
         self.event_loop = event_loop
         self.update_scheduled = False
         self.update_lock = threading.Lock()
@@ -108,10 +100,9 @@ class WorkspaceChangeHandler(FileSystemEventHandler):
         async def delayed_update():
             await asyncio.sleep(0.5)  # debounce 500ms for bursts
             try:
-                # Refresh the main-repo BP cache before downstream publishers
+                # Refresh the main-repo BP cache before downstream consumers
                 # read from it.
                 process_service.refresh(None)
-                await publish_processes(self.client)
                 await _broadcast_processes()
             except Exception as e:
                 logger.warning("Error publishing processes: %s", e)
@@ -440,115 +431,95 @@ async def lifespan(app: FastAPI):
     dump_profile = _start_profiling()
 
     scheduler = AsyncIOScheduler(timezone="UTC")
-    result = await mqtt_resource.connect()
 
-    if result:
-        client = mqtt_resource.get_client()
+    # Warm the ProcessService cache so the first `_broadcast_processes`
+    # (SSE) read finds it populated.
+    process_service.refresh_all()
 
-        # Set up MQTT subscriptions for process operations
-        await setup_mqtt_subscriptions(client)
+    # Warm the AutomationService scope-keyed cache. Cheap (filesystem
+    # scan + bitswan.yaml read) and means the first GET /automations/
+    # or SSE consumer doesn't pay for an inline `refresh_all()`.
+    try:
+        await get_automation_service().refresh_all()
+    except Exception as e:
+        logger.warning("Initial automations cache warm failed: %s", e)
 
-        # Warm the ProcessService cache before publishing anything — both
-        # `publish_processes` (MQTT) and `_broadcast_processes` (SSE) read
-        # from it.
-        process_service.refresh_all()
+    # Warm the worktree-list cache so the first SSE consumer doesn't
+    # pay the git-cost of an initial scan.
+    try:
+        await refresh_worktrees()
+    except Exception as e:
+        logger.warning("Initial worktrees cache warm failed: %s", e)
 
-        # Warm the AutomationService scope-keyed cache. Cheap (filesystem
-        # scan + bitswan.yaml read) and means the first GET /automations/
-        # or SSE consumer doesn't pay for an inline `refresh_all()`.
+    # Set up file system watcher for workspace directory
+    workspace_dir = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
+    if os.path.exists(workspace_dir):
+        event_handler = WorkspaceChangeHandler(asyncio.get_event_loop())
+        observer = Observer()
+        observer.schedule(event_handler, workspace_dir, recursive=True)
+        observer.start()
+        print(f"Started watching workspace directory: {workspace_dir}")
+    else:
+        print(f"Workspace directory does not exist: {workspace_dir}")
+
+    # Watch worktree directories for file changes → SSE push.
+    # Create the directory first so a fresh workspace (where worktrees/
+    # doesn't exist yet) still gets a watcher attached. Without this the
+    # first `POST /worktrees/create` has no listener, the cache stays
+    # empty, and `GET /worktrees/` keeps returning [] until gitops
+    # restarts. The recursive watcher on `workspace_dir` doesn't help —
+    # `WorkspaceChangeHandler` only refreshes automations/processes, not
+    # the worktrees list cache.
+    worktrees_dir = os.path.join(workspace_dir, "worktrees")
+    os.makedirs(worktrees_dir, exist_ok=True)
+    wt_handler = WorktreeChangeHandler(asyncio.get_event_loop(), worktrees_dir)
+    worktree_observer = Observer()
+    worktree_observer.schedule(wt_handler, worktrees_dir, recursive=True)
+    worktree_observer.start()
+    print(f"Started watching worktrees directory: {worktrees_dir}")
+
+    # Clean up completed/failed deploy tasks every 10 minutes
+    scheduler.add_job(
+        deploy_manager.cleanup_old_tasks,
+        trigger="interval",
+        minutes=10,
+        name="cleanup_deploy_tasks",
+    )
+
+    # Same for snapshot tasks
+    scheduler.add_job(
+        snapshot_manager.cleanup_old_tasks,
+        trigger="interval",
+        minutes=10,
+        name="cleanup_snapshot_tasks",
+    )
+
+    # Daily backup at 2 AM UTC (if configured)
+    async def _scheduled_backup():
+        from app.services.backup_service import (
+            get_backup_config,
+            get_restic_key,
+            run_backup,
+        )
+
+        config = get_backup_config()
+        if not config or not get_restic_key():
+            return  # Not configured, skip
         try:
-            await get_automation_service().refresh_all()
+            await run_backup(config)
+            print("Scheduled backup completed successfully")
         except Exception as e:
-            logger.warning("Initial automations cache warm failed: %s", e)
+            print(f"Scheduled backup failed: {e}")
 
-        # Warm the worktree-list cache so the first SSE consumer doesn't
-        # pay the git-cost of an initial scan.
-        try:
-            await refresh_worktrees()
-        except Exception as e:
-            logger.warning("Initial worktrees cache warm failed: %s", e)
+    scheduler.add_job(
+        _scheduled_backup,
+        trigger="cron",
+        hour=2,
+        minute=0,
+        name="daily_backup",
+    )
 
-        # Publish processes and automations
-        await publish_processes(client)
-        await publish_automations(client)
-
-        # Schedule periodic updates
-        scheduler.add_job(
-            functools.partial(publish_automations, client),
-            trigger="interval",
-            seconds=10,
-            name="publish_automations",
-        )
-
-        # Set up file system watcher for workspace directory
-        workspace_dir = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
-        if os.path.exists(workspace_dir):
-            event_handler = WorkspaceChangeHandler(client, asyncio.get_event_loop())
-            observer = Observer()
-            observer.schedule(event_handler, workspace_dir, recursive=True)
-            observer.start()
-            print(f"Started watching workspace directory: {workspace_dir}")
-        else:
-            print(f"Workspace directory does not exist: {workspace_dir}")
-
-        # Watch worktree directories for file changes → SSE push.
-        # Create the directory first so a fresh workspace (where worktrees/
-        # doesn't exist yet) still gets a watcher attached. Without this the
-        # first `POST /worktrees/create` has no listener, the cache stays
-        # empty, and `GET /worktrees/` keeps returning [] until gitops
-        # restarts. The recursive watcher on `workspace_dir` doesn't help —
-        # `WorkspaceChangeHandler` only refreshes automations/processes, not
-        # the worktrees list cache.
-        worktrees_dir = os.path.join(workspace_dir, "worktrees")
-        os.makedirs(worktrees_dir, exist_ok=True)
-        wt_handler = WorktreeChangeHandler(asyncio.get_event_loop(), worktrees_dir)
-        worktree_observer = Observer()
-        worktree_observer.schedule(wt_handler, worktrees_dir, recursive=True)
-        worktree_observer.start()
-        print(f"Started watching worktrees directory: {worktrees_dir}")
-
-        # Clean up completed/failed deploy tasks every 10 minutes
-        scheduler.add_job(
-            deploy_manager.cleanup_old_tasks,
-            trigger="interval",
-            minutes=10,
-            name="cleanup_deploy_tasks",
-        )
-
-        # Same for snapshot tasks
-        scheduler.add_job(
-            snapshot_manager.cleanup_old_tasks,
-            trigger="interval",
-            minutes=10,
-            name="cleanup_snapshot_tasks",
-        )
-
-        # Daily backup at 2 AM UTC (if configured)
-        async def _scheduled_backup():
-            from app.services.backup_service import (
-                get_backup_config,
-                get_restic_key,
-                run_backup,
-            )
-
-            config = get_backup_config()
-            if not config or not get_restic_key():
-                return  # Not configured, skip
-            try:
-                await run_backup(config)
-                print("Scheduled backup completed successfully")
-            except Exception as e:
-                print(f"Scheduled backup failed: {e}")
-
-        scheduler.add_job(
-            _scheduled_backup,
-            trigger="cron",
-            hour=2,
-            minute=0,
-            name="daily_backup",
-        )
-
-        scheduler.start()
+    scheduler.start()
 
     # Warm the history cache in the background so first requests are fast
     _cache_task = asyncio.create_task(get_automation_service().warm_history_cache())

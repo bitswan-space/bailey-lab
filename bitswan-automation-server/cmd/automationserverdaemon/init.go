@@ -193,7 +193,7 @@ func startDaemonContainer(startMessage, successMessage string) error {
 
 	// Launch the daemon container
 	// Mount the binary, config directory, docker socket, and mkcert directory
-	// Use bitswan_network to allow resolving Docker service names like aoc-emqx
+	// Use bitswan_network to allow resolving Docker service names
 	// Use pre-built image with all tools (git, ssh-keygen, docker-cli, mkcert) pre-installed
 	// Set BITSWAN_CADDY_HOST to use 'caddy' hostname instead of 'localhost' when on bitswan_network
 	// Mount the bitswan automation server socket directory for IPC

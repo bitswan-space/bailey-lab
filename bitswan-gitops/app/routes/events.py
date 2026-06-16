@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.dependencies import get_automation_service, get_image_service
 from app.deploy_manager import deploy_manager
 from app.event_broadcaster import event_broadcaster
-from app.mqtt_processes import process_service
+from app.services.process_service import process_service
 from app.routes.worktrees import get_cached_worktrees
 
 router = APIRouter(tags=["events"])

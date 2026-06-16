@@ -125,56 +125,10 @@ func getSwaggerUIHTML() string {
 // getOpenAPISpec returns the OpenAPI 3.0 specification as a JSON string
 func getOpenAPISpec() string {
 	// This is a simplified OpenAPI spec - you can expand it with more details
-	mqttDocs := "API for managing automations, workspaces, certificate authorities, and ingress in the Bitswan automation server daemon.\n\n" +
-		"## MQTT API\n\n" +
-		"The automation server daemon also provides an MQTT-based API for workspace management. " +
-		"All MQTT topics are relative to the automation server's mountpoint: `/orgs/{org_id}/automation-servers/{automation_server_id}`.\n\n" +
-		"### Workspace List Topic\n\n" +
-		"**Topic:** `workspaces` (published by daemon)\n\n" +
-		"**QoS:** 1 (At least once delivery)\n\n" +
-		"**Retain:** true\n\n" +
-		"**Message Format:**\n```json\n{\n  \"workspaces\": [\n    {\"id\": \"workspace-uuid-1\", \"name\": \"workspace-1\"},\n    {\"id\": \"workspace-uuid-2\", \"name\": \"workspace-2\"}\n  ],\n  \"timestamp\": \"2024-01-15T10:30:00Z\"\n}\n```\n\n" +
-		"The daemon publishes this list whenever workspaces are added or removed.\n\n" +
-		"### Workspace Create Command\n\n" +
-		"**Topic:** `workspace/create` (subscribe to send commands)\n\n" +
-		"**QoS:** 1\n\n" +
-		"**Request Format:**\n```json\n{\n  \"request-id\": \"unique-request-id\",\n  \"name\": \"workspace-name\",\n  \"remote\": \"git-repo-url\",\n  \"branch\": \"branch-name\",\n  \"domain\": \"example.com\",\n  \"certs-dir\": \"/path/to/certs\",\n  \"verbose\": false,\n  \"mkcerts\": false,\n  \"no-ide\": false,\n  \"no-dashboard\": false,\n  \"set-hosts\": false,\n  \"local\": false,\n  \"gitops-image\": \"image:tag\",\n  \"editor-image\": \"image:tag\",\n  \"dashboard-image\": \"image:tag\",\n  \"gitops-dev-source-dir\": \"/path/to/source\",\n  \"editor-dev-source-dir\": \"/path/to/source\",\n  \"dashboard-dev-source-dir\": \"/path/to/source\",\n  \"oauth-config\": \"/path/to/oauth.json\",\n  \"no-oauth\": false,\n  \"ssh-port\": \"2222\"\n}\n```\n\n" +
-		"**Response:** Logs and results are published to the `logs` topic (see below).\n\n" +
-		"### Workspace Create Confirm Command\n\n" +
-		"**Topic:** `workspace/create/{request-id}/confirm` (publish to confirm SSH key prompt)\n\n" +
-		"**QoS:** 1\n\n" +
-		"During workspace creation with an SSH remote, the daemon generates an SSH deploy key and publishes a log message with level `prompt`. " +
-		"The frontend should display the SSH key to the user and wait for them to confirm they have added the deploy key to the repository. " +
-		"Once confirmed, publish any message to this topic to unblock the daemon and continue with the git clone.\n\n" +
-		"### Workspace Delete Command\n\n" +
-		"**Topic:** `workspace/delete` (subscribe to send commands)\n\n" +
-		"**QoS:** 1\n\n" +
-		"**Request Format:**\n```json\n{\n  \"request-id\": \"unique-request-id\",\n  \"id\": \"workspace-uuid\"\n}\n```\n\n" +
-		"**Note:** The `id` field is required. The `name` field is optional and provided for backwards compatibility only. " +
-		"Workspaces are identified by ID to support renaming.\n\n" +
-		"**Response:** Logs and results are published to the `logs` topic (see below).\n\n" +
-		"### Logs Topic\n\n" +
-		"**Topic:** `logs` (subscribe to receive logs and results)\n\n" +
-		"**QoS:** 1\n\n" +
-		"**Message Types:**\n\n" +
-		"1. **Log Message** (Docker NDJSON format with request-id):\n```json\n{\n  \"request-id\": \"unique-request-id\",\n  \"time\": \"2024-01-15T10:30:00Z\",\n  \"level\": \"info\",\n  \"message\": \"Log message content\"\n}\n```\n\n" +
-		"Log levels: `info`, `error`, `warning`, `prompt`. " +
-		"A `prompt` level message indicates the daemon is waiting for user confirmation (e.g., after displaying an SSH deploy key). " +
-		"To unblock the daemon, publish to `workspace/create/{request-id}/confirm` (MQTT) or POST to `/workspace/init/confirm` (HTTP).\n\n" +
-		"2. **Result Message** (final status):\n```json\n{\n  \"request-id\": \"unique-request-id\",\n  \"success\": true,\n  \"message\": \"Workspace created successfully\",\n  \"error\": \"\"\n}\n```\n\n" +
-		"Or on failure:\n```json\n{\n  \"request-id\": \"unique-request-id\",\n  \"success\": false,\n  \"message\": \"\",\n  \"error\": \"Error description\"\n}\n```\n\n" +
-		"### Authentication\n\n" +
-		"MQTT connections require JWT authentication. Obtain credentials from the AOC API endpoint:\n" +
-		"`GET /api/automation_server/emqx/jwt/`\n\n" +
-		"The JWT token should include:\n" +
-		"- `username`: Automation server ID\n" +
-		"- `client_attrs.mountpoint`: `/orgs/{org_id}/automation-servers/{automation_server_id}`\n\n" +
-		"### Connection\n\n" +
-		"Connect to the MQTT broker using the URL and token from the AOC API. " +
-		"The URL typically uses WSS protocol through the ingress (e.g., `wss://mqtt.bitswan.localhost`)."
-	
+	apiDesc := "API for managing automations, workspaces, certificate authorities, and ingress in the Bitswan automation server daemon."
+
 	// Escape the description for JSON
-	escapedDesc := strings.ReplaceAll(mqttDocs, `"`, `\"`)
+	escapedDesc := strings.ReplaceAll(apiDesc, `"`, `\"`)
 	escapedDesc = strings.ReplaceAll(escapedDesc, "\n", "\\n")
 	
 	return `{

@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from app.dependencies import get_automation_service
 from app.deploy_runner import spawn_set_deploy
 from app.event_broadcaster import event_broadcaster
-from app.mqtt_processes import process_service
+from app.services.process_service import process_service
 from app.services import template_service
 from app.services.automation_service import AutomationService
 

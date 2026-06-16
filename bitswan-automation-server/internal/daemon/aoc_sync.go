@@ -7,7 +7,7 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 )
 
-// syncWorkspaceListToAOC syncs the workspace list with AOC via REST API
+// syncWorkspaceListToAOC syncs the workspace list with AOC via the REST API
 // Returns nil if AOC is not configured (not an error)
 func syncWorkspaceListToAOC() error {
 	// Get the current workspace list

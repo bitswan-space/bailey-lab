@@ -48,12 +48,12 @@ type DashboardDevConfig struct {
 }
 
 // CreateDockerCompose generates docker-compose-dashboard.yml content.
-func (d *DashboardService) CreateDockerCompose(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, mqttEnvVars []string, trustCA bool) (string, error) {
-	return d.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain, oauthConfig, mqttEnvVars, trustCA, nil)
+func (d *DashboardService) CreateDockerCompose(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, trustCA bool) (string, error) {
+	return d.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain, oauthConfig, trustCA, nil)
 }
 
 // CreateDockerComposeWithDevMode generates the dashboard's docker-compose file with optional dev-mode mount.
-func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, mqttEnvVars []string, trustCA bool, devConfig *DashboardDevConfig) (string, error) {
+func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, trustCA bool, devConfig *DashboardDevConfig) (string, error) {
 	homeDir := os.Getenv("HOME")
 	hostHomeDir := os.Getenv("HOST_HOME")
 	if hostHomeDir == "" {
@@ -105,10 +105,6 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		if extraHosts := oauth.BuildExtraHosts(oauthConfig); len(extraHosts) > 0 {
 			bitswanDashboard["extra_hosts"] = extraHosts
 		}
-	}
-
-	if len(mqttEnvVars) > 0 {
-		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string), mqttEnvVars...)
 	}
 
 	caVolumes, caEnvVars := certauthority.GetCACertMountConfig(trustCA)
@@ -172,23 +168,6 @@ func (d *DashboardService) Enable(gitopsSecretToken, bitswanDashboardImage, doma
 
 	metadata, _ := d.GetMetadata()
 
-	var mqttEnvVars []string
-	if metadata != nil && metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PASSWORD="+*metadata.MqttPassword)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "MQTT_TOPIC="+*metadata.MqttTopic)
-	}
-
-	if oauthConfig != nil && metadata != nil && metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_ALLOWED_GROUPS_TOPIC=/groups")
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PASSWORD="+*metadata.MqttPassword)
-	}
-
 	// Dev-mode is purely a function of whether a source dir is set in metadata.
 	var devConfig *DashboardDevConfig
 	if metadata != nil && metadata.DashboardDevSourceDir != nil && *metadata.DashboardDevSourceDir != "" {
@@ -196,7 +175,7 @@ func (d *DashboardService) Enable(gitopsSecretToken, bitswanDashboardImage, doma
 		fmt.Printf("Dashboard dev mode enabled (source: %q)\n", devConfig.SourceDir)
 	}
 
-	content, err := d.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain, oauthConfig, mqttEnvVars, trustCA, devConfig)
+	content, err := d.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain, oauthConfig, trustCA, devConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create docker-compose content: %w", err)
 	}
@@ -332,15 +311,6 @@ func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, stagin
 		}
 	}
 
-	var mqttEnvVars []string
-	if metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PASSWORD="+*metadata.MqttPassword)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "MQTT_TOPIC="+*metadata.MqttTopic)
-	}
-
 	oauthConfig, oauthErr := oauth.GetOauthConfig(d.WorkspaceName)
 	if oauthErr != nil {
 		if metadata.WorkspaceId != nil && *metadata.WorkspaceId != "" {
@@ -362,14 +332,6 @@ func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, stagin
 		}
 	}
 
-	if oauthConfig != nil && metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_ALLOWED_GROUPS_TOPIC=/groups")
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PASSWORD="+*metadata.MqttPassword)
-	}
-
 	var devConfig *DashboardDevConfig
 	if metadata.DashboardDevSourceDir != nil && *metadata.DashboardDevSourceDir != "" {
 		devConfig = &DashboardDevConfig{SourceDir: *metadata.DashboardDevSourceDir}
@@ -381,7 +343,6 @@ func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, stagin
 		bitswanDashboardImage,
 		metadata.Domain,
 		oauthConfig,
-		mqttEnvVars,
 		trustCA,
 		devConfig,
 	)

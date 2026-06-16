@@ -20,9 +20,6 @@ func NewTestCmd() *cobra.Command {
 	cmd.AddCommand(newPullAndDeployCmd())
 	cmd.AddCommand(newUpdateCmd())
 	cmd.AddCommand(newCleanupCmd())
-	cmd.AddCommand(newMqttWorkspaceCmd())
-	cmd.AddCommand(newMockAOCServerCmd())
-	cmd.AddCommand(newMqttTestPublisherCmd())
 
 	return cmd
 }

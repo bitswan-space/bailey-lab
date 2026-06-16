@@ -607,7 +607,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	var aocEnvVars []string
-	var mqttEnvVars []string
 	workspaceId := ""
 	fmt.Println("Registering workspace...")
 
@@ -653,15 +652,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			}
 
 			aocEnvVars = aocClient.GetAOCEnvironmentVariables(workspaceId, automationServerToken)
-
-			fmt.Println("Getting EMQX JWT for workspace...")
-			mqttCreds, err := aocClient.GetMQTTCredentials(workspaceId)
-			if err != nil {
-				return fmt.Errorf("failed to get MQTT credentials: %w", err)
-			}
-			fmt.Println("EMQX JWT received successfully!")
-
-			mqttEnvVars = aoc.GetMQTTEnvironmentVariables(mqttCreds)
 		}
 	}
 
@@ -682,7 +672,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		WorkspaceName:      workspaceName,
 		GitopsImage:        imgopsImage,
 		Domain:             *domain,
-		MqttEnvVars:        mqttEnvVars,
 		AocEnvVars:         aocEnvVars,
 		OAuthEnvVars:       oauthEnvVars,
 		GitopsDevSourceDir: *gitopsDevSourceDir,
@@ -711,7 +700,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	fmt.Println("GitOps deployment set up successfully!")
 
 	// Save metadata to file
-	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noIde, *noDashboard, *noCodingAgent, &workspaceId, mqttEnvVars, *gitopsDevSourceDir, *editorDevSourceDir, *dashboardDevSourceDir, *codingAgentDevSourceDir, codingAgentSecret); err != nil {
+	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noIde, *noDashboard, *noCodingAgent, &workspaceId, *gitopsDevSourceDir, *editorDevSourceDir, *dashboardDevSourceDir, *codingAgentDevSourceDir, codingAgentSecret); err != nil {
 		fmt.Printf("Warning: Failed to save metadata: %v\n", err)
 	}
 
@@ -904,7 +893,7 @@ func setHostsFile(workspaceName, domain string, noIde bool) error {
 	return nil
 }
 
-func saveMetadata(gitopsConfig, workspaceName, token, domain string, noIde, noDashboard, noCodingAgent bool, workspaceId *string, mqttEnvVars []string, gitopsDevSourceDir, editorDevSourceDir, dashboardDevSourceDir, codingAgentDevSourceDir, codingAgentSecret string) error {
+func saveMetadata(gitopsConfig, workspaceName, token, domain string, noIde, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, editorDevSourceDir, dashboardDevSourceDir, codingAgentDevSourceDir, codingAgentSecret string) error {
 	metadata := config.WorkspaceMetadata{
 		Domain:       domain,
 		GitopsURL:    fmt.Sprintf("https://%s-gitops.%s", workspaceName, domain),
@@ -913,28 +902,6 @@ func saveMetadata(gitopsConfig, workspaceName, token, domain string, noIde, noDa
 
 	if workspaceId != nil {
 		metadata.WorkspaceId = workspaceId
-	}
-
-	if len(mqttEnvVars) > 0 {
-		for _, envVar := range mqttEnvVars {
-			key, value, _ := strings.Cut(envVar, "=")
-			switch key {
-			case "MQTT_USERNAME":
-				metadata.MqttUsername = &value
-			case "MQTT_PASSWORD":
-				metadata.MqttPassword = &value
-			case "MQTT_BROKER":
-				metadata.MqttBroker = &value
-			case "MQTT_PORT":
-				port, err := strconv.Atoi(value)
-				if err != nil {
-					return fmt.Errorf("failed to convert MQTT_PORT: %w", err)
-				}
-				metadata.MqttPort = &port
-			case "MQTT_TOPIC":
-				metadata.MqttTopic = &value
-			}
-		}
 	}
 
 	if !noIde {
