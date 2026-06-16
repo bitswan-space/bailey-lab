@@ -73,6 +73,87 @@ const P_ROLES = [
     desc: 'A signed-in identity with no elevated role; sees only workspaces they own or are added to.' },
 ];
 
+// PendingApprovalBar — the device-trust step, inlined under the person it
+// belongs to in the roster. The admin reads the code off the user's screen and
+// types it here; the backend validates it (a mismatch is a 401). Shows whether
+// this is the person's first device or an additional one, so the admin has the
+// context to decide. POSTs to the gate's approve handler (PApi.approvePair).
+function PendingApprovalBar({ req, person, ctx }) {
+  const { toast, refresh, setData } = ctx;
+  const [code, setCode] = useP('');
+  const [error, setError] = useP(false);
+  const [errMsg, setErrMsg] = useP('');
+  const [busy, setBusy] = useP(false);
+
+  const codeNoSep = (s) => s.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+  // The pairing code is 6 digits (generatePendingPair, "%06d"); the backend
+  // never sends it (that's the whole point — the admin reads it off the user's
+  // device), so we just require a full 6-char entry and let the server check it.
+  const codeReady = codeNoSep(code).length >= 6;
+  const firstName = (req.userName || req.userEmail).split(/[ @]/)[0];
+  const existingDevices = person ? (person.deviceCount || 0) : 0;
+  const isAdditional = existingDevices > 0;
+
+  const approve = async () => {
+    if (!codeReady) { setError(true); return; }
+    setBusy(true); setError(false); setErrMsg('');
+    try {
+      await PApi.approvePair(req.userEmail, codeNoSep(code));
+      toast(`Device trusted for ${req.userName}`, 'success');
+      // Refresh approvals (clears this bar), devices, and the roster (device
+      // counts + a brand-new person now becomes a real device owner).
+      await Promise.all([refresh('approvals'), refresh('devices'), refresh('people')]);
+    } catch (e) {
+      setError(true);
+      setErrMsg(e instanceof PApiError && e.status === 401
+        ? "Code didn't match — check with them and try again."
+        : (e.message || 'Approval failed.'));
+    } finally { setBusy(false); }
+  };
+  // No "deny" route exists server-side; pending pairs expire on their own.
+  // Dismiss only clears it from this view until the next refetch.
+  const dismiss = () => {
+    setData(d => ({ ...d, pending: (d.pending || []).filter(x => x.id !== req.id) }));
+    toast(`Dismissed request from ${req.userName} (it will expire server-side)`, 'info');
+  };
+
+  return (
+    <div style={{ borderTop: `1px solid ${PC.primary}33`, background: error ? PC.redSoft : PC.primarySoft, padding: '14px 18px 16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 9 }}>
+        <span style={{ width: 32, height: 32, borderRadius: 8, background: '#fff', border: `1px solid ${PC.border}`,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', flex: '0 0 auto' }}>
+          <PDeviceIcon kind={req.kind} size={16} color={PC.primary} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: PC.fg, display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+            Device awaiting approval
+            {isAdditional ? <PPill tone="neutral" size="xs">Additional device</PPill> : <PPill tone="info" size="xs">First device</PPill>}
+            <PPill tone="warning" size="xs">⏱ {req.requested}</PPill>
+          </div>
+          <div style={{ fontSize: 11.5, color: PC.muted, marginTop: 2 }}>
+            {isAdditional
+              ? `${firstName} already has ${existingDevices} trusted device${existingDevices > 1 ? 's' : ''} — this would add another.`
+              : `This is ${firstName}'s first device on this server — no other trusted devices yet.`}
+          </div>
+        </div>
+      </div>
+      <p style={{ margin: '0 0 12px', fontSize: 12.5, color: PC.muted, lineHeight: '18px' }}>
+        Ask {firstName} to read you the code shown on their device, then type it below. This proves they're physically present — a compromised identity-provider account alone can't get in.
+      </p>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+        <PSeg format={[3, 3]} value={code} onChange={v => { setCode(v); setError(false); setErrMsg(''); }} size="md" auto />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <PBtn variant="primary" leftIcon="shield-check" disabled={!codeReady || busy} onClick={approve}>{busy ? 'Approving…' : 'Trust this device'}</PBtn>
+          <PBtn variant="default" leftIcon="x" disabled={busy} onClick={dismiss}>Dismiss</PBtn>
+        </div>
+      </div>
+      {error && <div style={{ marginTop: 10, fontSize: 12.5, color: PC.red, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <PIcon name="x-circle" size={14} color={PC.red} /> {errMsg || `Enter the full code from ${firstName}'s screen.`}
+      </div>}
+    </div>
+  );
+}
+
 // ─── USERS & ROLES ──────────────────────────────────────────────────────────
 // Wired to GET /bailey/api/people (admin-only): the roster, per-person role,
 // workspace/device counts, last-active and invited flag all come from
@@ -109,13 +190,37 @@ function UsersView({ ctx }) {
   const ROLES = P_ROLES;
   const people = data.people || [];
   const loaded = data.load.people === 'ok';
-  const list = people.filter(u =>
+
+  // Pending device approvals are shown inline, under the person they belong to.
+  // Group them by email so each row knows whether it has one waiting.
+  const pending = data.pending || [];
+  const pendingByEmail = {};
+  pending.forEach(p => {
+    const k = (p.userEmail || '').toLowerCase();
+    (pendingByEmail[k] = pendingByEmail[k] || []).push(p);
+  });
+  // A brand-new person signing in from their first device isn't in the roster
+  // yet (no trusted device, workspace, or TOTP). Surface them as synthetic
+  // "new arrival" rows at the top so the admin can approve them here too.
+  const rosterEmails = new Set(people.map(p => (p.email || '').toLowerCase()));
+  const newArrivals = Object.keys(pendingByEmail)
+    .filter(k => !rosterEmails.has(k))
+    .map(k => {
+      const req = pendingByEmail[k][0];
+      return {
+        id: req.userEmail, name: req.userName || req.userEmail, email: req.userEmail,
+        role: 'user', workspaceCount: 0, deviceCount: 0, lastActive: '', invited: false, isNewArrival: true,
+      };
+    })
+    .sort((a, b) => a.email.localeCompare(b.email));
+  const combined = [...newArrivals, ...people];
+  const list = combined.filter(u =>
     u.name.toLowerCase().includes(query.toLowerCase()) || u.email.toLowerCase().includes(query.toLowerCase()));
 
   return (
     <div>
       <PPageHeader title="People &amp; roles"
-        subtitle="Everyone with access to this server. Roles govern what they can do; devices govern where they can do it from." />
+        subtitle="Everyone with access to this server. Roles govern what they can do; devices govern where they can do it from. New sign-ins from an untrusted device appear here for you to approve." />
 
       {/* Least-trust principle — even an admin can't see everyone's data. */}
       <div style={{ display: 'flex', gap: 10, padding: '11px 14px', marginBottom: 14,
@@ -155,6 +260,16 @@ function UsersView({ ctx }) {
         </div>
       )}
 
+      {loaded && pending.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', marginBottom: 14,
+          border: `1px solid ${PC.primary}55`, background: PC.primarySoft, borderRadius: 10 }}>
+          <PIcon name="shield-alert" size={15} color={PC.primary} style={{ flex: '0 0 auto' }} />
+          <span style={{ flex: 1, fontSize: 12.5, color: PC.fg, lineHeight: '17px' }}>
+            {pending.length} device{pending.length > 1 ? 's' : ''} awaiting approval — highlighted below. A signed-in user can't reach the server until you confirm the code shown on their device.
+          </span>
+        </div>
+      )}
+
       {loaded && (<>
       <div style={{ position: 'relative', maxWidth: 320, marginBottom: 14 }}>
         <PIcon name="search" size={14} color={PC.mutedFg} style={{ position: 'absolute', left: 11, top: 11 }} />
@@ -172,36 +287,44 @@ function UsersView({ ctx }) {
           fontSize: 11, fontWeight: 600, color: PC.muted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
           <span>Person</span><span>Role</span><span>Workspaces</span><span>Devices</span><span>Last active</span>
         </div>
-        {list.map(u => (
-          <div key={u.id} style={{ display: 'grid', gridTemplateColumns: '2.2fr 1fr 1fr 1fr 0.9fr', gap: 12,
-            padding: '12px 18px', borderBottom: `1px solid ${PC.surface2}`, alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 }}>
-              <PAvatar user={u} size={32} />
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg, display: 'flex', alignItems: 'center', gap: 7 }}>
-                  {u.name}
-                  {u.role === 'admin' && <span title="Administrator"><PIcon name="crown" size={13} color={PC.amber} /></span>}
-                  {u.invited && <PPill tone="warning" size="xs">Invited</PPill>}
+        {list.map(u => {
+          const reqs = pendingByEmail[(u.email || '').toLowerCase()] || [];
+          const hasPending = reqs.length > 0;
+          return (
+          <div key={u.id} style={{ borderBottom: `1px solid ${PC.surface2}`, boxShadow: hasPending ? `inset 3px 0 0 ${PC.primary}` : 'none' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '2.2fr 1fr 1fr 1fr 0.9fr', gap: 12,
+              padding: '12px 18px', alignItems: 'center', background: hasPending ? PC.primarySoft : 'transparent' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 }}>
+                <PAvatar user={u} size={32} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg, display: 'flex', alignItems: 'center', gap: 7 }}>
+                    {u.name}
+                    {u.role === 'admin' && <span title="Administrator"><PIcon name="crown" size={13} color={PC.amber} /></span>}
+                    {u.isNewArrival && <PPill tone="info" size="xs">New</PPill>}
+                    {u.invited && <PPill tone="warning" size="xs">Invited</PPill>}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: PC.muted, fontFamily: 'Geist Mono, monospace' }}>{u.email}</div>
                 </div>
-                <div style={{ fontSize: 11.5, color: PC.muted, fontFamily: 'Geist Mono, monospace' }}>{u.email}</div>
               </div>
+              {/* Role is a styled dropdown; admins change roles here. The role is
+                  stored locally (user_roles) and authoritative — not from SSO. */}
+              <RoleSelect role={u.role} onPick={(role) => changeRole(u.email, role)} />
+              <span style={{ fontSize: 13, color: PC.fg }}>{u.workspaceCount}</span>
+              <button onClick={() => u.deviceCount > 0 && navigate('users', u.id)} title={u.deviceCount ? 'Manage devices' : 'No devices'}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 9px', borderRadius: 7,
+                  border: `1px solid ${u.deviceCount ? PC.border : 'transparent'}`, background: u.deviceCount ? '#fff' : 'transparent',
+                  cursor: u.deviceCount ? 'pointer' : 'default', fontFamily: 'inherit', fontSize: 13, color: u.deviceCount ? PC.fg : PC.mutedFg, fontWeight: 500, width: 'fit-content' }}
+                onMouseEnter={e => { if (u.deviceCount) e.currentTarget.style.background = PC.surface2; }}
+                onMouseLeave={e => { if (u.deviceCount) e.currentTarget.style.background = '#fff'; }}>
+                <PIcon name="laptop" size={13} color={PC.mutedFg} />{u.deviceCount}
+                {u.deviceCount > 0 && <PIcon name="chevron-right" size={12} color={PC.mutedFg} />}
+              </button>
+              <span style={{ fontSize: 12.5, color: PC.muted }}>{u.lastActive || '—'}</span>
             </div>
-            {/* Role is a styled dropdown; admins change roles here. The role is
-                stored locally (user_roles) and authoritative — not from SSO. */}
-            <RoleSelect role={u.role} onPick={(role) => changeRole(u.email, role)} />
-            <span style={{ fontSize: 13, color: PC.fg }}>{u.workspaceCount}</span>
-            <button onClick={() => u.deviceCount > 0 && navigate('users', u.id)} title={u.deviceCount ? 'Manage devices' : 'No devices'}
-              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 9px', borderRadius: 7,
-                border: `1px solid ${u.deviceCount ? PC.border : 'transparent'}`, background: u.deviceCount ? '#fff' : 'transparent',
-                cursor: u.deviceCount ? 'pointer' : 'default', fontFamily: 'inherit', fontSize: 13, color: u.deviceCount ? PC.fg : PC.mutedFg, fontWeight: 500, width: 'fit-content' }}
-              onMouseEnter={e => { if (u.deviceCount) e.currentTarget.style.background = PC.surface2; }}
-              onMouseLeave={e => { if (u.deviceCount) e.currentTarget.style.background = '#fff'; }}>
-              <PIcon name="laptop" size={13} color={PC.mutedFg} />{u.deviceCount}
-              {u.deviceCount > 0 && <PIcon name="chevron-right" size={12} color={PC.mutedFg} />}
-            </button>
-            <span style={{ fontSize: 12.5, color: PC.muted }}>{u.lastActive || '—'}</span>
+            {reqs.map(req => <PendingApprovalBar key={req.id} req={req} person={u} ctx={ctx} />)}
           </div>
-        ))}
+          );
+        })}
       </PCard>
       )}
       </>)}
@@ -288,170 +411,6 @@ function UserDevicesDrawer({ userId, onClose, ctx }) {
         </div>
       ))}
     </PDrawer>
-  );
-}
-
-// ─── DEVICE APPROVALS (the trust gate) ──────────────────────────────────────
-function ApprovalsView({ ctx }) {
-  const { data, setData, toast, refresh } = ctx;
-  const [focusId, setFocusId] = useP(data.pending[0]?.id || null);
-  const [code, setCode] = useP('');
-  const [error, setError] = useP(false);
-  const [errMsg, setErrMsg] = useP('');
-  const [busy, setBusy] = useP(false);
-
-  React.useEffect(() => { setCode(''); setError(false); setErrMsg(''); }, [focusId]);
-  // Keep a valid focus as the live list changes (mount, refetch).
-  React.useEffect(() => {
-    if (!data.pending.find(p => p.id === focusId)) setFocusId(data.pending[0]?.id || null);
-  }, [data.pending]);
-
-  const focus = data.pending.find(p => p.id === focusId) || null;
-  const codeNoSep = (s) => s.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-  // The backend does NOT send the expected code (the admin reads it off the
-  // user's screen — that's the trust step), so we can't match locally. The
-  // pairing code is 6 digits (generatePendingPair, "%06d"); require a full
-  // 6-char entry and let the server validate it — a mismatch comes back as a
-  // 401 from /2fa-gate/approve.
-  const codeReady = focus && codeNoSep(code).length >= 6;
-
-  // Live: POST email+code to the gate's approve handler, then re-fetch the
-  // pending list. On a code mismatch the backend returns 401 → ApiError.
-  const approve = async () => {
-    if (!codeReady || !focus) { setError(true); return; }
-    setBusy(true); setError(false); setErrMsg('');
-    try {
-      await PApi.approvePair(focus.userEmail, codeNoSep(code));
-      toast(`Device trusted for ${focus.userName}`, 'success');
-      await Promise.all([refresh('approvals'), refresh('devices')]);
-    } catch (e) {
-      setError(true);
-      setErrMsg(e instanceof PApiError && e.status === 401
-        ? "Code didn't match — check with them and try again."
-        : (e.message || 'Approval failed.'));
-    } finally { setBusy(false); }
-  };
-  // TODO(api): no backend endpoint yet — there's no "deny/reject pending
-  // pair" route in bailey_dispatch.go. Pending requests expire on their
-  // own; "Dismiss" only clears it from this view until the next refetch.
-  const deny = (p) => {
-    setData(d => ({ ...d, pending: d.pending.filter(x => x.id !== p.id) }));
-    toast(`Dismissed request from ${p.userName} (it will expire server-side)`, 'info');
-    const next = data.pending.filter(x => x.id !== p.id)[0];
-    setFocusId(next ? next.id : null);
-  };
-
-  const detailRow = (label, value, mono) => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, padding: '7px 0', borderBottom: `1px solid ${PC.surface2}` }}>
-      <span style={{ fontSize: 12, color: PC.muted, whiteSpace: 'nowrap' }}>{label}</span>
-      <span style={{ fontSize: 12.5, color: PC.fg, fontWeight: 500, fontFamily: mono ? 'Geist Mono, monospace' : 'inherit', whiteSpace: 'nowrap' }}>{value}</span>
-    </div>
-  );
-
-  return (
-    <div>
-      <PPageHeader title="New user approvals" icon="shield-check"
-        subtitle="Your identity provider proves who someone is. This step proves which device they're on. A signed-in user reaches the server only after you confirm the code shown on their screen — so a compromised identity-provider account still can't get in." />
-
-      {data.load.approvals !== 'ok' && (
-        <PLiveState status={data.load.approvals} error={data.error.approvals}
-          label="Loading pending approvals…" onRetry={() => refresh('approvals')} />
-      )}
-
-      <div style={{ display: 'grid', gridTemplateColumns: '340px 1fr', gap: 18, alignItems: 'start' }}>
-        {/* Left: queue */}
-        <PCard pad={0}>
-          <div style={{ padding: '13px 16px', borderBottom: `1px solid ${PC.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: 13, fontWeight: 600, color: PC.fg, whiteSpace: 'nowrap' }}>Awaiting approval</span>
-            <PPill tone={data.pending.length ? 'warning' : 'neutral'} size="xs">{data.pending.length}</PPill>
-          </div>
-          {data.pending.length === 0 ? (
-            <PEmpty icon="shield-check" title="Nothing pending" text="New sign-ins from untrusted devices will appear here." />
-          ) : (
-            <div style={{ padding: 8 }}>
-              {data.pending.map(p => {
-                const on = p.id === focusId;
-                return (
-                  <button key={p.id} onClick={() => setFocusId(p.id)} style={{
-                    display: 'flex', alignItems: 'center', gap: 11, width: '100%', padding: '11px 12px', borderRadius: 9,
-                    border: `1px solid ${on ? PC.primary : 'transparent'}`, background: on ? PC.primarySoft : 'transparent',
-                    cursor: 'pointer', textAlign: 'left', marginBottom: 2 }}
-                    onMouseEnter={e => { if (!on) e.currentTarget.style.background = PC.surface; }}
-                    onMouseLeave={e => { if (!on) e.currentTarget.style.background = 'transparent'; }}>
-                    <span style={{ width: 34, height: 34, borderRadius: 9, flex: '0 0 auto', background: '#fff', border: `1px solid ${PC.border}`,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      <PDeviceIcon kind={p.kind} size={16} color={PC.muted} />
-                    </span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: PC.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.userName}</div>
-                      <div style={{ fontSize: 11.5, color: PC.muted }}>Pending pair · {p.requested}</div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </PCard>
-
-        {/* Right: detail + code entry */}
-        {focus ? (
-          <PCard pad={0}>
-            <div style={{ padding: '18px 22px', borderBottom: `1px solid ${PC.border}`, display: 'flex', alignItems: 'center', gap: 13 }}>
-              <span style={{ width: 46, height: 46, borderRadius: 11, flex: '0 0 auto', background: PC.surface2,
-                display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <PDeviceIcon kind={focus.kind} size={22} color={PC.fg} />
-              </span>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 16, fontWeight: 700, color: PC.fg, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  {focus.userName}
-                  {focus.firstDevice
-                    ? <PPill tone="info" size="xs">First device</PPill>
-                    : <PPill tone="neutral" size="xs">Additional device</PPill>}
-                </div>
-                <div style={{ fontSize: 12.5, color: PC.muted, fontFamily: 'Geist Mono, monospace' }}>{focus.userEmail}</div>
-              </div>
-              <PPill tone="warning" size="xs">⏱ {focus.requested}</PPill>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0, padding: '6px 22px 4px' }}>
-              <div style={{ paddingRight: 18 }}>
-                {detailRow('Account', focus.userEmail, true)}
-                {detailRow('Signed in via', focus.oauth)}
-              </div>
-              <div style={{ paddingLeft: 18, borderLeft: `1px solid ${PC.surface2}` }}>
-                {detailRow('Requested', focus.requested)}
-                {detailRow('Trust origin', 'Admin approval')}
-              </div>
-            </div>
-
-            {/* code entry */}
-            <div style={{ margin: '14px 22px 22px', padding: 20, borderRadius: 12, border: `1px solid ${error ? PC.red : PC.border}`,
-              background: error ? PC.redSoft : PC.surface }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 6 }}>
-                <PIcon name="keyboard" size={16} color={PC.fg} />
-                <span style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg, whiteSpace: 'nowrap' }}>Confirm the code</span>
-              </div>
-              <p style={{ margin: '0 0 14px', fontSize: 12.5, color: PC.muted, lineHeight: '18px' }}>
-                Ask {focus.userName.split(' ')[0]} to read you the code shown on their device, then type it below. This proves they're physically present.
-              </p>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-                <PSeg format={[3, 3]} value={code} onChange={v => { setCode(v); setError(false); setErrMsg(''); }} size="md" auto />
-              </div>
-              {error && <div style={{ marginTop: 10, fontSize: 12.5, color: PC.red, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <PIcon name="x-circle" size={14} color={PC.red} /> {errMsg || `Enter the full code from ${focus.userName.split('@')[0]}'s screen.`}
-              </div>}
-              <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-                <PBtn variant="primary" leftIcon="shield-check" disabled={!codeReady || busy} onClick={approve}>{busy ? 'Approving…' : 'Trust this device'}</PBtn>
-                <PBtn variant="danger" leftIcon="x" disabled={busy} onClick={() => deny(focus)}>Dismiss</PBtn>
-              </div>
-            </div>
-          </PCard>
-        ) : (
-          <PCard><PEmpty icon="shield-check" title="No device selected"
-            text="All caught up — there are no devices waiting for approval." /></PCard>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -608,4 +567,4 @@ function EndpointAccessView({ ctx }) {
   );
 }
 
-window.SC_PEOPLE = { UsersView, ApprovalsView, EndpointAccessView };
+window.SC_PEOPLE = { UsersView, EndpointAccessView };

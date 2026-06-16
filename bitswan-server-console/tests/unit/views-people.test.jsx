@@ -5,7 +5,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { SC_PEOPLE, installFetch } from './harness.js';
 import { makeData, Host, spies } from './ctx.js';
 
-const { UsersView, ApprovalsView, EndpointAccessView } = SC_PEOPLE;
+const { UsersView, EndpointAccessView } = SC_PEOPLE;
 
 const people = [
   { id: 'tomas@h', name: 'Tomas', email: 'tomas@h', role: 'admin', workspaceCount: 2, deviceCount: 3, lastActive: 'now', invited: false },
@@ -75,60 +75,79 @@ describe('UsersView', () => {
   });
 });
 
-describe('ApprovalsView', () => {
-  function withPending() {
+// Device approvals are now part of UsersView: a pending device shows as a
+// highlighted bar under the person it belongs to (or a synthetic "New" row for
+// a first-time sign-in not yet in the roster).
+describe('UsersView — device approvals', () => {
+  const codeInput = () => document.querySelector('input[autocapitalize="characters"]');
+  // Pending request for alex@h (in the roster, member, 0 devices) + a brand-new
+  // person martin@h who isn't in the roster yet.
+  function withPending(extraPending = []) {
     return makeData({
+      people,
       pending: [
-        { id: 'alex@h', userName: 'Alex Mraz', userEmail: 'alex@h', firstDevice: true, kind: 'laptop', requested: '4m ago', oauth: 'Keycloak SSO', code: '' },
-        { id: 'martin@h', userName: 'Martin Kral', userEmail: 'martin@h', firstDevice: false, kind: 'phone', requested: '22m ago', oauth: 'Keycloak SSO', code: '' },
+        { id: 'alex@h', userName: 'Alex', userEmail: 'alex@h', firstDevice: true, kind: 'laptop', requested: '4m ago', oauth: 'Keycloak SSO', code: '' },
+        ...extraPending,
       ],
     });
   }
 
-  it('renders the queue and selects between pending devices', () => {
-    render(<Host View={ApprovalsView} data={withPending()} />);
-    expect(screen.getByText('New user approvals')).toBeTruthy();
-    fireEvent.click(screen.getByText('Martin Kral'));
-    expect(screen.getAllByText(/Martin Kral/).length).toBeGreaterThan(0);
+  it('shows a pending device as a highlighted bar under that person + a summary', () => {
+    render(<Host View={UsersView} data={withPending()} />);
+    expect(screen.getByText(/1 device awaiting approval/)).toBeTruthy();
+    expect(screen.getByText('Device awaiting approval')).toBeTruthy();
+    expect(screen.getByText('Trust this device')).toBeTruthy();
+    // alex has no existing devices → framed as their first device.
+    expect(screen.getByText(/first device on this server/)).toBeTruthy();
   });
 
-  it('shows empty state when nothing pending', () => {
-    render(<Host View={ApprovalsView} data={makeData({ pending: [] })} />);
-    expect(screen.getByText('Nothing pending')).toBeTruthy();
-    expect(screen.getByText('No device selected')).toBeTruthy();
+  it('frames an additional device when the person already has devices', () => {
+    // tomas@h has 3 devices in the roster; a pending request is "additional".
+    render(<Host View={UsersView} data={makeData({ people, pending: [
+      { id: 'tomas@h', userName: 'Tomas', userEmail: 'tomas@h', firstDevice: false, kind: 'phone', requested: '2m ago', oauth: 'sso', code: '' },
+    ] })} />);
+    expect(screen.getByText('Additional device')).toBeTruthy();
+    expect(screen.getByText(/already has 3 trusted devices/)).toBeTruthy();
   });
 
-  it('approve success refreshes approvals + devices', async () => {
+  it('surfaces a first-time sign-in (not yet in the roster) as a New row', () => {
+    render(<Host View={UsersView} data={makeData({ people: [], pending: [
+      { id: 'newbie@h', userName: 'newbie@h', userEmail: 'newbie@h', firstDevice: true, kind: 'laptop', requested: '1m ago', oauth: 'sso', code: '' },
+    ] })} />);
+    expect(screen.getByText('New')).toBeTruthy();
+    expect(screen.getAllByText('newbie@h').length).toBeGreaterThan(0);
+    expect(screen.getByText('Device awaiting approval')).toBeTruthy();
+  });
+
+  it('no pending → no approval bar or summary', () => {
+    render(<Host View={UsersView} data={makeData({ people, pending: [] })} />);
+    expect(screen.queryByText('Device awaiting approval')).toBeNull();
+    expect(screen.queryByText(/awaiting approval/)).toBeNull();
+  });
+
+  it('approve success refreshes approvals + devices + people', async () => {
     const s = spies();
     installFetch({ '/2fa-gate/approve': { status: 200, text: 'ok' } });
-    render(<Host View={ApprovalsView} data={withPending()} extra={s} />);
-    const codeInput = document.querySelector('input');
-    fireEvent.change(codeInput, { target: { value: '123456' } });
+    render(<Host View={UsersView} data={withPending()} extra={s} />);
+    fireEvent.change(codeInput(), { target: { value: '123456' } });
     fireEvent.click(screen.getByText('Trust this device'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Device trusted'), 'success'));
     expect(s.refresh).toHaveBeenCalledWith('approvals');
     expect(s.refresh).toHaveBeenCalledWith('devices');
+    expect(s.refresh).toHaveBeenCalledWith('people');
   });
 
-  it('approve 401 shows mismatch message', async () => {
+  it('approve 401 shows the mismatch message', async () => {
     installFetch({ '/2fa-gate/approve': { status: 401, text: 'unauthorized' } });
-    render(<Host View={ApprovalsView} data={withPending()} />);
-    fireEvent.change(document.querySelector('input'), { target: { value: '123456' } });
+    render(<Host View={UsersView} data={withPending()} />);
+    fireEvent.change(codeInput(), { target: { value: '123456' } });
     fireEvent.click(screen.getByText('Trust this device'));
     await waitFor(() => expect(screen.getByText(/Code didn't match/)).toBeTruthy());
   });
 
-  it('approve non-401 error shows the generic message', async () => {
-    installFetch({ '/2fa-gate/approve': { status: 500, json: { error: 'server boom' } } });
-    render(<Host View={ApprovalsView} data={withPending()} />);
-    fireEvent.change(document.querySelector('input'), { target: { value: '123456' } });
-    fireEvent.click(screen.getByText('Trust this device'));
-    await waitFor(() => expect(screen.getByText('server boom')).toBeTruthy());
-  });
-
-  it('dismiss removes the request and re-focuses', () => {
+  it('dismiss clears the request from view', () => {
     const s = spies();
-    render(<Host View={ApprovalsView} data={withPending()} extra={s} />);
+    render(<Host View={UsersView} data={withPending()} extra={s} />);
     fireEvent.click(screen.getByText('Dismiss'));
     expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Dismissed request'), 'info');
   });

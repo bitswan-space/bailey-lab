@@ -99,9 +99,11 @@ describe('App live-data loading + adapters + routing', () => {
     await waitFor(() => expect(screen.getByText(/Trust spreads device-to-device/)).toBeTruthy());
     fireEvent.click(screen.getByText('Security & recovery'));
     await waitFor(() => expect(screen.getByText(/Authenticator app/)).toBeTruthy());
-    // approvals route
-    fireEvent.click(screen.getByText('New user approvals'));
-    await waitFor(() => expect(screen.getByText('Awaiting approval')).toBeTruthy());
+    // approvals are merged into People & roles — the pending device shows as a
+    // highlighted bar under the person (no separate "New user approvals" nav).
+    expect(screen.queryByText('New user approvals')).toBeNull();
+    fireEvent.click(screen.getByText('People & roles'));
+    await waitFor(() => expect(screen.getByText('Device awaiting approval')).toBeTruthy());
   });
 
   it('derives the initial view from the URL (/devices → devices view)', async () => {

@@ -123,7 +123,7 @@ function OverviewView({ ctx }) {
         <WStat label="People" value={counts.people} icon="users" onClick={() => go('users')} />
         <WStat label="Devices" value={counts.trustedDevices} icon="laptop" tone="success" onClick={() => go('devices')} />
         <WStat label="Pending" value={pending} icon="shield-alert" tone={pending ? 'warning' : 'neutral'}
-          sub={pending ? 'Needs your review' : 'All clear'} onClick={() => go('approvals')} />
+          sub={pending ? 'Needs your review' : 'All clear'} onClick={() => go('users')} />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr', gap: 18, alignItems: 'start' }}>
@@ -142,7 +142,7 @@ function OverviewView({ ctx }) {
               <p style={{ margin: '0 0 12px', fontSize: 13, color: '#92400e', lineHeight: '19px' }}>
                 A signed-in user can't reach this server until you confirm the code shown on their device.
               </p>
-              <WBtn variant="primary" size="sm" leftIcon="arrow-right" onClick={() => go('approvals')}>Review approvals</WBtn>
+              <WBtn variant="primary" size="sm" leftIcon="arrow-right" onClick={() => go('users')}>Review approvals</WBtn>
             </div>
           )}
 

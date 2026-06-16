@@ -4,7 +4,7 @@ import React from 'react';
 const { C: AC, Icon: AIcon, Btn: ABtn, Pill: APill, useLucide: useALucide } = window.WD_SHELL;
 const { Avatar: AAvatar, Toast: AToast } = window.SC_UI;
 const { OverviewView, WorkspacesView } = window.SC_WORKSPACES;
-const { UsersView, ApprovalsView, EndpointAccessView } = window.SC_PEOPLE;
+const { UsersView, EndpointAccessView } = window.SC_PEOPLE;
 const { DevicesView, SecurityView } = window.SC_DEVICES;
 const { BootstrapScene, ApprovalScene, RecoveryScene } = window.SC_SCENES;
 const { Api } = window.SC_API;
@@ -219,8 +219,10 @@ const NAV = [
   ]},
   { group: 'Admin', items: [
     { id: 'overview',  label: 'Server overview',  icon: 'gauge' },
-    { id: 'users',     label: 'People & roles',   icon: 'users' },
-    { id: 'approvals', label: 'New user approvals', icon: 'shield-check', badge: 'pending' },
+    // New-user device approvals are merged into People & roles (the pending
+    // device shows as a highlighted bar under that person), so the badge lives
+    // here now — there's no separate approvals page.
+    { id: 'users',     label: 'People & roles',   icon: 'users', badge: 'pending' },
     { id: 'acl',       label: 'Endpoint access',  icon: 'git-fork' },
   ]},
 ];
@@ -233,11 +235,14 @@ const NAV = [
 // routing works end-to-end. A second path segment carries a view's open
 // "drawer" (the workspace being managed, the person whose devices you're
 // viewing) — e.g. /workspaces/acme, /users/jane@x.
-const ROUTES = ['workspaces', 'overview', 'users', 'approvals', 'acl', 'devices', 'security'];
+const ROUTES = ['workspaces', 'overview', 'users', 'acl', 'devices', 'security'];
 
 function parseLocation() {
   const segs = (window.location.pathname || '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
-  const route = ROUTES.includes(segs[0]) ? segs[0] : 'workspaces';
+  // /approvals is merged into People & roles — redirect old links there.
+  let first = segs[0];
+  if (first === 'approvals') first = 'users';
+  const route = ROUTES.includes(first) ? first : 'workspaces';
   const param = segs[1] != null && segs[1] !== '' ? decodeURIComponent(segs[1]) : null;
   return { route, param };
 }
@@ -286,6 +291,8 @@ function Console({ data, setData, toast, refresh }) {
   // navigate(route[, param]) pushes a new URL and updates state. ctx.go is the
   // back-compat single-arg form used by views to switch top-level sections.
   const navigate = (toRoute, param) => {
+    // 'approvals' is merged into People & roles — keep old callers working.
+    if (toRoute === 'approvals') toRoute = 'users';
     const next = { route: ROUTES.includes(toRoute) ? toRoute : 'workspaces', param: param || null };
     const want = canonicalPath(next);
     if (window.location.pathname !== want) {
@@ -313,7 +320,7 @@ function Console({ data, setData, toast, refresh }) {
 
   const views = {
     workspaces: WorkspacesView, overview: OverviewView, users: UsersView,
-    approvals: ApprovalsView, acl: EndpointAccessView, devices: DevicesView, security: SecurityView,
+    acl: EndpointAccessView, devices: DevicesView, security: SecurityView,
   };
   const View = views[route] || WorkspacesView;
 

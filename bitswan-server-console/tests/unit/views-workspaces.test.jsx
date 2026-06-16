@@ -28,7 +28,7 @@ describe('OverviewView', () => {
     fireEvent.click(screen.getByText('People'));
     fireEvent.click(screen.getByText('Devices'));
     fireEvent.click(screen.getByText('Pending'));
-    expect(s.go).toHaveBeenCalledWith('approvals');
+    expect(s.go).toHaveBeenCalledWith('users'); // approvals merged into People & roles
     expect(s.go).toHaveBeenCalledWith('workspaces');
   });
   it('shows the loading/error banner and retries', () => {
