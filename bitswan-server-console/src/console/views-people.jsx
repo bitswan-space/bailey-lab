@@ -53,7 +53,7 @@ function UsersView({ ctx }) {
   const list = people.filter(u =>
     u.name.toLowerCase().includes(query.toLowerCase()) || u.email.toLowerCase().includes(query.toLowerCase()));
 
-  const ROLE_DISABLED = "Role changes aren't wired up yet — the backend has no role-write endpoint.";
+  const ROLE_DISABLED = "Changing roles isn't available yet — it needs an identity-provider admin client (same as invites). Coming soon.";
 
   return (
     <div>
@@ -129,8 +129,17 @@ function UsersView({ ctx }) {
                 <div style={{ fontSize: 11.5, color: PC.muted, fontFamily: 'Geist Mono, monospace' }}>{u.email}</div>
               </div>
             </div>
-            <div title={ROLE_DISABLED}>
-              <PPill tone={P_ROLE_TONE[u.role] || 'neutral'} size="xs">{u.role}</PPill>
+            {/* Role is a dropdown (Admin can change roles) — but there's no
+                role-write backend yet, so picking a new role explains that and
+                doesn't persist. The current role still comes live from /people. */}
+            <div title={ROLE_DISABLED} style={{ width: 138 }}>
+              <PSelect value={u.role}
+                options={(() => {
+                  const o = P_ROLES.map(r => ({ value: r.id, label: r.label }));
+                  if (!o.some(x => x.value === u.role)) o.unshift({ value: u.role, label: u.role });
+                  return o;
+                })()}
+                onChange={() => toast(ROLE_DISABLED, 'info')} />
             </div>
             <span style={{ fontSize: 13, color: PC.fg }}>{u.workspaceCount}</span>
             <button onClick={() => u.deviceCount > 0 && navigate('users', u.id)} title={u.deviceCount ? 'Manage devices' : 'No devices'}

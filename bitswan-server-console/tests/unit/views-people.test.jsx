@@ -59,6 +59,16 @@ describe('UsersView', () => {
     render(<Host View={UsersView} data={makeData({ people, peopleWarning: 'kc down' })} />);
     expect(screen.getByText(/kc down/)).toBeTruthy();
   });
+
+  it('role is a dropdown; changing it explains it is not wired yet (no fake change)', () => {
+    const s = spies();
+    render(<Host View={UsersView} data={makeData({ people })} extra={s} />);
+    // A real <select> of roles (Admin/Auditor/Member/User), not a static pill.
+    const roleSelect = screen.getAllByRole('combobox')[0];
+    expect(roleSelect).toBeTruthy();
+    fireEvent.change(roleSelect, { target: { value: 'auditor' } });
+    expect(s.toast).toHaveBeenCalledWith(expect.stringContaining("isn't available yet"), 'info');
+  });
 });
 
 describe('ApprovalsView', () => {
