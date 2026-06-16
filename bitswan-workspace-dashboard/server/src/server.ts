@@ -14,6 +14,7 @@ import { registerCodingAgentRoutes } from './routes/coding-agent.js';
 import { registerSnapshotRoutes } from './routes/snapshots.js';
 import { registerWorktreeRoutes } from './routes/worktrees.js';
 import { registerWorktreeFilesRoutes } from './routes/worktree-files.js';
+import { registerMeRoutes } from './routes/me.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -55,6 +56,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   });
 
   registerAuthRoutes(app);
+  registerMeRoutes(app, { gitops });
   registerCodingAgentRoutes(app, { gitops });
   registerBusinessProcessRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
   registerWorktreeRoutes(app, { gitops });

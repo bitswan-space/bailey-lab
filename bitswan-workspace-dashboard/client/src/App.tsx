@@ -9,6 +9,7 @@ import {
 import { SessionProvider } from '@/components/agents/SessionProvider';
 import { Toaster } from '@/components/ui/sonner';
 import { WorkspaceView } from '@/components/views/WorkspaceView';
+import { api } from '@/lib/api';
 import type { FlowTab } from '@/types';
 
 export function App() {
@@ -80,6 +81,31 @@ function Shell() {
   // eslint-disable-next-line no-restricted-syntax -- null = no worktree selected
   const [worktree, setWorktree] = useState<string | null>(readPersistedWorktree);
   const [tab, setTab] = useState<FlowTab>(readPersistedTab);
+  // The logged-in user's own copy, created on first login by GET /api/me and
+  // auto-selected below. null until resolved; `myCopyResolved` gates worktree
+  // auto-selection so we don't briefly land on someone else's copy first.
+  // eslint-disable-next-line no-restricted-syntax -- null = not yet resolved
+  const [myCopy, setMyCopy] = useState<string | null>(null);
+  const [myCopyResolved, setMyCopyResolved] = useState(false);
+
+  // On load, resolve the user's personal copy (creating it on first login).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getMe()
+      .then((me) => {
+        if (!cancelled) setMyCopy(me?.copy ?? null);
+      })
+      .catch(() => {
+        // No identity / gitops down — fall back to default worktree selection.
+      })
+      .finally(() => {
+        if (!cancelled) setMyCopyResolved(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // One-time cleanup of pre-redesign persistence keys.
   useEffect(() => {
@@ -125,18 +151,23 @@ function Shell() {
     setBpId(allBps[0]?.id ?? null);
   }, [processes, allBps, bpId]);
 
-  // Keep `worktree` consistent with the snapshot. Fires only when the
-  // snapshot changes — not when the selection itself changes — so an
-  // optimistic setWorktree (e.g. just after creating one) survives until
-  // the SSE feed delivers the new entry. Auto-selects the first worktree
-  // when none is selected.
+  // Keep `worktree` consistent with the snapshot, defaulting to the user's
+  // OWN copy. Waits until `myCopy` is resolved before auto-selecting so a new
+  // user doesn't briefly land on another user's copy. An optimistic selection
+  // (the current value, or the user's own copy while it's still being created
+  // and not yet in the snapshot) survives until the SSE feed delivers it.
   useEffect(() => {
     if (worktreesSnapshot === null) return;
+    if (!myCopyResolved) return;
     setWorktree((cur) => {
-      if (cur && worktreesSnapshot.some((w) => w.name === cur)) return cur;
+      if (cur && (worktreesSnapshot.some((w) => w.name === cur) || cur === myCopy))
+        return cur;
+      // Prefer the user's own copy (even before it appears in the snapshot, so
+      // first-login selection sticks); otherwise fall back to the first copy.
+      if (myCopy) return myCopy;
       return worktreesSnapshot[0]?.name ?? null;
     });
-  }, [worktreesSnapshot]);
+  }, [worktreesSnapshot, myCopy, myCopyResolved]);
 
   const bp = useMemo(
     () => allBps.find((b) => b.id === bpId) ?? null,

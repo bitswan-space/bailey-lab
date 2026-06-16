@@ -74,16 +74,23 @@ async def _clone_postgres_db(copy_name: str) -> str:
     """Clone the dev Postgres database for a copy. Returns the new DB name.
 
     A copy's live-dev backends are wired to connect to ``postgres_copy_<copy>``,
-    so this database MUST exist for the copy to work. Any failure here is fatal
-    and raises — never silently skip, or the backend boots against a nonexistent
-    database and dies with an opaque 502.
+    so when this workspace runs Postgres the database MUST exist — a failure to
+    clone it then is fatal (the backend would boot against a nonexistent DB and
+    die with an opaque 502). But a workspace with no Postgres yet (e.g. a fresh
+    one where a user's personal copy is created before any business process)
+    simply has nothing to clone, so we skip — there is no dev DB to copy and the
+    per-copy DB is provisioned later when a Postgres-backed BP is deployed.
+    Returns the new DB name, or None when Postgres isn't enabled in this
+    workspace.
     """
     secrets = _get_postgres_secrets("dev")
     if not secrets:
-        raise RuntimeError(
-            "Postgres dev secrets unavailable; cannot create the copy "
-            f"database for '{copy_name}'"
+        logger.info(
+            "Postgres not enabled in this workspace; skipping per-copy database "
+            "for '%s' (nothing to clone)",
+            copy_name,
         )
+        return None
 
     user = secrets["POSTGRES_USER"]
     password = secrets["POSTGRES_PASSWORD"]

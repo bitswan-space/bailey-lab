@@ -228,6 +228,12 @@ export interface CreateAutomationResponse {
 }
 
 export const api = {
+  /**
+   * Identify the logged-in user and ensure their personal copy exists
+   * (created on first login, reused after). The client auto-selects `copy`.
+   */
+  getMe: () => getJson<{ email: string; copy: string; created: boolean }>('/api/me'),
+
   createBusinessProcess: (body: CreateBusinessProcessRequest) =>
     postJson<CreateBusinessProcessResponse>('/api/business-processes', body),
 
