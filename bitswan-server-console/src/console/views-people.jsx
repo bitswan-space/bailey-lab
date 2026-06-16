@@ -284,7 +284,7 @@ function ApprovalsView({ ctx }) {
   return (
     <div>
       <PPageHeader title="New user approvals" icon="shield-check"
-        subtitle="Keycloak proves who someone is. This step proves which device they're on. A signed-in user reaches the server only after you confirm the code shown on their screen — so a compromised Keycloak account still can't get in." />
+        subtitle="Your identity provider proves who someone is. This step proves which device they're on. A signed-in user reaches the server only after you confirm the code shown on their screen — so a compromised identity-provider account still can't get in." />
 
       {data.load.approvals !== 'ok' && (
         <PLiveState status={data.load.approvals} error={data.error.approvals}

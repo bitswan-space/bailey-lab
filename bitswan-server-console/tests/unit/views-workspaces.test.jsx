@@ -61,18 +61,20 @@ describe('WorkspacesView', () => {
     expect(s.openUrl).toHaveBeenCalledWith('http://dash', expect.anything());
   });
 
-  it('renders a live workspace list, opens it, opens the manage drawer', () => {
+  it('renders a live workspace list, opens it, opens the manage drawer (owner: real members)', async () => {
     const s = spies();
-    const data = makeData({ workspaces: [liveWs()] });
+    installFetch({ '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [{ principal_type: 'email', principal_value: 'bob@x', role: 'access' }] } } });
+    const data = makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] });
     render(<Host View={WorkspacesView} data={data} extra={s} />);
     expect(screen.getByText('Workspaces')).toBeTruthy();
     fireEvent.click(screen.getByText('Open'));
     expect(s.openUrl).toHaveBeenCalled();
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    // No seed Ownership/Members UI — the drawer shows open links + share note.
-    expect(screen.getByText('You own this workspace')).toBeTruthy();
-    expect(screen.queryByText('Ownership')).toBeNull();
-    expect(screen.queryByText('Transfer ownership')).toBeNull();
+    // Wireframe drawer: Ownership + Members (real, from the share API).
+    expect(screen.getByText('Ownership')).toBeTruthy();
+    expect(screen.getByText('Members')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('me@example.test')).toBeTruthy()); // owner
+    await waitFor(() => expect(screen.getByText('bob@x')).toBeTruthy());           // member
   });
 
   it('empty workspace list shows the empty state', () => {
@@ -128,45 +130,28 @@ describe('WorkspacesView', () => {
     await waitFor(() => expect(screen.getByText('create failed')).toBeTruthy());
   });
 
-  it('manage drawer (live owner): update + trash', async () => {
+  it('manage drawer (owner): add then remove a member via the share API', async () => {
     const s = spies();
     installFetch({
-      '/bailey/api/workspaces/demo/update': { ndjson: [{ event: 'done' }] },
-      '/bailey/api/workspaces/demo/trash': { json: {} },
+      '/2fa-gate/api/share/dash.example.test': (url, init) => (init && init.method === 'POST')
+        ? { json: { owner_email: 'me@example.test', grants: [{ principal_type: 'email', principal_value: 'new@x', role: 'access' }] } }
+        : { json: { owner_email: 'me@example.test', grants: [] } },
     });
-    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs()] })} extra={s} />);
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    fireEvent.click(screen.getByText('Update'));
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('Workspace containers updated', 'success'));
-    fireEvent.click(screen.getByText('Trash'));
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('Workspace trashed', 'info'));
+    await waitFor(() => expect(screen.getByText(/No members yet/)).toBeTruthy());
+    fireEvent.change(screen.getByPlaceholderText('person@example.com'), { target: { value: 'new@x' } });
+    fireEvent.click(screen.getByText('Add'));
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('added'), 'success'));
+    await waitFor(() => expect(screen.getByText('new@x')).toBeTruthy());
   });
 
-  it('manage drawer (live trashed): restore', async () => {
+  it('manage drawer (non-owner): read-only note, no member management', () => {
     const s = spies();
-    installFetch({ '/bailey/api/workspaces/demo/restore': { json: {} } });
-    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ status: 'archived', isTrashed: true })] })} extra={s} />);
-    fireEvent.click(screen.getByTitle('Manage workspace'));
-    fireEvent.click(screen.getByText('Restore'));
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('Workspace restored', 'success'));
-  });
-
-  it('manage drawer (live): open editor + gitops', () => {
-    const s = spies();
-    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs()] })} extra={s} />);
-    fireEvent.click(screen.getByTitle('Manage workspace'));
-    fireEvent.click(screen.getByText('Open editor'));
-    fireEvent.click(screen.getByText('Open gitops'));
-    expect(s.openUrl).toHaveBeenCalledTimes(2);
-  });
-
-  it('manage drawer (live non-owner): trash/restore disabled, update hidden', () => {
-    const s = spies();
-    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ isOwner: false })] })} extra={s} />);
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ isOwner: false, dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
     expect(screen.getByText('Shared with you')).toBeTruthy();
-    expect(screen.queryByText('Update')).toBeNull();
-    const trashBtn = screen.getByText('Trash').closest('button');
-    expect(trashBtn.disabled).toBe(true);
+    expect(screen.getByText(/Only its owner can manage/)).toBeTruthy();
+    expect(screen.queryByText('Ownership')).toBeNull();
   });
 });

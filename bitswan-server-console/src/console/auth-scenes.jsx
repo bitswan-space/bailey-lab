@@ -38,7 +38,7 @@ function WhyComplicatedLink() {
         </p>
         <h3 style={{ margin: '16px 0 4px', fontSize: 14.5, fontWeight: 700, color: SC.fg }}>Safe even if your login provider is breached</h3>
         <p style={{ margin: '0 0 6px', fontSize: 13, color: SC.muted, lineHeight: '19px' }}>
-          If an attacker compromised your central identity provider (SSO / Keycloak), they still couldn't get to your data. A fresh device must be confirmed on this server — by reading back the code shown on the device — and that approval happens on infrastructure you own, beyond the identity provider's reach.
+          If an attacker compromised your central identity provider (SSO), they still couldn't get to your data. A fresh device must be confirmed on this server — by reading back the code shown on the device — and that approval happens on infrastructure you own, beyond the identity provider's reach.
         </p>
         <h3 style={{ margin: '16px 0 4px', fontSize: 14.5, fontWeight: 700, color: SC.fg }}>Lost or stolen device? Cut it off instantly</h3>
         <p style={{ margin: '0 0 6px', fontSize: 13, color: SC.muted, lineHeight: '19px' }}>
@@ -142,7 +142,7 @@ function BootstrapScene({ onClaim }) {
       <div style={{ display: 'flex', gap: 10, padding: '14px 22px', background: SC.surface, borderTop: `1px solid ${SC.border}` }}>
         <SIcon name="shield" size={15} color={SC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
         <span style={{ fontSize: 11.5, color: SC.muted, lineHeight: '16px' }}>
-          From now on, a Keycloak login alone never grants access — every device must be explicitly trusted.
+          From now on, a login from your identity provider alone never grants access — every device must be explicitly trusted.
         </span>
       </div>
     </SceneShell>

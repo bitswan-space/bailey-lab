@@ -112,14 +112,16 @@ function DevicesView({ ctx }) {
         })}
       </div>
 
-      <div style={{ display: 'flex', gap: 10, marginTop: 16, padding: 14, borderRadius: 12, background: DC.surface, border: `1px solid ${DC.border}` }}>
-        <DIcon name="info" size={15} color={DC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
-        <span style={{ fontSize: 12.5, color: DC.muted, lineHeight: '18px' }}>
-          Lose access to <em>all</em> of these devices and you'll be locked out — a Keycloak login alone won't let you back in. Set up&nbsp;
-          <button onClick={() => ctx.go('security')} style={{ border: 0, background: 'transparent', color: DC.primary, cursor: 'pointer', padding: 0, font: 'inherit', fontWeight: 600 }}>authenticator recovery</button>
-          &nbsp;so you always have a way back.
-        </span>
-      </div>
+      {!data.recovery.totpActive && (
+        <div style={{ display: 'flex', gap: 10, marginTop: 16, padding: 14, borderRadius: 12, background: DC.surface, border: `1px solid ${DC.border}` }}>
+          <DIcon name="info" size={15} color={DC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
+          <span style={{ fontSize: 12.5, color: DC.muted, lineHeight: '18px' }}>
+            Lose access to <em>all</em> of these devices and you'll be locked out — signing in with your identity provider alone won't let you back in. Set up&nbsp;
+            <button onClick={() => ctx.go('security')} style={{ border: 0, background: 'transparent', color: DC.primary, cursor: 'pointer', padding: 0, font: 'inherit', fontWeight: 600 }}>authenticator recovery</button>
+            &nbsp;so you always have a way back.
+          </span>
+        </div>
+      )}
 
       <DModal open={!!revoke} onClose={() => setRevoke(null)} icon="log-out" title={`Sign out ${revoke?.name}?`}
         subtitle="That device will lose trust immediately and must be re-linked to get back in."
@@ -207,14 +209,22 @@ function SecurityView({ ctx }) {
   const [setupOpen, setSetupOpen] = useD(false);
   const [showCodes, setShowCodes] = useD(false);
   const [regenBusy, setRegenBusy] = useD(false);
+  const [removeBusy, setRemoveBusy] = useD(false);
   // Codes shown here are only those generated in this session (empty when the
   // user enrolled earlier — the plaintext can't be re-fetched).
   const sessionCodes = rec.recoveryCodes || [];
 
-  const removeTotp = () => {
-    // No backend "remove" endpoint in the gate contract; keep the control
-    // visible only as a local toggle would be misleading, so we surface it.
-    toast('Removing the authenticator is done from account settings', 'info');
+  // Live: remove this user's authenticator (POST /bailey/api/totp/remove) and
+  // reflect it locally so the card flips back to "Not set up".
+  const removeTotp = async () => {
+    setRemoveBusy(true);
+    try {
+      await DApi.removeTotp();
+      setData(d => ({ ...d, recovery: { ...d.recovery, totpActive: false, recoveryCodes: [] } }));
+      toast('Authenticator removed', 'info');
+    } catch (e) {
+      toast(`Couldn't remove authenticator: ${e.message}`, 'danger');
+    } finally { setRemoveBusy(false); }
   };
   const regenerate = async () => {
     setRegenBusy(true);
@@ -252,11 +262,11 @@ function SecurityView({ ctx }) {
                   : <DPill tone="warning" size="xs">Not set up</DPill>}
               </div>
               <p style={{ margin: '5px 0 0', fontSize: 13, color: DC.muted, lineHeight: '19px', maxWidth: 440 }}>
-                Use Google Authenticator, 1Password, or any TOTP app. A rotating 6-digit code becomes a recovery factor that doesn't depend on Keycloak or any single device.
+                Use Google Authenticator, 1Password, or any TOTP app. A rotating 6-digit code becomes a recovery factor that doesn't depend on your identity provider or any single device.
               </p>
             </div>
             {rec.totpActive
-              ? <DBtn variant="danger" size="sm" onClick={removeTotp}>Remove</DBtn>
+              ? <DBtn variant="danger" size="sm" disabled={removeBusy} onClick={removeTotp}>{removeBusy ? 'Removing…' : 'Remove'}</DBtn>
               : <DBtn variant="primary" leftIcon="plus" onClick={() => setSetupOpen(true)}>Set up</DBtn>}
           </div>
         </DCard>

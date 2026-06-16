@@ -117,9 +117,9 @@ describe('App live-data loading + adapters + routing', () => {
     setLocation({ pathname: '/workspaces/ws1' });
     installFetch(fullRoutes());
     render(<App />);
-    // The manage drawer for ws1 is open on load — no click needed. "Open
-    // editor" only exists inside the drawer.
-    await waitFor(() => expect(screen.getByText('Open editor')).toBeTruthy());
+    // The manage drawer for ws1 is open on load — no click needed. "Ownership"
+    // only exists inside the drawer (owner view).
+    await waitFor(() => expect(screen.getByText('Ownership')).toBeTruthy());
   });
 
   it('navigation pushes a canonical URL', async () => {

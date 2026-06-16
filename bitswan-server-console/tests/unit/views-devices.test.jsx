@@ -134,7 +134,10 @@ describe('SecurityView', () => {
 
   it('active TOTP: shows/hides codes, regenerate, and remove', async () => {
     const s = spies();
-    installFetch({ '/bailey/api/backup-codes/regenerate': { json: { backup_codes: ['XXXX-9999'] } } });
+    installFetch({
+      '/bailey/api/backup-codes/regenerate': { json: { backup_codes: ['XXXX-9999'] } },
+      '/bailey/api/totp/remove': { json: { ok: true } },
+    });
     const data = makeData({ recovery: { totpActive: true, recoveryCodes: ['OLD1-2222'] } });
     render(<Host View={SecurityView} data={data} extra={s} />);
     expect(screen.getByText('● Active')).toBeTruthy();
@@ -142,8 +145,9 @@ describe('SecurityView', () => {
     expect(screen.getByText('OLD1-2222')).toBeTruthy();
     fireEvent.click(screen.getByText('Regenerate'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith('New recovery codes generated', 'success'));
+    // Remove actually calls the backend now (no nonsense "account settings" toast).
     fireEvent.click(screen.getByText('Remove'));
-    expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('account settings'), 'info');
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('Authenticator removed', 'info'));
   });
 
   it('active TOTP with no session codes: generate-new branch + error', async () => {

@@ -306,7 +306,7 @@ function WorkspacesView({ ctx }) {
       )}
 
       <CreateWorkspaceModal open={createOpen} onClose={() => setCreateOpen(false)} data={data} setData={setData} toast={toast} currentUser={currentUser} refresh={refresh} />
-      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} data={data} setData={setData} toast={toast} openUrl={openUrl} refresh={refresh} />
+      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} />
 
       <WModal open={emptyOpen} onClose={emptyBusy ? () => {} : () => setEmptyOpen(false)} icon="trash-2" title="Empty trash?"
         subtitle="This permanently deletes every trashed workspace you own — containers and data. This can't be undone."
@@ -388,61 +388,130 @@ function CreateWorkspaceModal({ open, onClose, data, setData, toast, currentUser
 // they're managed per-endpoint on the gate's /2fa-gate/share/<host> page — so
 // this drawer never shows a member roster or transfer control (there is no
 // backend for it; faking one would be mock data).
-function ManageWorkspaceDrawer({ ws, onClose, data, setData, toast, openUrl, refresh }) {
-  const [busy, setBusy] = useWS(false);
-  if (!ws) return null;
+function hostFromUrl(u) {
+  try { return new URL(u).host; } catch (e) { return ''; }
+}
 
-  // Live: trash → POST /workspaces/<name>/trash, restore → /restore.
-  // Re-fetch the list after so the card moves section.
-  const toggleArchive = async () => {
-    setBusy(true);
+// Ownership + Members, per the wireframe. Members are the REAL ACL grants on
+// the workspace's dashboard endpoint (GET/POST /2fa-gate/api/share/<host>):
+// owner_email + access grants. Owner-only — a non-owner can't read the share
+// state, so they get an honest read-only note. Transfer-ownership has no
+// backend, so it's shown disabled rather than faked.
+function ManageWorkspaceDrawer({ ws, onClose, toast }) {
+  const [share, setShare] = useWS(null);   // {owner_email, grants} | null while loading
+  const [err, setErr] = useWS('');
+  const [addEmail, setAddEmail] = useWS('');
+  const [busy, setBusy] = useWS('');        // '' | 'add' | <principal being removed>
+
+  const dashHost = ws ? hostFromUrl(ws.dashboard) : '';
+
+  React.useEffect(() => {
+    if (!ws || !ws.isOwner) { setShare(null); setErr(''); return undefined; }
+    let alive = true;
+    setShare(null); setErr(''); setAddEmail('');
+    WApi.workspaceMembers(dashHost)
+      .then(r => { if (alive) setShare(r); })
+      .catch(e => { if (alive) { setErr(e.message || 'Could not load members.'); setShare({ owner_email: '', grants: [] }); } });
+    return () => { alive = false; };
+  }, [ws && ws.id]);
+
+  if (!ws) return null;
+  const members = share ? (share.grants || []).filter(g => g.role === 'access') : [];
+  const SECTION = { fontSize: 11, fontWeight: 600, color: WC.muted, textTransform: 'uppercase', letterSpacing: 0.4 };
+
+  const addMember = async () => {
+    const email = addEmail.trim();
+    if (!email) return;
+    setBusy('add');
     try {
-      if (ws.status === 'active') { await WApi.trashWorkspace(ws.name); toast('Workspace trashed', 'info'); }
-      else { await WApi.restoreWorkspace(ws.name); toast('Workspace restored', 'success'); }
-      await refresh('workspaces');
-      onClose();
-    } catch (e) {
-      toast(`Couldn't ${ws.status === 'active' ? 'trash' : 'restore'} workspace: ${e.message}`, 'danger');
-    } finally { setBusy(false); }
+      setShare(await WApi.addWorkspaceMember(dashHost, email));
+      setAddEmail('');
+      toast(`${email} added to ${ws.name}`, 'success');
+    } catch (e) { toast(`Couldn't add member: ${e.message}`, 'danger'); }
+    finally { setBusy(''); }
   };
-  // Live: update → POST /workspaces/<name>/update (NDJSON; owner-only).
-  const doUpdate = async () => {
-    setBusy(true);
+  const removeMember = async (g) => {
+    setBusy(g.principal_value);
     try {
-      await WApi.updateWorkspace(ws.name, () => {});
-      toast('Workspace containers updated', 'success');
-    } catch (e) {
-      toast(`Update failed: ${e.message}`, 'danger');
-    } finally { setBusy(false); }
+      setShare(await WApi.removeWorkspaceMember(dashHost, g.principal_type, g.principal_value, g.role));
+      toast(`${g.principal_value} removed from ${ws.name}`, 'info');
+    } catch (e) { toast(`Couldn't remove member: ${e.message}`, 'danger'); }
+    finally { setBusy(''); }
   };
 
   return (
     <WDrawer open={!!ws} onClose={onClose} icon="layout-grid" title={ws.name}
       subtitle={ws.isOwner ? 'You own this workspace' : 'Shared with you'}
-      footer={<>
-        {ws.status === 'active' && ws.isOwner && (
-          <WBtn variant="default" disabled={busy} leftIcon="refresh-cw" onClick={doUpdate}>Update</WBtn>
-        )}
-        <WBtn variant={ws.status === 'active' ? 'default' : 'primary'} disabled={busy || !ws.isOwner}
-          leftIcon={ws.status === 'active' ? 'archive' : 'archive-restore'} onClick={toggleArchive}>
-          {ws.status === 'active' ? 'Trash' : 'Restore'}
-        </WBtn>
-        <WBtn variant="primary" disabled={busy} onClick={onClose}>Done</WBtn>
-      </>}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
-        {ws.editorUrl && (
-          <WBtn variant="default" leftIcon="external-link" onClick={() => openUrl(ws.editorUrl, `${ws.name} editor`)}>Open editor</WBtn>
-        )}
-        {ws.gitopsUrl && (
-          <WBtn variant="default" leftIcon="external-link" onClick={() => openUrl(ws.gitopsUrl, `${ws.name} gitops`)}>Open gitops</WBtn>
-        )}
-        <div style={{ display: 'flex', gap: 9, padding: 12, borderRadius: 10, background: WC.surface, border: `1px solid ${WC.border}` }}>
+      footer={<WBtn variant="primary" onClick={onClose}>Done</WBtn>}>
+      {!ws.isOwner ? (
+        <div style={{ display: 'flex', gap: 9, padding: 13, borderRadius: 10, background: WC.surface, border: `1px solid ${WC.border}` }}>
           <WIcon name="info" size={15} color={WC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
-          <span style={{ fontSize: 12, color: WC.muted, lineHeight: '17px' }}>
-            Members &amp; access for this workspace are managed per-endpoint on its share page (not from here).
+          <span style={{ fontSize: 12.5, color: WC.muted, lineHeight: '18px' }}>
+            You're a member of this workspace. Only its owner can manage ownership and members.
           </span>
         </div>
-      </div>
+      ) : (
+        <>
+          {/* Ownership */}
+          <div style={{ ...SECTION, marginBottom: 10 }}>Ownership</div>
+          <div style={{ border: `1px solid ${WC.border}`, borderRadius: 10, padding: 14, marginBottom: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+              <WAvatar user={{ name: share?.owner_email || ws.name }} size={36} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg, display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'Geist Mono, monospace' }}>
+                  {share ? (share.owner_email || 'Unknown') : 'Loading…'} <WPill tone="primary" size="xs">Owner</WPill>
+                </div>
+              </div>
+            </div>
+            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 9 }}>
+              <span title="Transferring ownership isn't supported yet." style={{ display: 'inline-flex' }}>
+                <WBtn variant="default" size="sm" leftIcon="arrow-left-right" disabled>Transfer ownership</WBtn>
+              </span>
+              <span style={{ fontSize: 11.5, color: WC.mutedFg }}>Not available yet.</span>
+            </div>
+          </div>
+
+          {/* Members */}
+          <div style={{ ...SECTION, margin: '20px 0 10px', display: 'flex', justifyContent: 'space-between' }}>
+            <span>Members</span><span>{share ? members.length : ''}</span>
+          </div>
+          {err && <div style={{ fontSize: 12.5, color: WC.red, marginBottom: 8 }}>{err}</div>}
+          {!share && !err && <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>Loading members…</div>}
+          {share && members.length === 0 && !err && (
+            <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>No members yet — only the owner has access.</div>
+          )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {members.map(g => (
+              <div key={g.principal_value} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 6px', borderRadius: 8 }}>
+                <WAvatar user={{ name: g.principal_value }} size={30} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: WC.fg, fontFamily: 'Geist Mono, monospace' }}>{g.principal_value}</div>
+                  <div style={{ fontSize: 11, color: WC.muted }}>{g.principal_type === 'group' ? 'Group' : 'Member'}</div>
+                </div>
+                <button onClick={() => removeMember(g)} disabled={busy === g.principal_value} title="Remove from workspace" style={{
+                  width: 28, height: 28, border: 0, background: 'transparent', borderRadius: 6, cursor: 'pointer',
+                  color: WC.mutedFg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <WIcon name="user-minus" size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Add member */}
+          <div style={{ ...SECTION, margin: '20px 0 10px' }}>Add a member</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ flex: 1 }}>
+              <WTextInput value={addEmail} onChange={setAddEmail} placeholder="person@example.com" />
+            </div>
+            <WBtn variant="primary" leftIcon="user-plus" disabled={busy === 'add' || !addEmail.trim()} onClick={addMember}>
+              {busy === 'add' ? 'Adding…' : 'Add'}
+            </WBtn>
+          </div>
+          <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
+            Grants this person access by email; they'll still trust a device of their own to get in.
+          </div>
+        </>
+      )}
     </WDrawer>
   );
 }

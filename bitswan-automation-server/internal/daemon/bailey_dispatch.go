@@ -115,6 +115,24 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleBaileyDevicesRemoveAPI(w, r, email)
 			return
 		}
+	case "/bailey/api/totp/remove":
+		// Remove THIS user's authenticator. A trusted-device account action
+		// (it's past the device-trust backstop), distinct from the untrusted
+		// enroll/verify gate APIs. After this the user keeps device trust but
+		// loses the authenticator recovery factor until they re-enrol.
+		if r.Method == http.MethodPost {
+			if email == "" {
+				writeJSONError(w, "no identity", http.StatusUnauthorized)
+				return
+			}
+			if err := dbDeleteTOTP(email); err != nil {
+				writeJSONError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true}`))
+			return
+		}
 	case "/bailey/api/approvals":
 		if r.Method == http.MethodGet {
 			handleBaileyApprovalsAPI(w, r, email, isAdminGroups(groups))

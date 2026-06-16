@@ -177,6 +177,7 @@ export const Api = {
   totpEnroll: () => getJSON('/bailey/api/totp/enroll'),
   totpVerify: (code) => postJSON('/bailey/api/totp/verify', { code }),
   regenerateBackupCodes: () => postJSON('/bailey/api/backup-codes/regenerate', {}),
+  removeTotp: () => postJSON('/bailey/api/totp/remove', {}),
   devices: () => getJSON('/bailey/api/devices'),
   removeDevice: (id) => postForm('/bailey/api/devices/remove', { id }),
   approvals: () => getJSON('/bailey/api/approvals'),
@@ -192,6 +193,16 @@ export const Api = {
   restoreWorkspace: (name) => postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/restore`),
   updateWorkspace: (name, onEvent) =>
     postNDJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/update`, {}, onEvent),
+  // Workspace membership = the ACL share state on the workspace's dashboard
+  // endpoint host: owner_email + grants. Owner-only (403 otherwise). Returns
+  // the updated listing on add/remove.
+  workspaceMembers: (host) => getJSON(`/2fa-gate/api/share/${encodeURIComponent(host)}`),
+  addWorkspaceMember: (host, email) =>
+    postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
+      { action: 'grant', principal_type: 'email', principal_value: email, role: 'access' }),
+  removeWorkspaceMember: (host, principalType, principalValue, role) =>
+    postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
+      { action: 'revoke', principal_type: principalType, principal_value: principalValue, role }),
   emptyTrash: (onEvent) =>
     postNDJSON('/bailey/api/workspaces/empty-trash', { confirmation: 'empty trash' }, onEvent),
   notificationsCount: () => getJSON('/bailey/api/notifications-count'),

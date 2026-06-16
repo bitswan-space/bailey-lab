@@ -80,7 +80,7 @@ function adaptApproval(p) {
     kind: 'laptop',
     browser: '', os: '', ip: '', location: '',
     requested: ageLabel(p.age_seconds),
-    oauth: 'Keycloak SSO',
+    oauth: 'Your identity provider',
     code: '', // not provided by backend — admin enters it from the user's screen
   };
 }
