@@ -459,24 +459,27 @@ async def lifespan(app: FastAPI):
         observer.schedule(event_handler, workspace_dir, recursive=True)
         observer.start()
         print(f"Started watching workspace directory: {workspace_dir}")
+
+        # Watch worktree directories for file changes → SSE push.
+        # Create the directory first so a fresh workspace (where worktrees/
+        # doesn't exist yet) still gets a watcher attached. Without this the
+        # first `POST /worktrees/create` has no listener, the cache stays
+        # empty, and `GET /worktrees/` keeps returning [] until gitops
+        # restarts. The recursive watcher on `workspace_dir` doesn't help —
+        # `WorkspaceChangeHandler` only refreshes automations/processes, not
+        # the worktrees list cache.
+        # Guarded by the workspace-dir check: this used to live behind the
+        # MQTT-connected branch, so it was skipped where there's no workspace
+        # repo (e.g. tests); keep that behaviour now that MQTT is gone.
+        worktrees_dir = os.path.join(workspace_dir, "worktrees")
+        os.makedirs(worktrees_dir, exist_ok=True)
+        wt_handler = WorktreeChangeHandler(asyncio.get_event_loop(), worktrees_dir)
+        worktree_observer = Observer()
+        worktree_observer.schedule(wt_handler, worktrees_dir, recursive=True)
+        worktree_observer.start()
+        print(f"Started watching worktrees directory: {worktrees_dir}")
     else:
         print(f"Workspace directory does not exist: {workspace_dir}")
-
-    # Watch worktree directories for file changes → SSE push.
-    # Create the directory first so a fresh workspace (where worktrees/
-    # doesn't exist yet) still gets a watcher attached. Without this the
-    # first `POST /worktrees/create` has no listener, the cache stays
-    # empty, and `GET /worktrees/` keeps returning [] until gitops
-    # restarts. The recursive watcher on `workspace_dir` doesn't help —
-    # `WorkspaceChangeHandler` only refreshes automations/processes, not
-    # the worktrees list cache.
-    worktrees_dir = os.path.join(workspace_dir, "worktrees")
-    os.makedirs(worktrees_dir, exist_ok=True)
-    wt_handler = WorktreeChangeHandler(asyncio.get_event_loop(), worktrees_dir)
-    worktree_observer = Observer()
-    worktree_observer.schedule(wt_handler, worktrees_dir, recursive=True)
-    worktree_observer.start()
-    print(f"Started watching worktrees directory: {worktrees_dir}")
 
     # Clean up completed/failed deploy tasks every 10 minutes
     scheduler.add_job(
