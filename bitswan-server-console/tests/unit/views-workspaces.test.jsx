@@ -74,12 +74,34 @@ describe('OverviewView', () => {
     await waitFor(() => expect(screen.getByText('SIEM forwarding')).toBeTruthy());
     expect(screen.getByText('○ Disconnected')).toBeTruthy();
     fireEvent.click(screen.getByText('Configure ingestor'));
+    // Port is pre-filled with the HTTP default (4318) and editable.
     fireEvent.change(screen.getByPlaceholderText('https://collector.example.com'), { target: { value: 'https://collector.acme.test' } });
-    fireEvent.change(screen.getByPlaceholderText('e.g. 4318'), { target: { value: '4318' } });
     fireEvent.click(screen.getByText('Save & connect'));
     await waitFor(() => expect(screen.getByText('● Connected')).toBeTruthy());
     expect(saved).toMatchObject({ enabled: true, protocol: 'otlp-http', endpoint: 'https://collector.acme.test', port: 4318 });
     expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('connected'), 'success');
+  });
+
+  it('SIEM card: choosing OTLP/gRPC swaps the default port to 4317 (still editable)', async () => {
+    const s = spies();
+    let saved = null;
+    installFetch({
+      '/bailey/api/admin/siem': (url, init) => {
+        if (init && init.method === 'POST') { saved = JSON.parse(init.body); return { json: { enabled: true, protocol: saved.protocol, endpoint: saved.endpoint, port: saved.port, has_auth_token: false, connected: true } }; }
+        return { json: { enabled: false, protocol: 'otlp-http', endpoint: '', has_auth_token: false, connected: false } };
+      },
+    });
+    render(<Host View={OverviewView} data={makeData({ overview })} extra={s} />);
+    await waitFor(() => expect(screen.getByText('Configure ingestor')).toBeTruthy());
+    fireEvent.click(screen.getByText('Configure ingestor'));
+    // Switch protocol → port follows to 4317; the field stays editable.
+    fireEvent.change(screen.getByDisplayValue('OTLP / HTTP'), { target: { value: 'otlp-grpc' } });
+    expect(screen.getByDisplayValue('4317')).toBeTruthy();
+    fireEvent.change(screen.getByDisplayValue('4317'), { target: { value: '5555' } }); // override
+    fireEvent.change(screen.getByPlaceholderText('collector.example.com'), { target: { value: 'otel.acme.test' } });
+    fireEvent.click(screen.getByText('Save & connect'));
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('connected'), 'success'));
+    expect(saved).toMatchObject({ enabled: true, protocol: 'otlp-grpc', endpoint: 'otel.acme.test', port: 5555 });
   });
 
   it('SIEM card: surfaces a connectivity failure without claiming connected', async () => {

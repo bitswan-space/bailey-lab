@@ -112,7 +112,9 @@ function SiemCard({ toast }) {
   const [editing, setEditing] = useWS(false);
   const [busy, setBusy] = useWS(false);
   const [saveErr, setSaveErr] = useWS('');
-  const [form, setForm] = useWS({ protocol: 'otlp-http', endpoint: '', port: '', auth_token: '' });
+  // Conventional OTLP receiver ports — HTTP on 4318, gRPC on 4317.
+  const defaultPortFor = (p) => (p === 'otlp-grpc' ? '4317' : '4318');
+  const [form, setForm] = useWS({ protocol: 'otlp-http', endpoint: '', port: '4318', auth_token: '' });
 
   const load = () => {
     setErr('');
@@ -121,11 +123,15 @@ function SiemCard({ toast }) {
   React.useEffect(() => { load(); }, []);
 
   const setF = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+  // Switching protocol resets the port to that protocol's default, but it
+  // stays an editable field the operator can override.
+  const onProtocolChange = (p) => setForm((f) => ({ ...f, protocol: p, port: defaultPortFor(p) }));
   const openEdit = () => {
+    const proto = (cfg && cfg.protocol) || 'otlp-http';
     setForm({
-      protocol: (cfg && cfg.protocol) || 'otlp-http',
+      protocol: proto,
       endpoint: (cfg && cfg.endpoint) || '',
-      port: (cfg && cfg.port) ? String(cfg.port) : '',
+      port: (cfg && cfg.port) ? String(cfg.port) : defaultPortFor(proto),
       auth_token: '',
     });
     setSaveErr('');
@@ -210,20 +216,25 @@ function SiemCard({ toast }) {
 
         {cfg && editing && (
           <div>
-            <div style={FIELD}>
-              <label style={labelStyle}>Protocol</label>
-              <select value={form.protocol} onChange={(e) => setF('protocol')(e.target.value)}
-                style={{ width: '100%', height: 34, padding: '0 9px', borderRadius: 8, border: `1px solid ${WC.border}`, background: '#fff', fontFamily: 'inherit', fontSize: 13, color: WC.fg }}>
-                <option value="otlp-http">OTLP / HTTP</option>
-              </select>
+            {/* Protocol + port travel together: the port follows the protocol's
+                default but stays editable. */}
+            <div style={{ ...FIELD, display: 'flex', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={labelStyle}>Protocol</label>
+                <select value={form.protocol} onChange={(e) => onProtocolChange(e.target.value)}
+                  style={{ width: '100%', height: 34, padding: '0 9px', borderRadius: 8, border: `1px solid ${WC.border}`, background: '#fff', fontFamily: 'inherit', fontSize: 13, color: WC.fg }}>
+                  <option value="otlp-http">OTLP / HTTP</option>
+                  <option value="otlp-grpc">OTLP / gRPC</option>
+                </select>
+              </div>
+              <div style={{ width: 96 }}>
+                <label style={labelStyle}>Port</label>
+                <WTextInput value={form.port} onChange={setF('port')} placeholder={defaultPortFor(form.protocol)} />
+              </div>
             </div>
             <div style={FIELD}>
               <label style={labelStyle}>Ingestor URL</label>
-              <WTextInput value={form.endpoint} onChange={setF('endpoint')} placeholder="https://collector.example.com" />
-            </div>
-            <div style={FIELD}>
-              <label style={labelStyle}>Port <span style={{ fontWeight: 400, color: WC.mutedFg }}>(optional)</span></label>
-              <WTextInput value={form.port} onChange={setF('port')} placeholder="e.g. 4318" />
+              <WTextInput value={form.endpoint} onChange={setF('endpoint')} placeholder={form.protocol === 'otlp-grpc' ? 'collector.example.com' : 'https://collector.example.com'} />
             </div>
             <div style={FIELD}>
               <label style={labelStyle}>Auth token <span style={{ fontWeight: 400, color: WC.mutedFg }}>(optional, sent as Bearer)</span></label>

@@ -28,8 +28,16 @@ import (
 
 const settingSIEMConfig = "siem_otel_config"
 
-// siemProtocolHTTP is the only transport implemented today (OTLP/HTTP+JSON).
-const siemProtocolHTTP = "otlp-http"
+// Supported OTLP transports.
+const (
+	siemProtocolHTTP = "otlp-http" // OTLP/HTTP with JSON encoding (POST /v1/logs)
+	siemProtocolGRPC = "otlp-grpc" // OTLP/gRPC (LogsService/Export)
+)
+
+// validSIEMProtocol reports whether p is a transport we implement.
+func validSIEMProtocol(p string) bool {
+	return p == siemProtocolHTTP || p == siemProtocolGRPC
+}
 
 // siemConfig is the persisted SIEM forwarding configuration.
 type siemConfig struct {
@@ -127,17 +135,37 @@ func otlpEndpointURL(c siemConfig) (string, error) {
 	return u.String(), nil
 }
 
-// otlpLogPayload builds the OTLP/HTTP JSON body for one audit event. Field
-// names follow the OTLP JSON mapping (lowerCamelCase) that collectors expect.
-func otlpLogPayload(e eventRecord, host string) ([]byte, error) {
+// otlpFields maps one audit event to the OTLP log-record pieces shared by both
+// transports: the event timestamp (unix nanos), the human-readable body, and
+// the structured attributes. Keeping this in one place means the HTTP/JSON and
+// gRPC/proto encoders emit identical records.
+func otlpFields(e eventRecord) (tsNano int64, body string, attrs [][2]string) {
 	ts, err := time.Parse(time.RFC3339, e.TS)
 	if err != nil {
 		ts = time.Now().UTC()
 	}
+	tsNano = ts.UTC().UnixNano()
+	body = strings.TrimSpace(strings.TrimSpace(e.Actor+" "+e.Action) + " " + e.Target)
+	attrs = [][2]string{
+		{"event.domain", "security.audit"},
+		{"event.name", e.Action},
+		{"enduser.id", e.Actor},
+		{"event.target", e.Target},
+	}
+	return tsNano, body, attrs
+}
+
+// otlpLogPayload builds the OTLP/HTTP JSON body for one audit event. Field
+// names follow the OTLP JSON mapping (lowerCamelCase) that collectors expect.
+func otlpLogPayload(e eventRecord, host string) ([]byte, error) {
+	tsNano, body, fields := otlpFields(e)
 	attr := func(k, v string) map[string]any {
 		return map[string]any{"key": k, "value": map[string]any{"stringValue": v}}
 	}
-	body := strings.TrimSpace(strings.TrimSpace(e.Actor+" "+e.Action) + " " + e.Target)
+	recAttrs := make([]any, 0, len(fields))
+	for _, kv := range fields {
+		recAttrs = append(recAttrs, attr(kv[0], kv[1]))
+	}
 	payload := map[string]any{
 		"resourceLogs": []any{map[string]any{
 			"resource": map[string]any{"attributes": []any{
@@ -148,16 +176,11 @@ func otlpLogPayload(e eventRecord, host string) ([]byte, error) {
 			"scopeLogs": []any{map[string]any{
 				"scope": map[string]any{"name": "bailey.audit"},
 				"logRecords": []any{map[string]any{
-					"timeUnixNano":   strconv.FormatInt(ts.UTC().UnixNano(), 10),
+					"timeUnixNano":   strconv.FormatInt(tsNano, 10),
 					"severityNumber": 9, // INFO
 					"severityText":   "INFO",
 					"body":           map[string]any{"stringValue": body},
-					"attributes": []any{
-						attr("event.domain", "security.audit"),
-						attr("event.name", e.Action),
-						attr("enduser.id", e.Actor),
-						attr("event.target", e.Target),
-					},
+					"attributes":     recAttrs,
 				}},
 			}},
 		}},
@@ -165,8 +188,17 @@ func otlpLogPayload(e eventRecord, host string) ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-// postOTLP sends one audit event to the configured ingestor synchronously.
+// postOTLP sends one audit event to the configured ingestor synchronously,
+// dispatching to the configured transport.
 func postOTLP(ctx context.Context, c siemConfig, e eventRecord) error {
+	if c.Protocol == siemProtocolGRPC {
+		return exportOTLPGRPC(ctx, c, e)
+	}
+	return postOTLPHTTP(ctx, c, e)
+}
+
+// postOTLPHTTP sends one event over OTLP/HTTP (JSON).
+func postOTLPHTTP(ctx context.Context, c siemConfig, e eventRecord) error {
 	endpoint, err := otlpEndpointURL(c)
 	if err != nil {
 		return err
@@ -302,8 +334,8 @@ func handleSIEMSet(w http.ResponseWriter, r *http.Request, by string) {
 	if protocol == "" {
 		protocol = siemProtocolHTTP
 	}
-	if protocol != siemProtocolHTTP {
-		writeJSONError(w, "unsupported protocol: only "+siemProtocolHTTP+" (OTLP/HTTP) is supported", http.StatusBadRequest)
+	if !validSIEMProtocol(protocol) {
+		writeJSONError(w, "unsupported protocol: use "+siemProtocolHTTP+" (OTLP/HTTP) or "+siemProtocolGRPC+" (OTLP/gRPC)", http.StatusBadRequest)
 		return
 	}
 	if req.Port < 0 || req.Port > 65535 {
@@ -323,7 +355,7 @@ func handleSIEMSet(w http.ResponseWriter, r *http.Request, by string) {
 	// Validate the endpoint up front when enabling, so we never persist an
 	// "enabled but unusable" config silently.
 	if cfg.Enabled {
-		if _, err := otlpEndpointURL(cfg); err != nil {
+		if err := validateSIEMEndpoint(cfg); err != nil {
 			writeJSONError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
