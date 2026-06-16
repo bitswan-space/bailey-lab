@@ -41,7 +41,9 @@ def test_ensure_bare_repo_provisions_hook_and_config(bare_repo):
     hook = os.path.join(bare_repo, "hooks", "pre-receive")
     assert os.path.isfile(hook)
     assert os.access(hook, os.X_OK)
-    cfg = _git("-C", bare_repo, "config", "--get", "receive.denyNonFastForwards").stdout.strip()
+    cfg = _git(
+        "-C", bare_repo, "config", "--get", "receive.denyNonFastForwards"
+    ).stdout.strip()
     assert cfg == "true"
 
 
@@ -54,13 +56,19 @@ def test_fast_forward_only_enforcement(bare_repo, tmp_path):
     _git("commit", "-qm", "c1", cwd=work)
 
     # New branch (creation) is allowed.
-    assert _git("push", "origin", "HEAD:refs/heads/main", cwd=work, check=False).returncode == 0
+    assert (
+        _git("push", "origin", "HEAD:refs/heads/main", cwd=work, check=False).returncode
+        == 0
+    )
 
     # Fast-forward is allowed.
     (work / "b.txt").write_text("b")
     _git("add", "-A", cwd=work)
     _git("commit", "-qm", "c2", cwd=work)
-    assert _git("push", "origin", "HEAD:refs/heads/main", cwd=work, check=False).returncode == 0
+    assert (
+        _git("push", "origin", "HEAD:refs/heads/main", cwd=work, check=False).returncode
+        == 0
+    )
 
     # History rewrite + force-push is rejected.
     _git("commit", "-q", "--amend", "-m", "c2-rewritten", cwd=work)
@@ -69,7 +77,9 @@ def test_fast_forward_only_enforcement(bare_repo, tmp_path):
     assert "fast-forward" in (forced.stderr + forced.stdout).lower()
 
     # Branch deletion is rejected.
-    _git("push", "origin", "HEAD:refs/heads/extra", cwd=work, check=False)  # create first
+    _git(
+        "push", "origin", "HEAD:refs/heads/extra", cwd=work, check=False
+    )  # create first
     deleted = _git("push", "origin", "--delete", "extra", cwd=work, check=False)
     assert deleted.returncode != 0
 
@@ -78,6 +88,9 @@ def test_derive_bp_and_copy_parsing():
     # main copy -> no copy context (stays unprefixed, like legacy main)
     assert derive_bp_and_worktree("copies/main/Test/backend") == ("test", "")
     # non-main copy -> copy context is the copy name
-    assert derive_bp_and_worktree("copies/feature1/Test/backend") == ("test", "feature1")
+    assert derive_bp_and_worktree("copies/feature1/Test/backend") == (
+        "test",
+        "feature1",
+    )
     # top-level automation (no BP segment)
     assert derive_bp_and_worktree("copies/main/solo") == ("", "")
