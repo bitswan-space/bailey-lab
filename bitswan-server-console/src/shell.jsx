@@ -25,7 +25,28 @@ const C = {
 };
 
 function Icon({ name, size = 14, color, style }) {
-  return <i data-lucide={name} style={{ width: size, height: size, color, display:'inline-block', ...style }}></i>;
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // Render the icon as imperative DOM INSIDE this React-owned <span>. lucide's
+    // createIcons() replaces the <i data-lucide> with an <svg>; because that
+    // swap happens to a node React does NOT track (React only owns the <span>),
+    // React never reconciles/removeChild's the swapped node. Previously Icon
+    // rendered the <i> directly, so when lucide swapped it React lost the node
+    // and crashed with "removeChild: not a child" (white page) on the next
+    // re-render/unmount — e.g. the TOTP setup verify→backup-codes transition.
+    el.textContent = '';
+    const i = document.createElement('i');
+    i.setAttribute('data-lucide', name);
+    el.appendChild(i);
+    if (window.lucide) { try { window.lucide.createIcons(); } catch (e) { /* noop */ } }
+    const svg = el.querySelector('svg');
+    if (svg) { svg.setAttribute('width', size); svg.setAttribute('height', size); }
+  }, [name, size]);
+  return <span ref={ref} aria-hidden="true" style={{
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    width: size, height: size, color, flex: '0 0 auto', ...style }} />;
 }
 
 // re-render lucide icons whenever a component mounts/updates

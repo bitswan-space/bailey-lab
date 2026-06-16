@@ -210,6 +210,7 @@ function SecurityView({ ctx }) {
   const [showCodes, setShowCodes] = useD(false);
   const [regenBusy, setRegenBusy] = useD(false);
   const [removeBusy, setRemoveBusy] = useD(false);
+  const [confirmRemove, setConfirmRemove] = useD(false);
   // Codes shown here are only those generated in this session (empty when the
   // user enrolled earlier — the plaintext can't be re-fetched).
   const sessionCodes = rec.recoveryCodes || [];
@@ -222,6 +223,7 @@ function SecurityView({ ctx }) {
       await DApi.removeTotp();
       setData(d => ({ ...d, recovery: { ...d.recovery, totpActive: false, recoveryCodes: [] } }));
       toast('Authenticator removed', 'info');
+      setConfirmRemove(false);
     } catch (e) {
       toast(`Couldn't remove authenticator: ${e.message}`, 'danger');
     } finally { setRemoveBusy(false); }
@@ -266,7 +268,7 @@ function SecurityView({ ctx }) {
               </p>
             </div>
             {rec.totpActive
-              ? <DBtn variant="danger" size="sm" disabled={removeBusy} onClick={removeTotp}>{removeBusy ? 'Removing…' : 'Remove'}</DBtn>
+              ? <DBtn variant="danger" size="sm" onClick={() => setConfirmRemove(true)}>Remove</DBtn>
               : <DBtn variant="primary" leftIcon="plus" onClick={() => setSetupOpen(true)}>Set up</DBtn>}
           </div>
         </DCard>
@@ -318,6 +320,20 @@ function SecurityView({ ctx }) {
       </div>
 
       <SetupTotpModal open={setupOpen} onClose={() => setSetupOpen(false)} data={data} setData={setData} toast={toast} onDone={() => setShowCodes(true)} />
+
+      <DModal open={confirmRemove} onClose={removeBusy ? () => {} : () => setConfirmRemove(false)} icon="shield-off" title="Remove authenticator?"
+        subtitle="This disables authenticator recovery for your account."
+        footer={<>
+          <DBtn variant="default" disabled={removeBusy} onClick={() => setConfirmRemove(false)}>Cancel</DBtn>
+          <DBtn variant="primary" disabled={removeBusy} style={{ background: DC.red, borderColor: DC.red }} onClick={removeTotp}>{removeBusy ? 'Removing…' : 'Remove authenticator'}</DBtn>
+        </>}>
+        <div style={{ display: 'flex', gap: 10, padding: 13, background: DC.surface, borderRadius: 10, border: `1px solid ${DC.border}` }}>
+          <DIcon name="alert-triangle" size={16} color={DC.red} style={{ marginTop: 1, flex: '0 0 auto' }} />
+          <span style={{ fontSize: 12.5, color: DC.fg, lineHeight: '18px' }}>
+            If you later lose access to all your trusted devices, you won't be able to recover with an authenticator code. You can set it up again at any time.
+          </span>
+        </div>
+      </DModal>
     </div>
   );
 }

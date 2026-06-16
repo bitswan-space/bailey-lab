@@ -145,8 +145,10 @@ describe('SecurityView', () => {
     expect(screen.getByText('OLD1-2222')).toBeTruthy();
     fireEvent.click(screen.getByText('Regenerate'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith('New recovery codes generated', 'success'));
-    // Remove actually calls the backend now (no nonsense "account settings" toast).
+    // Remove asks for confirmation first, then calls the backend.
     fireEvent.click(screen.getByText('Remove'));
+    expect(screen.getByText('Remove authenticator?')).toBeTruthy();
+    fireEvent.click(screen.getByText('Remove authenticator'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith('Authenticator removed', 'info'));
   });
 
