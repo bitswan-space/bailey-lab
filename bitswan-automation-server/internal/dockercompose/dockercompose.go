@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/certauthority"
@@ -250,8 +251,10 @@ func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
 }
 
 // CreateTraefikDockerComposeFile creates a docker-compose file for global Traefik.
+// env, when non-nil, is added to the traefik service environment (used to
+// configure lego's httpreq DNS-01 provider for wildcard certificates).
 // networks parameter is optional - if provided, adds those networks along with bitswan_network.
-func CreateTraefikDockerComposeFile(traefikPath string, networks ...string) (string, error) {
+func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, networks ...string) (string, error) {
 	traefikVolumes := []string{
 		traefikPath + "/traefik.yml:/etc/traefik/traefik.yml:z",
 		traefikPath + "/certs:/tls:z",
@@ -273,17 +276,33 @@ func CreateTraefikDockerComposeFile(traefikPath string, networks ...string) (str
 		}
 	}
 
+	traefikService := map[string]interface{}{
+		"image":          "traefik:v3.6",
+		"restart":        "always",
+		"container_name": "traefik",
+		"ports":          []string{"80:80", "443:443", "9080:8080"},
+		"networks":       traefikNetworks,
+		"volumes":        traefikVolumes,
+	}
+	if len(env) > 0 {
+		// Sorted for deterministic output — the daemon compares the rendered
+		// compose file against the one on disk to detect config drift.
+		keys := make([]string, 0, len(env))
+		for key := range env {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		envList := make([]string, 0, len(env))
+		for _, key := range keys {
+			envList = append(envList, fmt.Sprintf("%s=%s", key, env[key]))
+		}
+		traefikService["environment"] = envList
+	}
+
 	dockerCompose := map[string]interface{}{
 		"version": "3.8",
 		"services": map[string]interface{}{
-			"traefik": map[string]interface{}{
-				"image":          "traefik:v3.6",
-				"restart":        "always",
-				"container_name": "traefik",
-				"ports":          []string{"80:80", "443:443", "9080:8080"},
-				"networks":       traefikNetworks,
-				"volumes":        traefikVolumes,
-			},
+			"traefik": traefikService,
 		},
 		"networks": networksMap,
 	}
@@ -302,8 +321,11 @@ func CreateTraefikDockerComposeFile(traefikPath string, networks ...string) (str
 // workspaceName: name of the workspace (used for container name)
 // traefikPath: path to traefik config directory
 // domain: the public domain — used to generate Docker labels so the global Traefik auto-discovers this sub-traefik.
+// wildcardResolver: when non-empty, the global Traefik resolver that issues a
+// shared *.{domain} wildcard certificate (DNS-01) — used instead of
+// per-hostname HTTP-01 certificates.
 // networks: list of additional networks (bitswan_network is always included)
-func CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikPath, domain string, networks []string) (string, error) {
+func CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikPath, domain, wildcardResolver string, networks []string) (string, error) {
 	traefikVolumes := []string{
 		traefikPath + "/traefik.yml:/etc/traefik/traefik.yml:z",
 	}
@@ -349,7 +371,16 @@ func CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikPath, domain 
 			fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", routerName): "80",
 		}
 		if !strings.HasSuffix(domain, ".localhost") {
-			labels[fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", routerName)] = "letsencrypt"
+			if wildcardResolver != "" {
+				// One wildcard certificate for the whole domain via DNS-01
+				// instead of an HTTP-01 certificate per SNI hostname (which
+				// quickly exhausts Let's Encrypt's per-domain rate limit).
+				labels[fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", routerName)] = wildcardResolver
+				labels[fmt.Sprintf("traefik.http.routers.%s.tls.domains[0].main", routerName)] = domain
+				labels[fmt.Sprintf("traefik.http.routers.%s.tls.domains[0].sans", routerName)] = "*." + domain
+			} else {
+				labels[fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", routerName)] = "letsencrypt"
+			}
 		}
 		serviceMap["labels"] = labels
 	}

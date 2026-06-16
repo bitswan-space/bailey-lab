@@ -87,7 +87,41 @@ type traefikRouter struct {
 
 // traefikRouterTLS, when non-nil, enables TLS termination on a router.
 type traefikRouterTLS struct {
-	CertResolver string `json:"certResolver,omitempty"`
+	CertResolver string      `json:"certResolver,omitempty"`
+	Domains      []TLSDomain `json:"domains,omitempty"`
+}
+
+// TLSDomain mirrors Traefik's router tls.domains entry. When set on a router
+// with an ACME cert resolver, Traefik requests a certificate for exactly
+// these domains instead of deriving one per SNI hostname — this is how a
+// single wildcard certificate (main: example.com, sans: [*.example.com]) is
+// shared across all routes under a domain.
+type TLSDomain struct {
+	Main string   `json:"main"`
+	SANs []string `json:"sans,omitempty"`
+}
+
+// WildcardTLSDomains returns the tls.domains entry for a wildcard certificate
+// covering domain and all single-level subdomains of it.
+func WildcardTLSDomains(domain string) []TLSDomain {
+	return []TLSDomain{{Main: domain, SANs: []string{"*." + domain}}}
+}
+
+// HostCoveredByWildcard reports whether hostname is covered by a wildcard
+// certificate for *.domain — i.e. it is the domain itself or exactly one
+// level below it. Wildcards do not match deeper subdomains
+// (a.b.example.com is NOT covered by *.example.com).
+func HostCoveredByWildcard(hostname, domain string) bool {
+	if hostname == "" || domain == "" {
+		return false
+	}
+	hostname = strings.TrimSuffix(strings.ToLower(hostname), ".")
+	domain = strings.TrimSuffix(strings.ToLower(domain), ".")
+	if hostname == domain {
+		return true
+	}
+	sub, found := strings.CutSuffix(hostname, "."+domain)
+	return found && sub != "" && !strings.Contains(sub, ".")
 }
 
 type traefikService struct {
@@ -403,6 +437,17 @@ func AddRoute(hostname, upstream string) error {
 // Routes targeting the global traefik include TLS and both entrypoints.
 // An optional certResolver string can be provided to use ACME (e.g. "letsencrypt").
 func AddRouteWithTraefik(hostname, upstream, traefikBaseURL string, certResolver ...string) error {
+	resolver := ""
+	if len(certResolver) > 0 {
+		resolver = certResolver[0]
+	}
+	return AddRouteWithTLSDomains(hostname, upstream, traefikBaseURL, resolver, nil)
+}
+
+// AddRouteWithTLSDomains is AddRouteWithTraefik with explicit tls.domains on
+// the router, so the ACME resolver requests a certificate for those domains
+// (e.g. a wildcard) instead of the route's own hostname.
+func AddRouteWithTLSDomains(hostname, upstream, traefikBaseURL, resolver string, tlsDomains []TLSDomain) error {
 	if traefikBaseURL == "" {
 		traefikBaseURL = getTraefikBaseURL()
 	}
@@ -413,11 +458,6 @@ func AddRouteWithTraefik(hostname, upstream, traefikBaseURL string, certResolver
 
 	workspaceTarget := isWorkspaceURL(traefikBaseURL)
 
-	resolver := ""
-	if len(certResolver) > 0 {
-		resolver = certResolver[0]
-	}
-
 	return modifyState(traefikBaseURL, func(state *traefikDynConfig) error {
 		router := &traefikRouter{
 			Rule:    fmt.Sprintf("Host(`%s`)", hostname),
@@ -427,7 +467,7 @@ func AddRouteWithTraefik(hostname, upstream, traefikBaseURL string, certResolver
 			router.EntryPoints = []string{"web"}
 		} else {
 			router.EntryPoints = []string{"web", "websecure"}
-			router.TLS = &traefikRouterTLS{CertResolver: resolver}
+			router.TLS = &traefikRouterTLS{CertResolver: resolver, Domains: tlsDomains}
 		}
 
 		state.HTTP.Routers[routeID] = router
@@ -438,6 +478,33 @@ func AddRouteWithTraefik(hostname, upstream, traefikBaseURL string, certResolver
 		}
 
 		fmt.Printf("AddRoute: added route %s -> %s (ID: %s)\n", hostname, processedUpstream, routeID)
+		return nil
+	})
+}
+
+// ApplyWildcardCertResolver switches existing ACME routes whose hostname is
+// covered by *.domain to the given cert resolver with a shared wildcard
+// certificate. Routes using mkcert or manually installed certificates
+// (TLS enabled but no cert resolver) are left untouched.
+func ApplyWildcardCertResolver(domain, resolver string) error {
+	traefikBaseURL := getTraefikBaseURL()
+	return modifyState(traefikBaseURL, func(state *traefikDynConfig) error {
+		migrated := 0
+		for _, router := range state.HTTP.Routers {
+			if router.TLS == nil || router.TLS.CertResolver == "" {
+				continue
+			}
+			hostname := extractHostFromRule(router.Rule)
+			if !HostCoveredByWildcard(hostname, domain) {
+				continue
+			}
+			router.TLS.CertResolver = resolver
+			router.TLS.Domains = WildcardTLSDomains(domain)
+			migrated++
+		}
+		if migrated > 0 {
+			fmt.Printf("ApplyWildcardCertResolver: %d route(s) under %s switched to resolver %s\n", migrated, domain, resolver)
+		}
 		return nil
 	})
 }

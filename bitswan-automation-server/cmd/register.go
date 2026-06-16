@@ -59,6 +59,10 @@ func newRegisterCmd() *cobra.Command {
 				return fmt.Errorf("failed to get automation server info: %w", err)
 			}
 
+			// Persist the AOC-assigned domain (e.g. acme-prod.bswn.io) so the
+			// daemon can configure wildcard certificates for it.
+			aocClient.SetDomain(serverInfo.Domain)
+
 			// Save the configuration
 			if err := aocClient.SaveConfig(); err != nil {
 				return fmt.Errorf("failed to save configuration: %w", err)
@@ -85,6 +89,20 @@ func newRegisterCmd() *cobra.Command {
 				fmt.Println("You may need to restart the daemon to connect to MQTT.")
 			} else {
 				fmt.Println("MQTT connection established successfully.")
+			}
+
+			// If the AOC assigned this server a domain, reconfigure the
+			// ingress so Traefik obtains a *.<domain> wildcard certificate
+			// via the DNS-01 challenge (through the AOC) instead of issuing
+			// a separate HTTP-01 certificate per endpoint.
+			if serverInfo.Domain != "" {
+				fmt.Printf("\n🔐 Configuring ingress for a *.%s wildcard certificate...\n", serverInfo.Domain)
+				if _, err := client.InitIngress(false); err != nil {
+					fmt.Printf("Warning: Failed to reconfigure ingress for wildcard certificates: %v\n", err)
+					fmt.Println("Run 'bitswan ingress init' to apply the wildcard certificate configuration.")
+				} else {
+					fmt.Println("Ingress configured to use a DNS-01 wildcard certificate.")
+				}
 			}
 
 			return nil

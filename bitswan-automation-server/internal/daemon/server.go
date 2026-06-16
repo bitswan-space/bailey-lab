@@ -233,6 +233,12 @@ func (s *Server) Run() error {
 	docsMux := http.NewServeMux()
 	docsMux.HandleFunc("/", s.handleDocs) // Root path serves docs
 	docsMux.HandleFunc("/api-docs", s.handleDocs)
+
+	// ACME DNS-01 bridge for Traefik's httpreq provider. Served on the TCP
+	// listener so the Traefik container can reach it over bitswan_network;
+	// protected by basic auth with the shared bridge secret.
+	docsMux.HandleFunc(acmeBridgePath+"/present", s.handleACMEDNSChallenge("present"))
+	docsMux.HandleFunc(acmeBridgePath+"/cleanup", s.handleACMEDNSChallenge("cleanup"))
 	s.docsServer = &http.Server{
 		Handler: docsMux,
 	}
