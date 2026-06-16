@@ -113,13 +113,14 @@ func requireIdentity(w http.ResponseWriter, email string) bool {
 // The single source of truth the SPA reads to choose a scene. See the
 // scene-selection rule documented in the returned shape below.
 type gateState struct {
-	Email        string `json:"email"`
-	IsAdmin      bool   `json:"is_admin"`
-	Claimed      bool   `json:"claimed"`       // any root admin recorded OR any trusted device exists
-	Trusted      bool   `json:"trusted"`       // THIS browser has a valid device cookie
-	TOTPEnrolled bool   `json:"totp_enrolled"` // this user has an authenticator secret
-	BackupCodes  bool   `json:"backup_codes"`  // this user has unused single-use backup codes
-	CanClaim     bool   `json:"can_claim"`     // unclaimed AND this caller may run the one-time bootstrap
+	Email           string `json:"email"`
+	IsAdmin         bool   `json:"is_admin"`
+	Claimed         bool   `json:"claimed"`            // any root admin recorded OR any trusted device exists
+	Trusted         bool   `json:"trusted"`            // THIS browser has a valid device cookie
+	TOTPEnrolled    bool   `json:"totp_enrolled"`      // this user has an authenticator secret
+	BackupCodes     bool   `json:"backup_codes"`       // this user has unused single-use backup codes
+	CanClaim        bool   `json:"can_claim"`          // unclaimed AND this caller may run the one-time bootstrap
+	HasTrustedDevice bool  `json:"has_trusted_device"` // this user ALREADY has ≥1 trusted device (can self-approve a new one)
 }
 
 func handleGateState(w http.ResponseWriter, r *http.Request, email string, groups []string) {
@@ -128,14 +129,21 @@ func handleGateState(w http.ResponseWriter, r *http.Request, email string, group
 	// everywhere, which the SPA can treat as "not signed in".
 	claimed := serverClaimed()
 	rec, _ := loadTOTPRecord(email)
+	hasTrustedDevice := false
+	if email != "" {
+		if devs, err := dbListDevices(email); err == nil && len(devs) > 0 {
+			hasTrustedDevice = true
+		}
+	}
 	writeJSON(w, gateState{
-		Email:        email,
-		IsAdmin:      isAdminGroups(groups),
-		Claimed:      claimed,
-		Trusted:      email != "" && currentDeviceForRequest(r, email) != nil,
-		TOTPEnrolled: email != "" && rec != nil,
-		BackupCodes:  email != "" && dbBackupCodesExist(email),
-		CanClaim:     !claimed && eligibleToClaim(email, groups),
+		Email:            email,
+		IsAdmin:          isAdminGroups(groups),
+		Claimed:          claimed,
+		Trusted:          email != "" && currentDeviceForRequest(r, email) != nil,
+		TOTPEnrolled:     email != "" && rec != nil,
+		BackupCodes:      email != "" && dbBackupCodesExist(email),
+		CanClaim:         !claimed && eligibleToClaim(email, groups),
+		HasTrustedDevice: hasTrustedDevice,
 	})
 }
 

@@ -3,7 +3,7 @@ import React from 'react';
 
 const { C: DC, Icon: DIcon, Btn: DBtn, Pill: DPill } = window.WD_SHELL;
 const {
-  Card: DCard, PageHeader: DPageHeader, Field: DField, Modal: DModal,
+  Card: DCard, PageHeader: DPageHeader, Field: DField, TextInput: DTextInput, Modal: DModal,
   SegmentedCode: DSeg, QRCode: DQR, QRImage: DQRImage, DeviceIcon: DDeviceIcon, ProtoHint: DProtoHint,
   CopyChip: DCopyChip, Toggle: DToggle, EmptyState: DEmpty, LiveState: DLiveState,
 } = window.SC_UI;
@@ -104,7 +104,7 @@ function DevicesView({ ctx }) {
         </span>
       </div>
 
-      <LinkDeviceModal open={linkOpen} onClose={() => setLinkOpen(false)} />
+      <LinkDeviceModal open={linkOpen} onClose={() => setLinkOpen(false)} ctx={ctx} />
 
       <DModal open={!!revoke} onClose={() => setRevoke(null)} icon="log-out" title={`Sign out ${revoke?.name}?`}
         subtitle="That device will lose trust immediately and must be re-linked to get back in."
@@ -127,27 +127,55 @@ function DevicesView({ ctx }) {
 }
 
 // ─── LINK DEVICE ────────────────────────────────────────────────────────────
-// There is ONE way to trust a new device, by design: the new device signs in
-// and presents a pairing code, which an already-trusted device approves on the
-// Device approvals page (or the user confirms with their own authenticator).
-// We deliberately do NOT offer the reverse direction (a trusted device minting
-// a PIN/QR for the new device to enter) — it's not a feature, so this modal
-// just explains the supported flow rather than teasing an unbuilt control.
-function LinkDeviceModal({ open, onClose }) {
+// Trust spreads device-to-device with NO admin: the new device signs in and
+// shows a short code; the user enters that code HERE, on a device they already
+// trust, and the new device is trusted immediately. This posts the code to the
+// same approval endpoint the gate uses (/2fa-gate/approve) for the caller's own
+// account — approverIsTrusted gates it to a trusted browser, and a non-admin
+// may only approve their OWN pending code, so a user links their own devices
+// without involving an admin.
+function LinkDeviceModal({ open, onClose, ctx }) {
+  const { currentUser, toast, refresh } = ctx;
+  const [code, setCode] = useD('');
+  const [busy, setBusy] = useD(false);
+  const [err, setErr] = useD('');
+
+  const submit = async () => {
+    const c = code.trim();
+    if (!c) { setErr('Enter the code shown on the new device.'); return; }
+    setBusy(true); setErr('');
+    try {
+      await DApi.approvePair(currentUser.email, c);
+      toast('New device linked and trusted', 'success');
+      setCode('');
+      await refresh('devices');
+      onClose();
+    } catch (e) {
+      setErr(e.message || "That code didn't match — check it and try again.");
+    } finally { setBusy(false); }
+  };
+
   return (
-    <DModal open={open} onClose={onClose} icon="smartphone" title="Link a new device" width={520}
-      subtitle="How to get a new device trusted on this server.">
-      <div style={{ display: 'flex', gap: 11, padding: '13px 15px', background: DC.surface, borderRadius: 10 }}>
+    <DModal open={open} onClose={() => { setCode(''); setErr(''); onClose(); }} icon="smartphone" title="Link a new device" width={520}
+      subtitle="Trust a new device from this one — no admin needed."
+      footer={<>
+        <DBtn variant="default" onClick={() => { setCode(''); setErr(''); onClose(); }}>Cancel</DBtn>
+        <DBtn variant="primary" leftIcon="link" disabled={busy || !code.trim()} onClick={submit}>{busy ? 'Linking…' : 'Link device'}</DBtn>
+      </>}>
+      <div style={{ display: 'flex', gap: 11, padding: '13px 15px', background: DC.surface, borderRadius: 10, marginBottom: 16 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, color: DC.fg, lineHeight: '17px' }}>
-          <div style={{ display: 'flex', gap: 9 }}><Step n="1" /><span>On the new device, open this server and sign in with Keycloak.</span></div>
-          <div style={{ display: 'flex', gap: 9 }}><Step n="2" /><span>It shows a code. Read that code to an admin, who approves it from the <strong>Device approvals</strong> page — or confirm it yourself with your authenticator app.</span></div>
-          <div style={{ display: 'flex', gap: 9 }}><Step n="3" /><span>Once approved, the new device is trusted and appears in this list.</span></div>
+          <div style={{ display: 'flex', gap: 9 }}><Step n="1" /><span>On the new device, open this server and sign in. It shows a short code.</span></div>
+          <div style={{ display: 'flex', gap: 9 }}><Step n="2" /><span>Enter that code below to trust the new device — it'll be let in straight away.</span></div>
         </div>
       </div>
 
-      <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end' }}>
-        <DBtn variant="primary" onClick={onClose}>Got it</DBtn>
-      </div>
+      <DField label="Code from the new device">
+        <DTextInput value={code} mono autoFocus placeholder="000000"
+          onChange={(v) => { setCode(v); setErr(''); }} />
+      </DField>
+      {err && (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: DC.red }}>{err}</div>
+      )}
     </DModal>
   );
 }

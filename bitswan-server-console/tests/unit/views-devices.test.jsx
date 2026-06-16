@@ -51,18 +51,30 @@ describe('DevicesView', () => {
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining("Couldn't remove device"), 'danger'));
   });
 
-  it('link device modal: explains the single supported approval flow, no PIN/QR stub', () => {
+  it('link device: enter the code from the new device → self-approve, no admin/PIN/QR stub', async () => {
     const s = spies();
+    installFetch({ '/2fa-gate/approve': { status: 200, text: 'ok' } });
     render(<Host View={DevicesView} data={makeData()} extra={s} />);
     fireEvent.click(screen.getByText('Link a device'));
-    // The one supported direction is explained: new device shows a code, a
-    // trusted device approves it. No mock PIN/QR, no "Simulate scan", and no
-    // teaser for the reverse direction (it's intentionally not a feature).
-    expect(screen.getByText(/Device approvals/)).toBeTruthy();
-    expect(screen.queryByText('Simulate scan')).toBeNull();
+    // No PIN/QR stub, no "ask an admin" framing — the user enters the code.
     expect(screen.queryByText('Link with a PIN')).toBeNull();
+    expect(screen.queryByText('Simulate scan')).toBeNull();
     expect(screen.queryByText(/isn't available yet/)).toBeNull();
-    // No fake device gets added.
+    // Enter the code shown on the new device and submit.
+    fireEvent.change(screen.getByPlaceholderText('000000'), { target: { value: '497722' } });
+    fireEvent.click(screen.getByText('Link device'));
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('New device linked and trusted', 'success'));
+    expect(s.refresh).toHaveBeenCalledWith('devices');
+  });
+
+  it('link device: a bad code surfaces the backend error, no device added', async () => {
+    const s = spies();
+    installFetch({ '/2fa-gate/approve': { status: 401, text: "Code didn't match — ask them to read it back." } });
+    render(<Host View={DevicesView} data={makeData()} extra={s} />);
+    fireEvent.click(screen.getByText('Link a device'));
+    fireEvent.change(screen.getByPlaceholderText('000000'), { target: { value: '000000' } });
+    fireEvent.click(screen.getByText('Link device'));
+    await waitFor(() => expect(screen.getByText(/didn't match/)).toBeTruthy());
     expect(s.toast).not.toHaveBeenCalledWith('New device linked and trusted', 'success');
   });
 });

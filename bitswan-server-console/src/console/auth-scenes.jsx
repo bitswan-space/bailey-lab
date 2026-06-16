@@ -160,6 +160,18 @@ function ApprovalScene({ onApproved, goConsole, gateState }) {
   // enrolled (per the real gate-state).
   const showTotpTab = !!(gateState && gateState.totp_enrolled);
   const email = (gateState && gateState.email) || '';
+  // Whether the user already has another trusted device. If so (or if they
+  // have an authenticator), they can approve THIS device themselves and we
+  // must NOT tell them to find an admin. Only a true first device (no trusted
+  // device, no authenticator) needs admin approval.
+  const hasTrustedDevice = !!(gateState && gateState.has_trusted_device);
+  const canSelfApprove = hasTrustedDevice || showTotpTab;
+  // How to describe approving the displayed code (the code method), tailored to
+  // what this user can actually do.
+  const codeApproverHint = hasTrustedDevice
+    ? "Enter this code on a device you already trust — open Your devices → Link a device — and you'll be let in automatically."
+    : 'Read this code to an admin. Once they approve it from a trusted device, you’ll be let in automatically.';
+  const waitingFor = hasTrustedDevice ? 'Waiting for approval' : 'Waiting for an admin';
 
   const [method, setMethod] = useSc('admin');   // 'admin' | 'totp'
   const [code, setCode] = useSc('');
@@ -214,14 +226,21 @@ function ApprovalScene({ onApproved, goConsole, gateState }) {
         </div>
 
         <h1 style={{ margin: 0, textAlign: 'center', fontSize: 20, fontWeight: 700, color: SC.fg, letterSpacing: '-0.3px' }}>Trust this device</h1>
-        <p style={{ margin: '8px auto 18px', textAlign: 'center', fontSize: 13, color: SC.muted, lineHeight: '19px', maxWidth: 350 }}>
-          You're signed in, but this device isn't trusted yet. {showTotpTab ? 'Confirm it with your authenticator, or have an admin approve the code.' : 'Have an admin approve the code below.'}
+        <p style={{ margin: '8px auto 18px', textAlign: 'center', fontSize: 13, color: SC.muted, lineHeight: '19px', maxWidth: 360 }}>
+          You're signed in, but this device isn't trusted yet.{' '}
+          {canSelfApprove
+            ? (hasTrustedDevice && showTotpTab
+                ? 'Approve it from a device you already trust, or confirm it with your authenticator.'
+                : hasTrustedDevice
+                  ? 'Approve it from a device you already trust — no admin needed.'
+                  : 'Confirm it with your authenticator, or have an admin approve the code.')
+            : 'Have an admin approve the code below.'}
         </p>
 
         {/* method switch — authenticator tab only when this user has TOTP enrolled */}
         {showTotpTab && (
           <div style={{ display: 'flex', gap: 6, padding: 4, background: SC.surface, borderRadius: 10, marginBottom: 20 }}>
-            <MethodTab active={method === 'admin'} icon="user-check" label="Admin approval" onClick={() => setMethod('admin')} />
+            <MethodTab active={method === 'admin'} icon="user-check" label={hasTrustedDevice ? 'Approve by code' : 'Admin approval'} onClick={() => setMethod('admin')} />
             <MethodTab active={method === 'totp'} icon="key-round" label="Authenticator" onClick={() => setMethod('totp')} />
           </div>
         )}
@@ -244,7 +263,7 @@ function ApprovalScene({ onApproved, goConsole, gateState }) {
             )}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 20, fontSize: 13, color: SC.primary, fontWeight: 500 }}>
               <SIcon name="loader" size={15} color={SC.primary} />
-              Waiting for an admin{'.'.repeat(dots)}
+              {waitingFor}{'.'.repeat(dots)}
             </div>
           </>
         ) : (
@@ -269,10 +288,10 @@ function ApprovalScene({ onApproved, goConsole, gateState }) {
           ? <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
               <SIcon name="shield" size={15} color={SC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
               <span style={{ fontSize: 11.5, color: SC.muted, lineHeight: '16px' }}>
-                Read this code to an admin. Once they approve it from a trusted device, you'll be let in automatically.
+                {codeApproverHint}
               </span>
             </div>
-          : <div style={{ textAlign: 'center', fontSize: 12, color: SC.muted }}>No authenticator set up? <button onClick={() => setMethod('admin')} style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Ask an admin instead</button></div>}
+          : <div style={{ textAlign: 'center', fontSize: 12, color: SC.muted }}>No authenticator handy? <button onClick={() => setMethod('admin')} style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>{hasTrustedDevice ? 'Use a code instead' : 'Ask an admin instead'}</button></div>}
       </div>
     </SceneShell>
   );
