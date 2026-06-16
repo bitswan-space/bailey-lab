@@ -96,7 +96,7 @@ function adaptWorkspace(w, callerEmail) {
     id: w.name,
     name: w.name,
     owner: w.is_owner ? callerEmail : (w.dashboard_role || w.editor_role || w.gitops_role || ''),
-    members: [], // TODO(api): membership list not exposed by /workspaces
+    members: w.members || [], // owner + grantee emails on the dashboard endpoint
     processes: 0, automations: 0,
     created: '', activity: '',
     status: w.is_trashed ? 'archived' : 'active',

@@ -155,6 +155,12 @@ describe('WorkspacesView', () => {
     expect(screen.queryByText('Ownership')).toBeNull();
   });
 
+  it('workspace card shows member avatars (initials from emails)', () => {
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ members: ['jane@x', 'bob@y'] })] })} />);
+    expect(screen.getByText('JX')).toBeTruthy(); // jane@x → JX
+    expect(screen.getByText('BY')).toBeTruthy(); // bob@y  → BY
+  });
+
   it('shows "Apps you can access" from accessible frontends (links, services excluded)', async () => {
     const s = spies();
     installFetch({ '/bailey/api/endpoints': { json: { endpoints: [

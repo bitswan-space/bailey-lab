@@ -295,6 +295,9 @@ function WorkspacesView({ ctx }) {
                       {archived && <WPill tone="neutral" size="xs">archived</WPill>}
                     </div>
                   </div>
+                  {w.members && w.members.length > 0 && (
+                    <WAvatarStack users={w.members.map(m => ({ id: m, name: m }))} size={26} />
+                  )}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     {!archived && (
                       <WBtn variant="primary" size="sm" leftIcon="external-link" onClick={() => openUrl(w.dashboard || w.gitopsUrl, `${w.name} dashboard`)}>Open</WBtn>

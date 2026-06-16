@@ -25,11 +25,12 @@ type accessibleWorkspace struct {
 	DashboardURL  string `json:"dashboard_url"` // the workspace's primary UI — what "Open" launches
 	EditorURL     string `json:"editor_url"`
 	GitopsURL     string `json:"gitops_url"`
-	DashboardRole string `json:"dashboard_role,omitempty"` // owner | access | none
-	EditorRole    string `json:"editor_role,omitempty"`
-	GitopsRole    string `json:"gitops_role,omitempty"`
-	IsOwner       bool   `json:"is_owner"`
-	IsTrashed     bool   `json:"is_trashed,omitempty"`
+	DashboardRole string   `json:"dashboard_role,omitempty"` // owner | access | none
+	EditorRole    string   `json:"editor_role,omitempty"`
+	GitopsRole    string   `json:"gitops_role,omitempty"`
+	IsOwner       bool     `json:"is_owner"`
+	IsTrashed     bool     `json:"is_trashed,omitempty"`
+	Members       []string `json:"members"` // owner + access-grantee emails on the dashboard endpoint
 }
 
 type listAccessibleResponse struct {
@@ -86,12 +87,44 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 				GitopsRole:    string(gitopsRole),
 				IsOwner:       isOwner,
 				IsTrashed:     IsWorkspaceTrashed(name),
+				Members:       workspaceMemberEmails(dashboardHost),
 			}
 			out.Workspaces = append(out.Workspaces, entry)
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// workspaceMemberEmails returns who can reach a workspace: the dashboard
+// endpoint's owner plus its access-grantee emails (deduped, owner first).
+// Group grants are skipped — there's no single email to render as an avatar.
+func workspaceMemberEmails(dashboardHost string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	add := func(e string) {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			return
+		}
+		k := strings.ToLower(e)
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, e)
+	}
+	if ep, _ := getEndpoint(dashboardHost); ep != nil {
+		add(ep.OwnerEmail)
+	}
+	if grants, err := listGrants(dashboardHost); err == nil {
+		for _, g := range grants {
+			if g.PrincipalType == "email" {
+				add(g.PrincipalValue)
+			}
+		}
+	}
+	return out
 }
 
 type createWorkspaceRequest struct {
