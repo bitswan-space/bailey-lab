@@ -21,11 +21,28 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/automations"
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/bitswan-space/bitswan-workspaces/internal/httpReq"
 	"github.com/spf13/cobra"
 )
+
+// workspaceDaemonInfo returns a workspace's gitops URL and secret from the
+// daemon. Workspace data lives in the daemon's Docker volume, which the host
+// CLI can't read directly, so metadata must come from the daemon rather than
+// config.GetWorkspaceMetadata (which reads the host filesystem). Requests the
+// long form (for GitopsURL) and password fields (for GitopsSecret).
+func workspaceDaemonInfo(client *daemon.Client, name string) (*daemon.WorkspaceInfo, error) {
+	resp, err := client.ListWorkspaces(true, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list workspaces: %w", err)
+	}
+	for i := range resp.Workspaces {
+		if resp.Workspaces[i].Name == name {
+			return &resp.Workspaces[i], nil
+		}
+	}
+	return nil, fmt.Errorf("workspace %q not found", name)
+}
 
 func newInitCmd() *cobra.Command {
 	var noRemove bool
@@ -117,8 +134,10 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	}
 	fmt.Println("✓ Workspace initialized")
 
-	// Get workspace metadata
-	metadata, err := config.GetWorkspaceMetadata(workspaceName)
+	// Get workspace metadata from the daemon. Workspace data lives in the
+	// daemon's Docker volume, which the host CLI can't read directly, so we
+	// can't use config.GetWorkspaceMetadata (it reads the host filesystem).
+	metadata, err := workspaceDaemonInfo(client, workspaceName)
 	if err != nil {
 		return fmt.Errorf("failed to get workspace metadata: %w", err)
 	}
@@ -1062,137 +1081,43 @@ func calculateGitBlobHash(filePath string) (string, error) {
 }
 
 func waitForGitopsReady(gitopsURL, secret, workspaceName string) error {
-	// gitops boots quickly (its image is already built locally), so 3 minutes is
-	// a generous margin for CI.
-	maxAttempts := 90 // 3 minutes total (90 * 2 seconds)
-	attempt := 0
-
-	// First, wait for container to be running
-	// Container name format: {workspaceName}-site-bitswan-gitops-1
+	// Probe the gitops service directly inside its container instead of through
+	// the public URL. The public path crosses Traefik, the protected gate (which
+	// redirects unauthenticated requests to OAuth), and host-side localhost
+	// resolution that can't follow cross-host redirects — none of which this
+	// readiness check cares about. A direct `curl localhost:8079` is
+	// deterministic across CI and AOC-connected hosts alike.
 	containerName := fmt.Sprintf("%s-site-bitswan-gitops-1", workspaceName)
-	fmt.Printf("Waiting for gitops container '%s' to be running...\n", containerName)
-	for i := 0; i < 30; i++ { // Wait up to 1 minute for container to start
-		cmd := exec.Command("docker", "ps", "--filter", fmt.Sprintf("name=%s", containerName), "--format", "{{.Status}}")
-		output, err := cmd.Output()
-		if err == nil && len(output) > 0 && strings.Contains(string(output), "Up") {
-			fmt.Printf("Container '%s' is running\n", containerName)
-			break
-		}
-		if i == 29 {
-			fmt.Printf("Warning: Container '%s' did not start within 1 minute, continuing anyway...\n", containerName)
-		}
-		time.Sleep(2 * time.Second)
-	}
+	const maxAttempts = 90 // ~3 minutes (90 * 2s)
 
-	for attempt < maxAttempts {
-		// Try to get automations list as a health check
-		url := fmt.Sprintf("%s/automations", gitopsURL)
-		url = automations.TransformURLForDaemon(url, workspaceName)
-		req, err := httpReq.NewRequest("GET", url, nil)
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			attempt++
-			continue
-		}
-
-		req.Header.Set("Authorization", "Bearer "+secret)
-
-		resp, err := httpReq.ExecuteRequestWithLocalhostResolution(req)
-		if err != nil {
-			// In CI, localhost resolution might fail, so also check container health
-			// After container has been running for a while, try to connect via Docker network
-			if attempt > 15 { // After 30 seconds, start checking container health and try direct connection
-				// Check if container is still running
-				checkCmd := exec.Command("docker", "ps", "--filter", fmt.Sprintf("name=%s", containerName), "--format", "{{.Status}}")
-				statusOutput, statusErr := checkCmd.Output()
-				if statusErr == nil && len(statusOutput) > 0 && strings.Contains(string(statusOutput), "Up") {
-					// Container is running, try connecting directly via Docker network
-					// Use docker exec to curl from within the network
-					if attempt > 30 { // After 60 seconds, try direct connection
-						// Try to curl from within the container's network
-						curlCmd := exec.Command("docker", "exec", containerName, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-							"-H", fmt.Sprintf("Authorization: Bearer %s", secret),
-							"http://localhost:8079/automations")
-						if curlOutput, curlErr := curlCmd.Output(); curlErr == nil {
-							statusCodeStr := strings.TrimSpace(string(curlOutput))
-							if statusCodeStr == "200" || statusCodeStr == "404" {
-								fmt.Printf("Service is responding directly on port 8079 (status: %s), but Caddy is returning 502\n", statusCodeStr)
-								fmt.Printf("This suggests a Caddy routing issue. Checking Caddy logs...\n")
-								// Check Caddy logs
-								caddyLogsCmd := exec.Command("docker", "logs", "caddy", "--tail", "20")
-								if caddyLogs, caddyErr := caddyLogsCmd.Output(); caddyErr == nil {
-									fmt.Printf("Recent Caddy logs:\n%s\n", string(caddyLogs))
-								}
-								// If service is responding directly, assume it's ready despite Caddy issue
-								if attempt > 60 {
-									fmt.Printf("Service is responding directly after 2+ minutes, assuming ready despite Caddy 502\n")
-									return nil
-								}
-							}
-						}
-					}
-				} else {
-					// Container not running - check logs
-					if attempt%20 == 0 {
-						fmt.Printf("Container may not be running. Checking container status and logs...\n")
-						logsCmd := exec.Command("docker", "logs", containerName, "--tail", "30")
-						if logsOutput, logsErr := logsCmd.Output(); logsErr == nil {
-							fmt.Printf("Container logs (last 30 lines):\n%s\n", string(logsOutput))
-						}
-					}
-				}
+	fmt.Printf("Waiting for gitops container '%s' to be ready...\n", containerName)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Trailing slash avoids gitops' 307 redirect on /automations.
+		curlCmd := exec.Command("docker", "exec", containerName, "curl", "-s", "-o", "/dev/null",
+			"-w", "%{http_code}",
+			"-H", fmt.Sprintf("Authorization: Bearer %s", secret),
+			"http://localhost:8079/automations/")
+		out, err := curlCmd.Output()
+		if err == nil {
+			// Any real HTTP status (2xx/3xx/4xx) means the server is up and
+			// serving; only "000" (no connection) or 5xx mean not-ready-yet.
+			code := strings.TrimSpace(string(out))
+			if code != "" && code != "000" && !strings.HasPrefix(code, "5") {
+				fmt.Printf("Gitops service is ready (HTTP %s)\n", code)
+				return nil
 			}
-			time.Sleep(2 * time.Second)
-			attempt++
-			continue
-		}
-		resp.Body.Close()
-
-		// If we get any response (even 200 or 404), the service is up
-		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
-			return nil
-		}
-
-		// 502 Bad Gateway means the service is NOT ready - don't treat it as ready
-		// Only treat 200/404 as ready, or 401 (auth issue, but service is up)
-		if resp.StatusCode == http.StatusBadGateway {
 			if attempt%10 == 0 {
-				fmt.Printf("Service returned 502 Bad Gateway (attempt %d/%d) - service not ready yet\n", attempt+1, maxAttempts)
-				// After many attempts, check if service is actually running but Caddy can't reach it
-				if attempt > 60 {
-					// Try direct connection to container
-					curlCmd := exec.Command("docker", "exec", containerName, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-						"-H", fmt.Sprintf("Authorization: Bearer %s", secret),
-						"http://localhost:8079/automations")
-					if curlOutput, curlErr := curlCmd.Output(); curlErr == nil {
-						statusCodeStr := strings.TrimSpace(string(curlOutput))
-						fmt.Printf("Direct container check returned status: %s\n", statusCodeStr)
-						if statusCodeStr == "200" || statusCodeStr == "404" {
-							fmt.Printf("Service is responding directly but Caddy returns 502 - likely Caddy routing issue\n")
-							// Check Caddy configuration
-							caddyConfigCmd := exec.Command("curl", "-s", "http://localhost:2019/config/apps/http/servers/srv0/routes")
-							if caddyConfig, caddyErr := caddyConfigCmd.Output(); caddyErr == nil {
-								fmt.Printf("Caddy routes config:\n%s\n", string(caddyConfig))
-							}
-						}
-					}
-				}
+				fmt.Printf("Gitops not serving yet (HTTP %s, attempt %d/%d)\n", code, attempt+1, maxAttempts)
 			}
-			time.Sleep(2 * time.Second)
-			attempt++
-			continue
+		} else if attempt%10 == 0 {
+			fmt.Printf("Gitops container not reachable yet (attempt %d/%d)\n", attempt+1, maxAttempts)
 		}
-
-		// For other status codes (like 401), log but continue waiting
-		// Don't assume service is ready just because we got a response
-		if attempt%10 == 0 {
-			fmt.Printf("Service returned status %d (attempt %d/%d) - waiting for 200/404\n", resp.StatusCode, attempt+1, maxAttempts)
-		}
-
 		time.Sleep(2 * time.Second)
-		attempt++
 	}
 
+	if logs, err := exec.Command("docker", "logs", containerName, "--tail", "30").CombinedOutput(); err == nil {
+		fmt.Printf("Gitops container logs (last 30 lines):\n%s\n", string(logs))
+	}
 	return fmt.Errorf("gitops service did not become ready within timeout")
 }
 

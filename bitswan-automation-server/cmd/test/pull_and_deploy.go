@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
@@ -99,8 +98,9 @@ func runTestPullAndDeploy(gitopsImage, editorImage string) error {
 	}
 	fmt.Println("✓ Workspace 1 initialized")
 
-	// Get workspace 1 metadata
-	metadata1, err := config.GetWorkspaceMetadata(workspace1Name)
+	// Get workspace 1 metadata from the daemon (data lives in its Docker
+	// volume, not on the host filesystem).
+	metadata1, err := workspaceDaemonInfo(client, workspace1Name)
 	if err != nil {
 		cleanupWorkspace(workspace1Name)
 		return fmt.Errorf("failed to get workspace 1 metadata: %w", err)
@@ -261,8 +261,9 @@ func runTestPullAndDeploy(gitopsImage, editorImage string) error {
 	}
 	fmt.Println("✓ Workspace 2 initialized with remote configured")
 
-	// Get workspace 2 metadata
-	metadata2, err := config.GetWorkspaceMetadata(workspace2Name)
+	// Get workspace 2 metadata from the daemon (data lives in its Docker
+	// volume, not on the host filesystem).
+	metadata2, err := workspaceDaemonInfo(client, workspace2Name)
 	if err != nil {
 		cleanupWorkspace(workspace1Name)
 		cleanupWorkspace(workspace2Name)
