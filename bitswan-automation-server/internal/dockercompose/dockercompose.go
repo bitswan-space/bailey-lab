@@ -115,10 +115,15 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 			// off the volume via subpaths instead of host bind paths.
 			"BITSWAN_VOLUME_NAME=bitswan",
 			// Canonical bare repo (served over smart-HTTP, fast-forward only)
-			// and the per-copy checkouts. The `main` copy is the default scope.
+			// and the per-copy checkouts under the workspace-repo dir. Keeping
+			// copies at <workspace-repo>/copies makes a deployment's
+			// workspace-root-relative path ("copies/<copy>/<rel>") resolve
+			// correctly both as a container-local path (join with
+			// BITSWAN_WORKSPACE_REPO_DIR) and as a volume subpath
+			// (workspaces/<ws>/<rel-path>). The `main` copy is the default scope.
 			"BITSWAN_GIT_REPOS_DIR=/git",
-			"BITSWAN_COPIES_DIR=/copies",
-			"BITSWAN_WORKSPACE_REPO_DIR=/copies/main",
+			"BITSWAN_WORKSPACE_REPO_DIR=/workspace-repo",
+			"BITSWAN_COPIES_DIR=/workspace-repo/copies",
 			"BITSWAN_GIT_REMOTE=http://" + config.WorkspaceName + "-gitops:8079/git/repo.git",
 		},
 	}
@@ -169,7 +174,7 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	// working-tree mount + gitops orphan-worktree gitdir rewrite.
 	gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
 		wsVolume("repo.git", "/git/repo.git"),
-		wsVolume("copies", "/copies"),
+		wsVolume("copies", "/workspace-repo/copies"),
 	)
 	if hostOs == WindowsMac {
 		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
