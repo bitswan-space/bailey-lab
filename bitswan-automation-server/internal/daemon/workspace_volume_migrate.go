@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/bitswan-space/bitswan-workspaces/internal/automations"
+	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 )
 
 // workspaceVolumeSubdirs are the per-workspace directories that workspace
@@ -73,7 +76,65 @@ func (s *Server) migrateWorkspaceDeploymentsToVolumes() {
 			fmt.Printf("Warning: failed to migrate workspace %q to volume mounts (will retry on next start): %v\n", ws.Name, err)
 			continue
 		}
+
+		// runWorkspaceUpdate regenerates the gitops/editor/dashboard/coding-agent
+		// containers onto the volume, but the deployed block-processor containers
+		// keep binding the old host directory until gitops redeploys them off the
+		// freshly-regenerated compose. Trigger that deploy now so no container is
+		// left writing to the (backup) host path.
+		if err := redeployWorkspaceAutomations(ws.Name); err != nil {
+			fmt.Printf("Warning: failed to redeploy automations for workspace %q onto volume mounts (will retry on next start): %v\n", ws.Name, err)
+			continue
+		}
+
 		_ = os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
 		fmt.Printf("Workspace %q now runs off the bitswan docker volume.\n", ws.Name)
 	}
+}
+
+// redeployWorkspaceAutomations asks the workspace's gitops service to redeploy
+// all automations off its current (post-migration) docker-compose, recreating
+// the block-processor containers on the bitswan volume.
+//
+// The gitops container was just recreated by runWorkspaceUpdate, so it may need a
+// moment to start serving — we poll its automations list until it responds, which
+// doubles as the readiness gate. A workspace with no deployed automations (e.g.
+// infra-only) has nothing to redeploy, so we return once gitops is reachable: the
+// deploy endpoint rejects an empty selection with a 500, and there are genuinely
+// no block-processor containers to move off the host path.
+func redeployWorkspaceAutomations(workspaceName string) error {
+	metadata, err := config.GetWorkspaceMetadata(workspaceName)
+	if err != nil {
+		return fmt.Errorf("failed to get workspace metadata: %w", err)
+	}
+
+	const (
+		attempts = 30
+		interval = 3 * time.Second
+	)
+
+	// Wait for gitops to come back up, using its automations list as both the
+	// readiness probe and the has-anything-to-deploy signal.
+	var deployed []automations.Automation
+	var lastErr error
+	ready := false
+	for i := 0; i < attempts; i++ {
+		deployed, lastErr = automations.GetAutomations(workspaceName)
+		if lastErr == nil {
+			ready = true
+			break
+		}
+		time.Sleep(interval)
+	}
+	if !ready {
+		return fmt.Errorf("gitops did not become ready in time: %w", lastErr)
+	}
+
+	if len(deployed) == 0 {
+		fmt.Printf("Workspace %q has no deployed automations; nothing to redeploy.\n", workspaceName)
+		return nil
+	}
+
+	fmt.Printf("Redeploying %d automation(s) for workspace %q onto volume mounts...\n", len(deployed), workspaceName)
+	return deployAutomations(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, os.Stdout)
 }

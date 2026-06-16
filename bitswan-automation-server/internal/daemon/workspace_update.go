@@ -35,15 +35,30 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 	editorDevSourceDir := fs.String("editor-dev-source-dir", "", "")
 	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
 
-	if err := fs.Parse(args); err != nil {
-		return fmt.Errorf("failed to parse flags: %w", err)
+	// Go's flag package stops parsing at the first non-flag token, so a flag
+	// placed after the workspace name (e.g. `update wraptest --gitops-image X`)
+	// would be silently ignored. Parse flags interspersed with positionals by
+	// re-parsing the remainder after each positional, so flag order relative to
+	// the workspace name doesn't matter.
+	var positionals []string
+	rest := args
+	for len(rest) > 0 {
+		if err := fs.Parse(rest); err != nil {
+			return fmt.Errorf("failed to parse flags: %w", err)
+		}
+		rest = fs.Args()
+		if len(rest) == 0 {
+			break
+		}
+		positionals = append(positionals, rest[0])
+		rest = rest[1:]
 	}
 
-	if len(fs.Args()) < 1 {
+	if len(positionals) < 1 {
 		return fmt.Errorf("workspace name is required")
 	}
 
-	workspaceName := fs.Args()[0]
+	workspaceName := positionals[0]
 	// Use HOME directly - inside container this is /root, on host it's the user's home
 	// The workspace files are mounted at /root/.config/bitswan in the container
 	homeDir := os.Getenv("HOME")
