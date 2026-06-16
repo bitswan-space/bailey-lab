@@ -39,9 +39,7 @@ class ProcessService:
             return os.path.join(_copies_dir(), copy)
         return os.path.join(_copies_dir(), "main")
 
-    def discover_processes(
-        self, copy: Optional[str] = None
-    ) -> Dict[str, ProcessInfo]:
+    def discover_processes(self, copy: Optional[str] = None) -> Dict[str, ProcessInfo]:
         """Discover business processes in the main repo or a single copy.
 
         A directory qualifies as a BP when it contains both `process.toml`

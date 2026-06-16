@@ -81,9 +81,7 @@ async def create_process(
         raise HTTPException(status_code=400, detail="Invalid copy name")
 
     try:
-        entry = process_service.create_business_process(
-            name=name, copy=body.copy
-        )
+        entry = process_service.create_business_process(name=name, copy=body.copy)
     except FileExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except (FileNotFoundError, ValueError) as e:
@@ -136,9 +134,7 @@ async def create_process(
             logger.exception("Failed to broadcast automations after BP scaffold")
 
         stage = "live-dev" if body.copy else "dev"
-        members = automation_service.members_for_bp(
-            name, copy=body.copy, stage=stage
-        )
+        members = automation_service.members_for_bp(name, copy=body.copy, stage=stage)
         res = await spawn_set_deploy(
             label=name,
             members=members,

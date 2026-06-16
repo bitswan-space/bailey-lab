@@ -115,9 +115,7 @@ def _copies_dir() -> str:
     return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
 
 
-def scan_workspace_sources(
-    workspace_root: str, copy: str | None = None
-) -> list[dict]:
+def scan_workspace_sources(workspace_root: str, copy: str | None = None) -> list[dict]:
     """Walk the filesystem for automation sources marked by `automation.toml`.
 
     Scans the `main` copy when `copy` is None, or the named copy otherwise.
@@ -761,9 +759,7 @@ class AutomationService:
         # For dev stage we scan from the main workspace (no copy); for
         # live-dev we honour `copy`.
         scan_copy = copy if stage == "live-dev" else None
-        sources = scan_workspace_sources(
-            self.workspace_repo_dir, copy=scan_copy
-        )
+        sources = scan_workspace_sources(self.workspace_repo_dir, copy=scan_copy)
         source = next((s for s in sources if s["relative_path"] == relative_path), None)
         if not source:
             ctx = f" in copy '{copy}'" if copy else ""
@@ -876,9 +872,7 @@ class AutomationService:
         as `scan_workspace_sources`).
         """
         scan_copy = copy if stage == "live-dev" else None
-        sources = scan_workspace_sources(
-            self.workspace_repo_dir, copy=scan_copy
-        )
+        sources = scan_workspace_sources(self.workspace_repo_dir, copy=scan_copy)
         bp_key = sanitize_automation_name(bp)
         out: list[dict] = []
         for s in sources:
