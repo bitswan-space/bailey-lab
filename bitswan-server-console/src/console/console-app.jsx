@@ -4,7 +4,7 @@ import React from 'react';
 const { C: AC, Icon: AIcon, Btn: ABtn, Pill: APill, useLucide: useALucide } = window.WD_SHELL;
 const { Avatar: AAvatar, Toast: AToast } = window.SC_UI;
 const { OverviewView, WorkspacesView } = window.SC_WORKSPACES;
-const { UsersView, ApprovalsView } = window.SC_PEOPLE;
+const { UsersView, ApprovalsView, EndpointAccessView } = window.SC_PEOPLE;
 const { DevicesView, SecurityView } = window.SC_DEVICES;
 const { BootstrapScene, ApprovalScene, RecoveryScene } = window.SC_SCENES;
 const { Api } = window.SC_API;
@@ -211,6 +211,7 @@ const NAV = [
     { id: 'overview',  label: 'Server overview',  icon: 'gauge' },
     { id: 'users',     label: 'People & roles',   icon: 'users' },
     { id: 'approvals', label: 'New user approvals', icon: 'shield-check', badge: 'pending' },
+    { id: 'acl',       label: 'Endpoint access',  icon: 'git-fork' },
   ]},
 ];
 
@@ -222,7 +223,7 @@ const NAV = [
 // routing works end-to-end. A second path segment carries a view's open
 // "drawer" (the workspace being managed, the person whose devices you're
 // viewing) — e.g. /workspaces/acme, /users/jane@x.
-const ROUTES = ['workspaces', 'overview', 'users', 'approvals', 'devices', 'security'];
+const ROUTES = ['workspaces', 'overview', 'users', 'approvals', 'acl', 'devices', 'security'];
 
 function parseLocation() {
   const segs = (window.location.pathname || '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
@@ -302,7 +303,7 @@ function Console({ data, setData, toast, refresh }) {
 
   const views = {
     workspaces: WorkspacesView, overview: OverviewView, users: UsersView,
-    approvals: ApprovalsView, devices: DevicesView, security: SecurityView,
+    approvals: ApprovalsView, acl: EndpointAccessView, devices: DevicesView, security: SecurityView,
   };
   const View = views[route] || WorkspacesView;
 

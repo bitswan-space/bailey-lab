@@ -398,4 +398,98 @@ function ApprovalsView({ ctx }) {
   );
 }
 
-window.SC_PEOPLE = { UsersView, ApprovalsView };
+// ─── ENDPOINT ACCESS (read-only ACL tree) ───────────────────────────────────
+// Admin-only, observational: every registered endpoint with its owner and ACL
+// grants, nested workspace → endpoints by `parent`. Read-only by design — even
+// an admin doesn't edit others' ACLs here; there are no mutation controls.
+function EndpointAccessView({ ctx }) {
+  const [tree, setTree] = useP(null);     // null = loading
+  const [err, setErr] = useP('');
+  const [nonce, setNonce] = useP(0);      // bump to refetch
+
+  usePE(() => {
+    let alive = true;
+    setErr(''); setTree(null);
+    PApi.adminACL()
+      .then(r => { if (alive) setTree(r.endpoints || []); })
+      .catch(e => { if (alive) { setErr(e.message || 'Could not load endpoints.'); setTree([]); } });
+    return () => { alive = false; };
+  }, [nonce]);
+
+  // Build parent → children. Roots = endpoints with no (or unknown) parent.
+  const eps = tree || [];
+  const byHost = {};
+  eps.forEach(e => { byHost[e.hostname] = e; });
+  const childrenOf = {};
+  eps.forEach(e => {
+    const key = (e.parent && byHost[e.parent]) ? e.parent : '';
+    (childrenOf[key] = childrenOf[key] || []).push(e);
+  });
+  const roots = (childrenOf[''] || []).slice().sort((a, b) => a.hostname.localeCompare(b.hostname));
+
+  const KIND = {
+    workspace: { icon: 'layout-grid', label: 'Workspace' },
+    frontend:  { icon: 'app-window', label: 'Frontend' },
+    service:   { icon: 'server-cog', label: 'Service' },
+  };
+
+  const Grants = ({ e }) => {
+    const list = e.grants || [];
+    return (
+      <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <PIcon name="crown" size={12} color={PC.amber} />
+          <span style={{ fontSize: 12, color: PC.fg, fontFamily: 'Geist Mono, monospace' }}>{e.owner_email || 'unowned'}</span>
+          <PPill tone="primary" size="xs">Owner</PPill>
+        </div>
+        {list.length === 0 ? (
+          <div style={{ fontSize: 11.5, color: PC.mutedFg, paddingLeft: 20 }}>No additional grants — only the owner has access.</div>
+        ) : list.map((g, i) => (
+          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 20 }}>
+            <PIcon name={g.principal_type === 'group' ? 'users' : 'user'} size={12} color={PC.mutedFg} />
+            <span style={{ fontSize: 12, color: PC.fg, fontFamily: 'Geist Mono, monospace' }}>{g.principal_value}</span>
+            <PPill tone={g.role === 'owner' ? 'primary' : 'neutral'} size="xs">{g.role}</PPill>
+            {g.principal_type === 'group' && <span style={{ fontSize: 10.5, color: PC.mutedFg }}>group</span>}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  const Node = ({ e, depth }) => {
+    const kids = (childrenOf[e.hostname] || []).slice().sort((a, b) => a.hostname.localeCompare(b.hostname));
+    const k = KIND[e.kind] || { icon: 'globe', label: e.kind || 'Endpoint' };
+    return (
+      <div style={{ marginLeft: depth ? 18 : 0, borderLeft: depth ? `1px solid ${PC.border}` : 'none', paddingLeft: depth ? 14 : 0 }}>
+        <div style={{ border: `1px solid ${PC.border}`, borderRadius: 10, background: '#fff', padding: '12px 14px', marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <PIcon name={k.icon} size={16} color={PC.muted} />
+            <span style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg, fontFamily: 'Geist Mono, monospace' }}>{e.hostname}</span>
+            <PPill tone="neutral" size="xs">{k.label}</PPill>
+            {e.stage && <PPill tone="outline" size="xs">{e.stage}</PPill>}
+          </div>
+          <Grants e={e} />
+        </div>
+        {kids.map(c => <Node key={c.hostname} e={c} depth={depth + 1} />)}
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <PPageHeader title="Endpoint access" icon="git-fork"
+        subtitle="Every endpoint this server routes, with its owner and who's been granted access. Read-only — a server-wide view of who can reach what; access is changed by each endpoint's owner from its share dialog." />
+      {tree === null && !err && <div style={{ fontSize: 13, color: PC.muted }}>Loading endpoints…</div>}
+      {err && (
+        <PLiveState status="error" error={err} label="Couldn't load endpoint access" onRetry={() => setNonce(n => n + 1)} />
+      )}
+      {tree !== null && !err && roots.length === 0 && (
+        <PEmpty icon="git-fork" title="No endpoints registered yet"
+          text="Endpoints appear here as workspaces and apps are created on this server." />
+      )}
+      {roots.map(e => <Node key={e.hostname} e={e} depth={0} />)}
+    </div>
+  );
+}
+
+window.SC_PEOPLE = { UsersView, ApprovalsView, EndpointAccessView };

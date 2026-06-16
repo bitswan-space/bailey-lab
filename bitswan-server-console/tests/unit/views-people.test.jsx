@@ -5,7 +5,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { SC_PEOPLE, installFetch } from './harness.js';
 import { makeData, Host, spies } from './ctx.js';
 
-const { UsersView, ApprovalsView } = SC_PEOPLE;
+const { UsersView, ApprovalsView, EndpointAccessView } = SC_PEOPLE;
 
 const people = [
   { id: 'tomas@h', name: 'Tomas', email: 'tomas@h', role: 'admin', workspaceCount: 2, deviceCount: 3, lastActive: 'now', invited: false },
@@ -117,5 +117,27 @@ describe('ApprovalsView', () => {
     render(<Host View={ApprovalsView} data={withPending()} extra={s} />);
     fireEvent.click(screen.getByText('Dismiss'));
     expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Dismissed request'), 'info');
+  });
+});
+
+describe('EndpointAccessView', () => {
+  it('renders the endpoint tree read-only: owners, grants, nested by parent', async () => {
+    installFetch({ '/bailey/api/admin/acl': { json: { endpoints: [
+      { hostname: 'acme-dashboard.d', display_name: 'acme (dashboard)', kind: 'workspace', stage: '', parent: '', owner_email: 'jane@x', grants: [{ principal_type: 'email', principal_value: 'bob@x', role: 'access' }] },
+      { hostname: 'acme-gitops.d', display_name: 'acme (gitops)', kind: 'service', stage: '', parent: 'acme-dashboard.d', owner_email: 'jane@x', grants: [] },
+    ] } } });
+    render(<Host View={EndpointAccessView} data={makeData()} />);
+    await waitFor(() => expect(screen.getByText('acme-dashboard.d')).toBeTruthy());
+    expect(screen.getByText('acme-gitops.d')).toBeTruthy();          // child endpoint
+    expect(screen.getAllByText('jane@x').length).toBeGreaterThan(0); // owner
+    expect(screen.getByText('bob@x')).toBeTruthy();                  // grant
+    // Read-only: no member-editing controls.
+    expect(screen.queryByPlaceholderText('person@example.com')).toBeNull();
+  });
+
+  it('surfaces an error and retries', async () => {
+    installFetch({ '/bailey/api/admin/acl': { status: 500, json: { error: 'acl boom' } } });
+    render(<Host View={EndpointAccessView} data={makeData()} />);
+    await waitFor(() => expect(screen.getByText('acl boom')).toBeTruthy());
   });
 });

@@ -243,6 +243,11 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleNetworkMapAPI(w, r)
 			return
 		}
+	case "/bailey/api/admin/acl":
+		if r.Method == http.MethodGet {
+			handleAdminACLTree(w, r)
+			return
+		}
 	case "/bailey/api/admin/default-images":
 		switch r.Method {
 		case http.MethodGet:

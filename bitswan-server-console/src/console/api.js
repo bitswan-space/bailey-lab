@@ -220,6 +220,8 @@ export const Api = {
   adminDevices: () => getJSON('/bailey/api/admin/devices'),
   adminRemoveDevice: (email, id) => postForm('/bailey/api/admin/devices/remove', { email, id }),
   adminNetworkMap: () => getJSON('/bailey/api/admin/network-map'),
+  // Read-only server-wide ACL tree: every endpoint + owner + grants (admin).
+  adminACL: () => getJSON('/bailey/api/admin/acl'),
   adminDefaultImages: () => getJSON('/bailey/api/admin/default-images'),
   setAdminDefaultImages: (body) => postJSON('/bailey/api/admin/default-images', body),
 };
