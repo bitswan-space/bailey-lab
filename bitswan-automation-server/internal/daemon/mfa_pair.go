@@ -181,7 +181,7 @@ func pendingPairPollHandler(w http.ResponseWriter, r *http.Request, email string
 	// Without this the new browser would land back at /admin/challenge
 	// immediately after redirecting, defeating the point of the
 	// "punch a code into a trusted browser" flow.
-	if _, groups := identityFromHeaders(r); isAdminGroups(groups) {
+	if callerIsAdmin(email) {
 		_ = setSessionCookie(w, r, email)
 	}
 	w.Header().Set("Content-Type", "application/json")

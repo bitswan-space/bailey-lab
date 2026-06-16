@@ -89,19 +89,28 @@ const P_ROLES = [
 // API isn't keyed by these identities yet) and is only reachable when the
 // backend reports a device count.
 function UsersView({ ctx }) {
-  const { data, toast, go, navigate, routeParam } = ctx;
+  const { data, toast, go, navigate, routeParam, refresh } = ctx;
   const [query, setQuery] = useP('');
   // The person whose devices are open lives in the URL (/users/:email) so the
   // drawer survives refresh and is shareable.
   const devicesUserId = routeParam;
+
+  // Assign a role (admin-only, stored locally) and refresh the roster.
+  const changeRole = async (email, role) => {
+    try {
+      await PApi.setUserRole(email, role);
+      toast(`Role updated to ${role}`, 'success');
+      refresh && refresh('people');
+    } catch (e) {
+      toast(`Couldn't change role: ${e.message}`, 'danger');
+    }
+  };
 
   const ROLES = P_ROLES;
   const people = data.people || [];
   const loaded = data.load.people === 'ok';
   const list = people.filter(u =>
     u.name.toLowerCase().includes(query.toLowerCase()) || u.email.toLowerCase().includes(query.toLowerCase()));
-
-  const ROLE_DISABLED = "Changing roles isn't available yet — it needs an identity-provider admin client (same as invites). Coming soon.";
 
   return (
     <div>
@@ -177,10 +186,9 @@ function UsersView({ ctx }) {
                 <div style={{ fontSize: 11.5, color: PC.muted, fontFamily: 'Geist Mono, monospace' }}>{u.email}</div>
               </div>
             </div>
-            {/* Role is a styled dropdown (Admin can change roles) — but there's
-                no role-write backend yet, so picking a new role explains that
-                and doesn't persist. The current role comes live from /people. */}
-            <RoleSelect role={u.role} onPick={() => toast(ROLE_DISABLED, 'info')} />
+            {/* Role is a styled dropdown; admins change roles here. The role is
+                stored locally (user_roles) and authoritative — not from SSO. */}
+            <RoleSelect role={u.role} onPick={(role) => changeRole(u.email, role)} />
             <span style={{ fontSize: 13, color: PC.fg }}>{u.workspaceCount}</span>
             <button onClick={() => u.deviceCount > 0 && navigate('users', u.id)} title={u.deviceCount ? 'Manage devices' : 'No devices'}
               style={{ display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 9px', borderRadius: 7,

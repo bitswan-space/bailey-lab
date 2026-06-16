@@ -217,6 +217,9 @@ export const Api = {
   // the People view keeps its control disabled rather than calling this.
   // Wired here for when the backend lands; throws ApiError(501) until then.
   invite: (email, role) => postJSON('/bailey/api/people/invite', { email, role }),
+  // Assign a user's role (admin-only). Stored locally in the daemon DB —
+  // authoritative, not pulled from SSO.
+  setUserRole: (email, role) => postJSON('/bailey/api/people/role', { email, role }),
   adminDevices: () => getJSON('/bailey/api/admin/devices'),
   adminRemoveDevice: (email, id) => postForm('/bailey/api/admin/devices/remove', { email, id }),
   adminNetworkMap: () => getJSON('/bailey/api/admin/network-map'),

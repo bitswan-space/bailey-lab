@@ -58,6 +58,11 @@ func TestAdminDevices_MarksCurrentDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Roles are authoritative in the local DB now; make the caller a real admin.
+	if err := dbSetUserRole(email, roleAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dbDeleteUserRole(email) })
 	// Build an admin request that ALSO presents this device's cookie under
 	// the same email, so currentDeviceForRequest resolves it.
 	w0 := httptest.NewRecorder()

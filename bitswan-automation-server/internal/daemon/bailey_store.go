@@ -136,6 +136,18 @@ CREATE TABLE IF NOT EXISTS server_settings (
   updated_by TEXT NOT NULL COLLATE NOCASE
 );
 
+-- Per-user role, managed locally (NOT pulled from SSO). An admin assigns
+-- roles in People & roles; this is the authoritative source for a user's role
+-- and for the admin capability. Unset users default to "member" (the root
+-- admin defaults to "admin"); SSO is used only for the first-admin claim
+-- bootstrap, never for ongoing role/admin decisions.
+CREATE TABLE IF NOT EXISTS user_roles (
+  email      TEXT PRIMARY KEY COLLATE NOCASE,
+  role       TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL COLLATE NOCASE
+);
+
 -- Single-use backup recovery codes. An opt-in recovery shortcut set up
 -- alongside the authenticator in the console's Security & recovery. Each
 -- row is one hashed code; using it deletes the row (single-use). The

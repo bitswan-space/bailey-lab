@@ -45,6 +45,13 @@ func trustedDeviceReq(t *testing.T, method, path, email, form string, groups ...
 	}
 	if len(groups) > 0 {
 		r.Header.Set("X-Forwarded-Groups", strings.Join(groups, ","))
+		// Roles are now authoritative in the local DB, not derived from SSO
+		// groups. Tests that present the admin group expect the caller to be
+		// an admin, so translate that into the local role the same way the
+		// dispatch test helper does.
+		if isAdminGroups(groups) {
+			_ = dbSetUserRole(email, roleAdmin, "test")
+		}
 	}
 	return r
 }

@@ -135,7 +135,7 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 		}
 	case "/bailey/api/approvals":
 		if r.Method == http.MethodGet {
-			handleBaileyApprovalsAPI(w, r, email, isAdminGroups(groups))
+			handleBaileyApprovalsAPI(w, r, email, callerIsAdmin(email))
 			return
 		}
 	case "/bailey/api/endpoints":
@@ -226,6 +226,11 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 	case "/bailey/api/people/invite":
 		if r.Method == http.MethodPost {
 			handleBaileyPeopleInvite(w, r)
+			return
+		}
+	case "/bailey/api/people/role":
+		if r.Method == http.MethodPost {
+			handleSetUserRole(w, r, email)
 			return
 		}
 	case "/bailey/api/admin/devices":

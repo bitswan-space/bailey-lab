@@ -137,7 +137,7 @@ func handleGateState(w http.ResponseWriter, r *http.Request, email string, group
 	}
 	writeJSON(w, gateState{
 		Email:            email,
-		IsAdmin:          isAdminGroups(groups),
+		IsAdmin:          callerIsAdmin(email),
 		Claimed:          claimed,
 		Trusted:          email != "" && currentDeviceForRequest(r, email) != nil,
 		TOTPEnrolled:     email != "" && rec != nil,
@@ -230,7 +230,7 @@ func handleGatePendingPairPoll(w http.ResponseWriter, r *http.Request, email str
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if _, groups := identityFromHeaders(r); isAdminGroups(groups) {
+	if callerIsAdmin(email) {
 		_ = setSessionCookie(w, r, email)
 	}
 	writeJSON(w, map[string]any{

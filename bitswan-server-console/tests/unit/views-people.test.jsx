@@ -60,8 +60,9 @@ describe('UsersView', () => {
     expect(screen.getByText(/kc down/)).toBeTruthy();
   });
 
-  it('role is a styled dropdown; picking a new role explains it is not wired yet', () => {
+  it('role is a styled dropdown; picking a new role persists it via the API', async () => {
     const s = spies();
+    installFetch({ '/bailey/api/people/role': { json: { ok: true, email: 'tomas@h', role: 'user' } } });
     render(<Host View={UsersView} data={makeData({ people })} extra={s} />);
     // Open the first row's role menu (tomas = admin).
     fireEvent.click(screen.getAllByTitle('Change role')[0]);
@@ -69,7 +70,8 @@ describe('UsersView', () => {
     // the earlier one is the static legend).
     const userOpts = screen.getAllByText('User');
     fireEvent.click(userOpts[userOpts.length - 1]);
-    expect(s.toast).toHaveBeenCalledWith(expect.stringContaining("isn't available yet"), 'info');
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Role updated'), 'success'));
+    expect(s.refresh).toHaveBeenCalledWith('people');
   });
 });
 

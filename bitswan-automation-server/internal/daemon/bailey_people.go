@@ -65,8 +65,76 @@ const (
 	roleAdmin   = "admin"
 	roleAuditor = "auditor"
 	roleMember  = "member"
-	roleViewer  = "viewer"
+	roleUser    = "user"
 )
+
+// validRole reports whether role is one we accept on a role-write.
+func validRole(role string) bool {
+	switch role {
+	case roleAdmin, roleAuditor, roleMember, roleUser:
+		return true
+	}
+	return false
+}
+
+// effectiveRole is the AUTHORITATIVE role for an email, resolved locally:
+//   - an explicit role in user_roles (set by an admin) wins;
+//   - otherwise the recorded root admin is "admin" (bootstrap, no lockout);
+//   - otherwise "member".
+// It is never derived from SSO groups — SSO only seeds the first admin via the
+// one-time claim flow, after which roles live entirely in user_roles.
+func effectiveRole(email string) string {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return ""
+	}
+	if r, _ := dbGetUserRole(email); r != "" {
+		return r
+	}
+	if strings.EqualFold(email, strings.TrimSpace(serverRootAdmin())) {
+		return roleAdmin
+	}
+	return roleMember
+}
+
+// callerIsAdmin is the admin CAPABILITY check — true iff the email's effective
+// role is admin. Replaces the old SSO-group check everywhere except the
+// first-admin claim bootstrap.
+func callerIsAdmin(email string) bool {
+	return effectiveRole(email) == roleAdmin
+}
+
+// handleSetUserRole assigns a user's role locally (admin-only; the caller is
+// already gated in handleBailey). Stores it in user_roles, which is the
+// authoritative source for the role and the admin capability.
+func handleSetUserRole(w http.ResponseWriter, r *http.Request, by string) {
+	var req struct {
+		Email string `json:"email"`
+		Role  string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	email := strings.TrimSpace(req.Email)
+	role := strings.TrimSpace(req.Role)
+	if email == "" || !validRole(role) {
+		writeJSONError(w, "email and a valid role (admin|auditor|member|user) are required", http.StatusBadRequest)
+		return
+	}
+	// The recorded root admin is the bootstrap admin — never let them be
+	// demoted from here, or the server could be left with no admin at all.
+	if strings.EqualFold(email, strings.TrimSpace(serverRootAdmin())) && role != roleAdmin {
+		writeJSONError(w, "the root admin's role can't be changed", http.StatusConflict)
+		return
+	}
+	if err := dbSetUserRole(email, role, by); err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "email": email, "role": role})
+}
 
 // gatherPeople builds the roster from every store the daemon can read.
 // Returns the people sorted by email and the first error encountered
@@ -191,21 +259,18 @@ func gatherPeople(r *http.Request) ([]personDTO, error) {
 		noteErr(tErr)
 	}
 
-	root := strings.ToLower(strings.TrimSpace(serverRootAdmin()))
 	out := make([]personDTO, 0, len(byEmail))
-	for key, a := range byEmail {
-		role := roleMember
-		if key == root {
-			role = roleAdmin
-		}
+	for _, a := range byEmail {
 		out = append(out, personDTO{
 			// No real display-name source without the Keycloak profile
 			// query (TODO), and we don't infer a name from the email
 			// local-part — name is reported as the email until a real
 			// profile source is wired.
-			Name:        a.email,
-			Email:       a.email,
-			Role:        role,
+			Name:  a.email,
+			Email: a.email,
+			// Role is the locally-stored, authoritative role (effectiveRole),
+			// not an SSO-derived one.
+			Role:        effectiveRole(a.email),
 			Workspaces:  a.workspaces,
 			Devices:     a.devices,
 			LastActive:  a.lastActive,

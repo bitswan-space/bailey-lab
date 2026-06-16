@@ -67,6 +67,12 @@ func ensureTrustedDeviceForReq(r *http.Request) {
 	if email == "" {
 		return
 	}
+	// Admin is now a LOCAL role (user_roles), not an SSO group. Tests still
+	// signal "this caller is an admin" with the admin group header, so translate
+	// that into a local admin role for the test's caller.
+	if g := r.Header.Get("X-Forwarded-Groups"); g != "" && isAdminGroups(strings.Split(g, ",")) {
+		_ = dbSetUserRole(email, roleAdmin, "test")
+	}
 	// The gate/bootstrap APIs (handleGateAPI) and the public whoami run BEFORE
 	// the device-trust backstop and are exactly the routes an untrusted device
 	// must reach to become trusted — auto-trusting them would mask the very

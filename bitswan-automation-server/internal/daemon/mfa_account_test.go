@@ -200,6 +200,13 @@ func TestAccountTOTP_DisableAdminOnly(t *testing.T) {
 		t.Errorf("non-admin disable = %d, want 403", w.Code)
 	}
 
+	// Promote the caller to a local admin (roles are now authoritative in the
+	// local DB, not derived from the forwarded-groups header).
+	if err := dbSetUserRole(email, roleAdmin, "test"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dbDeleteUserRole(email) })
+
 	// Admin disable → 303 + record gone.
 	rAdmin := acctReq(http.MethodPost, "/x", email, "action=disable")
 	rAdmin.Header.Set("X-Forwarded-Groups", adminGrp)

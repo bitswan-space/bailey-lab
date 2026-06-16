@@ -32,8 +32,8 @@ const baileyConfigName = "bailey"
 // org admin group. Thin wrapper over identityFromHeaders/isAdminGroups
 // so handlers can ask the question without unpacking headers.
 func isAdmin(r *http.Request) bool {
-	_, g := identityFromHeaders(r)
-	return isAdminGroups(g)
+	email, _ := identityFromHeaders(r)
+	return callerIsAdmin(email)
 }
 
 // forwardedIdentityHeaders are every request header from which the
