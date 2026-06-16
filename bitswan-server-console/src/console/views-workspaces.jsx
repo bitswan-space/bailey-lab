@@ -216,6 +216,10 @@ function SiemCard({ toast }) {
 
         {cfg && editing && (
           <div>
+            <div style={FIELD}>
+              <label style={labelStyle}>Ingestor URL</label>
+              <WTextInput value={form.endpoint} onChange={setF('endpoint')} placeholder={form.protocol === 'otlp-grpc' ? 'collector.example.com' : 'https://collector.example.com'} />
+            </div>
             {/* Protocol + port travel together: the port follows the protocol's
                 default but stays editable. */}
             <div style={{ ...FIELD, display: 'flex', gap: 10 }}>
@@ -231,10 +235,6 @@ function SiemCard({ toast }) {
                 <label style={labelStyle}>Port</label>
                 <WTextInput value={form.port} onChange={setF('port')} placeholder={defaultPortFor(form.protocol)} />
               </div>
-            </div>
-            <div style={FIELD}>
-              <label style={labelStyle}>Ingestor URL</label>
-              <WTextInput value={form.endpoint} onChange={setF('endpoint')} placeholder={form.protocol === 'otlp-grpc' ? 'collector.example.com' : 'https://collector.example.com'} />
             </div>
             <div style={FIELD}>
               <label style={labelStyle}>Auth token <span style={{ fontWeight: 400, color: WC.mutedFg }}>(optional, sent as Bearer)</span></label>
