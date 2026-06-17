@@ -140,9 +140,7 @@ async def put_bp_secrets_route(
     """Apply a BP's secrets: encrypt + version them in bitswan.yaml as one commit
     (so they roll back together) and re-derive each stage's env file. Names are
     shared across stages; values are per stage. Take effect on the next deploy."""
-    return await automation_service.write_bp_secrets(
-        bp, body.values, body.deployed_by
-    )
+    return await automation_service.write_bp_secrets(bp, body.values, body.deployed_by)
 
 
 class DrPolicyRequest(BaseModel):
