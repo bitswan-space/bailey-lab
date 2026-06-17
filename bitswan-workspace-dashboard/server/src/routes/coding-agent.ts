@@ -181,14 +181,22 @@ function isValidUuid(value: unknown): value is string {
 }
 
 /**
- * Default 30 min of double-silence (no PTY output AND no client input).
- * Override via `CODING_AGENT_IDLE_TIMEOUT_MS=<number>`; `0` disables.
+ * Idle teardown is DISABLED by default: a backgrounded coding-agent session
+ * (the user navigated away, or just stepped away from the keyboard) must stay
+ * live so that when they come back the agent is right there, exactly where they
+ * left off. The terminal is kept mounted client-side and its WebSocket/ssh stay
+ * open, so there's nothing to "restart".
+ *
+ * An operator who wants idle reaping for resource hygiene can opt in with
+ * `CODING_AGENT_IDLE_TIMEOUT_MS=<ms>` — and even then the agent isn't killed,
+ * just detached (see `closeForIdle`): the dtach-wrapped Claude keeps running and
+ * a later reconnect resumes it in place.
  */
 function idleTimeoutMs(): number {
   const raw = process.env.CODING_AGENT_IDLE_TIMEOUT_MS;
-  if (raw === undefined) return 30 * 60 * 1000;
+  if (raw === undefined) return 0;
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 30 * 60 * 1000;
+  return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 /**

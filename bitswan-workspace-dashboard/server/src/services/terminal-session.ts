@@ -57,37 +57,27 @@ export function handleTerminalConnection(
   let timedOut = false;
   const closeForIdle = () => {
     timedOut = true;
+    // DETACH, don't kill. The remote Claude is wrapped in dtach, so closing the
+    // ssh connection merely detaches this client — Claude keeps running and a
+    // later reconnect (Resume) re-attaches exactly where the user left off. We
+    // deliberately do NOT send Ctrl+C here: that would make Claude exit and drop
+    // its dtach socket, destroying the session the user expects to return to.
     try {
       socket.send(
         JSON.stringify({
           type: 'idle-timeout',
-          message: 'Closed due to inactivity. Pick the session and click Resume to continue.',
+          message:
+            'Detached after inactivity — your session is still running. Resume to reconnect where you left off.',
         }),
       );
     } catch {
       // socket may already be in CLOSING
     }
-    // Two Ctrl+Cs ~100ms apart. Claude treats it as exit; raw bash falls
-    // through to the wrapper finishing and the ssh closing on its own.
     try {
-      term.write('\x03');
+      socket.close(1000, 'idle detach');
     } catch {
-      // process may already be gone
+      // already closed
     }
-    setTimeout(() => {
-      try {
-        term.write('\x03');
-      } catch {
-        // already gone
-      }
-    }, 100);
-    setTimeout(() => {
-      try {
-        socket.close(1000, 'idle timeout');
-      } catch {
-        // already closed
-      }
-    }, 2500);
   };
   const armIdle = () => {
     if (idleMs <= 0 || timedOut) return;
