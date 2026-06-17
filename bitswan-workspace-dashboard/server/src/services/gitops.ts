@@ -536,7 +536,7 @@ export class GitopsClient {
 
   async bpSetSecrets(
     bp: string,
-    payload: { keys: string[]; values: Record<string, Record<string, string>> },
+    values: Record<string, Record<string, string>>,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
@@ -546,7 +546,7 @@ export class GitopsClient {
           Authorization: `Bearer ${this.secret}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ values }),
       },
     );
     let body: unknown = null;

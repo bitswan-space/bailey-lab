@@ -265,12 +265,13 @@ export interface BpHistory {
   history: BpHistoryEntry[];
 }
 
-/** Deployments → Secrets: a BP's shared secret key names and per-stage values.
- *  `values` is keyed by realm (dev / staging / production; dev covers live-dev). */
-export interface BpSecrets {
-  keys: string[];
-  values: Record<string, Record<string, string>>;
-}
+/** One stage's secret values: {KEY: value}. */
+export type StageSecrets = Record<string, string>;
+
+/** A BP's decrypted secrets, keyed by realm (dev / staging / production; dev
+ *  covers live-dev). Secret NAMES are shared across stages; VALUES are per
+ *  stage, so this is the full per-stage map. */
+export type BpSecrets = Record<string, StageSecrets>;
 
 /** A file's content from a BP's source at a commit (Inspect → Files). */
 export interface BpFileContent {
@@ -392,15 +393,17 @@ export const api = {
       `/api/automations/business-processes/${encodeURIComponent(bp)}/scale`,
       { stage, replicas },
     ),
-  /** Deployments → Secrets: shared key names + per-stage values for a BP. */
+  /** Deployments → Secrets: a BP's decrypted per-stage secrets. */
   bpSecrets: (bp: string) =>
     getJson<BpSecrets>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
     ),
-  setBpSecrets: (bp: string, payload: BpSecrets) =>
+  /** Apply a BP's secrets (all stages) — encrypts + versions them in
+   *  bitswan.yaml as one commit. Names are shared; values are per stage. */
+  setBpSecrets: (bp: string, values: BpSecrets) =>
     putJson<BpSecrets>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
-      payload,
+      { values },
     ),
   /** Inspect → Files: the full source tree of a BP at a commit. */
   bpFileTree: (bp: string, commit: string) =>

@@ -24,6 +24,7 @@ dependencies = [
  "aiohttp",
  "httpx",
  "yappi",
+ "cryptography",
 ]
 
 [project.optional-dependencies]

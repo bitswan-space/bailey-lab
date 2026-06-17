@@ -1,6 +1,6 @@
-"""Per-BP secrets store: shared key names, per-stage values, derived env
-files, and the dev/live-dev realm sharing that replaces automation.toml
-[secrets] groups."""
+"""Per-(BP, stage) secrets crypto + helpers: AES-256-GCM envelope with a
+workspace-local key, value normalisation, and the derived plaintext env file.
+The encrypt→bitswan.yaml→commit→decrypt round-trip is exercised live."""
 
 import os
 
@@ -15,92 +15,60 @@ def test_realm_for_stage_shares_dev_and_live_dev():
     assert S.realm_for_stage("") == "production"
 
 
-def test_write_then_read_round_trips(tmp_path):
+def test_encrypt_decrypt_round_trip_and_key_file(tmp_path):
     sd = str(tmp_path)
-    data = {
-        "keys": ["API_KEY", "DB_URL"],
-        "values": {
-            "dev": {"API_KEY": "dev-key", "DB_URL": "dev-db"},
-            "staging": {"API_KEY": "stg-key"},
-            "production": {},
-        },
-    }
-    S.write_bp_secrets(sd, "shop", data)
-    out = S.read_bp_secrets(sd, "shop")
-    assert out["keys"] == ["API_KEY", "DB_URL"]
-    assert out["values"]["dev"] == {"API_KEY": "dev-key", "DB_URL": "dev-db"}
-    # Empty values are not persisted (a stage with no value = "Not set").
-    assert out["values"]["staging"] == {"API_KEY": "stg-key"}
-    assert out["values"]["production"] == {}
+    values = {"API_KEY": "s3cr3t", "DB_URL": "postgres://x"}
+    blob = S.encrypt_secrets(sd, values)
+    # Ciphertext is opaque base64 — the plaintext never appears in it.
+    assert "s3cr3t" not in blob
+    assert S.decrypt_secrets(sd, blob) == values
+    # The key is written 0600 on the volume and reused.
+    key_path = os.path.join(sd, ".aes-key")
+    assert os.path.exists(key_path)
+    assert oct(os.stat(key_path).st_mode & 0o777) == "0o600"
 
 
-def test_keys_uppercased_deduped_and_unioned(tmp_path):
+def test_each_encrypt_uses_a_fresh_nonce(tmp_path):
     sd = str(tmp_path)
-    S.write_bp_secrets(
-        sd,
-        "shop",
-        {
-            "keys": ["api_key", "API_KEY"],  # dup after upper-casing
-            "values": {
-                # A value set only in staging makes that key part of the shared
-                # union (so dev/production show it as "Not set").
-                "dev": {"api_key": "v1"},
-                "staging": {"only_staging": "s"},
-                "production": {},
-            },
-        },
+    v = {"A": "1"}
+    assert S.encrypt_secrets(sd, v) != S.encrypt_secrets(sd, v)  # random nonce
+
+
+def test_decrypt_garbage_returns_empty(tmp_path):
+    assert S.decrypt_secrets(str(tmp_path), "not-valid-base64-blob!!") == {}
+
+
+def test_decrypt_with_wrong_key_returns_empty(tmp_path):
+    sd1 = str(tmp_path / "a")
+    sd2 = str(tmp_path / "b")
+    os.makedirs(sd1)
+    os.makedirs(sd2)
+    blob = S.encrypt_secrets(sd1, {"A": "1"})
+    # Different secrets dir = different key → can't decrypt (GCM auth fails).
+    assert S.decrypt_secrets(sd2, blob) == {}
+
+
+def test_normalise_values_uppercases_and_keeps_empty():
+    out = S.normalise_values({"api_key": "v", "  ": "x", "EMPTY": "", "n": None})
+    assert out == {"API_KEY": "v", "EMPTY": "", "N": ""}  # blank key dropped
+
+
+def test_materialize_env_skips_empty_values(tmp_path):
+    sd = str(tmp_path)
+    path = S.materialize_env(
+        sd, "shop", "dev", {"API_KEY": "v", "UNSET": "", "DB": "x"}
     )
-    out = S.read_bp_secrets(sd, "shop")
-    assert out["keys"] == ["API_KEY", "ONLY_STAGING"]  # union, deduped, upper-cased
-    assert out["values"]["dev"] == {"API_KEY": "v1"}
-    assert out["values"]["staging"] == {"ONLY_STAGING": "s"}
-    assert out["values"]["production"] == {}
+    assert path == os.path.join(sd, "bp", "shop", "dev")
+    with open(path) as f:
+        body = f.read()
+    assert "API_KEY=v\n" in body and "DB=x\n" in body
+    assert "UNSET" not in body  # empty (declared-but-unset) not injected
+    assert oct(os.stat(path).st_mode & 0o777) == "0o600"
 
 
-def test_keys_are_union_across_stages(tmp_path):
+def test_env_file_path_uses_realm_and_slug(tmp_path):
     sd = str(tmp_path)
-    # No explicit keys; each stage contributes a distinct key. The shared set is
-    # their union so every stage is guided to fill in the others.
-    S.write_bp_secrets(
-        sd,
-        "shop",
-        {"keys": [], "values": {"dev": {"A": "1"}, "staging": {"B": "2"}}},
+    # live-dev resolves to the dev realm; BP name is slugified.
+    assert S.env_file_path(sd, "My Shop", "live-dev") == os.path.join(
+        sd, "bp", "my-shop", "dev"
     )
-    out = S.read_bp_secrets(sd, "shop")
-    assert set(out["keys"]) == {"A", "B"}
-    assert out["values"]["dev"] == {"A": "1"}
-    assert out["values"]["staging"] == {"B": "2"}
-    assert out["values"]["production"] == {}
-
-
-def test_derived_env_file_and_dev_live_dev_share(tmp_path):
-    sd = str(tmp_path)
-    S.write_bp_secrets(
-        sd,
-        "shop",
-        {"keys": ["API_KEY"], "values": {"dev": {"API_KEY": "dev-key"}}},
-    )
-    # dev and live-dev resolve to the SAME env file.
-    dev_file = S.bp_secret_env_file(sd, "shop", "dev")
-    live_file = S.bp_secret_env_file(sd, "shop", "live-dev")
-    assert dev_file is not None and dev_file == live_file
-    with open(dev_file) as f:
-        assert f.read() == "API_KEY=dev-key\n"
-    # production has no values → its env file is empty, but exists.
-    prod_file = S.bp_secret_env_file(sd, "shop", "production")
-    assert prod_file is not None
-    with open(prod_file) as f:
-        assert f.read() == ""
-
-
-def test_read_missing_returns_empty_store(tmp_path):
-    out = S.read_bp_secrets(str(tmp_path), "never-saved")
-    assert out == {"keys": [], "values": {"dev": {}, "staging": {}, "production": {}}}
-
-
-def test_env_files_live_under_bp_slug_dir(tmp_path):
-    sd = str(tmp_path)
-    S.write_bp_secrets(sd, "My Shop", {"keys": ["K"], "values": {"dev": {"K": "v"}}})
-    # Slug is sanitised; the canonical JSON + per-realm files live under bp/.
-    assert os.path.exists(os.path.join(sd, "bp", "my-shop.json"))
-    assert os.path.exists(os.path.join(sd, "bp", "my-shop", "dev"))

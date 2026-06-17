@@ -155,19 +155,21 @@ export function registerAutomationRoutes(
     },
   );
 
-  // Deployments → Secrets: persist the BP's secrets.
+  // Deployments → Secrets: apply a BP's secrets (encrypted + versioned, one
+  // commit). Names are shared across stages; values are per stage, so the body
+  // carries every realm's map: { dev, staging, production }.
   app.put<{
     Params: { bp: string };
-    Body: { keys?: string[]; values?: Record<string, Record<string, string>> };
+    Body: { values?: Record<string, Record<string, string>> };
   }>('/api/automations/business-processes/:bp/secrets', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-    const { keys, values } = req.body ?? {};
-    if (!Array.isArray(keys) || typeof values !== 'object' || values === null) {
-      return reply.code(400).send({ error: 'keys[] and values{} are required' });
+    const { values } = req.body ?? {};
+    if (typeof values !== 'object' || values === null) {
+      return reply.code(400).send({ error: 'values{} is required' });
     }
     try {
-      const r = await gitops.bpSetSecrets(req.params.bp, { keys, values });
+      const r = await gitops.bpSetSecrets(req.params.bp, values);
       if (!r.ok) {
         return reply
           .code(r.status >= 400 && r.status < 500 ? r.status : 502)

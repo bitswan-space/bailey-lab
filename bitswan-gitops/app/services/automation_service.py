@@ -33,7 +33,7 @@ from app.utils import (
 from app.async_docker import get_async_docker_client, DockerError
 from app.deploy_manager import deploy_manager
 from app.services.image_service import ImageService
-from app.services.bp_secrets import bp_secret_env_file
+from app.services import bp_secrets
 from app.services.oauth2_helpers import (
     OAUTH2_PROXY_PATH,
     copy_oauth2_proxy_to_container,
@@ -1321,6 +1321,55 @@ class AutomationService:
         """The git commit a BP's stage is currently deployed at, or None when
         the stage has never been deployed."""
         return self._bp_stage_node(bp, stage).get("git_commit")
+
+    def read_bp_secrets(self, bp: str) -> dict:
+        """Decrypted per-stage secrets for a BP: {dev, staging, production} each
+        a {KEY: value} map. Each stage is independent (dev covers live-dev)."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        enc = (bs.get("secrets") or {}).get(bp) or {}
+        out: dict[str, dict] = {}
+        for realm in bp_secrets.REALMS:
+            blob = enc.get(realm)
+            out[realm] = (
+                bp_secrets.decrypt_secrets(self.secrets_dir, blob) if blob else {}
+            )
+        return out
+
+    async def write_bp_secrets(
+        self,
+        bp: str,
+        values_by_realm: dict,
+        deployed_by: str | None = None,
+    ) -> dict:
+        """Encrypt + version a BP's secrets in bitswan.yaml as ONE commit.
+
+        Secret *names* are shared across stages; *values* are per stage, so the
+        editor sends every realm's {KEY: value} map and we persist them together
+        — one rollback point captures the whole secret state. Each realm gets its
+        own AES blob (per-stage storage), and we re-derive each realm's plaintext
+        env file. Values apply on the next deploy of that stage."""
+        cleaned = {
+            realm: bp_secrets.normalise_values(values_by_realm.get(realm) or {})
+            for realm in bp_secrets.REALMS
+        }
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        enc = bs.setdefault("secrets", {}).setdefault(bp, {})
+        for realm, clean in cleaned.items():
+            enc[realm] = bp_secrets.encrypt_secrets(self.secrets_dir, clean)
+        path = os.path.join(self.gitops_dir, "bitswan.yaml")
+        with open(path, "w") as f:
+            dump_bitswan_yaml(bs, f)
+        await update_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
+            "secrets",
+            deployed_by=deployed_by,
+            message=f"secrets {bp}",
+        )
+        for realm, clean in cleaned.items():
+            bp_secrets.materialize_env(self.secrets_dir, bp, realm, clean)
+        return self.read_bp_secrets(bp)
 
     async def scale_business_process(self, bp: str, stage: str, replicas: int) -> dict:
         """Scale every member container of a BP stage to `replicas` (Inspect →
@@ -3827,19 +3876,26 @@ fi
             # network_mode comes from the deployment entry below (3861 fallback).
             network_mode = None
 
-            # Per-business-process secrets: shared key names across stages, with
-            # per-stage values (dev/live-dev share the dev realm). Replaces the
-            # old automation.toml [secrets] groups — set from the dashboard
-            # Deployments → Secrets tab. The values live in the derived env file
-            # under the secrets volume, never in this compose output.
+            # Per-(BP, stage) secrets: decrypt this stage's blob from
+            # bitswan.yaml and (re)materialise the plaintext env file the
+            # container loads. Deriving it here — at deploy time, from the
+            # current bitswan.yaml — means a stage rollback (which restores its
+            # bitswan.yaml revision) restores its secrets too. Ciphertext stays
+            # in git; plaintext stays on the secrets volume, never in compose.
             if bp_sanitized:
-                bp_secret_env = bp_secret_env_file(
-                    self.secrets_dir, bp_sanitized, stage
+                realm = bp_secrets.realm_for_stage(stage)
+                blob = ((bs_yaml.get("secrets") or {}).get(bp_sanitized) or {}).get(
+                    realm
                 )
-                if bp_secret_env:
-                    entry.setdefault("env_file", [])
-                    if bp_secret_env not in entry["env_file"]:
-                        entry["env_file"].append(bp_secret_env)
+                values = (
+                    bp_secrets.decrypt_secrets(self.secrets_dir, blob) if blob else {}
+                )
+                bp_secret_env = bp_secrets.materialize_env(
+                    self.secrets_dir, bp_sanitized, stage, values
+                )
+                entry.setdefault("env_file", [])
+                if bp_secret_env not in entry["env_file"]:
+                    entry["env_file"].append(bp_secret_env)
 
             # Service dependency secrets (from [services.*] in automation.toml).
             service_secret_names = self._resolve_service_secrets(

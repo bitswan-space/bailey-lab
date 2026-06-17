@@ -20,7 +20,6 @@ from app.deploy_runner import spawn_set_deploy
 from app.event_broadcaster import event_broadcaster
 from app.routes.agent import _scan_automations
 from app.services.automation_service import AutomationService, make_hostname_label
-from app.services.bp_secrets import read_bp_secrets, write_bp_secrets
 from app.dependencies import get_automation_service
 
 logger = logging.getLogger(__name__)
@@ -116,10 +115,10 @@ async def scale_bp(
 
 
 class BpSecretsRequest(BaseModel):
-    # Shared key names across stages, and per-stage (dev/staging/production)
-    # values. dev/live-dev share the dev realm.
-    keys: list[str]
+    # Secret NAMES are shared across stages; VALUES are per stage. The editor
+    # sends every realm's {KEY: value} map: {dev, staging, production}.
     values: dict[str, dict[str, str]]
+    deployed_by: str | None = None
 
 
 @router.get("/business-processes/{bp}/secrets")
@@ -127,9 +126,9 @@ async def get_bp_secrets_route(
     bp: str,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    """The BP's secrets: shared key names + per-stage values (Deployments →
-    Secrets)."""
-    return read_bp_secrets(automation_service.secrets_dir, bp)
+    """A BP's decrypted per-stage secrets: {dev, staging, production} each a
+    {KEY: value} map (Deployments → Secrets)."""
+    return automation_service.read_bp_secrets(bp)
 
 
 @router.put("/business-processes/{bp}/secrets")
@@ -138,9 +137,12 @@ async def put_bp_secrets_route(
     body: BpSecretsRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    """Persist the BP's secrets. Values take effect on the next deploy of the
-    affected stage (containers load them via env_file)."""
-    return write_bp_secrets(automation_service.secrets_dir, bp, body.model_dump())
+    """Apply a BP's secrets: encrypt + version them in bitswan.yaml as one commit
+    (so they roll back together) and re-derive each stage's env file. Names are
+    shared across stages; values are per stage. Take effect on the next deploy."""
+    return await automation_service.write_bp_secrets(
+        bp, body.values, body.deployed_by
+    )
 
 
 @router.get("/business-processes/{bp}/files")
