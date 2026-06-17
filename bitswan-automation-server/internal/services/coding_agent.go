@@ -192,23 +192,18 @@ func (c *CodingAgentService) Enable(gitopsAgentSecret, codingAgentImage, domain 
 		return fmt.Errorf("failed to create coding-agent-sessions directory: %w", err)
 	}
 
-	// Create workspace/worktrees directory
-	worktreesDir := filepath.Join(c.WorkspacePath, "workspace", "worktrees")
-	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
-		return fmt.Errorf("failed to create workspace/worktrees directory: %w", err)
-	}
-
 	hostOsTmp := runtime.GOOS
 
 	if hostOsTmp == "linux" {
-		// Change ownership for Linux
+		// Change ownership for Linux. The per-copy checkouts live under the
+		// `copies` volume subpath (created/owned by gitops); the agent only
+		// needs its home + session dirs here.
 		dirs := []struct {
 			path string
 			name string
 		}{
 			{codingAgentHomeDir, "coding-agent-home"},
 			{codingAgentSessionsDir, "coding-agent-sessions"},
-			{worktreesDir, "workspace/worktrees"},
 		}
 
 		for _, dir := range dirs {
