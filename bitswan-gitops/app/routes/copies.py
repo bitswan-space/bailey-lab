@@ -750,78 +750,105 @@ def _porcelain_to_kind(code: str) -> str | None:
     return None
 
 
+_NAME_STATUS_KIND = {
+    "A": "added",
+    "M": "modified",
+    "D": "deleted",
+    "R": "renamed",
+    "C": "copied",
+    "T": "modified",
+}
+
+
 @router.get("/{name}/status")
 async def get_copy_status(name: str):
-    """Per-file change list for a copy (status --porcelain + diff --numstat)."""
+    """Per-file change list for a copy: everything that pressing Sync & Deploy
+    will make the new main — commits ahead of main, plus uncommitted edits,
+    plus new untracked files. The working tree (not just HEAD) is compared
+    against main, so changes show whether or not they've been committed yet."""
     copy_path = _resolve_copy_path(name)
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
 
-    status_out, status_err, status_rc = await call_git_command_with_output(
-        "git", "status", "--porcelain=v1", "-z", cwd=copy_path
+    # Refresh main from the local bare repo (filesystem, no credentials);
+    # FETCH_HEAD then points at the current main.
+    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
+
+    by_path: dict[str, dict] = {}
+
+    # Tracked delta vs main (commits ahead of main + staged/unstaged edits).
+    # --no-renames so paths stay real (a rename becomes delete + add) — the UI
+    # uses each path to fetch its per-file diff.
+    num_out, _, _ = await call_git_command_with_output(
+        "git", "diff", "--no-renames", "--numstat", "FETCH_HEAD", cwd=copy_path
     )
-    if status_rc != 0:
-        raise HTTPException(
-            status_code=500, detail=f"git status failed: {status_err.strip()}"
-        )
-
-    changed: list[dict] = []
-    records = status_out.split("\x00")
-    skip_next = False
-    for rec in records:
-        if skip_next:
-            skip_next = False
+    for line in num_out.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
             continue
-        if not rec:
-            continue
-        code = rec[:2]
-        path = rec[3:] if len(rec) > 3 else ""
-        kind = _porcelain_to_kind(code)
-        if not kind or not path:
-            continue
-        if code[0] == "R" or code[1] == "R":
-            skip_next = True
-        changed.append({"path": path, "kind": kind, "adds": 0, "dels": 0})
-
-    numstat_out, _, numstat_rc = await call_git_command_with_output(
-        "git", "diff", "--numstat", "HEAD", cwd=copy_path
+        adds_str, dels_str, p = parts
+        by_path[p] = {
+            "path": p,
+            "kind": "modified",
+            "adds": int(adds_str) if adds_str.isdigit() else 0,
+            "dels": int(dels_str) if dels_str.isdigit() else 0,
+        }
+    ns_out, _, _ = await call_git_command_with_output(
+        "git", "diff", "--no-renames", "--name-status", "FETCH_HEAD", cwd=copy_path
     )
-    if numstat_rc == 0:
-        by_path = {c["path"]: c for c in changed}
-        for line in numstat_out.splitlines():
-            parts = line.split("\t", 2)
-            if len(parts) != 3:
-                continue
-            adds_str, dels_str, path = parts
-            adds = int(adds_str) if adds_str.isdigit() else 0
-            dels = int(dels_str) if dels_str.isdigit() else 0
-            entry = by_path.get(path)
-            if entry is not None:
-                entry["adds"] = adds
-                entry["dels"] = dels
+    for line in ns_out.splitlines():
+        cols = line.split("\t")
+        if len(cols) < 2:
+            continue
+        kind = _NAME_STATUS_KIND.get(cols[0][:1], "modified")
+        p = cols[-1]  # for renames, the new path
+        if p in by_path:
+            by_path[p]["kind"] = kind
+        else:
+            by_path[p] = {"path": p, "kind": kind, "adds": 0, "dels": 0}
 
-    return {"changed": changed}
+    # New untracked files (not in main and not yet committed) — the whole file
+    # becomes main, so surface it as added.
+    others_out, _, _ = await call_git_command_with_output(
+        "git", "ls-files", "--others", "--exclude-standard", cwd=copy_path
+    )
+    for p in others_out.splitlines():
+        p = p.strip()
+        if p and p not in by_path:
+            by_path[p] = {"path": p, "kind": "added", "adds": 0, "dels": 0}
+
+    return {"changed": list(by_path.values())}
 
 
 @router.get("/{name}/diff")
 async def get_copy_diff(name: str, path: str | None = Query(None)):
-    """Unified diff of the copy against its own HEAD. Optional `?path=` filter."""
+    """Unified diff of the copy against main — what will become the new main on
+    Sync & Deploy, committed or not. Optional `?path=` filter."""
     copy_path = _resolve_copy_path(name)
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+    if path is not None and not _is_safe_relative_path(path):
+        raise HTTPException(status_code=400, detail="invalid path")
 
-    git_args: list[str] = ["git", "diff", "HEAD"]
-    if path is not None:
-        if not _is_safe_relative_path(path):
-            raise HTTPException(status_code=400, detail="invalid path")
-        git_args += ["--", path]
-    else:
-        git_args += ["--", "."]
+    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
+
+    git_args: list[str] = ["git", "diff", "FETCH_HEAD"]
+    git_args += ["--", path] if path is not None else ["--", "."]
 
     stdout, stderr, rc = await call_git_command_with_output(*git_args, cwd=copy_path)
     if rc != 0:
         raise HTTPException(
             status_code=500, detail=f"Failed to get diff: {stderr.strip()}"
         )
+
+    # Untracked new files don't appear in `git diff` against a ref — show the
+    # whole file as added (`--no-index` exits 1 when it finds a diff; that's
+    # expected, not an error, so we ignore the return code and use the output).
+    if path is not None and not stdout.strip():
+        no_index_out, _, _ = await call_git_command_with_output(
+            "git", "diff", "--no-index", "--", "/dev/null", path, cwd=copy_path
+        )
+        if no_index_out.strip():
+            stdout = no_index_out
 
     return {"diff": stdout}
