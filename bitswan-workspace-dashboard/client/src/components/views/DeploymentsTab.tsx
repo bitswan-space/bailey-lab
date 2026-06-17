@@ -24,7 +24,6 @@ import {
   Shield,
   Square,
   Undo2,
-  Users,
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -81,8 +80,7 @@ type Section =
   | 'containers'
   | 'backups'
   | 'firewall'
-  | 'supply'
-  | 'access';
+  | 'supply';
 
 const STAGE_IDS = STAGES.map((s) => s.id);
 const SECTION_IDS: Section[] = [
@@ -92,7 +90,6 @@ const SECTION_IDS: Section[] = [
   'backups',
   'firewall',
   'supply',
-  'access',
 ];
 
 function short(sha: string | null | undefined, n = 12): string {
@@ -794,7 +791,6 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     { id: 'backups', icon: Archive, label: 'Backups' },
     { id: 'firewall', icon: Shield, label: 'Firewall' },
     { id: 'supply', icon: Boxes, label: 'Supply chain' },
-    { id: 'access', icon: Users, label: 'Access control' },
   ];
 
   return (
@@ -1015,10 +1011,8 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
               <EmptyTab icon={Archive} label="Backups" />
             ) : section === 'firewall' ? (
               <EmptyTab icon={Shield} label="Firewall" />
-            ) : section === 'supply' ? (
-              <EmptyTab icon={Boxes} label="Supply chain" />
             ) : (
-              <EmptyTab icon={Users} label="Access control" />
+              <EmptyTab icon={Boxes} label="Supply chain" />
             )}
           </div>
         </div>
