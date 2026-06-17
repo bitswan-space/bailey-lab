@@ -217,11 +217,23 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
       byName.set(name, entry);
       return entry;
     };
+    // Promoted deployments (dev/staging/production) and main-scope discovery
+    // live under `copies/main/` — main is now a checkout, not the repo root.
+    // Per-user copies (`copies/<name>/`) are live-dev previews and never
+    // belong in this shared, main-scoped tab. Match the BP against the path
+    // with the `copies/main/` prefix stripped (older deploys may carry a bare
+    // `<bp>/…` path, so handle both).
+    const MAIN_PREFIX = 'copies/main/';
     for (const a of raw) {
       const rel = a.relative_path ?? '';
-      if (!rel.startsWith(bp.name)) continue;
-      if (rel.includes('/copies/') || rel.startsWith('copies/')) continue;
+      if (rel.startsWith('copies/') && !rel.startsWith(MAIN_PREFIX)) continue;
+      const bpRel = rel.startsWith(MAIN_PREFIX)
+        ? rel.slice(MAIN_PREFIX.length)
+        : rel;
+      if (bpRel !== bp.name && !bpRel.startsWith(`${bp.name}/`)) continue;
       const key = a.automation_name ?? a.name;
+      // Keep the FULL relative_path (incl. copies/main/) — it's the volume
+      // mount path the per-automation Deploy endpoint expects.
       const entry = ensure(key, rel);
       const stage = a.stage;
       if (stage === 'dev' || stage === 'staging' || stage === 'production') {
