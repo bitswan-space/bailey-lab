@@ -23,6 +23,12 @@ export interface Copy {
   commit_message: string;
   has_requirements: boolean;
   synced: boolean;
+  /** Commits on this copy not yet on main. */
+  ahead: number;
+  /** Commits on main this copy hasn't picked up (>0 ⇒ a rebase is needed). */
+  behind: number;
+  /** Uncommitted changes in the working tree. */
+  has_changes: boolean;
 }
 
 /** The top-bar flow tabs. Description, Deployments and Snapshots work

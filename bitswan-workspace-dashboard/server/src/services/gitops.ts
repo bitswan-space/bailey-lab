@@ -307,6 +307,17 @@ export class GitopsClient {
   }
 
   /**
+   * `POST /copies/{name}/sync` — commit WIP and, when the copy is a pure
+   * fast-forward of main, fast-forward main to it server-side. Returns
+   * `needs_rebase` in the body when a rebase is required instead.
+   */
+  async syncCopy(
+    name: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(`/copies/${encodeURIComponent(name)}/sync`, {});
+  }
+
+  /**
    * `POST /automations/start-deploy` — workspace-bind-mount deploy. Body is
    * `{ relative_path, stage, copy? }`. Gitops resolves the source under
    * `/workspace-repo`, merges `bitswan_lib`, computes the checksum, and

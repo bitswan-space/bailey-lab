@@ -207,6 +207,14 @@ export interface CreateBusinessProcessResponse {
   setup_error?: string | null;
 }
 
+/** Gitops `POST /copies/{name}/sync` response. */
+export interface SyncCopyResult {
+  status: 'success' | 'needs_rebase';
+  /** "fast-forward" when synced server-side. */
+  method?: string | null;
+  message: string;
+}
+
 /** Gitops `POST /copies/create` response (plus auto-deploy fields). */
 export interface CreateCopyResponse {
   name: string;
@@ -357,6 +365,14 @@ export const api = {
       getJson<{ diff: string }>(
         `/api/copies/${encodeURIComponent(name)}/diff${p ? `?path=${encodeURIComponent(p)}` : ''}`,
       ),
+    /**
+     * Sync the copy into main. Commits WIP and, when the copy is a pure
+     * fast-forward of main (no rebase needed), fast-forwards main to it
+     * server-side. Returns `needs_rebase` when main has diverged — the caller
+     * then hands off to the coding agent to rebase.
+     */
+    sync: (name: string) =>
+      postJson<SyncCopyResult>(`/api/copies/${encodeURIComponent(name)}/sync`, {}),
   },
 
   snapshots: {

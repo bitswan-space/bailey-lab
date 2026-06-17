@@ -21,6 +21,32 @@ export function registerCopyRoutes(
   app: FastifyInstance,
   { gitops }: CopyRoutesOptions,
 ): void {
+  app.post<{ Params: { name: string } }>(
+    '/api/copies/:name/sync',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      const { name } = req.params;
+      if (!name) {
+        return reply.code(400).send({ error: 'name is required' });
+      }
+      try {
+        const r = await gitops.syncCopy(name);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name }, 'copy sync failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   app.post<{
     Body: { branch_name?: string; base_branch?: string };
   }>('/api/copies', async (req, reply) => {
