@@ -734,65 +734,55 @@ class AutomationService:
         cached image — no rebuild. Replaces the old materialize-and-mount path for
         promoted stages: the source now lives INSIDE the image. Returns
         (full_tag, image_id)."""
+        import docker
+
         auto_name = sanitize_automation_name(
             os.path.basename(source_dir.rstrip(os.sep))
         )
         parent = os.path.dirname(source_dir.rstrip(os.sep))
         bp_name = sanitize_automation_name(os.path.basename(parent))
         ws = self.workspace_name or "workspace"
-        tag_root = f"{ws}-{bp_name}-{auto_name}-app"
-        full_tag = f"internal/{tag_root}:sha{source_sha}"
+        tag_root = f"internal/{ws}-{bp_name}-{auto_name}-app"
+        full_tag = f"{tag_root}:sha{source_sha}"
         mp = mount_path or "/app"
 
-        image_service = ImageService()
-
-        async def _resolve_id() -> str | None:
-            for im in await image_service.get_images():
-                if im.get("tag") == full_tag:
-                    return im.get("id")
-            return None
-
-        already = any(
-            im.get("tag") == full_tag and im.get("build_status") in (None, "ready")
-            for im in await image_service.get_images()
-        )
-        if not already and image_service._get_build_status(source_sha) != "building":
+        def _build_sync() -> str | None:
+            client = docker.from_env()
+            # Dedup: an image for this exact source already exists — reuse it.
+            try:
+                return client.images.get(full_tag).id
+            except docker.errors.ImageNotFound:
+                pass
             ctx = tempfile.mkdtemp(prefix=".bswn-bake-")
             try:
-                # Merge the source dirs (later-wins) into the build context.
+                # Merge the source dirs (later-wins). symlinks=True PRESERVES
+                # symlinks (e.g. go.mod → /deps/go.mod, an absolute path the
+                # runtime base provides) — `COPY . <mp>` keeps them as symlinks
+                # in the image, resolving at runtime. Following them here would
+                # fail (the target only exists inside the running container).
                 for d in dirs_to_merge:
                     if os.path.isdir(d):
                         shutil.copytree(d, ctx, dirs_exist_ok=True, symlinks=True)
-                # Build-only files must not be baked into the app dir.
                 with open(os.path.join(ctx, ".dockerignore"), "w") as f:
                     f.write("image/\nDockerfile\n.dockerignore\n")
                 with open(os.path.join(ctx, "Dockerfile"), "w") as f:
                     f.write(f"FROM {base_image}\nCOPY . {mp}\n")
-                await image_service.create_image(
-                    tag_root, build_context_path=ctx, checksum=source_sha
+                image, _logs = client.images.build(
+                    path=ctx, tag=full_tag, rm=True, pull=False
                 )
+                client.images.get(full_tag).tag(tag_root, "latest")
+                return image.id
             finally:
                 shutil.rmtree(ctx, ignore_errors=True)
 
-        if not already:
-            deadline = asyncio.get_event_loop().time() + 5 * 60
-            while True:
-                status = image_service._get_build_status(source_sha)
-                if status == "ready":
-                    break
-                if status == "failed":
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Source image build failed for {full_tag}",
-                    )
-                if asyncio.get_event_loop().time() >= deadline:
-                    raise HTTPException(
-                        status_code=504,
-                        detail=f"Source image build timed out for {full_tag}",
-                    )
-                await asyncio.sleep(2)
-
-        return full_tag, await _resolve_id()
+        try:
+            image_id = await asyncio.to_thread(_build_sync)
+        except docker.errors.BuildError as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Source image build failed for {full_tag}: {e}",
+            )
+        return full_tag, image_id
 
     async def _source_commit(self, source_dir: str) -> str | None:
         """Git commit of the source tree being deployed (the copy/main HEAD), so a
