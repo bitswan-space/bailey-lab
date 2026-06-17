@@ -335,9 +335,10 @@ def _flat_to_tree(bs_yaml: dict) -> dict:
             stage = "production"
         node = tree.setdefault(bp, {}).setdefault(stage, {})
         ex = (existing.get(bp, {}) or {}).get(stage, {}) or {}
-        for k in ("git_commit", "deployed_at", "deployed_by", "history"):
-            if k in ex:
-                node[k] = ex[k]
+        # Only the shared source git_commit is metadata on the node; deployment
+        # HISTORY is derived from the git log of bitswan.yaml, not stored here.
+        if "git_commit" in ex:
+            node["git_commit"] = ex["git_commit"]
         node.setdefault("deployments", {})[dep_id] = conf
     return tree
 

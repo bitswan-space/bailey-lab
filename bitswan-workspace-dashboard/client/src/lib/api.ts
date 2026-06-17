@@ -232,10 +232,13 @@ export interface BpHistoryMember {
   image_id?: string | null;
 }
 
-/** One deployment in a BP stage's history (newest-first). */
+/** One deployment in a BP stage's history (newest-first). Derived from the git
+ *  log of bitswan.yaml. */
 export interface BpHistoryEntry {
-  // eslint-disable-next-line no-restricted-syntax -- nullable wire field
-  git_commit: string | null;
+  /** bitswan.yaml commit sha = the deploy-event id (the rollback key). */
+  commit: string;
+  // eslint-disable-next-line no-restricted-syntax -- nullable: the deployed source version
+  source_commit: string | null;
   deployed_at: string;
   // eslint-disable-next-line no-restricted-syntax -- nullable wire field
   deployed_by: string | null;

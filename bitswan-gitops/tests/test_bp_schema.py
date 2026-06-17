@@ -6,6 +6,8 @@ schema/grouping/history logic with git writes stubbed.
 """
 
 import asyncio
+import os
+import subprocess
 
 from app.utils import read_bitswan_yaml, dump_bitswan_yaml
 from app.services import automation_service as asvc
@@ -78,62 +80,98 @@ def test_flat_tree_round_trip(tmp_path):
     assert deps["backend-shop-dev"]["stage"] == "dev"
 
 
-def test_write_bp_deploy_and_history(tmp_path, monkeypatch):
-    """write_bp_deploy records the stage's shared commit + a history entry;
-    bp_history reads it back with the current flag, and a second deploy prepends
-    (newest-first)."""
-    monkeypatch.setenv("BITSWAN_GITOPS_DIR", str(tmp_path))
+def _git(*args, cwd, env_extra=None):
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_COMMITTER_NAME="t")
+    env.update(env_extra or {})
+    return subprocess.run(["git", *args], cwd=cwd, env=env, check=True)
+
+
+def test_write_bp_deploy_sets_only_commit_no_history(tmp_path, monkeypatch):
+    """write_bp_deploy stamps the node's shared git_commit and stores NO history
+    array in bitswan.yaml — git is the history source of truth."""
 
     async def _noop_update_git(*a, **k):
         return None
 
     monkeypatch.setattr(asvc, "update_git", _noop_update_git)
-
     svc = AutomationService()
     svc.gitops_dir = str(tmp_path)
     svc.gitops_dir_host = str(tmp_path)
-
-    # Seed a flat bitswan.yaml with the BP's dev deployments.
     with open(tmp_path / "bitswan.yaml", "w") as f:
         dump_bitswan_yaml(_flat_yaml(), f)
 
-    members = [
-        {
-            "deployment_id": "backend-shop-dev",
-            "image": "img:a",
-            "image_id": "sha256:aaa",
-        },
-        {
-            "deployment_id": "frontend-shop-dev",
-            "image": "img:b",
-            "image_id": "sha256:bbb",
-        },
-    ]
     asyncio.run(
-        svc.write_bp_deploy(
-            "shop", "dev", "commit-one", members, "tim@x", source="deploy"
-        )
+        svc.write_bp_deploy("shop", "dev", "commit-one", [], "tim@x", source="deploy")
     )
 
-    h = svc.bp_history("shop", "dev")
-    assert h["current"] == "commit-one"
-    assert len(h["history"]) == 1
-    assert h["history"][0]["status"] == "deployed"
-    assert set(h["history"][0]["members"].keys()) == {
-        "backend-shop-dev",
-        "frontend-shop-dev",
-    }
+    import yaml
 
-    # A second deploy prepends (newest-first) and moves `current`.
-    asyncio.run(
-        svc.write_bp_deploy(
-            "shop", "dev", "commit-two", members, "tim@x", source="deploy"
+    raw = yaml.safe_load(open(tmp_path / "bitswan.yaml"))
+    node = raw["business_processes"]["shop"]["dev"]
+    assert node["git_commit"] == "commit-one"
+    assert "history" not in node  # history lives in git, not the file
+    assert "deployed_at" not in node and "deployed_by" not in node
+
+
+def test_bp_history_from_git_log(tmp_path):
+    """bp_history is derived from the git log of bitswan.yaml: one entry per
+    distinct BP-stage state, newest-first, with the current marker."""
+    import os as _os
+
+    _os.environ.pop("BITSWAN_COPIES_DIR", None)
+    repo = tmp_path
+    _git("init", "-q", cwd=str(repo))
+    _git("config", "user.email", "t@t", cwd=str(repo))
+    _git("config", "user.name", "t", cwd=str(repo))
+
+    def commit_state(src_commit, msg, author="dev@x", marker=None):
+        bs = {
+            "business_processes": {
+                "shop": {
+                    "dev": {
+                        "git_commit": src_commit,
+                        "deployments": {
+                            "backend-shop-dev": {
+                                "image": f"img:{src_commit}",
+                                "image_id": f"sha256:{src_commit}",
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        if marker is not None:
+            # An unrelated change to the file that leaves shop/dev untouched.
+            bs["_marker"] = marker
+        import yaml
+
+        with open(repo / "bitswan.yaml", "w") as f:
+            yaml.dump(bs, f)
+        _git("add", "bitswan.yaml", cwd=str(repo))
+        _git(
+            "commit",
+            "-q",
+            "-m",
+            msg,
+            cwd=str(repo),
+            env_extra={"GIT_AUTHOR_EMAIL": author, "GIT_COMMITTER_EMAIL": author},
         )
-    )
-    h2 = svc.bp_history("shop", "dev")
-    assert h2["current"] == "commit-two"
-    assert [r["git_commit"] for r in h2["history"]] == ["commit-two", "commit-one"]
 
-    # The deployments survived the metadata writes (still grouped, hydrated).
-    bs = read_bitswan_yaml(str(tmp_path))
-    assert "backend-shop-dev" in bs["deployments"]
+    commit_state("aaaaaaaa", "deploy shop → dev @ aaaaaaaa")
+    commit_state("aaaaaaaa", "unrelated edit", marker="x")  # shop/dev unchanged
+    commit_state("bbbbbbbb", "deploy shop → dev @ bbbbbbbb")
+    commit_state("aaaaaaaa", "rollback shop → dev @ aaaaaaaa")
+
+    svc = AutomationService()
+    svc.gitops_dir = str(repo)
+    svc.gitops_dir_host = str(repo)
+
+    h = asyncio.run(svc.bp_history("shop", "dev"))
+    srcs = [e["source_commit"] for e in h["history"]]
+    # Newest-first; the dup "unrelated edit" collapsed; rollback is its own entry.
+    assert srcs == ["aaaaaaaa", "bbbbbbbb", "aaaaaaaa"]
+    assert h["history"][0]["status"] == "rolled-back"
+    assert h["history"][0]["source"] == "rollback"
+    assert h["history"][1]["status"] == "deployed"
+    # `current` is the newest event commit, and only it is the live one.
+    assert h["current"] == h["history"][0]["commit"]

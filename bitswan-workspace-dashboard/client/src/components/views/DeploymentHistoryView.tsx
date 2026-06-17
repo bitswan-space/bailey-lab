@@ -73,12 +73,13 @@ export function DeploymentHistoryView({
 
   const runRollback = useCallback(
     async (entry: BpHistoryEntry) => {
-      if (!entry.git_commit) return;
+      if (!entry.commit) return;
+      const ver = (entry.source_commit ?? entry.commit).slice(0, 8);
       setBusy(true);
-      const work = api.bpRollback(bp, stage, entry.git_commit);
+      const work = api.bpRollback(bp, stage, entry.commit);
       toast.promise(work, {
-        loading: `Rolling ${bp} back to ${entry.git_commit.slice(0, 8)}…`,
-        success: `${bp} rolled back to ${entry.git_commit.slice(0, 8)}`,
+        loading: `Rolling ${bp} back to ${ver}…`,
+        success: `${bp} rolled back to ${ver}`,
         error: (e: unknown) => `Rollback failed: ${String(e)}`,
       });
       try {
@@ -147,8 +148,8 @@ export function DeploymentHistoryView({
           ) : (
             <ul className="flex flex-col gap-2">
               {data.history.map((entry, i) => {
-                const isCurrent =
-                  !!entry.git_commit && entry.git_commit === data.current;
+                const isCurrent = entry.commit === data.current;
+                const ver = entry.source_commit ?? entry.commit;
                 const tone = statusTone(entry.status);
                 const members = Object.entries(entry.members ?? {});
                 const firstImageId = members.find(
@@ -156,7 +157,7 @@ export function DeploymentHistoryView({
                 )?.[1]?.image_id;
                 return (
                   <li
-                    key={`${entry.git_commit}-${i}`}
+                    key={`${entry.commit}-${i}`}
                     className={cn(
                       'rounded-lg border bg-background px-4 py-3',
                       isCurrent
@@ -170,9 +171,7 @@ export function DeploymentHistoryView({
                         aria-hidden
                       />
                       <span className="font-mono text-sm font-semibold text-foreground">
-                        {entry.git_commit
-                          ? entry.git_commit.slice(0, 8)
-                          : '(no commit)'}
+                        {ver.slice(0, 8)}
                       </span>
                       <span className={cn('text-xs font-medium', tone.text)}>
                         {tone.label}
@@ -204,7 +203,7 @@ export function DeploymentHistoryView({
                           {firstImageId.replace(/^sha256:/, '').slice(0, 12)}
                         </span>
                       )}
-                      {!isCurrent && entry.git_commit && (
+                      {!isCurrent && entry.commit && (
                         <Button
                           variant="outline"
                           size="sm"
@@ -236,7 +235,7 @@ export function DeploymentHistoryView({
               All containers in <span className="font-mono">{bp}</span> at{' '}
               {STAGE_LABEL[stage] ?? stage} will be redeployed together to commit{' '}
               <span className="font-mono">
-                {confirm?.git_commit?.slice(0, 8)}
+                {(confirm?.source_commit ?? confirm?.commit)?.slice(0, 8)}
               </span>{' '}
               ({confirm ? Object.keys(confirm.members ?? {}).length : 0}{' '}
               container(s)). This records a new history entry.

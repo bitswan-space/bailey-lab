@@ -78,8 +78,9 @@ async def get_bp_history(
     stage: str = Query("dev"),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    """Deployment history for one BP stage (newest-first; `current` = live)."""
-    return automation_service.bp_history(bp, stage)
+    """Deployment history for one BP stage (newest-first; `current` = live).
+    Derived from the git log of bitswan.yaml."""
+    return await automation_service.bp_history(bp, stage)
 
 
 @router.post("/business-processes/{bp}/rollback")

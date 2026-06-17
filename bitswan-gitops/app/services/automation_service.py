@@ -1116,34 +1116,16 @@ class AutomationService:
         source: str,
         status: str = "deployed",
     ) -> None:
-        """Record a BP-level deploy/promote/rollback in the business_processes
-        tree: set the stage's shared git_commit + deployer + timestamp and
-        prepend a history entry capturing each member's image. All members of a
-        BP deploy share one commit and roll back as a group."""
+        """Stamp the BP stage's shared source git commit onto the tree and commit
+        — that git commit IS the deployment-history record (see `bp_history`).
+        No history list is kept in bitswan.yaml; git is the source of truth. The
+        commit subject (`<source> <bp> → <stage>`) lets history infer the kind
+        (deploy / promote / rollback)."""
         stage_key = "production" if stage in ("", "production") else stage
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         tree = bs.setdefault("business_processes", {})
         node = tree.setdefault(bp, {}).setdefault(stage_key, {})
-        now = datetime.now().isoformat(timespec="seconds")
-        member_map = {
-            m["deployment_id"]: {
-                "image": m.get("image"),
-                "image_id": m.get("image_id"),
-            }
-            for m in members
-        }
         node["git_commit"] = git_commit
-        node["deployed_at"] = now
-        node["deployed_by"] = deployed_by
-        rec = {
-            "git_commit": git_commit,
-            "deployed_at": now,
-            "deployed_by": deployed_by,
-            "status": status,
-            "source": source,
-            "members": member_map,
-        }
-        node.setdefault("history", []).insert(0, rec)
         bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
         with open(bitswan_yaml_path, "w") as f:
             dump_bitswan_yaml(bs, f)
@@ -1156,19 +1138,84 @@ class AutomationService:
             message=f"{source} {bp} → {stage_key} @ {(git_commit or '')[:8]}",
         )
 
-    def bp_history(self, bp: str, stage: str) -> dict:
-        """Deployment history for one BP stage (newest-first), with the live
-        commit flagged. Drives the Deployment History tab."""
+    async def bp_history(self, bp: str, stage: str, limit: int = 200) -> dict:
+        """Deployment history for one BP stage, derived from the GIT LOG of
+        bitswan.yaml (no history is stored in the file). Each distinct state of
+        business_processes[bp][stage] across commits is one entry; the commit's
+        author/date/subject give who/when/kind. Newest-first; `current` = the
+        live (newest) entry's commit."""
         stage_key = "production" if stage in ("", "production") else stage
-        bs = read_bitswan_yaml(self.gitops_dir) or {}
-        node = ((bs.get("business_processes") or {}).get(bp, {}) or {}).get(
-            stage_key
-        ) or {}
+        out, _, rc = await call_git_command_with_output(
+            "git",
+            "log",
+            f"-{limit}",
+            "--reverse",
+            "--format=%H%x1f%aI%x1f%ae%x1f%s",
+            "--",
+            "bitswan.yaml",
+            cwd=self.gitops_dir,
+        )
+        entries: list[dict] = []
+        prev_key = None
+        for line in (out or "").splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 4:
+                continue
+            sha, date, author, subject = parts
+            content, _, crc = await call_git_command_with_output(
+                "git", "show", f"{sha}:bitswan.yaml", cwd=self.gitops_dir
+            )
+            if crc != 0:
+                continue
+            try:
+                y = yaml.safe_load(content) or {}
+            except Exception:
+                continue
+            node = ((y.get("business_processes") or {}).get(bp, {}) or {}).get(
+                stage_key
+            )
+            if not node:
+                continue
+            src = node.get("git_commit")
+            members = {
+                k: {
+                    "image": (v or {}).get("image"),
+                    "image_id": (v or {}).get("image_id"),
+                }
+                for k, v in (node.get("deployments") or {}).items()
+            }
+            # Collapse consecutive commits that left this BP stage unchanged
+            # (other BPs / service toggles also touch bitswan.yaml).
+            key = (src, tuple(sorted((k, m["image_id"]) for k, m in members.items())))
+            if key == prev_key or not src:
+                prev_key = key
+                continue
+            prev_key = key
+            low = subject.lower()
+            if "rollback" in low:
+                status, source = "rolled-back", "rollback"
+            elif "promote" in low:
+                status = "deployed"
+                source = "staging" if stage_key == "production" else "dev"
+            else:
+                status, source = "deployed", "deploy"
+            entries.append(
+                {
+                    "commit": sha,  # the deploy-event id (rollback key)
+                    "source_commit": src,  # the deployed source version
+                    "deployed_at": date,
+                    "deployed_by": author,
+                    "status": status,
+                    "source": source,
+                    "members": members,
+                }
+            )
+        entries.reverse()  # newest-first
         return {
             "bp": bp,
             "stage": stage_key,
-            "current": node.get("git_commit"),
-            "history": node.get("history", []) or [],
+            "current": entries[0]["commit"] if entries else None,
+            "history": entries,
         }
 
     async def rollback_business_process(
@@ -1179,55 +1226,45 @@ class AutomationService:
         deployed_by: str | None = None,
         progress_callback: Callable[..., Any] | None = None,
     ) -> dict:
-        """Roll a BP stage back to a prior history entry: re-point ALL its member
-        deployments to that entry's images (as a group) and redeploy. Records a
-        new `rolled-back` history entry."""
+        """Roll a BP stage back to a prior deployment. `git_commit` is the history
+        entry's id — the bitswan.yaml commit sha. We read that revision, re-point
+        ALL the BP's member deployments to the images it recorded (as a group),
+        and redeploy. The redeploy's own git commit becomes the new history
+        entry (subject "rollback …")."""
         stage_key = "production" if stage in ("", "production") else stage
-        bs = read_bitswan_yaml(self.gitops_dir) or {}
-        node = ((bs.get("business_processes") or {}).get(bp, {}) or {}).get(
-            stage_key
-        ) or {}
-        rec = next(
-            (h for h in node.get("history", []) if h.get("git_commit") == git_commit),
-            None,
+        content, _, rc = await call_git_command_with_output(
+            "git", "show", f"{git_commit}:bitswan.yaml", cwd=self.gitops_dir
         )
-        if not rec:
+        if rc != 0:
+            raise HTTPException(
+                status_code=404, detail=f"No such revision {git_commit[:8]}"
+            )
+        try:
+            y = yaml.safe_load(content) or {}
+        except Exception:
+            raise HTTPException(status_code=500, detail="Could not parse that revision")
+        node = ((y.get("business_processes") or {}).get(bp, {}) or {}).get(stage_key)
+        target = (node or {}).get("deployments") or {}
+        if not target:
             raise HTTPException(
                 status_code=404,
-                detail=f"No history entry {git_commit[:8]} for {bp}/{stage_key}",
+                detail=f"No deployment for {bp}/{stage_key} at {git_commit[:8]}",
             )
-        members = rec.get("members") or {}
-        if not members:
-            raise HTTPException(
-                status_code=400, detail="History entry has no members to roll back"
-            )
+        target_src = (node or {}).get("git_commit")
 
         # Re-point the (flat, hydrated) deployment entries to the historical
         # images; dump regroups them into the tree.
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
         deployments = bs.setdefault("deployments", {})
-        for dep_id, mi in members.items():
+        for dep_id, mi in target.items():
             dep = deployments.get(dep_id)
             if dep is None:
                 continue
-            dep["image"] = mi.get("image")
-            dep["image_id"] = mi.get("image_id")
-            dep["source_commit"] = git_commit
-
-        now = datetime.now().isoformat(timespec="seconds")
-        node["git_commit"] = git_commit
-        node["deployed_at"] = now
-        node["deployed_by"] = deployed_by
-        node.setdefault("history", []).insert(
-            0,
-            {
-                "git_commit": git_commit,
-                "deployed_at": now,
-                "deployed_by": deployed_by,
-                "status": "rolled-back",
-                "source": "rollback",
-                "members": members,
-            },
-        )
+            dep["image"] = (mi or {}).get("image")
+            dep["image_id"] = (mi or {}).get("image_id")
+            dep["source_commit"] = target_src
+        tree = bs.setdefault("business_processes", {})
+        tree.setdefault(bp, {}).setdefault(stage_key, {})["git_commit"] = target_src
         path = os.path.join(self.gitops_dir, "bitswan.yaml")
         with open(path, "w") as f:
             dump_bitswan_yaml(bs, f)
@@ -1237,9 +1274,9 @@ class AutomationService:
             bp,
             "deploy",
             deployed_by=deployed_by,
-            message=f"rollback {bp} → {stage_key} @ {git_commit[:8]}",
+            message=f"rollback {bp} → {stage_key} @ {(target_src or '')[:8]}",
         )
-        deployment_ids = list(members.keys())
+        deployment_ids = list(target.keys())
         result = await self.apply_compose_for_deployments(
             deployment_ids, deployed_by=deployed_by, report=progress_callback
         )
@@ -1247,7 +1284,7 @@ class AutomationService:
             "message": "Rolled back",
             "bp": bp,
             "stage": stage_key,
-            "git_commit": git_commit,
+            "git_commit": target_src,
             "deployment_ids": deployment_ids,
             "result": result,
         }
