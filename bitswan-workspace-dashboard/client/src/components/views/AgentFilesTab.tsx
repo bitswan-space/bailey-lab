@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { useSessions } from '@/components/agents/SessionProvider';
 import { useAgentSessions } from '@/hooks/useAgentSessions';
 import { cn } from '@/lib/utils';
+import { useUrlEnum, useUrlFlag } from '@/lib/urlState';
 
 interface AgentFilesTabProps {
   copy: string;
@@ -15,6 +16,7 @@ interface AgentFilesTabProps {
 }
 
 type Sub = 'chat' | 'files' | 'containers';
+const SUBS: Sub[] = ['chat', 'files', 'containers'];
 
 /**
  * The Agents screen, per the wireframe (Workspace Dashboard → Agents): one
@@ -43,11 +45,20 @@ export function AgentFilesTab({ copy, bp, branch: _branch }: AgentFilesTabProps)
   } = useSessions();
   const { sessions: past } = useAgentSessions(copy, bp);
 
-  const [sub, setSub] = useState<Sub>('chat');
-  const [showDiff, setShowDiff] = useState(false);
+  // Sub-tab and the Diff toggle live in the URL so the Agents view is
+  // deep-linkable (?sub=files&diff=1).
+  const [sub, setSub] = useUrlEnum('sub', SUBS, 'chat');
+  const [showDiff, setShowDiff] = useUrlFlag('diff');
+  // Turn Diff off when the user changes sub-tab or copy — but NOT on the
+  // initial mount, so a pasted ?diff=1 link is honoured.
+  const diffResetReady = useRef(false);
   useEffect(() => {
+    if (!diffResetReady.current) {
+      diffResetReady.current = true;
+      return;
+    }
     setShowDiff(false);
-  }, [sub, copy]);
+  }, [sub, copy, setShowDiff]);
 
   // Bind this BP as the active scope and hand the provider the Chat pane so
   // it can portal the terminal over it. Cleanup unbinds so terminals stay
@@ -139,7 +150,7 @@ export function AgentFilesTab({ copy, bp, branch: _branch }: AgentFilesTabProps)
             variant={showDiff ? 'default' : 'outline'}
             size="sm"
             className="ml-auto h-6 px-2 text-xs"
-            onClick={() => setShowDiff((v) => !v)}
+            onClick={() => setShowDiff(!showDiff)}
           >
             <GitPullRequest className="size-3" aria-hidden />
             Diff

@@ -10,6 +10,7 @@ import type { BusinessProcess, Copy } from '@/types';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
 import { deployBpWithToast } from '@/lib/deployBp';
+import { useUrlEnum } from '@/lib/urlState';
 
 interface SyncDeployTabProps {
   bp: BusinessProcess;
@@ -36,7 +37,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
   const { startSyncSession, setSelectedFor, agentStatus, ensureAgent } =
     useSessions();
   const [busy, setBusy] = useState(false);
-  const [view, setView] = useState<'diff' | 'history'>('diff');
+  const [view, setView] = useUrlEnum('view', ['diff', 'history'] as const, 'diff');
 
   // Scope the change summary to this BP — only its changes get synced/deployed,
   // so the counts here match the BP-scoped diff below.

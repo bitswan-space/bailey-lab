@@ -37,6 +37,7 @@ import {
   watchSnapshotTask,
 } from '@/lib/snapshotTask';
 import { cn } from '@/lib/utils';
+import { setUrlParams, useUrlParam } from '@/lib/urlState';
 import {
   SNAPSHOT_STAGES,
   type BusinessProcess,
@@ -87,12 +88,11 @@ export function SnapshotsTab({ bp }: SnapshotsTabProps) {
   const [task, setTask] = useState<SnapshotTask | null>(null);
   // eslint-disable-next-line no-restricted-syntax -- null = no provision in flight
   const [provisioning, setProvisioning] = useState<SnapshotStage | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [cloneOpen, setCloneOpen] = useState(false);
-  // eslint-disable-next-line no-restricted-syntax -- null = dialog closed
-  const [restoreTarget, setRestoreTarget] = useState<Snapshot | null>(null);
-  // eslint-disable-next-line no-restricted-syntax -- null = dialog closed
-  const [deleteTarget, setDeleteTarget] = useState<Snapshot | null>(null);
+  // The open dialog (and, for restore/delete, the targeted snapshot id) lives
+  // in the URL so dialogs are deep-linkable (?dialog=create, or
+  // ?dialog=delete&snap=<id>).
+  const [dialog, setDialog] = useUrlParam('dialog');
+  const [snapId] = useUrlParam('snap');
   // Task ids already being watched — survives re-renders, guards
   // double-watching the same task (mount + explicit spawn).
   const watched = useRef(new Set<string>());
@@ -158,6 +158,31 @@ export function SnapshotsTab({ bp }: SnapshotsTabProps) {
   );
   const snapshots = data?.snapshots ?? [];
   const busy = task !== null;
+
+  // Resolve the URL-keyed dialog state back to the booleans / snapshot
+  // targets the JSX consumes; the setters write `dialog`/`snap` into the URL.
+  const createOpen = dialog === 'create';
+  const cloneOpen = dialog === 'clone';
+  const restoreTarget =
+    dialog === 'restore' ? snapshots.find((s) => s.id === snapId) ?? null : null;
+  const deleteTarget =
+    dialog === 'delete' ? snapshots.find((s) => s.id === snapId) ?? null : null;
+  const setCreateOpen = useCallback(
+    (open: boolean) => setDialog(open ? 'create' : null),
+    [setDialog],
+  );
+  const setCloneOpen = useCallback(
+    (open: boolean) => setDialog(open ? 'clone' : null),
+    [setDialog],
+  );
+  const setRestoreTarget = useCallback(
+    (s: Snapshot | null) => setUrlParams({ dialog: s ? 'restore' : null, snap: s?.id ?? null }),
+    [],
+  );
+  const setDeleteTarget = useCallback(
+    (s: Snapshot | null) => setUrlParams({ dialog: s ? 'delete' : null, snap: s?.id ?? null }),
+    [],
+  );
 
   const runProvision = useCallback(
     async (stage: SnapshotStage) => {

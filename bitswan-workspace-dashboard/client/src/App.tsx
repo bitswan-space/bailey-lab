@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AuthGate } from '@/components/auth/AuthGate';
 import { TopNav } from '@/components/workspace/TopNav';
 import {
@@ -10,6 +10,7 @@ import { SessionProvider } from '@/components/agents/SessionProvider';
 import { Toaster } from '@/components/ui/sonner';
 import { WorkspaceView } from '@/components/views/WorkspaceView';
 import { api } from '@/lib/api';
+import { getUrlParam, setUrlParams } from '@/lib/urlState';
 import type { FlowTab } from '@/types';
 
 export function App() {
@@ -42,8 +43,33 @@ const FLOW_TABS: FlowTab[] = [
   'snapshots',
 ];
 
+// Page-scoped query params owned by the individual tab components. They're
+// cleared when the user switches tabs so the URL never carries a previous
+// page's state (e.g. a Deployments `section` lingering on the Agent tab).
+const PAGE_SCOPED_PARAMS = [
+  'stage',
+  'section',
+  'inspect',
+  'panel',
+  'file',
+  'sub',
+  'diff',
+  'view',
+  'filter',
+  'q',
+  'dialog',
+  'snap',
+];
+
+// The URL query string is the source of truth for the selected BP, copy and
+// tab — that's what makes a pasted link reproduce the exact view. We fall
+// back to sessionStorage (last session) only when the param is absent, then
+// immediately reflect the resolved choice back into the URL.
+
 // eslint-disable-next-line no-restricted-syntax -- null = no persisted choice
 function readPersistedBpId(): string | null {
+  const fromUrl = getUrlParam('bp');
+  if (fromUrl) return fromUrl;
   try {
     return sessionStorage.getItem(BP_STORAGE_KEY);
   } catch {
@@ -53,6 +79,8 @@ function readPersistedBpId(): string | null {
 
 // eslint-disable-next-line no-restricted-syntax -- null = no persisted choice
 function readPersistedCopy(): string | null {
+  const fromUrl = getUrlParam('copy');
+  if (fromUrl) return fromUrl;
   try {
     return sessionStorage.getItem(WT_STORAGE_KEY);
   } catch {
@@ -61,6 +89,8 @@ function readPersistedCopy(): string | null {
 }
 
 function readPersistedTab(): FlowTab {
+  const fromUrl = getUrlParam('tab');
+  if (fromUrl && (FLOW_TABS as string[]).includes(fromUrl)) return fromUrl as FlowTab;
   try {
     const raw = sessionStorage.getItem(TAB_STORAGE_KEY);
     if (raw && (FLOW_TABS as string[]).includes(raw)) return raw as FlowTab;
@@ -117,8 +147,10 @@ function Shell() {
     }
   }, []);
 
-  // Mirror current selection to sessionStorage on change.
+  // Mirror current selection to the URL (source of truth for deep links)
+  // and to sessionStorage (last-session fallback) on change.
   useEffect(() => {
+    setUrlParams({ bp: bpId });
     try {
       if (bpId) sessionStorage.setItem(BP_STORAGE_KEY, bpId);
       else sessionStorage.removeItem(BP_STORAGE_KEY);
@@ -127,6 +159,7 @@ function Shell() {
     }
   }, [bpId]);
   useEffect(() => {
+    setUrlParams({ copy });
     try {
       if (copy) sessionStorage.setItem(WT_STORAGE_KEY, copy);
       else sessionStorage.removeItem(WT_STORAGE_KEY);
@@ -135,12 +168,32 @@ function Shell() {
     }
   }, [copy]);
   useEffect(() => {
+    setUrlParams({ tab });
     try {
       sessionStorage.setItem(TAB_STORAGE_KEY, tab);
     } catch {
       // ignore
     }
   }, [tab]);
+
+  // Browser back/forward: re-sync the top-level selection from the URL.
+  useEffect(() => {
+    const onPop = () => {
+      setBpId(getUrlParam('bp'));
+      setCopy(getUrlParam('copy'));
+      const t = getUrlParam('tab');
+      setTab(t && (FLOW_TABS as string[]).includes(t) ? (t as FlowTab) : 'description');
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  // Switching tabs drops the previous page's scoped params so the URL stays
+  // a clean, faithful description of what's on screen.
+  const handleTab = useCallback((next: FlowTab) => {
+    setTab(next);
+    setUrlParams(Object.fromEntries(PAGE_SCOPED_PARAMS.map((k) => [k, null])));
+  }, []);
 
   // The BP switcher lists every BP (main + copies; the processes feed is
   // already deduped by name). Keep `bpId` consistent: when the current BP
@@ -190,14 +243,14 @@ function Shell() {
         copies={copies}
         onSelectCopy={setCopy}
         tab={tab}
-        onTab={setTab}
+        onTab={handleTab}
       />
       {isLoading ? (
         <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
           Loading business processes…
         </div>
       ) : (
-        <WorkspaceView bp={bp} wt={wt} tab={tab} onTab={setTab} />
+        <WorkspaceView bp={bp} wt={wt} tab={tab} onTab={handleTab} />
       )}
     </div>
   );

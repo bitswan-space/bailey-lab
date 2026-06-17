@@ -3,6 +3,7 @@ import { ArrowUp, RefreshCw, Upload } from 'lucide-react';
 import { useDropzone, type DropEvent } from 'react-dropzone';
 import { toast } from 'sonner';
 import { api, type ChangedKind } from '@/lib/api';
+import { useUrlParam } from '@/lib/urlState';
 import { useFileContent } from '@/hooks/useFileContent';
 import { useFileTree } from '@/hooks/useFileTree';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
@@ -28,7 +29,8 @@ interface Props {
 export function FilesTab({ copy, bp }: Props) {
   const { tree, loading: treeLoading, refresh: refreshTree } = useFileTree(copy);
   const { changed, refresh: refreshStatus } = useCopyStatus(copy);
-  const [openPath, setOpenPath] = useState<string | null>(null);
+  // The open file lives in the URL (?file=…) so the Files view is deep-linkable.
+  const [openPath, setOpenPath] = useUrlParam('file');
   const {
     data,
     loading: contentLoading,
@@ -41,10 +43,17 @@ export function FilesTab({ copy, bp }: Props) {
   // the user navigates to a different BP / copy so each cd starts
   // scoped again.
   const [showFullTree, setShowFullTree] = useState(false);
+  // Reset the scope toggle and close the open file when the user switches BP
+  // or copy — but NOT on the initial mount, so a pasted ?file=… link opens.
+  const resetReady = useRef(false);
   useEffect(() => {
+    if (!resetReady.current) {
+      resetReady.current = true;
+      return;
+    }
     setShowFullTree(false);
     setOpenPath(null);
-  }, [bp, copy]);
+  }, [bp, copy, setOpenPath]);
 
   // Resolve the BP folder in the current tree. If the BP doesn't exist
   // as a top-level folder yet (e.g. brand-new BP with no files), or the

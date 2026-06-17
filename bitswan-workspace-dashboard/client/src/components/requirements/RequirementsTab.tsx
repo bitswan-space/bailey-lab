@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { FlaskConical, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -17,6 +17,7 @@ import { useRequirements } from '@/hooks/useRequirements';
 import { useSessions, type BpSessionKind } from '@/components/agents/SessionProvider';
 import { nextStatus } from './StatusBadge';
 import { RequirementsTable } from './RequirementsTable';
+import { useUrlEnum, useUrlParam } from '@/lib/urlState';
 import type { Requirement, ReqStatus } from '@/lib/api';
 
 interface Props {
@@ -52,8 +53,15 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     ensureAgent,
   } = useSessions();
 
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<Filter>('all');
+  // Search term and status filter live in the URL so a filtered view is
+  // deep-linkable (?filter=fail&q=auth).
+  const [searchRaw, setSearchRaw] = useUrlParam('q');
+  const search = searchRaw ?? '';
+  const setSearch = useCallback(
+    (v: string) => setSearchRaw(v || null),
+    [setSearchRaw],
+  );
+  const [filter, setFilter] = useUrlEnum('filter', FILTERS, 'all');
   const [pendingEditId, setPendingEditId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Requirement | null>(null);
 

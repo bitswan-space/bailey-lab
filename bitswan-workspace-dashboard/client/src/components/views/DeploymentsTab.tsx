@@ -54,6 +54,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { cn } from '@/lib/utils';
+import { setUrlParams, useUrlEnum, useUrlParam } from '@/lib/urlState';
 import type { BusinessProcess } from '@/types';
 
 // The same CodeMirror viewer the copy file browser uses — lazy-loaded so the
@@ -82,6 +83,17 @@ type Section =
   | 'firewall'
   | 'supply'
   | 'access';
+
+const STAGE_IDS = STAGES.map((s) => s.id);
+const SECTION_IDS: Section[] = [
+  'history',
+  'secrets',
+  'containers',
+  'backups',
+  'firewall',
+  'supply',
+  'access',
+];
 
 function short(sha: string | null | undefined, n = 12): string {
   return (sha ?? '').slice(0, n);
@@ -205,6 +217,7 @@ function entryTone(e: BpHistoryEntry, isCurrent: boolean) {
 
 // ── Inspect modal (per deployment) ──────────────────────────────────────────
 type InspectPanel = 'scale' | 'files' | 'diff' | 'secrets' | 'image';
+const INSPECT_PANELS: InspectPanel[] = ['scale', 'files', 'diff', 'secrets', 'image'];
 function InspectModal({
   bp,
   stage,
@@ -225,7 +238,11 @@ function InspectModal({
   onScaled: () => void;
 }) {
   const isCurrent = !!current && entry.commit === current.commit;
-  const [panel, setPanel] = useState<InspectPanel>(isCurrent ? 'scale' : 'diff');
+  const [panel, setPanel] = useUrlEnum(
+    'panel',
+    INSPECT_PANELS,
+    isCurrent ? 'scale' : 'diff',
+  );
   const [diff, setDiff] = useState('');
   const [diffLoading, setDiffLoading] = useState(false);
   const commit = entry.source_commit ?? '';
@@ -236,8 +253,9 @@ function InspectModal({
   // eslint-disable-next-line no-restricted-syntax -- null = not loaded
   const [tree, setTree] = useState<FileTreeNode[] | null>(null);
   const [treeLoading, setTreeLoading] = useState(false);
-  // eslint-disable-next-line no-restricted-syntax -- null = nothing open
-  const [openFile, setOpenFile] = useState<string | null>(null);
+  // The open file lives in the URL (?file=…) so the Inspect Files view is
+  // deep-linkable; null = nothing open.
+  const [openFile, setOpenFile] = useUrlParam('file');
   // eslint-disable-next-line no-restricted-syntax -- null = not loaded
   const [fileContent, setFileContent] = useState<import('@/lib/api').BpFileContent | null>(
     null,
@@ -617,16 +635,18 @@ function DeploymentCard({
  */
 export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   const { automations } = useAutomations();
-  const [activeStage, setActiveStage] = useState<StageId>('dev');
-  const [section, setSection] = useState<Section>('history');
+  // Stage, section, the open Inspect modal and the rollback confirmation all
+  // live in the URL so the exact view is deep-linkable.
+  const [activeStage, setActiveStage] = useUrlEnum('stage', STAGE_IDS, 'dev');
+  const [section, setSection] = useUrlEnum('section', SECTION_IDS, 'history');
   const [byStage, setByStage] = useState<Record<string, BpHistory | null>>({});
   const [loaded, setLoaded] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [busy, setBusy] = useState(false);
-  // eslint-disable-next-line no-restricted-syntax -- null = no confirm
-  const [confirm, setConfirm] = useState<BpHistoryEntry | null>(null);
-  // eslint-disable-next-line no-restricted-syntax -- null = modal closed
-  const [inspect, setInspect] = useState<BpHistoryEntry | null>(null);
+  // The Inspect modal and rollback confirm are keyed by the entry's commit;
+  // the entry itself is resolved from the loaded history below.
+  const [inspectCommit, setInspectCommit] = useUrlParam('inspect');
+  const [rollbackCommit, setRollbackCommit] = useUrlParam('rollback');
 
   useEffect(() => {
     let alive = true;
@@ -654,6 +674,27 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   const currentEntry = useMemo(
     () => history.find((e) => e.commit === data?.current) ?? history[0] ?? null,
     [history, data],
+  );
+
+  // Resolve the URL-keyed Inspect modal / rollback confirm back to their
+  // history entries; the setters write the entry's commit into the URL.
+  const inspect = useMemo(
+    () => history.find((e) => e.commit === inspectCommit) ?? null,
+    [history, inspectCommit],
+  );
+  const confirm = useMemo(
+    () => history.find((e) => e.commit === rollbackCommit) ?? null,
+    [history, rollbackCommit],
+  );
+  const setInspect = useCallback(
+    // eslint-disable-next-line no-restricted-syntax -- null = close modal
+    (e: BpHistoryEntry | null) => setInspectCommit(e ? e.commit : null),
+    [setInspectCommit],
+  );
+  const setConfirm = useCallback(
+    // eslint-disable-next-line no-restricted-syntax -- null = close dialog
+    (e: BpHistoryEntry | null) => setRollbackCommit(e ? e.commit : null),
+    [setRollbackCommit],
   );
 
   // Live containers for the current deployment (availability).
@@ -991,7 +1032,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
           current={currentEntry}
           stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
           currentReplicas={Math.max(1, ...members.map((m) => m.replicas || 0), 0)}
-          onClose={() => setInspect(null)}
+          onClose={() => setUrlParams({ inspect: null, panel: null, file: null })}
           onScaled={refresh}
         />
       )}
