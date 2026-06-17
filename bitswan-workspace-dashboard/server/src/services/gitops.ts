@@ -518,6 +518,46 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  async bpSecrets(
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpSetSecrets(
+    bp: string,
+    payload: { keys: string[]; values: Record<string, Record<string, string>> },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   async bpScale(
     bp: string,
     stage: string,

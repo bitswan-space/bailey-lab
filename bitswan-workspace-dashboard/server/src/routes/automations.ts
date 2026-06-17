@@ -134,6 +134,52 @@ export function registerAutomationRoutes(
     },
   );
 
+  // Deployments → Secrets: read the BP's shared key names + per-stage values.
+  app.get<{ Params: { bp: string } }>(
+    '/api/automations/business-processes/:bp/secrets',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.bpSecrets(req.params.bp);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'bp secrets read failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  // Deployments → Secrets: persist the BP's secrets.
+  app.put<{
+    Params: { bp: string };
+    Body: { keys?: string[]; values?: Record<string, Record<string, string>> };
+  }>('/api/automations/business-processes/:bp/secrets', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { keys, values } = req.body ?? {};
+    if (!Array.isArray(keys) || typeof values !== 'object' || values === null) {
+      return reply.code(400).send({ error: 'keys[] and values{} are required' });
+    }
+    try {
+      const r = await gitops.bpSetSecrets(req.params.bp, { keys, values });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp secrets write failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   // Inspect → Scale: scale every member container of a BP stage.
   app.post<{
     Params: { bp: string };

@@ -1,11 +1,14 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Archive,
   ArrowRight,
   Boxes,
   Check,
   Code2,
   Download,
+  Eye,
+  EyeOff,
   ExternalLink,
   FileText,
   FlaskConical,
@@ -17,12 +20,14 @@ import {
   Loader2,
   Lock,
   Play,
+  Plus,
   RotateCcw,
   Rocket,
   Scaling,
   Search,
   Shield,
   Square,
+  Trash2,
   Undo2,
   X,
 } from 'lucide-react';
@@ -38,6 +43,7 @@ import {
   isTransientNetworkError,
   type BpHistory,
   type BpHistoryEntry,
+  type BpSecrets,
   type ChangedKind,
   type FileTreeNode,
 } from '@/lib/api';
@@ -199,6 +205,226 @@ function EmptyTab({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
       <div className="max-w-sm text-[13px] text-muted-foreground">
         Not implemented yet — coming in a later release.
       </div>
+    </div>
+  );
+}
+
+// ── Secrets editor (Deployments → Secrets) ─────────────────────────────────
+// Shared secret KEY names across stages, per-stage VALUES. dev/live-dev share
+// the dev realm; this tab edits the active stage's values. Matches the
+// wireframe: masked value + reveal toggle, rename-renames-all-stages,
+// delete-removes-from-all-stages, "Add secret", a missing-values banner.
+function normalizeSecrets(s: BpSecrets | null | undefined): BpSecrets {
+  return {
+    keys: Array.isArray(s?.keys) ? s!.keys : [],
+    values: s && typeof s.values === 'object' && s.values ? s.values : {},
+  };
+}
+
+function SecretsEditor({
+  bp,
+  stage,
+  stageLabel,
+}: {
+  bp: string;
+  stage: StageId;
+  stageLabel: string;
+}) {
+  const [store, setStore] = useState<BpSecrets>({ keys: [], values: {} });
+  const [reveal, setReveal] = useState<Record<string, boolean>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const storeRef = useRef(store);
+  storeRef.current = store;
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    api
+      .bpSecrets(bp)
+      .then((s) => alive && setStore(normalizeSecrets(s)))
+      .catch(() => alive && setStore({ keys: [], values: {} }))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [bp]);
+
+  const save = useCallback(
+    (next: BpSecrets) => {
+      setStore(next); // optimistic
+      setSaving(true);
+      api
+        .setBpSecrets(bp, next)
+        .then((saved) => setStore(normalizeSecrets(saved)))
+        .catch((e) => toast.error(`Couldn't save secrets: ${String(e)}`))
+        .finally(() => setSaving(false));
+    },
+    [bp],
+  );
+
+  // dev/staging/production map straight to their realm (live-dev isn't a
+  // deployments-tab stage; it reuses dev's values at deploy time).
+  const realm = stage;
+  const stageVals = store.values[realm] || {};
+
+  const setLocalValue = (key: string, v: string) =>
+    setStore((s) => ({
+      ...s,
+      values: { ...s.values, [realm]: { ...(s.values[realm] || {}), [key]: v } },
+    }));
+
+  const renameKey = (oldKey: string, raw: string) => {
+    const newKey = (raw || '').trim().toUpperCase();
+    if (!newKey || newKey === oldKey || store.keys.includes(newKey)) return;
+    const next: BpSecrets = {
+      keys: store.keys.map((k) => (k === oldKey ? newKey : k)),
+      values: {},
+    };
+    for (const r of Object.keys(store.values)) {
+      const rv = store.values[r] ?? {};
+      const nv: Record<string, string> = {};
+      for (const [k, v] of Object.entries(rv)) {
+        nv[k === oldKey ? newKey : k] = v;
+      }
+      next.values[r] = nv;
+    }
+    save(next);
+  };
+
+  const removeKey = (key: string) => {
+    const next: BpSecrets = { keys: store.keys.filter((k) => k !== key), values: {} };
+    for (const r of Object.keys(store.values)) {
+      const nv = { ...(store.values[r] ?? {}) };
+      delete nv[key];
+      next.values[r] = nv;
+    }
+    save(next);
+  };
+
+  const addKey = () => {
+    let n = 1;
+    let name = 'NEW_SECRET';
+    while (store.keys.includes(name)) {
+      n += 1;
+      name = `NEW_SECRET_${n}`;
+    }
+    save({ keys: [...store.keys, name], values: store.values });
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center gap-2 p-8 text-sm text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" aria-hidden /> Loading secrets…
+      </div>
+    );
+  }
+
+  const missingCount = store.keys.filter((k) => !(stageVals[k] || '').trim()).length;
+
+  return (
+    <div className="px-1 py-3">
+      <div className="mb-3 flex items-center justify-between">
+        <p className="max-w-2xl text-[13px] text-muted-foreground">
+          Secret names are shared across every stage; values are set per stage.
+          These are injected into all of {bp}&apos;s containers and take effect on
+          the next deploy of this stage.
+        </p>
+        {saving && (
+          <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin" aria-hidden /> Saving…
+          </span>
+        )}
+      </div>
+
+      {missingCount > 0 && (
+        <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <AlertTriangle className="size-3.5 shrink-0 text-amber-600" aria-hidden />
+          {missingCount} secret{missingCount === 1 ? '' : 's'}{' '}
+          {missingCount === 1 ? 'has' : 'have'} no value in {stageLabel} yet.
+        </div>
+      )}
+
+      <div className="grid grid-cols-[210px_1fr_32px] gap-2 px-0 pb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <span>
+          Name <span className="font-normal normal-case tracking-normal">(shared)</span>
+        </span>
+        <span>Value in {stageLabel}</span>
+        <span />
+      </div>
+
+      <div className="flex flex-col gap-2">
+        {store.keys.length === 0 && (
+          <div className="rounded-lg border border-dashed border-border py-5 text-center text-[13px] text-muted-foreground">
+            No secrets yet — click &quot;Add secret&quot; below.
+          </div>
+        )}
+        {store.keys.map((key) => {
+          const val = stageVals[key] || '';
+          const missing = !val.trim();
+          return (
+            <div key={key} className="grid grid-cols-[210px_1fr_32px] items-center gap-2">
+              <input
+                defaultValue={key}
+                onBlur={(e) => renameKey(key, e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                }}
+                className="h-8 rounded-md border border-border bg-background px-2.5 font-mono text-[12px] font-semibold outline-none focus:border-primary"
+              />
+              <div className="relative">
+                <input
+                  type={reveal[key] ? 'text' : 'password'}
+                  value={val}
+                  onChange={(e) => setLocalValue(key, e.target.value)}
+                  onBlur={() => save(storeRef.current)}
+                  placeholder={missing ? 'Needs a value' : 'value'}
+                  className={cn(
+                    'h-8 w-full rounded-md border px-2.5 pr-20 font-mono text-[12px] outline-none focus:border-primary',
+                    missing ? 'border-amber-300 bg-amber-50' : 'border-border bg-white',
+                  )}
+                />
+                {missing ? (
+                  <span className="pointer-events-none absolute right-2 top-1.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                    Not set
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setReveal((r) => ({ ...r, [key]: !r[key] }))}
+                    title={reveal[key] ? 'Hide' : 'Show'}
+                    className="absolute right-1.5 top-1 flex h-6 items-center rounded px-1.5 text-muted-foreground hover:text-foreground"
+                  >
+                    {reveal[key] ? (
+                      <EyeOff className="size-3.5" aria-hidden />
+                    ) : (
+                      <Eye className="size-3.5" aria-hidden />
+                    )}
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => removeKey(key)}
+                title="Delete secret (removes it from every stage)"
+                className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-red-600"
+              >
+                <Trash2 className="size-3.5" aria-hidden />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      <button
+        type="button"
+        onClick={addKey}
+        title="Adds a secret name to every stage — fill in each stage's value separately"
+        className="mt-3.5 inline-flex h-8 items-center gap-1.5 rounded-md border border-dashed border-border bg-white px-3 text-[12px] font-medium text-muted-foreground hover:border-primary/40 hover:text-foreground"
+      >
+        <Plus className="size-3.5" aria-hidden />
+        Add secret
+      </button>
     </div>
   );
 }
@@ -1006,7 +1232,11 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 </div>
               )
             ) : section === 'secrets' ? (
-              <EmptyTab icon={KeyRound} label="Secrets" />
+              <SecretsEditor
+                bp={bp.name}
+                stage={activeStage}
+                stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
+              />
             ) : section === 'backups' ? (
               <EmptyTab icon={Archive} label="Backups" />
             ) : section === 'firewall' ? (

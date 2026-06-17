@@ -74,6 +74,15 @@ async function deleteEmpty(url: string): Promise<void> {
   await fetchWithRetry(url, { method: 'DELETE' });
 }
 
+async function putJson<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetchWithRetry(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return (await r.json()) as T;
+}
+
 async function patchJson<T>(url: string, body: unknown): Promise<T> {
   const r = await fetchWithRetry(url, {
     method: 'PATCH',
@@ -256,6 +265,13 @@ export interface BpHistory {
   history: BpHistoryEntry[];
 }
 
+/** Deployments → Secrets: a BP's shared secret key names and per-stage values.
+ *  `values` is keyed by realm (dev / staging / production; dev covers live-dev). */
+export interface BpSecrets {
+  keys: string[];
+  values: Record<string, Record<string, string>>;
+}
+
 /** A file's content from a BP's source at a commit (Inspect → Files). */
 export interface BpFileContent {
   path: string;
@@ -375,6 +391,16 @@ export const api = {
     postJson<{ replicas: number; members: string[] }>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/scale`,
       { stage, replicas },
+    ),
+  /** Deployments → Secrets: shared key names + per-stage values for a BP. */
+  bpSecrets: (bp: string) =>
+    getJson<BpSecrets>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
+    ),
+  setBpSecrets: (bp: string, payload: BpSecrets) =>
+    putJson<BpSecrets>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
+      payload,
     ),
   /** Inspect → Files: the full source tree of a BP at a commit. */
   bpFileTree: (bp: string, commit: string) =>
