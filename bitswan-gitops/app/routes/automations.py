@@ -10,7 +10,8 @@ from fastapi import (
     HTTPException,
     Query,
 )
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from pydantic import BaseModel
 
@@ -92,6 +93,54 @@ async def get_bp_diff(
 ):
     """Unified diff of a BP's source between two commits (history "diff vs current")."""
     return await automation_service.bp_diff(bp, from_sha, to)
+
+
+class ScaleBPRequest(BaseModel):
+    stage: str
+    replicas: int
+
+
+@router.post("/business-processes/{bp}/scale")
+async def scale_bp(
+    bp: str,
+    body: ScaleBPRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Scale every member container of a BP stage (Inspect → Scale)."""
+    if body.replicas < 1:
+        raise HTTPException(status_code=400, detail="replicas must be at least 1")
+    return await automation_service.scale_business_process(
+        bp, body.stage, body.replicas
+    )
+
+
+@router.get("/business-processes/{bp}/files")
+async def get_bp_files(
+    bp: str,
+    commit: str = Query(...),
+    path: str = Query(""),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """List or read a BP's source at a commit (Inspect → Files)."""
+    return await automation_service.bp_files(bp, commit, path)
+
+
+@router.get("/business-processes/{bp}/bundle")
+async def get_bp_bundle(
+    bp: str,
+    stage: str = Query(...),
+    commit: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Download a deployment bundle (source + docker images + DB schema)."""
+    path = await automation_service.bundle_deployment(bp, stage, commit)
+    filename = f"{bp}-{stage}-{commit[:8]}.tar.gz"
+    return FileResponse(
+        path,
+        media_type="application/gzip",
+        filename=filename,
+        background=BackgroundTask(lambda: os.path.exists(path) and os.remove(path)),
+    )
 
 
 @router.post("/business-processes/{bp}/rollback")

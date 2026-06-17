@@ -5,6 +5,7 @@ import os
 import json
 import re
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import yaml
@@ -1304,6 +1305,179 @@ class AutomationService:
             cwd=main,
         )
         return {"diff": out if rc == 0 else "", "from": from_sha, "to": to_sha}
+
+    def _bp_stage_members(self, bp: str, stage: str) -> dict:
+        """The {deployment_id: {image, image_id}} map for a BP at a stage."""
+        stage_key = "production" if stage in ("", "production") else stage
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        node = ((bs.get("business_processes") or {}).get(bp, {}) or {}).get(
+            stage_key
+        ) or {}
+        return node.get("deployments") or {}
+
+    async def scale_business_process(self, bp: str, stage: str, replicas: int) -> dict:
+        """Scale every member container of a BP stage to `replicas` (Inspect →
+        Scale). Reuses the per-deployment scale_automation."""
+        members = self._bp_stage_members(bp, stage)
+        if not members:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No deployment for {bp}/{stage}",
+            )
+        for dep_id in members:
+            await self.scale_automation(dep_id, replicas)
+        return {
+            "bp": bp,
+            "stage": stage,
+            "replicas": replicas,
+            "members": list(members),
+        }
+
+    async def bp_files(self, bp: str, commit: str, path: str = "") -> dict:
+        """List or read a BP's source at a git commit (Inspect → Files). A blob
+        returns its content (1 MiB cap); a tree returns its immediate children."""
+        if not re.fullmatch(r"[0-9a-fA-F]{4,64}", commit or ""):
+            raise HTTPException(status_code=400, detail="invalid commit")
+        if path and (path.startswith("/") or ".." in path.split("/")):
+            raise HTTPException(status_code=400, detail="invalid path")
+        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
+        rel = f"{bp}/{path}".rstrip("/") if path else bp
+        typ, _, trc = await call_git_command_with_output(
+            "git", "cat-file", "-t", f"{commit}:{rel}", cwd=main
+        )
+        typ = typ.strip()
+        if trc != 0:
+            raise HTTPException(status_code=404, detail=f"not found: {path or bp}")
+        if typ == "blob":
+            out, _, _ = await call_git_command_with_output(
+                "git", "show", f"{commit}:{rel}", cwd=main
+            )
+            cap = 1_000_000
+            return {
+                "kind": "file",
+                "path": path,
+                "content": out[:cap],
+                "truncated": len(out) > cap,
+            }
+        out, _, _ = await call_git_command_with_output(
+            "git", "ls-tree", commit, "--", f"{rel}/", cwd=main
+        )
+        entries = []
+        for line in out.splitlines():
+            meta, _, fpath = line.partition("\t")
+            parts = meta.split()
+            if not fpath or len(parts) < 2:
+                continue
+            kind = "folder" if parts[1] == "tree" else "file"
+            relpath = fpath[len(bp) + 1 :] if fpath.startswith(bp + "/") else fpath
+            entries.append(
+                {"name": os.path.basename(fpath), "path": relpath, "kind": kind}
+            )
+        entries.sort(key=lambda e: (e["kind"] != "folder", e["name"]))
+        return {"kind": "tree", "path": path, "entries": entries}
+
+    async def _pg_dump_schema(self, stage: str) -> str | None:
+        """`pg_dump --schema-only` of the stage's Postgres via docker exec, or
+        None when Postgres isn't enabled for the stage."""
+        from app.services.bp_databases import get_service_secrets
+
+        secrets = get_service_secrets("postgres", stage)
+        if not secrets or not secrets.get("POSTGRES_USER"):
+            return None
+        user = secrets["POSTGRES_USER"]
+        pw = secrets.get("POSTGRES_PASSWORD", "")
+        db = secrets.get("POSTGRES_DB", "postgres")
+        ws = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace")
+        container = f"{ws}__postgres-{stage}"
+        try:
+            client = get_async_docker_client()
+            found = await client.list_containers(
+                all=False, filters={"name": [f"^/{container}$"]}
+            )
+            if not found:
+                return None
+            cid = found[0]["Id"]
+            exec_id = await client.exec_create(
+                cid,
+                [
+                    "sh",
+                    "-c",
+                    f"PGPASSWORD='{pw}' pg_dump --schema-only -U {user} {db}",
+                ],
+            )
+            out = await client.exec_start(exec_id)
+            return (
+                out if isinstance(out, str) else (out or b"").decode("utf-8", "replace")
+            )
+        except Exception as e:
+            logger.warning("pg_dump schema failed for %s: %s", stage, e)
+            return None
+
+    async def bundle_deployment(self, bp: str, stage: str, commit: str) -> str:
+        """Build a downloadable .tar.gz of a deployment: the source at `commit`,
+        a `docker save` of each member image, and the stage's Postgres schema.
+        Returns the path to the temp archive (the route streams + deletes it)."""
+        if not re.fullmatch(r"[0-9a-fA-F]{4,64}", commit or ""):
+            raise HTTPException(status_code=400, detail="invalid commit")
+        stage_key = "production" if stage in ("", "production") else stage
+        members = self._bp_stage_members(bp, stage_key)
+        if not members:
+            raise HTTPException(
+                status_code=404, detail=f"No deployment for {bp}/{stage_key}"
+            )
+        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
+        schema = await self._pg_dump_schema(stage_key)
+
+        def _build() -> str:
+            import docker
+
+            staging = tempfile.mkdtemp(prefix=".bundle-")
+            try:
+                # 1) source at the commit
+                src_dir = os.path.join(staging, "source")
+                os.makedirs(src_dir)
+                src_tar = os.path.join(staging, "source.tar")
+                with open(src_tar, "wb") as f:
+                    rc = subprocess.run(
+                        ["git", "archive", "--format=tar", commit, "--", f"{bp}/"],
+                        cwd=main,
+                        stdout=f,
+                    ).returncode
+                if rc == 0:
+                    with tarfile.open(src_tar) as t:
+                        t.extractall(src_dir)
+                os.remove(src_tar)
+                # 2) docker save each member image
+                client = docker.from_env()
+                img_dir = os.path.join(staging, "images")
+                os.makedirs(img_dir)
+                for dep_id, m in members.items():
+                    ref = (m or {}).get("image") or (m or {}).get("image_id")
+                    if not ref:
+                        continue
+                    image = client.images.get(ref)  # raises if missing — fail loudly
+                    with open(os.path.join(img_dir, f"{dep_id}.tar"), "wb") as f:
+                        for chunk in image.save(named=True):
+                            f.write(chunk)
+                # 3) schema + manifest
+                if schema:
+                    with open(os.path.join(staging, "schema.sql"), "w") as f:
+                        f.write(schema)
+                else:
+                    with open(os.path.join(staging, "README.txt"), "w") as f:
+                        f.write("Postgres not enabled for this stage; no schema.sql.\n")
+                # 4) assemble the archive
+                out_fd, out_path = tempfile.mkstemp(
+                    prefix=f"{bp}-{stage_key}-", suffix=".tar.gz"
+                )
+                os.close(out_fd)
+                with tarfile.open(out_path, "w:gz") as tar:
+                    tar.add(staging, arcname=f"{bp}-{stage_key}-{commit[:8]}")
+                return out_path
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+
+        return await asyncio.to_thread(_build)
 
     async def apply_compose_for_deployments(
         self,

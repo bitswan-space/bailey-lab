@@ -13,7 +13,6 @@ import subprocess
 import pytest
 
 from app.services import git_server
-from app.routes import copies
 from app.routes.copies import SyncCopyRequest, get_commit_diff, sync_copy
 
 
@@ -45,7 +44,7 @@ def _main_tree(bare):
 
 def _branch_subjects(bare, ref):
     out = _git("-C", bare, "log", "--format=%s", ref).stdout
-    return [l for l in out.splitlines() if l]
+    return [line for line in out.splitlines() if line]
 
 
 @pytest.fixture()
