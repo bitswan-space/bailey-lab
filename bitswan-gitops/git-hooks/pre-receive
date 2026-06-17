@@ -27,14 +27,27 @@ while read -r oldrev newrev refname; do
         exit 1
     fi
 
-    # Brand-new ref (branch/tag creation) — allowed.
+    # Brand-new ref (branch/tag creation) — allowed. This covers the one-time
+    # creation of `main` when a workspace is seeded.
     if is_zero "$oldrev"; then
         continue
     fi
 
-    # Existing ref: require a fast-forward, i.e. the old tip must be an
-    # ancestor of the new tip. This rejects force-pushes and rebases of
-    # already-published commits.
+    # `main` is the protected, deploy-only branch — the "live" code area. It is
+    # advanced ONLY server-side by the user-gated deploy (gitops fast-forwards
+    # it with `git update-ref`, which does not run this hook), after the user
+    # has reviewed the diff and pressed Deploy. A direct push to main from a
+    # copy (agent or editor) is rejected, so a coding agent can't
+    # `git push origin main` changes the user never reviewed or deployed. Work
+    # is published on copy branches and integrated through the dashboard.
+    if [ "$refname" = "refs/heads/main" ]; then
+        echo "remote: rejected $refname: main is deploy-only — push your copy branch and deploy it from the dashboard" >&2
+        exit 1
+    fi
+
+    # Other existing refs (copy branches): require a fast-forward, i.e. the old
+    # tip must be an ancestor of the new tip. This rejects force-pushes and
+    # rebases of already-published commits.
     if ! git merge-base --is-ancestor "$oldrev" "$newrev"; then
         echo "remote: rejected $refname: non-fast-forward update (force-push or history rewrite) is not allowed" >&2
         echo "remote: pull and rebase your work onto the latest $refname, then push again" >&2

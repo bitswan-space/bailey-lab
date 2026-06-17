@@ -55,6 +55,9 @@ def _install_pre_receive_hook(repo_path: str) -> None:
             '    echo "remote: rejected $refname: deleting refs is not allowed" >&2; exit 1\n'
             "  fi\n"
             '  if is_zero "$oldrev"; then continue; fi\n'
+            '  if [ "$refname" = "refs/heads/main" ]; then\n'
+            '    echo "remote: rejected $refname: main is deploy-only — push your copy branch and deploy it from the dashboard" >&2; exit 1\n'
+            "  fi\n"
             '  if ! git merge-base --is-ancestor "$oldrev" "$newrev"; then\n'
             '    echo "remote: rejected $refname: non-fast-forward update is not allowed" >&2; exit 1\n'
             "  fi\n"

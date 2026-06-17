@@ -1740,14 +1740,32 @@ func verifyGitServer(gitopsURL, secret string) error {
 	if out, err := runGit("-C", work, "commit", "-m", "git server ff test"); err != nil {
 		return fmt.Errorf("git commit: %w: %s", err, out)
 	}
-	if out, err := runGit("-C", work, "push", "origin", "HEAD:refs/heads/main"); err != nil {
-		return fmt.Errorf("fast-forward push was rejected unexpectedly: %w: %s", err, out)
+	// main is deploy-only: a direct push to it must be rejected — it only
+	// advances server-side via the user-gated deploy, never by a client push.
+	if out, err := runGit("-C", work, "push", "origin", "HEAD:refs/heads/main"); err == nil {
+		return fmt.Errorf("push to protected main was accepted but must be rejected: %s", out)
+	}
+	// Work goes on a copy branch: creating it and fast-forwarding it are allowed.
+	if out, err := runGit("-C", work, "push", "origin", "HEAD:refs/heads/git-server-test"); err != nil {
+		return fmt.Errorf("copy-branch creation push was rejected unexpectedly: %w: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(work, "git-server-test2.txt"), []byte("ok2\n"), 0644); err != nil {
+		return err
+	}
+	if out, err := runGit("-C", work, "add", "-A"); err != nil {
+		return fmt.Errorf("git add: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "commit", "-m", "git server ff test 2"); err != nil {
+		return fmt.Errorf("git commit: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "push", "origin", "HEAD:refs/heads/git-server-test"); err != nil {
+		return fmt.Errorf("fast-forward push to a copy branch was rejected unexpectedly: %w: %s", err, out)
 	}
 	// Rewrite the just-pushed commit and force-push — the server must reject it.
 	if out, err := runGit("-C", work, "commit", "--amend", "-m", "rewritten"); err != nil {
 		return fmt.Errorf("git amend: %w: %s", err, out)
 	}
-	if out, err := runGit("-C", work, "push", "-f", "origin", "HEAD:refs/heads/main"); err == nil {
+	if out, err := runGit("-C", work, "push", "-f", "origin", "HEAD:refs/heads/git-server-test"); err == nil {
 		return fmt.Errorf("force-push was accepted but must be rejected (fast-forward-only): %s", out)
 	}
 	return nil

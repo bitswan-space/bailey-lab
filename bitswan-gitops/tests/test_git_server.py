@@ -59,32 +59,50 @@ def test_fast_forward_only_enforcement(bare_repo, tmp_path):
     _git("add", "-A", cwd=work)
     _git("commit", "-qm", "c1", cwd=work)
 
-    # New branch (creation) is allowed.
+    # Creating `main` (the one-time workspace seed) is allowed.
     assert (
         _git("push", "origin", "HEAD:refs/heads/main", cwd=work, check=False).returncode
         == 0
     )
 
-    # Fast-forward is allowed.
+    # `main` is deploy-only: a direct push to the EXISTING main is rejected,
+    # even a fast-forward — main is advanced server-side by the gated deploy.
     (work / "b.txt").write_text("b")
     _git("add", "-A", cwd=work)
     _git("commit", "-qm", "c2", cwd=work)
+    blocked = _git("push", "origin", "HEAD:refs/heads/main", cwd=work, check=False)
+    assert blocked.returncode != 0
+    assert "deploy-only" in (blocked.stderr + blocked.stdout).lower()
+
+    # Copy branches are normal append-only branches. Creation is allowed.
     assert (
-        _git("push", "origin", "HEAD:refs/heads/main", cwd=work, check=False).returncode
+        _git(
+            "push", "origin", "HEAD:refs/heads/feature1", cwd=work, check=False
+        ).returncode
         == 0
     )
 
-    # History rewrite + force-push is rejected.
-    _git("commit", "-q", "--amend", "-m", "c2-rewritten", cwd=work)
-    forced = _git("push", "-f", "origin", "HEAD:refs/heads/main", cwd=work, check=False)
+    # Fast-forward on a copy branch is allowed.
+    (work / "c.txt").write_text("c")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-qm", "c3", cwd=work)
+    assert (
+        _git(
+            "push", "origin", "HEAD:refs/heads/feature1", cwd=work, check=False
+        ).returncode
+        == 0
+    )
+
+    # History rewrite + force-push on a copy branch is rejected.
+    _git("commit", "-q", "--amend", "-m", "c3-rewritten", cwd=work)
+    forced = _git(
+        "push", "-f", "origin", "HEAD:refs/heads/feature1", cwd=work, check=False
+    )
     assert forced.returncode != 0
     assert "fast-forward" in (forced.stderr + forced.stdout).lower()
 
     # Branch deletion is rejected.
-    _git(
-        "push", "origin", "HEAD:refs/heads/extra", cwd=work, check=False
-    )  # create first
-    deleted = _git("push", "origin", "--delete", "extra", cwd=work, check=False)
+    deleted = _git("push", "origin", "--delete", "feature1", cwd=work, check=False)
     assert deleted.returncode != 0
 
 
