@@ -498,15 +498,21 @@ async def _refresh_main_copy_checkout() -> None:
     # Fetch from the local bare path (gitops can't authenticate to its own
     # smart-HTTP `origin`); FETCH_HEAD then points at the new main tip.
     await call_git_command("git", "fetch", bare, "main", cwd=main_copy)
+    # `main` is deploy-only and the bare ref is authoritative, so force the
+    # checkout to match it exactly (`reset --hard`) rather than `merge --ff-only`.
+    # ff-only is fragile: if the checkout ever diverges (a stray commit, an
+    # interrupted sync), every subsequent sync would 500 forever. reset --hard
+    # leaves untracked/ignored build artifacts in place and just realigns the
+    # tracked tree with the canonical main.
     out, err, rc = await call_git_command_with_output(
-        "git", "merge", "--ff-only", "FETCH_HEAD", cwd=main_copy
+        "git", "reset", "--hard", "FETCH_HEAD", cwd=main_copy
     )
     if rc != 0:
         raise HTTPException(
             status_code=500,
             detail=(
-                "main fast-forwarded in the canonical repo, but the main "
-                f"checkout could not be advanced: {(err or out).strip()}"
+                "main advanced in the canonical repo, but the main checkout "
+                f"could not be realigned: {(err or out).strip()}"
             ),
         )
 
