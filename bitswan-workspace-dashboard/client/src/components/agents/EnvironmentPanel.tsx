@@ -18,6 +18,7 @@ import {
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
+import { SecretsEditor } from '@/components/secrets/SecretsEditor';
 import { cn } from '@/lib/utils';
 
 /**
@@ -256,7 +257,7 @@ export function EnvironmentPanel({ bp, copy }: Props) {
           )}
         </Section>
 
-        <DevSecrets />
+        <DevSecrets bp={bp} />
       </div>
     </div>
   );
@@ -476,7 +477,7 @@ function Empty({ children }: { children: React.ReactNode }) {
   return <div className="py-1 text-[11px] text-muted-foreground">{children}</div>;
 }
 
-function DevSecrets() {
+function DevSecrets({ bp }: { bp: string }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="flex flex-col gap-2 px-3.5 py-3">
@@ -493,13 +494,13 @@ function DevSecrets() {
         )}
       </button>
       {open ? (
-        <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-[12px] text-muted-foreground">
-          Secret editing isn’t wired up yet — env vars &amp; API keys for this
-          copy will live here.
-        </div>
+        // Shared editor scoped to the dev realm — the same values the
+        // Deployments → Secrets "Development" stage edits (dev/live-dev share).
+        <SecretsEditor bp={bp} stage="dev" stageLabel="Development" compact />
       ) : (
         <div className="text-[11px] text-muted-foreground">
-          Environment variables &amp; API keys for this copy. Click to edit.
+          Environment variables &amp; API keys for this business process&apos;s dev
+          stage (shared with live-dev). Click to edit.
         </div>
       )}
     </div>
