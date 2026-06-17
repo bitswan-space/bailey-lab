@@ -1308,12 +1308,20 @@ class AutomationService:
 
     def _bp_stage_members(self, bp: str, stage: str) -> dict:
         """The {deployment_id: {image, image_id}} map for a BP at a stage."""
+        return self._bp_stage_node(bp, stage).get("deployments") or {}
+
+    def _bp_stage_node(self, bp: str, stage: str) -> dict:
+        """The business_processes[bp][stage] node ({git_commit, deployments})."""
         stage_key = "production" if stage in ("", "production") else stage
         bs = read_bitswan_yaml(self.gitops_dir) or {}
-        node = ((bs.get("business_processes") or {}).get(bp, {}) or {}).get(
+        return ((bs.get("business_processes") or {}).get(bp, {}) or {}).get(
             stage_key
         ) or {}
-        return node.get("deployments") or {}
+
+    def bp_stage_commit(self, bp: str, stage: str) -> str | None:
+        """The git commit a BP's stage is currently deployed at, or None when
+        the stage has never been deployed."""
+        return self._bp_stage_node(bp, stage).get("git_commit")
 
     async def scale_business_process(self, bp: str, stage: str, replicas: int) -> dict:
         """Scale every member container of a BP stage to `replicas` (Inspect →

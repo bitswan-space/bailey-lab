@@ -615,10 +615,15 @@ async def _sync_copy_per_bp(
     bp_commits = bp_out.split()
 
     if not bp_commits:
+        # Nothing to merge — but the deployed dev stage can still be behind main
+        # (e.g. it was synced before the auto-deploy existed). "Sync & Deploy"
+        # should still bring dev up to main, so deploy when it's stale.
+        task_id = await _spawn_dev_deploy(bp, deployer)
         return SyncCopyResponse(
             status="success",
             method="noop",
             message=f"No changes to '{bp}' to sync into main.",
+            deploy_task_id=task_id,
         )
 
     # Fast path: the copy's only un-merged commits are this BP's and they sit
@@ -772,14 +777,48 @@ async def _sync_copy_per_bp(
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-async def _spawn_dev_deploy(bp: str, deployer: str | None) -> str | None:
-    """Redeploy a business process's dev stage from main after a sync advances
-    main, so the deployed dev stage tracks main — i.e. once a copy is "fully
-    synced", the dev stage shows the same thing as live-dev.
+async def _bp_dev_stage_stale(bp: str, service) -> bool:
+    """True when the BP's dev stage needs (re)deploying to match main: never
+    deployed, or this BP's source differs between the commit dev is deployed at
+    and main's HEAD. Returns False only when dev already reflects main for this
+    BP — so "Sync & Deploy" is a genuine no-op only when there's truly nothing
+    to do (and doesn't spam the deploy history with identical redeploys)."""
+    dev_commit = service.bp_stage_commit(bp, "dev")
+    if not dev_commit:
+        return True  # never deployed to dev
+    main_dir = os.path.join(_copies_dir(), "main")
+    head_out, _, hrc = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=main_dir
+    )
+    if hrc != 0:
+        return True  # can't tell → deploy
+    main_head = head_out.strip()
+    if dev_commit == main_head:
+        return False
+    # Compare only THIS BP's tree between the deployed commit and main, so an
+    # unrelated BP advancing main doesn't trigger a needless redeploy here.
+    _, _, drc = await call_git_command_with_output(
+        "git",
+        "diff",
+        "--quiet",
+        f"{dev_commit}..{main_head}",
+        "--",
+        f"{bp}/",
+        cwd=main_dir,
+    )
+    return drc != 0  # non-zero exit = there are differences = stale
 
+
+async def _spawn_dev_deploy(bp: str, deployer: str | None) -> str | None:
+    """(Re)deploy a business process's dev stage from main so the deployed dev
+    stage tracks main — i.e. once a copy is "fully synced", the dev stage shows
+    the same thing as live-dev. Called on every successful sync AND on a no-op
+    sync (nothing to merge), since the dev stage can still be behind main.
+
+    Skips when dev already reflects main for this BP (no spurious redeploy).
     Best-effort and non-blocking: bakes/deploys in a background task (mirrors
     the copy-creation auto-deploy) and returns the deploy task id, or None when
-    there's nothing deployable. Never raises — a sync must not fail because the
+    there's nothing to do. Never raises — a sync must not fail because the
     follow-up deploy couldn't start."""
     try:
         from app.dependencies import get_automation_service
@@ -787,6 +826,9 @@ async def _spawn_dev_deploy(bp: str, deployer: str | None) -> str | None:
         service = get_automation_service()
         members = service.members_for_bp(bp, copy=None, stage="dev")
         if not members:
+            return None
+        if not await _bp_dev_stage_stale(bp, service):
+            logger.info("Dev stage for '%s' already matches main; no redeploy", bp)
             return None
         res = await spawn_set_deploy(
             label=f"sync-deploy:{bp}",
@@ -1194,6 +1236,44 @@ async def get_copy_status(name: str):
             by_path[p] = {"path": p, "kind": "added", "adds": 0, "dels": 0}
 
     return {"changed": list(by_path.values())}
+
+
+@router.get("/{name}/divergence")
+async def get_bp_divergence(name: str, bp: str = Query(...)):
+    """Split a copy's divergence from main into commits that touch THIS business
+    process vs every OTHER business process.
+
+    A per-BP Sync & Deploy only ever syncs/deploys the BP being viewed, so the
+    whole-copy ahead/behind counts are misleading there: a copy can be far ahead
+    of main purely because of work on *other* BPs, while the viewed BP is itself
+    identical to main. This lets the UI show "this business process" and "other
+    business processes" separately, so "up to date" reflects the BP you're on."""
+    _validate_bp_dir(bp)
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    # Refresh our view of main from the local bare repo; FETCH_HEAD = current main.
+    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
+
+    async def _count(rng: str, path: str | None = None) -> int:
+        args = ["git", "rev-list", "--count", rng]
+        if path:
+            args += ["--", path]
+        out, _, rc = await call_git_command_with_output(*args, cwd=copy_path)
+        return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
+
+    ahead_total = await _count("FETCH_HEAD..HEAD")
+    ahead_bp = await _count("FETCH_HEAD..HEAD", f"{bp}/")
+    behind_total = await _count("HEAD..FETCH_HEAD")
+    behind_bp = await _count("HEAD..FETCH_HEAD", f"{bp}/")
+    return {
+        "bp": bp,
+        "ahead_bp": ahead_bp,
+        "ahead_other": max(0, ahead_total - ahead_bp),
+        "behind_bp": behind_bp,
+        "behind_other": max(0, behind_total - behind_bp),
+    }
 
 
 async def _git_log(ref: str, copy_path: str, limit: int = 50) -> list[dict]:

@@ -14,7 +14,12 @@ import pytest
 
 from app.services import git_server
 from app.routes import copies
-from app.routes.copies import SyncCopyRequest, get_commit_diff, sync_copy
+from app.routes.copies import (
+    SyncCopyRequest,
+    get_bp_divergence,
+    get_commit_diff,
+    sync_copy,
+)
 
 
 def _git(*args, cwd=None, check=True):
@@ -170,21 +175,42 @@ def test_sync_redeploys_synced_bp_dev_stage(env, monkeypatch):
     assert res.deploy_task_id == "task-123"
 
 
-def test_sync_with_no_bp_changes_does_not_redeploy(env, monkeypatch):
-    """A per-BP sync with nothing to sync for that BP is a noop — no dev deploy."""
+def test_sync_noop_still_checks_dev_deploy(env, monkeypatch):
+    """Even with nothing to merge (noop), "Sync & Deploy" still asks to bring
+    the dev stage up to main — the deployed dev stage may be behind. The
+    staleness gate inside _spawn_dev_deploy decides whether it actually
+    redeploys; here we assert the noop path no longer silently skips it."""
     env["make_copy"]("u1")  # no commits touching bpa
 
     calls = []
 
     async def _fake_dev_deploy(bp, deployer):
         calls.append((bp, deployer))
-        return "task-123"
+        return "task-9"
 
     monkeypatch.setattr(copies, "_spawn_dev_deploy", _fake_dev_deploy)
 
     res = asyncio.run(sync_copy("u1", SyncCopyRequest(deployer="dev@x", bp="bpa")))
     assert res.status == "success" and res.method == "noop"
-    assert calls == []
+    assert calls == [("bpa", "dev@x")]
+    assert res.deploy_task_id == "task-9"
+
+
+def test_bp_divergence_splits_this_bp_from_others(env):
+    """Divergence reports commits touching THIS BP separately from commits
+    touching other BPs — so a per-BP screen can say 'this BP is up to date'
+    even when the copy as a whole is ahead/behind from other BPs' work."""
+    copy = env["make_copy"]("u1")
+    _commit(copy, "bpa/file.txt", "a1\n", "bpa change")  # ahead for bpa
+    _commit(copy, "bpb/file.txt", "b1\n", "bpb change")  # ahead for bpb (other)
+
+    d = asyncio.run(get_bp_divergence("u1", bp="bpa"))
+    assert d["ahead_bp"] == 1 and d["ahead_other"] == 1
+    assert d["behind_bp"] == 0 and d["behind_other"] == 0
+
+    # From bpb's vantage point the roles swap.
+    d2 = asyncio.run(get_bp_divergence("u1", bp="bpb"))
+    assert d2["ahead_bp"] == 1 and d2["ahead_other"] == 1
 
 
 def test_whole_copy_sync_fast_forwards(env):
