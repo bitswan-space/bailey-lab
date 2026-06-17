@@ -22,7 +22,7 @@ export function registerCopyRoutes(
   app: FastifyInstance,
   { gitops }: CopyRoutesOptions,
 ): void {
-  app.post<{ Params: { name: string } }>(
+  app.post<{ Params: { name: string }; Body: { bp?: string } }>(
     '/api/copies/:name/sync',
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
@@ -33,11 +33,15 @@ export function registerCopyRoutes(
       if (!name) {
         return reply.code(400).send({ error: 'name is required' });
       }
+      // Optional: scope the sync to one business process (only its commits go
+      // to main). Client-supplied; gitops validates the name.
+      const bp =
+        typeof req.body?.bp === 'string' && req.body.bp ? req.body.bp : undefined;
       // The deployer recorded on the deploy tag is the validated token email,
       // never a client-supplied value — it can't be spoofed.
       const deployer = await emailFromRequest(req, app.log);
       try {
-        const r = await gitops.syncCopy(name, deployer ?? undefined);
+        const r = await gitops.syncCopy(name, deployer ?? undefined, bp);
         if (!r.ok) {
           return reply
             .code(r.status >= 400 && r.status < 500 ? r.status : 502)

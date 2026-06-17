@@ -7,10 +7,23 @@ import { DiffView } from './DiffView';
 
 interface Props {
   copy: string;
+  /** When set, only show changes under this directory (e.g. the BP being
+   *  synced) — the diff that will actually become main on Sync & Deploy. */
+  pathPrefix?: string;
 }
 
-export function DiffTab({ copy }: Props) {
-  const { changed, loading, refresh: refreshStatus } = useCopyStatus(copy);
+export function DiffTab({ copy, pathPrefix }: Props) {
+  const { changed: allChanged, loading, refresh: refreshStatus } =
+    useCopyStatus(copy);
+  const changed = useMemo(
+    () =>
+      pathPrefix
+        ? allChanged.filter(
+            (c) => c.path === pathPrefix || c.path.startsWith(`${pathPrefix}/`),
+          )
+        : allChanged,
+    [allChanged, pathPrefix],
+  );
   const [selected, setSelected] = useState<string | null>(null);
   const { diff, loading: diffLoading, refresh: refreshDiff } = useFileDiff(
     copy,

@@ -16,6 +16,8 @@ import datetime
 import logging
 import os
 import re
+import shutil
+import tempfile
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -520,6 +522,179 @@ class SyncCopyResponse(BaseModel):
 class SyncCopyRequest(BaseModel):
     # Email of the user who pressed Sync & Deploy, recorded on the deploy tag.
     deployer: str | None = None
+    # When set, sync ONLY the commits that touched this business process's
+    # directory into main (auto-rebasing the copy's other commits), so an
+    # unrelated BP's work-in-progress isn't dragged into the deploy.
+    bp: str | None = None
+
+
+def _validate_bp_dir(bp: str) -> None:
+    if bp in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", bp or ""):
+        raise HTTPException(status_code=400, detail="invalid business process name")
+
+
+async def _sync_copy_per_bp(
+    name: str, copy_path: str, bp: str, deployer: str | None
+) -> "SyncCopyResponse":
+    """Sync ONLY the commits that touched business process ``bp`` into main, then
+    rebase the copy onto the new main (dropping the now-merged commits).
+
+    Cherry-picks the BP's commits onto a temp branch off main; if that or the
+    follow-up copy rebase hits a conflict, NOTHING is touched and we return
+    ``needs_rebase`` so the coding agent resolves it. main and the copy's branch
+    ref are advanced server-side with ``update-ref`` — the copy rebase rewrites
+    history, which the ff-only pre-receive hook would otherwise reject.
+
+    Assumes the caller already committed WIP and fetched main (FETCH_HEAD)."""
+    _validate_bp_dir(bp)
+    bare = bare_repo_path()
+
+    # git identity for cherry-pick/rebase committer; author is preserved.
+    ident: list[str] = []
+    who = (deployer or "").strip()
+    if who:
+        ident = ["-c", f"user.name={who}", "-c", f"user.email={who}"]
+
+    # Commits on the copy not yet in main (oldest-first), and the subset that
+    # touched this BP's directory.
+    all_out, _, _ = await call_git_command_with_output(
+        "git", "rev-list", "--reverse", "FETCH_HEAD..HEAD", cwd=copy_path
+    )
+    bp_out, _, _ = await call_git_command_with_output(
+        "git", "rev-list", "--reverse", "FETCH_HEAD..HEAD", "--", f"{bp}/",
+        cwd=copy_path,
+    )
+    all_commits = all_out.split()
+    bp_commits = bp_out.split()
+
+    if not bp_commits:
+        return SyncCopyResponse(
+            status="success", method="noop",
+            message=f"No changes to '{bp}' to sync into main.",
+        )
+
+    # Fast path: the copy's only un-merged commits are this BP's and they sit
+    # directly on main — a plain fast-forward, no history rewrite needed.
+    _, _, ff_rc = await call_git_command_with_output(
+        "git", "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD", cwd=copy_path
+    )
+    if ff_rc == 0 and set(all_commits) == set(bp_commits):
+        p_out, p_err, p_rc = await call_git_command_with_output(
+            "git", "push", bare, f"HEAD:refs/heads/{name}", cwd=copy_path
+        )
+        if p_rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to push copy '{name}': {(p_err or p_out).strip()}",
+            )
+        await _fast_forward_main_to_branch(name)
+        await _tag_deploy(name, deployer)
+        return SyncCopyResponse(
+            status="success", method="fast-forward",
+            message=f"Synced '{bp}' into main (fast-forward).",
+        )
+
+    # General path: cherry-pick only the BP commits onto a temp branch off main.
+    # The temp dir is "."-prefixed so the copy watchers ignore it.
+    tmpdir = tempfile.mkdtemp(prefix=f".syncbp-{name}-", dir=_copies_dir())
+    os.rmdir(tmpdir)  # git worktree add needs to create the dir itself
+    try:
+        _, w_err, w_rc = await call_git_command_with_output(
+            "git", "worktree", "add", "--detach", tmpdir, "FETCH_HEAD",
+            cwd=copy_path,
+        )
+        if w_rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to set up temp worktree: {w_err.strip()}",
+            )
+        try:
+            for c in bp_commits:
+                _, cp_err, cp_rc = await call_git_command_with_output(
+                    "git", *ident, "cherry-pick", "--allow-empty", c, cwd=tmpdir
+                )
+                if cp_rc != 0:
+                    await call_git_command("git", "cherry-pick", "--abort", cwd=tmpdir)
+                    return SyncCopyResponse(
+                        status="needs_rebase",
+                        message=(
+                            f"Applying '{bp}' commits onto main hit a conflict — "
+                            "hand off to the coding agent to rebase and resolve."
+                        ),
+                    )
+            tip_out, _, _ = await call_git_command_with_output(
+                "git", "rev-parse", "HEAD", cwd=tmpdir
+            )
+            temp_tip = tip_out.strip()
+        finally:
+            await call_git_command(
+                "git", "worktree", "remove", "--force", tmpdir, cwd=copy_path
+            )
+
+        # Rebase the copy onto the prospective new main, dropping commits that
+        # are now already applied (the BP ones become empty).
+        _, r_err, r_rc = await call_git_command_with_output(
+            "git", *ident, "rebase", "--onto", temp_tip, "FETCH_HEAD",
+            "--empty=drop", cwd=copy_path,
+        )
+        if r_rc != 0:
+            await call_git_command("git", "rebase", "--abort", cwd=copy_path)
+            return SyncCopyResponse(
+                status="needs_rebase",
+                message=(
+                    "Rebasing the copy onto the new main hit a conflict — "
+                    "hand off to the coding agent to rebase and resolve."
+                ),
+            )
+        new_tip_out, _, _ = await call_git_command_with_output(
+            "git", "rev-parse", "HEAD", cwd=copy_path
+        )
+        new_copy_tip = new_tip_out.strip()
+
+        # Transfer the new objects to the bare via a NEW temp ref (allowed by the
+        # ff-only hook), then advance main + the copy branch with server-side
+        # update-ref (bypasses the hook for the rebased copy history).
+        tmp_ref = f"refs/sync-tmp/{name}"
+        _, tp_err, tp_rc = await call_git_command_with_output(
+            "git", "push", bare, f"HEAD:{tmp_ref}", cwd=copy_path
+        )
+        if tp_rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to publish synced objects: {tp_err.strip()}",
+            )
+        # Only advance main if temp_tip is a true fast-forward of it.
+        _, _, anc_rc = await call_git_command_with_output(
+            "git", "-C", bare, "merge-base", "--is-ancestor",
+            "refs/heads/main", temp_tip,
+        )
+        if anc_rc != 0:
+            await call_git_command_with_output(
+                "git", "-C", bare, "update-ref", "-d", tmp_ref
+            )
+            return SyncCopyResponse(
+                status="needs_rebase",
+                message="main moved during sync — retry, or let the agent rebase.",
+            )
+        await call_git_command_with_output(
+            "git", "-C", bare, "update-ref", "refs/heads/main", temp_tip
+        )
+        await call_git_command_with_output(
+            "git", "-C", bare, "update-ref", f"refs/heads/{name}", new_copy_tip
+        )
+        await call_git_command_with_output(
+            "git", "-C", bare, "update-ref", "-d", tmp_ref
+        )
+
+        await _refresh_main_copy_checkout()
+        await _tag_deploy(name, deployer)
+        return SyncCopyResponse(
+            status="success", method="cherry-pick",
+            message=f"Synced '{bp}' into main; rebased the copy onto the new main.",
+        )
+    finally:
+        if os.path.isdir(tmpdir):
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 async def _tag_deploy(name: str, deployer: str | None) -> None:
@@ -598,6 +773,14 @@ async def sync_copy(name: str, body: SyncCopyRequest | None = None):
     #    points at the current main and its objects are in the copy.
     bare = bare_repo_path()
     await call_git_command("git", "fetch", bare, "main", cwd=copy_path)
+
+    # 2b) Per-BP sync: when a business process is named, only its commits go to
+    #     main and the copy is auto-rebased — keeps unrelated BPs out of the
+    #     deploy. Falls through to the whole-copy fast-forward below when no BP.
+    bp = body.bp if body else None
+    deployer = body.deployer if body else None
+    if bp:
+        return await _sync_copy_per_bp(name, copy_path, bp, deployer)
 
     # 3) Fast-forward only when main (FETCH_HEAD) is an ancestor of the copy's
     #    HEAD — i.e. the copy is purely ahead and no rebase is required.

@@ -38,12 +38,17 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<'diff' | 'history'>('diff');
 
-  const adds = changed.reduce((a, c) => a + c.adds, 0);
-  const dels = changed.reduce((a, c) => a + c.dels, 0);
+  // Scope the change summary to this BP — only its changes get synced/deployed,
+  // so the counts here match the BP-scoped diff below.
+  const bpChanged = changed.filter(
+    (c) => c.path === bp.name || c.path.startsWith(`${bp.name}/`),
+  );
+  const adds = bpChanged.reduce((a, c) => a + c.adds, 0);
+  const dels = bpChanged.reduce((a, c) => a + c.dels, 0);
   // Uncommitted work is still deployable: Sync & Deploy auto-commits it. So the
   // copy counts as actionable when it has either un-merged commits (not synced)
   // OR uncommitted changes — only a clean, fully-merged copy disables the button.
-  const dirty = changed.length > 0;
+  const dirty = bpChanged.length > 0;
   const actionable = !wt.synced || dirty;
 
   const handoffToAgent = useCallback(async () => {
@@ -74,7 +79,9 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
     try {
       let result;
       try {
-        result = await api.copyFiles.sync(wt.name);
+        // Scope the sync to this BP: only its commits go to main, the copy's
+        // other commits are auto-rebased (or handed to the agent on conflict).
+        result = await api.copyFiles.sync(wt.name, bp.name);
       } catch (err) {
         toast.error(`Sync failed: ${String(err)}`);
         return;
@@ -144,7 +151,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
               </span>
             )}
             <span className="font-mono text-xs text-muted-foreground">
-              {changed.length} file{changed.length === 1 ? '' : 's'} ·{' '}
+              {bpChanged.length} file{bpChanged.length === 1 ? '' : 's'} ·{' '}
               <span className="text-emerald-600">+{adds}</span> ·{' '}
               <span className="text-red-600">−{dels}</span>
             </span>
@@ -186,7 +193,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
       </div>
       <div className="flex min-h-0 flex-1 flex-col">
         {view === 'diff' ? (
-          <DiffTab copy={wt.name} />
+          <DiffTab copy={wt.name} pathPrefix={bp.name} />
         ) : (
           <CopyHistoryView copy={wt.name} />
         )}

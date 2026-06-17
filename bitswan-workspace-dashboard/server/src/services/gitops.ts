@@ -336,9 +336,11 @@ export class GitopsClient {
   async syncCopy(
     name: string,
     deployer?: string,
+    bp?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     return this.postJson(`/copies/${encodeURIComponent(name)}/sync`, {
       deployer: deployer ?? null,
+      bp: bp ?? null,
     });
   }
 

@@ -396,8 +396,11 @@ export const api = {
      * server-side. Returns `needs_rebase` when main has diverged — the caller
      * then hands off to the coding agent to rebase.
      */
-    sync: (name: string) =>
-      postJson<SyncCopyResult>(`/api/copies/${encodeURIComponent(name)}/sync`, {}),
+    sync: (name: string, bp?: string) =>
+      postJson<SyncCopyResult>(
+        `/api/copies/${encodeURIComponent(name)}/sync`,
+        bp ? { bp } : {},
+      ),
     history: (name: string) =>
       getJson<CopyHistory>(`/api/copies/${encodeURIComponent(name)}/history`),
   },
