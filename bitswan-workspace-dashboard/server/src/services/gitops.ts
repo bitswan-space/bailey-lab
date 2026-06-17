@@ -280,6 +280,28 @@ export class GitopsClient {
   }
 
   /**
+   * `GET /copies/{name}/commit/{sha}/diff` — unified diff introduced by a
+   * single commit (`git show`). Drives the clickable rows in the Sync &
+   * Deploy History view; resolves commits on either side of the graph.
+   */
+  async copyCommitDiff(
+    name: string,
+    sha: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `POST /copies/create` — create a new git clone under the
    * workspace's `copies/` directory and check out a branch into it.
    * The new copy is picked up by gitops's filesystem watcher and

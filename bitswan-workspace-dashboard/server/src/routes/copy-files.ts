@@ -296,6 +296,34 @@ export function registerCopyFilesRoutes(
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   });
+
+  app.get<{ Params: { name: string; sha: string } }>(
+    '/api/copies/:name/commit/:sha/diff',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!isValidCopyName(req.params.name)) {
+        return reply.code(400).send({ error: 'invalid copy' });
+      }
+      if (!/^[0-9a-fA-F]{4,64}$/.test(req.params.sha)) {
+        return reply.code(400).send({ error: 'invalid commit' });
+      }
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      try {
+        const r = await gitops.copyCommitDiff(req.params.name, req.params.sha);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name: req.params.name }, 'commit diff proxy failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
 }
 
 /**

@@ -40,6 +40,11 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
 
   const adds = changed.reduce((a, c) => a + c.adds, 0);
   const dels = changed.reduce((a, c) => a + c.dels, 0);
+  // Uncommitted work is still deployable: Sync & Deploy auto-commits it. So the
+  // copy counts as actionable when it has either un-merged commits (not synced)
+  // OR uncommitted changes — only a clean, fully-merged copy disables the button.
+  const dirty = changed.length > 0;
+  const actionable = !wt.synced || dirty;
 
   const handoffToAgent = useCallback(async () => {
     if (agentStatus === 'idle' || agentStatus === 'failed') {
@@ -120,11 +125,11 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
             become the new main once the deploy succeeds.
           </p>
           <div className="mt-3 flex items-center gap-3.5">
-            {wt.synced ? (
+            {wt.synced && !dirty ? (
               <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
                 Up to date with main
               </span>
-            ) : (
+            ) : !wt.synced ? (
               <span className="inline-flex items-center gap-2.5 text-xs">
                 <span className="font-semibold text-amber-600">
                   ↓ {wt.behind} behind
@@ -132,6 +137,10 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
                 <span className="font-semibold text-emerald-600">
                   ↑ {wt.ahead} ahead
                 </span>
+              </span>
+            ) : (
+              <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700">
+                Uncommitted changes
               </span>
             )}
             <span className="font-mono text-xs text-muted-foreground">
@@ -144,9 +153,9 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
         <Button
           size="lg"
           className="shrink-0"
-          disabled={wt.synced || busy}
+          disabled={!actionable || busy}
           title={
-            wt.synced
+            !actionable
               ? 'Already up to date with main'
               : 'Commit, fast-forward into main, and deploy to dev'
           }

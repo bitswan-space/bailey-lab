@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Rocket } from 'lucide-react';
 import { api, type CopyHistory, type HistoryCommit } from '@/lib/api';
+import { DiffView } from '@/components/diff/DiffView';
 import { cn } from '@/lib/utils';
 
 function GraphRow({
@@ -8,6 +9,8 @@ function GraphRow({
   side,
   tag,
   copyHereLabel,
+  selected,
+  onSelect,
 }: {
   commit: HistoryCommit;
   side: 'left' | 'right';
@@ -17,14 +20,24 @@ function GraphRow({
   /** When set, this (main) commit is also where the copy currently points —
    *  show the copy label on the left even though they share the commit. */
   copyHereLabel?: string;
+  selected: boolean;
+  onSelect: () => void;
 }) {
   const isLeft = side === 'left';
   return (
-    <div className="relative py-2.5">
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        'relative block w-full cursor-pointer py-2.5 text-left transition-colors',
+        selected ? 'bg-primary/5' : 'hover:bg-muted/50',
+      )}
+    >
       {/* node on the centre line */}
       <span
         className={cn(
-          'absolute left-1/2 top-3.5 size-2.5 -translate-x-1/2 rounded-full ring-2 ring-background',
+          'absolute left-1/2 top-3.5 size-2.5 -translate-x-1/2 rounded-full ring-2',
+          selected ? 'ring-primary' : 'ring-background',
           isLeft || copyHereLabel ? 'bg-emerald-500' : 'bg-primary',
         )}
         aria-hidden
@@ -78,26 +91,32 @@ function GraphRow({
           </div>
         ))}
       </div>
-    </div>
+    </button>
   );
 }
 
 /**
- * Single-column commit graph around a centre line: this copy's own (un-merged)
- * commits branch to the LEFT, main's commits run down the RIGHT. Deploy markers
- * ("<email> deployed <date>") sit on the main commits each Sync & Deploy left
- * at the tip.
+ * Two panes: on the left a single-column commit graph around a centre line —
+ * this copy's own (un-merged) commits branch LEFT, main's commits run down the
+ * RIGHT, deploy markers sit on the main commits each Sync & Deploy left at the
+ * tip. Clicking any commit shows the diff it introduced (`git show`) in the
+ * right pane.
  */
 export function CopyHistoryView({ copy }: { copy: string }) {
   // eslint-disable-next-line no-restricted-syntax -- null = not yet loaded
   const [data, setData] = useState<CopyHistory | null>(null);
   // eslint-disable-next-line no-restricted-syntax -- null = no error
   const [error, setError] = useState<string | null>(null);
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing selected
+  const [selected, setSelected] = useState<HistoryCommit | null>(null);
+  const [diff, setDiff] = useState('');
+  const [diffLoading, setDiffLoading] = useState(false);
 
   useEffect(() => {
     let alive = true;
     setData(null);
     setError(null);
+    setSelected(null);
     api.copyFiles
       .history(copy)
       .then((d) => {
@@ -111,8 +130,32 @@ export function CopyHistoryView({ copy }: { copy: string }) {
     };
   }, [copy]);
 
+  // Fetch the selected commit's diff.
+  useEffect(() => {
+    if (!selected) {
+      setDiff('');
+      return;
+    }
+    let alive = true;
+    setDiffLoading(true);
+    api.copyFiles
+      .commitDiff(copy, selected.sha)
+      .then((r) => {
+        if (alive) setDiff(r.diff);
+      })
+      .catch(() => {
+        if (alive) setDiff('');
+      })
+      .finally(() => {
+        if (alive) setDiffLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [copy, selected]);
+
   // The copy's own commits = those not yet on main. The rest of the copy's log
-  // is shared history and shows on the main side below.
+  // is shared history and shows on the main side.
   const copyUnique = useMemo(() => {
     if (!data) return [];
     const onMain = new Set(data.main.map((c) => c.sha));
@@ -120,8 +163,7 @@ export function CopyHistoryView({ copy }: { copy: string }) {
   }, [data]);
 
   // The copy's current tip. When it has no un-merged commits this sha is a main
-  // commit, and we still want to show where the copy points — so mark that main
-  // row with the copy label even though the two share the commit.
+  // commit, and we still mark that main row with the copy label.
   const copyHeadOnMain = useMemo(() => {
     if (!data || copyUnique.length > 0) return null;
     return data.copy[0]?.sha ?? null;
@@ -141,31 +183,46 @@ export function CopyHistoryView({ copy }: { copy: string }) {
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto bg-background py-4">
-      <div className="relative mx-auto max-w-3xl px-4">
-        {/* centre line */}
-        <span
-          className="absolute bottom-0 top-0 w-0.5 -translate-x-1/2 bg-border"
-          style={{ left: '50%' }}
-          aria-hidden
+    <div className="flex min-h-0 flex-1 overflow-hidden bg-background">
+      {/* Left: the commit graph. */}
+      <div className="w-[480px] shrink-0 overflow-auto border-r border-border py-4">
+        <div className="relative px-4">
+          {/* centre line */}
+          <span
+            className="absolute bottom-0 top-0 w-0.5 -translate-x-1/2 bg-border"
+            style={{ left: '50%' }}
+            aria-hidden
+          />
+          {copyUnique.map((c, i) => (
+            <GraphRow
+              key={`copy-${c.sha}`}
+              commit={c}
+              side="left"
+              tag={i === 0 ? copy : undefined}
+              selected={selected?.sha === c.sha}
+              onSelect={() => setSelected(c)}
+            />
+          ))}
+          {data.main.map((c, i) => (
+            <GraphRow
+              key={`main-${c.sha}`}
+              commit={c}
+              side="right"
+              tag={i === 0 ? 'main' : undefined}
+              copyHereLabel={c.sha === copyHeadOnMain ? copy : undefined}
+              selected={selected?.sha === c.sha}
+              onSelect={() => setSelected(c)}
+            />
+          ))}
+        </div>
+      </div>
+      {/* Right: the selected commit's diff. */}
+      <div className="min-w-0 flex-1 overflow-hidden">
+        <DiffView
+          path={selected ? `${selected.short} · ${selected.subject}` : null}
+          diff={diff}
+          loading={diffLoading}
         />
-        {copyUnique.map((c, i) => (
-          <GraphRow
-            key={`copy-${c.sha}`}
-            commit={c}
-            side="left"
-            tag={i === 0 ? copy : undefined}
-          />
-        ))}
-        {data.main.map((c, i) => (
-          <GraphRow
-            key={`main-${c.sha}`}
-            commit={c}
-            side="right"
-            tag={i === 0 ? 'main' : undefined}
-            copyHereLabel={c.sha === copyHeadOnMain ? copy : undefined}
-          />
-        ))}
       </div>
     </div>
   );

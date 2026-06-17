@@ -982,3 +982,26 @@ async def get_copy_diff(name: str, path: str | None = Query(None)):
             stdout = no_index_out
 
     return {"diff": stdout}
+
+
+@router.get("/{name}/commit/{sha}/diff")
+async def get_commit_diff(name: str, sha: str):
+    """Unified diff introduced by a single commit (`git show`), for the history
+    view's clickable rows. Resolves commits from both this copy (HEAD) and main:
+    main's objects are fetched below, so either side of the graph is viewable."""
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+    if not re.fullmatch(r"[0-9a-fA-F]{4,64}", sha or ""):
+        raise HTTPException(status_code=400, detail="invalid commit")
+
+    # main commits are reachable only via FETCH_HEAD's objects — fetch first.
+    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
+    stdout, stderr, rc = await call_git_command_with_output(
+        "git", "show", "--no-color", "--format=medium", sha, cwd=copy_path
+    )
+    if rc != 0:
+        raise HTTPException(
+            status_code=404, detail=f"commit not found: {(stderr or stdout).strip()}"
+        )
+    return {"diff": stdout}

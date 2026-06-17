@@ -384,6 +384,12 @@ export const api = {
       getJson<{ diff: string }>(
         `/api/copies/${encodeURIComponent(name)}/diff${p ? `?path=${encodeURIComponent(p)}` : ''}`,
       ),
+    /** Unified diff introduced by a single commit (`git show`), for the
+     *  clickable rows in the History view. */
+    commitDiff: (name: string, sha: string) =>
+      getJson<{ diff: string }>(
+        `/api/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff`,
+      ),
     /**
      * Sync the copy into main. Commits WIP and, when the copy is a pure
      * fast-forward of main (no rebase needed), fast-forwards main to it
