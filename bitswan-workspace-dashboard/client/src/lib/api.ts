@@ -271,6 +271,16 @@ export interface SyncCopyResult {
   message: string;
 }
 
+/** Gitops `GET /copies/{name}/divergence?bp=` — commit counts vs main, split
+ *  into the viewed business process vs all other business processes. */
+export interface BpDivergence {
+  bp: string;
+  ahead_bp: number;
+  ahead_other: number;
+  behind_bp: number;
+  behind_other: number;
+}
+
 /** Gitops `POST /copies/create` response (plus auto-deploy fields). */
 export interface CreateCopyResponse {
   name: string;
@@ -451,6 +461,12 @@ export const api = {
     status: (name: string) =>
       getJson<{ changed: ChangedFile[] }>(
         `/api/copies/${encodeURIComponent(name)}/status`,
+      ),
+    /** Commit divergence from main split into this BP vs every other BP, so the
+     *  per-BP Sync & Deploy screen reflects the BP being viewed. */
+    divergence: (name: string, bp: string) =>
+      getJson<BpDivergence>(
+        `/api/copies/${encodeURIComponent(name)}/divergence?bp=${encodeURIComponent(bp)}`,
       ),
     diff: (name: string, p?: string) =>
       getJson<{ diff: string }>(

@@ -77,6 +77,31 @@ export function registerCopyRoutes(
     },
   );
 
+  app.get<{ Params: { name: string }; Querystring: { bp?: string } }>(
+    '/api/copies/:name/divergence',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      if (!req.query.bp) {
+        return reply.code(400).send({ error: 'bp is required' });
+      }
+      try {
+        const r = await gitops.copyDivergence(req.params.name, req.query.bp);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name: req.params.name }, 'copy divergence failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   app.post<{
     Body: { branch_name?: string; base_branch?: string };
   }>('/api/copies', async (req, reply) => {

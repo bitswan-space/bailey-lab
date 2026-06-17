@@ -361,6 +361,23 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  async copyDivergence(
+    name: string,
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/divergence?bp=${encodeURIComponent(bp)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /**
    * `POST /automations/start-deploy` — workspace-bind-mount deploy. Body is
    * `{ relative_path, stage, copy? }`. Gitops resolves the source under

@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Rocket } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSessions } from '@/components/agents/SessionProvider';
@@ -46,11 +46,37 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
   );
   const adds = bpChanged.reduce((a, c) => a + c.adds, 0);
   const dels = bpChanged.reduce((a, c) => a + c.dels, 0);
-  // Uncommitted work is still deployable: Sync & Deploy auto-commits it. So the
-  // copy counts as actionable when it has either un-merged commits (not synced)
-  // OR uncommitted changes — only a clean, fully-merged copy disables the button.
   const dirty = bpChanged.length > 0;
-  const actionable = !wt.synced || dirty;
+
+  // The copy as a whole can be far ahead/behind main purely from work on OTHER
+  // business processes, while THIS one is identical to main. Split the
+  // divergence so the screen reflects the BP you're actually on. Re-fetched
+  // whenever the change list updates (i.e. after a sync).
+  // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
+  const [divergence, setDivergence] = useState<import('@/lib/api').BpDivergence | null>(
+    null,
+  );
+  useEffect(() => {
+    let alive = true;
+    api.copyFiles
+      .divergence(wt.name, bp.name)
+      .then((d) => alive && setDivergence(d))
+      .catch(() => alive && setDivergence(null));
+    return () => {
+      alive = false;
+    };
+  }, [wt.name, bp.name, changed]);
+
+  const aheadBp = divergence?.ahead_bp ?? 0;
+  const behindBp = divergence?.behind_bp ?? 0;
+  const aheadOther = divergence?.ahead_other ?? 0;
+  const behindOther = divergence?.behind_other ?? 0;
+  // This BP is up to date with main when it has no un-merged commits, isn't
+  // behind main, and has no uncommitted edits. Other BPs' divergence does NOT
+  // count — they sync from their own Sync & Deploy. Uncommitted work is still
+  // actionable (Sync & Deploy auto-commits it).
+  const bpUpToDate = aheadBp === 0 && behindBp === 0 && !dirty;
+  const actionable = !bpUpToDate;
 
   const handoffToAgent = useCallback(async () => {
     if (agentStatus === 'idle' || agentStatus === 'failed') {
@@ -132,30 +158,50 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
             <strong className="text-foreground">dev</strong>. Your changes below
             become the new main once the deploy succeeds.
           </p>
-          <div className="mt-3 flex items-center gap-3.5">
-            {wt.synced && !dirty ? (
-              <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
-                Up to date with main
+          <div className="mt-3 flex flex-col gap-2">
+            {/* THIS business process — the only thing this button syncs/deploys. */}
+            <div className="flex flex-wrap items-center gap-2.5 text-xs">
+              <span className="w-44 shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                This business process
               </span>
-            ) : !wt.synced ? (
-              <span className="inline-flex items-center gap-2.5 text-xs">
-                <span className="font-semibold text-amber-600">
-                  ↓ {wt.behind} behind
+              {bpUpToDate ? (
+                <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                  Up to date with main
                 </span>
-                <span className="font-semibold text-emerald-600">
-                  ↑ {wt.ahead} ahead
+              ) : (
+                <span className="inline-flex flex-wrap items-center gap-2.5">
+                  {behindBp > 0 && (
+                    <span className="font-semibold text-amber-600">↓ {behindBp} behind</span>
+                  )}
+                  {aheadBp > 0 && (
+                    <span className="font-semibold text-emerald-600">↑ {aheadBp} ahead</span>
+                  )}
+                  {dirty && (
+                    <span className="font-mono text-muted-foreground">
+                      {bpChanged.length} uncommitted file{bpChanged.length === 1 ? '' : 's'} ·{' '}
+                      <span className="text-emerald-600">+{adds}</span> ·{' '}
+                      <span className="text-red-600">−{dels}</span>
+                    </span>
+                  )}
                 </span>
-              </span>
-            ) : (
-              <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700">
-                Uncommitted changes
-              </span>
+              )}
+            </div>
+            {/* OTHER business processes — informational; each syncs from its own
+                Sync & Deploy screen and is NOT touched by this button. */}
+            {(aheadOther > 0 || behindOther > 0) && (
+              <div className="flex flex-wrap items-center gap-2.5 text-xs">
+                <span className="w-44 shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Other business processes
+                </span>
+                <span className="inline-flex flex-wrap items-center gap-2.5 text-muted-foreground">
+                  {behindOther > 0 && <span>↓ {behindOther} behind</span>}
+                  {aheadOther > 0 && <span>↑ {aheadOther} ahead</span>}
+                  <span className="text-[11px] italic">
+                    not synced by this button — each deploys from its own screen
+                  </span>
+                </span>
+              </div>
             )}
-            <span className="font-mono text-xs text-muted-foreground">
-              {bpChanged.length} file{bpChanged.length === 1 ? '' : 's'} ·{' '}
-              <span className="text-emerald-600">+{adds}</span> ·{' '}
-              <span className="text-red-600">−{dels}</span>
-            </span>
           </div>
         </div>
         <Button
