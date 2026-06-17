@@ -538,8 +538,20 @@ async def sync_copy(name: str, body: SyncCopyRequest | None = None):
     if status_out and status_out.strip():
         if not await call_git_command("git", "add", "-A", cwd=copy_path):
             raise HTTPException(status_code=500, detail="Failed to stage changes")
+        # Attribute the auto-commit to the user who pressed Sync & Deploy, not
+        # to gitops, so the history shows real authorship.
+        deployer = (body.deployer if body else None) or ""
+        commit_cmd = ["git"]
+        if deployer.strip():
+            commit_cmd += [
+                "-c",
+                f"user.name={deployer.strip()}",
+                "-c",
+                f"user.email={deployer.strip()}",
+            ]
+        commit_cmd += ["commit", "-m", "Sync: commit work in progress"]
         _, c_err, c_rc = await call_git_command_with_output(
-            "git", "commit", "-m", "Sync: commit work in progress", cwd=copy_path
+            *commit_cmd, cwd=copy_path
         )
         if c_rc != 0:
             raise HTTPException(
