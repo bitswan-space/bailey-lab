@@ -1289,6 +1289,22 @@ class AutomationService:
             "result": result,
         }
 
+    async def bp_diff(self, bp: str, from_sha: str, to_sha: str) -> dict:
+        """Unified diff of a BP's source between two commits (the history view's
+        "diff vs current"). Scoped to the BP's directory, computed in copies/main
+        where the canonical source lives."""
+        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
+        out, _, rc = await call_git_command_with_output(
+            "git",
+            "diff",
+            "--no-color",
+            f"{from_sha}..{to_sha}",
+            "--",
+            f"{bp}/",
+            cwd=main,
+        )
+        return {"diff": out if rc == 0 else "", "from": from_sha, "to": to_sha}
+
     async def apply_compose_for_deployments(
         self,
         deployment_ids: list[str],

@@ -80,10 +80,36 @@ def test_flat_tree_round_trip(tmp_path):
     assert deps["backend-shop-dev"]["stage"] == "dev"
 
 
-def _git(*args, cwd, env_extra=None):
+def _git(*args, cwd, env_extra=None, capture=False):
     env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_COMMITTER_NAME="t")
     env.update(env_extra or {})
-    return subprocess.run(["git", *args], cwd=cwd, env=env, check=True)
+    return subprocess.run(
+        ["git", *args], cwd=cwd, env=env, check=True, capture_output=capture, text=True
+    )
+
+
+def test_bp_diff(tmp_path, monkeypatch):
+    """bp_diff returns the unified diff of a BP's source between two commits."""
+    copies = tmp_path / "copies"
+    main = copies / "main"
+    (main / "shop").mkdir(parents=True)
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(copies))
+    _git("init", "-q", cwd=str(main))
+    _git("config", "user.email", "t@t", cwd=str(main))
+    _git("config", "user.name", "t", cwd=str(main))
+    (main / "shop" / "f.txt").write_text("v1\n")
+    _git("add", "-A", cwd=str(main))
+    _git("commit", "-qm", "c1", cwd=str(main))
+    sha1 = _git("rev-parse", "HEAD", cwd=str(main), capture=True).stdout.strip()
+    (main / "shop" / "f.txt").write_text("v2\n")
+    _git("add", "-A", cwd=str(main))
+    _git("commit", "-qm", "c2", cwd=str(main))
+    sha2 = _git("rev-parse", "HEAD", cwd=str(main), capture=True).stdout.strip()
+
+    svc = AutomationService()
+    r = asyncio.run(svc.bp_diff("shop", sha1, sha2))
+    assert "+v2" in r["diff"] and "-v1" in r["diff"]
+    assert "shop/f.txt" in r["diff"]
 
 
 def test_write_bp_deploy_sets_only_commit_no_history(tmp_path, monkeypatch):

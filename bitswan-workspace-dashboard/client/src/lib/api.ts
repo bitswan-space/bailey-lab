@@ -348,6 +348,11 @@ export const api = {
       `/api/automations/business-processes/${encodeURIComponent(bp)}/rollback`,
       { stage, git_commit: gitCommit },
     ),
+  /** Unified diff of a BP's source between two commits (history "diff vs current"). */
+  bpDiff: (bp: string, from: string, to: string) =>
+    getJson<{ diff: string }>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    ),
   deployStatus: (taskId: string) =>
     getJson<DeployStatusResponse>(
       `/api/automations/deploy-status/${encodeURIComponent(taskId)}`,

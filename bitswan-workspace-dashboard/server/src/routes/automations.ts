@@ -133,6 +133,31 @@ export function registerAutomationRoutes(
     },
   );
 
+  // Diff a BP's source between two commits (history "diff vs current").
+  app.get<{
+    Params: { bp: string };
+    Querystring: { from?: string; to?: string };
+  }>('/api/automations/business-processes/:bp/diff', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { from, to } = req.query;
+    if (!from || !to) {
+      return reply.code(400).send({ error: 'from and to are required' });
+    }
+    try {
+      const r = await gitops.bpDiff(req.params.bp, from, to);
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp diff failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   // Roll a whole BP stage back to a prior deployment (all members together).
   app.post<{
     Params: { bp: string };

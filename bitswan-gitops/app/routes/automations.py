@@ -83,6 +83,17 @@ async def get_bp_history(
     return await automation_service.bp_history(bp, stage)
 
 
+@router.get("/business-processes/{bp}/diff")
+async def get_bp_diff(
+    bp: str,
+    from_sha: str = Query(..., alias="from"),
+    to: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Unified diff of a BP's source between two commits (history "diff vs current")."""
+    return await automation_service.bp_diff(bp, from_sha, to)
+
+
 @router.post("/business-processes/{bp}/rollback")
 async def rollback_bp(
     bp: str,

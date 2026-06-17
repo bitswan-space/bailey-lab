@@ -483,6 +483,24 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  async bpDiff(
+    bp: string,
+    from: string,
+    to: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   async bpRollback(input: {
     bp: string;
     stage: string;
