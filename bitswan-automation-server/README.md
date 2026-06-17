@@ -146,3 +146,7 @@ bitswan workspace --remote=git@github.com:<your-name>/<your-repo>.git my-workspa
 # Contribute
 
 If you find issues in that setup or have some nice features / improvements, I would welcome an issue or a PR :)
+
+# License
+
+Part of [Bitswan Lab](https://github.com/bitswan-space/bailey-lab), which is **shared source**. Licensed under your choice of the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) or the [PolyForm Perimeter License 1.0.0](https://polyformproject.org/licenses/perimeter/1.0.0) — see [`LICENSE`](LICENSE). Free for noncommercial use, and for commercial use that doesn't compete with Bitswan. The separate Bitswan Enterprise edition is proprietary.

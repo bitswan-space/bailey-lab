@@ -24,3 +24,7 @@ npm run dev
 Vite serves the client at http://localhost:5173 and proxies `/ws` to the Fastify server on `:8080`.
 
 > Local dev spawns the pty as your host user in the host filesystem. Use Docker for the realistic uid-1000 / mounted-workspace setup.
+
+## License
+
+Part of [Bitswan Lab](https://github.com/bitswan-space/bailey-lab), which is **shared source**. Licensed under your choice of the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) or the [PolyForm Perimeter License 1.0.0](https://polyformproject.org/licenses/perimeter/1.0.0) — see [`LICENSE`](LICENSE). Free for noncommercial use, and for commercial use that doesn't compete with Bitswan. The separate Bitswan Enterprise edition is proprietary.
