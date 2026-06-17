@@ -89,7 +89,7 @@ def test_record_dr_test_clears_overdue_and_sets_last(tmp_path, monkeypatch):
     assert test["id"].startswith("dr")
     assert test["date"] == date.today().isoformat()
     # snapshot + note are woven into the note text.
-    assert '20260616-120000-abcd1234' in test["note"]
+    assert "20260616-120000-abcd1234" in test["note"]
     assert "verified order totals" in test["note"]
 
 
