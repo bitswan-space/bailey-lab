@@ -528,6 +528,10 @@ class SyncCopyResponse(BaseModel):
     status: str  # "success" | "needs_rebase"
     method: str | None = None  # "fast-forward" when synced server-side
     message: str
+    # Task id of the dev-stage redeploy spawned after a successful sync, so the
+    # deployed dev stage tracks main (matches live-dev). None when nothing was
+    # deployed (no change, or no deployable members).
+    deploy_task_id: str | None = None
 
 
 class SyncCopyRequest(BaseModel):
@@ -633,10 +637,12 @@ async def _sync_copy_per_bp(
             )
         await _fast_forward_main_to_branch(name)
         await _tag_deploy(name, deployer)
+        task_id = await _spawn_dev_deploy(bp, deployer)
         return SyncCopyResponse(
             status="success",
             method="fast-forward",
             message=f"Synced '{bp}' into main (fast-forward).",
+            deploy_task_id=task_id,
         )
 
     # General path: cherry-pick only the BP commits onto a temp branch off main.
@@ -754,14 +760,50 @@ async def _sync_copy_per_bp(
 
         await _refresh_main_copy_checkout()
         await _tag_deploy(name, deployer)
+        task_id = await _spawn_dev_deploy(bp, deployer)
         return SyncCopyResponse(
             status="success",
             method="cherry-pick",
             message=f"Synced '{bp}' into main; rebased the copy onto the new main.",
+            deploy_task_id=task_id,
         )
     finally:
         if os.path.isdir(tmpdir):
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+async def _spawn_dev_deploy(bp: str, deployer: str | None) -> str | None:
+    """Redeploy a business process's dev stage from main after a sync advances
+    main, so the deployed dev stage tracks main — i.e. once a copy is "fully
+    synced", the dev stage shows the same thing as live-dev.
+
+    Best-effort and non-blocking: bakes/deploys in a background task (mirrors
+    the copy-creation auto-deploy) and returns the deploy task id, or None when
+    there's nothing deployable. Never raises — a sync must not fail because the
+    follow-up deploy couldn't start."""
+    try:
+        from app.dependencies import get_automation_service
+
+        service = get_automation_service()
+        members = service.members_for_bp(bp, copy=None, stage="dev")
+        if not members:
+            return None
+        res = await spawn_set_deploy(
+            label=f"sync-deploy:{bp}",
+            members=members,
+            stage="dev",
+            commit_subject=(f"{deployer} synced {bp}" if deployer else None),
+            service=service,
+        )
+        deploy = res.get("deploy")
+        if res.get("error"):
+            logger.warning(
+                "Auto dev-deploy after sync failed for '%s': %s", bp, res["error"]
+            )
+        return deploy["task_id"] if deploy else None
+    except Exception as e:
+        logger.warning("Auto dev-deploy after sync errored for '%s': %s", bp, e)
+        return None
 
 
 async def _tag_deploy(name: str, deployer: str | None) -> None:
@@ -874,10 +916,24 @@ async def sync_copy(name: str, body: SyncCopyRequest | None = None):
 
     await _fast_forward_main_to_branch(name)
     await _tag_deploy(name, body.deployer if body else None)
+    # Redeploy the dev stage of every BP whose source changed in this sync, so
+    # the deployed dev stage tracks main (FETCH_HEAD is the pre-sync main).
+    diff_out, _, _ = await call_git_command_with_output(
+        "git", "diff", "--name-only", "FETCH_HEAD..HEAD", cwd=copy_path
+    )
+    changed_bps = sorted(
+        {line.split("/")[0] for line in diff_out.splitlines() if "/" in line}
+    )
+    first_task: str | None = None
+    for changed_bp in changed_bps:
+        tid = await _spawn_dev_deploy(changed_bp, deployer)
+        if tid and first_task is None:
+            first_task = tid
     return SyncCopyResponse(
         status="success",
         method="fast-forward",
         message=f"Synced '{name}' into main (fast-forward).",
+        deploy_task_id=first_task,
     )
 
 

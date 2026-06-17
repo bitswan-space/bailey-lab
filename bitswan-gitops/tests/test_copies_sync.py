@@ -13,6 +13,7 @@ import subprocess
 import pytest
 
 from app.services import git_server
+from app.routes import copies
 from app.routes.copies import SyncCopyRequest, get_commit_diff, sync_copy
 
 
@@ -145,6 +146,45 @@ def test_per_bp_sync_conflict_leaves_main_untouched(env):
     # No temp ref left dangling.
     refs = _git("-C", bare, "for-each-ref", "refs/sync-tmp").stdout.strip()
     assert refs == ""
+
+
+def test_sync_redeploys_synced_bp_dev_stage(env, monkeypatch):
+    """A successful per-BP sync redeploys that BP's dev stage from main, so the
+    deployed dev stage tracks main (matches live-dev). The deploy task id is
+    surfaced on the response."""
+    copy = env["make_copy"]("u1")
+    _commit(copy, "bpa/file.txt", "a1\n", "bpa change")
+
+    calls = []
+
+    async def _fake_dev_deploy(bp, deployer):
+        calls.append((bp, deployer))
+        return "task-123"
+
+    monkeypatch.setattr(copies, "_spawn_dev_deploy", _fake_dev_deploy)
+
+    res = asyncio.run(sync_copy("u1", SyncCopyRequest(deployer="dev@x", bp="bpa")))
+    assert res.status == "success"
+    # The synced BP's dev stage was (re)deployed, and only that BP.
+    assert calls == [("bpa", "dev@x")]
+    assert res.deploy_task_id == "task-123"
+
+
+def test_sync_with_no_bp_changes_does_not_redeploy(env, monkeypatch):
+    """A per-BP sync with nothing to sync for that BP is a noop — no dev deploy."""
+    env["make_copy"]("u1")  # no commits touching bpa
+
+    calls = []
+
+    async def _fake_dev_deploy(bp, deployer):
+        calls.append((bp, deployer))
+        return "task-123"
+
+    monkeypatch.setattr(copies, "_spawn_dev_deploy", _fake_dev_deploy)
+
+    res = asyncio.run(sync_copy("u1", SyncCopyRequest(deployer="dev@x", bp="bpa")))
+    assert res.status == "success" and res.method == "noop"
+    assert calls == []
 
 
 def test_whole_copy_sync_fast_forwards(env):
