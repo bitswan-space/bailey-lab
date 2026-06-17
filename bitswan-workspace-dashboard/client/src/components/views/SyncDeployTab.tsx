@@ -82,14 +82,16 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
         await handoffToAgent();
         return;
       }
-      // Fast-forwarded into main — now deploy the business process to dev.
+      // Fast-forwarded into main — now deploy the business process to the
+      // shared `dev` stage (scanned from main, NOT the copy's live-dev). This
+      // is what the Deployments tab shows and what staging/production promote
+      // from; the copy's own live-dev preview keeps running independently.
       await deployBpWithToast({
         bp: bp.name,
-        stage: 'live-dev',
-        copy: wt.name,
-        loading: `Synced — deploying ${bp.name}…`,
-        success: `${bp.name} synced and deployed`,
-        failurePrefix: `Synced into main, but deploy failed for ${bp.name}`,
+        stage: 'dev',
+        loading: `Synced — deploying ${bp.name} to dev…`,
+        success: `${bp.name} synced and deployed to dev`,
+        failurePrefix: `Synced into main, but deploy to dev failed for ${bp.name}`,
       });
     } finally {
       setBusy(false);
