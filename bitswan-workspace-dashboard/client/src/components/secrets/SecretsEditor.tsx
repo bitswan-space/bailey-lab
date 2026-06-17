@@ -113,10 +113,10 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
       if (!newKey || newKey === oldKey || d.keys.includes(newKey)) return d;
       const values: Record<string, Record<string, string>> = {};
       for (const r of REALMS) {
-        values[r] = {};
-        for (const k of Object.keys(d.values[r] || {})) {
-          values[r][k === oldKey ? newKey : k] = d.values[r][k];
-        }
+        const src = d.values[r] || {};
+        const next: Record<string, string> = {};
+        for (const k of Object.keys(src)) next[k === oldKey ? newKey : k] = src[k] ?? '';
+        values[r] = next;
       }
       return { keys: d.keys.map((k) => (k === oldKey ? newKey : k)), values };
     });

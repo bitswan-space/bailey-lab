@@ -558,6 +558,91 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** `GET .../business-processes/{bp}/dr` — a BP's disaster-recovery status
+   *  (cadence policy, manual recovery-test log, overdue flag). */
+  async dr(bp: string): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/dr`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `PUT .../business-processes/{bp}/dr/policy` — set the recovery-test cadence. */
+  async setDrPolicy(
+    bp: string,
+    policy: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/dr/policy`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ policy }),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `POST .../business-processes/{bp}/dr/tests` — record a hand-performed
+   *  recovery test (prepended; the log stays newest-first). */
+  async recordDrTest(
+    bp: string,
+    payload: { by?: string; note?: string; snapshot?: string },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/dr/tests`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET /snapshots/{bp}` — the BP's snapshot list (+ eligibility/usage/tasks).
+   *  Exposed for the DR panel's "tested against" snapshot picker. */
+  async bpSnapshots(
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/snapshots/${encodeURIComponent(bp)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   async bpScale(
     bp: string,
     stage: string,

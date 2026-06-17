@@ -182,6 +182,102 @@ export function registerAutomationRoutes(
     }
   });
 
+  // Disaster Recovery → read the BP's recovery-test cadence + manual test log.
+  app.get<{ Params: { bp: string } }>(
+    '/api/automations/business-processes/:bp/dr',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.dr(req.params.bp);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'bp dr read failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  // Disaster Recovery → set the recovery-test cadence policy.
+  app.put<{
+    Params: { bp: string };
+    Body: { policy?: string };
+  }>('/api/automations/business-processes/:bp/dr/policy', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { policy } = req.body ?? {};
+    if (!policy || typeof policy !== 'string') {
+      return reply.code(400).send({ error: 'policy is required' });
+    }
+    try {
+      const r = await gitops.setDrPolicy(req.params.bp, policy);
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp dr policy write failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Disaster Recovery → record a hand-performed recovery test (versioned).
+  app.post<{
+    Params: { bp: string };
+    Body: { by?: string; note?: string; snapshot?: string };
+  }>('/api/automations/business-processes/:bp/dr/tests', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { by, note, snapshot } = req.body ?? {};
+    // Attribute the test to the signed-in user (the client doesn't send `by`).
+    const author = by || (await emailFromRequest(req, app.log)) || undefined;
+    try {
+      const r = await gitops.recordDrTest(req.params.bp, {
+        ...(author ? { by: author } : {}),
+        ...(note ? { note } : {}),
+        ...(snapshot ? { snapshot } : {}),
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp dr test record failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Disaster Recovery → the BP's snapshot list (the DR panel's "tested
+  // against" snapshot picker). Proxies the gitops snapshots list.
+  app.get<{ Params: { bp: string } }>(
+    '/api/automations/business-processes/:bp/snapshots',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.bpSnapshots(req.params.bp);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'bp snapshots failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   // Inspect → Scale: scale every member container of a BP stage.
   app.post<{
     Params: { bp: string };

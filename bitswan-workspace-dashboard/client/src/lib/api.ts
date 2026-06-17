@@ -1,5 +1,6 @@
 import type {
   DockerInspect,
+  Snapshot,
   SnapshotListResponse,
   SnapshotEligibility,
   SnapshotStage,
@@ -273,6 +274,42 @@ export type StageSecrets = Record<string, string>;
  *  stage, so this is the full per-stage map. */
 export type BpSecrets = Record<string, StageSecrets>;
 
+/** Disaster-recovery cadence policy: how often a manual recovery test is
+ *  expected. Maps to a window in days (monthly 30, quarterly 91,
+ *  semi-annually 182, annually 365). */
+export type DrPolicy = 'monthly' | 'quarterly' | 'semi-annually' | 'annually';
+
+/** One hand-performed recovery-test log entry. `at` is a human date string
+ *  (e.g. "Jun 17, 2026"); `date` is the ISO yyyy-mm-dd used for the overdue
+ *  calculation. */
+export interface DrTest {
+  id: string;
+  by: string;
+  at: string;
+  date: string;
+  note: string;
+  verified: boolean;
+}
+
+/** A BP's disaster-recovery status: cadence policy, the manual recovery-test
+ *  log (newest-first), and the derived overdue flag. `last`/`days_since` are
+ *  null when no test has been recorded; `overdue` is true then too. */
+export interface DrStatus {
+  policy: DrPolicy;
+  window_days: number;
+  tests: DrTest[];
+  // eslint-disable-next-line no-restricted-syntax -- null = never tested
+  last: { by: string; at: string; date: string } | null;
+  // eslint-disable-next-line no-restricted-syntax -- null = never tested
+  days_since: number | null;
+  overdue: boolean;
+}
+
+/** One snapshot item from `bpSnapshots` (the gitops snapshot manifest). Alias
+ *  of {@link Snapshot} — the DR panel's "tested against" picker renders
+ *  `label` / `created_at` / `total_size_bytes` (and `id` / `stage`). */
+export type BpSnapshot = Snapshot;
+
 /** A file's content from a BP's source at a commit (Inspect → Files). */
 export interface BpFileContent {
   path: string;
@@ -404,6 +441,31 @@ export const api = {
     putJson<BpSecrets>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
       { values },
+    ),
+  /** Disaster Recovery: a BP's recovery-test cadence + manual test log. */
+  drStatus: (bp: string) =>
+    getJson<DrStatus>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/dr`,
+    ),
+  /** Disaster Recovery: set the recovery-test cadence policy. */
+  setDrPolicy: (bp: string, policy: DrPolicy) =>
+    putJson<DrStatus>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/dr/policy`,
+      { policy },
+    ),
+  /** Disaster Recovery: record a hand-performed recovery test (versioned). */
+  recordDrTest: (
+    bp: string,
+    body: { by?: string; note?: string; snapshot?: string },
+  ) =>
+    postJson<DrStatus>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/dr/tests`,
+      body,
+    ),
+  /** Disaster Recovery: the BP's snapshot list (the "tested against" picker). */
+  bpSnapshots: (bp: string) =>
+    getJson<SnapshotListResponse>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/snapshots`,
     ),
   /** Inspect → Files: the full source tree of a BP at a commit. */
   bpFileTree: (bp: string, commit: string) =>

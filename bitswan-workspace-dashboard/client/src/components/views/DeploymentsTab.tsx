@@ -6,6 +6,7 @@ import {
   Check,
   CircleSlash,
   Code2,
+  DatabaseBackup,
   Download,
   ExternalLink,
   FileText,
@@ -17,6 +18,7 @@ import {
   History,
   KeyRound,
   Layers,
+  LifeBuoy,
   Loader2,
   Lock,
   Play,
@@ -36,6 +38,7 @@ import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { DiffView } from '@/components/diff/DiffView';
 import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
+import { DisasterRecoveryPanel } from '@/components/disaster-recovery/DisasterRecoveryPanel';
 import { promoteBpWithToast } from '@/lib/deployBp';
 import { STATUS_META, stateToDisplay } from '@/lib/status';
 import {
@@ -69,15 +72,22 @@ const CodeEditor = lazy(() => import('@/components/files/CodeEditor'));
 const EMPTY_STATUS: Map<string, ChangedKind> = new Map();
 const NOOP = () => {};
 
-type StageId = 'dev' | 'staging' | 'production';
+type StageId = 'dev' | 'staging' | 'production' | 'dr';
 const STAGES: { id: StageId; label: string; icon: LucideIcon }[] = [
   { id: 'dev', label: 'Development', icon: Code2 },
   { id: 'staging', label: 'Staging', icon: FlaskConical },
   { id: 'production', label: 'Production', icon: Rocket },
+  { id: 'dr', label: 'Disaster Recovery', icon: LifeBuoy },
 ];
 const STAGE_LABEL: Record<string, string> = Object.fromEntries(
   STAGES.map((s) => [s.id, s.label]),
 );
+
+// DR mirrors Production — it shows Production's deployment data and shares its
+// secrets. Map a stage id to the id whose data it displays.
+const stageDataId = (id: StageId): StageId => (id === 'dr' ? 'production' : id);
+// Stages that actually have their own deployment history (DR has none).
+const DATA_STAGES: StageId[] = ['dev', 'staging', 'production'];
 
 type Section =
   | 'history'
@@ -85,7 +95,8 @@ type Section =
   | 'containers'
   | 'backups'
   | 'firewall'
-  | 'supply';
+  | 'supply'
+  | 'recovery';
 
 const STAGE_IDS = STAGES.map((s) => s.id);
 const SECTION_IDS: Section[] = [
@@ -95,6 +106,7 @@ const SECTION_IDS: Section[] = [
   'backups',
   'firewall',
   'supply',
+  'recovery',
 ];
 
 function short(sha: string | null | undefined, n = 12): string {
@@ -108,6 +120,7 @@ function SectionTab({
   icon: Icon,
   label,
   count,
+  locked,
   onSelect,
 }: {
   id: Section;
@@ -115,6 +128,7 @@ function SectionTab({
   icon: LucideIcon;
   label: string;
   count?: number;
+  locked?: boolean;
   onSelect: (id: Section) => void;
 }) {
   return (
@@ -130,6 +144,7 @@ function SectionTab({
     >
       <Icon className="size-3.5" aria-hidden />
       {label}
+      {locked && <Lock className="size-3 text-muted-foreground" aria-hidden />}
       {typeof count === 'number' && (
         <span
           className={cn(
@@ -163,7 +178,6 @@ function StageNode({
     <button
       type="button"
       onClick={onClick}
-      disabled={!deployed && !active}
       className="relative flex shrink-0 flex-col items-center"
     >
       <span
@@ -228,6 +242,19 @@ function PromoteButton({
       Promote
       <ArrowRight className="size-3.5" aria-hidden />
     </button>
+  );
+}
+
+// ── "Mirrored from Production" banner for DR's read-only sections ───────────
+function MirrorBanner() {
+  return (
+    <div className="mb-3 flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-[12px] text-muted-foreground">
+      <Lock className="size-3.5 shrink-0" aria-hidden />
+      <span>
+        Mirrored from <strong className="text-foreground">Production</strong> · read-only.
+        To change this, manage it on the Production stage.
+      </span>
+    </div>
   );
 }
 
@@ -696,11 +723,11 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     let alive = true;
     setLoaded(false);
     Promise.all(
-      STAGES.map((s) =>
+      DATA_STAGES.map((s) =>
         api
-          .bpHistory(bp.name, s.id)
-          .then((h) => [s.id, h] as const)
-          .catch(() => [s.id, null] as const),
+          .bpHistory(bp.name, s)
+          .then((h) => [s, h] as const)
+          .catch(() => [s, null] as const),
       ),
     ).then((pairs) => {
       if (!alive) return;
@@ -713,7 +740,9 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   }, [bp.name, reloadKey]);
 
   const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
-  const data = byStage[activeStage] ?? null;
+  const isDr = activeStage === 'dr';
+  // DR mirrors Production's deployment data.
+  const data = byStage[stageDataId(activeStage)] ?? null;
   const history = data?.history ?? [];
   const currentEntry = useMemo(
     () => history.find((e) => e.commit === data?.current) ?? history[0] ?? null,
@@ -836,26 +865,50 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   // stages (max members seen on any stage's current deployment).
   const bpContainerCount = useMemo(() => {
     let max = 0;
-    for (const s of STAGES) {
-      const h = byStage[s.id];
+    for (const s of DATA_STAGES) {
+      const h = byStage[s];
       const cur = h?.history.find((e) => e.commit === h.current) ?? h?.history[0];
       if (cur) max = Math.max(max, Object.keys(cur.members ?? {}).length);
     }
     return max;
   }, [byStage]);
 
-  const SECTIONS: { id: Section; icon: LucideIcon; label: string; count?: number }[] = [
-    { id: 'history', icon: History, label: 'Deployment history', count: history.length },
-    { id: 'secrets', icon: KeyRound, label: 'Secrets' },
-    { id: 'containers', icon: Boxes, label: 'Containers', count: members.length },
-    { id: 'backups', icon: Archive, label: 'Backups' },
-    { id: 'firewall', icon: Shield, label: 'Firewall' },
-    { id: 'supply', icon: Boxes, label: 'Supply chain' },
-  ];
+  // DR's tabs: its own Recovery-tests + Containers, then a "Mirrored from
+  // Production" group (read-only) for the data it shares. Other stages keep the
+  // full set.
+  const SECTIONS: {
+    id: Section;
+    icon: LucideIcon;
+    label: string;
+    count?: number;
+    locked?: boolean;
+  }[] = isDr
+    ? [
+        { id: 'recovery', icon: LifeBuoy, label: 'Recovery tests' },
+        { id: 'containers', icon: Boxes, label: 'Containers', count: members.length },
+        { id: 'history', icon: History, label: 'Deployment history', count: history.length, locked: true },
+        { id: 'secrets', icon: KeyRound, label: 'Secrets', locked: true },
+        { id: 'firewall', icon: Shield, label: 'Firewall', locked: true },
+        { id: 'supply', icon: Boxes, label: 'Supply chain', locked: true },
+      ]
+    : [
+        { id: 'history', icon: History, label: 'Deployment history', count: history.length },
+        { id: 'secrets', icon: KeyRound, label: 'Secrets' },
+        { id: 'containers', icon: Boxes, label: 'Containers', count: members.length },
+        { id: 'backups', icon: Archive, label: 'Backups' },
+        { id: 'firewall', icon: Shield, label: 'Firewall' },
+        { id: 'supply', icon: Boxes, label: 'Supply chain' },
+      ];
+  // The section that's actually shown — falls back to the stage's first tab when
+  // the URL section isn't valid here (e.g. 'backups' isn't a DR tab, 'recovery'
+  // only exists on DR).
+  const visibleSection: Section = SECTIONS.some((s) => s.id === section)
+    ? section
+    : (SECTIONS[0]?.id ?? 'history');
 
   return (
     <div className="flex-1 overflow-auto bg-background">
-      <div className="mx-auto flex max-w-5xl flex-col gap-5 px-7 py-6">
+      <div className="flex flex-col gap-5 px-6 py-6">
         {/* Section header */}
         <div className="flex items-end gap-4">
           <div className="min-w-0 flex-1">
@@ -875,7 +928,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         {/* Stage pipeline — a bare stepper above the card (wireframe) */}
         <div className="flex items-center gap-2 px-11 pt-7">
           {STAGES.map((s, i) => {
-            const sHist = byStage[s.id];
+            const sHist = byStage[stageDataId(s.id)];
             const deployed = !!sHist && sHist.history.length > 0;
             const next = STAGES[i + 1];
             const srcCur =
@@ -898,12 +951,26 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   <>
                     <div className="h-0.5 flex-1 bg-border" aria-hidden />
                     <div className="shrink-0">
-                      <PromoteButton
-                        canPromote={canPromote}
-                        label={next.label}
-                        busy={busy}
-                        onClick={() => void runPromote(next.id as 'staging' | 'production')}
-                      />
+                      {next.id === 'dr' ? (
+                        // DR isn't promoted into — it's seeded by restoring
+                        // Production's data. The pill just selects the DR stage.
+                        <button
+                          type="button"
+                          onClick={() => setActiveStage('dr')}
+                          title="Disaster Recovery — restore & verify Production's data"
+                          className="inline-flex h-[30px] items-center gap-1.5 rounded-full border border-dashed border-border bg-background px-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-muted-foreground hover:border-primary/40 hover:text-foreground"
+                        >
+                          <DatabaseBackup className="size-3.5" aria-hidden />
+                          Restore
+                        </button>
+                      ) : (
+                        <PromoteButton
+                          canPromote={canPromote}
+                          label={next.label}
+                          busy={busy}
+                          onClick={() => void runPromote(next.id as 'staging' | 'production')}
+                        />
+                      )}
                     </div>
                     <div className="h-0.5 flex-1 bg-border" aria-hidden />
                   </>
@@ -1007,18 +1074,35 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
 
           {/* Section tabs */}
           <div className="flex flex-wrap items-center gap-4 border-b border-border px-[22px] pt-3.5">
-            {SECTIONS.map((s) => (
-              <SectionTab key={s.id} {...s} active={section === s.id} onSelect={setSection} />
+            {SECTIONS.filter((s) => !s.locked).map((s) => (
+              <SectionTab key={s.id} {...s} active={visibleSection === s.id} onSelect={setSection} />
+            ))}
+            {isDr && SECTIONS.some((s) => s.locked) && (
+              <>
+                <span className="h-[22px] w-px self-center bg-border" aria-hidden />
+                <span className="inline-flex items-center gap-1.5 self-center text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                  <Lock className="size-3" aria-hidden />
+                  Mirrored from Production
+                </span>
+              </>
+            )}
+            {SECTIONS.filter((s) => s.locked).map((s) => (
+              <SectionTab key={s.id} {...s} active={visibleSection === s.id} onSelect={setSection} />
             ))}
           </div>
 
           {/* Section content */}
           <div className="bg-muted/30 px-[22px] py-5">
+            {isDr && (visibleSection === 'history' || visibleSection === 'secrets' || visibleSection === 'firewall' || visibleSection === 'supply') && (
+              <MirrorBanner />
+            )}
             {!loaded ? (
               <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" aria-hidden /> Loading…
               </div>
-            ) : section === 'history' ? (
+            ) : visibleSection === 'recovery' ? (
+              <DisasterRecoveryPanel bp={bp.name} frontends={frontends} />
+            ) : visibleSection === 'history' ? (
               history.length === 0 ? (
                 <div className="px-3 py-10 text-center text-sm text-muted-foreground">
                   <History className="mx-auto size-7 text-muted-foreground" aria-hidden />
@@ -1044,7 +1128,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   ))}
                 </div>
               )
-            ) : section === 'containers' ? (
+            ) : visibleSection === 'containers' ? (
               members.length === 0 ? (
                 <div className="px-3 py-10 text-center text-sm text-muted-foreground">
                   No containers in {STAGE_LABEL[activeStage]}.
@@ -1093,15 +1177,22 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   })}
                 </div>
               )
-            ) : section === 'secrets' ? (
-              <SecretsEditor
-                bp={bp.name}
-                stage={activeStage}
-                stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
-              />
-            ) : section === 'backups' ? (
+            ) : visibleSection === 'secrets' ? (
+              isDr ? (
+                // Mirrored from Production — read-only.
+                <div className="pointer-events-none opacity-90">
+                  <SecretsEditor bp={bp.name} stage="production" stageLabel="Production" />
+                </div>
+              ) : (
+                <SecretsEditor
+                  bp={bp.name}
+                  stage={activeStage}
+                  stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
+                />
+              )
+            ) : visibleSection === 'backups' ? (
               <EmptyTab icon={Archive} label="Backups" />
-            ) : section === 'firewall' ? (
+            ) : visibleSection === 'firewall' ? (
               <EmptyTab icon={Shield} label="Firewall" />
             ) : (
               <EmptyTab icon={Boxes} label="Supply chain" />
