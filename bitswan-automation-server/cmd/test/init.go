@@ -585,10 +585,10 @@ func testFrontendEndpoint(endpointURL, workspaceName string) error {
 
 // testCodingAgentCLI verifies the bitswan-coding-agent CLI can authenticate to
 // gitops from inside the coding-agent container. `deployments list` hits gitops
-// GET /agent/deployments with the agent token — the same auth path as
-// `vcs commit`. This guards the agent-token wiring: gitops must resolve the same
-// BITSWAN_GITOPS_AGENT_SECRET the coding-agent container was given, or every
-// agent call 401s.
+// GET /agent/deployments with the agent token — the same agent-token auth path
+// the git credential helper uses to push. This guards the agent-token wiring:
+// gitops must resolve the same BITSWAN_GITOPS_AGENT_SECRET the coding-agent
+// container was given, or every agent call 401s.
 //
 // We pass --copy explicitly. Without it the CLI tries to auto-detect the
 // copy from $PWD and fails client-side ("cannot detect copy") before

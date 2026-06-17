@@ -383,12 +383,12 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
               Sync copy &quot;{wt.name}&quot; with main?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Opens a coding-agent session at the copy root that runs the{' '}
-              <code>bitswan-coding-agent vcs sync</code> flow. Uncommitted
-              changes are committed as <code>pre-sync-commit</code> first; if
-              merge conflicts occur the agent will walk you through resolving
-              them via <code>vcs sync-continue</code>. After a successful sync,
-              changed automations are deployed to dev automatically.
+              Commits any work in progress and rebases this copy onto the
+              latest <code>main</code> with plain git (<code>git pull --rebase</code>),
+              then fast-forward pushes it. If the rebase hits conflicts, a
+              coding-agent session opens at the copy root to walk you through
+              resolving them. After a successful sync, changed automations are
+              deployed to dev automatically.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

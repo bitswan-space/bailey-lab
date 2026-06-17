@@ -71,8 +71,8 @@ interface SessionsContextValue {
    */
   startSession(copy: string, bp: string, kind?: BpSessionKind): string;
   /**
-   * Start a copy-level git-sync session. No BP — the auto-cmd cd's to
-   * the copy root and runs the bitswan-coding-agent vcs sync flow.
+   * Start a copy-level git-sync session. No BP — the auto-cmd cd's to the copy
+   * root and runs the git rebase/conflict-resolution flow (SYNC_PROMPT).
    */
   startSyncSession(copy: string): string;
   /**
