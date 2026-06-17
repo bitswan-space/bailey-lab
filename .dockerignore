@@ -3,6 +3,11 @@
 # context lean: only bitswan-gitops/ and bitswan-automation-server/ are needed.
 .git
 **/node_modules
+# …but keep the committed `node_modules -> /deps/node_modules` SYMLINKS that
+# ship with the example/business-process templates. They're 18-byte symlinks
+# (not real dependency trees), and the scaffolded frontend's live-dev Vite
+# server resolves its deps through them — dropping them 500s every new BP.
+!bitswan-gitops/examples/**/node_modules
 **/dist
 **/.vite
 **/*.log
