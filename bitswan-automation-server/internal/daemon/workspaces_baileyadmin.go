@@ -517,7 +517,13 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request, email 
 		done <- EmptyTrashFor(email, groups, serverOwner, pw)
 		pw.Close()
 	}()
+	// The relay goroutine writes `log` events to `w` as output streams in. We
+	// MUST wait for it to finish before writing the terminal event and
+	// returning — otherwise the relay races the handler's final write (and any
+	// caller, e.g. a test, reading the response body after the handler returns).
+	relayDone := make(chan struct{})
 	go func() {
+		defer close(relayDone)
 		buf := make([]byte, 4096)
 		var partial []byte
 		for {
@@ -541,7 +547,11 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request, email 
 			}
 		}
 	}()
-	if err := <-done; err != nil {
+	err := <-done
+	// EmptyTrashFor has returned and pw is closed, so the relay will hit EOF and
+	// finish; wait for it before any further write to `w`.
+	<-relayDone
+	if err != nil {
 		writeEvent(map[string]any{"event": "error", "error": err.Error()})
 		return
 	}
