@@ -66,6 +66,37 @@ class PromoteBPRequest(BaseModel):
     stage: str  # "staging" or "production"
 
 
+class RollbackBPRequest(BaseModel):
+    stage: str  # "dev" | "staging" | "production"
+    git_commit: str
+    deployed_by: str | None = None
+
+
+@router.get("/business-processes/{bp}/history")
+async def get_bp_history(
+    bp: str,
+    stage: str = Query("dev"),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Deployment history for one BP stage (newest-first; `current` = live)."""
+    return automation_service.bp_history(bp, stage)
+
+
+@router.post("/business-processes/{bp}/rollback")
+async def rollback_bp(
+    bp: str,
+    body: RollbackBPRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Roll a whole BP stage back to a prior deployment (all members together)."""
+    return await automation_service.rollback_business_process(
+        bp=bp,
+        stage=body.stage,
+        git_commit=body.git_commit,
+        deployed_by=body.deployed_by,
+    )
+
+
 @router.post("/start-deploy")
 async def start_deploy(
     body: StartDeployRequest,

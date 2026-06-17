@@ -19,6 +19,7 @@ from app.utils import (
     docker_compose_up,
     generate_workspace_url,
     read_bitswan_yaml,
+    dump_bitswan_yaml,
     read_pipeline_conf,
     read_automation_config,
     remove_route_from_ingress,
@@ -733,7 +734,9 @@ class AutomationService:
         cached image — no rebuild. Replaces the old materialize-and-mount path for
         promoted stages: the source now lives INSIDE the image. Returns
         (full_tag, image_id)."""
-        auto_name = sanitize_automation_name(os.path.basename(source_dir.rstrip(os.sep)))
+        auto_name = sanitize_automation_name(
+            os.path.basename(source_dir.rstrip(os.sep))
+        )
         parent = os.path.dirname(source_dir.rstrip(os.sep))
         bp_name = sanitize_automation_name(os.path.basename(parent))
         ws = self.workspace_name or "workspace"
@@ -1075,7 +1078,7 @@ class AutomationService:
 
         bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
         with open(bitswan_yaml_path, "w") as f:
-            yaml.dump(bs_yaml, f)
+            dump_bitswan_yaml(bs_yaml, f)
 
         await update_git(
             self.gitops_dir,
@@ -1112,6 +1115,152 @@ class AutomationService:
                 await self.enable_services(services, svc_stage)
 
         return bs_yaml
+
+    async def write_bp_deploy(
+        self,
+        bp: str,
+        stage: str,
+        git_commit: str | None,
+        members: list[dict],
+        deployed_by: str | None,
+        source: str,
+        status: str = "deployed",
+    ) -> None:
+        """Record a BP-level deploy/promote/rollback in the business_processes
+        tree: set the stage's shared git_commit + deployer + timestamp and
+        prepend a history entry capturing each member's image. All members of a
+        BP deploy share one commit and roll back as a group."""
+        stage_key = "production" if stage in ("", "production") else stage
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        tree = bs.setdefault("business_processes", {})
+        node = tree.setdefault(bp, {}).setdefault(stage_key, {})
+        now = datetime.now().isoformat(timespec="seconds")
+        member_map = {
+            m["deployment_id"]: {
+                "image": m.get("image"),
+                "image_id": m.get("image_id"),
+            }
+            for m in members
+        }
+        node["git_commit"] = git_commit
+        node["deployed_at"] = now
+        node["deployed_by"] = deployed_by
+        rec = {
+            "git_commit": git_commit,
+            "deployed_at": now,
+            "deployed_by": deployed_by,
+            "status": status,
+            "source": source,
+            "members": member_map,
+        }
+        node.setdefault("history", []).insert(0, rec)
+        bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
+        with open(bitswan_yaml_path, "w") as f:
+            dump_bitswan_yaml(bs, f)
+        await update_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
+            "deploy",
+            deployed_by=deployed_by,
+            message=f"{source} {bp} → {stage_key} @ {(git_commit or '')[:8]}",
+        )
+
+    def bp_history(self, bp: str, stage: str) -> dict:
+        """Deployment history for one BP stage (newest-first), with the live
+        commit flagged. Drives the Deployment History tab."""
+        stage_key = "production" if stage in ("", "production") else stage
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        node = ((bs.get("business_processes") or {}).get(bp, {}) or {}).get(
+            stage_key
+        ) or {}
+        return {
+            "bp": bp,
+            "stage": stage_key,
+            "current": node.get("git_commit"),
+            "history": node.get("history", []) or [],
+        }
+
+    async def rollback_business_process(
+        self,
+        bp: str,
+        stage: str,
+        git_commit: str,
+        deployed_by: str | None = None,
+        progress_callback: Callable[..., Any] | None = None,
+    ) -> dict:
+        """Roll a BP stage back to a prior history entry: re-point ALL its member
+        deployments to that entry's images (as a group) and redeploy. Records a
+        new `rolled-back` history entry."""
+        stage_key = "production" if stage in ("", "production") else stage
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        node = ((bs.get("business_processes") or {}).get(bp, {}) or {}).get(
+            stage_key
+        ) or {}
+        rec = next(
+            (h for h in node.get("history", []) if h.get("git_commit") == git_commit),
+            None,
+        )
+        if not rec:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No history entry {git_commit[:8]} for {bp}/{stage_key}",
+            )
+        members = rec.get("members") or {}
+        if not members:
+            raise HTTPException(
+                status_code=400, detail="History entry has no members to roll back"
+            )
+
+        # Re-point the (flat, hydrated) deployment entries to the historical
+        # images; dump regroups them into the tree.
+        deployments = bs.setdefault("deployments", {})
+        for dep_id, mi in members.items():
+            dep = deployments.get(dep_id)
+            if dep is None:
+                continue
+            dep["image"] = mi.get("image")
+            dep["image_id"] = mi.get("image_id")
+            dep["source_commit"] = git_commit
+
+        now = datetime.now().isoformat(timespec="seconds")
+        node["git_commit"] = git_commit
+        node["deployed_at"] = now
+        node["deployed_by"] = deployed_by
+        node.setdefault("history", []).insert(
+            0,
+            {
+                "git_commit": git_commit,
+                "deployed_at": now,
+                "deployed_by": deployed_by,
+                "status": "rolled-back",
+                "source": "rollback",
+                "members": members,
+            },
+        )
+        path = os.path.join(self.gitops_dir, "bitswan.yaml")
+        with open(path, "w") as f:
+            dump_bitswan_yaml(bs, f)
+        await update_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
+            "deploy",
+            deployed_by=deployed_by,
+            message=f"rollback {bp} → {stage_key} @ {git_commit[:8]}",
+        )
+        deployment_ids = list(members.keys())
+        result = await self.apply_compose_for_deployments(
+            deployment_ids, deployed_by=deployed_by, report=progress_callback
+        )
+        return {
+            "message": "Rolled back",
+            "bp": bp,
+            "stage": stage_key,
+            "git_commit": git_commit,
+            "deployment_ids": deployment_ids,
+            "result": result,
+        }
 
     async def apply_compose_for_deployments(
         self,
@@ -1200,7 +1349,7 @@ class AutomationService:
         if changed:
             bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
             with open(bitswan_yaml_path, "w") as f:
-                yaml.dump(bs_yaml, f)
+                dump_bitswan_yaml(bs_yaml, f)
             await update_git(
                 self.gitops_dir,
                 self.gitops_dir_host,
@@ -1278,6 +1427,7 @@ class AutomationService:
             "message": "Deployed successfully",
             "label": label,
             "deployment_ids": deployment_ids,
+            "prepped": prepped,
             "result": result,
         }
 
@@ -1318,6 +1468,25 @@ class AutomationService:
             commit_subject=f"deploy business process {bp}",
             progress_callback=progress_callback,
         )
+
+        # Record the BP-level deploy (shared git commit + per-member images +
+        # history) for the Deployment History tab + group rollback. live-dev is
+        # a per-copy preview, not a tracked stage.
+        if stage != "live-dev":
+            prepped = out.get("prepped") or []
+            git_commit = next(
+                (p.get("source_commit") for p in prepped if p.get("source_commit")),
+                None,
+            )
+            await self.write_bp_deploy(
+                bp=bp,
+                stage=stage,
+                git_commit=git_commit,
+                members=prepped,
+                deployed_by=deployed_by,
+                source="deploy",
+                status="deployed",
+            )
 
         return {
             "message": "Deployed business process successfully",
@@ -1458,6 +1627,19 @@ class AutomationService:
         deployment_ids = [m["deployment_id"] for m in members]
         result = await self.apply_compose_for_deployments(
             deployment_ids, deployed_by=deployed_by, report=_report
+        )
+
+        git_commit = next(
+            (m.get("source_commit") for m in members if m.get("source_commit")), None
+        )
+        await self.write_bp_deploy(
+            bp=bp,
+            stage=target_stage,
+            git_commit=git_commit,
+            members=members,
+            deployed_by=deployed_by,
+            source=source_stage,
+            status="deployed",
         )
 
         return {
@@ -2157,7 +2339,7 @@ fi
             bs_yaml = {"deployments": {}}
             bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
             with open(bitswan_yaml_path, "w") as f:
-                yaml.dump(bs_yaml, f)
+                dump_bitswan_yaml(bs_yaml, f)
             await update_git(
                 self.gitops_dir,
                 self.gitops_dir_host,
@@ -2249,7 +2431,7 @@ fi
 
             bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
             with open(bitswan_yaml_path, "w") as f:
-                yaml.dump(bs_yaml, f)
+                dump_bitswan_yaml(bs_yaml, f)
 
             await update_git(
                 self.gitops_dir,
@@ -2294,7 +2476,7 @@ fi
                 del bs_yaml["deployments"][k]
             bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
             with open(bitswan_yaml_path, "w") as f:
-                yaml.dump(bs_yaml, f)
+                dump_bitswan_yaml(bs_yaml, f)
 
         await _report(
             "generating_compose", "Generating docker-compose configuration..."
@@ -2355,7 +2537,7 @@ fi
 
                 bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
                 with open(bitswan_yaml_path, "w") as f:
-                    yaml.dump(bs_yaml, f)
+                    dump_bitswan_yaml(bs_yaml, f)
 
                 await update_git(
                     self.gitops_dir,
@@ -2391,7 +2573,7 @@ fi
             bs_yaml = {"deployments": {}}
             bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
             with open(bitswan_yaml_path, "w") as f:
-                yaml.dump(bs_yaml, f)
+                dump_bitswan_yaml(bs_yaml, f)
             await update_git(self.gitops_dir, self.gitops_dir_host, "all", "initialize")
 
         active_deployments = self.get_active_automations()
@@ -2479,7 +2661,7 @@ fi
 
         bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
         with open(bitswan_yaml_path, "w") as f:
-            yaml.dump(bs_yaml, f)
+            dump_bitswan_yaml(bs_yaml, f)
 
         # Commit with a descriptive message using GitLockContext
         async with GitLockContext(timeout=10.0):
@@ -2599,7 +2781,7 @@ fi
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
         bs_yaml["deployments"][deployment_id]["active"] = False
         with open(os.path.join(self.gitops_dir, "bitswan.yaml"), "w") as f:
-            yaml.dump(bs_yaml, f)
+            dump_bitswan_yaml(bs_yaml, f)
         await update_git(
             self.gitops_dir, self.gitops_dir_host, deployment_id, "mark_as_inactive"
         )
@@ -2612,7 +2794,7 @@ fi
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
         bs_yaml["deployments"][deployment_id]["active"] = True
         with open(os.path.join(self.gitops_dir, "bitswan.yaml"), "w") as f:
-            yaml.dump(bs_yaml, f)
+            dump_bitswan_yaml(bs_yaml, f)
         await update_git(
             self.gitops_dir, self.gitops_dir_host, deployment_id, "mark_as_active"
         )
@@ -2629,7 +2811,7 @@ fi
 
         bs_yaml["deployments"].pop(deployment_id)
         with open(os.path.join(self.gitops_dir, "bitswan.yaml"), "w") as f:
-            yaml.dump(bs_yaml, f)
+            dump_bitswan_yaml(bs_yaml, f)
         await update_git(self.gitops_dir, self.gitops_dir_host, deployment_id, "remove")
 
     # get active automations from bitswan.yaml

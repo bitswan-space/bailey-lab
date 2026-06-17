@@ -299,13 +299,69 @@ async def call_git_command_with_output(*command, **kwargs) -> tuple[str, str, in
     return stdout.decode(), stderr.decode(), proc.returncode
 
 
+# ── bitswan.yaml deployment storage ────────────────────────────────────────
+# On disk, deployments are grouped in a tree: business_processes[<bp>][<stage>]
+# = { git_commit, deployed_at, deployed_by, history[], deployments{<id>: conf} }.
+# In memory we ALSO expose the legacy FLAT `deployments` map (hydrated on read)
+# so the many readers stay unchanged; `dump_bitswan_yaml` re-groups flat → tree
+# on write and persists only the tree. (production stage key is "production";
+# the flat conf keeps the canonical "" stage.)
+
+
+def _tree_to_flat(bs_yaml: dict) -> dict:
+    """Hydrate a flat {deployment_id: conf} map from the business_processes tree."""
+    flat: dict = {}
+    for bp, stages in (bs_yaml.get("business_processes") or {}).items():
+        for stage, node in (stages or {}).items():
+            for dep_id, conf in ((node or {}).get("deployments") or {}).items():
+                c = dict(conf or {})
+                c.setdefault("context", bp)
+                c.setdefault("stage", "" if stage == "production" else stage)
+                flat[dep_id] = c
+    return flat
+
+
+def _flat_to_tree(bs_yaml: dict) -> dict:
+    """Group the flat `deployments` map into business_processes[bp][stage],
+    preserving per-stage metadata (git_commit/deployed_*/history) already in the
+    in-memory tree."""
+    existing = bs_yaml.get("business_processes") or {}
+    tree: dict = {}
+    for dep_id, conf in (bs_yaml.get("deployments") or {}).items():
+        conf = conf or {}
+        bp = conf.get("context") or "ungrouped"
+        stage = conf.get("stage") or "production"
+        if stage == "":
+            stage = "production"
+        node = tree.setdefault(bp, {}).setdefault(stage, {})
+        ex = (existing.get(bp, {}) or {}).get(stage, {}) or {}
+        for k in ("git_commit", "deployed_at", "deployed_by", "history"):
+            if k in ex:
+                node[k] = ex[k]
+        node.setdefault("deployments", {})[dep_id] = conf
+    return tree
+
+
+def dump_bitswan_yaml(bs_yaml: dict, f) -> None:
+    """Persist bitswan.yaml with deployments grouped into the business_processes
+    tree (the flat in-memory `deployments` map is dropped from disk)."""
+    out = dict(bs_yaml)
+    out["business_processes"] = _flat_to_tree(bs_yaml)
+    out.pop("deployments", None)
+    yaml.dump(out, f)
+
+
 def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
     bitswan_yaml_path = os.path.join(bitswan_dir, "bitswan.yaml")
     try:
         if os.path.exists(bitswan_yaml_path):
             with open(bitswan_yaml_path, "r") as f:
                 bs_yaml: dict = yaml.safe_load(f)
-                return bs_yaml
+            # Hydrate the flat `deployments` view from the tree so all readers
+            # work unchanged. (Legacy flat-only files are returned as-is.)
+            if isinstance(bs_yaml, dict) and bs_yaml.get("business_processes"):
+                bs_yaml["deployments"] = _tree_to_flat(bs_yaml)
+            return bs_yaml
     except Exception:
         return None
 
