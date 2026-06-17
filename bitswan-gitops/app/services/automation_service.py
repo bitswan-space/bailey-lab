@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import tarfile
+import tempfile
 import yaml
 import requests
 from datetime import datetime
@@ -716,6 +717,88 @@ class AutomationService:
         )
         return full_tag
 
+    async def _bake_source_image(
+        self,
+        source_dir: str,
+        dirs_to_merge: list[str],
+        base_image: str,
+        mount_path: str,
+        source_sha: str,
+    ) -> tuple[str, str | None]:
+        """Bake the merged source tree into a docker image as a final COPY layer.
+
+        Builds `internal/<ws>-<bp>-<auto>-app:sha<source_sha>` =
+        ``FROM <base_image>`` + ``COPY . <mount_path>``. Content-addressed by
+        `source_sha` (the merged-tree git hash) so an unchanged source reuses the
+        cached image — no rebuild. Replaces the old materialize-and-mount path for
+        promoted stages: the source now lives INSIDE the image. Returns
+        (full_tag, image_id)."""
+        auto_name = sanitize_automation_name(os.path.basename(source_dir.rstrip(os.sep)))
+        parent = os.path.dirname(source_dir.rstrip(os.sep))
+        bp_name = sanitize_automation_name(os.path.basename(parent))
+        ws = self.workspace_name or "workspace"
+        tag_root = f"{ws}-{bp_name}-{auto_name}-app"
+        full_tag = f"internal/{tag_root}:sha{source_sha}"
+        mp = mount_path or "/app"
+
+        image_service = ImageService()
+
+        async def _resolve_id() -> str | None:
+            for im in await image_service.get_images():
+                if im.get("tag") == full_tag:
+                    return im.get("id")
+            return None
+
+        already = any(
+            im.get("tag") == full_tag and im.get("build_status") in (None, "ready")
+            for im in await image_service.get_images()
+        )
+        if not already and image_service._get_build_status(source_sha) != "building":
+            ctx = tempfile.mkdtemp(prefix=".bswn-bake-")
+            try:
+                # Merge the source dirs (later-wins) into the build context.
+                for d in dirs_to_merge:
+                    if os.path.isdir(d):
+                        shutil.copytree(d, ctx, dirs_exist_ok=True, symlinks=True)
+                # Build-only files must not be baked into the app dir.
+                with open(os.path.join(ctx, ".dockerignore"), "w") as f:
+                    f.write("image/\nDockerfile\n.dockerignore\n")
+                with open(os.path.join(ctx, "Dockerfile"), "w") as f:
+                    f.write(f"FROM {base_image}\nCOPY . {mp}\n")
+                await image_service.create_image(
+                    tag_root, build_context_path=ctx, checksum=source_sha
+                )
+            finally:
+                shutil.rmtree(ctx, ignore_errors=True)
+
+        if not already:
+            deadline = asyncio.get_event_loop().time() + 5 * 60
+            while True:
+                status = image_service._get_build_status(source_sha)
+                if status == "ready":
+                    break
+                if status == "failed":
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Source image build failed for {full_tag}",
+                    )
+                if asyncio.get_event_loop().time() >= deadline:
+                    raise HTTPException(
+                        status_code=504,
+                        detail=f"Source image build timed out for {full_tag}",
+                    )
+                await asyncio.sleep(2)
+
+        return full_tag, await _resolve_id()
+
+    async def _source_commit(self, source_dir: str) -> str | None:
+        """Git commit of the source tree being deployed (the copy/main HEAD), so a
+        baked image maps back to exact source."""
+        out, _, rc = await call_git_command_with_output(
+            "git", "rev-parse", "HEAD", cwd=source_dir
+        )
+        return out.strip() if rc == 0 else None
+
     @staticmethod
     def deployment_id_for(source: dict, stage: str) -> str:
         """Resolve the deployment_id for a scanned source at a given stage.
@@ -792,7 +875,7 @@ class AutomationService:
         # afterwards would materialize a stale config and silently fall back to
         # the default runtime image.
         try:
-            await self._ensure_automation_image(source_dir)
+            base_tag = await self._ensure_automation_image(source_dir)
         except HTTPException:
             raise
         except Exception as exc:
@@ -801,15 +884,30 @@ class AutomationService:
                 detail=f"Image build failed: {exc}",
             )
 
+        # live-dev keeps the bind-mount of the live workspace tree (instant edit
+        # loop). Promoted stages (dev/staging/production) BAKE the source into
+        # the image so a deployment is a single immutable artifact identified by
+        # its image id + source git commit — no mounted blob tree.
         if stage == "live-dev":
             checksum = "live-dev"
+            image = None
+            image_id = None
+            source_commit = None
         else:
+            auto_conf = read_automation_config(source_dir)
+            base_image = base_tag or auto_conf.image
             checksum = await calculate_git_tree_hash(dirs_to_merge)
-            await self.materialize_merged_tree(dirs_to_merge, checksum)
+            image, image_id = await self._bake_source_image(
+                source_dir, dirs_to_merge, base_image, auto_conf.mount_path, checksum
+            )
+            source_commit = await self._source_commit(source_dir)
 
         return {
             "deployment_id": deployment_id,
             "checksum": checksum,
+            "image": image,
+            "image_id": image_id,
+            "source_commit": source_commit,
             "stage": stage,
             "relative_path": source["relative_path"],
             "automation_name": source["automation_name"],
@@ -952,6 +1050,15 @@ class AutomationService:
                 dep["services"] = m["services"]
             if m.get("replicas") is not None:
                 dep["replicas"] = m["replicas"]
+            # Image-baked deploys: the source lives inside the image. Record the
+            # baked image ref, its resolved id, and the source git commit so a
+            # deployment maps back to exact source (and promote/rollback reuse it).
+            if m.get("image") is not None:
+                dep["image"] = m["image"]
+            if m.get("image_id") is not None:
+                dep["image_id"] = m["image_id"]
+            if m.get("source_commit") is not None:
+                dep["source_commit"] = m["source_commit"]
             if "active" not in dep:
                 dep["active"] = True
 
@@ -1261,7 +1368,7 @@ class AutomationService:
             if not in_bp:
                 continue
             checksum = conf.get("checksum")
-            if not checksum or checksum == "live-dev":
+            if (not checksum or checksum == "live-dev") and not conf.get("image"):
                 continue
 
             automation_name = conf.get("automation_name")
@@ -1292,6 +1399,11 @@ class AutomationService:
                 {
                     "deployment_id": target_id,
                     "checksum": checksum,
+                    # Promotion reuses the SAME baked image (no rebuild): carry
+                    # the source stage's image ref + id + source commit forward.
+                    "image": conf.get("image"),
+                    "image_id": conf.get("image_id"),
+                    "source_commit": conf.get("source_commit"),
                     "stage": target_stage,
                     "relative_path": conf.get("relative_path"),
                     "automation_name": automation_name,
@@ -3357,8 +3469,12 @@ fi
 
             deployment_dir = os.path.join(self.gitops_dir_host, source)
 
-            # Use unified automation config for image, expose, and port
+            # Use unified automation config for image, expose, and port.
+            # Promoted stages (dev/staging/production) bake the source INTO the
+            # image, so use the recorded baked image instead of the base runtime.
             entry["image"] = automation_config.image
+            if stage != "live-dev" and conf.get("image"):
+                entry["image"] = conf["image"]
             expose = automation_config.expose
             port = automation_config.port
 
@@ -3485,7 +3601,11 @@ fi
                     entry["volumes"].append(
                         f"{source_mount_path}:{automation_config.mount_path}:ro"
                     )
+            elif conf.get("image"):
+                # Source is baked into the image (promoted stages) — no mount.
+                pass
             else:
+                # Legacy/transitional: mount the materialized checksum tree.
                 if bitswan_volume_name:
                     subpath = _normalize_subpath(
                         f"workspaces/{bitswan_workspace_name}/gitops/{source}"
