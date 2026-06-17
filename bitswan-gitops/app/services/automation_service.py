@@ -34,6 +34,7 @@ from app.utils import (
 from app.async_docker import get_async_docker_client, DockerError
 from app.deploy_manager import deploy_manager
 from app.services.image_service import ImageService
+from app.services.bp_secrets import bp_secret_env_file
 from app.services.oauth2_helpers import (
     OAUTH2_PROXY_PATH,
     copy_oauth2_proxy_to_container,
@@ -3830,69 +3831,34 @@ fi
             )
 
             network_mode = None
-            secret_groups = []
-
-            # Get secret groups based on config format
-            if automation_config.config_format == "toml":
-                # For TOML format, use stage-specific secrets only (no fallback)
-                if stage == "live-dev":
-                    # live-dev and dev share secrets — fall back to each other
-                    secret_groups = (
-                        automation_config.live_dev_groups
-                        or automation_config.dev_groups
-                        or []
-                    )
-                elif stage == "dev":
-                    # dev and live-dev share secrets — fall back to each other
-                    secret_groups = (
-                        automation_config.dev_groups
-                        or automation_config.live_dev_groups
-                        or []
-                    )
-                elif stage == "staging" and automation_config.staging_groups:
-                    secret_groups = automation_config.staging_groups
-                elif stage == "production" and automation_config.production_groups:
-                    secret_groups = automation_config.production_groups
-            elif pipeline_conf:
-                # For INI format (pipelines.conf), use existing logic with fallback
+            # Legacy INI (pipelines.conf) network_mode is still honoured.
+            if pipeline_conf:
                 network_mode = pipeline_conf.get(
                     "docker.compose", "network_mode", fallback=conf.get("network_mode")
                 )
 
-                # Check for stage-specific secret groups first, then fall back to groups
-                stage_groups_key = f"{stage}_groups"
-                secret_groups_str = pipeline_conf.get(
-                    "secrets", stage_groups_key, fallback=""
+            # Per-business-process secrets: shared key names across stages, with
+            # per-stage values (dev/live-dev share the dev realm). Replaces the
+            # old automation.toml [secrets] groups — set from the dashboard
+            # Deployments → Secrets tab. The values live in the derived env file
+            # under the secrets volume, never in this compose output.
+            if bp_sanitized:
+                bp_secret_env = bp_secret_env_file(
+                    self.secrets_dir, bp_sanitized, stage
                 )
-                if not secret_groups_str:
-                    # Fall back to generic groups if stage-specific groups not set
-                    secret_groups_str = pipeline_conf.get(
-                        "secrets", "groups", fallback=""
-                    )
-                secret_groups = (
-                    secret_groups_str.split(" ") if secret_groups_str else []
-                )
+                if bp_secret_env:
+                    entry.setdefault("env_file", [])
+                    if bp_secret_env not in entry["env_file"]:
+                        entry["env_file"].append(bp_secret_env)
 
-            for secret_group in secret_groups:
-                # Skip empty secret groups
-                if not secret_group:
-                    continue
-                if os.path.exists(self.secrets_dir):
-                    secret_env_file = os.path.join(self.secrets_dir, secret_group)
-                    if os.path.exists(secret_env_file):
-                        if not entry.get("env_file"):
-                            entry["env_file"] = []
-                        entry["env_file"].append(secret_env_file)
-
-            # Inject service dependency secrets (from [services.*] in automation.toml)
+            # Service dependency secrets (from [services.*] in automation.toml).
             service_secret_names = self._resolve_service_secrets(
                 automation_config, stage
             )
             for svc_secret_name in service_secret_names:
                 svc_secret_path = os.path.join(self.secrets_dir, svc_secret_name)
                 if os.path.exists(svc_secret_path):
-                    if not entry.get("env_file"):
-                        entry["env_file"] = []
+                    entry.setdefault("env_file", [])
                     if svc_secret_path not in entry["env_file"]:
                         entry["env_file"].append(svc_secret_path)
 

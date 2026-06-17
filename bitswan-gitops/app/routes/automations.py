@@ -20,6 +20,7 @@ from app.deploy_runner import spawn_set_deploy
 from app.event_broadcaster import event_broadcaster
 from app.routes.agent import _scan_automations
 from app.services.automation_service import AutomationService, make_hostname_label
+from app.services.bp_secrets import read_bp_secrets, write_bp_secrets
 from app.dependencies import get_automation_service
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,34 @@ async def scale_bp(
     return await automation_service.scale_business_process(
         bp, body.stage, body.replicas
     )
+
+
+class BpSecretsRequest(BaseModel):
+    # Shared key names across stages, and per-stage (dev/staging/production)
+    # values. dev/live-dev share the dev realm.
+    keys: list[str]
+    values: dict[str, dict[str, str]]
+
+
+@router.get("/business-processes/{bp}/secrets")
+async def get_bp_secrets_route(
+    bp: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """The BP's secrets: shared key names + per-stage values (Deployments →
+    Secrets)."""
+    return read_bp_secrets(automation_service.secrets_dir, bp)
+
+
+@router.put("/business-processes/{bp}/secrets")
+async def put_bp_secrets_route(
+    bp: str,
+    body: BpSecretsRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Persist the BP's secrets. Values take effect on the next deploy of the
+    affected stage (containers load them via env_file)."""
+    return write_bp_secrets(automation_service.secrets_dir, bp, body.model_dump())
 
 
 @router.get("/business-processes/{bp}/files")

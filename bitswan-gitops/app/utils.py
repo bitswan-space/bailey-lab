@@ -101,28 +101,12 @@ class AutomationConfig:
     port: int = 8080
     config_format: str = "ini"  # "toml" or "ini"
     mount_path: str = "/opt/pipelines"  # "/app/" for TOML, "/opt/pipelines" for INI
-    # Stage-specific secret groups (only for automation.toml - no general fallback)
-    live_dev_groups: list[str] | None = None
-    dev_groups: list[str] | None = None
-    staging_groups: list[str] | None = None
-    production_groups: list[str] | None = None
     # CORS allowed domains for Keycloak client (optional)
     allowed_domains: list[str] | None = None
     # Infrastructure service dependencies
     services: dict[str, ServiceDependency] | None = None
     # Use host network for external access (Selenium testing)
     external_testing_network: bool = False
-
-
-def _parse_string_or_list(value) -> list[str] | None:
-    """Parse a value that can be either a string or list into a list."""
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return [str(g).strip() for g in value if str(g).strip()]
-    if isinstance(value, str):
-        return [g.strip() for g in value.split() if g.strip()]
-    return None
 
 
 def parse_automation_toml(content: str) -> AutomationConfig | None:
@@ -135,7 +119,6 @@ def parse_automation_toml(content: str) -> AutomationConfig | None:
         raise ValueError(f"Syntax error in automation.toml: {e}") from e
 
     deployment = data.get("deployment", {})
-    secrets = data.get("secrets", {})
 
     # Parse allowed_domains as a list (for CORS in Keycloak client)
     allowed_domains = deployment.get("allowed_domains")
@@ -164,10 +147,6 @@ def parse_automation_toml(content: str) -> AutomationConfig | None:
         port=deployment.get("port", 8080),
         config_format="toml",
         mount_path="/app/",
-        live_dev_groups=_parse_string_or_list(secrets.get("live-dev")),
-        dev_groups=_parse_string_or_list(secrets.get("dev")),
-        staging_groups=_parse_string_or_list(secrets.get("staging")),
-        production_groups=_parse_string_or_list(secrets.get("production")),
         allowed_domains=allowed_domains,
         services=services,
         external_testing_network=deployment.get("external-testing-network", False),
