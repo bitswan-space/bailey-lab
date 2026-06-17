@@ -226,6 +226,33 @@ export interface CopyHistory {
   main: HistoryCommit[];
 }
 
+/** One member's baked image in a BP deployment-history entry. */
+export interface BpHistoryMember {
+  image?: string | null;
+  image_id?: string | null;
+}
+
+/** One deployment in a BP stage's history (newest-first). */
+export interface BpHistoryEntry {
+  // eslint-disable-next-line no-restricted-syntax -- nullable wire field
+  git_commit: string | null;
+  deployed_at: string;
+  // eslint-disable-next-line no-restricted-syntax -- nullable wire field
+  deployed_by: string | null;
+  status: string; // "deployed" | "rolled-back"
+  source: string; // "deploy" | "dev" | "staging" | "rollback"
+  members: Record<string, BpHistoryMember>;
+}
+
+/** Gitops `GET /automations/business-processes/{bp}/history` response. */
+export interface BpHistory {
+  bp: string;
+  stage: string;
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing deployed
+  current: string | null;
+  history: BpHistoryEntry[];
+}
+
 /** Gitops `POST /copies/{name}/sync` response. */
 export interface SyncCopyResult {
   status: 'success' | 'needs_rebase';
@@ -307,6 +334,17 @@ export const api = {
     postJson<DeployBPResponse>('/api/automations/deploy-bp', body),
   promoteBusinessProcess: (body: PromoteBPRequest) =>
     postJson<DeployBPResponse>('/api/automations/promote-bp', body),
+  /** Per-stage deployment history for a business process (newest-first). */
+  bpHistory: (bp: string, stage: string) =>
+    getJson<BpHistory>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/history?stage=${encodeURIComponent(stage)}`,
+    ),
+  /** Roll a whole BP stage back to a prior deployment (all members together). */
+  bpRollback: (bp: string, stage: string, gitCommit: string) =>
+    postJson<{ message: string }>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/rollback`,
+      { stage, git_commit: gitCommit },
+    ),
   deployStatus: (taskId: string) =>
     getJson<DeployStatusResponse>(
       `/api/automations/deploy-status/${encodeURIComponent(taskId)}`,

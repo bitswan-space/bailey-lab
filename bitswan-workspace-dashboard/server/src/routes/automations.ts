@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { openSse } from '../lib/sse.js';
+import { emailFromRequest } from '../lib/user.js';
 import type { GitopsClient } from '../services/gitops.js';
 
 export interface AutomationRoutesOptions {
@@ -107,6 +108,59 @@ export function registerAutomationRoutes(
       return r.body;
     } catch (err) {
       app.log.warn({ err, bp, stage }, 'promote-bp failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Per-stage deployment history for a business process (newest-first).
+  app.get<{ Params: { bp: string }; Querystring: { stage?: string } }>(
+    '/api/automations/business-processes/:bp/history',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.bpHistory(req.params.bp, req.query.stage || 'dev');
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'bp history failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  // Roll a whole BP stage back to a prior deployment (all members together).
+  app.post<{
+    Params: { bp: string };
+    Body: { stage?: string; git_commit?: string };
+  }>('/api/automations/business-processes/:bp/rollback', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { stage, git_commit } = req.body ?? {};
+    if (!stage || !git_commit) {
+      return reply.code(400).send({ error: 'stage and git_commit are required' });
+    }
+    // Deployer attribution comes from the validated token, never the client.
+    const deployer = await emailFromRequest(req, app.log);
+    try {
+      const r = await gitops.bpRollback({
+        bp: req.params.bp,
+        stage,
+        git_commit,
+        ...(deployer ? { deployed_by: deployer } : {}),
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp rollback failed');
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   });

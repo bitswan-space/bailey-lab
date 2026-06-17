@@ -466,6 +466,50 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  async bpHistory(
+    bp: string,
+    stage: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/history?stage=${encodeURIComponent(stage)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpRollback(input: {
+    bp: string;
+    stage: string;
+    git_commit: string;
+    deployed_by?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const { bp, ...rest } = input;
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/rollback`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(rest),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /**
    * `POST /automations/{id}/deploy` — re-deploy at a given checksum into the
    * specified stage. Used for promotions from a deployed source stage to the

@@ -9,6 +9,7 @@ import {
   ExternalLink,
   FlaskConical,
   Globe,
+  History,
   Layers,
   Loader2,
   Play,
@@ -42,6 +43,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { EmptyState } from '@/components/shared/EmptyState';
+import { DeploymentHistoryView } from '@/components/views/DeploymentHistoryView';
 import { Button } from '@/components/ui/button';
 import { api, isTransientNetworkError } from '@/lib/api';
 import { promoteBpWithToast } from '@/lib/deployBp';
@@ -198,6 +200,7 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
   const [bulkBusy, setBulkBusy] = useState<LifecycleAction | null>(null);
   const [bulkRemoveOpen, setBulkRemoveOpen] = useState(false);
   const [rowBusy, setRowBusy] = useState<Record<string, LifecycleAction>>({});
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   // Group the BP's main-scoped automations by name. Deployed entries
   // (dev/staging/production) and discoverable ones (stage === null)
@@ -643,6 +646,16 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
                 {agg.replicasTotal} replica{agg.replicasTotal === 1 ? '' : 's'}
               </span>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              className={cn(agg.replicasTotal > 0 ? '' : 'ml-auto')}
+              onClick={() => setHistoryOpen(true)}
+              title={`Deployment history & rollback — ${stageLabel}`}
+            >
+              <History className="size-3.5" aria-hidden />
+              History
+            </Button>
           </div>
 
           {agg.health === 'empty' ? (
@@ -900,6 +913,14 @@ export function DeploymentsTab({ bp }: DeploymentsTabProps) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {historyOpen && (
+        <DeploymentHistoryView
+          bp={bp.name}
+          stage={selectedStage}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
     </div>
   );
 }
