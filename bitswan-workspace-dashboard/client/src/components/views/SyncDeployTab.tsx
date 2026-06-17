@@ -69,7 +69,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
     try {
       let result;
       try {
-        result = await api.copies.sync(wt.name);
+        result = await api.copyFiles.sync(wt.name);
       } catch (err) {
         toast.error(`Sync failed: ${String(err)}`);
         return;

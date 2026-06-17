@@ -59,7 +59,7 @@ export function CopyHistoryView({ copy }: { copy: string }) {
     let alive = true;
     setData(null);
     setError(null);
-    api.copies
+    api.copyFiles
       .history(copy)
       .then((d) => {
         if (alive) setData(d);
