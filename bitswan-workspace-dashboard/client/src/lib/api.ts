@@ -256,17 +256,12 @@ export interface BpHistory {
   history: BpHistoryEntry[];
 }
 
-/** One entry in a BP source directory listing (Inspect → Files). */
-export interface BpFileEntry {
-  name: string;
+/** A file's content from a BP's source at a commit (Inspect → Files). */
+export interface BpFileContent {
   path: string;
-  kind: 'file' | 'folder';
+  content: string;
+  truncated: boolean;
 }
-
-/** Inspect → Files response: a directory listing or a file's content. */
-export type BpFiles =
-  | { kind: 'tree'; path: string; entries: BpFileEntry[] }
-  | { kind: 'file'; path: string; content: string; truncated: boolean };
 
 /** Gitops `POST /copies/{name}/sync` response. */
 export interface SyncCopyResult {
@@ -371,10 +366,15 @@ export const api = {
       `/api/automations/business-processes/${encodeURIComponent(bp)}/scale`,
       { stage, replicas },
     ),
-  /** Inspect → Files: list or read a BP's source at a commit. */
-  bpFiles: (bp: string, commit: string, path = '') =>
-    getJson<BpFiles>(
-      `/api/automations/business-processes/${encodeURIComponent(bp)}/files?commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
+  /** Inspect → Files: the full source tree of a BP at a commit. */
+  bpFileTree: (bp: string, commit: string) =>
+    getJson<{ entries: FileTreeNode[] }>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/files?commit=${encodeURIComponent(commit)}`,
+    ),
+  /** Inspect → Files: a single file's content at a commit. */
+  bpFileContent: (bp: string, commit: string, path: string) =>
+    getJson<BpFileContent>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/file-content?commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
     ),
   /** Inspect → Download image: direct href for the deployment bundle download. */
   bpBundleUrl: (bp: string, stage: string, commit: string) =>

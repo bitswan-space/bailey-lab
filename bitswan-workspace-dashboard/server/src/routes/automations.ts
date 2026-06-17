@@ -159,10 +159,10 @@ export function registerAutomationRoutes(
     }
   });
 
-  // Inspect → Files: list/read a BP's source at a commit.
+  // Inspect → Files: the full source tree of a BP at a commit.
   app.get<{
     Params: { bp: string };
-    Querystring: { commit?: string; path?: string };
+    Querystring: { commit?: string };
   }>('/api/automations/business-processes/:bp/files', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
@@ -170,7 +170,7 @@ export function registerAutomationRoutes(
       return reply.code(400).send({ error: 'commit is required' });
     }
     try {
-      const r = await gitops.bpFiles(req.params.bp, req.query.commit, req.query.path ?? '');
+      const r = await gitops.bpFileTree(req.params.bp, req.query.commit);
       if (!r.ok) {
         return reply
           .code(r.status >= 400 && r.status < 500 ? r.status : 502)
@@ -179,6 +179,30 @@ export function registerAutomationRoutes(
       return r.body;
     } catch (err) {
       app.log.warn({ err, bp: req.params.bp }, 'bp files failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Inspect → Files: a single file's content at a commit.
+  app.get<{
+    Params: { bp: string };
+    Querystring: { commit?: string; path?: string };
+  }>('/api/automations/business-processes/:bp/file-content', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    if (!req.query.commit || !req.query.path) {
+      return reply.code(400).send({ error: 'commit and path are required' });
+    }
+    try {
+      const r = await gitops.bpFileContent(req.params.bp, req.query.commit, req.query.path);
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp file content failed');
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   });

@@ -40,21 +40,22 @@ def test_bp_files_list_and_read(tmp_path, monkeypatch):
 
     svc = AutomationService()
 
-    # Root listing of the BP.
-    root = asyncio.run(svc.bp_files("shop", sha, ""))
-    assert root["kind"] == "tree"
-    names = {e["name"]: e["kind"] for e in root["entries"]}
+    # Full recursive tree of the BP, nested folders-before-files.
+    tree = asyncio.run(svc.bp_file_tree("shop", sha))
+    entries = tree["entries"]
+    names = {e["name"]: e["kind"] for e in entries}
     assert names == {"backend": "folder", "README.md": "file"}
+    backend = next(e for e in entries if e["name"] == "backend")
+    assert backend["children"][0]["name"] == "main.go"
+    assert backend["children"][0]["path"] == "backend/main.go"
 
-    # Listing a subfolder.
-    sub = asyncio.run(svc.bp_files("shop", sha, "backend"))
-    assert [e["name"] for e in sub["entries"]] == ["main.go"]
+    # Reading a file at the deployed commit.
+    f = asyncio.run(svc.bp_file_content("shop", sha, "README.md"))
+    assert f["content"] == "# shop\n" and f["truncated"] is False
 
-    # Reading a file.
-    f = asyncio.run(svc.bp_files("shop", sha, "README.md"))
-    assert (
-        f["kind"] == "file" and f["content"] == "# shop\n" and f["truncated"] is False
-    )
+    # A nested file resolves too.
+    g = asyncio.run(svc.bp_file_content("shop", sha, "backend/main.go"))
+    assert g["content"] == "package main\n"
 
 
 def test_scale_business_process_scales_all_members(tmp_path, monkeypatch):

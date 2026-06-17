@@ -118,11 +118,21 @@ async def scale_bp(
 async def get_bp_files(
     bp: str,
     commit: str = Query(...),
-    path: str = Query(""),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    """List or read a BP's source at a commit (Inspect → Files)."""
-    return await automation_service.bp_files(bp, commit, path)
+    """The full source tree of a BP at a commit (Inspect → Files)."""
+    return await automation_service.bp_file_tree(bp, commit)
+
+
+@router.get("/business-processes/{bp}/file-content")
+async def get_bp_file_content(
+    bp: str,
+    commit: str = Query(...),
+    path: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """A single file's content from a BP's source at a commit (Inspect → Files)."""
+    return await automation_service.bp_file_content(bp, commit, path)
 
 
 @router.get("/business-processes/{bp}/bundle")

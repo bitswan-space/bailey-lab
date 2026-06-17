@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Archive,
   ArrowRight,
@@ -8,7 +8,6 @@ import {
   Download,
   ExternalLink,
   FileText,
-  ChevronRight,
   FlaskConical,
   Folder,
   GitCompare,
@@ -32,9 +31,17 @@ import type { LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { DiffView } from '@/components/diff/DiffView';
+import { FileTree } from '@/components/files/FileTree';
 import { promoteBpWithToast } from '@/lib/deployBp';
 import { STATUS_META, stateToDisplay } from '@/lib/status';
-import { api, isTransientNetworkError, type BpHistory, type BpHistoryEntry } from '@/lib/api';
+import {
+  api,
+  isTransientNetworkError,
+  type BpHistory,
+  type BpHistoryEntry,
+  type ChangedKind,
+  type FileTreeNode,
+} from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import {
   AlertDialog,
@@ -48,6 +55,14 @@ import {
 } from '@/components/ui/alert-dialog';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess } from '@/types';
+
+// The same CodeMirror viewer the copy file browser uses — lazy-loaded so the
+// editor bundle only lands when someone actually opens a file in Inspect.
+const CodeEditor = lazy(() => import('@/components/files/CodeEditor'));
+// The Inspect file tree is a read-only snapshot at a commit: no VCS status
+// badges, no drag-to-upload. Stable empty/no-op values keep FileTree happy.
+const EMPTY_STATUS: Map<string, ChangedKind> = new Map();
+const NOOP = () => {};
 
 type StageId = 'dev' | 'staging' | 'production';
 const STAGES: { id: StageId; label: string; icon: LucideIcon }[] = [
@@ -217,13 +232,17 @@ function InspectModal({
   // Scale
   const [replicas, setReplicas] = useState(Math.max(1, currentReplicas || 1));
   const [scaling, setScaling] = useState(false);
-  // Files
-  const [filePath, setFilePath] = useState('');
+  // Files — full source tree at the deployed commit + the open file's content.
   // eslint-disable-next-line no-restricted-syntax -- null = not loaded
-  const [files, setFiles] = useState<
-    import('@/lib/api').BpFiles | null
-  >(null);
-  const [filesLoading, setFilesLoading] = useState(false);
+  const [tree, setTree] = useState<FileTreeNode[] | null>(null);
+  const [treeLoading, setTreeLoading] = useState(false);
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing open
+  const [openFile, setOpenFile] = useState<string | null>(null);
+  // eslint-disable-next-line no-restricted-syntax -- null = not loaded
+  const [fileContent, setFileContent] = useState<import('@/lib/api').BpFileContent | null>(
+    null,
+  );
+  const [contentLoading, setContentLoading] = useState(false);
 
   useEffect(() => {
     if (panel !== 'diff' || !current?.source_commit || !entry.source_commit) return;
@@ -240,19 +259,36 @@ function InspectModal({
     };
   }, [panel, bp, entry, current]);
 
+  // Load the BP's source tree once when the Files tab opens.
   useEffect(() => {
-    if (panel !== 'files' || !commit) return;
+    if (panel !== 'files' || !commit || tree) return;
     let alive = true;
-    setFilesLoading(true);
+    setTreeLoading(true);
     api
-      .bpFiles(bp, commit, filePath)
-      .then((r) => alive && setFiles(r))
-      .catch(() => alive && setFiles(null))
-      .finally(() => alive && setFilesLoading(false));
+      .bpFileTree(bp, commit)
+      .then((r) => alive && setTree(r.entries))
+      .catch(() => alive && setTree([]))
+      .finally(() => alive && setTreeLoading(false));
     return () => {
       alive = false;
     };
-  }, [panel, bp, commit, filePath]);
+  }, [panel, bp, commit, tree]);
+
+  // Load the open file's content.
+  useEffect(() => {
+    if (!openFile || !commit) return;
+    let alive = true;
+    setContentLoading(true);
+    setFileContent(null);
+    api
+      .bpFileContent(bp, commit, openFile)
+      .then((r) => alive && setFileContent(r))
+      .catch(() => alive && setFileContent(null))
+      .finally(() => alive && setContentLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [bp, commit, openFile]);
 
   const applyScale = useCallback(async () => {
     setScaling(true);
@@ -279,8 +315,6 @@ function InspectModal({
     { id: 'secrets', icon: KeyRound, label: 'Secrets snapshot' },
     { id: 'image', icon: Download, label: 'Download image' },
   ];
-
-  const crumbs = filePath ? filePath.split('/') : [];
 
   return (
     <div
@@ -382,63 +416,85 @@ function InspectModal({
                 </div>
               </div>
             ) : panel === 'files' ? (
-              <div className="flex h-full flex-col">
-                <div className="flex items-center gap-1 border-b border-border px-4 py-2 text-xs text-muted-foreground">
-                  <button type="button" className="hover:text-foreground" onClick={() => setFilePath('')}>
-                    {bp}
-                  </button>
-                  {crumbs.map((c, i) => (
-                    <span key={i} className="flex items-center gap-1">
-                      <ChevronRight className="size-3" aria-hidden />
-                      <button
-                        type="button"
-                        className="hover:text-foreground"
-                        onClick={() => setFilePath(crumbs.slice(0, i + 1).join('/'))}
-                      >
-                        {c}
-                      </button>
+              <div className="flex h-full overflow-hidden">
+                <aside className="flex w-[240px] shrink-0 flex-col border-r border-border">
+                  <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-2">
+                    <Folder className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground">
+                      {bp}
                     </span>
-                  ))}
-                </div>
-                {filesLoading ? (
-                  <div className="flex items-center justify-center gap-2 p-8 text-sm text-muted-foreground">
-                    <Loader2 className="size-4 animate-spin" aria-hidden /> Loading…
+                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                      {short(commit, 7)}
+                    </span>
                   </div>
-                ) : files?.kind === 'file' ? (
-                  <pre className="m-0 flex-1 overflow-auto whitespace-pre px-4 py-3 font-mono text-[12px] leading-5 text-foreground">
-                    {files.content}
-                    {files.truncated ? '\n… (truncated)' : ''}
-                  </pre>
-                ) : files?.kind === 'tree' ? (
-                  <div className="flex-1 overflow-auto p-2">
-                    {filePath && (
-                      <button
-                        type="button"
-                        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[13px] text-muted-foreground hover:bg-muted"
-                        onClick={() => setFilePath(crumbs.slice(0, -1).join('/'))}
-                      >
-                        <Folder className="size-3.5" aria-hidden /> ..
-                      </button>
+                  <div className="flex-1 overflow-auto">
+                    {treeLoading ? (
+                      <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                        Loading…
+                      </div>
+                    ) : tree && tree.length ? (
+                      <FileTree
+                        tree={tree}
+                        openPath={openFile}
+                        statusByPath={EMPTY_STATUS}
+                        onOpen={setOpenFile}
+                        dragHoverFolder={null}
+                        onDragHoverChange={NOOP}
+                      />
+                    ) : (
+                      <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                        No files.
+                      </div>
                     )}
-                    {files.entries.map((e) => (
-                      <button
-                        key={e.path}
-                        type="button"
-                        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[13px] text-foreground hover:bg-muted"
-                        onClick={() => setFilePath(e.path)}
-                      >
-                        {e.kind === 'folder' ? (
-                          <Folder className="size-3.5 text-primary" aria-hidden />
-                        ) : (
-                          <FileText className="size-3.5 text-muted-foreground" aria-hidden />
-                        )}
-                        {e.name}
-                      </button>
-                    ))}
                   </div>
-                ) : (
-                  <div className="p-8 text-center text-sm text-muted-foreground">No files.</div>
-                )}
+                </aside>
+                <div className="flex min-w-0 flex-1 flex-col">
+                  {!openFile ? (
+                    <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
+                      <FileText className="size-6" aria-hidden />
+                      Select a file to view its source.
+                    </div>
+                  ) : contentLoading ? (
+                    <div className="flex items-center justify-center gap-2 p-8 text-sm text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin" aria-hidden /> Loading…
+                    </div>
+                  ) : fileContent ? (
+                    <>
+                      <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2 text-xs">
+                        <FileText className="size-3.5 text-muted-foreground" aria-hidden />
+                        <span className="min-w-0 flex-1 truncate font-mono text-foreground">
+                          {openFile}
+                        </span>
+                        {fileContent.truncated && (
+                          <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                            truncated
+                          </span>
+                        )}
+                      </div>
+                      <div className="min-h-0 flex-1">
+                        <Suspense
+                          fallback={
+                            <div className="p-8 text-center text-sm text-muted-foreground">
+                              Loading editor…
+                            </div>
+                          }
+                        >
+                          <CodeEditor
+                            value={fileContent.content}
+                            path={openFile}
+                            readOnly
+                            onChange={NOOP}
+                            onSave={NOOP}
+                          />
+                        </Suspense>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                      Failed to load file.
+                    </div>
+                  )}
+                </div>
               </div>
             ) : panel === 'image' ? (
               <div className="flex flex-col gap-4 p-5">

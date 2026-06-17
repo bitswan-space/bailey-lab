@@ -1333,48 +1333,90 @@ class AutomationService:
             "members": list(members),
         }
 
-    async def bp_files(self, bp: str, commit: str, path: str = "") -> dict:
-        """List or read a BP's source at a git commit (Inspect → Files). A blob
-        returns its content (1 MiB cap); a tree returns its immediate children."""
+    @staticmethod
+    def _nest_tree(paths: list[str]) -> list[dict]:
+        """Turn a flat list of BP-relative file paths into the nested
+        FileTreeNode shape the dashboard's FileTree component consumes
+        ({name, kind, path, children?}), folders before files, each sorted."""
+        root: dict = {}
+        for p in sorted(paths):
+            parts = [seg for seg in p.split("/") if seg]
+            cur = root
+            acc: list[str] = []
+            for i, seg in enumerate(parts):
+                acc.append(seg)
+                is_file = i == len(parts) - 1
+                node = cur.get(seg)
+                if node is None:
+                    node = {
+                        "name": seg,
+                        "path": "/".join(acc),
+                        "kind": "file" if is_file else "folder",
+                        "_children": None if is_file else {},
+                    }
+                    cur[seg] = node
+                if not is_file:
+                    cur = node["_children"]
+
+        def to_list(d: dict) -> list[dict]:
+            out = []
+            for node in d.values():
+                if node["kind"] == "folder":
+                    out.append(
+                        {
+                            "name": node["name"],
+                            "path": node["path"],
+                            "kind": "folder",
+                            "children": to_list(node["_children"]),
+                        }
+                    )
+                else:
+                    out.append(
+                        {"name": node["name"], "path": node["path"], "kind": "file"}
+                    )
+            out.sort(key=lambda e: (e["kind"] != "folder", e["name"].lower()))
+            return out
+
+        return to_list(root)
+
+    async def bp_file_tree(self, bp: str, commit: str) -> dict:
+        """The full recursive source tree of a BP at a git commit (Inspect →
+        Files), as nested FileTreeNode entries with BP-relative paths."""
         if not re.fullmatch(r"[0-9a-fA-F]{4,64}", commit or ""):
             raise HTTPException(status_code=400, detail="invalid commit")
-        if path and (path.startswith("/") or ".." in path.split("/")):
+        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
+        out, _, rc = await call_git_command_with_output(
+            "git", "ls-tree", "-r", "--name-only", commit, "--", f"{bp}/", cwd=main
+        )
+        if rc != 0:
+            raise HTTPException(status_code=404, detail=f"not found: {bp}@{commit}")
+        prefix = bp + "/"
+        rels = [
+            line[len(prefix) :] if line.startswith(prefix) else line
+            for line in out.splitlines()
+            if line.strip()
+        ]
+        return {"entries": self._nest_tree(rels)}
+
+    async def bp_file_content(self, bp: str, commit: str, path: str) -> dict:
+        """A single file's content from a BP's source at a git commit (1 MiB
+        cap, Inspect → Files)."""
+        if not re.fullmatch(r"[0-9a-fA-F]{4,64}", commit or ""):
+            raise HTTPException(status_code=400, detail="invalid commit")
+        if not path or path.startswith("/") or ".." in path.split("/"):
             raise HTTPException(status_code=400, detail="invalid path")
         main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
-        rel = f"{bp}/{path}".rstrip("/") if path else bp
+        rel = f"{bp}/{path}"
         typ, _, trc = await call_git_command_with_output(
             "git", "cat-file", "-t", f"{commit}:{rel}", cwd=main
         )
-        typ = typ.strip()
-        if trc != 0:
-            raise HTTPException(status_code=404, detail=f"not found: {path or bp}")
-        if typ == "blob":
-            out, _, _ = await call_git_command_with_output(
-                "git", "show", f"{commit}:{rel}", cwd=main
-            )
-            cap = 1_000_000
-            return {
-                "kind": "file",
-                "path": path,
-                "content": out[:cap],
-                "truncated": len(out) > cap,
-            }
+        if trc != 0 or typ.strip() != "blob":
+            raise HTTPException(status_code=404, detail=f"not a file: {path}")
         out, _, _ = await call_git_command_with_output(
-            "git", "ls-tree", commit, "--", f"{rel}/", cwd=main
+            "git", "show", f"{commit}:{rel}", cwd=main
         )
-        entries = []
-        for line in out.splitlines():
-            meta, _, fpath = line.partition("\t")
-            parts = meta.split()
-            if not fpath or len(parts) < 2:
-                continue
-            kind = "folder" if parts[1] == "tree" else "file"
-            relpath = fpath[len(bp) + 1 :] if fpath.startswith(bp + "/") else fpath
-            entries.append(
-                {"name": os.path.basename(fpath), "path": relpath, "kind": kind}
-            )
-        entries.sort(key=lambda e: (e["kind"] != "folder", e["name"]))
-        return {"kind": "tree", "path": path, "entries": entries}
+        cap = 1_000_000
+        return {"path": path, "content": out[:cap], "truncated": len(out) > cap}
 
     async def _pg_dump_schema(self, stage: str) -> str | None:
         """`pg_dump --schema-only` of the stage's Postgres via docker exec, or

@@ -526,13 +526,30 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
-  async bpFiles(
+  async bpFileTree(
+    bp: string,
+    commit: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/files?commit=${encodeURIComponent(commit)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpFileContent(
     bp: string,
     commit: string,
     path: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
-      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/files?commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/file-content?commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
       { headers: { Authorization: `Bearer ${this.secret}` } },
     );
     let body: unknown = null;
