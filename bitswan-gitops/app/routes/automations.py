@@ -145,6 +145,56 @@ async def put_bp_secrets_route(
     )
 
 
+class DrPolicyRequest(BaseModel):
+    policy: str
+    deployed_by: str | None = None
+
+
+class DrTestRequest(BaseModel):
+    by: str | None = None
+    note: str | None = None
+    snapshot: str | None = None
+    deployed_by: str | None = None
+
+
+@router.get("/business-processes/{bp}/dr")
+async def get_bp_dr_route(
+    bp: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """A BP's disaster-recovery status: test cadence policy, the manual
+    recovery-test log (newest-first), and the derived overdue flag."""
+    return automation_service.read_dr(bp)
+
+
+@router.put("/business-processes/{bp}/dr/policy")
+async def put_bp_dr_policy_route(
+    bp: str,
+    body: DrPolicyRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Set a BP's recovery-test cadence policy (versioned in bitswan.yaml)."""
+    try:
+        return await automation_service.write_dr_policy(
+            bp, body.policy, body.deployed_by
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/business-processes/{bp}/dr/tests")
+async def post_bp_dr_test_route(
+    bp: str,
+    body: DrTestRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Record a hand-performed recovery test for a BP (versioned in bitswan.yaml,
+    prepended so the log stays newest-first)."""
+    return await automation_service.record_dr_test(
+        bp, body.by, body.note, body.snapshot, body.deployed_by
+    )
+
+
 @router.get("/business-processes/{bp}/files")
 async def get_bp_files(
     bp: str,

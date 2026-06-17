@@ -8,9 +8,10 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import uuid
 import yaml
 import requests
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Callable
 from app.models import DeployedAutomation
 from app.utils import (
@@ -1370,6 +1371,127 @@ class AutomationService:
         for realm, clean in cleaned.items():
             bp_secrets.materialize_env(self.secrets_dir, bp, realm, clean)
         return self.read_bp_secrets(bp)
+
+    # -- disaster-recovery test log ---------------------------------------------
+    # A per-BP, hand-kept log of manual recovery tests (someone restored a
+    # snapshot and verified the data by hand). Persisted in bitswan.yaml under
+    # the top-level `disaster_recovery` key, versioned in git like secrets.
+
+    # Recovery-test cadence policies → window in days. A BP is "overdue" when
+    # the last manual test is older than its policy window (or there is none).
+    DR_POLICY_WINDOW_DAYS = {
+        "monthly": 30,
+        "quarterly": 91,
+        "semi-annually": 182,
+        "annually": 365,
+    }
+    DR_DEFAULT_POLICY = "quarterly"
+
+    def read_dr(self, bp: str) -> dict:
+        """A BP's disaster-recovery status: its test cadence policy, the manual
+        recovery-test log (newest-first), and a derived overdue flag.
+
+        `days_since` is the age in days of the newest test (None when there are
+        no tests); `overdue` is True when that age exceeds the policy window —
+        or when no test has ever been recorded."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        record = (bs.get("disaster_recovery") or {}).get(bp) or {}
+        policy = record.get("policy") or self.DR_DEFAULT_POLICY
+        window_days = self.DR_POLICY_WINDOW_DAYS.get(
+            policy, self.DR_POLICY_WINDOW_DAYS[self.DR_DEFAULT_POLICY]
+        )
+        # Tests are stored newest-first (record_dr_test prepends).
+        tests = list(record.get("tests") or [])
+
+        days_since: int | None = None
+        last: dict | None = None
+        if tests:
+            newest = tests[0]
+            last = {
+                "by": newest.get("by"),
+                "at": newest.get("at"),
+                "date": newest.get("date"),
+            }
+            try:
+                test_date = date.fromisoformat(newest["date"])
+                days_since = (date.today() - test_date).days
+            except (KeyError, ValueError, TypeError):
+                days_since = None
+
+        overdue = days_since is None or days_since > window_days
+        return {
+            "policy": policy,
+            "window_days": window_days,
+            "tests": tests,
+            "last": last,
+            "days_since": days_since,
+            "overdue": overdue,
+        }
+
+    async def write_dr_policy(
+        self, bp: str, policy: str, deployed_by: str | None = None
+    ) -> dict:
+        """Set a BP's recovery-test cadence policy, versioned in bitswan.yaml as
+        one commit. Returns the updated DR status."""
+        if policy not in self.DR_POLICY_WINDOW_DAYS:
+            raise ValueError(
+                f"Invalid DR policy '{policy}': must be one of "
+                f"{sorted(self.DR_POLICY_WINDOW_DAYS)}"
+            )
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        record = bs.setdefault("disaster_recovery", {}).setdefault(bp, {})
+        record["policy"] = policy
+        path = os.path.join(self.gitops_dir, "bitswan.yaml")
+        with open(path, "w") as f:
+            dump_bitswan_yaml(bs, f)
+        await update_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
+            "dr",
+            deployed_by=deployed_by,
+            message=f"dr policy {bp} → {policy}",
+        )
+        return self.read_dr(bp)
+
+    async def record_dr_test(
+        self,
+        bp: str,
+        by: str | None,
+        note: str | None,
+        snapshot: str | None,
+        deployed_by: str | None = None,
+    ) -> dict:
+        """Record a hand-performed recovery test for a BP, versioned in
+        bitswan.yaml as one commit. Prepended so the log is newest-first.
+        Returns the updated DR status."""
+        today = date.today()
+        note_text = (f'Tested against "{snapshot}". ' if snapshot else "") + (
+            note or "Recovery procedure performed and data verified by hand."
+        )
+        test = {
+            "id": f"dr{uuid.uuid4().hex}",
+            "by": by or "unknown",
+            "at": today.strftime("%b %-d, %Y"),
+            "date": today.isoformat(),
+            "note": note_text,
+            "verified": True,
+        }
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        record = bs.setdefault("disaster_recovery", {}).setdefault(bp, {})
+        record.setdefault("tests", []).insert(0, test)
+        path = os.path.join(self.gitops_dir, "bitswan.yaml")
+        with open(path, "w") as f:
+            dump_bitswan_yaml(bs, f)
+        await update_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
+            "dr",
+            deployed_by=deployed_by,
+            message=f"dr recovery test {bp}",
+        )
+        return self.read_dr(bp)
 
     async def scale_business_process(self, bp: str, stage: str, replicas: int) -> dict:
         """Scale every member container of a BP stage to `replicas` (Inspect →
