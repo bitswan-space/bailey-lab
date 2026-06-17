@@ -1,9 +1,10 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Archive,
   ArrowRight,
   Boxes,
   Check,
+  CircleSlash,
   Code2,
   Download,
   ExternalLink,
@@ -11,6 +12,8 @@ import {
   FlaskConical,
   Folder,
   GitCompare,
+  GitMerge,
+  Globe,
   History,
   KeyRound,
   Layers,
@@ -24,6 +27,7 @@ import {
   Shield,
   Square,
   Undo2,
+  User,
   X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -141,6 +145,8 @@ function SectionTab({
 }
 
 // ── Pipeline node ───────────────────────────────────────────────────────────
+// Label sits ABOVE the circle; the active stage gets a brand-blue ring and a
+// short vertical "tail" dropping toward the card below (wireframe StageNode).
 function StageNode({
   stage,
   deployed,
@@ -158,35 +164,69 @@ function StageNode({
       type="button"
       onClick={onClick}
       disabled={!deployed && !active}
-      className={cn(
-        'flex shrink-0 flex-col items-center gap-1.5 bg-background px-1',
-        !deployed && !active && 'opacity-50',
-      )}
+      className="relative flex shrink-0 flex-col items-center"
     >
       <span
         className={cn(
-          'relative flex size-[52px] items-center justify-center rounded-full',
-          deployed ? 'bg-emerald-500 text-white' : 'border-[1.5px] border-dashed border-border text-muted-foreground',
-          active && 'ring-[3px] ring-foreground ring-offset-0',
-        )}
-      >
-        <Icon className="size-[22px]" aria-hidden />
-        <span className="absolute -bottom-0.5 -right-0.5 flex size-[18px] items-center justify-center rounded-full border-2 border-background bg-background">
-          {deployed ? (
-            <Check className="size-3 text-emerald-500" aria-hidden />
-          ) : (
-            <span className="size-1.5 rounded-full bg-zinc-300" />
-          )}
-        </span>
-      </span>
-      <span
-        className={cn(
-          'text-[11px] font-bold uppercase tracking-wide',
+          'absolute bottom-[calc(100%+8px)] left-1/2 -translate-x-1/2 whitespace-nowrap text-[11px] font-bold uppercase tracking-[0.08em]',
           active ? 'text-foreground' : 'text-muted-foreground',
         )}
       >
         {stage.label}
       </span>
+      <span className={cn('rounded-full', active && 'ring-4 ring-primary')}>
+        <span
+          className={cn(
+            'relative flex size-[52px] items-center justify-center rounded-full',
+            deployed
+              ? 'bg-emerald-500 text-white shadow-sm'
+              : 'border-[1.5px] border-dashed border-border text-muted-foreground',
+          )}
+        >
+          <Icon className="size-[22px]" aria-hidden />
+          <span className="absolute -bottom-0.5 -right-0.5 flex size-[18px] items-center justify-center rounded-full border-2 border-background bg-background shadow-sm">
+            {deployed ? (
+              <Check className="size-3 text-emerald-500" aria-hidden />
+            ) : (
+              <span className="size-1.5 rounded-full bg-zinc-300" />
+            )}
+          </span>
+        </span>
+      </span>
+      {active && (
+        <span className="absolute top-full h-[22px] w-0.5 bg-primary" aria-hidden />
+      )}
+    </button>
+  );
+}
+
+// ── Promote pill (wireframe AggregatePromote) ───────────────────────────────
+function PromoteButton({
+  canPromote,
+  label,
+  busy,
+  onClick,
+}: {
+  canPromote: boolean;
+  label: string;
+  busy: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={!canPromote || busy}
+      onClick={onClick}
+      title={canPromote ? `Promote all containers to ${label}` : `Nothing new to promote to ${label}`}
+      className={cn(
+        'inline-flex h-[30px] items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold uppercase tracking-[0.03em] transition-colors',
+        canPromote
+          ? 'border-primary bg-primary text-primary-foreground shadow-sm hover:bg-primary/90'
+          : 'cursor-not-allowed border-border bg-background text-muted-foreground',
+      )}
+    >
+      Promote
+      <ArrowRight className="size-3.5" aria-hidden />
     </button>
   );
 }
@@ -580,7 +620,7 @@ function DeploymentCard({
     <div
       className={cn(
         'flex flex-col gap-2.5 rounded-[10px] border bg-background px-4 py-3.5',
-        isCurrent ? 'border-primary ring-1 ring-primary/20' : 'border-border',
+        isCurrent ? 'border-primary ring-[3px] ring-primary/15' : 'border-border',
       )}
     >
       <div className="flex flex-wrap items-center gap-2.5">
@@ -589,11 +629,6 @@ function DeploymentCard({
         <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', tone.cls)}>
           {isCurrent ? `Current on ${stageLabel}` : tone.label}
         </span>
-        {entry.source && entry.source !== 'deploy' && (
-          <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
-            {entry.source === 'rollback' ? 'rollback' : `promoted from ${entry.source}`}
-          </span>
-        )}
         <span className="ml-auto text-[11px] text-muted-foreground">{entry.deployed_at}</span>
         <div className="flex items-center gap-1.5">
           {isCurrent ? (
@@ -614,7 +649,18 @@ function DeploymentCard({
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-3.5 text-[12px] text-muted-foreground">
-        {entry.deployed_by && <span>{entry.deployed_by}</span>}
+        {entry.deployed_by && (
+          <span className="inline-flex items-center gap-1.5">
+            <User className="size-3" aria-hidden />
+            {entry.deployed_by}
+          </span>
+        )}
+        {entry.source && entry.source !== 'deploy' && (
+          <span className="inline-flex items-center gap-1.5">
+            <GitMerge className="size-3" aria-hidden />
+            {entry.source === 'rollback' ? 'rolled back' : `promoted from ${entry.source}`}
+          </span>
+        )}
         <span>{members.length} container{members.length === 1 ? '' : 's'}</span>
         {firstImg && <span className="font-mono">{firstImg.replace(/^sha256:/, '').slice(0, 12)}</span>}
       </div>
@@ -779,11 +825,24 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
 
   const friendly = useMemo(() => {
     const failing = members.filter((m) => m.display === 'failed' || m.display === 'stopped').length;
-    if (!currentEntry) return { label: 'Not deployed yet', color: 'text-muted-foreground', dot: 'bg-zinc-400' };
+    if (!currentEntry)
+      return { label: 'Not deployed yet', color: 'text-muted-foreground', dot: 'bg-zinc-400', ring: 'ring-zinc-400/10' };
     if (failing > 0)
-      return { label: `${failing} service${failing === 1 ? '' : 's'} not running`, color: 'text-red-600', dot: 'bg-red-500' };
-    return { label: 'Healthy', color: 'text-emerald-600', dot: 'bg-emerald-500' };
+      return { label: `${failing} service${failing === 1 ? '' : 's'} not running`, color: 'text-red-600', dot: 'bg-red-500', ring: 'ring-red-500/10' };
+    return { label: 'Healthy', color: 'text-emerald-600', dot: 'bg-emerald-500', ring: 'ring-emerald-500/10' };
   }, [members, currentEntry]);
+
+  // "{N} containers promote together" — the BP's container count, stable across
+  // stages (max members seen on any stage's current deployment).
+  const bpContainerCount = useMemo(() => {
+    let max = 0;
+    for (const s of STAGES) {
+      const h = byStage[s.id];
+      const cur = h?.history.find((e) => e.commit === h.current) ?? h?.history[0];
+      if (cur) max = Math.max(max, Object.keys(cur.members ?? {}).length);
+    }
+    return max;
+  }, [byStage]);
 
   const SECTIONS: { id: Section; icon: LucideIcon; label: string; count?: number }[] = [
     { id: 'history', icon: History, label: 'Deployment history', count: history.length },
@@ -796,57 +855,70 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
 
   return (
     <div className="flex-1 overflow-auto bg-background">
-      <div className="mx-auto max-w-5xl px-7 py-6">
-        <div className="overflow-hidden rounded-2xl border border-border bg-background shadow-sm">
-          {/* Pipeline */}
-          <div className="relative border-b border-border px-6 py-6">
-            <div className="absolute left-[16%] right-[16%] top-[50px] h-0.5 bg-border" aria-hidden />
-            <div className="relative z-10 grid grid-cols-[1fr_auto_1fr_auto_1fr] items-center gap-3">
-              {STAGES.map((s, i) => {
-                const sHist = byStage[s.id];
-                const deployed = !!sHist && sHist.history.length > 0;
-                const next = STAGES[i + 1];
-                const srcCur =
-                  sHist?.history.find((h) => h.commit === sHist.current)?.source_commit ?? null;
-                const tgtCur = next
-                  ? (byStage[next.id]?.history.find(
-                      (h) => h.commit === byStage[next.id]?.current,
-                    )?.source_commit ?? null)
-                  : null;
-                const canPromote = deployed && !!next && !busy && srcCur !== tgtCur;
-                return (
-                  <div key={s.id} className="contents">
-                    <StageNode
-                      stage={s}
-                      deployed={deployed}
-                      active={s.id === activeStage}
-                      onClick={() => setActiveStage(s.id)}
-                    />
-                    {next && (
-                      <div className="bg-background px-2">
-                        <Button
-                          variant={canPromote ? 'default' : 'outline'}
-                          size="sm"
-                          className="rounded-full"
-                          disabled={!canPromote}
-                          onClick={() => void runPromote(next.id as 'staging' | 'production')}
-                          title={canPromote ? `Promote to ${next.label}` : `Nothing new to promote to ${next.label}`}
-                        >
-                          Promote
-                          <ArrowRight className="size-3.5" aria-hidden />
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+      <div className="mx-auto flex max-w-5xl flex-col gap-5 px-7 py-6">
+        {/* Section header */}
+        <div className="flex items-end gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Automation
+            </div>
+            <div className="text-[18px] font-semibold tracking-tight text-foreground">
+              {bp.name}
+            </div>
+            <div className="mt-0.5 text-[13px] text-muted-foreground">
+              {bpContainerCount} container{bpContainerCount === 1 ? '' : 's'} promote together.
+              Pick a stage to manage its deployment, secrets and history.
             </div>
           </div>
+        </div>
 
+        {/* Stage pipeline — a bare stepper above the card (wireframe) */}
+        <div className="flex items-center gap-2 px-11 pt-7">
+          {STAGES.map((s, i) => {
+            const sHist = byStage[s.id];
+            const deployed = !!sHist && sHist.history.length > 0;
+            const next = STAGES[i + 1];
+            const srcCur =
+              sHist?.history.find((h) => h.commit === sHist.current)?.source_commit ?? null;
+            const tgtCur = next
+              ? (byStage[next.id]?.history.find(
+                  (h) => h.commit === byStage[next.id]?.current,
+                )?.source_commit ?? null)
+              : null;
+            const canPromote = deployed && !!next && srcCur !== tgtCur;
+            return (
+              <Fragment key={s.id}>
+                <StageNode
+                  stage={s}
+                  deployed={deployed}
+                  active={s.id === activeStage}
+                  onClick={() => setActiveStage(s.id)}
+                />
+                {next && (
+                  <>
+                    <div className="h-0.5 flex-1 bg-border" aria-hidden />
+                    <div className="shrink-0">
+                      <PromoteButton
+                        canPromote={canPromote}
+                        label={next.label}
+                        busy={busy}
+                        onClick={() => void runPromote(next.id as 'staging' | 'production')}
+                      />
+                    </div>
+                    <div className="h-0.5 flex-1 bg-border" aria-hidden />
+                  </>
+                )}
+              </Fragment>
+            );
+          })}
+        </div>
+
+        {/* Rich stage card */}
+        <div className="overflow-hidden rounded-[14px] border border-border bg-background shadow-sm">
           {/* Stage header */}
-          <div className="flex flex-wrap items-start gap-4 border-b border-border px-6 py-5">
+          <div className="flex flex-wrap items-start gap-4 border-b border-border px-[22px] py-[18px]">
             <div className="flex min-w-0 flex-1 items-center gap-3">
-              <span className={cn('size-3 rounded-full', friendly.dot)} aria-hidden />
+              <span className={cn('size-3 rounded-full ring-[5px]', friendly.dot, friendly.ring)} aria-hidden />
               <div className="min-w-0">
                 <div className="text-[18px] font-bold tracking-tight text-foreground">
                   {STAGE_LABEL[activeStage]}
@@ -876,7 +948,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
 
           {/* Open app */}
           {frontends.length > 0 && (
-            <div className="border-b border-border px-6 py-4">
+            <div className="border-b border-border px-[22px] py-4">
               <div className="mb-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 Open app
               </div>
@@ -885,17 +957,32 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   const deployed = f.display === 'running';
                   const inner = (
                     <>
-                      <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
-                        <ExternalLink className="size-4 text-muted-foreground" aria-hidden />
+                      <span
+                        className={cn(
+                          'flex size-9 shrink-0 items-center justify-center rounded-lg',
+                          deployed ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+                        )}
+                      >
+                        <Globe className="size-[18px]" aria-hidden />
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate font-mono text-[13px] font-semibold text-foreground">
+                        <span
+                          className={cn(
+                            'block truncate font-mono text-[13px] font-semibold',
+                            deployed ? 'text-foreground' : 'text-muted-foreground',
+                          )}
+                        >
                           {f.name}
                         </span>
                         <span className="block truncate text-[11px] text-muted-foreground">
                           {deployed && f.url ? f.url.replace('https://', '') : 'Not deployed'}
                         </span>
                       </span>
+                      {deployed && f.url ? (
+                        <ExternalLink className="size-3.5 shrink-0 text-primary" aria-hidden />
+                      ) : (
+                        <CircleSlash className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                      )}
                     </>
                   );
                   return deployed && f.url ? (
@@ -919,14 +1006,14 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
           )}
 
           {/* Section tabs */}
-          <div className="flex flex-wrap items-center gap-4 border-b border-border px-6 pt-3.5">
+          <div className="flex flex-wrap items-center gap-4 border-b border-border px-[22px] pt-3.5">
             {SECTIONS.map((s) => (
               <SectionTab key={s.id} {...s} active={section === s.id} onSelect={setSection} />
             ))}
           </div>
 
           {/* Section content */}
-          <div className="bg-muted/30 px-6 py-5">
+          <div className="bg-muted/30 px-[22px] py-5">
             {!loaded ? (
               <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" aria-hidden /> Loading…
