@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { openSse } from '../lib/sse.js';
 import { emailFromRequest } from '../lib/user.js';
@@ -132,6 +133,83 @@ export function registerAutomationRoutes(
       }
     },
   );
+
+  // Inspect → Scale: scale every member container of a BP stage.
+  app.post<{
+    Params: { bp: string };
+    Body: { stage?: string; replicas?: number };
+  }>('/api/automations/business-processes/:bp/scale', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { stage, replicas } = req.body ?? {};
+    if (!stage || typeof replicas !== 'number') {
+      return reply.code(400).send({ error: 'stage and replicas are required' });
+    }
+    try {
+      const r = await gitops.bpScale(req.params.bp, stage, replicas);
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp scale failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Inspect → Files: list/read a BP's source at a commit.
+  app.get<{
+    Params: { bp: string };
+    Querystring: { commit?: string; path?: string };
+  }>('/api/automations/business-processes/:bp/files', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    if (!req.query.commit) {
+      return reply.code(400).send({ error: 'commit is required' });
+    }
+    try {
+      const r = await gitops.bpFiles(req.params.bp, req.query.commit, req.query.path ?? '');
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp files failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Inspect → Download image: stream the (large) deployment bundle through.
+  app.get<{
+    Params: { bp: string };
+    Querystring: { stage?: string; commit?: string };
+  }>('/api/automations/business-processes/:bp/bundle', async (req, reply) => {
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { stage, commit } = req.query;
+    if (!stage || !commit) {
+      return reply.code(400).send({ error: 'stage and commit are required' });
+    }
+    try {
+      const r = await gitops.bpBundle(req.params.bp, stage, commit);
+      if (!r.ok || !r.body) {
+        return reply.code(r.status >= 400 ? r.status : 502).send({ error: 'bundle failed' });
+      }
+      reply.header('Content-Type', r.headers.get('content-type') ?? 'application/gzip');
+      reply.header(
+        'Content-Disposition',
+        r.headers.get('content-disposition') ??
+          `attachment; filename="${req.params.bp}-${stage}.tar.gz"`,
+      );
+      return reply.send(Readable.fromWeb(r.body as never));
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp bundle failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
 
   // Diff a BP's source between two commits (history "diff vs current").
   app.get<{

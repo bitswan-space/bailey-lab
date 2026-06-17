@@ -501,6 +501,58 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  async bpScale(
+    bp: string,
+    stage: string,
+    replicas: number,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/scale`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ stage, replicas }),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpFiles(
+    bp: string,
+    commit: string,
+    path: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/files?commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Returns the raw upstream Response so the route can stream the (large)
+   *  bundle body straight through with its Content-Disposition. */
+  async bpBundle(bp: string, stage: string, commit: string): Promise<Response> {
+    return fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/bundle?stage=${encodeURIComponent(stage)}&commit=${encodeURIComponent(commit)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+  }
+
   async bpRollback(input: {
     bp: string;
     stage: string;

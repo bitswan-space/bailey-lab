@@ -256,6 +256,18 @@ export interface BpHistory {
   history: BpHistoryEntry[];
 }
 
+/** One entry in a BP source directory listing (Inspect → Files). */
+export interface BpFileEntry {
+  name: string;
+  path: string;
+  kind: 'file' | 'folder';
+}
+
+/** Inspect → Files response: a directory listing or a file's content. */
+export type BpFiles =
+  | { kind: 'tree'; path: string; entries: BpFileEntry[] }
+  | { kind: 'file'; path: string; content: string; truncated: boolean };
+
 /** Gitops `POST /copies/{name}/sync` response. */
 export interface SyncCopyResult {
   status: 'success' | 'needs_rebase';
@@ -353,6 +365,20 @@ export const api = {
     getJson<{ diff: string }>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
     ),
+  /** Inspect → Scale: scale every member container of a BP stage. */
+  bpScale: (bp: string, stage: string, replicas: number) =>
+    postJson<{ replicas: number; members: string[] }>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/scale`,
+      { stage, replicas },
+    ),
+  /** Inspect → Files: list or read a BP's source at a commit. */
+  bpFiles: (bp: string, commit: string, path = '') =>
+    getJson<BpFiles>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/files?commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
+    ),
+  /** Inspect → Download image: direct href for the deployment bundle download. */
+  bpBundleUrl: (bp: string, stage: string, commit: string) =>
+    `/api/automations/business-processes/${encodeURIComponent(bp)}/bundle?stage=${encodeURIComponent(stage)}&commit=${encodeURIComponent(commit)}`,
   deployStatus: (taskId: string) =>
     getJson<DeployStatusResponse>(
       `/api/automations/deploy-status/${encodeURIComponent(taskId)}`,

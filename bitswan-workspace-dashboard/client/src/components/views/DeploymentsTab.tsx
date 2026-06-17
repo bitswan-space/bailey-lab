@@ -8,7 +8,9 @@ import {
   Download,
   ExternalLink,
   FileText,
+  ChevronRight,
   FlaskConical,
+  Folder,
   GitCompare,
   History,
   KeyRound,
@@ -190,21 +192,38 @@ function entryTone(e: BpHistoryEntry, isCurrent: boolean) {
 type InspectPanel = 'scale' | 'files' | 'diff' | 'secrets' | 'image';
 function InspectModal({
   bp,
+  stage,
   entry,
   current,
   stageLabel,
+  currentReplicas,
   onClose,
+  onScaled,
 }: {
   bp: string;
+  stage: StageId;
   entry: BpHistoryEntry;
   current: BpHistoryEntry | null;
   stageLabel: string;
+  currentReplicas: number;
   onClose: () => void;
+  onScaled: () => void;
 }) {
   const isCurrent = !!current && entry.commit === current.commit;
   const [panel, setPanel] = useState<InspectPanel>(isCurrent ? 'scale' : 'diff');
   const [diff, setDiff] = useState('');
   const [diffLoading, setDiffLoading] = useState(false);
+  const commit = entry.source_commit ?? '';
+  // Scale
+  const [replicas, setReplicas] = useState(Math.max(1, currentReplicas || 1));
+  const [scaling, setScaling] = useState(false);
+  // Files
+  const [filePath, setFilePath] = useState('');
+  // eslint-disable-next-line no-restricted-syntax -- null = not loaded
+  const [files, setFiles] = useState<
+    import('@/lib/api').BpFiles | null
+  >(null);
+  const [filesLoading, setFilesLoading] = useState(false);
 
   useEffect(() => {
     if (panel !== 'diff' || !current?.source_commit || !entry.source_commit) return;
@@ -221,6 +240,38 @@ function InspectModal({
     };
   }, [panel, bp, entry, current]);
 
+  useEffect(() => {
+    if (panel !== 'files' || !commit) return;
+    let alive = true;
+    setFilesLoading(true);
+    api
+      .bpFiles(bp, commit, filePath)
+      .then((r) => alive && setFiles(r))
+      .catch(() => alive && setFiles(null))
+      .finally(() => alive && setFilesLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [panel, bp, commit, filePath]);
+
+  const applyScale = useCallback(async () => {
+    setScaling(true);
+    const work = api.bpScale(bp, stage, replicas);
+    toast.promise(work, {
+      loading: `Scaling ${bp} to ${replicas}…`,
+      success: `${bp} scaled to ${replicas} replica${replicas === 1 ? '' : 's'}`,
+      error: (e: unknown) => `Scale failed: ${String(e)}`,
+    });
+    try {
+      await work;
+      onScaled();
+    } catch {
+      /* toast handled */
+    } finally {
+      setScaling(false);
+    }
+  }, [bp, stage, replicas, onScaled]);
+
   const tabs: { id: InspectPanel; icon: LucideIcon; label: string }[] = [
     ...(isCurrent ? [{ id: 'scale' as const, icon: Scaling, label: 'Scale' }] : []),
     { id: 'files', icon: FileText, label: 'Files' },
@@ -228,6 +279,8 @@ function InspectModal({
     { id: 'secrets', icon: KeyRound, label: 'Secrets snapshot' },
     { id: 'image', icon: Download, label: 'Download image' },
   ];
+
+  const crumbs = filePath ? filePath.split('/') : [];
 
   return (
     <div
@@ -291,12 +344,136 @@ function InspectModal({
                 diff={diff || (diffLoading ? '' : 'No changes.')}
                 loading={diffLoading}
               />
+            ) : panel === 'scale' ? (
+              <div className="flex flex-col gap-4 p-5">
+                <div className="text-[13px] text-foreground">
+                  Number of running replicas for every container in this business
+                  process at {stageLabel}.
+                </div>
+                <div className="flex items-center gap-2.5">
+                  {[1, 2, 3, 4, 5, 6].map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => setReplicas(n)}
+                      className={cn(
+                        'flex size-10 items-center justify-center rounded-lg border text-sm font-semibold',
+                        n === replicas
+                          ? 'border-primary bg-primary/10 text-primary'
+                          : 'border-border text-foreground hover:bg-muted',
+                      )}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    currently {currentReplicas} replica{currentReplicas === 1 ? '' : 's'}
+                  </span>
+                </div>
+                <div className="flex justify-end">
+                  <Button size="sm" disabled={scaling} onClick={() => void applyScale()}>
+                    {scaling ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <Check className="size-3.5" aria-hidden />
+                    )}
+                    Apply
+                  </Button>
+                </div>
+              </div>
+            ) : panel === 'files' ? (
+              <div className="flex h-full flex-col">
+                <div className="flex items-center gap-1 border-b border-border px-4 py-2 text-xs text-muted-foreground">
+                  <button type="button" className="hover:text-foreground" onClick={() => setFilePath('')}>
+                    {bp}
+                  </button>
+                  {crumbs.map((c, i) => (
+                    <span key={i} className="flex items-center gap-1">
+                      <ChevronRight className="size-3" aria-hidden />
+                      <button
+                        type="button"
+                        className="hover:text-foreground"
+                        onClick={() => setFilePath(crumbs.slice(0, i + 1).join('/'))}
+                      >
+                        {c}
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                {filesLoading ? (
+                  <div className="flex items-center justify-center gap-2 p-8 text-sm text-muted-foreground">
+                    <Loader2 className="size-4 animate-spin" aria-hidden /> Loading…
+                  </div>
+                ) : files?.kind === 'file' ? (
+                  <pre className="m-0 flex-1 overflow-auto whitespace-pre px-4 py-3 font-mono text-[12px] leading-5 text-foreground">
+                    {files.content}
+                    {files.truncated ? '\n… (truncated)' : ''}
+                  </pre>
+                ) : files?.kind === 'tree' ? (
+                  <div className="flex-1 overflow-auto p-2">
+                    {filePath && (
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[13px] text-muted-foreground hover:bg-muted"
+                        onClick={() => setFilePath(crumbs.slice(0, -1).join('/'))}
+                      >
+                        <Folder className="size-3.5" aria-hidden /> ..
+                      </button>
+                    )}
+                    {files.entries.map((e) => (
+                      <button
+                        key={e.path}
+                        type="button"
+                        className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[13px] text-foreground hover:bg-muted"
+                        onClick={() => setFilePath(e.path)}
+                      >
+                        {e.kind === 'folder' ? (
+                          <Folder className="size-3.5 text-primary" aria-hidden />
+                        ) : (
+                          <FileText className="size-3.5 text-muted-foreground" aria-hidden />
+                        )}
+                        {e.name}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-8 text-center text-sm text-muted-foreground">No files.</div>
+                )}
+              </div>
+            ) : panel === 'image' ? (
+              <div className="flex flex-col gap-4 p-5">
+                <p className="text-[13px] leading-relaxed text-muted-foreground">
+                  Bundles the deployment's source at{' '}
+                  <span className="font-mono">{short(commit, 8)}</span>, the built
+                  container image(s), and the database schema into one archive you
+                  can use to recreate this deployment.
+                </p>
+                <div className="flex flex-col gap-1.5 text-[13px] text-foreground">
+                  {['Container images (docker save)', 'Source code at the deployed commit', 'Database schema (pg_dump)'].map((l) => (
+                    <div key={l} className="flex items-center gap-2">
+                      <Check className="size-3.5 text-emerald-500" aria-hidden />
+                      {l}
+                    </div>
+                  ))}
+                </div>
+                <div>
+                  <a
+                    href={api.bpBundleUrl(bp, stage, commit)}
+                    download
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-[13px] font-medium text-primary-foreground hover:bg-primary/90"
+                  >
+                    <Download className="size-3.5" aria-hidden />
+                    Download bundle
+                  </a>
+                  <div className="mt-1.5 text-[11px] text-muted-foreground">
+                    Can be large (hundreds of MB) — the download may take a while.
+                  </div>
+                </div>
+              </div>
             ) : (
               <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center text-sm text-muted-foreground">
                 <Lock className="size-6" aria-hidden />
-                <div className="font-medium text-foreground">
-                  {tabs.find((t) => t.id === panel)?.label}
-                </div>
+                <div className="font-medium text-foreground">Secrets snapshot</div>
                 <div className="max-w-xs">Not implemented yet — coming in a later release.</div>
               </div>
             )}
@@ -753,10 +930,13 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
       {inspect && (
         <InspectModal
           bp={bp.name}
+          stage={activeStage}
           entry={inspect}
           current={currentEntry}
           stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
+          currentReplicas={Math.max(1, ...members.map((m) => m.replicas || 0), 0)}
           onClose={() => setInspect(null)}
+          onScaled={refresh}
         />
       )}
 
