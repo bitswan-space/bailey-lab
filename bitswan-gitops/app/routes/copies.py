@@ -349,15 +349,25 @@ async def _git_state(copy_path: str, name: str) -> dict:
         "git", "status", "--porcelain", cwd=copy_path
     )
     has_changes = bool(status_out and status_out.strip())
-    synced = False
-    if not has_changes:
-        _, _, behind_rc = await call_git_command_with_output(
-            "git", "merge-base", "--is-ancestor", "origin/main", "HEAD", cwd=copy_path
-        )
-        _, _, ahead_rc = await call_git_command_with_output(
-            "git", "merge-base", "--is-ancestor", "HEAD", "origin/main", cwd=copy_path
-        )
-        synced = behind_rc == 0 and ahead_rc == 0
+
+    # Ahead/behind vs the locally-known origin/main (cheap, no network — the
+    # ref is refreshed by pushes/fetches, and the sync action fetches before it
+    # acts). "ahead" = commits on the copy not yet on main; "behind" = commits
+    # on main the copy hasn't picked up. behind == 0 means a fast-forward of
+    # main to this copy needs no rebase.
+    ahead = behind = 0
+    ahead_out, _, ahead_cnt_rc = await call_git_command_with_output(
+        "git", "rev-list", "--count", "origin/main..HEAD", cwd=copy_path
+    )
+    if ahead_cnt_rc == 0 and ahead_out.strip().isdigit():
+        ahead = int(ahead_out.strip())
+    behind_out, _, behind_cnt_rc = await call_git_command_with_output(
+        "git", "rev-list", "--count", "HEAD..origin/main", cwd=copy_path
+    )
+    if behind_cnt_rc == 0 and behind_out.strip().isdigit():
+        behind = int(behind_out.strip())
+
+    synced = not has_changes and ahead == 0 and behind == 0
 
     return {
         "name": name,
@@ -366,6 +376,9 @@ async def _git_state(copy_path: str, name: str) -> dict:
         "commit_message": commit_message,
         "has_requirements": has_requirements,
         "synced": synced,
+        "ahead": ahead,
+        "behind": behind,
+        "has_changes": has_changes,
     }
 
 
@@ -419,33 +432,22 @@ class MergeCopyResponse(BaseModel):
     message: str
 
 
-@router.post("/{name}/merge")
-async def merge_copy(name: str):
-    """Fast-forward `main` to the copy's branch tip in the canonical repo.
-
-    Append-only: this only succeeds when `main` is an ancestor of the copy's
-    branch (a true fast-forward). Otherwise the caller must rebase the copy onto
-    the latest main (and push) first — we never rewrite published history.
-    """
-    _validate_copy_name(name)
+async def _fast_forward_main_to_branch(name: str) -> dict:
+    """Fast-forward `main` to the copy's branch tip in the canonical (bare)
+    repo. Append-only: succeeds only when `main` is an ancestor of the branch
+    (a true fast-forward); raises 409 otherwise. The branch must already be
+    pushed to the bare repo."""
     bare = bare_repo_path()
 
-    # Does the branch exist in the canonical repo?
     _, _, exists_rc = await call_git_command_with_output(
         "git", "-C", bare, "rev-parse", "--verify", f"refs/heads/{name}"
     )
     if exists_rc != 0:
         raise HTTPException(status_code=404, detail=f"Copy branch '{name}' not found")
 
-    # main must be an ancestor of the branch tip (fast-forward only).
     _, _, ff_rc = await call_git_command_with_output(
-        "git",
-        "-C",
-        bare,
-        "merge-base",
-        "--is-ancestor",
-        "refs/heads/main",
-        f"refs/heads/{name}",
+        "git", "-C", bare, "merge-base", "--is-ancestor",
+        "refs/heads/main", f"refs/heads/{name}",
     )
     if ff_rc != 0:
         raise HTTPException(
@@ -464,11 +466,92 @@ async def merge_copy(name: str):
             status_code=500,
             detail=f"Failed to fast-forward main: {(err or out).strip()}",
         )
+    return {"status": "success", "message": f"main fast-forwarded to '{name}'"}
 
-    return {
-        "status": "success",
-        "message": f"main fast-forwarded to '{name}'",
-    }
+
+@router.post("/{name}/merge")
+async def merge_copy(name: str):
+    """Fast-forward `main` to the copy's branch tip in the canonical repo."""
+    _validate_copy_name(name)
+    return await _fast_forward_main_to_branch(name)
+
+
+class SyncCopyResponse(BaseModel):
+    status: str  # "success" | "needs_rebase"
+    method: str | None = None  # "fast-forward" when synced server-side
+    message: str
+
+
+@router.post("/{name}/sync")
+async def sync_copy(name: str):
+    """Sync a copy into main the cheap way when possible.
+
+    Commits any work in progress, then — IF the copy is a pure fast-forward of
+    main (main hasn't advanced since the copy branched, so no rebase is needed)
+    — pushes the branch and fast-forwards `main` to it, entirely server-side
+    with plain git. No coding agent involved.
+
+    When main HAS advanced (a rebase would be required to resolve the
+    divergence), we do NOT touch anything and return ``needs_rebase`` so the
+    caller can hand off to the coding agent, which rebases + resolves conflicts.
+    """
+    _validate_copy_name(name)
+    if name == "main":
+        raise HTTPException(
+            status_code=400, detail="the main copy cannot be synced with itself"
+        )
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    # 1) Commit any work in progress so it's part of what we fast-forward.
+    status_out, _, _ = await call_git_command_with_output(
+        "git", "status", "--porcelain", cwd=copy_path
+    )
+    if status_out and status_out.strip():
+        if not await call_git_command("git", "add", "-A", cwd=copy_path):
+            raise HTTPException(status_code=500, detail="Failed to stage changes")
+        _, c_err, c_rc = await call_git_command_with_output(
+            "git", "commit", "-m", "Sync: commit work in progress", cwd=copy_path
+        )
+        if c_rc != 0:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to commit: {c_err.strip()}"
+            )
+
+    # 2) Refresh our view of main (the only network step).
+    await call_git_command("git", "fetch", "origin", "main", cwd=copy_path)
+
+    # 3) Fast-forward only when origin/main is an ancestor of the copy's HEAD —
+    #    i.e. the copy is purely ahead and no rebase is required.
+    _, _, ff_possible_rc = await call_git_command_with_output(
+        "git", "merge-base", "--is-ancestor", "origin/main", "HEAD", cwd=copy_path
+    )
+    if ff_possible_rc != 0:
+        return SyncCopyResponse(
+            status="needs_rebase",
+            message=(
+                "main has advanced since this copy branched; a rebase is "
+                "required. Hand off to the coding agent to rebase and resolve."
+            ),
+        )
+
+    # 4) Publish the branch (ff-only server accepts it) and fast-forward main.
+    p_out, p_err, p_rc = await call_git_command_with_output(
+        "git", "push", "origin", "HEAD", cwd=copy_path
+    )
+    if p_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to push copy '{name}': {(p_err or p_out).strip()}",
+        )
+
+    await _fast_forward_main_to_branch(name)
+    return SyncCopyResponse(
+        status="success",
+        method="fast-forward",
+        message=f"Synced '{name}' into main (fast-forward).",
+    )
 
 
 def _own_container_id_from_proc() -> str | None:
