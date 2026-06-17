@@ -12,6 +12,7 @@ This replaces the old shared-``.git`` worktree model. The router is served under
 """
 
 import asyncio
+import datetime
 import logging
 import os
 import re
@@ -481,8 +482,35 @@ class SyncCopyResponse(BaseModel):
     message: str
 
 
+class SyncCopyRequest(BaseModel):
+    # Email of the user who pressed Sync & Deploy, recorded on the deploy tag.
+    deployer: str | None = None
+
+
+async def _tag_deploy(name: str, deployer: str | None) -> None:
+    """Tag the new main tip to record a deploy: an annotated tag whose subject
+    is "<email> deployed <date> <time> UTC". These tags are what the history
+    view shows as deploy markers on main."""
+    bare = bare_repo_path()
+    # Annotated tags need a tagger identity; set a mechanical one on the bare
+    # repo (idempotent). The human + time live in the tag subject.
+    await call_git_command_with_output(
+        "git", "-C", bare, "config", "user.email", "bailey@bitswan"
+    )
+    await call_git_command_with_output(
+        "git", "-C", bare, "config", "user.name", "Bailey"
+    )
+    now = datetime.datetime.now(datetime.timezone.utc)
+    who = (deployer or "someone").strip() or "someone"
+    subject = f"{who} deployed {now.strftime('%Y-%m-%d %H:%M UTC')}"
+    tag = f"deploy/{int(now.timestamp())}"
+    await call_git_command_with_output(
+        "git", "-C", bare, "tag", "-a", "-f", tag, "-m", subject, "refs/heads/main"
+    )
+
+
 @router.post("/{name}/sync")
-async def sync_copy(name: str):
+async def sync_copy(name: str, body: SyncCopyRequest | None = None):
     """Sync a copy into main the cheap way when possible.
 
     Commits any work in progress, then — IF the copy is a pure fast-forward of
@@ -554,6 +582,7 @@ async def sync_copy(name: str):
         )
 
     await _fast_forward_main_to_branch(name)
+    await _tag_deploy(name, body.deployer if body else None)
     return SyncCopyResponse(
         status="success",
         method="fast-forward",
@@ -818,6 +847,60 @@ async def get_copy_status(name: str):
             by_path[p] = {"path": p, "kind": "added", "adds": 0, "dels": 0}
 
     return {"changed": list(by_path.values())}
+
+
+async def _git_log(ref: str, copy_path: str, limit: int = 50) -> list[dict]:
+    """Recent commits on `ref` as structured rows. Fields are unit-separated so
+    subjects with tabs/spaces survive intact."""
+    out, _, rc = await call_git_command_with_output(
+        "git", "log", f"-{limit}",
+        "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s", ref, cwd=copy_path
+    )
+    commits: list[dict] = []
+    if rc == 0:
+        for line in out.splitlines():
+            f = line.split("\x1f")
+            if len(f) == 6:
+                commits.append({
+                    "sha": f[0], "short": f[1], "author_name": f[2],
+                    "author_email": f[3], "date": f[4], "subject": f[5],
+                })
+    return commits
+
+
+@router.get("/{name}/history")
+async def get_copy_history(name: str):
+    """Commit history for the Sync & Deploy history view: this copy's commits
+    and main's commits, with deploy markers (`<email> deployed <date>`) attached
+    to the main commits each Sync & Deploy left at main's tip."""
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
+    copy_commits = await _git_log("HEAD", copy_path)
+    main_commits = await _git_log("FETCH_HEAD", copy_path)
+
+    # Map main commit -> deploy-tag subjects. Annotated tags expose the tagged
+    # commit via %(*objectname); fall back to %(objectname) just in case.
+    # NB: for-each-ref does NOT interpret git-log's %x1f escape, so use a plain
+    # separator. The two object ids are hex (no "|"); the subject is last, so
+    # maxsplit=2 keeps a subject containing "|" intact.
+    deploys: dict[str, list[str]] = {}
+    tags_out, _, _ = await call_git_command_with_output(
+        "git", "for-each-ref", "refs/tags/deploy",
+        "--format=%(*objectname)|%(objectname)|%(contents:subject)",
+        cwd=bare_repo_path(),
+    )
+    for line in tags_out.splitlines():
+        f = line.split("|", 2)
+        if len(f) == 3:
+            commit_sha = f[0] or f[1]
+            deploys.setdefault(commit_sha, []).append(f[2])
+    for c in main_commits:
+        c["deploys"] = deploys.get(c["sha"], [])
+
+    return {"copy": copy_commits, "main": main_commits}
 
 
 @router.get("/{name}/diff")
