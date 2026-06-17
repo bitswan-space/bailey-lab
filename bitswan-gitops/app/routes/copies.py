@@ -466,7 +466,42 @@ async def _fast_forward_main_to_branch(name: str) -> dict:
             status_code=500,
             detail=f"Failed to fast-forward main: {(err or out).strip()}",
         )
+    # The bare repo's `main` ref now points at the new tip, but the scanners
+    # (in_main, main-branch live-dev) read the `copies/main` WORKING TREE — so
+    # advance that checkout too, or the synced BP never shows up in main.
+    await _refresh_main_copy_checkout()
     return {"status": "success", "message": f"main fast-forwarded to '{name}'"}
+
+
+async def _refresh_main_copy_checkout() -> None:
+    """Fast-forward the gitops-maintained `copies/main` working tree to the
+    canonical repo's `main` tip.
+
+    `main` is deploy-only: it advances solely through this code path, never a
+    human edit, so the checkout is always a clean fast-forward of the bare ref.
+    This is the checkout the process/automation scanners walk for the main
+    scope, so without this step a synced BP advances `refs/heads/main` but
+    stays invisible in main (`in_main` false, no main-branch live-dev)."""
+    main_copy = os.path.join(_copies_dir(), "main")
+    if not os.path.isdir(os.path.join(main_copy, ".git")):
+        # The main copy is provisioned at workspace init; if it isn't here yet
+        # there is nothing to advance (and the bare ref is already current).
+        return
+    bare = bare_repo_path()
+    # Fetch from the local bare path (gitops can't authenticate to its own
+    # smart-HTTP `origin`); FETCH_HEAD then points at the new main tip.
+    await call_git_command("git", "fetch", bare, "main", cwd=main_copy)
+    out, err, rc = await call_git_command_with_output(
+        "git", "merge", "--ff-only", "FETCH_HEAD", cwd=main_copy
+    )
+    if rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "main fast-forwarded in the canonical repo, but the main "
+                f"checkout could not be advanced: {(err or out).strip()}"
+            ),
+        )
 
 
 @router.post("/{name}/merge")
