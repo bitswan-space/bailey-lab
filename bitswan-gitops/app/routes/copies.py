@@ -448,8 +448,13 @@ async def _fast_forward_main_to_branch(name: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Copy branch '{name}' not found")
 
     _, _, ff_rc = await call_git_command_with_output(
-        "git", "-C", bare, "merge-base", "--is-ancestor",
-        "refs/heads/main", f"refs/heads/{name}",
+        "git",
+        "-C",
+        bare,
+        "merge-base",
+        "--is-ancestor",
+        "refs/heads/main",
+        f"refs/heads/{name}",
     )
     if ff_rc != 0:
         raise HTTPException(
@@ -533,6 +538,31 @@ def _validate_bp_dir(bp: str) -> None:
         raise HTTPException(status_code=400, detail="invalid business process name")
 
 
+def _ident_args(deployer: str | None) -> list[str]:
+    """`-c user.name/email` so commits are attributed to the deployer, not gitops."""
+    who = (deployer or "").strip()
+    return ["-c", f"user.name={who}", "-c", f"user.email={who}"] if who else []
+
+
+async def _wip_commit(
+    copy_path: str, deployer: str | None, add_args: list[str], message: str
+) -> None:
+    """Stage ``add_args`` and commit if anything was staged (no-op otherwise)."""
+    await call_git_command("git", "add", *add_args, cwd=copy_path)
+    _, _, clean_rc = await call_git_command_with_output(
+        "git", "diff", "--cached", "--quiet", cwd=copy_path
+    )
+    if clean_rc == 0:
+        return  # nothing staged
+    _, c_err, c_rc = await call_git_command_with_output(
+        "git", *_ident_args(deployer), "commit", "-m", message, cwd=copy_path
+    )
+    if c_rc != 0:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to commit: {c_err.strip()}"
+        )
+
+
 async def _sync_copy_per_bp(
     name: str, copy_path: str, bp: str, deployer: str | None
 ) -> "SyncCopyResponse":
@@ -548,12 +578,14 @@ async def _sync_copy_per_bp(
     Assumes the caller already committed WIP and fetched main (FETCH_HEAD)."""
     _validate_bp_dir(bp)
     bare = bare_repo_path()
+    ident = _ident_args(deployer)
 
-    # git identity for cherry-pick/rebase committer; author is preserved.
-    ident: list[str] = []
-    who = (deployer or "").strip()
-    if who:
-        ident = ["-c", f"user.name={who}", "-c", f"user.email={who}"]
+    # Copy HEAD before we touch anything, so a mid-rebuild conflict can restore
+    # the copy exactly as it was (then hand off to the agent).
+    oh_out, _, _ = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=copy_path
+    )
+    orig_head = oh_out.strip()
 
     # Commits on the copy not yet in main (oldest-first), and the subset that
     # touched this BP's directory.
@@ -561,7 +593,12 @@ async def _sync_copy_per_bp(
         "git", "rev-list", "--reverse", "FETCH_HEAD..HEAD", cwd=copy_path
     )
     bp_out, _, _ = await call_git_command_with_output(
-        "git", "rev-list", "--reverse", "FETCH_HEAD..HEAD", "--", f"{bp}/",
+        "git",
+        "rev-list",
+        "--reverse",
+        "FETCH_HEAD..HEAD",
+        "--",
+        f"{bp}/",
         cwd=copy_path,
     )
     all_commits = all_out.split()
@@ -569,7 +606,8 @@ async def _sync_copy_per_bp(
 
     if not bp_commits:
         return SyncCopyResponse(
-            status="success", method="noop",
+            status="success",
+            method="noop",
             message=f"No changes to '{bp}' to sync into main.",
         )
 
@@ -590,7 +628,8 @@ async def _sync_copy_per_bp(
         await _fast_forward_main_to_branch(name)
         await _tag_deploy(name, deployer)
         return SyncCopyResponse(
-            status="success", method="fast-forward",
+            status="success",
+            method="fast-forward",
             message=f"Synced '{bp}' into main (fast-forward).",
         )
 
@@ -600,7 +639,12 @@ async def _sync_copy_per_bp(
     os.rmdir(tmpdir)  # git worktree add needs to create the dir itself
     try:
         _, w_err, w_rc = await call_git_command_with_output(
-            "git", "worktree", "add", "--detach", tmpdir, "FETCH_HEAD",
+            "git",
+            "worktree",
+            "add",
+            "--detach",
+            tmpdir,
+            "FETCH_HEAD",
             cwd=copy_path,
         )
         if w_rc != 0:
@@ -631,21 +675,32 @@ async def _sync_copy_per_bp(
                 "git", "worktree", "remove", "--force", tmpdir, cwd=copy_path
             )
 
-        # Rebase the copy onto the prospective new main, dropping commits that
-        # are now already applied (the BP ones become empty).
-        _, r_err, r_rc = await call_git_command_with_output(
-            "git", *ident, "rebase", "--onto", temp_tip, "FETCH_HEAD",
-            "--empty=drop", cwd=copy_path,
+        # Rebuild the copy as: new main (temp_tip) + its NON-BP commits replayed
+        # in order. Explicit (reset + cherry-pick the non-BP commits) rather than
+        # `git rebase`, whose already-applied detection is version-dependent —
+        # the BP commits are simply not replayed since they're already in main.
+        bp_set = set(bp_commits)
+        non_bp = [c for c in all_commits if c not in bp_set]
+        await call_git_command_with_output(
+            "git", "reset", "--hard", temp_tip, cwd=copy_path
         )
-        if r_rc != 0:
-            await call_git_command("git", "rebase", "--abort", cwd=copy_path)
-            return SyncCopyResponse(
-                status="needs_rebase",
-                message=(
-                    "Rebasing the copy onto the new main hit a conflict — "
-                    "hand off to the coding agent to rebase and resolve."
-                ),
+        for c in non_bp:
+            _, rc_err, rc_rc = await call_git_command_with_output(
+                "git", *ident, "cherry-pick", "--allow-empty", c, cwd=copy_path
             )
+            if rc_rc != 0:
+                await call_git_command("git", "cherry-pick", "--abort", cwd=copy_path)
+                # Restore the copy exactly as it was; main is still untouched.
+                await call_git_command_with_output(
+                    "git", "reset", "--hard", orig_head, cwd=copy_path
+                )
+                return SyncCopyResponse(
+                    status="needs_rebase",
+                    message=(
+                        "Replaying the copy's other commits onto the new main hit "
+                        "a conflict — hand off to the coding agent to rebase."
+                    ),
+                )
         new_tip_out, _, _ = await call_git_command_with_output(
             "git", "rev-parse", "HEAD", cwd=copy_path
         )
@@ -665,8 +720,13 @@ async def _sync_copy_per_bp(
             )
         # Only advance main if temp_tip is a true fast-forward of it.
         _, _, anc_rc = await call_git_command_with_output(
-            "git", "-C", bare, "merge-base", "--is-ancestor",
-            "refs/heads/main", temp_tip,
+            "git",
+            "-C",
+            bare,
+            "merge-base",
+            "--is-ancestor",
+            "refs/heads/main",
+            temp_tip,
         )
         if anc_rc != 0:
             await call_git_command_with_output(
@@ -689,7 +749,8 @@ async def _sync_copy_per_bp(
         await _refresh_main_copy_checkout()
         await _tag_deploy(name, deployer)
         return SyncCopyResponse(
-            status="success", method="cherry-pick",
+            status="success",
+            method="cherry-pick",
             message=f"Synced '{bp}' into main; rebased the copy onto the new main.",
         )
     finally:
@@ -741,32 +802,28 @@ async def sync_copy(name: str, body: SyncCopyRequest | None = None):
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
 
-    # 1) Commit any work in progress so it's part of what we fast-forward.
-    status_out, _, _ = await call_git_command_with_output(
-        "git", "status", "--porcelain", cwd=copy_path
-    )
-    if status_out and status_out.strip():
-        if not await call_git_command("git", "add", "-A", cwd=copy_path):
-            raise HTTPException(status_code=500, detail="Failed to stage changes")
-        # Attribute the auto-commit to the user who pressed Sync & Deploy, not
-        # to gitops, so the history shows real authorship.
-        deployer = (body.deployer if body else None) or ""
-        commit_cmd = ["git"]
-        if deployer.strip():
-            commit_cmd += [
-                "-c",
-                f"user.name={deployer.strip()}",
-                "-c",
-                f"user.email={deployer.strip()}",
-            ]
-        commit_cmd += ["commit", "-m", "Sync: commit work in progress"]
-        _, c_err, c_rc = await call_git_command_with_output(
-            *commit_cmd, cwd=copy_path
+    # 1) Commit work in progress so it's part of what we sync. For a per-BP
+    #    sync, stage ONLY that BP's changes as the syncable commit, then commit
+    #    any remaining (other-BP) changes separately so they ride on the copy
+    #    but never reach main. For a whole-copy sync, stage everything.
+    deployer = body.deployer if body else None
+    bp = body.bp if body else None
+    if bp:
+        _validate_bp_dir(bp)
+        await _wip_commit(
+            copy_path,
+            deployer,
+            ["--", f"{bp}/"],
+            f"Sync: commit work in progress ({bp})",
         )
-        if c_rc != 0:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to commit: {c_err.strip()}"
-            )
+        await _wip_commit(
+            copy_path,
+            deployer,
+            ["-A"],
+            "wip: changes outside the synced business process",
+        )
+    else:
+        await _wip_commit(copy_path, deployer, ["-A"], "Sync: commit work in progress")
 
     # 2) Refresh our view of main from the LOCAL bare repo (filesystem — gitops
     #    can't authenticate to its own smart-HTTP `origin`). FETCH_HEAD now
@@ -777,8 +834,6 @@ async def sync_copy(name: str, body: SyncCopyRequest | None = None):
     # 2b) Per-BP sync: when a business process is named, only its commits go to
     #     main and the copy is auto-rebased — keeps unrelated BPs out of the
     #     deploy. Falls through to the whole-copy fast-forward below when no BP.
-    bp = body.bp if body else None
-    deployer = body.deployer if body else None
     if bp:
         return await _sync_copy_per_bp(name, copy_path, bp, deployer)
 
@@ -1083,18 +1138,28 @@ async def _git_log(ref: str, copy_path: str, limit: int = 50) -> list[dict]:
     """Recent commits on `ref` as structured rows. Fields are unit-separated so
     subjects with tabs/spaces survive intact."""
     out, _, rc = await call_git_command_with_output(
-        "git", "log", f"-{limit}",
-        "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s", ref, cwd=copy_path
+        "git",
+        "log",
+        f"-{limit}",
+        "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s",
+        ref,
+        cwd=copy_path,
     )
     commits: list[dict] = []
     if rc == 0:
         for line in out.splitlines():
             f = line.split("\x1f")
             if len(f) == 6:
-                commits.append({
-                    "sha": f[0], "short": f[1], "author_name": f[2],
-                    "author_email": f[3], "date": f[4], "subject": f[5],
-                })
+                commits.append(
+                    {
+                        "sha": f[0],
+                        "short": f[1],
+                        "author_name": f[2],
+                        "author_email": f[3],
+                        "date": f[4],
+                        "subject": f[5],
+                    }
+                )
     return commits
 
 
@@ -1118,7 +1183,9 @@ async def get_copy_history(name: str):
     # maxsplit=2 keeps a subject containing "|" intact.
     deploys: dict[str, list[str]] = {}
     tags_out, _, _ = await call_git_command_with_output(
-        "git", "for-each-ref", "refs/tags/deploy",
+        "git",
+        "for-each-ref",
+        "refs/tags/deploy",
         "--format=%(*objectname)|%(objectname)|%(contents:subject)",
         cwd=bare_repo_path(),
     )
