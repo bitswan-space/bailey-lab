@@ -53,17 +53,6 @@ class DeployedAutomation(BaseModel):
     expose: bool = False
 
 
-class JupyterServer(BaseModel):
-    automation_name: str
-    session_id: str
-    pre_image: str
-    token: str
-
-
-class JupyterServerHeartbeatRequest(BaseModel):
-    servers: list[JupyterServer]
-
-
 class ProcessInfo(BaseModel):
     id: str
     name: str

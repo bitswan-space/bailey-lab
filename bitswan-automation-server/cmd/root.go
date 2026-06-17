@@ -47,7 +47,7 @@ Contact BitSwan for licensing information:
 func newRootCmd(version string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bitswan",
-		Short: "Deploy your Jupyter pipelines with bitswan",
+		Short: "Deploy and manage your bitswan automations",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
 		},

@@ -156,9 +156,7 @@ def _read_group(dir_path: str) -> Optional[TemplateGroupInfo]:
             sub = os.path.join(dir_path, name)
             if not os.path.isdir(sub):
                 continue
-            if os.path.exists(os.path.join(sub, "automation.toml")) or os.path.exists(
-                os.path.join(sub, "pipelines.conf")
-            ):
+            if os.path.exists(os.path.join(sub, "automation.toml")):
                 automations.append(name)
     except OSError:
         pass

@@ -6,7 +6,6 @@ from fastapi.openapi.utils import get_openapi
 from app.lifespan import lifespan
 from app.routes.automations import router as automations_router
 from app.routes.images import router as images_router
-from app.routes.jupyter import router as jupyter_router
 from app.routes.services import router as services_router
 from app.routes.docs import router as docs_router
 from app.routes.events import router as events_router
@@ -60,7 +59,6 @@ async def log_slow_requests(request: Request, call_next):
 app.include_router(templates_router, dependencies=[Depends(verify_token)])
 app.include_router(automations_router, dependencies=[Depends(verify_token)])
 app.include_router(images_router, dependencies=[Depends(verify_token)])
-app.include_router(jupyter_router, dependencies=[Depends(verify_token)])
 app.include_router(services_router, dependencies=[Depends(verify_token)])
 app.include_router(events_router, dependencies=[Depends(verify_token)])
 app.include_router(processes_router, dependencies=[Depends(verify_token)])

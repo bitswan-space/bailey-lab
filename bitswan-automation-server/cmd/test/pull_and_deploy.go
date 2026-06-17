@@ -118,7 +118,7 @@ func runTestPullAndDeploy(gitopsImage, editorImage string) error {
 	fmt.Println("\n[2/9] Deploying FastAPI to workspace 1...")
 	imageHash, err := computeImageDirHash()
 	if err != nil {
-		fmt.Printf("Warning: could not compute image dir hash: %v (pipelines.conf will not be patched)\n", err)
+		fmt.Printf("Warning: could not compute image dir hash: %v\n", err)
 		imageHash = ""
 	}
 	zipPath, checksum, err := createFastAPIZip(imageHash)

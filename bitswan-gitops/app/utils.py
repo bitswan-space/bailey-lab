@@ -1,7 +1,5 @@
 import asyncio
-from configparser import ConfigParser
 from dataclasses import dataclass
-from io import StringIO
 from datetime import datetime, timezone
 import hashlib
 import logging
@@ -90,7 +88,7 @@ SERVICE_REALMS = {"dev", "staging", "production"}
 
 @dataclass
 class AutomationConfig:
-    """Unified automation configuration from either automation.toml or pipelines.conf."""
+    """Automation configuration from automation.toml."""
 
     id: str | None = (
         None  # Unique automation ID (used as Keycloak client_id when auth=True)
@@ -99,8 +97,8 @@ class AutomationConfig:
     image: str = "bitswan/pipeline-runtime-environment:latest"
     expose: bool = False
     port: int = 8080
-    config_format: str = "ini"  # "toml" or "ini"
-    mount_path: str = "/opt/pipelines"  # "/app/" for TOML, "/opt/pipelines" for INI
+    # Where the source tree is mounted/baked inside the container.
+    mount_path: str = "/app/"
     # CORS allowed domains for Keycloak client (optional)
     allowed_domains: list[str] | None = None
     # Infrastructure service dependencies
@@ -145,7 +143,6 @@ def parse_automation_toml(content: str) -> AutomationConfig | None:
         image=deployment.get("image", "bitswan/pipeline-runtime-environment:latest"),
         expose=deployment.get("expose", False),
         port=deployment.get("port", 8080),
-        config_format="toml",
         mount_path="/app/",
         allowed_domains=allowed_domains,
         services=services,
@@ -175,40 +172,9 @@ def read_automation_toml(source_dir: str) -> AutomationConfig | None:
 
 
 def read_automation_config(source_dir: str) -> AutomationConfig:
-    """
-    Read automation configuration with priority: automation.toml > pipelines.conf.
-    Returns AutomationConfig with deployment settings.
-    """
-    # Try automation.toml first (highest priority)
-    toml_config = read_automation_toml(source_dir)
-    if toml_config:
-        return toml_config
-
-    # Fall back to pipelines.conf
-    pipeline_conf = read_pipeline_conf(source_dir)
-    if pipeline_conf:
-        # Parse id and auth for Keycloak
-        automation_id = None
-        if pipeline_conf.has_option("deployment", "id"):
-            automation_id = pipeline_conf.get("deployment", "id")
-        auth = pipeline_conf.getboolean("deployment", "auth", fallback=False)
-
-        return AutomationConfig(
-            id=automation_id,
-            auth=auth,
-            image=pipeline_conf.get(
-                "deployment",
-                "pre",
-                fallback="bitswan/pipeline-runtime-environment:latest",
-            ),
-            expose=pipeline_conf.getboolean("deployment", "expose", fallback=False),
-            port=int(pipeline_conf.get("deployment", "port", fallback="8080")),
-            config_format="ini",
-            mount_path="/opt/pipelines",
-        )
-
-    # Return default config if no config file found
-    return AutomationConfig()
+    """Read an automation's configuration from automation.toml, or defaults
+    when none is present."""
+    return read_automation_toml(source_dir) or AutomationConfig()
 
 
 async def wait_coroutine(*args, **kwargs) -> int:
@@ -350,42 +316,6 @@ def calculate_uptime(created_at: str) -> str:
     created_at = datetime.fromisoformat(created_at)
     uptime = datetime.now(timezone.utc) - created_at
     return humanize.naturaldelta(uptime)
-
-
-def parse_pipeline_conf(content: str) -> ConfigParser | None:
-    """Parse pipelines.conf content from a string."""
-    if not content or not content.strip():
-        return None
-    try:
-        config = ConfigParser()
-        config.read_file(StringIO(content))
-        return config
-    except Exception:
-        return None
-
-
-def read_pipeline_conf(source_dir: str) -> ConfigParser | None:
-    """Read pipelines.conf from a directory (legacy method, uses parse_pipeline_conf internally)."""
-    conf_file_path = os.path.join(source_dir, "pipelines.conf")
-    if os.path.exists(conf_file_path):
-        with open(conf_file_path, "r") as f:
-            content = f.read()
-        return parse_pipeline_conf(content)
-    return None
-
-
-def test_read_pipeline_conf():
-    import tempfile
-
-    # create a tempdir with a pipelines.conf file
-    with tempfile.TemporaryDirectory() as tmpdirname:
-        with open(os.path.join(tmpdirname, "pipelines.conf"), "w") as f:
-            f.write("[pipeline1]\n")
-            f.write("key1=value1\n")
-            f.write("key2=value2\n")
-
-        config = read_pipeline_conf(tmpdirname)
-        assert config.get("pipeline1", "key1") == "value1"
 
 
 def generate_workspace_url(

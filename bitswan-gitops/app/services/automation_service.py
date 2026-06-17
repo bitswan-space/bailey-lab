@@ -21,7 +21,6 @@ from app.utils import (
     generate_workspace_url,
     read_bitswan_yaml,
     dump_bitswan_yaml,
-    read_pipeline_conf,
     read_automation_config,
     remove_route_from_ingress,
     sanitize_automation_name,
@@ -227,8 +226,7 @@ class AutomationService:
         self.gitops_dir = os.path.join(self.bs_home, "gitops")
         self.gitops_dir_host = os.path.join(self.bs_home_host, "gitops")
         self.secrets_dir = os.path.join(self.bs_home, "secrets")
-        # Workspace directory for live-dev mode (source code mounting)
-        # Uses same path structure as jupyter_service for consistency
+        # Workspace directory for live-dev mode (source code mounting).
         self.workspace_dir = os.path.join(self.bs_home, "workspace")
         self.workspace_dir_host = os.path.join(self.bs_home_host, "workspace")
         # Workspace repo directory (mounted at /workspace-repo in container)
@@ -3713,10 +3711,6 @@ fi
                     status_code=500,
                     detail=f"Deployment directory {source_dir} does not exist",
                 )
-            pipeline_conf = None
-            if stage != "live-dev" and os.path.exists(source_dir):
-                pipeline_conf = read_pipeline_conf(source_dir)
-
             # Ensure services from automation config on disk are reflected in
             # the deployment conf so _merge_infra_services() can discover them.
             # Without this, promoted deployments (dev/staging/production) whose
@@ -3830,12 +3824,8 @@ fi
                 datetime.utcnow().isoformat() + "Z"
             )
 
+            # network_mode comes from the deployment entry below (3861 fallback).
             network_mode = None
-            # Legacy INI (pipelines.conf) network_mode is still honoured.
-            if pipeline_conf:
-                network_mode = pipeline_conf.get(
-                    "docker.compose", "network_mode", fallback=conf.get("network_mode")
-                )
 
             # Per-business-process secrets: shared key names across stages, with
             # per-stage values (dev/live-dev share the dev realm). Replaces the

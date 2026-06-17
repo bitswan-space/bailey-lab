@@ -1,6 +1,6 @@
 # Bitswan GitOps
 
-Bitswan gitops is a service that manages the deployment, management and monitoring of bitswan automations. With it, you can deploy a bitswan Jupyter notebook into production with the click of a button.
+Bitswan gitops is a service that manages the deployment, management and monitoring of bitswan automations. With it, you can deploy a business process into production with the click of a button.
 
 ## Installation
 
