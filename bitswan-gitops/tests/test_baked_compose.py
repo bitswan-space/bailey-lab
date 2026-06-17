@@ -77,3 +77,22 @@ def test_unbaked_deploy_still_requires_materialized_dir(svc):
     }
     with pytest.raises(fastapi.HTTPException):
         svc.generate_docker_compose(bs)
+
+
+def test_resolve_config_falls_back_to_workspace_for_baked(svc, tmp_path):
+    """A baked promoted deployment has no <gitops_dir>/<checksum>/ tree, so its
+    config (expose/port) must come from the workspace source — otherwise a
+    frontend silently loses `expose` (no ingress URL → "Not deployed")."""
+    ws = tmp_path / "ws"
+    auto = ws / "copies" / "main" / "bp" / "frontend"
+    auto.mkdir(parents=True)
+    (auto / "automation.toml").write_text("[deployment]\nexpose = true\nport = 5173\n")
+    svc.workspace_repo_dir = str(ws)
+
+    conf = {
+        "stage": "dev",
+        "checksum": "0" * 40,  # no blob dir on disk
+        "relative_path": "copies/main/bp/frontend",
+    }
+    cfg = svc.resolve_automation_config(conf)
+    assert cfg.expose is True

@@ -2561,7 +2561,8 @@ fi
         """Resolve AutomationConfig for a deployment from the canonical source.
 
         For live-dev: reads automation.toml from the workspace source directory.
-        For promoted stages: reads from the gitops checksum directory.
+        For promoted stages: reads from the gitops checksum directory, falling
+        back to the workspace source when that blob tree is absent.
         Single source of truth — used by both deploy_automation (service auto-enable)
         and generate_docker_compose (container config).
         """
@@ -2578,6 +2579,18 @@ fi
 
         if source_dir and os.path.exists(source_dir):
             return read_automation_config(source_dir)
+
+        # Image-baked deploys carry the source INSIDE the image, so the
+        # <gitops_dir>/<checksum>/ blob tree no longer exists. Config like
+        # `expose`, `port` and `services` is stable across the bake, so read it
+        # from the automation's workspace source rather than silently defaulting
+        # to AutomationConfig() — which would un-expose frontends (no ingress
+        # route, no automation_url → the dashboard shows a running frontend as
+        # "Not deployed").
+        if relative_path:
+            ws_dir = os.path.join(self.workspace_repo_dir, relative_path)
+            if os.path.exists(ws_dir):
+                return read_automation_config(ws_dir)
         return AutomationConfig()
 
     async def deploy_automation(
