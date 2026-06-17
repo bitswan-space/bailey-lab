@@ -3678,7 +3678,15 @@ fi
                     status_code=500,
                     detail=f"Live-dev deployment {deployment_id} is missing relative_path",
                 )
-            elif stage != "live-dev" and not os.path.exists(source_dir):
+            elif (
+                stage != "live-dev"
+                and not conf.get("image")
+                and not os.path.exists(source_dir)
+            ):
+                # Only the legacy materialize-and-mount path needs the
+                # `<gitops_dir>/<checksum>/` tree on disk. Image-baked
+                # deployments carry their source INSIDE the image, so the
+                # directory is intentionally absent — don't fail on it.
                 raise HTTPException(
                     status_code=500,
                     detail=f"Deployment directory {source_dir} does not exist",
