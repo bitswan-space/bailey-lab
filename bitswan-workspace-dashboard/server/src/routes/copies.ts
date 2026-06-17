@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { GitopsClient } from '../services/gitops.js';
+import { emailFromRequest } from '../lib/user.js';
 
 export interface CopyRoutesOptions {
   gitops: GitopsClient | null;
@@ -32,8 +33,11 @@ export function registerCopyRoutes(
       if (!name) {
         return reply.code(400).send({ error: 'name is required' });
       }
+      // The deployer recorded on the deploy tag is the validated token email,
+      // never a client-supplied value — it can't be spoofed.
+      const deployer = await emailFromRequest(req, app.log);
       try {
-        const r = await gitops.syncCopy(name);
+        const r = await gitops.syncCopy(name, deployer ?? undefined);
         if (!r.ok) {
           return reply
             .code(r.status >= 400 && r.status < 500 ? r.status : 502)
@@ -42,6 +46,28 @@ export function registerCopyRoutes(
         return r.body;
       } catch (err) {
         app.log.warn({ err, name }, 'copy sync failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  app.get<{ Params: { name: string } }>(
+    '/api/copies/:name/history',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      try {
+        const r = await gitops.copyHistory(req.params.name);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name: req.params.name }, 'copy history failed');
         return reply.code(502).send({ error: 'gitops unreachable' });
       }
     },

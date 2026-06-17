@@ -4,6 +4,8 @@ import { toast } from 'sonner';
 import { useSessions } from '@/components/agents/SessionProvider';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
 import { DiffTab } from '@/components/diff/DiffTab';
+import { CopyHistoryView } from '@/components/views/CopyHistoryView';
+import { cn } from '@/lib/utils';
 import type { BusinessProcess, Copy } from '@/types';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
@@ -34,6 +36,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
   const { startSyncSession, setSelectedFor, agentStatus, ensureAgent } =
     useSessions();
   const [busy, setBusy] = useState(false);
+  const [view, setView] = useState<'diff' | 'history'>('diff');
 
   const adds = changed.reduce((a, c) => a + c.adds, 0);
   const dels = changed.reduce((a, c) => a + c.dels, 0);
@@ -152,9 +155,30 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
         </Button>
       </div>
 
-      {/* Line-by-line diff of what will become the new main. */}
-      <div className="min-h-0 flex-1">
-        <DiffTab copy={wt.name} />
+      {/* Diff (what becomes main) / History (copy + main commits, deploy tags). */}
+      <div className="flex shrink-0 items-center gap-4 border-b border-border bg-background px-7">
+        {(['diff', 'history'] as const).map((id) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setView(id)}
+            className={cn(
+              '-mb-px border-b-2 py-2.5 text-[13px] font-medium capitalize transition-colors',
+              view === id
+                ? 'border-foreground text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {id}
+          </button>
+        ))}
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {view === 'diff' ? (
+          <DiffTab copy={wt.name} />
+        ) : (
+          <CopyHistoryView copy={wt.name} />
+        )}
       </div>
     </div>
   );

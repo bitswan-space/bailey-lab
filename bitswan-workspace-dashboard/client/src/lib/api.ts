@@ -207,6 +207,25 @@ export interface CreateBusinessProcessResponse {
   setup_error?: string | null;
 }
 
+/** One commit row in the copy/main history. */
+export interface HistoryCommit {
+  sha: string;
+  short: string;
+  author_name: string;
+  author_email: string;
+  date: string;
+  subject: string;
+  /** Deploy markers ("<email> deployed <date>") for main commits left at the
+   *  tip by a Sync & Deploy. Absent/empty on non-deploy commits. */
+  deploys?: string[];
+}
+
+/** Gitops `GET /copies/{name}/history` response. */
+export interface CopyHistory {
+  copy: HistoryCommit[];
+  main: HistoryCommit[];
+}
+
 /** Gitops `POST /copies/{name}/sync` response. */
 export interface SyncCopyResult {
   status: 'success' | 'needs_rebase';
@@ -373,6 +392,8 @@ export const api = {
      */
     sync: (name: string) =>
       postJson<SyncCopyResult>(`/api/copies/${encodeURIComponent(name)}/sync`, {}),
+    history: (name: string) =>
+      getJson<CopyHistory>(`/api/copies/${encodeURIComponent(name)}/history`),
   },
 
   snapshots: {

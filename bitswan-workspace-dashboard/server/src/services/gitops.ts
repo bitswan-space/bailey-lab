@@ -313,8 +313,28 @@ export class GitopsClient {
    */
   async syncCopy(
     name: string,
+    deployer?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
-    return this.postJson(`/copies/${encodeURIComponent(name)}/sync`, {});
+    return this.postJson(`/copies/${encodeURIComponent(name)}/sync`, {
+      deployer: deployer ?? null,
+    });
+  }
+
+  /** `GET /copies/{name}/history` — copy + main commit logs with deploy tags. */
+  async copyHistory(
+    name: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/history`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
   }
 
   /**
