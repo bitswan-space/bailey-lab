@@ -342,27 +342,26 @@ async def _git_state(copy_path: str, name: str) -> dict:
 
     has_requirements = os.path.exists(os.path.join(copy_path, ".requirements.json"))
 
-    # Synced when there are no uncommitted changes and the branch is neither
-    # ahead of nor behind origin/main. origin/main is updated by `git fetch`;
-    # compare against the locally-known remote ref (cheap, no network).
     status_out, _, _ = await call_git_command_with_output(
         "git", "status", "--porcelain", cwd=copy_path
     )
     has_changes = bool(status_out and status_out.strip())
 
-    # Ahead/behind vs the locally-known origin/main (cheap, no network — the
-    # ref is refreshed by pushes/fetches, and the sync action fetches before it
-    # acts). "ahead" = commits on the copy not yet on main; "behind" = commits
-    # on main the copy hasn't picked up. behind == 0 means a fast-forward of
-    # main to this copy needs no rebase.
+    # Ahead/behind vs the canonical main. Refresh our view of main from the
+    # LOCAL bare repo (filesystem, no network, no credentials — gitops can't
+    # authenticate to its own smart-HTTP `origin`); FETCH_HEAD then points at
+    # the current main. "ahead" = commits on the copy not yet on main;
+    # "behind" = commits on main the copy hasn't picked up. behind == 0 means a
+    # fast-forward of main to this copy needs no rebase.
     ahead = behind = 0
+    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
     ahead_out, _, ahead_cnt_rc = await call_git_command_with_output(
-        "git", "rev-list", "--count", "origin/main..HEAD", cwd=copy_path
+        "git", "rev-list", "--count", "FETCH_HEAD..HEAD", cwd=copy_path
     )
     if ahead_cnt_rc == 0 and ahead_out.strip().isdigit():
         ahead = int(ahead_out.strip())
     behind_out, _, behind_cnt_rc = await call_git_command_with_output(
-        "git", "rev-list", "--count", "HEAD..origin/main", cwd=copy_path
+        "git", "rev-list", "--count", "HEAD..FETCH_HEAD", cwd=copy_path
     )
     if behind_cnt_rc == 0 and behind_out.strip().isdigit():
         behind = int(behind_out.strip())
@@ -519,13 +518,16 @@ async def sync_copy(name: str):
                 status_code=500, detail=f"Failed to commit: {c_err.strip()}"
             )
 
-    # 2) Refresh our view of main (the only network step).
-    await call_git_command("git", "fetch", "origin", "main", cwd=copy_path)
+    # 2) Refresh our view of main from the LOCAL bare repo (filesystem — gitops
+    #    can't authenticate to its own smart-HTTP `origin`). FETCH_HEAD now
+    #    points at the current main and its objects are in the copy.
+    bare = bare_repo_path()
+    await call_git_command("git", "fetch", bare, "main", cwd=copy_path)
 
-    # 3) Fast-forward only when origin/main is an ancestor of the copy's HEAD —
-    #    i.e. the copy is purely ahead and no rebase is required.
+    # 3) Fast-forward only when main (FETCH_HEAD) is an ancestor of the copy's
+    #    HEAD — i.e. the copy is purely ahead and no rebase is required.
     _, _, ff_possible_rc = await call_git_command_with_output(
-        "git", "merge-base", "--is-ancestor", "origin/main", "HEAD", cwd=copy_path
+        "git", "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD", cwd=copy_path
     )
     if ff_possible_rc != 0:
         return SyncCopyResponse(
@@ -536,9 +538,14 @@ async def sync_copy(name: str):
             ),
         )
 
-    # 4) Publish the branch (ff-only server accepts it) and fast-forward main.
+    # 4) Publish the branch to the canonical repo and fast-forward main.
+    # Push directly to the local bare repo path (not the smart-HTTP `origin`):
+    # gitops has no git credentials for its own HTTP server, and a local push
+    # still runs the pre-receive hook (this is a copy branch, so a fast-forward
+    # is allowed). This transfers the new commit objects; the update-ref below
+    # then advances main.
     p_out, p_err, p_rc = await call_git_command_with_output(
-        "git", "push", "origin", "HEAD", cwd=copy_path
+        "git", "push", bare, f"HEAD:refs/heads/{name}", cwd=copy_path
     )
     if p_rc != 0:
         raise HTTPException(
