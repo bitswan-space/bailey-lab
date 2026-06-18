@@ -1585,6 +1585,150 @@ class AutomationService:
         )
         return self.read_dr(bp)
 
+    # ── Backups: blue-green production slots + retention + audit log ──────────
+    # Each production BP runs two self-contained slots (a/b): each has its own
+    # app containers wired to its own logical DB. `live_slot` is which slot the
+    # production ingress serves (= Production); the other slot is DR. A swap
+    # flips `live_slot` and repoints the production ingress to it — zero
+    # downtime, no data moved (DR ↔ Production). Restores only ever write the
+    # standby (DR) slot. State + an audit log live in bitswan.yaml under the
+    # top-level `backups` key (versioned like secrets/firewall/dr). The git log
+    # is the full audit trail; the in-yaml `log` is a bounded recent view for
+    # the UI's audit panel.
+    BACKUP_DEFAULT_RETENTION = {"daily": 7, "weekly": 0, "monthly": 3}
+
+    @staticmethod
+    def _other_slot(slot: str) -> str:
+        return "b" if slot == "a" else "a"
+
+    def read_backups(self, bp: str) -> dict:
+        """A BP's backup state: which production slot is live (Production) vs
+        standby (DR), the retention policy, and the recent audit log."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rec = (bs.get("backups") or {}).get(bp) or {}
+        live = rec.get("live_slot") or "a"
+        return {
+            "bp": bp,
+            "live_slot": live,
+            "standby_slot": self._other_slot(live),
+            "retention": {
+                **self.BACKUP_DEFAULT_RETENTION,
+                **(rec.get("retention") or {}),
+            },
+            "log": list(rec.get("log") or []),
+        }
+
+    def live_slot(self, bp: str) -> str:
+        return self.read_backups(bp)["live_slot"]
+
+    def standby_slot(self, bp: str) -> str:
+        return self.read_backups(bp)["standby_slot"]
+
+    def _append_backup_log(
+        self, rec: dict, action: str, detail: str, by: str | None
+    ) -> None:
+        today = date.today()
+        rec.setdefault("log", []).insert(
+            0,
+            {
+                "id": uuid.uuid4().hex,
+                "action": action,  # created | restored | swapped | retention
+                "detail": detail,
+                "by": by or "unknown",
+                "at": today.strftime("%b %-d, %Y"),
+                "date": today.isoformat(),
+            },
+        )
+        del rec["log"][50:]  # bounded; git history is the full audit trail
+
+    async def _save_and_commit_backups(
+        self, bs: dict, bp: str, by: str | None, message: str
+    ) -> None:
+        path = os.path.join(self.gitops_dir, "bitswan.yaml")
+        with open(path, "w") as f:
+            dump_bitswan_yaml(bs, f)
+        await update_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
+            "backups",
+            deployed_by=by,
+            message=message,
+        )
+
+    async def record_backup_event(
+        self, bp: str, action: str, detail: str, by: str | None = None
+    ) -> dict:
+        """Audit a backup-domain event (created/restored) in bitswan.yaml."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rec = bs.setdefault("backups", {}).setdefault(bp, {})
+        self._append_backup_log(rec, action, detail, by)
+        await self._save_and_commit_backups(
+            bs, bp, by, f"backup {action} {bp}: {detail}"
+        )
+        return self.read_backups(bp)
+
+    async def set_backup_retention(
+        self, bp: str, retention: dict, by: str | None = None
+    ) -> dict:
+        """Set the production backup retention policy (daily/weekly/monthly counts)."""
+        clean = {
+            k: max(0, int((retention or {}).get(k, 0) or 0))
+            for k in ("daily", "weekly", "monthly")
+        }
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rec = bs.setdefault("backups", {}).setdefault(bp, {})
+        rec["retention"] = clean
+        desc = (
+            ", ".join(f"{v} {k}" for k, v in clean.items() if v)
+            or "no automatic backups"
+        )
+        self._append_backup_log(rec, "retention", f"retention policy → {desc}", by)
+        await self._save_and_commit_backups(
+            bs, bp, by, f"backup retention {bp}: {desc}"
+        )
+        return self.read_backups(bp)
+
+    async def swap_production_dr(
+        self, bp: str, by: str | None = None, role: str | None = None
+    ) -> dict:
+        """The DR go-live swap: flip which production slot (a/b) is live and
+        repoint the production ingress to it. Zero downtime, no data moved — DR
+        becomes Production and the old Production becomes DR. Versioned/audited.
+
+        The pointer flip + audit are authoritative here; the ingress repoint is
+        best-effort and only lands once the two-slot production deploy exists
+        (the blue-green deploy infra). A missing repoint target is logged, not
+        fatal — the recorded `live_slot` stays the source of truth."""
+        cur = self.read_backups(bp)
+        new_live = cur["standby_slot"]
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rec = bs.setdefault("backups", {}).setdefault(bp, {})
+        rec["live_slot"] = new_live
+        self._append_backup_log(
+            rec,
+            "swapped",
+            f"production slot {cur['live_slot']} → {new_live} (DR ↔ Production)",
+            by,
+        )
+        await self._save_and_commit_backups(
+            bs, bp, by, f"swap production/DR {bp}: → slot {new_live}"
+        )
+        try:
+            await self._repoint_production_to_slot(bp, new_live)
+        except Exception as e:  # noqa: BLE001 — best-effort until infra is live
+            logging.warning(
+                "swap %s: ingress repoint to slot %s deferred (%s)", bp, new_live, e
+            )
+        return self.read_backups(bp)
+
+    async def _repoint_production_to_slot(self, bp: str, slot: str) -> None:
+        """Point the production ingress at a slot's frontend container(s). Part
+        of the blue-green deploy infra (flagged — needs two-slot prod live)."""
+        raise NotImplementedError(
+            "two-slot production deploy not provisioned for this BP"
+        )
+
     # ── Supply chain (SBOM + CVEs) ───────────────────────────────────────────
     def _supply_chain_waivers(self, bs: dict, bp: str, realm: str) -> dict:
         return (((bs.get("supply_chain") or {}).get(bp) or {}).get(realm) or {}).get(

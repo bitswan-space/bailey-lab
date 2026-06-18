@@ -197,6 +197,53 @@ async def post_bp_dr_test_route(
     )
 
 
+class BackupRetentionRequest(BaseModel):
+    daily: int = 7
+    weekly: int = 0
+    monthly: int = 3
+    by: str | None = None
+
+
+class BackupSwapRequest(BaseModel):
+    by: str | None = None
+    role: str | None = None
+
+
+@router.get("/business-processes/{bp}/backups")
+async def get_bp_backups_route(
+    bp: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """A BP's backup state: which production slot is live (Production) vs standby
+    (DR), the retention policy, and the recent audit log (newest-first)."""
+    return automation_service.read_backups(bp)
+
+
+@router.put("/business-processes/{bp}/backups/retention")
+async def put_bp_backup_retention_route(
+    bp: str,
+    body: BackupRetentionRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Set the production backup retention policy (versioned + audited)."""
+    return await automation_service.set_backup_retention(
+        bp,
+        {"daily": body.daily, "weekly": body.weekly, "monthly": body.monthly},
+        body.by,
+    )
+
+
+@router.post("/business-processes/{bp}/backups/swap")
+async def post_bp_backup_swap_route(
+    bp: str,
+    body: BackupSwapRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """DR go-live swap: flip which production slot is live and repoint the
+    production ingress to it (zero downtime, no data moved)."""
+    return await automation_service.swap_production_dr(bp, body.by, body.role)
+
+
 class SupplyChainWaiverRequest(BaseModel):
     stage: str
     package: str

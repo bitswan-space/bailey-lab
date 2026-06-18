@@ -136,12 +136,14 @@ class SnapshotProvisionRequest(BaseModel):
 
 class SnapshotCreateRequest(BaseModel):
     label: str = ""
+    by: str | None = None
 
 
 class SnapshotRestoreRequest(BaseModel):
     snapshot_id: str
     source_stage: str
     target_stage: str
+    by: str | None = None
 
 
 class SnapshotCloneRequest(BaseModel):

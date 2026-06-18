@@ -55,6 +55,19 @@ def _validate_stage(stage: str) -> None:
         )
 
 
+async def _audit_backup(slug: str, action: str, detail: str, by: str | None) -> None:
+    """Append a backup/restore event to bitswan.yaml (versioned audit log).
+    Best-effort: an audit failure must never fail the snapshot operation."""
+    try:
+        from app.dependencies import get_automation_service
+
+        await get_automation_service().record_backup_event(slug, action, detail, by)
+    except Exception as e:  # noqa: BLE001
+        import logging
+
+        logging.warning("backup audit (%s %s) failed: %s", action, slug, e)
+
+
 # NOTE: route order matters — the concrete /tasks/{task_id} route must be
 # declared before the parameterised /{bp} routes would shadow it.
 @router.get("/tasks/{task_id}")
@@ -159,6 +172,12 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _audit_backup(
+        slug,
+        "restored",
+        f"{body.source_stage} snapshot → {body.target_stage}",
+        body.by,
+    )
     return JSONResponse(
         status_code=202,
         content={
@@ -179,6 +198,14 @@ async def clone_stage(bp: str, body: SnapshotCloneRequest):
     slug = _bp_slug(bp)
     _validate_stage(body.source_stage)
     _validate_stage(body.target_stage)
+    if body.target_stage == "production":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cloning directly into live Production is not allowed — restore "
+                "into Disaster Recovery and swap to go live."
+            ),
+        )
     try:
         res = await spawn_clone_stage(slug, body.source_stage, body.target_stage)
     except BusyError as e:
@@ -210,6 +237,9 @@ async def create_snapshot(bp: str, stage: str, body: SnapshotCreateRequest):
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _audit_backup(
+        slug, "created", f"{body.label or 'snapshot'} ({stage})", body.by
+    )
     return JSONResponse(
         status_code=202,
         content={
