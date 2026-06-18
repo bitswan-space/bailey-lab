@@ -132,6 +132,8 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 		s.handleIngressInit(w, r)
 	case path == "add-route":
 		s.handleIngressAddRoute(w, r)
+	case path == "repoint-route":
+		s.handleIngressRepointRoute(w, r)
 	case path == "list-routes":
 		s.handleIngressListRoutes(w, r)
 	case strings.HasPrefix(path, "remove-route/"):
@@ -1365,6 +1367,59 @@ func (s *Server) handleIngressAddRoute(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(IngressAddRouteResponse{
 		Success: true,
 		Message: fmt.Sprintf("Successfully added route: %s -> %s", req.Hostname, req.Upstream),
+	})
+}
+
+// handleIngressRepointRoute handles POST /ingress/repoint-route — atomically
+// repoints an EXISTING production route's upstream to a different container.
+// This is the single primitive behind both zero-downtime promotion (point the
+// production hostname at the freshly-deployed app version, same DB) and the DR
+// go-live swap (point it at the other slot's containers, other DB). Unlike
+// add-route it deliberately does NOT touch TLS certs, the Bailey ACL, or
+// OAuth redirect URIs — the route already exists with all of that; only the
+// upstream the route resolves to changes. The rewrite reuses addRouteTraefik /
+// addRouteCaddy, so it is correct across every routing topology (protected
+// wrap, workspace sub-traefik, or direct) and replaces the upstream in place.
+func (s *Server) handleIngressRepointRoute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req IngressAddRouteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Hostname == "" || req.Upstream == "" {
+		writeJSONError(w, "hostname and upstream are required", http.StatusBadRequest)
+		return
+	}
+
+	jwtToken := r.Header.Get("BITSWAN_AUTOMATION_SERVER_DAEMON_TOKEN")
+	workspaceName := resolveWorkspaceName(req, jwtToken)
+
+	switch DetectIngressType() {
+	case IngressTraefik:
+		if err := addRouteTraefik(req, workspaceName); err != nil {
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case IngressCaddy:
+		if err := addRouteCaddy(req); err != nil {
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	default:
+		writeJSONError(w, "no ingress proxy detected", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(IngressAddRouteResponse{
+		Success: true,
+		Message: fmt.Sprintf("Repointed route: %s -> %s", req.Hostname, req.Upstream),
 	})
 }
 

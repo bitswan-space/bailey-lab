@@ -515,6 +515,37 @@ func getOpenAPISpec() string {
 					}
 				}
 			},
+			"/ingress/repoint-route": {
+				"post": {
+					"summary": "Repoint an existing route's upstream (zero-downtime promote / DR swap)",
+					"requestBody": {
+						"required": true,
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "object",
+									"properties": {
+										"hostname": {
+											"type": "string"
+										},
+										"upstream": {
+											"type": "string"
+										},
+										"workspace_name": {
+											"type": "string"
+										}
+									}
+								}
+							}
+						}
+					},
+					"responses": {
+						"200": {
+							"description": "Route repointed"
+						}
+					}
+				}
+			},
 			"/ingress/list-routes": {
 				"get": {
 					"summary": "List ingress routes",
