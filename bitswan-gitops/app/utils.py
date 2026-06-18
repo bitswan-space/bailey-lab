@@ -21,6 +21,16 @@ import toml
 import yaml
 from fastapi import HTTPException
 
+# Parse bitswan.yaml with libyaml's C loader when available — it is ~6x faster
+# than the pure-Python SafeLoader and produces identical output. Falls back to
+# the pure-Python loader if libyaml isn't installed.
+_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def load_yaml(text: str):
+    """Safe-load YAML text using the fast C loader when available."""
+    return yaml.load(text, Loader=_SAFE_LOADER)
+
 
 # Thread-safe git lock that works across both async and sync contexts
 # Uses a threading.Lock as the underlying mechanism for cross-thread safety
@@ -302,7 +312,7 @@ def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
     try:
         if os.path.exists(bitswan_yaml_path):
             with open(bitswan_yaml_path, "r") as f:
-                bs_yaml: dict = yaml.safe_load(f)
+                bs_yaml: dict = yaml.load(f, Loader=_SAFE_LOADER)
             # Hydrate the flat `deployments` view from the tree so all readers
             # work unchanged. (Legacy flat-only files are returned as-is.)
             if isinstance(bs_yaml, dict) and bs_yaml.get("business_processes"):

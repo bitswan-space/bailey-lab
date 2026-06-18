@@ -12,6 +12,7 @@ import uuid
 import yaml
 import requests
 from datetime import date, datetime
+from functools import lru_cache
 from typing import Any, Callable
 from app.models import DeployedAutomation
 from app.utils import (
@@ -22,6 +23,7 @@ from app.utils import (
     generate_workspace_url,
     read_bitswan_yaml,
     dump_bitswan_yaml,
+    load_yaml,
     read_automation_config,
     remove_route_from_ingress,
     sanitize_automation_name,
@@ -43,6 +45,31 @@ from app.services.oauth2_helpers import (
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=2048)
+def _parse_revision_business_processes(gitops_dir: str, sha: str) -> dict:
+    """Parsed `business_processes` map from `bitswan.yaml` at a git commit.
+
+    A commit's content is immutable, so this is memoized by (gitops_dir, sha):
+    deployment history derives from the git log of bitswan.yaml and re-reads the
+    same revisions on every page load (and once per stage), so caching the parse
+    turns repeat loads into pure cache hits. Returns {} if the revision is
+    missing or unparseable. Uses the fast libyaml loader via load_yaml.
+    """
+    proc = subprocess.run(
+        ["git", "show", f"{sha}:bitswan.yaml"],
+        cwd=gitops_dir,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return {}
+    try:
+        y = load_yaml(proc.stdout) or {}
+    except Exception:
+        return {}
+    return (y.get("business_processes") or {}) if isinstance(y, dict) else {}
 
 
 def _short_hash(context: str) -> str:
@@ -1163,18 +1190,11 @@ class AutomationService:
             if len(parts) != 4:
                 continue
             sha, date, author, subject = parts
-            content, _, crc = await call_git_command_with_output(
-                "git", "show", f"{sha}:bitswan.yaml", cwd=self.gitops_dir
-            )
-            if crc != 0:
-                continue
-            try:
-                y = yaml.safe_load(content) or {}
-            except Exception:
-                continue
-            node = ((y.get("business_processes") or {}).get(bp, {}) or {}).get(
-                stage_key
-            )
+            # Memoized git-show + parse, shared across stages and repeat loads
+            # (a commit's bitswan.yaml is immutable). This is the hot path —
+            # see _parse_revision_business_processes.
+            bps = _parse_revision_business_processes(self.gitops_dir, sha)
+            node = (bps.get(bp, {}) or {}).get(stage_key)
             if not node:
                 continue
             src = node.get("git_commit")
