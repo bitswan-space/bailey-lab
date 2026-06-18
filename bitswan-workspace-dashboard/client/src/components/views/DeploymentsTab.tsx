@@ -43,6 +43,7 @@ import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
 import { DisasterRecoveryPanel } from '@/components/disaster-recovery/DisasterRecoveryPanel';
 import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
+import { FirewallPanel } from '@/components/firewall/FirewallPanel';
 import { LogsPane } from '@/components/automations/inspect/LogsPane';
 import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import type { ServiceType } from '@/lib/api';
@@ -1117,6 +1118,25 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     };
   }, [bp.name, activeStage, isDr, reloadKey]);
 
+  // Firewall tab badge: count of blocked/observed hosts awaiting review.
+  const [firewallBadge, setFirewallBadge] = useState<
+    { n: number; cls: string; title: string }[]
+  >([]);
+  useEffect(() => {
+    let alive = true;
+    api
+      .firewall(bp.name, isDr ? 'production' : activeStage)
+      .then((r) => {
+        if (!alive) return;
+        const n = (r.attempts ?? []).length;
+        setFirewallBadge(n ? [{ n, cls: 'bg-red-600', title: `${n} unreviewed blocked attempts` }] : []);
+      })
+      .catch(() => alive && setFirewallBadge([]));
+    return () => {
+      alive = false;
+    };
+  }, [bp.name, activeStage, isDr, reloadKey]);
+
   // DR's tabs: its own Recovery-tests + Containers, then a "Mirrored from
   // Production" group (read-only) for the data it shares. Other stages keep the
   // full set.
@@ -1133,7 +1153,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         { id: 'containers', icon: Boxes, label: 'Containers', count: members.length },
         { id: 'history', icon: History, label: 'Deployment history', count: history.length, locked: true },
         { id: 'secrets', icon: KeyRound, label: 'Secrets', locked: true },
-        { id: 'firewall', icon: Shield, label: 'Firewall', locked: true },
+        { id: 'firewall', icon: Shield, label: 'Firewall', locked: true, badges: firewallBadge },
         { id: 'supply', icon: Boxes, label: 'Supply chain', locked: true, badges: supplyBadges },
       ]
     : [
@@ -1141,7 +1161,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         { id: 'secrets', icon: KeyRound, label: 'Secrets' },
         { id: 'containers', icon: Boxes, label: 'Containers', count: members.length },
         { id: 'backups', icon: Archive, label: 'Backups' },
-        { id: 'firewall', icon: Shield, label: 'Firewall' },
+        { id: 'firewall', icon: Shield, label: 'Firewall', badges: firewallBadge },
         { id: 'supply', icon: Boxes, label: 'Supply chain', badges: supplyBadges },
       ];
   // The section that's actually shown — falls back to the stage's first tab when
@@ -1396,7 +1416,15 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             ) : visibleSection === 'backups' ? (
               <EmptyTab icon={Archive} label="Backups" />
             ) : visibleSection === 'firewall' ? (
-              <EmptyTab icon={Shield} label="Firewall" />
+              <FirewallPanel
+                bp={bp.name}
+                stage={isDr ? 'production' : activeStage}
+                stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
+                prevStage={
+                  activeStage === 'staging' ? 'dev' : activeStage === 'production' ? 'staging' : undefined
+                }
+                readOnly={isDr}
+              />
             ) : (
               <SupplyChainPanel
                 bp={bp.name}

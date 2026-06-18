@@ -113,6 +113,44 @@ export async function emailFromRequest(
  * Slugify the whole email so the name is unique per user (emails are unique):
  *   alice@acme.com -> alice-acme-com
  */
+/**
+ * Best-effort role for firewall RBAC: "admin" | "auditor" | "member". Read from
+ * the Keycloak access token's group/role claims (validated via userinfo), mapped
+ * with env-configurable group names. gitops is the hard backstop — it rejects
+ * production rule changes unless the role is admin/auditor — so an unknown role
+ * simply fails closed there. Returns "member" when no privileged group matches.
+ */
+const ADMIN_GROUPS = new Set(
+  (process.env.BITSWAN_FW_ADMIN_GROUPS ?? 'admin,owner').split(',').map((s) => s.trim().toLowerCase()),
+);
+const AUDITOR_GROUPS = new Set(
+  (process.env.BITSWAN_FW_AUDITOR_GROUPS ?? 'auditor').split(',').map((s) => s.trim().toLowerCase()),
+);
+
+export async function fwRoleFromRequest(
+  req: FastifyRequest,
+  log?: { warn: (obj: unknown, msg?: string) => void },
+): Promise<'admin' | 'auditor' | 'member'> {
+  const token = bearerToken(req);
+  if (!token || !USERINFO_URL) return 'member';
+  let info: Record<string, unknown>;
+  try {
+    const res = await fetch(USERINFO_URL, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) return 'member';
+    info = (await res.json()) as Record<string, unknown>;
+  } catch (err) {
+    log?.warn({ err }, 'fwRole userinfo failed');
+    return 'member';
+  }
+  const groups = new Set<string>();
+  for (const g of (info.groups as string[] | undefined) ?? []) groups.add(String(g).replace(/^\//, '').toLowerCase());
+  const ra = info.realm_access as { roles?: string[] } | undefined;
+  for (const r of ra?.roles ?? []) groups.add(String(r).toLowerCase());
+  if ([...groups].some((g) => ADMIN_GROUPS.has(g))) return 'admin';
+  if ([...groups].some((g) => AUDITOR_GROUPS.has(g))) return 'auditor';
+  return 'member';
+}
+
 export function copyNameForEmail(email: string): string {
   const slug = email
     .toLowerCase()

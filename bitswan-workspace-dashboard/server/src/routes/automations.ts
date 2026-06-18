@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { openSse } from '../lib/sse.js';
-import { emailFromRequest } from '../lib/user.js';
+import { emailFromRequest, fwRoleFromRequest } from '../lib/user.js';
 import type { GitopsClient } from '../services/gitops.js';
 
 export interface AutomationRoutesOptions {
@@ -316,6 +316,63 @@ export function registerAutomationRoutes(
       },
     });
   }
+
+  // Firewall → egress allow-list rules + blocked/observed attempts.
+  app.get<{ Params: { bp: string }; Querystring: { stage?: string } }>(
+    '/api/automations/business-processes/:bp/firewall',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.firewall(req.params.bp, req.query.stage || 'dev');
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'firewall read failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  // Firewall → set/delete a rule, or pull rules forward. The actor email + the
+  // resolved role are injected server-side; gitops enforces prod RBAC.
+  const fwWrite = (
+    suffix: string,
+    method: 'PUT' | 'DELETE' | 'POST',
+  ) =>
+    app.route<{ Params: { bp: string }; Body: Record<string, unknown> }>({
+      method,
+      url: `/api/automations/business-processes/:bp/firewall${suffix}`,
+      handler: async (req, reply) => {
+        reply.header('Cache-Control', 'no-store');
+        if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+        const by = (await emailFromRequest(req, app.log)) || undefined;
+        const role = await fwRoleFromRequest(req, app.log);
+        try {
+          const r = await gitops.firewallWrite(req.params.bp, suffix, method, {
+            ...(req.body ?? {}),
+            ...(by ? { by } : {}),
+            role,
+          });
+          if (!r.ok) {
+            return reply
+              .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+              .send({ error: 'gitops error', status: r.status, body: r.body });
+          }
+          return r.body;
+        } catch (err) {
+          app.log.warn({ err, bp: req.params.bp }, 'firewall write failed');
+          return reply.code(502).send({ error: 'gitops unreachable' });
+        }
+      },
+    });
+  fwWrite('/rules', 'PUT');
+  fwWrite('/rules', 'DELETE');
+  fwWrite('/promote', 'POST');
 
   // Disaster Recovery → the BP's snapshot list (the DR panel's "tested
   // against" snapshot picker). Proxies the gitops snapshots list.

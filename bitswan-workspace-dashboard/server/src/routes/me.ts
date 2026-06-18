@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { GitopsClient } from '../services/gitops.js';
-import { copyNameForEmail, emailFromRequest } from '../lib/user.js';
+import { copyNameForEmail, emailFromRequest, fwRoleFromRequest } from '../lib/user.js';
 
 export interface MeRoutesOptions {
   gitops: GitopsClient | null;
@@ -49,6 +49,7 @@ export function registerMeRoutes(
         });
     }
 
-    return { email, copy };
+    const role = await fwRoleFromRequest(req, app.log);
+    return { email, copy, role };
   });
 }

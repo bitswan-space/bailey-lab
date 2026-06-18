@@ -574,6 +574,53 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** `GET .../business-processes/{bp}/firewall?stage=` — allow-list + attempts. */
+  async firewall(
+    bp: string,
+    stage: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall?stage=${encodeURIComponent(stage)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Firewall rule set/delete/promote. `path` selects /rules or /promote;
+   *  `method` is PUT/DELETE/POST. gitops versions the change + enforces prod RBAC
+   *  from the `role` in the payload. */
+  async firewallWrite(
+    bp: string,
+    path: string,
+    method: 'PUT' | 'DELETE' | 'POST',
+    payload: Record<string, unknown>,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /** `GET .../business-processes/{bp}/supply-chain?stage=` — SBOM + CVEs + waivers. */
   async supplyChain(
     bp: string,

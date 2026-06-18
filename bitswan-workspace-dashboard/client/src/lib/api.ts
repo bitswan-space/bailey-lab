@@ -352,6 +352,31 @@ export interface SupplyChainReport {
   waivers: CveWaiver[];
 }
 
+/** Egress firewall (outbound allow-list). */
+export interface FirewallRule {
+  host: string;
+  status: 'allowed' | 'denied';
+  purpose?: string;
+  by?: string;
+  at?: string;
+  gdpr?: Record<string, unknown> | null;
+}
+export interface FirewallAttempt {
+  host: string;
+  count: number;
+  // eslint-disable-next-line no-restricted-syntax -- nullable telemetry
+  last: string | null;
+  proto?: string;
+}
+export interface FirewallReport {
+  bp: string;
+  stage: string;
+  posture: 'monitor' | 'enforce' | string;
+  rules: FirewallRule[];
+  attempts: FirewallAttempt[]; // "needs review" — observed hosts with no rule yet
+  allowed: string[];
+}
+
 /** Infra services shown in the Containers tab's "Stage services" row. */
 export type ServiceType = 'postgres' | 'minio' | 'couchdb';
 
@@ -438,7 +463,10 @@ export const api = {
    * Identify the logged-in user and ensure their personal copy exists
    * (created on first login, reused after). The client auto-selects `copy`.
    */
-  getMe: () => getJson<{ email: string; copy: string; created: boolean }>('/api/me'),
+  getMe: () =>
+    getJson<{ email: string; copy: string; created?: boolean; role?: 'admin' | 'auditor' | 'member' }>(
+      '/api/me',
+    ),
 
   createBusinessProcess: (body: CreateBusinessProcessRequest) =>
     postJson<CreateBusinessProcessResponse>('/api/business-processes', body),
@@ -515,6 +543,32 @@ export const api = {
   ) =>
     postJson<DrStatus>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/dr/tests`,
+      body,
+    ),
+  /** Firewall: egress allow-list rules + blocked/observed attempts for a stage. */
+  firewall: (bp: string, stage: string) =>
+    getJson<FirewallReport>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/firewall?stage=${encodeURIComponent(stage)}`,
+    ),
+  /** Firewall: allow or deny an outbound host (versioned + audited). */
+  setFirewallRule: (
+    bp: string,
+    body: { stage: string; host: string; status: 'allowed' | 'denied'; purpose?: string; gdpr?: Record<string, unknown> },
+  ) =>
+    putJson<FirewallReport>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/firewall/rules`,
+      body,
+    ),
+  /** Firewall: remove a rule (revoke an allow / clear a deny). */
+  deleteFirewallRule: (bp: string, body: { stage: string; host: string }) =>
+    delJson<FirewallReport>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/firewall/rules`,
+      body,
+    ),
+  /** Firewall: pull rules forward (dev→staging→production). */
+  promoteFirewall: (bp: string, body: { from_stage: string; to_stage: string }) =>
+    postJson<FirewallReport>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/firewall/promote`,
       body,
     ),
   /** Supply chain: SBOM packages + CVEs + waiver log for a stage's image(s). */
