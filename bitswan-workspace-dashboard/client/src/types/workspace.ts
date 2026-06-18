@@ -31,13 +31,12 @@ export interface Copy {
   has_changes: boolean;
 }
 
-/** The top-bar flow tabs. Description, Deployments and Snapshots work
- *  without a copy (both are always main-scoped); the other three follow
- *  the selected copy. */
+/** The top-bar flow tabs. Description and Deployments work without a
+ *  copy (both are always main-scoped); the other three follow the
+ *  selected copy. Data snapshots live inside Deployments, per stage. */
 export type FlowTab =
   | 'description'
   | 'agent'
   | 'requirements'
   | 'sync-deploy'
-  | 'deployments'
-  | 'snapshots';
+  | 'deployments';

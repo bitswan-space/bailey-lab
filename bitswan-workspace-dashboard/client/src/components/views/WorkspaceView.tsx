@@ -2,7 +2,6 @@ import { GitBranch, GitMerge, Rocket } from 'lucide-react';
 import { AgentFilesTab } from '@/components/views/AgentFilesTab';
 import { EnvironmentPanel } from '@/components/agents/EnvironmentPanel';
 import { DeploymentsTab } from '@/components/views/DeploymentsTab';
-import { SnapshotsTab } from '@/components/views/SnapshotsTab';
 import { SyncDeployTab } from '@/components/views/SyncDeployTab';
 import { RequirementsTab } from '@/components/requirements/RequirementsTab';
 import { ReadmeCard } from '@/components/workspace/ReadmeCard';
@@ -94,17 +93,6 @@ export function WorkspaceView({ bp, wt, tab, onTab }: WorkspaceViewProps) {
           <SyncDeployTab bp={bp} wt={wt} onShowAgents={() => onTab('agent')} />
         ) : (
           <CopyGate bp={bp} wt={wt} what="sync and deploy" />
-        ))}
-
-      {tab === 'snapshots' &&
-        (bp.inMain ? (
-          <SnapshotsTab bp={bp} />
-        ) : (
-          <CenteredNote
-            icon={<GitMerge className="size-5 text-primary" aria-hidden />}
-            title="Not in main yet"
-            body={`“${bp.name}” only exists in copies. Sync a copy to main first — then its data snapshots show up here.`}
-          />
         ))}
 
       {tab === 'deployments' &&

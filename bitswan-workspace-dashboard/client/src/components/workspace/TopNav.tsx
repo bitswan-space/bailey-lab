@@ -1,6 +1,5 @@
 import {
   Bot,
-  Camera,
   CheckSquare,
   ChevronRight,
   FileText,
@@ -44,7 +43,6 @@ const FLOW_STEPS: {
   },
   { id: 'sync-deploy', label: 'Sync & Deploy', Icon: Rocket, needsCopy: true },
   { id: 'deployments', label: 'Deployments', Icon: Server, needsCopy: false },
-  { id: 'snapshots', label: 'Snapshots', Icon: Camera, needsCopy: false },
 ];
 
 /**

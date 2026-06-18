@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowRight,
   Boxes,
+  Camera,
   Check,
   CircleSlash,
   Code2,
@@ -71,7 +72,8 @@ import {
 } from '@/components/ui/alert-dialog';
 import { cn } from '@/lib/utils';
 import { setUrlParams, useUrlEnum, useUrlParam } from '@/lib/urlState';
-import type { BusinessProcess } from '@/types';
+import type { BusinessProcess, SnapshotStage } from '@/types';
+import { StageSnapshotsSection } from '@/components/views/StageSnapshotsSection';
 
 // The same CodeMirror viewer the copy file browser uses — lazy-loaded so the
 // editor bundle only lands when someone actually opens a file in Inspect.
@@ -102,6 +104,7 @@ type Section =
   | 'history'
   | 'secrets'
   | 'containers'
+  | 'snapshots'
   | 'backups'
   | 'firewall'
   | 'supply'
@@ -112,6 +115,7 @@ const SECTION_IDS: Section[] = [
   'history',
   'secrets',
   'containers',
+  'snapshots',
   'backups',
   'firewall',
   'supply',
@@ -989,6 +993,9 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
 
   const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
   const isDr = activeStage === 'dr';
+  // Data snapshots are per snapshot-stage (dev/staging/production); DR mirrors
+  // production. The ternary narrows StageId → SnapshotStage (drops 'dr').
+  const snapshotStage: SnapshotStage = activeStage === 'dr' ? 'production' : activeStage;
   // DR mirrors Production's deployment data.
   const data = byStage[stageDataId(activeStage)] ?? null;
   const history = data?.history ?? [];
@@ -1201,6 +1208,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         { id: 'history', icon: History, label: 'Deployment history', count: history.length },
         { id: 'secrets', icon: KeyRound, label: 'Secrets' },
         { id: 'containers', icon: Boxes, label: 'Containers', count: members.length },
+        { id: 'snapshots', icon: Camera, label: 'Snapshots' },
         { id: 'backups', icon: Archive, label: 'Backups' },
         { id: 'firewall', icon: Shield, label: 'Firewall', badges: firewallBadge },
         { id: 'supply', icon: Boxes, label: 'Supply chain', badges: supplyBadges },
@@ -1454,6 +1462,8 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
                 />
               )
+            ) : visibleSection === 'snapshots' ? (
+              <StageSnapshotsSection bp={bp} stage={snapshotStage} />
             ) : visibleSection === 'backups' ? (
               <EmptyTab icon={Archive} label="Backups" />
             ) : visibleSection === 'firewall' ? (

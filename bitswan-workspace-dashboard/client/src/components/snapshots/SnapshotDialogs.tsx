@@ -208,12 +208,16 @@ export function CloneDialog({
   open,
   bpSlug,
   enabledStages,
+  fixedSource,
   onCancel,
   onConfirm,
 }: {
   open: boolean;
   bpSlug: string;
   enabledStages: SnapshotStage[];
+  /** When set, the source stage is implied (per-stage view) — no "From"
+   *  picker is shown and only the target is chosen. */
+  fixedSource?: SnapshotStage;
   onCancel: () => void;
   onConfirm: (source: SnapshotStage, target: SnapshotStage) => void;
 }) {
@@ -225,11 +229,11 @@ export function CloneDialog({
 
   useEffect(() => {
     if (open) {
-      setSource(enabledStages[0] ?? null);
+      setSource(fixedSource ?? enabledStages[0] ?? null);
       setTarget(null);
       setTyped('');
     }
-  }, [open, enabledStages]);
+  }, [open, enabledStages, fixedSource]);
 
   const targetChoices = useMemo(
     () => enabledStages.filter((s) => s !== source),
@@ -248,25 +252,39 @@ export function CloneDialog({
         <DialogHeader>
           <DialogTitle>Clone stage data</DialogTitle>
           <DialogDescription>
-            One-click copy of this business process&apos;s data from one stage
-            into another — e.g. seed Staging from Production.
+            {fixedSource
+              ? `One-click copy of ${STAGE_META[fixedSource].label}’s data into another stage — e.g. seed Staging from Production.`
+              : 'One-click copy of this business process’s data from one stage into another — e.g. seed Staging from Production.'}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
-          <div className="text-[13px] font-medium text-muted-foreground">From</div>
-          <StagePicker
-            value={source}
-            onChange={(s) => {
-              setSource(s);
-              if (target === s) setTarget(null);
-              setTyped('');
-            }}
-            enabled={enabledStages}
-          />
-          <div className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
-            <ArrowRight className="size-3.5" aria-hidden />
-            Into
-          </div>
+          {fixedSource ? (
+            <div className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
+              Copy{' '}
+              <strong className="text-foreground">
+                {STAGE_META[fixedSource].label}
+              </strong>
+              <ArrowRight className="size-3.5" aria-hidden />
+              into
+            </div>
+          ) : (
+            <>
+              <div className="text-[13px] font-medium text-muted-foreground">From</div>
+              <StagePicker
+                value={source}
+                onChange={(s) => {
+                  setSource(s);
+                  if (target === s) setTarget(null);
+                  setTyped('');
+                }}
+                enabled={enabledStages}
+              />
+              <div className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
+                <ArrowRight className="size-3.5" aria-hidden />
+                Into
+              </div>
+            </>
+          )}
           <StagePicker
             value={target}
             onChange={(s) => {

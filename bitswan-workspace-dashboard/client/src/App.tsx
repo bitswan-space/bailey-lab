@@ -40,7 +40,6 @@ const FLOW_TABS: FlowTab[] = [
   'requirements',
   'sync-deploy',
   'deployments',
-  'snapshots',
 ];
 
 // Page-scoped query params owned by the individual tab components. They're
