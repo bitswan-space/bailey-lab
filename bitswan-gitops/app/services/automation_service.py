@@ -4736,34 +4736,43 @@ fi
         # proxy. It sits on bitswan_network (so the workers reach infra + the
         # internet through it) and logs blocked/observed hosts to the shared
         # firewall dir for the dashboard's "needs review" feed.
-        gw_image = os.environ.get(
-            "BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest"
-        )
-        fw_host_dir = os.path.join(os.path.dirname(self.gitops_dir_host), "firewall")
-        os.makedirs(firewall_service.firewall_dir(), exist_ok=True)
-        for (ctx, stage), fw in fw_scope.items():
-            if not fw["ok"]:
-                continue
-            gw, realm = fw["gw"], fw["realm"]
-            dc["services"][gw] = {
-                "image": gw_image,
-                "container_name": gw,
-                "restart": "unless-stopped",
-                "cap_add": ["NET_ADMIN"],
-                "networks": {"bitswan_network": {"aliases": [gw]}},
-                "environment": {
-                    "BITSWAN_FW_MODE": fw["mode"],
-                    "BITSWAN_FW_ALLOW": ",".join(fw["allow"]),
-                    "BITSWAN_FW_ATTEMPTS": f"/firewall/{ctx}__{realm}.attempts.jsonl",
-                },
-                "volumes": [f"{fw_host_dir}:/firewall"],
-                "labels": {
-                    "gitops.firewall_gateway": "true",
-                    "gitops.bp": ctx,
-                    "gitops.stage": realm,
-                },
-            }
-            external_networks.add("bitswan_network")
+        # Only touch the firewall dir / emit gateways when at least one (ctx,
+        # stage) actually has an active firewall — keeps deploys zero-blast-radius
+        # when the feature is unused (the shared firewall volume may not be
+        # writable, or even exist, on workspaces that never configured egress
+        # rules). When a firewall IS active, a failure to create the attempts dir
+        # must surface (the gateway can't run without it) — so no try/except.
+        if any(f.get("ok") for f in fw_scope.values()):
+            gw_image = os.environ.get(
+                "BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest"
+            )
+            fw_host_dir = os.path.join(
+                os.path.dirname(self.gitops_dir_host), "firewall"
+            )
+            os.makedirs(firewall_service.firewall_dir(), exist_ok=True)
+            for (ctx, stage), fw in fw_scope.items():
+                if not fw["ok"]:
+                    continue
+                gw, realm = fw["gw"], fw["realm"]
+                dc["services"][gw] = {
+                    "image": gw_image,
+                    "container_name": gw,
+                    "restart": "unless-stopped",
+                    "cap_add": ["NET_ADMIN"],
+                    "networks": {"bitswan_network": {"aliases": [gw]}},
+                    "environment": {
+                        "BITSWAN_FW_MODE": fw["mode"],
+                        "BITSWAN_FW_ALLOW": ",".join(fw["allow"]),
+                        "BITSWAN_FW_ATTEMPTS": f"/firewall/{ctx}__{realm}.attempts.jsonl",
+                    },
+                    "volumes": [f"{fw_host_dir}:/firewall"],
+                    "labels": {
+                        "gitops.firewall_gateway": "true",
+                        "gitops.bp": ctx,
+                        "gitops.stage": realm,
+                    },
+                }
+                external_networks.add("bitswan_network")
 
         # Merge infra service entries (Kafka, CouchDB, etc.) for enabled services
         infra_service_names = self._merge_infra_services(
