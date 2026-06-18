@@ -137,6 +137,18 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
     slug = _bp_slug(bp)
     _validate_stage(body.source_stage)
     _validate_stage(body.target_stage)
+    # Safety: never overwrite LIVE Production data with a restore. Recovery goes
+    # into the isolated Disaster-Recovery standby (restored, hand-verified) and
+    # only then goes live via the DR swap (an ingress repoint, no data move).
+    if body.target_stage == "production":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Restoring directly into live Production is not allowed. Restore "
+                "into Disaster Recovery, verify the data, then swap DR with "
+                "Production (ingress cutover)."
+            ),
+        )
     try:
         res = await spawn_restore_snapshot(
             slug, body.snapshot_id, body.source_stage, body.target_stage
