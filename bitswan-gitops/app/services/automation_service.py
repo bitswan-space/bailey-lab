@@ -4143,6 +4143,51 @@ fi
         # any container can reach the others. Scoped per BP+stage so business
         # processes stay isolated. The association is explicit data, not a
         # hostname guessed at runtime.
+        # Egress-firewall pre-pass: which (ctx, stage) groups route their worker
+        # containers through a per-group egress gateway. Opt-in — only BPs that
+        # have a `firewall` node for the realm are affected (zero change
+        # otherwise). live-dev is never gated (the edit loop). Workers with
+        # replicas>1 can't share one netns, so the gateway is disabled for that
+        # group (logged) rather than silently leaving a hole half-applied.
+        fw_scope: dict[tuple[str, str], dict] = {}
+        for _dep_id, _conf in deployments.items():
+            if not _conf:
+                continue
+            _stage = _conf.get("stage", "production") or "production"
+            if _stage == "live-dev":
+                continue
+            _ctx = _conf.get("context", "")
+            _realm = bp_secrets.realm_for_stage(_stage)
+            fwnode = ((bs_yaml.get("firewall") or {}).get(_ctx) or {}).get(_realm)
+            if not fwnode:
+                continue
+            key = (_ctx, _stage)
+            fw = fw_scope.setdefault(
+                key,
+                {
+                    "gw": make_hostname_label(
+                        self.workspace_name, "fwgw", _ctx, _stage
+                    ),
+                    "mode": fwnode.get("posture")
+                    or firewall_service.posture_for(_realm),
+                    "allow": firewall_service.allowed_hosts(bs_yaml, _ctx, _realm),
+                    "realm": _realm,
+                    "ok": True,
+                },
+            )
+            if (_conf.get("replicas") or 1) > 1:
+                fw["ok"] = False
+                logger.warning(
+                    "firewall: %s/%s has a replicas>1 member; egress gateway disabled "
+                    "for this group (shared netns can't host replicas)",
+                    _ctx,
+                    _realm,
+                )
+
+        def _fw_active(ctx: str, stage: str) -> dict | None:
+            fw = fw_scope.get((ctx, stage))
+            return fw if fw and fw["ok"] else None
+
         worker_hosts_by_scope: dict[tuple[str, str], list[str]] = {}
         for _dep_id, _conf in deployments.items():
             if not _conf:
@@ -4156,7 +4201,14 @@ fi
                 continue
             if _cfg.expose:
                 continue  # frontends are not workers
-            _host = make_hostname_label(self.workspace_name, _name, _ctx, _stage)
+            # When firewalled, the worker lives in the gateway's netns, so peers
+            # reach it at the gateway's hostname (the gateway is on bitswan_network).
+            _fw = _fw_active(_ctx, _stage)
+            _host = (
+                _fw["gw"]
+                if _fw
+                else make_hostname_label(self.workspace_name, _name, _ctx, _stage)
+            )
             worker_hosts_by_scope.setdefault((_ctx, _stage), []).append(
                 f"{_name}={_host}:{_cfg.port}"
             )
@@ -4320,6 +4372,18 @@ fi
 
             # network_mode comes from the deployment entry below (3861 fallback).
             network_mode = None
+
+            # Egress firewall: route this worker through its group's gateway by
+            # sharing the gateway's network namespace, with NET_ADMIN/NET_RAW
+            # dropped so container-root can't alter the gateway's iptables. Only
+            # workers are gated — a frontend's egress is the iframe's, enforced
+            # via CSP. The gateway service itself is emitted after the loop.
+            _fw = _fw_active(dep_context, dep_stage)
+            if _fw and not automation_config.expose:
+                network_mode = f"service:{_fw['gw']}"
+                entry["cap_drop"] = sorted(
+                    set(entry.get("cap_drop", [])) | {"NET_ADMIN", "NET_RAW"}
+                )
 
             # Per-(BP, stage) secrets: decrypt this stage's blob from
             # bitswan.yaml and (re)materialise the plaintext env file the
@@ -4553,6 +4617,41 @@ fi
 
             if conf.get("enabled", True):
                 dc["services"][service_name] = entry
+
+        # Emit one egress-gateway service per firewalled (ctx, stage) group. The
+        # workers above share its netns; it holds NET_ADMIN, installs the
+        # iptables interception (entrypoint), and runs the SNI/Host allow-list
+        # proxy. It sits on bitswan_network (so the workers reach infra + the
+        # internet through it) and logs blocked/observed hosts to the shared
+        # firewall dir for the dashboard's "needs review" feed.
+        gw_image = os.environ.get(
+            "BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest"
+        )
+        fw_host_dir = os.path.join(os.path.dirname(self.gitops_dir_host), "firewall")
+        os.makedirs(firewall_service.firewall_dir(), exist_ok=True)
+        for (ctx, stage), fw in fw_scope.items():
+            if not fw["ok"]:
+                continue
+            gw, realm = fw["gw"], fw["realm"]
+            dc["services"][gw] = {
+                "image": gw_image,
+                "container_name": gw,
+                "restart": "unless-stopped",
+                "cap_add": ["NET_ADMIN"],
+                "networks": {"bitswan_network": {"aliases": [gw]}},
+                "environment": {
+                    "BITSWAN_FW_MODE": fw["mode"],
+                    "BITSWAN_FW_ALLOW": ",".join(fw["allow"]),
+                    "BITSWAN_FW_ATTEMPTS": f"/firewall/{ctx}__{realm}.attempts.jsonl",
+                },
+                "volumes": [f"{fw_host_dir}:/firewall"],
+                "labels": {
+                    "gitops.firewall_gateway": "true",
+                    "gitops.bp": ctx,
+                    "gitops.stage": realm,
+                },
+            }
+            external_networks.add("bitswan_network")
 
         # Merge infra service entries (Kafka, CouchDB, etc.) for enabled services
         infra_service_names = self._merge_infra_services(
