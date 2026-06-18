@@ -193,6 +193,49 @@ async def post_bp_dr_test_route(
     )
 
 
+class SupplyChainWaiverRequest(BaseModel):
+    stage: str
+    package: str
+    cve: str
+    comment: str | None = None
+    by: str | None = None
+
+
+@router.get("/business-processes/{bp}/supply-chain")
+async def get_bp_supply_chain(
+    bp: str,
+    stage: str = Query("dev"),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """SBOM packages + CVEs (syft/grype) for the image(s) deployed to a BP stage,
+    plus the out-of-scope waiver log."""
+    return automation_service.read_supply_chain(bp, stage)
+
+
+@router.post("/business-processes/{bp}/supply-chain/waivers")
+async def post_bp_supply_chain_waiver(
+    bp: str,
+    body: SupplyChainWaiverRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Mark a CVE out of scope (versioned in bitswan.yaml with who/when/why)."""
+    return await automation_service.add_supply_chain_waiver(
+        bp, body.stage, body.package, body.cve, body.comment or "", body.by
+    )
+
+
+@router.delete("/business-processes/{bp}/supply-chain/waivers")
+async def delete_bp_supply_chain_waiver(
+    bp: str,
+    body: SupplyChainWaiverRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Restore a previously-waived CVE to in-scope (its own commit)."""
+    return await automation_service.remove_supply_chain_waiver(
+        bp, body.stage, body.package, body.cve, body.by
+    )
+
+
 @router.get("/business-processes/{bp}/files")
 async def get_bp_files(
     bp: str,

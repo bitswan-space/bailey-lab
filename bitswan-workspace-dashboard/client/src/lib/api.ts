@@ -75,6 +75,15 @@ async function deleteEmpty(url: string): Promise<void> {
   await fetchWithRetry(url, { method: 'DELETE' });
 }
 
+async function delJson<T>(url: string, body: unknown): Promise<T> {
+  const r = await fetchWithRetry(url, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return (await r.json()) as T;
+}
+
 async function putJson<T>(url: string, body: unknown): Promise<T> {
   const r = await fetchWithRetry(url, {
     method: 'PUT',
@@ -310,6 +319,39 @@ export interface DrStatus {
  *  `label` / `created_at` / `total_size_bytes` (and `id` / `stage`). */
 export type BpSnapshot = Snapshot;
 
+/** Supply chain: CVE severity buckets the UI renders. */
+export type CveSeverity = 'critical' | 'high' | 'medium' | 'low';
+export interface SupplyChainCve {
+  id: string;
+  severity: CveSeverity;
+}
+export interface SupplyChainPackage {
+  name: string;
+  version: string;
+  type: string;
+  cves: SupplyChainCve[];
+}
+/** An out-of-scope marking (who/when/why) — logged in bitswan.yaml. */
+export interface CveWaiver {
+  package: string;
+  cve: string;
+  by: string;
+  at: string;
+  comment: string;
+}
+/** `supplyChain(bp, stage)` — SBOM + CVEs + waivers for a stage's deployed image(s). */
+export interface SupplyChainReport {
+  bp: string;
+  stage: string;
+  /** ok | pending (scan not done) | unavailable (scan failed) | not-deployed */
+  status: string;
+  // eslint-disable-next-line no-restricted-syntax -- null until first scan
+  scanned_at: string | null;
+  image_count: number;
+  packages: SupplyChainPackage[];
+  waivers: CveWaiver[];
+}
+
 /** Infra services shown in the Containers tab's "Stage services" row. */
 export type ServiceType = 'postgres' | 'minio' | 'couchdb';
 
@@ -473,6 +515,26 @@ export const api = {
   ) =>
     postJson<DrStatus>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/dr/tests`,
+      body,
+    ),
+  /** Supply chain: SBOM packages + CVEs + waiver log for a stage's image(s). */
+  supplyChain: (bp: string, stage: string) =>
+    getJson<SupplyChainReport>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}`,
+    ),
+  /** Supply chain: mark a CVE out of scope (versioned + audited in bitswan.yaml). */
+  addCveWaiver: (
+    bp: string,
+    body: { stage: string; package: string; cve: string; comment: string },
+  ) =>
+    postJson<SupplyChainReport>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/waivers`,
+      body,
+    ),
+  /** Supply chain: restore a previously-waived CVE to in-scope. */
+  removeCveWaiver: (bp: string, body: { stage: string; package: string; cve: string }) =>
+    delJson<SupplyChainReport>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/waivers`,
       body,
     ),
   /** Disaster Recovery: the BP's snapshot list (the "tested against" picker). */

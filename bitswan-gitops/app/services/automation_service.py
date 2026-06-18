@@ -37,6 +37,7 @@ from app.async_docker import get_async_docker_client, DockerError
 from app.deploy_manager import deploy_manager
 from app.services.image_service import ImageService
 from app.services import bp_secrets
+from app.services import supply_chain_service
 from app.services.oauth2_helpers import (
     OAUTH2_PROXY_PATH,
     copy_oauth2_proxy_to_container,
@@ -922,6 +923,10 @@ class AutomationService:
                 source_dir, dirs_to_merge, base_image, auto_conf.mount_path, checksum
             )
             source_commit = await self._source_commit(source_dir)
+            # First build of this image → SBOM (syft) + CVE scan (grype) in the
+            # background; the daily job refreshes CVEs later. Never blocks deploy.
+            if image and image_id:
+                supply_chain_service.spawn_scan(image, image_id)
 
         return {
             "deployment_id": deployment_id,
@@ -1512,6 +1517,160 @@ class AutomationService:
             message=f"dr recovery test {bp}",
         )
         return self.read_dr(bp)
+
+    # ── Supply chain (SBOM + CVEs) ───────────────────────────────────────────
+    def _supply_chain_waivers(self, bs: dict, bp: str, realm: str) -> dict:
+        return (((bs.get("supply_chain") or {}).get(bp) or {}).get(realm) or {}).get(
+            "waivers"
+        ) or {}
+
+    def read_supply_chain(self, bp: str, stage: str) -> dict:
+        """SBOM + CVE rollup for the image(s) deployed to a BP stage, with the
+        out-of-scope waiver log. Packages and CVEs are merged (deduped) across the
+        stage's member images; waivers live in bitswan.yaml (versioned, audited).
+        `status`: ok | pending (scan not done yet) | unavailable | not-deployed."""
+        realm = bp_secrets.realm_for_stage(stage)
+        deployments = self._bp_stage_node(bp, stage).get("deployments") or {}
+        image_ids = [
+            (d or {}).get("image_id")
+            for d in deployments.values()
+            if (d or {}).get("image_id")
+        ]
+        merged: dict[tuple, dict] = {}
+        statuses: list[str] = []
+        scanned_ats: list[str] = []
+        for iid in image_ids:
+            scan = supply_chain_service.read_image_scan(iid)
+            statuses.append(scan.get("status"))
+            if scan.get("scanned_at"):
+                scanned_ats.append(scan["scanned_at"])
+            for p in scan.get("packages", []):
+                entry = merged.setdefault(
+                    (p["name"], p["version"]),
+                    {
+                        "name": p["name"],
+                        "version": p["version"],
+                        "type": p.get("type", ""),
+                        "cves": {},
+                    },
+                )
+                for c in p.get("cves", []):
+                    entry["cves"][c["id"]] = c["severity"]
+        packages = [
+            {
+                "name": e["name"],
+                "version": e["version"],
+                "type": e["type"],
+                "cves": [
+                    {"id": cid, "severity": sev}
+                    for cid, sev in sorted(e["cves"].items())
+                ],
+            }
+            for e in sorted(merged.values(), key=lambda x: x["name"].lower())
+        ]
+        if not image_ids:
+            status = "not-deployed"
+        elif any(s == "ok" for s in statuses):
+            status = "ok"
+        elif any(s == "unavailable" for s in statuses):
+            status = "unavailable"
+        else:
+            status = "pending"
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        waivers = self._supply_chain_waivers(bs, bp, realm)
+        waiver_list = [
+            {
+                "package": v.get("package"),
+                "cve": v.get("cve"),
+                "by": v.get("by"),
+                "at": v.get("at"),
+                "comment": v.get("comment"),
+            }
+            for v in waivers.values()
+        ]
+        return {
+            "bp": bp,
+            "stage": realm,
+            "status": status,
+            "scanned_at": min(scanned_ats) if scanned_ats else None,
+            "image_count": len(image_ids),
+            "packages": packages,
+            "waivers": waiver_list,
+        }
+
+    async def add_supply_chain_waiver(
+        self,
+        bp: str,
+        stage: str,
+        package: str,
+        cve: str,
+        comment: str,
+        by: str | None = None,
+    ) -> dict:
+        """Mark a CVE out of scope for a BP stage — recorded in bitswan.yaml
+        (versioned) with who/when/why, so there's a permanent audit log."""
+        realm = bp_secrets.realm_for_stage(stage)
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        sc = bs.setdefault("supply_chain", {}).setdefault(bp, {}).setdefault(realm, {})
+        sc.setdefault("waivers", {})[f"{package}|{cve}"] = {
+            "package": package,
+            "cve": cve,
+            "by": by or "unknown",
+            "at": date.today().strftime("%b %-d, %Y"),
+            "comment": (comment or "").strip(),
+        }
+        path = os.path.join(self.gitops_dir, "bitswan.yaml")
+        with open(path, "w") as f:
+            dump_bitswan_yaml(bs, f)
+        await update_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
+            "supply-chain",
+            deployed_by=by,
+            message=f"supply-chain: {cve} ({package}) out of scope for {bp}/{realm}",
+        )
+        return self.read_supply_chain(bp, stage)
+
+    async def remove_supply_chain_waiver(
+        self, bp: str, stage: str, package: str, cve: str, by: str | None = None
+    ) -> dict:
+        """Restore a previously-waived CVE to in-scope (its own commit)."""
+        realm = bp_secrets.realm_for_stage(stage)
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        waivers = self._supply_chain_waivers(bs, bp, realm)
+        if f"{package}|{cve}" in waivers:
+            del waivers[f"{package}|{cve}"]
+            path = os.path.join(self.gitops_dir, "bitswan.yaml")
+            with open(path, "w") as f:
+                dump_bitswan_yaml(bs, f)
+            await update_git(
+                self.gitops_dir,
+                self.gitops_dir_host,
+                bp,
+                "supply-chain",
+                deployed_by=by,
+                message=f"supply-chain: restore {cve} ({package}) to in-scope for {bp}/{realm}",
+            )
+        return self.read_supply_chain(bp, stage)
+
+    async def rescan_deployed_images(self) -> dict:
+        """Daily job: refresh the grype vuln DB (best-effort) and re-run grype
+        against every distinct deployed image's cached SBOM so new CVEs surface."""
+        await supply_chain_service.update_vuln_db()
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        seen: set[str] = set()
+        scanned = 0
+        for dep in (bs.get("deployments") or {}).values():
+            dep = dep or {}
+            iid, ref = dep.get("image_id"), dep.get("image")
+            if not iid or iid in seen:
+                continue
+            seen.add(iid)
+            await supply_chain_service.scan_image(ref or iid, iid, force_cve=True)
+            scanned += 1
+        logger.info(f"supply-chain daily rescan: {scanned} image(s)")
+        return {"rescanned": scanned}
 
     async def scale_business_process(self, bp: str, stage: str, replicas: int) -> dict:
         """Scale every member container of a BP stage to `replicas` (Inspect →

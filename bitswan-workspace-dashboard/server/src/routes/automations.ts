@@ -256,6 +256,67 @@ export function registerAutomationRoutes(
     }
   });
 
+  // Supply chain → SBOM packages + CVEs (syft/grype) for the deployed image(s)
+  // at a stage, plus the out-of-scope waiver log.
+  app.get<{ Params: { bp: string }; Querystring: { stage?: string } }>(
+    '/api/automations/business-processes/:bp/supply-chain',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.supplyChain(req.params.bp, req.query.stage || 'dev');
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'supply-chain read failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  // Supply chain → mark a CVE out of scope (POST) / restore it (DELETE),
+  // attributed to the signed-in user and versioned in bitswan.yaml.
+  for (const method of ['POST', 'DELETE'] as const) {
+    app.route<{
+      Params: { bp: string };
+      Body: { stage?: string; package?: string; cve?: string; comment?: string };
+    }>({
+      method,
+      url: '/api/automations/business-processes/:bp/supply-chain/waivers',
+      handler: async (req, reply) => {
+        reply.header('Cache-Control', 'no-store');
+        if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+        const { stage, package: pkg, cve, comment } = req.body ?? {};
+        if (!stage || !pkg || !cve) {
+          return reply.code(400).send({ error: 'stage, package and cve are required' });
+        }
+        const by = (await emailFromRequest(req, app.log)) || undefined;
+        try {
+          const r = await gitops.supplyChainWaiver(req.params.bp, method, {
+            stage,
+            package: pkg,
+            cve,
+            ...(comment ? { comment } : {}),
+            ...(by ? { by } : {}),
+          });
+          if (!r.ok) {
+            return reply
+              .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+              .send({ error: 'gitops error', status: r.status, body: r.body });
+          }
+          return r.body;
+        } catch (err) {
+          app.log.warn({ err, bp: req.params.bp }, 'supply-chain waiver failed');
+          return reply.code(502).send({ error: 'gitops unreachable' });
+        }
+      },
+    });
+  }
+
   // Disaster Recovery → the BP's snapshot list (the DR panel's "tested
   // against" snapshot picker). Proxies the gitops snapshots list.
   app.get<{ Params: { bp: string } }>(

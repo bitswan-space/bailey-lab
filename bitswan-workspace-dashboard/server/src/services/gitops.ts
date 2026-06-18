@@ -574,6 +574,51 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** `GET .../business-processes/{bp}/supply-chain?stage=` — SBOM + CVEs + waivers. */
+  async supplyChain(
+    bp: string,
+    stage: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Mark a CVE out of scope (POST) or restore it (DELETE) — body carries
+   *  {stage, package, cve, comment?, by?}; gitops versions it in bitswan.yaml. */
+  async supplyChainWaiver(
+    bp: string,
+    method: 'POST' | 'DELETE',
+    payload: { stage: string; package: string; cve: string; comment?: string; by?: string },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/waivers`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /** `PUT .../business-processes/{bp}/dr/policy` — set the recovery-test cadence. */
   async setDrPolicy(
     bp: string,

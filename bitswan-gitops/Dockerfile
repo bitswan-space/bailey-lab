@@ -45,6 +45,11 @@ USER root
 # Runtime tooling (snapshots/backups + the oauth2-proxy download below)
 RUN apt-get update && apt-get install -y curl jq tar restic awscli && rm -rf /var/lib/apt/lists/*
 
+# Supply-chain scanning: syft (SBOM) + grype (CVEs). Static Go binaries; grype
+# downloads its vuln DB on first run (and the daily re-scan job refreshes it).
+RUN curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh  | sh -s -- -b /usr/local/bin \
+ && curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
 # Download oauth2-proxy
 RUN LATEST_VERSION=$(curl -s https://api.github.com/repos/bitswan-space/bitswan-aoc-oauth2/releases/latest | jq -r '.tag_name') \
     && curl -L -o /usr/local/bin/oauth2-proxy https://github.com/bitswan-space/bitswan-aoc-oauth2/releases/download/${LATEST_VERSION}/oauth2-proxy-mqtt \

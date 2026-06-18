@@ -42,6 +42,7 @@ import { DiffView } from '@/components/diff/DiffView';
 import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
 import { DisasterRecoveryPanel } from '@/components/disaster-recovery/DisasterRecoveryPanel';
+import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
 import { LogsPane } from '@/components/automations/inspect/LogsPane';
 import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import type { ServiceType } from '@/lib/api';
@@ -127,6 +128,7 @@ function SectionTab({
   label,
   count,
   locked,
+  badges,
   onSelect,
 }: {
   id: Section;
@@ -135,6 +137,7 @@ function SectionTab({
   label: string;
   count?: number;
   locked?: boolean;
+  badges?: { n: number; cls: string; title: string }[];
   onSelect: (id: Section) => void;
 }) {
   return (
@@ -161,6 +164,15 @@ function SectionTab({
           {count}
         </span>
       )}
+      {(badges ?? []).map((b, i) => (
+        <span
+          key={i}
+          title={b.title}
+          className={cn('rounded-full px-1.5 text-[10px] font-bold text-white', b.cls)}
+        >
+          {b.n}
+        </span>
+      ))}
     </button>
   );
 }
@@ -1074,6 +1086,37 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     return max;
   }, [byStage]);
 
+  // Critical/high CVE badge on the Supply chain tab (active, non-waived) for the
+  // current stage — one fetch per stage view.
+  const [supplyBadges, setSupplyBadges] = useState<
+    { n: number; cls: string; title: string }[]
+  >([]);
+  useEffect(() => {
+    let alive = true;
+    api
+      .supplyChain(bp.name, isDr ? 'production' : activeStage)
+      .then((r) => {
+        if (!alive) return;
+        const waived = new Set((r.waivers ?? []).map((w) => `${w.package}|${w.cve}`));
+        let crit = 0;
+        let high = 0;
+        for (const p of r.packages ?? [])
+          for (const c of p.cves) {
+            if (waived.has(`${p.name}|${c.id}`)) continue;
+            if (c.severity === 'critical') crit += 1;
+            else if (c.severity === 'high') high += 1;
+          }
+        const b: { n: number; cls: string; title: string }[] = [];
+        if (crit) b.push({ n: crit, cls: 'bg-red-600', title: `${crit} critical CVEs` });
+        if (high) b.push({ n: high, cls: 'bg-orange-600', title: `${high} high CVEs` });
+        setSupplyBadges(b);
+      })
+      .catch(() => alive && setSupplyBadges([]));
+    return () => {
+      alive = false;
+    };
+  }, [bp.name, activeStage, isDr, reloadKey]);
+
   // DR's tabs: its own Recovery-tests + Containers, then a "Mirrored from
   // Production" group (read-only) for the data it shares. Other stages keep the
   // full set.
@@ -1083,6 +1126,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     label: string;
     count?: number;
     locked?: boolean;
+    badges?: { n: number; cls: string; title: string }[];
   }[] = isDr
     ? [
         { id: 'recovery', icon: LifeBuoy, label: 'Recovery tests' },
@@ -1090,7 +1134,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         { id: 'history', icon: History, label: 'Deployment history', count: history.length, locked: true },
         { id: 'secrets', icon: KeyRound, label: 'Secrets', locked: true },
         { id: 'firewall', icon: Shield, label: 'Firewall', locked: true },
-        { id: 'supply', icon: Boxes, label: 'Supply chain', locked: true },
+        { id: 'supply', icon: Boxes, label: 'Supply chain', locked: true, badges: supplyBadges },
       ]
     : [
         { id: 'history', icon: History, label: 'Deployment history', count: history.length },
@@ -1098,7 +1142,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         { id: 'containers', icon: Boxes, label: 'Containers', count: members.length },
         { id: 'backups', icon: Archive, label: 'Backups' },
         { id: 'firewall', icon: Shield, label: 'Firewall' },
-        { id: 'supply', icon: Boxes, label: 'Supply chain' },
+        { id: 'supply', icon: Boxes, label: 'Supply chain', badges: supplyBadges },
       ];
   // The section that's actually shown — falls back to the stage's first tab when
   // the URL section isn't valid here (e.g. 'backups' isn't a DR tab, 'recovery'
@@ -1354,7 +1398,12 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             ) : visibleSection === 'firewall' ? (
               <EmptyTab icon={Shield} label="Firewall" />
             ) : (
-              <EmptyTab icon={Boxes} label="Supply chain" />
+              <SupplyChainPanel
+                bp={bp.name}
+                stage={isDr ? 'production' : activeStage}
+                stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
+                readOnly={isDr}
+              />
             )}
           </div>
         </div>

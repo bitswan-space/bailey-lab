@@ -540,6 +540,25 @@ async def lifespan(app: FastAPI):
         name="daily_backup",
     )
 
+    # Daily supply-chain re-scan at 3 AM UTC: refresh grype's vuln DB and re-run
+    # it against every deployed image's cached SBOM so newly-disclosed CVEs against
+    # unchanged images surface without a rebuild.
+    async def _scheduled_supply_chain_scan():
+        from app.dependencies import get_automation_service
+
+        try:
+            await get_automation_service().rescan_deployed_images()
+        except Exception as e:
+            print(f"Scheduled supply-chain scan failed: {e}")
+
+    scheduler.add_job(
+        _scheduled_supply_chain_scan,
+        trigger="cron",
+        hour=3,
+        minute=0,
+        name="daily_supply_chain_scan",
+    )
+
     scheduler.start()
 
     # Warm the history cache in the background so first requests are fast
