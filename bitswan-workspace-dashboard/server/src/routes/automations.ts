@@ -278,6 +278,29 @@ export function registerAutomationRoutes(
     },
   );
 
+  // Containers tab → "Stage services": status (incl. admin_ui URL) of an infra
+  // service (postgres/minio/couchdb) for a stage. Only enabled+running services
+  // are surfaced as links by the client.
+  app.get<{ Params: { type: string }; Querystring: { stage?: string } }>(
+    '/api/services/:type/status',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.serviceStatus(req.params.type, req.query.stage || '');
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, type: req.params.type }, 'service status failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   // Inspect → Scale: scale every member container of a BP stage.
   app.post<{
     Params: { bp: string };

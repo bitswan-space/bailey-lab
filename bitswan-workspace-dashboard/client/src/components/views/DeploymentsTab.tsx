@@ -6,8 +6,10 @@ import {
   Check,
   CircleSlash,
   Code2,
+  Database,
   DatabaseBackup,
   Download,
+  HardDrive,
   ExternalLink,
   FileText,
   FlaskConical,
@@ -28,6 +30,7 @@ import {
   Search,
   Shield,
   Square,
+  Terminal,
   Undo2,
   User,
   X,
@@ -39,8 +42,11 @@ import { DiffView } from '@/components/diff/DiffView';
 import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
 import { DisasterRecoveryPanel } from '@/components/disaster-recovery/DisasterRecoveryPanel';
+import { LogsPane } from '@/components/automations/inspect/LogsPane';
+import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
+import type { ServiceType } from '@/lib/api';
 import { promoteBpWithToast } from '@/lib/deployBp';
-import { STATUS_META, stateToDisplay } from '@/lib/status';
+import { STATUS_META, stateToDisplay, type DisplayStatus } from '@/lib/status';
 import {
   api,
   isTransientNetworkError,
@@ -267,6 +273,201 @@ function EmptyTab({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
       <div className="max-w-sm text-[13px] text-muted-foreground">
         Not implemented yet — coming in a later release.
       </div>
+    </div>
+  );
+}
+
+// ── Containers tab ──────────────────────────────────────────────────────────
+interface Member {
+  id: string;
+  name: string;
+  present: boolean;
+  display: DisplayStatus;
+  replicas: number;
+  // eslint-disable-next-line no-restricted-syntax -- null = no URL
+  url: string | null;
+  expose: boolean;
+}
+
+const SERVICE_META: Record<ServiceType, { label: string; icon: LucideIcon }> = {
+  postgres: { label: 'Postgres', icon: Database },
+  minio: { label: 'MinIO', icon: HardDrive },
+  couchdb: { label: 'CouchDB', icon: Database },
+};
+
+// Map a deployment stage to the realm whose infra services back it (DR mirrors
+// production; live-dev shares dev) — matches the gitops service stages.
+function realmForStage(stage: StageId): string {
+  if (stage === 'dr') return 'production';
+  return stage;
+}
+
+/** "Stage services" row — links to the real admin consoles of the infra
+ *  services (Postgres/MinIO/CouchDB) that are actually enabled+running for this
+ *  stage. Renders nothing when none are — no fabricated links. */
+function StageServicesRow({ stage }: { stage: StageId }) {
+  const [links, setLinks] = useState<{ type: ServiceType; url: string }[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const realm = realmForStage(stage);
+    const types: ServiceType[] = ['postgres', 'minio', 'couchdb'];
+    Promise.all(
+      types.map((t) =>
+        api
+          .serviceStatus(t, realm)
+          .then((s) => ({ t, s }))
+          .catch(() => ({ t, s: null })),
+      ),
+    ).then((rows) => {
+      if (!alive) return;
+      setLinks(
+        rows
+          .filter(({ s }) => s && s.enabled && s.running && s.connection_info?.admin_ui)
+          .map(({ t, s }) => ({ type: t, url: s!.connection_info!.admin_ui as string })),
+      );
+    });
+    return () => {
+      alive = false;
+    };
+  }, [stage]);
+
+  if (links.length === 0) return null;
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-2 rounded-[10px] border border-border bg-background px-3.5 py-2.5">
+      <span className="mr-1 text-[12px] font-semibold text-foreground">Stage services</span>
+      {links.map(({ type, url }) => {
+        const meta = SERVICE_META[type];
+        const Icon = meta.icon;
+        return (
+          <a
+            key={type}
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            title={`Open ${meta.label} admin in a new tab`}
+            className="inline-flex h-[26px] items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] font-medium text-muted-foreground hover:border-primary/40 hover:text-foreground"
+          >
+            <Icon className="size-3.5" aria-hidden />
+            {meta.label}
+            <ExternalLink className="size-3" aria-hidden />
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
+/** One container card: header (status + lifecycle) + inline Logs / Inspect
+ *  expanders (single-open), reusing the shared LogsPane + OverviewPane. */
+function ContainerCard({
+  m,
+  onAction,
+}: {
+  m: Member;
+  onAction: (action: 'start' | 'stop' | 'restart', id: string, name: string) => void;
+}) {
+  const [open, setOpen] = useState<'logs' | 'inspect' | null>(null);
+  const meta = STATUS_META[m.display];
+  const running = m.display === 'running';
+  const KindIcon = m.expose ? Globe : Boxes;
+  const toggle = (p: 'logs' | 'inspect') => setOpen((cur) => (cur === p ? null : p));
+  return (
+    <div className="overflow-hidden rounded-[10px] border border-border bg-background">
+      <div className="flex flex-wrap items-center gap-2.5 px-4 py-3">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+          <KindIcon className="size-3.5 text-muted-foreground" aria-hidden />
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[13px] font-semibold text-foreground">
+          {m.name}
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className={cn('size-2 rounded-full', meta.dot)} aria-hidden />
+          <span className={cn('text-xs', meta.labelColor)}>{meta.label}</span>
+        </span>
+        {m.replicas > 0 && (
+          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+            <Layers className="size-3" aria-hidden />
+            {m.replicas}
+          </span>
+        )}
+        {m.present && (
+          <div className="flex items-center gap-0.5">
+            <Button variant="ghost" size="icon" className="size-8" title="Restart"
+              onClick={() => onAction('restart', m.id, m.name)}>
+              <RotateCcw className="size-3.5" aria-hidden />
+            </Button>
+            {running ? (
+              <Button variant="ghost" size="icon" className="size-8 text-red-600" title="Stop"
+                onClick={() => onAction('stop', m.id, m.name)}>
+                <Square className="size-3.5" aria-hidden />
+              </Button>
+            ) : (
+              <Button variant="ghost" size="icon" className="size-8 text-emerald-600" title="Start"
+                onClick={() => onAction('start', m.id, m.name)}>
+                <Play className="size-3.5" aria-hidden />
+              </Button>
+            )}
+          </div>
+        )}
+        <span className="mx-1 h-5 w-px bg-border" aria-hidden />
+        <button
+          type="button"
+          onClick={() => toggle('logs')}
+          className={cn(
+            'inline-flex h-7 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] font-medium',
+            open === 'logs' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          <Terminal className="size-3" aria-hidden />
+          Logs
+        </button>
+        <button
+          type="button"
+          onClick={() => toggle('inspect')}
+          className={cn(
+            'inline-flex h-7 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] font-medium',
+            open === 'inspect' ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          <Search className="size-3" aria-hidden />
+          Inspect
+        </button>
+      </div>
+      {open === 'logs' && (
+        <div className="h-64 border-t border-border">
+          <LogsPane deploymentId={m.id} active />
+        </div>
+      )}
+      {open === 'inspect' && (
+        <div className="border-t border-border px-4 py-3.5">
+          <OverviewPane deploymentId={m.id} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContainersSection({
+  members,
+  stage,
+  stageLabel,
+  onAction,
+}: {
+  members: Member[];
+  stage: StageId;
+  stageLabel: string;
+  onAction: (action: 'start' | 'stop' | 'restart', id: string, name: string) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <StageServicesRow stage={stage} />
+      {members.length === 0 ? (
+        <div className="px-3 py-10 text-center text-sm text-muted-foreground">
+          No containers in {stageLabel}.
+        </div>
+      ) : (
+        members.map((m) => <ContainerCard key={m.id} m={m} onAction={onAction} />)
+      )}
     </div>
   );
 }
@@ -1129,54 +1330,12 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 </div>
               )
             ) : visibleSection === 'containers' ? (
-              members.length === 0 ? (
-                <div className="px-3 py-10 text-center text-sm text-muted-foreground">
-                  No containers in {STAGE_LABEL[activeStage]}.
-                </div>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  {members.map((m) => {
-                    const meta = STATUS_META[m.display];
-                    const running = m.display === 'running';
-                    return (
-                      <div
-                        key={m.id}
-                        className="flex items-center gap-3 rounded-[10px] border border-border bg-background px-4 py-3"
-                      >
-                        <span className={cn('size-2.5 rounded-full', meta.dot)} aria-hidden />
-                        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-                          {m.name}
-                        </span>
-                        <span className={cn('text-xs', meta.labelColor)}>{meta.label}</span>
-                        {m.replicas > 0 && (
-                          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                            <Layers className="size-3" aria-hidden />
-                            {m.replicas}
-                          </span>
-                        )}
-                        {m.present && (
-                          <div className="flex items-center gap-0.5">
-                            <Button variant="ghost" size="icon" className="size-8" title="Start"
-                              disabled={running}
-                              onClick={() => void runContainer('start', m.id, m.name)}>
-                              <Play className="size-3.5" aria-hidden />
-                            </Button>
-                            <Button variant="ghost" size="icon" className="size-8" title="Stop"
-                              disabled={!running}
-                              onClick={() => void runContainer('stop', m.id, m.name)}>
-                              <Square className="size-3.5" aria-hidden />
-                            </Button>
-                            <Button variant="ghost" size="icon" className="size-8" title="Restart"
-                              onClick={() => void runContainer('restart', m.id, m.name)}>
-                              <RotateCcw className="size-3.5" aria-hidden />
-                            </Button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )
+              <ContainersSection
+                members={members}
+                stage={activeStage}
+                stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
+                onAction={runContainer}
+              />
             ) : visibleSection === 'secrets' ? (
               isDr ? (
                 // Mirrored from Production — read-only.

@@ -643,6 +643,43 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** Infra-service status for a stage (Containers tab "Stage services" row).
+   *  gitops only includes `connection_info.admin_ui` when show_passwords=true,
+   *  so we request it but then strip everything except the admin URL — the DB
+   *  credentials must never reach the browser. */
+  async serviceStatus(
+    type: string,
+    stage: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/services/${encodeURIComponent(type)}/status?stage=${encodeURIComponent(stage)}&show_passwords=true`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let raw: unknown = null;
+    try {
+      raw = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    let body: unknown = raw;
+    if (r.ok && raw && typeof raw === 'object') {
+      const s = raw as {
+        service?: unknown;
+        enabled?: unknown;
+        running?: unknown;
+        connection_info?: { admin_ui?: unknown } | null;
+      };
+      // Sanitize: only the non-secret fields the Containers tab needs.
+      body = {
+        service: s.service,
+        enabled: s.enabled,
+        running: s.running,
+        connection_info: { admin_ui: s.connection_info?.admin_ui ?? null },
+      };
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   async bpScale(
     bp: string,
     stage: string,

@@ -310,6 +310,19 @@ export interface DrStatus {
  *  `label` / `created_at` / `total_size_bytes` (and `id` / `stage`). */
 export type BpSnapshot = Snapshot;
 
+/** Infra services shown in the Containers tab's "Stage services" row. */
+export type ServiceType = 'postgres' | 'minio' | 'couchdb';
+
+/** Status of one infra service at a stage (subset we use — gitops returns more
+ *  when show_passwords=true). `connection_info.admin_ui` is the admin console. */
+export interface ServiceStatus {
+  service: string;
+  enabled: boolean;
+  running: boolean;
+  // eslint-disable-next-line no-restricted-syntax -- nullable upstream field
+  connection_info?: { admin_ui?: string | null } | null;
+}
+
 /** A file's content from a BP's source at a commit (Inspect → Files). */
 export interface BpFileContent {
   path: string;
@@ -509,6 +522,13 @@ export const api = {
 
   inspectAutomation: (id: string) =>
     getJson<DockerInspect[]>(`/api/automations/${encodeURIComponent(id)}/inspect`),
+
+  /** Infra-service status for a stage (Containers tab "Stage services" row).
+   *  Returns enabled/running + the admin-console URL when present. */
+  serviceStatus: (type: ServiceType, stage: string) =>
+    getJson<ServiceStatus>(
+      `/api/services/${encodeURIComponent(type)}/status?stage=${encodeURIComponent(stage)}`,
+    ),
 
   readme: async (bpId: string, copy?: string): Promise<string | null> => {
     const qs = copy ? `?copy=${encodeURIComponent(copy)}` : '';
