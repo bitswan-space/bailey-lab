@@ -574,6 +574,50 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** `GET .../business-processes/{bp}/backups` — blue-green slot state (live vs
+   *  standby/DR), retention policy, and the recent audit log. */
+  async backups(bp: string): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/backups`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Backup writes: `path` is "/retention" (PUT) or "/swap" (POST). gitops
+   *  versions + audits the change in bitswan.yaml. */
+  async backupWrite(
+    bp: string,
+    path: string,
+    method: 'PUT' | 'POST',
+    payload: Record<string, unknown>,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/backups${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /** `GET .../business-processes/{bp}/firewall?stage=` — allow-list + attempts. */
   async firewall(
     bp: string,

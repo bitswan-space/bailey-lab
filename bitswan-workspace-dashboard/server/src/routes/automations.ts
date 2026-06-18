@@ -256,6 +256,57 @@ export function registerAutomationRoutes(
     }
   });
 
+  // Backups → blue-green slot state (live vs standby/DR), retention, audit log.
+  app.get<{ Params: { bp: string } }>(
+    '/api/automations/business-processes/:bp/backups',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.backups(req.params.bp);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'bp backups read failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  // Backups → set the production retention policy / run the DR go-live swap.
+  // Both attribute to the signed-in user (the client doesn't send `by`).
+  const backupWrite = (suffix: string, method: 'PUT' | 'POST') =>
+    app.route<{ Params: { bp: string }; Body: Record<string, unknown> }>({
+      method,
+      url: `/api/automations/business-processes/:bp/backups${suffix}`,
+      handler: async (req, reply) => {
+        reply.header('Cache-Control', 'no-store');
+        if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+        const by = (await emailFromRequest(req, app.log)) || undefined;
+        try {
+          const r = await gitops.backupWrite(req.params.bp, suffix, method, {
+            ...(req.body ?? {}),
+            ...(by ? { by } : {}),
+          });
+          if (!r.ok) {
+            return reply
+              .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+              .send({ error: 'gitops error', status: r.status, body: r.body });
+          }
+          return r.body;
+        } catch (err) {
+          app.log.warn({ err, bp: req.params.bp }, 'bp backups write failed');
+          return reply.code(502).send({ error: 'gitops unreachable' });
+        }
+      },
+    });
+  backupWrite('/retention', 'PUT');
+  backupWrite('/swap', 'POST');
+
   // Supply chain → SBOM packages + CVEs (syft/grype) for the deployed image(s)
   // at a stage, plus the out-of-scope waiver log.
   app.get<{ Params: { bp: string }; Querystring: { stage?: string } }>(

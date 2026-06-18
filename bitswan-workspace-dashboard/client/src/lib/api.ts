@@ -327,6 +327,26 @@ export interface DrStatus {
  *  `label` / `created_at` / `total_size_bytes` (and `id` / `stage`). */
 export type BpSnapshot = Snapshot;
 
+/** One audited backup-domain event (created / restored / swapped / retention). */
+export interface BackupEvent {
+  id: string;
+  action: 'created' | 'restored' | 'swapped' | 'retention' | string;
+  detail: string;
+  by: string;
+  at: string;
+  date: string;
+}
+
+/** A BP's blue-green production backup state: which slot is live (Production)
+ *  vs standby (Disaster Recovery), the retention policy, and the audit log. */
+export interface BackupState {
+  bp: string;
+  live_slot: 'a' | 'b';
+  standby_slot: 'a' | 'b';
+  retention: { daily: number; weekly: number; monthly: number };
+  log: BackupEvent[];
+}
+
 /** Supply chain: CVE severity buckets the UI renders. */
 export type CveSeverity = 'critical' | 'high' | 'medium' | 'low';
 export interface SupplyChainCve {
@@ -566,6 +586,27 @@ export const api = {
     postJson<DrStatus>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/dr/tests`,
       body,
+    ),
+  /** Backups: blue-green slot state (live vs standby/DR), retention, audit log. */
+  backups: (bp: string) =>
+    getJson<BackupState>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/backups`,
+    ),
+  /** Backups: set the production retention policy (daily/weekly/monthly). */
+  setBackupRetention: (
+    bp: string,
+    retention: { daily: number; weekly: number; monthly: number },
+  ) =>
+    putJson<BackupState>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/backups/retention`,
+      retention,
+    ),
+  /** Backups: DR go-live swap — flip which production slot is live (ingress
+   *  cutover, zero downtime, no data moved). */
+  swapProductionDr: (bp: string) =>
+    postJson<BackupState>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/backups/swap`,
+      {},
     ),
   /** Firewall: egress allow-list rules + blocked/observed attempts for a stage. */
   firewall: (bp: string, stage: string) =>

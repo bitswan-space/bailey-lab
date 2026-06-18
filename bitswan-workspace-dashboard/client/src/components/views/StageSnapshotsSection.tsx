@@ -28,7 +28,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { api } from '@/lib/api';
+import { api, type BackupState } from '@/lib/api';
 import {
   snapshotStepLabel,
   snapshotTaskProgress,
@@ -258,13 +258,17 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Production: retention policy + live/standby slot + audit log. */}
+      {stage === 'production' && <ProductionBackupCard bp={bp.name} />}
+
       {/* Intro + actions */}
       <div className="flex flex-wrap items-start gap-3">
         <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-muted-foreground">
-          Point-in-time snapshots of <strong className="text-foreground">{meta.label}</strong>
-          &apos;s data (Postgres, CouchDB, MinIO). Restore one into any stage —
-          the target&apos;s current data is auto-snapshotted first. Code and
-          deployments are never touched.
+          Point-in-time backups of <strong className="text-foreground">{meta.label}</strong>
+          &apos;s data (Postgres, CouchDB, MinIO). To recover, restore one into the isolated{' '}
+          <strong className="text-foreground">Disaster Recovery</strong> slot and verify it before
+          going live — restoring directly onto live Production is not allowed. Code and deployments
+          are never touched.
         </p>
         <div className="flex shrink-0 items-center gap-2">
           {stageEnabled && enabledStages.length >= 2 && (
@@ -466,6 +470,125 @@ function TaskProgressCard({ task }: { task: SnapshotTask }) {
       <div className="mt-2 text-xs text-muted-foreground">
         {task.message || snapshotStepLabel(task.step)}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Production-only: the backup retention policy, the live/standby (Production/DR)
+ * slot indicator, and the audit log of backup/restore/swap events — all from
+ * the gitops `backups` model (versioned in bitswan.yaml). Per the wireframe's
+ * BackupPolicyCard + AuditLogView.
+ */
+function ProductionBackupCard({ bp }: { bp: string }) {
+  // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
+  const [state, setState] = useState<BackupState | null>(null);
+  const [draft, setDraft] = useState<{ daily: number; weekly: number; monthly: number } | null>(
+    null,
+  );
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(() => {
+    let alive = true;
+    api
+      .backups(bp)
+      .then((s) => {
+        if (!alive) return;
+        setState(s);
+        setDraft(s.retention);
+      })
+      .catch(() => alive && setState(null));
+    return () => {
+      alive = false;
+    };
+  }, [bp]);
+  useEffect(() => load(), [load]);
+
+  if (!state || !draft) return null;
+
+  const dirty =
+    draft.daily !== state.retention.daily ||
+    draft.weekly !== state.retention.weekly ||
+    draft.monthly !== state.retention.monthly;
+
+  const save = () => {
+    setSaving(true);
+    const work = api.setBackupRetention(bp, draft);
+    toast.promise(work, {
+      loading: 'Saving retention policy…',
+      success: 'Retention policy saved — versioned in bitswan.yaml',
+      error: (e: unknown) => `Couldn't save: ${String(e)}`,
+    });
+    work
+      .then((s) => {
+        setState(s);
+        setDraft(s.retention);
+      })
+      .catch(() => {})
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <div className="flex flex-col gap-3 rounded-[10px] border border-border bg-background p-4">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="text-[13px] font-bold text-foreground">Backup retention &amp; live slot</span>
+        <span className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground">
+          Production is slot{' '}
+          <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 font-mono text-[11px] font-bold text-emerald-700">
+            {state.live_slot.toUpperCase()}
+          </span>
+          · DR is slot{' '}
+          <span className="rounded-full bg-amber-100 px-1.5 py-0.5 font-mono text-[11px] font-bold text-amber-700">
+            {state.standby_slot.toUpperCase()}
+          </span>
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-4">
+        {(['daily', 'weekly', 'monthly'] as const).map((k) => (
+          <label key={k} className="flex flex-col gap-1">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {k}
+            </span>
+            <input
+              type="number"
+              min={0}
+              value={draft[k]}
+              onChange={(e) =>
+                setDraft((d) => d && { ...d, [k]: Math.max(0, Number(e.target.value) || 0) })
+              }
+              className="h-8 w-20 rounded-md border border-border bg-background px-2 text-[13px] outline-none focus:border-primary"
+            />
+          </label>
+        ))}
+        <Button size="sm" disabled={!dirty || saving} onClick={save}>
+          {saving ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : null}
+          Save policy
+        </Button>
+        <span className="text-[11px] text-muted-foreground">
+          How many automatic backups to keep per cadence (0 disables). Manual backups are kept until
+          deleted.
+        </span>
+      </div>
+
+      {state.log.length > 0 && (
+        <div className="flex flex-col gap-1 border-t border-border pt-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Audit log
+          </span>
+          {state.log.slice(0, 8).map((e) => (
+            <div key={e.id} className="flex items-baseline gap-2 text-[12px]">
+              <span className="rounded bg-muted px-1.5 text-[10px] font-semibold uppercase text-muted-foreground">
+                {e.action}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-foreground">{e.detail}</span>
+              <span className="shrink-0 text-[11px] text-muted-foreground">
+                {e.by} · {e.at}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -3,7 +3,6 @@ import {
   Archive,
   ArrowRight,
   Boxes,
-  Camera,
   Check,
   CircleSlash,
   Code2,
@@ -104,7 +103,6 @@ type Section =
   | 'history'
   | 'secrets'
   | 'containers'
-  | 'snapshots'
   | 'backups'
   | 'firewall'
   | 'supply'
@@ -115,7 +113,6 @@ const SECTION_IDS: Section[] = [
   'history',
   'secrets',
   'containers',
-  'snapshots',
   'backups',
   'firewall',
   'supply',
@@ -1208,7 +1205,6 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         { id: 'history', icon: History, label: 'Deployment history', count: history.length },
         { id: 'secrets', icon: KeyRound, label: 'Secrets' },
         { id: 'containers', icon: Boxes, label: 'Containers', count: members.length },
-        { id: 'snapshots', icon: Camera, label: 'Snapshots' },
         { id: 'backups', icon: Archive, label: 'Backups' },
         { id: 'firewall', icon: Shield, label: 'Firewall', badges: firewallBadge },
         { id: 'supply', icon: Boxes, label: 'Supply chain', badges: supplyBadges },
@@ -1462,10 +1458,8 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
                 />
               )
-            ) : visibleSection === 'snapshots' ? (
-              <StageSnapshotsSection bp={bp} stage={snapshotStage} />
             ) : visibleSection === 'backups' ? (
-              <EmptyTab icon={Archive} label="Backups" />
+              <StageSnapshotsSection bp={bp} stage={snapshotStage} />
             ) : visibleSection === 'firewall' ? (
               <FirewallPanel
                 bp={bp.name}

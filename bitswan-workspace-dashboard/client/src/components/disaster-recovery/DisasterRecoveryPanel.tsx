@@ -15,6 +15,7 @@ import {
 import { toast } from 'sonner';
 import { api, type BpSnapshot, type DrPolicy, type DrStatus } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { DrArchitectureDoc } from './DrArchitectureDoc';
 
 /**
  * Disaster Recovery panel (wireframe: Deployments → DR stage → Recovery tests).
@@ -63,8 +64,11 @@ export function DisasterRecoveryPanel({
     null,
   );
   const [swap, setSwap] = useState<{ ack: boolean } | null>(null);
+  const [swapping, setSwapping] = useState(false);
   const [snapshots, setSnapshots] = useState<BpSnapshot[]>([]);
   const [recording, setRecording] = useState(false);
+  // 'recovery' = the live recovery panel; 'docs' = the architecture explainer.
+  const [view, setView] = useState<'recovery' | 'docs'>('recovery');
 
   const reload = useCallback(() => {
     let alive = true;
@@ -129,6 +133,20 @@ export function DisasterRecoveryPanel({
 
   return (
     <div className="relative flex flex-col gap-3.5">
+      {/* Recovery | How it works (architecture docs) */}
+      <div className="flex items-center gap-4 border-b border-border">
+        <DocTab active={view === 'recovery'} onClick={() => setView('recovery')}>
+          Recovery
+        </DocTab>
+        <DocTab active={view === 'docs'} onClick={() => setView('docs')}>
+          How it works
+        </DocTab>
+      </div>
+
+      {view === 'docs' && <DrArchitectureDoc />}
+
+      {view === 'recovery' && (
+        <>
       {/* What DR is */}
       <p className="text-[12.5px] leading-relaxed text-muted-foreground">
         Disaster Recovery mirrors <strong className="text-foreground">Production</strong> — same
@@ -256,6 +274,8 @@ export function DisasterRecoveryPanel({
           ))
         )}
       </div>
+        </>
+      )}
 
       {/* Run-test wizard */}
       {run && (
@@ -439,8 +459,9 @@ export function DisasterRecoveryPanel({
             </p>
             <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
               <AlertTriangle className="size-3.5 shrink-0 text-amber-600" aria-hidden />
-              Automated failover isn&apos;t configured for this workspace yet — the cutover must be
-              performed by an operator. This dialog records your intent only.
+              The swap flips which slot is live and is recorded in the audit log immediately. The
+              actual ingress cutover lands once the two-slot blue-green production deploy is
+              provisioned for this BP; until then the recorded live slot is authoritative.
             </div>
             <label className="flex cursor-pointer items-start gap-2.5">
               <input
@@ -464,20 +485,62 @@ export function DisasterRecoveryPanel({
             </button>
             <button
               type="button"
-              disabled={!swap.ack}
+              disabled={!swap.ack || swapping}
               onClick={() => {
-                toast.message('Failover is performed by an operator — not available from here.');
-                setSwap(null);
+                setSwapping(true);
+                const work = api.swapProductionDr(bp);
+                toast.promise(work, {
+                  loading: 'Swapping DR ↔ Production…',
+                  success: (s) =>
+                    `Swapped — production is now slot ${s.live_slot.toUpperCase()} (versioned in bitswan.yaml)`,
+                  error: (e: unknown) => `Swap failed: ${String(e)}`,
+                });
+                work
+                  .then(() => {
+                    setSwap(null);
+                    reload();
+                  })
+                  .catch(() => {})
+                  .finally(() => setSwapping(false));
               }}
               className="inline-flex h-8 items-center gap-1.5 rounded-md bg-red-600 px-3.5 text-[13px] font-semibold text-white hover:bg-red-700 disabled:opacity-40"
             >
-              <ArrowLeftRight className="size-3.5" aria-hidden />
+              {swapping ? (
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              ) : (
+                <ArrowLeftRight className="size-3.5" aria-hidden />
+              )}
               Swap now
             </button>
           </div>
         </Modal>
       )}
     </div>
+  );
+}
+
+function DocTab({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        '-mb-px border-b-2 px-1 py-2 text-[13px] transition-colors',
+        active
+          ? 'border-foreground font-semibold text-foreground'
+          : 'border-transparent font-medium text-muted-foreground hover:text-foreground',
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
