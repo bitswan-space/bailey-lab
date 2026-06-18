@@ -75,20 +75,36 @@ def validate_bp_slug(slug: str) -> None:
         raise ValueError(f"Invalid BP slug: {slug!r}")
 
 
-def bp_resource_names(bp_slug: str) -> dict:
+def bp_resource_names(bp_slug: str, slot: str | None = None) -> dict:
     """Stage-independent per-BP resource names.
 
     Postgres identifiers are capped at 63 bytes; MinIO bucket names at 63
     chars. Slugs come from directory names so they're rarely near the limit,
     but truncate defensively (collisions after truncation surface as a
     registry slug conflict, not silent data sharing).
+
+    `slot` ("a"/"b") selects one of a BP's two blue-green PRODUCTION data
+    backends: each slot is a fully separate logical DB/bucket/couch namespace,
+    so the live slot (Production) and the standby slot (DR) never share data.
+    `slot=None` is the single-backend scheme used everywhere else (dev/staging,
+    and any pre-blue-green production DB) — its names are byte-identical to
+    before, so existing data is untouched.
     """
     validate_bp_slug(bp_slug)
-    pg = ("bp_" + bp_slug.replace("-", "_"))[:63]
-    bucket = ("bp-" + bp_slug)[:63].rstrip("-")
+    if slot:
+        if slot not in ("a", "b"):
+            raise ValueError(f"Invalid blue-green slot: {slot!r} (want 'a'/'b')")
+        # Reserve room for the "_<slot>"/"-<slot>" suffix within the 63-byte cap.
+        pg = (("bp_" + bp_slug.replace("-", "_"))[:61]) + f"_{slot}"
+        bucket = (("bp-" + bp_slug)[:61].rstrip("-")) + f"-{slot}"
+        couch = f"bp-{bp_slug}-{slot}-"
+    else:
+        pg = ("bp_" + bp_slug.replace("-", "_"))[:63]
+        bucket = ("bp-" + bp_slug)[:63].rstrip("-")
+        couch = f"bp-{bp_slug}-"
     return {
         "postgres_db": pg,
-        "couchdb_prefix": f"bp-{bp_slug}-",
+        "couchdb_prefix": couch,
         "minio_bucket": bucket,
     }
 
