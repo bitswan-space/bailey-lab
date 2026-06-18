@@ -71,6 +71,8 @@ class RollbackBPRequest(BaseModel):
     stage: str  # "dev" | "staging" | "production"
     git_commit: str
     deployed_by: str | None = None
+    kind: str = "deploy"  # "deploy" | "firewall"
+    role: str | None = None  # caller's Bailey role (for production firewall gating)
 
 
 @router.get("/business-processes/{bp}/history")
@@ -359,7 +361,18 @@ async def rollback_bp(
     body: RollbackBPRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    """Roll a whole BP stage back to a prior deployment (all members together)."""
+    """Roll a BP stage back to a prior state. `kind=deploy` (default) re-points
+    the member deployments to a prior version; `kind=firewall` restores the
+    stage's egress allow-list to a prior commit (production needs admin/auditor).
+    Both come from the same git-derived history timeline."""
+    if body.kind == "firewall":
+        return await automation_service.rollback_firewall(
+            bp=bp,
+            stage=body.stage,
+            git_commit=body.git_commit,
+            by=body.deployed_by,
+            role=body.role,
+        )
     return await automation_service.rollback_business_process(
         bp=bp,
         stage=body.stage,

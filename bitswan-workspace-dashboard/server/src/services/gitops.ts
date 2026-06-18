@@ -846,6 +846,8 @@ export class GitopsClient {
     stage: string;
     git_commit: string;
     deployed_by?: string;
+    kind?: 'deploy' | 'firewall';
+    role?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const { bp, ...rest } = input;
     const r = await fetch(

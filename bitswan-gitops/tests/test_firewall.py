@@ -5,6 +5,7 @@ writes are stubbed; the attempts telemetry is read from the firewall cache dir.
 """
 
 import asyncio
+import subprocess
 
 import pytest
 from fastapi import HTTPException
@@ -121,3 +122,89 @@ def test_attempts_feed_from_gateway_jsonl(tmp_path, monkeypatch):
     )
     fw2 = svc.read_firewall("shop", "production")
     assert {a["host"] for a in fw2["attempts"]} == {"evil.com"}
+
+
+# ── deployment-history audit log + rollback (real git repo) ──────────────────
+# bp_history is derived from the git LOG of bitswan.yaml, so these use the real
+# update_git against a throwaway repo (no remote → it just adds + commits).
+
+
+def _git_svc(tmp_path, monkeypatch):
+    monkeypatch.setattr(fws, "firewall_dir", lambda: str(tmp_path / "fw"))
+    monkeypatch.delenv("HOST_PATH", raising=False)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "ci@x"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "ci"], cwd=tmp_path, check=True)
+    svc = AutomationService()
+    svc.gitops_dir = str(tmp_path)
+    svc.gitops_dir_host = str(tmp_path)
+    with open(tmp_path / "bitswan.yaml", "w") as f:
+        dump_bitswan_yaml({"deployments": {}}, f)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True)
+    return svc
+
+
+def _fw_history(svc, bp, stage):
+    h = asyncio.run(svc.bp_history(bp, stage))
+    return h, [e for e in h["history"] if e["source"] == "firewall"]
+
+
+def test_firewall_changes_appear_in_deployment_history(tmp_path, monkeypatch):
+    svc = _git_svc(tmp_path, monkeypatch)
+    asyncio.run(svc.set_firewall_rule("shop", "dev", "a.com", "allowed", by="tim@x"))
+    asyncio.run(svc.set_firewall_rule("shop", "dev", "bad.com", "denied", by="tim@x"))
+
+    h, fw_entries = _fw_history(svc, "shop", "dev")
+    # Two distinct rule-set states → two audit-log entries (newest-first).
+    assert len(fw_entries) == 2
+    assert fw_entries[0]["firewall"]["allowed"] == 1
+    assert fw_entries[0]["firewall"]["denied"] == 1
+    assert fw_entries[0]["deployed_by"] == "tim@x"
+    assert "bad.com" in fw_entries[0]["firewall"]["summary"]
+    # Firewall events never become the live "current" version.
+    assert h["current"] is None
+
+
+def test_firewall_rollback_restores_prior_ruleset(tmp_path, monkeypatch):
+    svc = _git_svc(tmp_path, monkeypatch)
+    asyncio.run(svc.set_firewall_rule("shop", "dev", "a.com", "allowed", by="x"))
+    _, fw_entries = _fw_history(svc, "shop", "dev")
+    commit_one = fw_entries[0]["commit"]  # state: only a.com allowed
+
+    asyncio.run(svc.set_firewall_rule("shop", "dev", "b.com", "allowed", by="x"))
+    assert {r["host"] for r in svc.read_firewall("shop", "dev")["rules"]} == {
+        "a.com",
+        "b.com",
+    }
+
+    fw_rb = asyncio.run(svc.rollback_firewall("shop", "dev", commit_one, by="x"))
+    assert {r["host"] for r in fw_rb["rules"]} == {"a.com"}
+    # The restore is itself versioned (a fresh audit-log entry on top).
+    _, after = _fw_history(svc, "shop", "dev")
+    assert after[0]["firewall"]["allowed"] == 1
+    assert after[0]["firewall"]["denied"] == 0
+
+
+def test_firewall_rollback_production_requires_role(tmp_path, monkeypatch):
+    svc = _git_svc(tmp_path, monkeypatch)
+    asyncio.run(
+        svc.set_firewall_rule(
+            "shop", "production", "a.com", "allowed", by="a", role="admin"
+        )
+    )
+    _, fw_entries = _fw_history(svc, "shop", "production")
+    commit = fw_entries[0]["commit"]
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(
+            svc.rollback_firewall("shop", "production", commit, by="u", role="member")
+        )
+    assert e.value.status_code == 403
+
+
+def test_firewall_rollback_unknown_revision_fails_loudly(tmp_path, monkeypatch):
+    svc = _git_svc(tmp_path, monkeypatch)
+    asyncio.run(svc.set_firewall_rule("shop", "dev", "a.com", "allowed", by="x"))
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(svc.rollback_firewall("shop", "dev", "deadbeef" * 5, by="x"))
+    assert e.value.status_code == 404

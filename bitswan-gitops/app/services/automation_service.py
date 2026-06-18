@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import logging
 import os
@@ -50,8 +51,8 @@ logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=2048)
-def _parse_revision_business_processes(gitops_dir: str, sha: str) -> dict:
-    """Parsed `business_processes` map from `bitswan.yaml` at a git commit.
+def _parse_revision_bitswan(gitops_dir: str, sha: str) -> dict:
+    """Whole parsed `bitswan.yaml` at a git commit.
 
     A commit's content is immutable, so this is memoized by (gitops_dir, sha):
     deployment history derives from the git log of bitswan.yaml and re-reads the
@@ -71,7 +72,22 @@ def _parse_revision_business_processes(gitops_dir: str, sha: str) -> dict:
         y = load_yaml(proc.stdout) or {}
     except Exception:
         return {}
-    return (y.get("business_processes") or {}) if isinstance(y, dict) else {}
+    return y if isinstance(y, dict) else {}
+
+
+def _parse_revision_business_processes(gitops_dir: str, sha: str) -> dict:
+    """Parsed `business_processes` map from `bitswan.yaml` at a git commit."""
+    return _parse_revision_bitswan(gitops_dir, sha).get("business_processes") or {}
+
+
+def _parse_revision_firewall_realm(
+    gitops_dir: str, sha: str, bp: str, realm: str
+) -> dict:
+    """The `firewall[bp][realm]` node (rules + posture) at a git commit, or {}.
+    Firewall rules are versioned in bitswan.yaml just like deployments, so each
+    distinct state across commits is one audit-log / rollback point."""
+    fw = _parse_revision_bitswan(gitops_dir, sha).get("firewall") or {}
+    return ((fw.get(bp) or {}).get(realm) or {}) if isinstance(fw, dict) else {}
 
 
 def _short_hash(context: str) -> str:
@@ -1173,12 +1189,20 @@ class AutomationService:
         )
 
     async def bp_history(self, bp: str, stage: str, limit: int = 200) -> dict:
-        """Deployment history for one BP stage, derived from the GIT LOG of
-        bitswan.yaml (no history is stored in the file). Each distinct state of
-        business_processes[bp][stage] across commits is one entry; the commit's
-        author/date/subject give who/when/kind. Newest-first; `current` = the
-        live (newest) entry's commit."""
+        """Deployment + firewall history for one BP stage, derived from the GIT
+        LOG of bitswan.yaml (no history is stored in the file). Two interleaved
+        timelines share the audit log:
+
+        * deploy events — each distinct state of business_processes[bp][stage].
+        * firewall events — each distinct state of firewall[bp][realm].rules.
+
+        Both are detected by comparing the *parsed state* across commits (never
+        by parsing the commit subject), so a firewall approve/deny/promote/revoke
+        shows up here and is a rollback point too. Newest-first; `current` = the
+        newest *deploy* entry's commit (the live version — firewall events never
+        change which version is live)."""
         stage_key = "production" if stage in ("", "production") else stage
+        realm = bp_secrets.realm_for_stage(stage_key)
         out, _, rc = await call_git_command_with_output(
             "git",
             "log",
@@ -1190,7 +1214,8 @@ class AutomationService:
             cwd=self.gitops_dir,
         )
         entries: list[dict] = []
-        prev_key = None
+        prev_dep_key = None
+        prev_fw_key: tuple | None = None
         for line in (out or "").splitlines():
             parts = line.split("\x1f")
             if len(parts) != 4:
@@ -1198,11 +1223,9 @@ class AutomationService:
             sha, date, author, subject = parts
             # Memoized git-show + parse, shared across stages and repeat loads
             # (a commit's bitswan.yaml is immutable). This is the hot path —
-            # see _parse_revision_business_processes.
+            # see _parse_revision_bitswan.
             bps = _parse_revision_business_processes(self.gitops_dir, sha)
-            node = (bps.get(bp, {}) or {}).get(stage_key)
-            if not node:
-                continue
+            node = (bps.get(bp, {}) or {}).get(stage_key) or {}
             src = node.get("git_commit")
             members = {
                 k: {
@@ -1211,37 +1234,80 @@ class AutomationService:
                 }
                 for k, v in (node.get("deployments") or {}).items()
             }
-            # Collapse consecutive commits that left this BP stage unchanged
-            # (other BPs / service toggles also touch bitswan.yaml).
-            key = (src, tuple(sorted((k, m["image_id"]) for k, m in members.items())))
-            if key == prev_key or not src:
-                prev_key = key
-                continue
-            prev_key = key
-            low = subject.lower()
-            if "rollback" in low:
-                status, source = "rolled-back", "rollback"
-            elif "promote" in low:
-                status = "deployed"
-                source = "staging" if stage_key == "production" else "dev"
-            else:
-                status, source = "deployed", "deploy"
-            entries.append(
-                {
-                    "commit": sha,  # the deploy-event id (rollback key)
-                    "source_commit": src,  # the deployed source version
-                    "deployed_at": date,
-                    "deployed_by": author,
-                    "status": status,
-                    "source": source,
-                    "members": members,
-                }
+            # ── deploy event: a changed (source, member-images) tuple ──────────
+            dep_key = (
+                src,
+                tuple(sorted((k, m["image_id"]) for k, m in members.items())),
             )
+            if src and dep_key != prev_dep_key:
+                low = subject.lower()
+                if "rollback" in low:
+                    status, source = "rolled-back", "rollback"
+                elif "promote" in low:
+                    status = "deployed"
+                    source = "staging" if stage_key == "production" else "dev"
+                else:
+                    status, source = "deployed", "deploy"
+                entries.append(
+                    {
+                        "commit": sha,  # the deploy-event id (rollback key)
+                        "source_commit": src,  # the deployed source version
+                        "deployed_at": date,
+                        "deployed_by": author,
+                        "status": status,
+                        "source": source,
+                        "members": members,
+                    }
+                )
+            emitted_deploy = src and dep_key != prev_dep_key
+            if src:
+                prev_dep_key = dep_key
+
+            # ── firewall event: a changed rule set for this realm ──────────────
+            fw_node = _parse_revision_firewall_realm(self.gitops_dir, sha, bp, realm)
+            fw_rules = fw_node.get("rules") or {}
+            fw_key = tuple(
+                sorted((h, (r or {}).get("status")) for h, r in fw_rules.items())
+            )
+            # Emit when the rule set actually changed and there is (or was)
+            # something to show — skips the long pre-firewall prefix of history.
+            # `not emitted_deploy` keeps one entry per commit (deploy and firewall
+            # changes always land in separate commits, but guard anyway).
+            if fw_key != prev_fw_key and (fw_key or prev_fw_key) and not emitted_deploy:
+                entries.append(
+                    {
+                        "commit": sha,
+                        "source_commit": None,
+                        "deployed_at": date,
+                        "deployed_by": author,
+                        "status": "firewall",
+                        "source": "firewall",
+                        "members": {},
+                        "firewall": {
+                            "realm": realm,
+                            "summary": subject,
+                            "allowed": sum(
+                                1
+                                for r in fw_rules.values()
+                                if (r or {}).get("status") == "allowed"
+                            ),
+                            "denied": sum(
+                                1
+                                for r in fw_rules.values()
+                                if (r or {}).get("status") == "denied"
+                            ),
+                        },
+                    }
+                )
+            prev_fw_key = fw_key
         entries.reverse()  # newest-first
+        current = next(
+            (e["commit"] for e in entries if e["source"] != "firewall"), None
+        )
         return {
             "bp": bp,
             "stage": stage_key,
-            "current": entries[0]["commit"] if entries else None,
+            "current": current,
             "history": entries,
         }
 
@@ -1800,6 +1866,52 @@ class AutomationService:
             bs, bp, by, f"promote firewall {bp}: {from_realm} → {to_realm}"
         )
         return self.read_firewall(bp, to_stage)
+
+    async def rollback_firewall(
+        self,
+        bp: str,
+        stage: str,
+        git_commit: str,
+        by: str | None = None,
+        role: str | None = None,
+    ) -> dict:
+        """Roll a BP realm's firewall rule set back to a prior commit. The audit
+        log lives in git (bp_history surfaces every firewall change), so a
+        rollback restores firewall[bp][realm] (rules + posture) exactly as it was
+        at `git_commit`, records the restore as its own versioned commit, and
+        reloads the egress gateway for any deployed members so enforcement
+        immediately reflects the restored allow-list. Production rollbacks
+        require an admin/auditor role (same gate as live edits)."""
+        self._require_fw_role(stage, role)
+        realm = bp_secrets.realm_for_stage(stage)
+        # Fail loudly if the revision does not exist (rather than silently
+        # clearing the realm because git show returned nothing).
+        _, _, rc = await call_git_command_with_output(
+            "git", "cat-file", "-e", f"{git_commit}^{{commit}}", cwd=self.gitops_dir
+        )
+        if rc != 0:
+            raise HTTPException(
+                status_code=404, detail=f"No such revision {git_commit[:8]}"
+            )
+        target = _parse_revision_firewall_realm(self.gitops_dir, git_commit, bp, realm)
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        fw = bs.setdefault("firewall", {}).setdefault(bp, {})
+        if target:
+            # deepcopy: the parsed revision is memoized (shared, immutable).
+            fw[realm] = copy.deepcopy(target)
+        else:
+            # The target predates any rule for this realm — restore that empty
+            # state by dropping the node entirely.
+            fw.pop(realm, None)
+        await self._save_and_commit_firewall(
+            bs, bp, by, f"rollback firewall {bp}/{realm} @ {git_commit[:8]}"
+        )
+        # Push the restored allow-list to the running gateway (no-op when the
+        # stage has nothing deployed — rules can be set before first deploy).
+        members = self._bp_stage_members(bp, stage)
+        if members:
+            await self.apply_compose_for_deployments(list(members), deployed_by=by)
+        return self.read_firewall(bp, stage)
 
     async def _save_and_commit_firewall(
         self, bs: dict, bp: str, by: str | None, message: str

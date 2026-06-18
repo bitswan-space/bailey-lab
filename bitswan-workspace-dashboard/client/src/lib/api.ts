@@ -261,9 +261,17 @@ export interface BpHistoryEntry {
   deployed_at: string;
   // eslint-disable-next-line no-restricted-syntax -- nullable wire field
   deployed_by: string | null;
-  status: string; // "deployed" | "rolled-back"
-  source: string; // "deploy" | "dev" | "staging" | "rollback"
+  status: string; // "deployed" | "rolled-back" | "firewall"
+  source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall"
   members: Record<string, BpHistoryMember>;
+  /** Present on firewall-change events: the realm + a one-line summary of the
+   *  change and the resulting allowed/denied counts (for the audit-log row). */
+  firewall?: {
+    realm: string;
+    summary: string;
+    allowed: number;
+    denied: number;
+  };
 }
 
 /** Gitops `GET /automations/business-processes/{bp}/history` response. */
@@ -496,11 +504,13 @@ export const api = {
     getJson<BpHistory>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/history?stage=${encodeURIComponent(stage)}`,
     ),
-  /** Roll a whole BP stage back to a prior deployment (all members together). */
-  bpRollback: (bp: string, stage: string, gitCommit: string) =>
+  /** Roll a BP stage back to a prior state. `kind=deploy` (default) re-points the
+   *  member deployments; `kind=firewall` restores the egress allow-list to that
+   *  commit (production needs admin/auditor — gated server-side). */
+  bpRollback: (bp: string, stage: string, gitCommit: string, kind: 'deploy' | 'firewall' = 'deploy') =>
     postJson<{ message: string }>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/rollback`,
-      { stage, git_commit: gitCommit },
+      { stage, git_commit: gitCommit, kind },
     ),
   /** Unified diff of a BP's source between two commits (history "diff vs current"). */
   bpDiff: (bp: string, from: string, to: string) =>

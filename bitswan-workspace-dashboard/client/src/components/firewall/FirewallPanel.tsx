@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowRight, Ban, Check, Loader2, Lock, ShieldAlert, ShieldCheck, Undo2 } from 'lucide-react';
+import { ArrowUpFromLine, Ban, Check, Loader2, Lock, ShieldAlert, ShieldCheck, Undo2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type FirewallReport } from '@/lib/api';
 import { cn } from '@/lib/utils';
+
+const REALM_LABEL: Record<string, string> = {
+  dev: 'Development',
+  staging: 'Staging',
+  production: 'Production',
+};
 
 /**
  * Egress firewall panel (wireframe Firewall tab). Shows the outbound allow-list
@@ -18,6 +24,7 @@ export function FirewallPanel({
   stageLabel,
   prevStage,
   readOnly = false,
+  onChange,
 }: {
   bp: string;
   stage: string;
@@ -25,12 +32,17 @@ export function FirewallPanel({
   /** the realm to pull rules forward FROM (e.g. staging←dev, production←staging) */
   prevStage?: string;
   readOnly?: boolean;
+  /** called after a rule change so the parent can refresh the deployment-history
+   *  audit log (each firewall change is a new versioned entry there). */
+  onChange?: () => void;
 }) {
   const [fw, setFw] = useState<FirewallReport | null>(null);
+  // The previous stage's rules — the source for the "Ready to promote" section.
+  const [prevFw, setPrevFw] = useState<FirewallReport | null>(null);
   const [role, setRole] = useState<string>('member');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [approve, setApprove] = useState<{ host: string } | null>(null);
+  const [approve, setApprove] = useState<{ host: string; purpose?: string } | null>(null);
   const [purpose, setPurpose] = useState('');
 
   const load = useCallback(() => {
@@ -41,11 +53,19 @@ export function FirewallPanel({
       .then((r) => alive && setFw(r))
       .catch(() => alive && setFw(null))
       .finally(() => alive && setLoading(false));
+    if (prevStage) {
+      api
+        .firewall(bp, prevStage)
+        .then((r) => alive && setPrevFw(r))
+        .catch(() => alive && setPrevFw(null));
+    } else {
+      setPrevFw(null);
+    }
     api.getMe().then((m) => alive && setRole(m.role || 'member')).catch(() => {});
     return () => {
       alive = false;
     };
-  }, [bp, stage]);
+  }, [bp, stage, prevStage]);
   useEffect(() => load(), [load]);
 
   // Production changes need admin/auditor; dev/staging are open. DR is read-only.
@@ -56,9 +76,15 @@ export function FirewallPanel({
     (key: string, p: Promise<FirewallReport>, msg: string) => {
       setBusy(key);
       toast.promise(p, { loading: '…', success: msg, error: (e: unknown) => `Failed: ${String(e)}` });
-      p.then(setFw).catch(() => {}).finally(() => setBusy(null));
+      p.then((r) => {
+        setFw(r);
+        // Each rule change is a new versioned commit → refresh the audit log.
+        onChange?.();
+      })
+        .catch(() => {})
+        .finally(() => setBusy(null));
     },
-    [],
+    [onChange],
   );
 
   const setRule = (host: string, status: 'allowed' | 'denied', purposeText = '') =>
@@ -77,6 +103,15 @@ export function FirewallPanel({
 
   const allowed = fw.rules.filter((r) => r.status === 'allowed');
   const denied = fw.rules.filter((r) => r.status === 'denied');
+
+  // "Ready to promote from {prev}": hosts approved in the previous stage that
+  // have no decision yet here. Accepting one carries its purpose forward and
+  // records the approval in this stage's audit log.
+  const decided = new Set(fw.rules.map((r) => r.host));
+  const prevLabel = prevStage ? (REALM_LABEL[prevStage] ?? prevStage) : '';
+  const promotable = (prevFw?.rules ?? []).filter(
+    (r) => r.status === 'allowed' && !decided.has(r.host),
+  );
 
   return (
     <div className="relative flex flex-col gap-3">
@@ -123,6 +158,33 @@ export function FirewallPanel({
         </Section>
       )}
 
+      {/* Ready to promote from the previous stage */}
+      {canEdit && promotable.length > 0 && (
+        <Section title={`Ready to promote from ${prevLabel}`} badge={promotable.length} accent>
+          {promotable.map((r) => (
+            <Row
+              key={r.host}
+              host={r.host}
+              sub={`Approved in ${prevLabel}${r.purpose ? ` · ${r.purpose}` : ''}`}
+              promote
+            >
+              <Btn
+                onClick={() => setRule(r.host, 'allowed', r.purpose ?? '')}
+                kind="approve"
+                busy={busy === r.host}
+              >
+                Accept for {stageLabel}
+              </Btn>
+              {!isProd && (
+                <Btn onClick={() => setRule(r.host, 'denied')} kind="deny">
+                  Deny
+                </Btn>
+              )}
+            </Row>
+          ))}
+        </Section>
+      )}
+
       <Section title="Allowed">
         {allowed.length === 0 && <Empty>No hosts allowed yet.</Empty>}
         {allowed.map((r) => (
@@ -147,24 +209,10 @@ export function FirewallPanel({
         </Section>
       )}
 
-      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-        <span>
-          {allowed.length} allowed · {denied.length} denied · {fw.attempts.length} need review · changes
-          are versioned in bitswan.yaml (audit log)
-        </span>
-        {canEdit && prevStage && (
-          <button
-            type="button"
-            disabled={busy === '__promote'}
-            onClick={() =>
-              run('__promote', api.promoteFirewall(bp, { from_stage: prevStage, to_stage: stage }),
-                `Pulled rules forward from ${prevStage}`)
-            }
-            className="inline-flex items-center gap-1 text-primary hover:underline"
-          >
-            <ArrowRight className="size-3" aria-hidden /> Pull rules forward from {prevStage}
-          </button>
-        )}
+      <div className="text-[11px] text-muted-foreground">
+        {allowed.length} allowed · {denied.length} denied · {fw.attempts.length} need review · every
+        change is versioned in bitswan.yaml and appears in the deployment history (audit log &amp;
+        rollback).
       </div>
 
       {/* Approve dialog (captures a purpose for the audit log) */}
@@ -221,13 +269,39 @@ function fmt(s: string | null) {
   }
 }
 
-function Section({ title, badge, danger, children }: { title: string; badge?: number; danger?: boolean; children: React.ReactNode }) {
+function Section({
+  title,
+  badge,
+  danger,
+  accent,
+  children,
+}: {
+  title: string;
+  badge?: number;
+  danger?: boolean;
+  accent?: boolean;
+  children: React.ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center gap-2">
-        <span className={cn('text-[11px] font-semibold uppercase tracking-wide', danger ? 'text-red-700' : 'text-muted-foreground')}>{title}</span>
+        <span
+          className={cn(
+            'text-[11px] font-semibold uppercase tracking-wide',
+            danger ? 'text-red-700' : accent ? 'text-blue-700' : 'text-muted-foreground',
+          )}
+        >
+          {title}
+        </span>
         {typeof badge === 'number' && badge > 0 && (
-          <span className="rounded-full bg-red-600 px-1.5 text-[10px] font-bold text-white">{badge}</span>
+          <span
+            className={cn(
+              'rounded-full px-1.5 text-[10px] font-bold text-white',
+              accent ? 'bg-blue-600' : 'bg-red-600',
+            )}
+          >
+            {badge}
+          </span>
         )}
       </div>
       <div className="flex flex-col gap-1.5">{children}</div>
@@ -235,11 +309,34 @@ function Section({ title, badge, danger, children }: { title: string; badge?: nu
   );
 }
 
-function Row({ host, sub, blocked, children }: { host: string; sub: string; blocked?: boolean; children?: React.ReactNode }) {
+function Row({
+  host,
+  sub,
+  blocked,
+  promote,
+  children,
+}: {
+  host: string;
+  sub: string;
+  blocked?: boolean;
+  promote?: boolean;
+  children?: React.ReactNode;
+}) {
   return (
     <div className="flex items-center gap-3 rounded-[10px] border border-border bg-background px-3.5 py-2.5">
-      <span className={cn('flex size-7 shrink-0 items-center justify-center rounded-md', blocked ? 'bg-red-50' : 'bg-emerald-50')}>
-        {blocked ? <ShieldAlert className="size-4 text-red-600" aria-hidden /> : <ShieldCheck className="size-4 text-emerald-600" aria-hidden />}
+      <span
+        className={cn(
+          'flex size-7 shrink-0 items-center justify-center rounded-md',
+          promote ? 'bg-blue-50' : blocked ? 'bg-red-50' : 'bg-emerald-50',
+        )}
+      >
+        {promote ? (
+          <ArrowUpFromLine className="size-4 text-blue-600" aria-hidden />
+        ) : blocked ? (
+          <ShieldAlert className="size-4 text-red-600" aria-hidden />
+        ) : (
+          <ShieldCheck className="size-4 text-emerald-600" aria-hidden />
+        )}
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate font-mono text-[13px] font-medium text-foreground">{host}</span>

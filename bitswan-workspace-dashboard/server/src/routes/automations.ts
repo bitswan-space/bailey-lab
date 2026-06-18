@@ -548,21 +548,26 @@ export function registerAutomationRoutes(
   // Roll a whole BP stage back to a prior deployment (all members together).
   app.post<{
     Params: { bp: string };
-    Body: { stage?: string; git_commit?: string };
+    Body: { stage?: string; git_commit?: string; kind?: 'deploy' | 'firewall' };
   }>('/api/automations/business-processes/:bp/rollback', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-    const { stage, git_commit } = req.body ?? {};
+    const { stage, git_commit, kind } = req.body ?? {};
     if (!stage || !git_commit) {
       return reply.code(400).send({ error: 'stage and git_commit are required' });
     }
     // Deployer attribution comes from the validated token, never the client.
     const deployer = await emailFromRequest(req, app.log);
+    // Firewall rollbacks are RBAC-gated in production — resolve the role here so
+    // the client cannot assert its own role (gitops enforces it again).
+    const role = kind === 'firewall' ? await fwRoleFromRequest(req, app.log) : undefined;
     try {
       const r = await gitops.bpRollback({
         bp: req.params.bp,
         stage,
         git_commit,
+        ...(kind ? { kind } : {}),
+        ...(role ? { role } : {}),
         ...(deployer ? { deployed_by: deployer } : {}),
       });
       if (!r.ok) {

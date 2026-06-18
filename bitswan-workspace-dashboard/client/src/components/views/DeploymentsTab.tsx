@@ -29,6 +29,7 @@ import {
   Scaling,
   Search,
   Shield,
+  ShieldCheck,
   Square,
   Terminal,
   Undo2,
@@ -486,6 +487,8 @@ function ContainersSection({
 }
 
 function entryTone(e: BpHistoryEntry, isCurrent: boolean) {
+  if (e.source === 'firewall')
+    return { dot: 'bg-violet-500', label: 'Firewall change', cls: 'bg-violet-100 text-violet-700' };
   if (e.status === 'rolled-back')
     return { dot: 'bg-amber-500', label: 'Rolled back', cls: 'bg-amber-100 text-amber-700' };
   if (e.status === 'failed')
@@ -854,6 +857,7 @@ function DeploymentCard({
   onInspect: () => void;
 }) {
   const tone = entryTone(entry, isCurrent);
+  const isFw = entry.source === 'firewall';
   const ver = entry.source_commit ?? entry.commit;
   const members = Object.entries(entry.members ?? {});
   const firstImg = members.find(([, m]) => m.image_id)?.[1]?.image_id;
@@ -872,21 +876,35 @@ function DeploymentCard({
         </span>
         <span className="ml-auto text-[11px] text-muted-foreground">{entry.deployed_at}</span>
         <div className="flex items-center gap-1.5">
-          {isCurrent ? (
-            <Button variant="outline" size="sm" onClick={onInspect}>
-              <Scaling className="size-3.5" aria-hidden />
-              Scale
-            </Button>
-          ) : (
+          {isFw ? (
+            // Firewall audit-log entry: restore the rule set to this commit.
             <Button variant="outline" size="sm" disabled={busy} onClick={onRollback}>
               <Undo2 className="size-3.5" aria-hidden />
-              Roll back
+              Restore rules
             </Button>
+          ) : isCurrent ? (
+            <>
+              <Button variant="outline" size="sm" onClick={onInspect}>
+                <Scaling className="size-3.5" aria-hidden />
+                Scale
+              </Button>
+              <Button variant="default" size="sm" onClick={onInspect}>
+                <Search className="size-3.5" aria-hidden />
+                Inspect
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="outline" size="sm" disabled={busy} onClick={onRollback}>
+                <Undo2 className="size-3.5" aria-hidden />
+                Roll back
+              </Button>
+              <Button variant="default" size="sm" onClick={onInspect}>
+                <Search className="size-3.5" aria-hidden />
+                Inspect
+              </Button>
+            </>
           )}
-          <Button variant="default" size="sm" onClick={onInspect}>
-            <Search className="size-3.5" aria-hidden />
-            Inspect
-          </Button>
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-3.5 text-[12px] text-muted-foreground">
@@ -896,14 +914,30 @@ function DeploymentCard({
             {entry.deployed_by}
           </span>
         )}
-        {entry.source && entry.source !== 'deploy' && (
-          <span className="inline-flex items-center gap-1.5">
-            <GitMerge className="size-3" aria-hidden />
-            {entry.source === 'rollback' ? 'rolled back' : `promoted from ${entry.source}`}
-          </span>
+        {isFw ? (
+          <>
+            <span className="inline-flex items-center gap-1.5">
+              <ShieldCheck className="size-3" aria-hidden />
+              {entry.firewall?.summary ?? 'firewall rules changed'}
+            </span>
+            <span>
+              {entry.firewall?.allowed ?? 0} allowed · {entry.firewall?.denied ?? 0} denied
+            </span>
+          </>
+        ) : (
+          <>
+            {entry.source && entry.source !== 'deploy' && (
+              <span className="inline-flex items-center gap-1.5">
+                <GitMerge className="size-3" aria-hidden />
+                {entry.source === 'rollback' ? 'rolled back' : `promoted from ${entry.source}`}
+              </span>
+            )}
+            <span>{members.length} container{members.length === 1 ? '' : 's'}</span>
+            {firstImg && (
+              <span className="font-mono">{firstImg.replace(/^sha256:/, '').slice(0, 12)}</span>
+            )}
+          </>
         )}
-        <span>{members.length} container{members.length === 1 ? '' : 's'}</span>
-        {firstImg && <span className="font-mono">{firstImg.replace(/^sha256:/, '').slice(0, 12)}</span>}
       </div>
     </div>
   );
@@ -1005,12 +1039,19 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
 
   const runRollback = useCallback(
     async (entry: BpHistoryEntry) => {
+      const isFw = entry.source === 'firewall';
       const ver = short(entry.source_commit ?? entry.commit, 8);
+      const what = isFw ? 'firewall rules' : bp.name;
       setBusy(true);
-      const work = api.bpRollback(bp.name, activeStage, entry.commit);
+      const work = api.bpRollback(
+        bp.name,
+        activeStage,
+        entry.commit,
+        isFw ? 'firewall' : 'deploy',
+      );
       toast.promise(work, {
-        loading: `Rolling ${bp.name} back to ${ver}…`,
-        success: `${bp.name} rolled back to ${ver}`,
+        loading: `Rolling ${what} back to ${ver}…`,
+        success: `${what} rolled back to ${ver}`,
         error: (e: unknown) => `Rollback failed: ${String(e)}`,
       });
       try {
@@ -1424,6 +1465,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   activeStage === 'staging' ? 'dev' : activeStage === 'production' ? 'staging' : undefined
                 }
                 readOnly={isDr}
+                onChange={refresh}
               />
             ) : (
               <SupplyChainPanel
@@ -1453,18 +1495,34 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
       <AlertDialog open={confirm !== null} onOpenChange={(o) => !o && setConfirm(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Roll back this business process?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {confirm?.source === 'firewall'
+                ? 'Restore firewall rules to this version?'
+                : 'Roll back this business process?'}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              All containers in <span className="font-mono">{bp.name}</span> at{' '}
-              {STAGE_LABEL[activeStage]} will be redeployed together to{' '}
-              <span className="font-mono">{short(confirm?.source_commit ?? confirm?.commit, 8)}</span> (
-              {confirm ? Object.keys(confirm.members ?? {}).length : 0} container(s)).
+              {confirm?.source === 'firewall' ? (
+                <>
+                  The egress allow-list for <span className="font-mono">{bp.name}</span> at{' '}
+                  {STAGE_LABEL[activeStage]} will be restored to{' '}
+                  <span className="font-mono">{short(confirm?.commit, 8)}</span> (
+                  {confirm?.firewall?.allowed ?? 0} allowed · {confirm?.firewall?.denied ?? 0} denied)
+                  and the running gateway reloaded. The restore is itself recorded in the audit log.
+                </>
+              ) : (
+                <>
+                  All containers in <span className="font-mono">{bp.name}</span> at{' '}
+                  {STAGE_LABEL[activeStage]} will be redeployed together to{' '}
+                  <span className="font-mono">{short(confirm?.source_commit ?? confirm?.commit, 8)}</span> (
+                  {confirm ? Object.keys(confirm.members ?? {}).length : 0} container(s)).
+                </>
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={() => setConfirm(null)}>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={() => confirm && void runRollback(confirm)}>
-              Roll back
+              {confirm?.source === 'firewall' ? 'Restore rules' : 'Roll back'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
