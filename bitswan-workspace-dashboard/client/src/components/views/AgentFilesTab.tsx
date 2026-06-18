@@ -13,6 +13,10 @@ interface AgentFilesTabProps {
   copy: string;
   bp: string;
   branch: string;
+  /** True only when the Coding Agent tab is the active tab (the pane stays
+   *  mounted-but-hidden otherwise). Gates auto-reattach so we don't spin up
+   *  sessions for BPs the user is only browsing on other tabs. */
+  tabVisible?: boolean;
 }
 
 type Sub = 'chat' | 'files' | 'containers';
@@ -32,10 +36,11 @@ const SUBS: Sub[] = ['chat', 'files', 'containers'];
  * (Plan, Notes, and the Playwright Browser pane from the wireframe are
  * intentionally not built.)
  */
-export function AgentFilesTab({ copy, bp, branch: _branch }: AgentFilesTabProps) {
+export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: AgentFilesTabProps) {
   const {
     sessions: allSessions,
     startSession,
+    resumeSession,
     setCurrentScope,
     setPaneEl,
     selectedFor,
@@ -43,7 +48,7 @@ export function AgentFilesTab({ copy, bp, branch: _branch }: AgentFilesTabProps)
     agentStatus,
     ensureAgent,
   } = useSessions();
-  const { sessions: past } = useAgentSessions(copy, bp);
+  const { sessions: past, loading: pastLoading } = useAgentSessions(copy, bp);
 
   // Sub-tab and the Diff toggle live in the URL so the Agents view is
   // deep-linkable (?sub=files&diff=1).
@@ -92,6 +97,37 @@ export function AgentFilesTab({ copy, bp, branch: _branch }: AgentFilesTabProps)
       setSelectedFor({ copy, bp }, agent.id);
     }
   }, [agent, selectedId, setSelectedFor, copy, bp]);
+
+  // Auto-reattach: the agent runs server-side inside `dtach` keyed by the
+  // Claude session UUID, so it survives a browser close / hard refresh — but
+  // the client's live-session list is in-memory and starts empty. When the
+  // user opens this BP's Coding Agent tab and nothing is attached, resume the
+  // most recent session: `dtach -A` re-attaches to the still-running agent
+  // (or `claude --resume` restores the conversation if it has exited). With no
+  // prior session, start a fresh one so the tab is never empty. Fires once per
+  // (copy, bp) visit; only when the tab is actually visible.
+  const autoAttachedScope = useRef<string | null>(null);
+  useEffect(() => {
+    if (!tabVisible || pastLoading) return;
+    const key = `${copy}/${bp}`;
+    if (agent) {
+      autoAttachedScope.current = key; // already attached — nothing to do
+      return;
+    }
+    if (autoAttachedScope.current === key) return;
+    autoAttachedScope.current = key;
+    const resumable = past
+      .filter((s) => s.claudeSessionId && s.kind !== 'sync')
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
+    if (resumable?.claudeSessionId) {
+      resumeSession(copy, bp, resumable.claudeSessionId, resumable.kind ?? 'claude');
+    } else {
+      startSession(copy, bp);
+    }
+    // The scope-keyed guard re-evaluates automatically when (copy, bp) changes
+    // — a different key means a different scope to attach. Within one scope it
+    // fires once, so a manual exit isn't immediately auto-restarted.
+  }, [tabVisible, pastLoading, agent, past, copy, bp, resumeSession, startSession]);
 
   // A friendly name for the agent chip: the conversation title once the poll
   // has one, else a stable fallback.

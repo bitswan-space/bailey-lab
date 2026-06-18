@@ -136,9 +136,14 @@ fi
 # case. Idle close on the dashboard server kills the underlying process,
 # at which point dtach removes the socket, so the *next* attach starts
 # fresh from claude's on-disk history via `--resume <uuid>`.
+#
+# `-r winch`: on (re)attach, send a SIGWINCH so Claude's full-screen TUI
+# repaints immediately. dtach's default redraw method is ctrl_l, which Claude
+# (an Ink/React app that only repaints on resize) ignores — without this the
+# reattached terminal stays blank until the user manually resizes the window.
 if [ -n "$CLAUDE_SESSION_ID" ]; then
     DTACH_SOCKET="/tmp/.claude-dtach-${CLAUDE_SESSION_ID}.sock"
-    SHELL_CMD="dtach -A ${DTACH_SOCKET} -z ${SHELL_CMD}"
+    SHELL_CMD="dtach -A ${DTACH_SOCKET} -z -r winch ${SHELL_CMD}"
 fi
 
 # Anon session - no recording, just shell

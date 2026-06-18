@@ -54,6 +54,7 @@ export function WorkspaceView({ bp, wt, tab, onTab }: WorkspaceViewProps) {
               copy={wt.name}
               bp={bp.name}
               branch={wt.branch || wt.name}
+              tabVisible={tab === 'agent'}
             />
           </div>
           <EnvironmentPanel bp={bp.name} copy={wt.name} />
