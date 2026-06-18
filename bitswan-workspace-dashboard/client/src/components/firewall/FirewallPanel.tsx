@@ -59,9 +59,14 @@ export function FirewallPanel({
   const [role, setRole] = useState<string>('member');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  // The GDPR form: `approve` opens it editable (fill on approval); `view` opens
-  // it read-only (inspect a stored record).
-  const [approve, setApprove] = useState<{ host: string; record?: GdprRecord } | null>(null);
+  // The GDPR form: `approve` opens it editable — mode 'approve' when allowing a
+  // blocked/denied host, mode 'edit' to view/fill/update an allowed host's
+  // record. `view` opens it read-only (for viewers who can't edit).
+  const [approve, setApprove] = useState<{
+    host: string;
+    record?: GdprRecord;
+    mode: 'approve' | 'edit';
+  } | null>(null);
   const [view, setView] = useState<{ host: string; record: GdprRecord } | null>(null);
 
   const load = useCallback(() => {
@@ -143,8 +148,8 @@ export function FirewallPanel({
         });
       })();
       toast.promise(work, {
-        loading: `Approving ${host}…`,
-        success: `Approved ${host} with data-processing record`,
+        loading: `Saving ${host}…`,
+        success: `Saved data-processing record for ${host}`,
         error: (e: unknown) => `Failed: ${String(e)}`,
       });
       try {
@@ -180,8 +185,18 @@ export function FirewallPanel({
     (r) => r.status === 'allowed' && !decided.has(r.host),
   );
 
+  // Editors can always open a host's data-processing record — to view it, fill
+  // it in for the first time, or update it (+ its DPA). Viewers see the button
+  // only when a record already exists, opened read-only.
   const recordBtn = (r: FirewallRule) =>
-    r.gdpr ? (
+    canEdit ? (
+      <Btn
+        onClick={() => setApprove({ host: r.host, record: r.gdpr ?? undefined, mode: 'edit' })}
+        kind="record"
+      >
+        Data record
+      </Btn>
+    ) : r.gdpr ? (
       <Btn onClick={() => setView({ host: r.host, record: r.gdpr! })} kind="record">
         Data record
       </Btn>
@@ -223,7 +238,7 @@ export function FirewallPanel({
             <Row key={a.host} host={a.host} sub={`${a.count} attempt${a.count === 1 ? '' : 's'} · last ${fmt(a.last)}`} blocked>
               {canEdit && (
                 <>
-                  <Btn onClick={() => setApprove({ host: a.host })} kind="approve">Approve</Btn>
+                  <Btn onClick={() => setApprove({ host: a.host, mode: 'approve' })} kind="approve">Approve</Btn>
                   <Btn onClick={() => setRule(a.host, 'denied')} kind="deny" busy={busy === a.host}>Deny</Btn>
                 </>
               )}
@@ -273,7 +288,7 @@ export function FirewallPanel({
               {recordBtn(r)}
               {canEdit && (
                 <>
-                  <Btn onClick={() => setApprove({ host: r.host, record: r.gdpr ?? undefined })} kind="approve" busy={busy === r.host}>Approve</Btn>
+                  <Btn onClick={() => setApprove({ host: r.host, record: r.gdpr ?? undefined, mode: 'approve' })} kind="approve" busy={busy === r.host}>Approve</Btn>
                   <Btn onClick={() => removeRule(r.host)} kind="plain">Remove</Btn>
                 </>
               )}
@@ -295,6 +310,7 @@ export function FirewallPanel({
           host={approve.host}
           stageLabel={stageLabel}
           initial={approve.record}
+          mode={approve.mode}
           busy={busy === approve.host}
           onClose={() => setApprove(null)}
           onSave={(record, file) => void saveApproval(approve.host, record, file)}
@@ -332,6 +348,7 @@ function GdprModal({
   host,
   stageLabel,
   initial,
+  mode = 'approve',
   readOnly = false,
   busy = false,
   onClose,
@@ -341,6 +358,7 @@ function GdprModal({
   host: string;
   stageLabel: string;
   initial?: GdprRecord;
+  mode?: 'approve' | 'edit';
   readOnly?: boolean;
   busy?: boolean;
   onClose: () => void;
@@ -351,6 +369,8 @@ function GdprModal({
   const set = <K extends keyof GdprRecord>(k: K, v: GdprRecord[K]) =>
     setRec((s) => ({ ...s, [k]: v }));
   const ro = readOnly;
+  const title = ro || mode === 'edit' ? 'Data-processing record' : 'Approve 3rd-party access';
+  const submitLabel = mode === 'edit' ? 'Save record' : 'Approve & record';
   const storedLabel =
     rec.stored === 'yes' ? 'Yes — stored' : rec.stored === 'transient' ? 'Transient only' : 'No';
 
@@ -368,9 +388,7 @@ function GdprModal({
             <ShieldCheck className="size-4 text-foreground" aria-hidden />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="text-[15px] font-bold text-foreground">
-              {ro ? 'Data-processing record' : 'Approve 3rd-party access'}
-            </div>
+            <div className="text-[15px] font-bold text-foreground">{title}</div>
             <div className="mt-0.5 truncate font-mono text-[12px] text-muted-foreground">{host}</div>
           </div>
           <button
@@ -386,9 +404,9 @@ function GdprModal({
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-5 py-4">
           {!ro && (
             <p className="text-[12px] leading-relaxed text-muted-foreground">
-              {stageLabel} will be permitted to reach this host. GDPR requires documenting what data
-              leaves the system and how the processor handles it — recorded in the audit log against
-              your name.
+              {mode === 'edit'
+                ? 'GDPR requires documenting what data leaves the system and how the processor handles it. Changes are recorded in the audit log against your name.'
+                : `${stageLabel} will be permitted to reach this host. GDPR requires documenting what data leaves the system and how the processor handles it — recorded in the audit log against your name.`}
             </p>
           )}
 
@@ -529,7 +547,7 @@ function GdprModal({
               className="inline-flex h-8 items-center gap-1.5 rounded-md bg-emerald-600 px-3.5 text-[13px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
             >
               {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" aria-hidden />}
-              Approve &amp; record
+              {submitLabel}
             </button>
           </div>
         )}
