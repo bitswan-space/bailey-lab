@@ -6,9 +6,11 @@ import os
 from fastapi import (
     APIRouter,
     Depends,
+    File,
     Form,
     HTTPException,
     Query,
+    UploadFile,
 )
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
@@ -314,6 +316,37 @@ async def promote_bp_firewall(
     return await automation_service.promote_firewall(
         bp, body.from_stage, body.to_stage, body.by, body.role
     )
+
+
+@router.post("/business-processes/{bp}/firewall/dpa")
+async def upload_bp_firewall_dpa(
+    bp: str,
+    stage: str = Form(...),
+    host: str = Form(...),
+    by: str | None = Form(None),
+    role: str | None = Form(None),
+    file: UploadFile = File(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Upload a host's GDPR data-processing-agreement PDF; stored + versioned in
+    the gitops repo under firewall-dpa/<bp>/. Production needs admin/auditor."""
+    content = await file.read()
+    return await automation_service.store_firewall_dpa(
+        bp, stage, host, content, filename=file.filename, by=by, role=role
+    )
+
+
+@router.get("/business-processes/{bp}/firewall/dpa")
+async def get_bp_firewall_dpa(
+    bp: str,
+    host: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Download a host's stored DPA PDF (shared across stages for the host)."""
+    path = automation_service.firewall_dpa_path(bp, host)
+    if not path:
+        raise HTTPException(status_code=404, detail="No DPA on file for that host")
+    return FileResponse(path, media_type="application/pdf")
 
 
 @router.get("/business-processes/{bp}/files")

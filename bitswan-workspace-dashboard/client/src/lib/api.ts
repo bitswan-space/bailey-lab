@@ -361,13 +361,25 @@ export interface SupplyChainReport {
 }
 
 /** Egress firewall (outbound allow-list). */
+/** GDPR data-processing record for an allowed 3rd-party host (the wireframe's
+ *  approval form). `dpaFile` is the original name of an uploaded DPA PDF stored
+ *  in the gitops repo (downloadable via firewallDpaUrl); empty when none. */
+export interface GdprRecord {
+  noUserData: boolean;
+  dataSent?: string;
+  purpose?: string;
+  stored?: 'no' | 'transient' | 'yes';
+  jurisdiction?: string;
+  dpaFile?: string;
+}
+
 export interface FirewallRule {
   host: string;
   status: 'allowed' | 'denied';
   purpose?: string;
   by?: string;
   at?: string;
-  gdpr?: Record<string, unknown> | null;
+  gdpr?: GdprRecord | null;
 }
 export interface FirewallAttempt {
   host: string;
@@ -563,7 +575,7 @@ export const api = {
   /** Firewall: allow or deny an outbound host (versioned + audited). */
   setFirewallRule: (
     bp: string,
-    body: { stage: string; host: string; status: 'allowed' | 'denied'; purpose?: string; gdpr?: Record<string, unknown> },
+    body: { stage: string; host: string; status: 'allowed' | 'denied'; purpose?: string; gdpr?: GdprRecord },
   ) =>
     putJson<FirewallReport>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/firewall/rules`,
@@ -581,6 +593,21 @@ export const api = {
       `/api/automations/business-processes/${encodeURIComponent(bp)}/firewall/promote`,
       body,
     ),
+  /** Firewall: upload a host's GDPR data-processing-agreement PDF (stored +
+   *  versioned in the gitops repo). Returns the stored filename. */
+  uploadFirewallDpa: (bp: string, body: { stage: string; host: string; file: File }) => {
+    const form = new FormData();
+    form.set('stage', body.stage);
+    form.set('host', body.host);
+    form.set('file', body.file, body.file.name);
+    return postMultipart<{ stored: string; filename: string }>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/firewall/dpa`,
+      form,
+    );
+  },
+  /** Firewall: download URL for a host's stored DPA PDF (open in a new tab). */
+  firewallDpaUrl: (bp: string, host: string) =>
+    `/api/automations/business-processes/${encodeURIComponent(bp)}/firewall/dpa?host=${encodeURIComponent(host)}`,
   /** Supply chain: SBOM packages + CVEs + waiver log for a stage's image(s). */
   supplyChain: (bp: string, stage: string) =>
     getJson<SupplyChainReport>(

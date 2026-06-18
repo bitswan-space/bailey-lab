@@ -374,6 +374,92 @@ export function registerAutomationRoutes(
   fwWrite('/rules', 'DELETE');
   fwWrite('/promote', 'POST');
 
+  // Upload a host's GDPR data-processing-agreement PDF (multipart). The file is
+  // stored + versioned in the gitops repo; production is RBAC-gated server-side.
+  app.post<{ Params: { bp: string } }>(
+    '/api/automations/business-processes/:bp/firewall/dpa',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      if (!req.isMultipart()) {
+        return reply.code(400).send({ error: 'expected multipart/form-data' });
+      }
+      let stage = '';
+      let host = '';
+      let filename = '';
+      let content: Buffer | null = null;
+      let contentType = 'application/pdf';
+      try {
+        for await (const part of req.parts()) {
+          if (part.type === 'file' && part.fieldname === 'file') {
+            filename = (part.filename ?? 'dpa.pdf').split('/').pop() || 'dpa.pdf';
+            contentType = part.mimetype || contentType;
+            content = await part.toBuffer();
+          } else if (part.type === 'field') {
+            if (part.fieldname === 'stage') stage = String(part.value);
+            else if (part.fieldname === 'host') host = String(part.value);
+          }
+        }
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'firewall dpa parse failed');
+        return reply.code(400).send({ error: 'could not read upload' });
+      }
+      if (!stage || !host || !content) {
+        return reply.code(400).send({ error: 'stage, host and file are required' });
+      }
+      // Attribution + role come from the validated token, never the client.
+      const by = (await emailFromRequest(req, app.log)) || undefined;
+      const role = await fwRoleFromRequest(req, app.log);
+      try {
+        const r = await gitops.firewallDpaUpload(req.params.bp, {
+          stage,
+          host,
+          filename,
+          content,
+          contentType,
+          ...(by ? { by } : {}),
+          ...(role ? { role } : {}),
+        });
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'firewall dpa upload failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  // Download a host's stored DPA PDF (streamed through from gitops).
+  app.get<{ Params: { bp: string }; Querystring: { host?: string } }>(
+    '/api/automations/business-processes/:bp/firewall/dpa',
+    async (req, reply) => {
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      const { host } = req.query;
+      if (!host) {
+        return reply.code(400).send({ error: 'host is required' });
+      }
+      try {
+        const r = await gitops.firewallDpaDownload(req.params.bp, host);
+        if (!r.ok) {
+          return reply.code(r.status >= 400 && r.status < 500 ? r.status : 502).send({
+            error: 'gitops error',
+            status: r.status,
+          });
+        }
+        reply.header('Content-Type', r.contentType);
+        reply.header('Cache-Control', 'no-store');
+        return reply.send(r.body);
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'firewall dpa download failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   // Disaster Recovery → the BP's snapshot list (the DR panel's "tested
   // against" snapshot picker). Proxies the gitops snapshots list.
   app.get<{ Params: { bp: string } }>(

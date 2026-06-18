@@ -1928,6 +1928,60 @@ class AutomationService:
             message=message,
         )
 
+    # -- firewall DPA (data-processing agreement) documents ---------------------
+    # A GDPR rule's `gdpr` record (in bitswan.yaml) may reference a signed DPA
+    # PDF. The PDF itself is too big/binary for bitswan.yaml, so it's stored in
+    # the gitops repo under firewall-dpa/<bp>/ (one file per realm+host) and
+    # versioned/pushed like everything else — same audit + rollback engine.
+
+    def _dpa_rel(self, bp: str, host: str) -> str:
+        """Repo-relative path of a host's DPA PDF, namespaced per BP. Keyed on
+        the host (the data processor), not the stage — a DPA with e.g. sentry.io
+        is the same agreement whichever stage reaches it, so a promoted rule
+        keeps pointing at the same document."""
+        safe_host = re.sub(r"[^a-z0-9._-]", "_", host.strip().lower())
+        return os.path.join("firewall-dpa", bp, f"{safe_host}.pdf")
+
+    def firewall_dpa_path(self, bp: str, host: str) -> str | None:
+        """Absolute path of the stored DPA PDF for a BP host, or None."""
+        p = os.path.join(self.gitops_dir, self._dpa_rel(bp, host.strip().lower()))
+        return p if os.path.isfile(p) else None
+
+    async def store_firewall_dpa(
+        self,
+        bp: str,
+        stage: str,
+        host: str,
+        content: bytes,
+        filename: str | None = None,
+        by: str | None = None,
+        role: str | None = None,
+    ) -> dict:
+        """Store a host's DPA PDF in the gitops repo (firewall-dpa/<bp>/) and
+        version it. Production needs admin/auditor, same as a rule change."""
+        self._require_fw_role(stage, role)
+        if not content:
+            raise HTTPException(status_code=400, detail="empty DPA upload")
+        host = host.strip().lower()
+        if not host:
+            raise HTTPException(status_code=400, detail="host is required")
+        realm = bp_secrets.realm_for_stage(stage)
+        rel = self._dpa_rel(bp, host)
+        abspath = os.path.join(self.gitops_dir, rel)
+        os.makedirs(os.path.dirname(abspath), exist_ok=True)
+        with open(abspath, "wb") as f:
+            f.write(content)
+        await update_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
+            "firewall",
+            deployed_by=by,
+            message=f"firewall dpa {bp}/{realm}: {host} ({filename or 'dpa.pdf'})",
+            extra_paths=[rel],
+        )
+        return {"stored": rel, "filename": filename or os.path.basename(abspath)}
+
     async def scale_business_process(self, bp: str, stage: str, replicas: int) -> dict:
         """Scale every member container of a BP stage to `replicas` (Inspect →
         Scale). Reuses the per-deployment scale_automation."""

@@ -10,7 +10,11 @@ import subprocess
 import pytest
 from fastapi import HTTPException
 
-from app.utils import read_bitswan_yaml, dump_bitswan_yaml
+from app.utils import (
+    call_git_command_with_output,
+    read_bitswan_yaml,
+    dump_bitswan_yaml,
+)
 from app.services import automation_service as asvc
 from app.services import firewall_service as fws
 from app.services.automation_service import AutomationService
@@ -208,3 +212,74 @@ def test_firewall_rollback_unknown_revision_fails_loudly(tmp_path, monkeypatch):
     with pytest.raises(HTTPException) as e:
         asyncio.run(svc.rollback_firewall("shop", "dev", "deadbeef" * 5, by="x"))
     assert e.value.status_code == 404
+
+
+# ── GDPR data-processing record + DPA PDF storage ────────────────────────────
+
+
+def test_gdpr_record_persists_on_rule(tmp_path, monkeypatch):
+    svc = _svc(tmp_path, monkeypatch)
+    gdpr = {
+        "noUserData": False,
+        "dataSent": "employee email, stack traces",
+        "purpose": "crash diagnostics",
+        "stored": "yes",
+        "jurisdiction": "USA (DPF)",
+        "dpaFile": "sentry-dpa.pdf",
+    }
+    fw = asyncio.run(
+        svc.set_firewall_rule(
+            "shop",
+            "dev",
+            "sentry.io",
+            "allowed",
+            "crash diagnostics",
+            gdpr=gdpr,
+            by="t",
+        )
+    )
+    rule = next(r for r in fw["rules"] if r["host"] == "sentry.io")
+    assert rule["gdpr"] == gdpr
+    # round-trips through bitswan.yaml
+    raw = read_bitswan_yaml(str(tmp_path))
+    assert raw["firewall"]["shop"]["dev"]["rules"]["sentry.io"]["gdpr"] == gdpr
+
+
+def test_dpa_pdf_stored_in_repo_per_host(tmp_path, monkeypatch):
+    svc = _git_svc(tmp_path, monkeypatch)
+    res = asyncio.run(
+        svc.store_firewall_dpa(
+            "shop",
+            "dev",
+            "Sentry.io",
+            b"%PDF-1.4 fake",
+            filename="sentry-dpa.pdf",
+            by="t",
+        )
+    )
+    # stored under firewall-dpa/<bp>/<host>.pdf (host-keyed, shared across stages)
+    assert res["stored"] == "firewall-dpa/shop/sentry.io.pdf"
+    p = svc.firewall_dpa_path("shop", "sentry.io")
+    assert p and p.endswith("firewall-dpa/shop/sentry.io.pdf")
+    with open(p, "rb") as f:
+        assert f.read() == b"%PDF-1.4 fake"
+    # committed into the gitops repo (the audit/rollback engine)
+    out, _, _ = asyncio.run(
+        call_git_command_with_output(
+            "git", "log", "--name-only", "--format=%s", "-1", cwd=str(tmp_path)
+        )
+    )
+    assert "firewall-dpa/shop/sentry.io.pdf" in out
+    # the same host in another stage resolves to the same document
+    assert svc.firewall_dpa_path("shop", "sentry.io") == p
+
+
+def test_dpa_upload_production_requires_role(tmp_path, monkeypatch):
+    svc = _svc(tmp_path, monkeypatch)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(
+            svc.store_firewall_dpa(
+                "shop", "production", "x.com", b"%PDF", by="u", role="member"
+            )
+        )
+    assert e.value.status_code == 403

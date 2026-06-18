@@ -650,9 +650,14 @@ async def update_git(
     action: str,
     deployed_by: str | None = None,
     message: str | None = None,
+    extra_paths: list[str] | None = None,
 ):
     """
     Update git repository with changes to bitswan.yaml.
+
+    `extra_paths` are additional repo-relative paths to stage in the same commit
+    (e.g. firewall DPA PDFs stored under firewall-dpa/<bp>/), so adjacent
+    artifacts are versioned and pushed atomically with bitswan.yaml.
 
     Uses async lock with minimal hold time - only during the actual git operations
     that need to be atomic (add, commit). Pull and push are done with retries
@@ -726,6 +731,12 @@ async def update_git(
         if os.path.exists(dc_container_path):
             dc_git_path = os.path.join(bitswan_dir, "docker-compose.yaml")
             await call_git_command("git", "add", dc_git_path, cwd=bitswan_dir)
+
+        # Stage any extra repo-relative artifacts (e.g. firewall DPA PDFs).
+        for rel in extra_paths or []:
+            await call_git_command(
+                "git", "add", os.path.join(bitswan_dir, rel), cwd=bitswan_dir
+            )
 
         author = (
             f"{deployed_by} <{deployed_by}>"

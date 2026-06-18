@@ -621,6 +621,60 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** Upload a host's GDPR data-processing-agreement PDF (stored + versioned in
+   *  the gitops repo). Forwards as multipart to gitops. */
+  async firewallDpaUpload(
+    bp: string,
+    input: {
+      stage: string;
+      host: string;
+      by?: string;
+      role?: string;
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const form = new FormData();
+    form.set('stage', input.stage);
+    form.set('host', input.host);
+    if (input.by) form.set('by', input.by);
+    if (input.role) form.set('role', input.role);
+    const blob = new Blob([new Uint8Array(input.content)], {
+      type: input.contentType || 'application/pdf',
+    });
+    form.set('file', blob, input.filename);
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall/dpa`,
+      { method: 'POST', headers: { Authorization: `Bearer ${this.secret}` }, body: form },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Download a host's stored DPA PDF (raw bytes for the dashboard to stream). */
+  async firewallDpaDownload(
+    bp: string,
+    host: string,
+  ): Promise<{ ok: boolean; status: number; body: Buffer; contentType: string }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall/dpa?host=${encodeURIComponent(host)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    const buf = Buffer.from(await r.arrayBuffer());
+    return {
+      ok: r.ok,
+      status: r.status,
+      body: buf,
+      contentType: r.headers.get('content-type') || 'application/pdf',
+    };
+  }
+
   /** `GET .../business-processes/{bp}/supply-chain?stage=` — SBOM + CVEs + waivers. */
   async supplyChain(
     bp: string,
