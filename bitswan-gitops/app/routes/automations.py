@@ -236,6 +236,84 @@ async def delete_bp_supply_chain_waiver(
     )
 
 
+class FirewallRuleRequest(BaseModel):
+    stage: str
+    host: str
+    status: str = "allowed"  # allowed | denied
+    purpose: str | None = None
+    gdpr: dict | None = None
+    by: str | None = None
+    role: str | None = None  # caller's Bailey role (admin/auditor) for prod gating
+
+
+class FirewallDeleteRequest(BaseModel):
+    stage: str
+    host: str
+    by: str | None = None
+    role: str | None = None
+
+
+class FirewallPromoteRequest(BaseModel):
+    from_stage: str
+    to_stage: str
+    by: str | None = None
+    role: str | None = None
+
+
+@router.get("/business-processes/{bp}/firewall")
+async def get_bp_firewall(
+    bp: str,
+    stage: str = Query("dev"),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Egress allow-list rules + blocked/observed attempts for a BP stage."""
+    return automation_service.read_firewall(bp, stage)
+
+
+@router.put("/business-processes/{bp}/firewall/rules")
+async def put_bp_firewall_rule(
+    bp: str,
+    body: FirewallRuleRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Allow/deny an outbound host (versioned in bitswan.yaml). Production
+    changes require an admin/auditor role."""
+    return await automation_service.set_firewall_rule(
+        bp,
+        body.stage,
+        body.host,
+        body.status,
+        body.purpose or "",
+        body.gdpr,
+        body.by,
+        body.role,
+    )
+
+
+@router.delete("/business-processes/{bp}/firewall/rules")
+async def delete_bp_firewall_rule(
+    bp: str,
+    body: FirewallDeleteRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Remove a firewall rule (revoke/clear)."""
+    return await automation_service.delete_firewall_rule(
+        bp, body.stage, body.host, body.by, body.role
+    )
+
+
+@router.post("/business-processes/{bp}/firewall/promote")
+async def promote_bp_firewall(
+    bp: str,
+    body: FirewallPromoteRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Pull firewall rules forward (dev→staging→production)."""
+    return await automation_service.promote_firewall(
+        bp, body.from_stage, body.to_stage, body.by, body.role
+    )
+
+
 @router.get("/business-processes/{bp}/files")
 async def get_bp_files(
     bp: str,

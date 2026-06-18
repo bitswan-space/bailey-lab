@@ -38,6 +38,7 @@ from app.deploy_manager import deploy_manager
 from app.services.image_service import ImageService
 from app.services import bp_secrets
 from app.services import supply_chain_service
+from app.services import firewall_service
 from app.services.oauth2_helpers import (
     OAUTH2_PROXY_PATH,
     copy_oauth2_proxy_to_container,
@@ -1671,6 +1672,149 @@ class AutomationService:
             scanned += 1
         logger.info(f"supply-chain daily rescan: {scanned} image(s)")
         return {"rescanned": scanned}
+
+    # ── Egress firewall (outbound allow-list) ────────────────────────────────
+    _FW_ROLES = ("admin", "auditor")
+
+    def read_firewall(self, bp: str, stage: str) -> dict:
+        """Allow-list rules (from bitswan.yaml, audited) + the gateway's
+        blocked/observed attempts (telemetry). `posture` is monitor for dev,
+        enforce for staging/production. `attempts` is the 'needs review' feed:
+        observed hosts that have no rule yet."""
+        realm = bp_secrets.realm_for_stage(stage)
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        node = ((bs.get("firewall") or {}).get(bp) or {}).get(realm) or {}
+        rules = node.get("rules") or {}
+        posture = node.get("posture") or firewall_service.posture_for(realm)
+        rule_list = [{"host": h, **(r or {})} for h, r in sorted(rules.items())]
+        attempts = firewall_service.read_attempts(bp, realm)
+        review = [
+            {"host": h, **a} for h, a in sorted(attempts.items()) if h not in rules
+        ]
+        return {
+            "bp": bp,
+            "stage": realm,
+            "posture": posture,
+            "rules": rule_list,
+            "attempts": review,
+            "allowed": [r["host"] for r in rule_list if r.get("status") == "allowed"],
+        }
+
+    def _require_fw_role(self, stage: str, role: str | None) -> None:
+        """Production rule changes require an admin or auditor role."""
+        if (
+            bp_secrets.realm_for_stage(stage) == "production"
+            and role not in self._FW_ROLES
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="Only admin or auditor roles may change production firewall rules",
+            )
+
+    async def set_firewall_rule(
+        self,
+        bp: str,
+        stage: str,
+        host: str,
+        status: str,  # "allowed" | "denied"
+        purpose: str = "",
+        gdpr: dict | None = None,
+        by: str | None = None,
+        role: str | None = None,
+    ) -> dict:
+        """Allow or deny an outbound host for a BP stage. Versioned in
+        bitswan.yaml (the audit log of who decided what, when, and why)."""
+        if status not in ("allowed", "denied"):
+            raise HTTPException(status_code=400, detail="status must be allowed|denied")
+        self._require_fw_role(stage, role)
+        host = host.strip().lower()
+        if not host:
+            raise HTTPException(status_code=400, detail="host is required")
+        realm = bp_secrets.realm_for_stage(stage)
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        node = bs.setdefault("firewall", {}).setdefault(bp, {}).setdefault(realm, {})
+        node.setdefault("posture", firewall_service.posture_for(realm))
+        node.setdefault("rules", {})[host] = {
+            "status": status,
+            "purpose": (purpose or "").strip(),
+            "by": by or "unknown",
+            "at": date.today().strftime("%b %-d, %Y"),
+            **({"gdpr": gdpr} if gdpr else {}),
+        }
+        await self._save_and_commit_firewall(
+            bs, bp, by, f"firewall {bp}/{realm}: {status} {host}"
+        )
+        return self.read_firewall(bp, stage)
+
+    async def delete_firewall_rule(
+        self,
+        bp: str,
+        stage: str,
+        host: str,
+        by: str | None = None,
+        role: str | None = None,
+    ) -> dict:
+        """Remove a rule (revoke an allow / clear a deny) — its own commit."""
+        self._require_fw_role(stage, role)
+        host = host.strip().lower()
+        realm = bp_secrets.realm_for_stage(stage)
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rules = (((bs.get("firewall") or {}).get(bp) or {}).get(realm) or {}).get(
+            "rules"
+        ) or {}
+        if host in rules:
+            del rules[host]
+            await self._save_and_commit_firewall(
+                bs, bp, by, f"firewall {bp}/{realm}: remove rule {host}"
+            )
+        return self.read_firewall(bp, stage)
+
+    async def promote_firewall(
+        self,
+        bp: str,
+        from_stage: str,
+        to_stage: str,
+        by: str | None = None,
+        role: str | None = None,
+    ) -> dict:
+        """Pull firewall rules forward (e.g. dev→staging→production). Copies the
+        source realm's rules onto the target realm. Target=production needs the
+        role check."""
+        self._require_fw_role(to_stage, role)
+        from_realm = bp_secrets.realm_for_stage(from_stage)
+        to_realm = bp_secrets.realm_for_stage(to_stage)
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        src = (((bs.get("firewall") or {}).get(bp) or {}).get(from_realm) or {}).get(
+            "rules"
+        ) or {}
+        node = bs.setdefault("firewall", {}).setdefault(bp, {}).setdefault(to_realm, {})
+        node.setdefault("posture", firewall_service.posture_for(to_realm))
+        dst = node.setdefault("rules", {})
+        for h, r in src.items():
+            dst[h] = {
+                **(r or {}),
+                "by": by or "unknown",
+                "at": date.today().strftime("%b %-d, %Y"),
+            }
+        await self._save_and_commit_firewall(
+            bs, bp, by, f"promote firewall {bp}: {from_realm} → {to_realm}"
+        )
+        return self.read_firewall(bp, to_stage)
+
+    async def _save_and_commit_firewall(
+        self, bs: dict, bp: str, by: str | None, message: str
+    ):
+        path = os.path.join(self.gitops_dir, "bitswan.yaml")
+        with open(path, "w") as f:
+            dump_bitswan_yaml(bs, f)
+        await update_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
+            "firewall",
+            deployed_by=by,
+            message=message,
+        )
 
     async def scale_business_process(self, bp: str, stage: str, replicas: int) -> dict:
         """Scale every member container of a BP stage to `replicas` (Inspect →
