@@ -254,13 +254,6 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
           <CopyHistoryView copy={wt.name} />
         ) : (
           <div className="min-h-0 flex-1 overflow-auto px-7 py-5">
-            <p className="mb-4 max-w-2xl text-[13px] leading-relaxed text-muted-foreground">
-              Vulnerabilities in the image this business process would build from{' '}
-              <strong className="font-mono font-semibold text-foreground">{wt.name}</strong>’s
-              current source — the same artifact <strong className="text-foreground">Sync &amp;
-              Deploy</strong> ships. Built and scanned on demand (first run for new code takes a
-              moment to build).
-            </p>
             <SupplyChainPanel
               bp={bp.name}
               stage="dev"
@@ -268,6 +261,15 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
               readOnly
               fetcher={checksFetcher}
               emptyHint={`No buildable automation source found for ${bp.name} in ${wt.name}.`}
+              intro={
+                <>
+                  Vulnerabilities in the image this business process would build from{' '}
+                  <strong className="font-mono font-semibold text-foreground">{wt.name}</strong>’s
+                  current source — the same artifact{' '}
+                  <strong className="text-foreground">Sync &amp; Deploy</strong> ships. Built and
+                  scanned on demand (first run for new code takes a moment to build).
+                </>
+              }
             />
           </div>
         )}

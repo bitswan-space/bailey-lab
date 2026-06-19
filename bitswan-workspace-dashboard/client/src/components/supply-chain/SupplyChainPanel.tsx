@@ -29,6 +29,7 @@ export function SupplyChainPanel({
   readOnly = false,
   fetcher,
   emptyHint,
+  intro,
 }: {
   bp: string;
   stage: string;
@@ -39,6 +40,9 @@ export function SupplyChainPanel({
   fetcher?: () => Promise<SupplyChainReport>;
   /** Message shown when there's nothing to scan (status not-deployed). */
   emptyHint?: string;
+  /** Override the intro line above the rollup (e.g. the Checks tab explains
+   *  it's the to-be-built image, not a deployed one). */
+  intro?: React.ReactNode;
 }) {
   const [report, setReport] = useState<SupplyChainReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -136,9 +140,15 @@ export function SupplyChainPanel({
       {/* Intro + rollup */}
       <div className="flex flex-wrap items-center gap-3">
         <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-muted-foreground">
-          Packages in the image{report.image_count > 1 ? 's' : ''} deployed to {stageLabel} and known
-          vulnerabilities (CVEs) against them.{' '}
-          {readOnly ? 'Mirrored from Production — read-only.' : 'Click a CVE to mark it out of scope.'}
+          {intro ?? (
+            <>
+              Packages in the image{report.image_count > 1 ? 's' : ''} deployed to {stageLabel} and
+              known vulnerabilities (CVEs) against them.{' '}
+              {readOnly
+                ? 'Mirrored from Production — read-only.'
+                : 'Click a CVE to mark it out of scope.'}
+            </>
+          )}
         </p>
         <div className="flex flex-wrap gap-1.5">
           {SEV_ORDER.map((k) =>
