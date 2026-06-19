@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.13-alpine
 
 # Dependencies are baked into the image (content-addressed by the image/ tree
 # hash, like the Go worker's go.mod). The application source is bind-mounted at
