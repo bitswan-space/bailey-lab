@@ -97,6 +97,42 @@ const STAGE_LABEL: Record<string, string> = Object.fromEntries(
 // DR mirrors Production — it shows Production's deployment data and shares its
 // secrets. Map a stage id to the id whose data it displays.
 const stageDataId = (id: StageId): StageId => (id === 'dr' ? 'production' : id);
+
+/** The content-hash tag of a baked image (`repo/name:sha<tree-hash>` → the
+ *  `sha…` part), which is deterministic from the source content. */
+function imageTag(img?: string | null): string | null {
+  if (!img) return null;
+  const i = img.lastIndexOf(':');
+  return i >= 0 ? img.slice(i + 1) : img;
+}
+
+/**
+ * A stable fingerprint of the content a stage is actually RUNNING: the sorted
+ * set of baked image content-hashes across the BP's members on its current
+ * deploy. This — not `source_commit` — is the real "version" to compare for
+ * promotability: the dev stage bakes the live workspace tree, which can be
+ * ahead of its committed git HEAD, so `source_commit` lags the deployed
+ * content and would hide a genuinely-newer dev build from Promote. Walks back
+ * from the current entry to the most recent one that lists images (firewall /
+ * backup events carry none). Returns null when nothing is deployed.
+ */
+function deployedContentKey(hist?: BpHistory | null): string | null {
+  if (!hist || hist.history.length === 0) return null;
+  const curIdx = Math.max(
+    0,
+    hist.history.findIndex((h) => h.commit === hist.current),
+  );
+  for (let i = curIdx; i < hist.history.length; i++) {
+    const members = hist.history[i]?.members;
+    const tags = members
+      ? Object.values(members)
+          .map((m) => imageTag(m.image) ?? m.image_id ?? null)
+          .filter((x): x is string => !!x)
+      : [];
+    if (tags.length) return tags.slice().sort().join('|');
+  }
+  return null;
+}
 // Stages that actually have their own deployment history (DR has none).
 const DATA_STAGES: StageId[] = ['dev', 'staging', 'production'];
 
@@ -1322,14 +1358,13 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             const sHist = byStage[stageDataId(s.id)];
             const deployed = !!sHist && sHist.history.length > 0;
             const next = STAGES[i + 1];
-            const srcCur =
-              sHist?.history.find((h) => h.commit === sHist.current)?.source_commit ?? null;
-            const tgtCur = next
-              ? (byStage[next.id]?.history.find(
-                  (h) => h.commit === byStage[next.id]?.current,
-                )?.source_commit ?? null)
-              : null;
-            const canPromote = deployed && !!next && srcCur !== tgtCur;
+            // Promotable when the source stage RUNS different content than the
+            // target — compared by baked-image content hash, not source_commit
+            // (the dev image can be ahead of its committed HEAD, so the commit
+            // would falsely read "same version").
+            const srcKey = deployedContentKey(sHist);
+            const tgtKey = next ? deployedContentKey(byStage[next.id]) : null;
+            const canPromote = deployed && !!next && srcKey !== tgtKey;
             return (
               <Fragment key={s.id}>
                 <StageNode
