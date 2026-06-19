@@ -345,12 +345,22 @@ export interface BackupEvent {
   date: string;
 }
 
-/** A BP's blue-green production backup state: which slot is live (Production)
- *  vs standby (Disaster Recovery), the retention policy, and the audit log. */
+export type AppSlot = 'a' | 'b' | 'c';
+
+/** A BP's blue-green production state: 3 app slots (a/b/c) over 2 persistent
+ *  DBs. live_db is which DB is Production (the other is the DR standby);
+ *  live_slot is which app slot the ingress serves; dr_slot is the slot wired
+ *  to the standby DB; the idle slots are the zero-downtime-promote buffer. */
 export interface BackupState {
   bp: string;
-  live_slot: 'a' | 'b';
-  standby_slot: 'a' | 'b';
+  live_db: 1 | 2;
+  standby_db: 1 | 2;
+  live_slot: AppSlot;
+  // eslint-disable-next-line no-restricted-syntax -- null = no DR slot provisioned
+  dr_slot: AppSlot | null;
+  idle_slots: AppSlot[];
+  /** Active app slots → the DB each is wired to. */
+  slots: Record<string, { db: number; state?: string }>;
   retention: { daily: number; weekly: number; monthly: number };
   log: BackupEvent[];
 }
@@ -609,11 +619,18 @@ export const api = {
       `/api/automations/business-processes/${encodeURIComponent(bp)}/backups/retention`,
       retention,
     ),
-  /** Backups: DR go-live swap — flip which production slot is live (ingress
-   *  cutover, zero downtime, no data moved). */
+  /** Backups: DR go-live swap — flip live_db to the standby and repoint the
+   *  ingress to the DR slot (zero downtime, no data moved). */
   swapProductionDr: (bp: string) =>
     postJson<BackupState>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/backups/swap`,
+      {},
+    ),
+  /** Backups: zero-downtime promote — stage the new version on the idle slot
+   *  (current live db), repoint the ingress to it, retire the old slot. */
+  zeroDowntimePromote: (bp: string) =>
+    postJson<BackupState>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/backups/promote`,
       {},
     ),
   /** Firewall: egress allow-list rules + blocked/observed attempts for a stage. */

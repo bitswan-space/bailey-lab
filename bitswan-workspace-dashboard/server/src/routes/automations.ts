@@ -306,6 +306,7 @@ export function registerAutomationRoutes(
     });
   backupWrite('/retention', 'PUT');
   backupWrite('/swap', 'POST');
+  backupWrite('/promote', 'POST');
 
   // Supply chain → SBOM packages + CVEs (syft/grype) for the deployed image(s)
   // at a stage, plus the out-of-scope waiver log.

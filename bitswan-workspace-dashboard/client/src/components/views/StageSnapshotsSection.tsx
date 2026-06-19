@@ -530,18 +530,37 @@ function ProductionBackupCard({ bp }: { bp: string }) {
 
   return (
     <div className="flex flex-col gap-3 rounded-[10px] border border-border bg-background p-4">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span className="text-[13px] font-bold text-foreground">Backup retention &amp; live slot</span>
-        <span className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground">
-          Production is slot{' '}
-          <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 font-mono text-[11px] font-bold text-emerald-700">
-            {state.live_slot.toUpperCase()}
-          </span>
-          · DR is slot{' '}
-          <span className="rounded-full bg-amber-100 px-1.5 py-0.5 font-mono text-[11px] font-bold text-amber-700">
-            {state.standby_slot.toUpperCase()}
-          </span>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <span className="text-[13px] font-bold text-foreground">
+          Backup retention &amp; blue-green state
         </span>
+        <div className="inline-flex flex-wrap items-center gap-1.5 text-[12px] text-muted-foreground">
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 font-medium text-emerald-700">
+            <span className="font-mono font-bold">slot {state.live_slot.toUpperCase()}</span>
+            <span className="opacity-70">→ db{state.live_db}</span>
+            <span className="rounded-full bg-emerald-600 px-1 text-[9px] font-bold uppercase text-white">
+              live
+            </span>
+          </span>
+          {state.dr_slot && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 font-medium text-amber-700">
+              <span className="font-mono font-bold">slot {state.dr_slot.toUpperCase()}</span>
+              <span className="opacity-70">→ db{state.standby_db}</span>
+              <span className="rounded-full bg-amber-500 px-1 text-[9px] font-bold uppercase text-white">
+                DR
+              </span>
+            </span>
+          )}
+          {state.idle_slots.map((s) => (
+            <span
+              key={s}
+              className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 font-mono font-medium text-muted-foreground"
+              title="Idle — the zero-downtime promote buffer"
+            >
+              slot {s.toUpperCase()} · idle
+            </span>
+          ))}
+        </div>
       </div>
 
       <div className="flex flex-wrap items-end gap-4">
