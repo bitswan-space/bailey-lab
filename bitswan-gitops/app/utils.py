@@ -351,20 +351,29 @@ def add_workspace_route_to_ingress(
     port: str,
     slot: str | None = None,
     upstream_slot: str | None = None,
+    host_stage: str | None = None,
 ) -> bool:
     from app.services.automation_service import make_hostname_label
 
     gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-    # `slot` picks the HOSTNAME: None → the canonical URL (production + every
-    # non-prod route), set → that slot's own `…-<slot>` host. `upstream_slot`
-    # picks the CONTAINER the route resolves to; it defaults to `slot` but is set
-    # separately for the canonical production host, which must resolve to the
-    # LIVE slot's container (there is no slot-free container) — the same decouple
-    # the swap/promote repoint relies on.
+    # The HOSTNAME and the CONTAINER it resolves to are decoupled, so a stable
+    # user-facing host can point at a blue-green slot's container:
+    #   • host_stage overrides the hostname's stage — the DR host is `…-dr` while
+    #     its container lives in the `production` realm.
+    #   • slot adds a `-<slot>` suffix to the hostname (used only for per-slot
+    #     hosts; the stable production/DR hosts pass slot=None).
+    #   • upstream_slot picks the container's slot (defaults to slot) — the
+    #     production host → the live slot, the DR host → the standby slot.
     container_slot = upstream_slot if upstream_slot is not None else slot
     hostname = generate_workspace_url(
-        workspace_name, automation_name, context, stage, gitops_domain, False, slot
+        workspace_name,
+        automation_name,
+        context,
+        host_stage or stage,
+        gitops_domain,
+        False,
+        slot,
     )
     svc_name = make_hostname_label(
         workspace_name, automation_name, context, stage, container_slot

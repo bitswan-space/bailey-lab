@@ -1048,13 +1048,41 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     [setRollbackCommit],
   );
 
-  // Live containers for the current deployment (availability).
+  // The DR stage serves the STANDBY blue-green slot. Its containers share the
+  // live slot's state (both slots always run), but "Open app" must point at the
+  // standby slot's own URL so operators verify the recovered app before swapping
+  // it live — not at the production URL (which the ingress routes to the LIVE
+  // slot). Fetch which slot is DR and rewrite the frontend URL to its host.
+  // eslint-disable-next-line no-restricted-syntax -- null = not loaded / not DR
+  const [drSlot, setDrSlot] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isDr) {
+      setDrSlot(null);
+      return;
+    }
+    let alive = true;
+    api
+      .backups(bp.name)
+      .then((b) => alive && setDrSlot(b.dr_slot))
+      .catch(() => alive && setDrSlot(null));
+    return () => {
+      alive = false;
+    };
+  }, [isDr, bp.name, reloadKey]);
+
+  // Live containers for the current deployment. On DR, resolve each member to
+  // the STANDBY slot's own container (`<id>@<dr_slot>`, surfaced separately by
+  // the introspection overlay) — distinct from the live slot's container, and
+  // carrying the stable `-dr` URL. The live slot keeps the bare id.
   const members = useMemo(() => {
     if (!currentEntry) return [];
     return Object.keys(currentEntry.members).map((id) => {
-      const a = automations.find((x) => x.deployment_id === id);
+      const lookupId = isDr && drSlot ? `${id}@${drSlot}` : id;
+      const a = automations.find((x) => x.deployment_id === lookupId);
       return {
-        id,
+        // Use the slot-specific id so Logs / Inspect / start-stop target the
+        // DR slot's actual container (…@<dr_slot>), not the live one.
+        id: lookupId,
         name: a?.automation_name ?? id,
         present: !!a?.deployment_id,
         display: a?.deployment_id ? stateToDisplay(a.state) : 'not-deployed',
@@ -1063,7 +1091,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         expose: a?.expose ?? false,
       };
     });
-  }, [currentEntry, automations]);
+  }, [currentEntry, automations, isDr, drSlot]);
   const frontends = members.filter((m) => m.expose);
   const replicaTotal = members.reduce((a, m) => a + (m.replicas || 0), 0);
 
@@ -1436,7 +1464,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             {/* The architecture explainer is static — never gate it on
                 deployment data (a never-deployed DR BP would hang on Loading). */}
             {visibleSection === 'architecture' ? (
-              <DrArchitectureDoc />
+              <DrArchitectureDoc bp={bp.name} />
             ) : !loaded ? (
               <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" aria-hidden /> Loading…

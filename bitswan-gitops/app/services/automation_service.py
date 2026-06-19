@@ -538,17 +538,37 @@ class AutomationService:
         for container in containers:
             labels = container.get("Labels", {})
             deployment_id = labels.get("gitops.deployment_id")
-            if not deployment_id or deployment_id not in by_id:
+            if not deployment_id:
                 continue
-            a = by_id[deployment_id]
+            # Blue-green production runs two distinct container sets per member.
+            # The LIVE slot's container is labelled with the bare deployment_id
+            # and overlays its base entry; a STANDBY/idle slot's container is
+            # labelled `<dep_id>@<slot>` and has no base entry — surface it as a
+            # SEPARATE automation (cloned from the base) so the DR stage shows
+            # its own container, never the live one. Its public URL is the stable
+            # `-dr` host (the ingress route the swap repoints), not a slot host.
+            base_id = deployment_id.split("@")[0]
+            slot = deployment_id.split("@")[1] if "@" in deployment_id else None
+            if deployment_id not in by_id:
+                if slot and base_id in by_id:
+                    a = by_id[base_id].model_copy()
+                    a.deployment_id = deployment_id
+                    entries.append(a)
+                    by_id[deployment_id] = a
+                else:
+                    continue
+            else:
+                a = by_id[deployment_id]
 
             label = labels.get("gitops.intended_exposed", "false")
-            dep_conf = dep_configs.get(deployment_id, {})
+            dep_conf = dep_configs.get(base_id, {})
             url = generate_workspace_url(
                 self.workspace_name,
-                dep_conf.get("automation_name", deployment_id),
+                dep_conf.get("automation_name", base_id),
                 dep_conf.get("context", ""),
-                dep_conf.get("stage", "production") or "production",
+                # Standby slot's stable user-facing URL is the `-dr` host; the
+                # live slot keeps the canonical production URL.
+                "dr" if slot else (dep_conf.get("stage", "production") or "production"),
                 gitops_domain,
                 True,
             )
@@ -1838,11 +1858,11 @@ class AutomationService:
             f"swap production/DR {bp}: → slot {target_slot} (db{new_live_db})",
         )
         try:
-            await self._repoint_production_to_slot(bp, target_slot)
+            # Repoint BOTH stable hosts: -production → new live slot, -dr → the
+            # new standby. Pure ingress cutover — no rename, no data move.
+            await self._repoint_blue_green(bp)
         except Exception as e:  # noqa: BLE001 — best-effort; recorded state wins
-            logging.warning(
-                "swap %s: ingress repoint to slot %s deferred (%s)", bp, target_slot, e
-            )
+            logging.warning("swap %s: ingress repoint deferred (%s)", bp, e)
         return self.read_backups(bp)
 
     async def begin_zero_downtime_promote(self, bp: str, by: str | None = None) -> dict:
@@ -1940,11 +1960,14 @@ class AutomationService:
         await self.apply_compose_for_deployments(dep_ids, deployed_by=by, report=report)
         return result
 
-    def _production_frontend_routes(self, bp: str, slot: str) -> list[tuple[str, str]]:
+    def _production_frontend_routes(
+        self, bp: str, slot: str, host_stage: str = "production"
+    ) -> list[tuple[str, str]]:
         """For each exposed (frontend) production deployment of `bp`, the
-        (canonical_hostname, slot_upstream) pair the ingress should map. The
-        canonical hostname is the stable production URL; the upstream is that
-        slot's frontend container. Repointing this pair is the swap/promote."""
+        (hostname, upstream) pair the ingress should map. `host_stage` picks the
+        stable host — 'production' (the live URL) or 'dr' (the standby URL) —
+        and `slot` picks the container it resolves to. Repointing these is the
+        swap (production→live slot, dr→standby slot) and the promote cutover."""
         if not (self.workspace_name and self.gitops_domain):
             return []
         bs = read_bitswan_yaml(self.gitops_dir) or {}
@@ -1953,11 +1976,8 @@ class AutomationService:
             conf = conf or {}
             if (conf.get("stage") or "production") != "production":
                 continue
-            if conf.get("context", "") != bp and conf.get("automation_name") != bp:
-                # The BP a deployment belongs to is its context (production
-                # context == bp slug). Skip deployments of other BPs.
-                if conf.get("context", "") != bp:
-                    continue
+            if conf.get("context", "") != bp:
+                continue  # production context == bp slug
             try:
                 cfg = self.resolve_automation_config(conf)
             except Exception:
@@ -1969,7 +1989,7 @@ class AutomationService:
             from app.utils import generate_workspace_url
 
             hostname = generate_workspace_url(
-                self.workspace_name, name, ctx, "production", self.gitops_domain, False
+                self.workspace_name, name, ctx, host_stage, self.gitops_domain, False
             )
             upstream = (
                 make_hostname_label(self.workspace_name, name, ctx, "production", slot)
@@ -1997,6 +2017,27 @@ class AutomationService:
             logging.info(
                 "repointed production %s → slot %s (%s)", hostname, slot, upstream
             )
+
+    async def _repoint_blue_green(self, bp: str) -> None:
+        """Repoint both stable production hosts to the current slots: `-production`
+        → the live slot, `-dr` → the standby slot. The swap primitive — pure
+        ingress cutover, no rename and no data move."""
+        from app.utils import repoint_route_in_ingress
+
+        state = self.read_backups(bp)
+        routes = self._production_frontend_routes(bp, state["live_slot"], "production")
+        if state["dr_slot"]:
+            routes += self._production_frontend_routes(bp, state["dr_slot"], "dr")
+        if not routes:
+            raise RuntimeError(
+                f"no exposed production frontend found for {bp} — nothing to repoint"
+            )
+        for hostname, upstream in routes:
+            if not repoint_route_in_ingress(hostname, upstream, self.workspace_name):
+                raise RuntimeError(
+                    f"ingress repoint failed for {hostname} → {upstream}"
+                )
+            logging.info("repointed %s → %s", hostname, upstream)
 
     # ── Supply chain (SBOM + CVEs) ───────────────────────────────────────────
     def read_supply_chain(self, bp: str, stage: str) -> dict:
@@ -4790,6 +4831,23 @@ fi
                 (s for s, m in slots.items() if (m or {}).get("db") == live_db), "a"
             )
 
+        def _dr_slot_for(_conf: dict) -> str | None:
+            """The standby (DR) slot — the active slot wired to the non-live db."""
+            bp_slug, _ = derive_bp_and_copy(_conf.get("relative_path"))
+            rec = (bs_yaml.get("backups") or {}).get(bp_slug or "") or {}
+            slots = rec.get("slots") or {"a": {"db": 1}, "b": {"db": 2}}
+            live_db = int(rec.get("live_db") or 1)
+            standby_db = 2 if live_db == 1 else 1
+            live = _live_slot_for(_conf)
+            return next(
+                (
+                    s
+                    for s, m in slots.items()
+                    if (m or {}).get("db") == standby_db and s != live
+                ),
+                None,
+            )
+
         fw_scope: dict[tuple[str, str, str | None], dict] = {}
         for _dep_id, _conf in deployments.items():
             if not _conf:
@@ -5146,22 +5204,20 @@ fi
 
             if expose and port:
                 # Exposed automations (frontends) are reached through Bailey's
-                # protected ingress, which authenticates the user upstream and
-                # applies the per-endpoint ACL. There is no per-automation
-                # oauth2-proxy and no expose_to — registering the route is
-                # enough, and add_workspace_route_to_ingress records the
-                # workspace dashboard as the endpoint's ACL parent so every
-                # workspace member can share it via the Bailey share button.
-                # Slot-stable identity: each slot is reachable at its own
-                # `…-<slot>` hostname (used for same-slot discovery + DR
-                # verification of the standby). The live slot ALSO owns the
-                # canonical production hostname below.
+                # protected ingress (auth + per-endpoint ACL); registering the
+                # route records the workspace dashboard as the ACL parent so
+                # members can share it.
+                #
+                # Blue-green production exposes two STABLE user-facing hosts: the
+                # LIVE slot owns `-production`, the standby (DR) slot owns `-dr`.
+                # The idle promote-buffer slot has no public route. A swap
+                # repoints these hosts between slots (no rename, no redeploy).
+                # Non-production stages use their single canonical host.
+                is_dr_slot = bool(slot) and slot == _dr_slot_for(conf)
+                role_stage = "dr" if is_dr_slot else dep_stage
+                publish = (not slot) or is_live_slot or is_dr_slot
                 url_label = make_hostname_label(
-                    self.workspace_name,
-                    dep_automation_name,
-                    dep_context,
-                    dep_stage,
-                    slot,
+                    self.workspace_name, dep_automation_name, dep_context, role_stage
                 )
                 url_prefix = f"https://{self.workspace_name}-"
                 url_suffix = f".{self.gitops_domain}"
@@ -5171,30 +5227,21 @@ fi
                 entry["environment"]["BITSWAN_URL_PREFIX"] = url_prefix
                 entry["environment"]["BITSWAN_URL_SUFFIX"] = url_suffix
 
-                entry["labels"]["gitops.intended_exposed"] = "true"
-                if not add_workspace_route_to_ingress(
-                    dep_automation_name, dep_context, dep_stage, port, slot=slot
+                entry["labels"]["gitops.intended_exposed"] = (
+                    "true" if publish else "false"
+                )
+                if publish and not add_workspace_route_to_ingress(
+                    dep_automation_name,
+                    dep_context,
+                    dep_stage,
+                    port,
+                    upstream_slot=slot,
+                    host_stage=role_stage,
                 ):
                     logger.warning(
-                        f"Failed to add ingress route for {deployment_id} — "
-                        "deployment will proceed but may not be externally reachable"
+                        f"Failed to add ingress route for {deployment_id} "
+                        f"(role {role_stage}, slot {slot})"
                     )
-                # The live production slot owns the canonical (slot-free)
-                # hostname — the URL users hit. A DR swap / zero-downtime
-                # promote repoints this canonical hostname to another slot.
-                if slot and is_live_slot:
-                    # Canonical hostname (slot-free) → the LIVE slot's container.
-                    if not add_workspace_route_to_ingress(
-                        dep_automation_name,
-                        dep_context,
-                        dep_stage,
-                        port,
-                        upstream_slot=slot,
-                    ):
-                        logger.warning(
-                            "Failed to add canonical production route for "
-                            f"{deployment_id} (live slot {slot})"
-                        )
 
             # Add the public hostname as a network alias so other containers
             # on the same Docker network can reach this automation by its URL.

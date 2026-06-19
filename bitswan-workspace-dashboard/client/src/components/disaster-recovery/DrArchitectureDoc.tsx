@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import {
   ArrowLeftRight,
   Boxes,
@@ -6,16 +7,25 @@ import {
   Rocket,
   ShieldCheck,
 } from 'lucide-react';
+import { api, type BackupState } from '@/lib/api';
+import { cn } from '@/lib/utils';
 
 /**
  * "How this works" — an in-product explainer for the blue-green production
- * architecture, shown as a tab on the DR page. Written what/why before how:
- * lead with the problem each capability solves, then the mechanics.
- * Static content; no data.
+ * architecture, shown as a tab on the DR page. Opens with a LIVE state diagram
+ * (which slot is Production / DR / idle right now), then explains the model
+ * what/why before how.
  */
-export function DrArchitectureDoc() {
+export function DrArchitectureDoc({ bp }: { bp: string }) {
   return (
     <div className="flex flex-col gap-5 text-[13px] leading-relaxed text-foreground">
+      <Section
+        icon={<Boxes className="size-4 text-primary" aria-hidden />}
+        title="Right now"
+      >
+        <LiveState bp={bp} />
+      </Section>
+
       <Section
         icon={<ShieldCheck className="size-4 text-primary" aria-hidden />}
         title="What this is for"
@@ -151,6 +161,76 @@ export function DrArchitectureDoc() {
           deployment history, and because it’s in git it’s a permanent, reviewable record.
         </p>
       </Section>
+    </div>
+  );
+}
+
+const ROLE_TAG = {
+  live: { label: 'Production', cls: 'bg-emerald-600' },
+  dr: { label: 'Disaster Recovery', cls: 'bg-amber-500' },
+  idle: { label: 'Idle', cls: 'bg-zinc-400' },
+} as const;
+
+/** Live, real-time view of which app slot each role points at right now —
+ *  driven by the actual backups state, so a swap/promote moves the tags. */
+function LiveState({ bp }: { bp: string }) {
+  // eslint-disable-next-line no-restricted-syntax -- null = loading
+  const [state, setState] = useState<BackupState | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    api
+      .backups(bp)
+      .then((s) => alive && setState(s))
+      .catch(() => alive && setFailed(true));
+    return () => {
+      alive = false;
+    };
+  }, [bp]);
+
+  if (failed)
+    return <p className="text-[12px] text-muted-foreground">Couldn’t load the current slot state.</p>;
+  if (!state)
+    return <p className="text-[12px] text-muted-foreground">Loading current state…</p>;
+
+  const roleOf = (slot: string): keyof typeof ROLE_TAG =>
+    state.live_slot === slot ? 'live' : state.dr_slot === slot ? 'dr' : 'idle';
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-[12px] text-muted-foreground">
+        Which app slot each role points at right now — the tags move as you swap or promote.
+      </p>
+      <DiagramBox>
+        {(['a', 'b', 'c'] as const).map((slot) => {
+          const role = roleOf(slot);
+          const tag = ROLE_TAG[role];
+          const db = state.slots?.[slot]?.db ?? null;
+          return (
+            <div key={slot} className="flex items-center gap-2">
+              <span className="font-semibold">slot {slot.toUpperCase()}</span>
+              <span className={role === 'idle' ? 'text-muted-foreground' : 'text-primary'}>
+                ───▶
+              </span>
+              <span className={role === 'idle' ? 'text-muted-foreground' : ''}>
+                {db ? `database ${db}` : 'no containers'}
+              </span>
+              <span
+                className={cn(
+                  'rounded-full px-1.5 text-[9px] font-bold uppercase text-white',
+                  tag.cls,
+                )}
+              >
+                {tag.label}
+              </span>
+            </div>
+          );
+        })}
+        <div className="pt-1 text-[11px] text-muted-foreground">
+          Production serves database {state.live_db}; Disaster Recovery holds database{' '}
+          {state.standby_db} (where restores land). A swap repoints these — no data moves.
+        </div>
+      </DiagramBox>
     </div>
   );
 }
