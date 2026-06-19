@@ -374,6 +374,7 @@ async def ensure_bp_databases(
     bp_name: str,
     realm: str,
     services: list[str] | None = None,
+    slot: str | None = None,
 ) -> dict:
     """Create the per-BP objects for every requested service at one realm.
 
@@ -381,6 +382,11 @@ async def ensure_bp_databases(
     and whose container is running; the rest are reported as skipped and
     retried on the next deploy. Marks each successfully created service as
     provisioned in the registry. Returns a per-service result dict.
+
+    `slot` ('a'/'b') provisions a blue-green slot's own logical objects
+    (`bp_<slug>_<slot>` etc.) instead of the slot-free names, tracked under a
+    separate registry key. Used to stand up the production standby (DR) slot
+    so a backup can be restored into it without ever touching the live slot.
     """
     from app.services.infra_service import get_service
 
@@ -390,13 +396,16 @@ async def ensure_bp_databases(
             f"Invalid realm '{realm}': must be one of {sorted(SERVICE_REALMS)}"
         )
 
-    names = bp_resource_names(bp_slug)
+    names = bp_resource_names(bp_slug, slot)
     requested = [s for s in (services or BP_DATA_SERVICES) if s in BP_DATA_SERVICES]
 
     registry = load_registry()
     register_bp_stage(registry, bp_slug, bp_name, realm)
     stage_entry = registry["bps"][bp_slug]["stages"][realm]
-    svc_state = stage_entry.setdefault("services", {})
+    if slot:
+        svc_state = stage_entry.setdefault("slots", {}).setdefault(slot, {})
+    else:
+        svc_state = stage_entry.setdefault("services", {})
 
     results: dict[str, str] = {}
     changed = True  # register_bp_stage may have added the stage entry

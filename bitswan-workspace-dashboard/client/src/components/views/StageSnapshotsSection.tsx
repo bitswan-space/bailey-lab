@@ -12,6 +12,7 @@ import {
   CloneDialog,
   CreateSnapshotDialog,
   RestoreDialog,
+  type RestoreTarget,
 } from '@/components/snapshots/SnapshotDialogs';
 import { STAGE_META } from '@/components/snapshots/StagePicker';
 import { EmptyState } from '@/components/shared/EmptyState';
@@ -203,7 +204,7 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
   );
 
   const runRestore = useCallback(
-    async (snapshot: Snapshot, target: SnapshotStage) => {
+    async (snapshot: Snapshot, target: RestoreTarget) => {
       setRestoreTarget(null);
       try {
         const { task_id } = await api.snapshots.restore(bp.name, {
@@ -390,21 +391,20 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
       <CreateSnapshotDialog
         open={createOpen}
         enabledStages={[stage]}
+        fixedStage={stage}
         onCancel={() => setCreateOpen(false)}
         onConfirm={(target, label) => void runCreate(target, label)}
       />
 
       <RestoreDialog
         snapshot={restoreTarget}
-        bpSlug={bpSlug}
-        enabledStages={SNAPSHOT_STAGES}
+        enabledStages={enabledStages}
         onCancel={() => setRestoreTarget(null)}
         onConfirm={(snapshot, target) => void runRestore(snapshot, target)}
       />
 
       <CloneDialog
         open={cloneOpen}
-        bpSlug={bpSlug}
         enabledStages={enabledStages}
         fixedSource={stage}
         onCancel={() => setCloneOpen(false)}

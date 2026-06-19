@@ -825,7 +825,8 @@ export const api = {
       body: {
         snapshot_id: string;
         source_stage: SnapshotStage;
-        target_stage: SnapshotStage;
+        // 'dr' = restore into Production's standby (DR) slot — never live prod.
+        target_stage: SnapshotStage | 'dr';
       },
     ) =>
       postJson<{ task_id: string }>(

@@ -143,9 +143,18 @@ async def spawn_create_snapshot(bp: str, stage: str, label: str = "") -> dict:
 
 
 async def spawn_restore_snapshot(
-    bp: str, snapshot_id: str, source_stage: str, target_stage: str
+    bp: str,
+    snapshot_id: str,
+    source_stage: str,
+    target_stage: str,
+    slot: str | None = None,
 ) -> dict:
-    """Reserve source+target stages and restore in the background."""
+    """Reserve source+target stages and restore in the background.
+
+    `slot` ('a'/'b') restores into that production slot's own logical DB
+    instead of the slot-free one — the DR-restore path (target_stage is
+    'production', slot is the standby) that never touches the live slot.
+    """
     from app.services.snapshot_service import get_snapshot_service
     from app.dependencies import get_automation_service
 
@@ -175,13 +184,14 @@ async def spawn_restore_snapshot(
 
     async def run(progress):
         return await service.restore_snapshot(
-            bp, snapshot_id, source_stage, target_stage, progress=progress
+            bp, snapshot_id, source_stage, target_stage, progress=progress, slot=slot
         )
 
+    dest = f"{target_stage} slot {slot}" if slot else target_stage
     _spawn_bg(
         _run_task(
             task.task_id,
-            f"Restore of {bp} ({source_stage} → {target_stage})",
+            f"Restore of {bp} ({source_stage} → {dest})",
             run,
         )
     )

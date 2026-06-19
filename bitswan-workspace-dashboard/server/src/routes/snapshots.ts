@@ -6,6 +6,10 @@ export interface SnapshotRoutesOptions {
 }
 
 const STAGES = new Set(['dev', 'staging', 'production']);
+// Where a restore/clone may LAND: never live Production. 'dr' is the safe
+// recovery sink (gitops maps it to the production standby slot); dev/staging
+// are in-place. The server mirrors the gitops-side guard.
+const RESTORE_TARGETS = new Set(['dev', 'staging', 'dr']);
 
 /**
  * `/api/snapshots/*` — per-BP stage-snapshot proxy. Thin pass-through to
@@ -111,10 +115,16 @@ export function registerSnapshotRoutes(
     if (!snapshot_id || typeof snapshot_id !== 'string') {
       return reply.code(400).send({ error: 'snapshot_id is required' });
     }
-    if (!source_stage || !STAGES.has(source_stage) || !target_stage || !STAGES.has(target_stage)) {
+    if (!source_stage || !STAGES.has(source_stage)) {
       return reply
         .code(400)
-        .send({ error: "source_stage and target_stage must be 'dev', 'staging' or 'production'" });
+        .send({ error: "source_stage must be 'dev', 'staging' or 'production'" });
+    }
+    if (!target_stage || !RESTORE_TARGETS.has(target_stage)) {
+      return reply.code(400).send({
+        error:
+          "target_stage must be 'dev', 'staging' or 'dr' — restoring onto live Production is not allowed",
+      });
     }
     try {
       return await forward(
@@ -138,10 +148,16 @@ export function registerSnapshotRoutes(
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
     const { source_stage, target_stage } = req.body ?? {};
-    if (!source_stage || !STAGES.has(source_stage) || !target_stage || !STAGES.has(target_stage)) {
+    if (!source_stage || !STAGES.has(source_stage)) {
       return reply
         .code(400)
-        .send({ error: "source_stage and target_stage must be 'dev', 'staging' or 'production'" });
+        .send({ error: "source_stage must be 'dev', 'staging' or 'production'" });
+    }
+    // Clone may seed dev/staging but never overwrite live Production.
+    if (!target_stage || target_stage === 'production' || !STAGES.has(target_stage)) {
+      return reply
+        .code(400)
+        .send({ error: "target_stage must be 'dev' or 'staging' — not live Production" });
     }
     try {
       return await forward(

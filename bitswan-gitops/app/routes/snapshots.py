@@ -149,22 +149,40 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
     """
     slug = _bp_slug(bp)
     _validate_stage(body.source_stage)
-    _validate_stage(body.target_stage)
-    # Safety: never overwrite LIVE Production data with a restore. Recovery goes
-    # into the isolated Disaster-Recovery standby (restored, hand-verified) and
-    # only then goes live via the DR swap (an ingress repoint, no data move).
-    if body.target_stage == "production":
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Restoring directly into live Production is not allowed. Restore "
-                "into Disaster Recovery, verify the data, then swap DR with "
-                "Production (ingress cutover)."
-            ),
-        )
+
+    # 'dr' is the safe recovery sink: restore into the production STANDBY
+    # slot's own logical DB (never the live slot), then hand-verify and swap.
+    # It maps to the production instance + the standby slot — the live slot's
+    # data is never touched by a restore.
+    service_target = body.target_stage
+    restore_slot: str | None = None
+    if body.target_stage == "dr":
+        from app.dependencies import get_automation_service
+
+        restore_slot = get_automation_service().standby_slot(slug)
+        service_target = "production"
+    else:
+        _validate_stage(body.target_stage)
+        # Safety: never overwrite LIVE Production data with a restore. Recovery
+        # goes into the isolated Disaster-Recovery standby (restored, hand-
+        # verified) and only then goes live via the DR swap (an ingress
+        # repoint, no data move).
+        if body.target_stage == "production":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Restoring directly into live Production is not allowed. "
+                    "Restore into Disaster Recovery, verify the data, then swap "
+                    "DR with Production (ingress cutover)."
+                ),
+            )
     try:
         res = await spawn_restore_snapshot(
-            slug, body.snapshot_id, body.source_stage, body.target_stage
+            slug,
+            body.snapshot_id,
+            body.source_stage,
+            service_target,
+            slot=restore_slot,
         )
     except BusyError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -172,10 +190,15 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    audit_dest = (
+        f"Disaster Recovery (standby slot {restore_slot})"
+        if restore_slot
+        else body.target_stage
+    )
     await _audit_backup(
         slug,
         "restored",
-        f"{body.source_stage} snapshot → {body.target_stage}",
+        f"{body.source_stage} snapshot → {audit_dest}",
         body.by,
     )
     return JSONResponse(
