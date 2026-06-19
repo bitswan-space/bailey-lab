@@ -1,13 +1,32 @@
 projectname?=bitswan
 
+# Bailey Server Console (SPA) — built separately and baked into the daemon
+# binary via `go:embed serverconsole_dist`. CONSOLE_DIR points at the sibling
+# package in the monorepo; CONSOLE_EMBED is the embed dir the binary compiles in.
+CONSOLE_DIR?=../bitswan-server-console
+CONSOLE_EMBED:=internal/daemon/serverconsole_dist
+
 default: help
 
 .PHONY: help
 help: ## list makefile targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
 
+.PHONY: console
+console: ## build the Server Console SPA and stage it for go:embed
+	# Always reconcile deps: a no-op when the tree is in sync, but it picks up
+	# packages newly added to package.json so the bundle is never stale.
+	# --prefer-offline uses the npm cache when possible (only new/missing
+	# packages hit the network), keeping the common case fast.
+	npm --prefix "$(CONSOLE_DIR)" install --no-audit --no-fund --prefer-offline
+	npm --prefix "$(CONSOLE_DIR)" run build
+	@rm -rf "$(CONSOLE_EMBED)"
+	@mkdir -p "$(CONSOLE_EMBED)"
+	@cp -r "$(CONSOLE_DIR)/dist/." "$(CONSOLE_EMBED)/"
+	@touch "$(CONSOLE_EMBED)/.gitkeep"
+
 .PHONY: build
-build: ## build golang binary
+build: console ## build golang binary with the Server Console SPA embedded
 	@CGO_ENABLED=0 go build \
 		-ldflags "-X main.version=$(shell git describe --abbrev=0 --tags) -w -s -extldflags '-static'" \
 		-a \

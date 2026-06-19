@@ -1095,6 +1095,36 @@ class AutomationService:
 
         return deployment_result
 
+    async def _ensure_worktree_db_or_abort(
+        self, worktree: str | None, stage: str | None
+    ) -> None:
+        """Guarantee a worktree's live-dev Postgres database exists before its
+        backends start, aborting the deploy if it can't be created.
+
+        Worktree live-dev automations connect to postgres_wt_<worktree> (the
+        POSTGRES_DB override in generate_docker_compose). That DB is cloned at
+        worktree-create, but a BP added to an existing worktree — or a recreated
+        dev-postgres that lost the clone — leaves it missing. Starting a backend
+        against a nonexistent database only trades a clear error here for an
+        opaque crash-loop / 502 later, so fail loudly instead. No-op for
+        non-worktree or non-live-dev deploys.
+        """
+        if not (worktree and stage == "live-dev"):
+            return
+        from app.services.bp_databases import ensure_worktree_postgres_db
+
+        try:
+            await ensure_worktree_postgres_db(self.workspace_name, worktree)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Worktree '{worktree}' Postgres database could not be "
+                    f"ensured; aborting deploy so backends don't start against "
+                    f"a missing database: {e}"
+                ),
+            )
+
     async def deploy_source_set(
         self,
         label: str,
@@ -1130,6 +1160,11 @@ class AutomationService:
                 status_code=404,
                 detail=f"No deployable automations for '{label}'",
             )
+
+        # Ensure the worktree's live-dev database exists before building or
+        # starting anything — abort the deploy if it can't be created, rather
+        # than start a backend that crash-loops against a missing database.
+        await self._ensure_worktree_db_or_abort(worktree, stage)
 
         # Prep every member up-front (fail-fast — touches no containers).
         total = len(members)
@@ -2048,20 +2083,25 @@ fi
         from app.services.bp_databases import register_new_bps_for_members
 
         _existing_conf = bs_yaml.get("deployments", {}).get(deployment_id) or {}
+        _eff_relative_path = relative_path or _existing_conf.get("relative_path")
+        _eff_stage = (
+            stage
+            if stage is not None
+            else (_existing_conf.get("stage") or "production")
+        )
         register_new_bps_for_members(
             bs_yaml,
-            [
-                {
-                    "relative_path": relative_path
-                    or _existing_conf.get("relative_path"),
-                    "stage": (
-                        stage
-                        if stage is not None
-                        else (_existing_conf.get("stage") or "production")
-                    ),
-                }
-            ],
+            [{"relative_path": _eff_relative_path, "stage": _eff_stage}],
         )
+
+        # A worktree live-dev automation connects to postgres_wt_<worktree>;
+        # ensure that database exists before starting it, aborting the deploy if
+        # it can't be created (mirrors the set-deploy path). Fail-fast here,
+        # before the bitswan.yaml write and compose-up below.
+        from app.services.bp_databases import derive_bp_and_worktree
+
+        _, _eff_worktree = derive_bp_and_worktree(_eff_relative_path)
+        await self._ensure_worktree_db_or_abort(_eff_worktree, _eff_stage)
 
         # Update bitswan.yaml with new parameters if provided
         has_updates = any(
@@ -3033,6 +3073,7 @@ fi
             derive_bp_and_worktree,
             is_registered,
             load_registry,
+            worktree_db_name,
         )
         from app.services.infra_service import stage_for_deployment
 
@@ -3203,8 +3244,7 @@ fi
             # database. Ordering is load-bearing: this MUST come after the
             # per-BP injection above so the worktree clone wins.
             if wt_name and stage == "live-dev":
-                wt_db = "postgres_wt_" + re.sub(r"[^a-z0-9_]", "_", wt_name.lower())
-                entry["environment"]["POSTGRES_DB"] = wt_db
+                entry["environment"]["POSTGRES_DB"] = worktree_db_name(wt_name)
 
             if self.workspace_name and self.gitops_domain:
                 if dep_context:
