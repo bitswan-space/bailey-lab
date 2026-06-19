@@ -79,6 +79,29 @@ export class GitopsClient {
   }
 
   /**
+   * `GET /automations/user-role?email=` — the authoritative Bailey role for an
+   * email, resolved by gitops from the automation-server daemon (the same store
+   * People & roles uses, NOT SSO groups). Pass an email already verified from
+   * the user's access token. Returns 'member' when the daemon can't resolve a
+   * role or the lookup fails — fail CLOSED (least privilege) for gating.
+   */
+  async userRole(email: string): Promise<'admin' | 'auditor' | 'member'> {
+    try {
+      const r = await fetch(
+        `${this.baseUrl}/automations/user-role?email=${encodeURIComponent(email)}`,
+        { headers: { Authorization: `Bearer ${this.secret}` } },
+      );
+      if (!r.ok) return 'member';
+      const body = (await r.json()) as { role?: string };
+      const role = body?.role;
+      if (role === 'admin' || role === 'auditor') return role;
+      return 'member';
+    } catch {
+      return 'member';
+    }
+  }
+
+  /**
    * `POST /automations/{id}/(start|stop|restart)`. gitops accepts an empty
    * JSON body; the status code is forwarded so the route handler can surface
    * 502s on upstream failure.

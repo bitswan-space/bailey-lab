@@ -417,6 +417,29 @@ def _ingress_client_and_base() -> tuple:
     return httpx.Client(timeout=10), base_url
 
 
+def daemon_user_role(email: str) -> str:
+    """The authoritative Bailey role (admin|auditor|member|user) for an email,
+    read from the automation-server daemon over the trusted local socket.
+
+    The daemon's user_roles store is the single source of truth — the same
+    `effectiveRole` the People & roles admin view shows — and is deliberately
+    NOT derived from SSO groups. Callers pass an identity that an upstream shim
+    has already verified (the dashboard validates the user's access token →
+    email before asking). Raises on transport failure so callers fail CLOSED
+    (treat as unprivileged) rather than guess a role.
+    """
+    email = (email or "").strip()
+    if not email:
+        return ""
+    client, base = _ingress_client_and_base()
+    try:
+        resp = client.get(f"{base}/bailey/role", params={"email": email})
+        resp.raise_for_status()
+        return (resp.json() or {}).get("role") or ""
+    finally:
+        client.close()
+
+
 def add_route_to_ingress(
     hostname: str,
     upstream: str,

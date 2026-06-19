@@ -159,6 +159,19 @@ class DrTestRequest(BaseModel):
     deployed_by: str | None = None
 
 
+@router.get("/user-role")
+async def get_user_role_route(email: str):
+    """The authoritative Bailey role for an email, resolved from the
+    automation-server daemon (the same store the People & roles view uses,
+    never SSO groups). The dashboard shim calls this with the identity it has
+    already verified from the user's access token; gitops bridges to the daemon
+    over its trusted local socket. Fails closed (500) if the daemon can't be
+    reached, so the caller treats the user as unprivileged."""
+    from app.utils import daemon_user_role
+
+    return {"email": email, "role": daemon_user_role(email)}
+
+
 @router.get("/business-processes/{bp}/dr")
 async def get_bp_dr_route(
     bp: str,

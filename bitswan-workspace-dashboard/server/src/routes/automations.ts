@@ -217,7 +217,7 @@ export function registerAutomationRoutes(
     // The recovery-test cadence is a compliance control — only admins/auditors
     // may change it. Resolve the role from the validated token (never trust the
     // client) and reject everyone else.
-    const role = await fwRoleFromRequest(req, app.log);
+    const role = await fwRoleFromRequest(req, gitops, app.log);
     if (role !== 'admin' && role !== 'auditor') {
       return reply
         .code(403)
@@ -434,7 +434,7 @@ export function registerAutomationRoutes(
         reply.header('Cache-Control', 'no-store');
         if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
         const by = (await emailFromRequest(req, app.log)) || undefined;
-        const role = await fwRoleFromRequest(req, app.log);
+        const role = await fwRoleFromRequest(req, gitops, app.log);
         try {
           const r = await gitops.firewallWrite(req.params.bp, suffix, method, {
             ...(req.body ?? {}),
@@ -492,7 +492,7 @@ export function registerAutomationRoutes(
       }
       // Attribution + role come from the validated token, never the client.
       const by = (await emailFromRequest(req, app.log)) || undefined;
-      const role = await fwRoleFromRequest(req, app.log);
+      const role = await fwRoleFromRequest(req, gitops, app.log);
       try {
         const r = await gitops.firewallDpaUpload(req.params.bp, {
           stage,
@@ -729,7 +729,7 @@ export function registerAutomationRoutes(
     const deployer = await emailFromRequest(req, app.log);
     // Firewall rollbacks are RBAC-gated in production — resolve the role here so
     // the client cannot assert its own role (gitops enforces it again).
-    const role = kind === 'firewall' ? await fwRoleFromRequest(req, app.log) : undefined;
+    const role = kind === 'firewall' ? await fwRoleFromRequest(req, gitops, app.log) : undefined;
     try {
       const r = await gitops.bpRollback({
         bp: req.params.bp,

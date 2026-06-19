@@ -49,10 +49,15 @@ func handleWhoami(w http.ResponseWriter, r *http.Request) {
 			hs[h] = v
 		}
 	}
+	email, _ := identityFromHeaders(r)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"headers":              hs,
 		"admin_group_constant": adminGroup,
 		"is_admin":             isAdmin(r),
+		// Authoritative Bailey role (admin|auditor|member|user) — what the
+		// dashboard badge shows. Same source as People & roles, not SSO groups.
+		"email": email,
+		"role":  effectiveRole(email),
 	})
 }

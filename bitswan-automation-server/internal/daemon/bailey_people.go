@@ -104,6 +104,31 @@ func callerIsAdmin(email string) bool {
 	return effectiveRole(email) == roleAdmin
 }
 
+// handleUserRole (GET /bailey/role?email=) returns the AUTHORITATIVE Bailey
+// role for an email — the same effectiveRole the People & roles view shows,
+// never derived from SSO groups. Mounted on the daemon's local socket mux
+// (authMiddleware): only a caller holding the daemon token over the local
+// socket reaches it — i.e. gitops resolving the role of an identity its
+// upstream shim already verified (the dashboard validates the user's access
+// token → email before asking). The lookup is by email and carries no
+// authority of its own, so it is safe for that trusted backend channel.
+func (s *Server) handleUserRole(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	email := strings.TrimSpace(r.URL.Query().Get("email"))
+	if email == "" {
+		writeJSONError(w, "email query parameter is required", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"email": email,
+		"role":  effectiveRole(email),
+	})
+}
+
 // handleSetUserRole assigns a user's role locally (admin-only; the caller is
 // already gated in handleBailey). Stores it in user_roles, which is the
 // authoritative source for the role and the admin capability.

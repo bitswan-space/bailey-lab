@@ -162,6 +162,12 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	mux.HandleFunc("/bailey/devices/approve", s.authMiddleware(s.handleDeviceApprove))
 	mux.HandleFunc("/bailey/devices/pending", s.authMiddleware(s.handleDevicesPending))
 
+	// Bailey authoritative role lookup (authenticated; socket-trusted). Lets a
+	// trusted backend (gitops, on behalf of the dashboard shim that already
+	// verified the user's access token) resolve a user's effectiveRole without
+	// re-deriving it from SSO groups. Read-only, keyed by email.
+	mux.HandleFunc("/bailey/role", s.authMiddleware(s.handleUserRole))
+
 	// Bailey endpoint access grants (authenticated; socket-trusted, CLI-only —
 	// deliberately not exposed on the public gate mux to keep the share UI
 	// least-privileged). Backs `bitswan bailey access {grant,revoke,list}`.

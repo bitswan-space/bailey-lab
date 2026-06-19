@@ -265,7 +265,7 @@ export function DisasterRecoveryPanel({
             <span aria-hidden>·</span>
             {editingPolicy && canEditPolicy ? (
               <span className="inline-flex items-center gap-1.5">
-                <span>test every</span>
+                <span>cadence</span>
                 <select
                   autoFocus
                   value={dr.policy}
@@ -290,7 +290,10 @@ export function DisasterRecoveryPanel({
             ) : (
               <span className="inline-flex items-center gap-1">
                 <span>
-                  tested every <strong className="font-semibold">{POLICY_LABEL[dr.policy]}</strong>
+                  tested{' '}
+                  <strong className="font-semibold">
+                    {POLICY_LABEL[dr.policy].toLowerCase()}
+                  </strong>
                 </span>
                 {canEditPolicy ? (
                   <button

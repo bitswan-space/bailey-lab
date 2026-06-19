@@ -49,7 +49,7 @@ export function registerMeRoutes(
         });
     }
 
-    const role = await fwRoleFromRequest(req, app.log);
+    const role = await fwRoleFromRequest(req, gitops, app.log);
     return { email, copy, role };
   });
 }
