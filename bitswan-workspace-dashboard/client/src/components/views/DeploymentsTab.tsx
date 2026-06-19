@@ -1016,6 +1016,32 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
 
   const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
   const isDr = activeStage === 'dr';
+
+  // The "Restore" action (stage row, between Production and DR) goes live on the
+  // recovered environment: swap which slot is Production vs DR — an ingress
+  // cutover + pointer flip, no data move. Confirmed because it changes which
+  // environment real users hit.
+  const [swapConfirm, setSwapConfirm] = useState(false);
+  const [swapping, setSwapping] = useState(false);
+  const runSwap = useCallback(async () => {
+    setSwapping(true);
+    const work = api.swapProductionDr(bp.name);
+    toast.promise(work, {
+      loading: 'Switching Production ↔ Disaster Recovery…',
+      success: (s) =>
+        `Switched — Production now serves slot ${s.live_slot.toUpperCase()} (database ${s.live_db})`,
+      error: (e: unknown) => `Switch failed: ${String(e)}`,
+    });
+    try {
+      await work;
+      refresh();
+    } catch {
+      /* toast handled */
+    } finally {
+      setSwapping(false);
+      setSwapConfirm(false);
+    }
+  }, [bp.name, refresh]);
   // Data snapshots are per snapshot-stage (dev/staging/production); DR mirrors
   // production. The ternary narrows StageId → SnapshotStage (drops 'dr').
   const snapshotStage: SnapshotStage = activeStage === 'dr' ? 'production' : activeStage;
@@ -1315,19 +1341,29 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 {next && (
                   <>
                     <div className="h-0.5 flex-1 bg-border" aria-hidden />
-                    {/* DR isn't promoted into — it's the standby slot, reached
-                        via its stage button and made live from the DR panel's
-                        swap. No action pill between Production and DR. */}
-                    {next.id !== 'dr' && (
-                      <div className="shrink-0">
+                    <div className="shrink-0">
+                      {next.id === 'dr' ? (
+                        // "Restore" = go live on the recovered environment: swap
+                        // which slot is Production vs DR (ingress cutover + state
+                        // flip, no data move). View/verify DR via its stage button.
+                        <button
+                          type="button"
+                          onClick={() => setSwapConfirm(true)}
+                          title="Restore: make Disaster Recovery the live Production (ingress cutover, no data moved)"
+                          className="inline-flex h-[30px] items-center gap-1.5 rounded-full border border-dashed border-border bg-background px-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-muted-foreground hover:border-primary/40 hover:text-foreground"
+                        >
+                          <RotateCcw className="size-3.5" aria-hidden />
+                          Restore
+                        </button>
+                      ) : (
                         <PromoteButton
                           canPromote={canPromote}
                           label={next.label}
                           busy={busy}
                           onClick={() => void runPromote(next.id as 'staging' | 'production')}
                         />
-                      </div>
-                    )}
+                      )}
+                    </div>
                     <div className="h-0.5 flex-1 bg-border" aria-hidden />
                   </>
                 )}
@@ -1577,6 +1613,27 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             <AlertDialogCancel onClick={() => setConfirm(null)}>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={() => confirm && void runRollback(confirm)}>
               {confirm?.source === 'firewall' ? 'Restore rules' : 'Roll back'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Restore = go live on the recovered (DR) environment via a slot swap. */}
+      <AlertDialog open={swapConfirm} onOpenChange={(o) => !o && setSwapConfirm(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Make Disaster Recovery the live Production?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Production traffic for <span className="font-mono">{bp.name}</span> will switch to the
+              standby (Disaster Recovery) slot, and the current Production becomes the new standby.
+              This is an <strong>ingress cutover plus a state flip</strong> — no data is moved and
+              nothing is rebuilt. Verify the DR environment first; you can switch straight back.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setSwapConfirm(false)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction disabled={swapping} onClick={() => void runSwap()}>
+              {swapping ? 'Switching…' : 'Restore — go live'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

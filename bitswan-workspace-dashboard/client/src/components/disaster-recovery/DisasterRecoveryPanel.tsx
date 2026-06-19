@@ -62,8 +62,6 @@ export function DisasterRecoveryPanel({
   const [run, setRun] = useState<{ snapId: string; didVerify: boolean; note: string } | null>(
     null,
   );
-  const [swap, setSwap] = useState<{ ack: boolean } | null>(null);
-  const [swapping, setSwapping] = useState(false);
   const [snapshots, setSnapshots] = useState<BpSnapshot[]>([]);
   const [recording, setRecording] = useState(false);
 
@@ -194,27 +192,8 @@ export function DisasterRecoveryPanel({
         </div>
       </div>
 
-      {/* Swap with Production */}
-      <div className="flex flex-wrap items-center gap-3.5 rounded-[10px] border border-border bg-background px-4 py-3.5">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-red-50">
-          <ArrowLeftRight className="size-[18px] text-red-600" aria-hidden />
-        </span>
-        <div className="min-w-[220px] flex-1">
-          <div className="text-[13.5px] font-bold text-foreground">Swap with Production</div>
-          <div className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
-            Go live on the recovered environment — DR becomes Production and the old Production
-            becomes the standby. Only do this in a real disaster, after verifying the data.
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={() => setSwap({ ack: false })}
-          className="inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-3.5 text-[12.5px] font-semibold text-red-700 hover:bg-muted"
-        >
-          <ArrowLeftRight className="size-3.5 text-red-600" aria-hidden />
-          Swap with Production
-        </button>
-      </div>
+      {/* Going live on the recovered environment is the "Restore" action on the
+          stage row (a slot swap) — no separate swap button here. */}
 
       {/* Manual-test log */}
       <div className="overflow-hidden rounded-[10px] border border-border bg-background">
@@ -411,91 +390,6 @@ export function DisasterRecoveryPanel({
         </Modal>
       )}
 
-      {/* Swap confirm */}
-      {swap && (
-        <Modal onClose={() => setSwap(null)}>
-          <div className="flex items-center gap-3 border-b border-border px-5 py-4">
-            <span className="flex size-[34px] shrink-0 items-center justify-center rounded-lg bg-red-50">
-              <ArrowLeftRight className="size-[17px] text-red-600" aria-hidden />
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="text-[15px] font-bold text-foreground">Swap DR with Production</div>
-              <div className="mt-0.5 text-[12px] text-muted-foreground">
-                {bp} · zero-downtime cutover
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setSwap(null)}
-              className="flex size-7 items-center justify-center rounded text-muted-foreground hover:text-foreground"
-            >
-              <X className="size-4" aria-hidden />
-            </button>
-          </div>
-          <div className="flex flex-col gap-3 px-5 py-4">
-            <p className="text-[13px] leading-relaxed text-zinc-600">
-              Traffic would be flipped to the Disaster Recovery environment: DR becomes the live{' '}
-              <strong className="text-foreground">Production</strong>, and today&apos;s Production is
-              demoted to standby. Only proceed during an actual disaster, after verifying the data.
-            </p>
-            <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
-              <AlertTriangle className="size-3.5 shrink-0 text-amber-600" aria-hidden />
-              The swap flips which slot is live and is recorded in the audit log immediately. The
-              actual ingress cutover lands once the two-slot blue-green production deploy is
-              provisioned for this BP; until then the recorded live slot is authoritative.
-            </div>
-            <label className="flex cursor-pointer items-start gap-2.5">
-              <input
-                type="checkbox"
-                checked={swap.ack}
-                onChange={(e) => setSwap((s) => s && { ...s, ack: e.target.checked })}
-                className="mt-0.5 cursor-pointer"
-              />
-              <span className="text-[13px] leading-snug text-foreground">
-                I understand this makes Disaster Recovery the live Production environment.
-              </span>
-            </label>
-          </div>
-          <div className="flex justify-end gap-2 border-t border-border bg-muted/30 px-5 py-3">
-            <button
-              type="button"
-              onClick={() => setSwap(null)}
-              className="inline-flex h-8 items-center rounded-md px-3 text-[13px] font-medium text-muted-foreground hover:text-foreground"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              disabled={!swap.ack || swapping}
-              onClick={() => {
-                setSwapping(true);
-                const work = api.swapProductionDr(bp);
-                toast.promise(work, {
-                  loading: 'Swapping DR ↔ Production…',
-                  success: (s) =>
-                    `Swapped — production is now slot ${s.live_slot.toUpperCase()} (versioned in bitswan.yaml)`,
-                  error: (e: unknown) => `Swap failed: ${String(e)}`,
-                });
-                work
-                  .then(() => {
-                    setSwap(null);
-                    reload();
-                  })
-                  .catch(() => {})
-                  .finally(() => setSwapping(false));
-              }}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-red-600 px-3.5 text-[13px] font-semibold text-white hover:bg-red-700 disabled:opacity-40"
-            >
-              {swapping ? (
-                <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              ) : (
-                <ArrowLeftRight className="size-3.5" aria-hidden />
-              )}
-              Swap now
-            </button>
-          </div>
-        </Modal>
-      )}
     </div>
   );
 }
