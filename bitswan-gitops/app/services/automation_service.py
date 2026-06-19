@@ -5183,8 +5183,13 @@ fi
                 # hostname — the URL users hit. A DR swap / zero-downtime
                 # promote repoints this canonical hostname to another slot.
                 if slot and is_live_slot:
+                    # Canonical hostname (slot-free) → the LIVE slot's container.
                     if not add_workspace_route_to_ingress(
-                        dep_automation_name, dep_context, dep_stage, port
+                        dep_automation_name,
+                        dep_context,
+                        dep_stage,
+                        port,
+                        upstream_slot=slot,
                     ):
                         logger.warning(
                             "Failed to add canonical production route for "
