@@ -18,7 +18,7 @@ import { snapshotStepLabel, watchSnapshotTask } from '@/lib/snapshotTask';
 import { cn } from '@/lib/utils';
 
 /**
- * Disaster Recovery panel (Deployments → DR stage → Recovery & rehearsal).
+ * Disaster Recovery panel (Deployments → DR stage → Rehearse & restore).
  *
  * DR mirrors Production against its own isolated database. Recovery is
  * rehearsed by hand: restore a Production backup INTO DR (replacing the DR
