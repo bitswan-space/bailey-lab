@@ -16,6 +16,7 @@ from app.services.bp_databases import (
     bp_resource_names,
     derive_bp_and_worktree,
     ensure_bp_databases,
+    ensure_worktree_postgres_db,
     get_service_secrets,
     is_registered,
     load_registry,
@@ -23,6 +24,7 @@ from app.services.bp_databases import (
     register_new_bps_for_members,
     save_registry,
     validate_bp_slug,
+    worktree_db_name,
 )
 
 
@@ -288,6 +290,84 @@ async def test_ensure_waits_for_cold_postgres(gitops_home, monkeypatch):
     assert load_registry()["bps"]["my-bp"]["stages"]["staging"]["services"]["postgres"][
         "provisioned"
     ]
+
+
+# ---------------------------------------------------------------------------
+# worktree database
+# ---------------------------------------------------------------------------
+
+
+def test_worktree_db_name_sanitizes():
+    assert worktree_db_name("foo") == "postgres_wt_foo"
+    # Uppercase and non [a-z0-9_] chars collapse to underscores.
+    assert worktree_db_name("Feat/Bar-1") == "postgres_wt_feat_bar_1"
+
+
+async def test_ensure_worktree_db_clones_when_missing(
+    gitops_home, monkeypatch, fake_docker
+):
+    """A BP added to an existing worktree (or a recreated dev-postgres) finds
+    no `postgres_wt_<wt>` — ensure clones it from the dev default DB."""
+    secrets_dir = gitops_home / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "postgres-dev").write_text(
+        "POSTGRES_USER=admin\nPOSTGRES_PASSWORD=pw\nPOSTGRES_DB=postgres\n"
+    )
+
+    def fake_get_service(svc_type, workspace, stage="production", **kw):
+        return FakeService(f"{workspace}__{svc_type}-{stage}")
+
+    monkeypatch.setattr("app.services.infra_service.get_service", fake_get_service)
+
+    # fake_docker reports the DB as nonexistent, so a clone must happen.
+    name = await ensure_worktree_postgres_db("ws-test", "foo")
+    assert name == "postgres_wt_foo"
+    creates = [c for c in fake_docker if "CREATE DATABASE" in " ".join(c)]
+    assert any(
+        'CREATE DATABASE "postgres_wt_foo" WITH TEMPLATE "postgres";' in " ".join(c)
+        for c in creates
+    )
+
+
+async def test_ensure_worktree_db_noop_when_present(gitops_home, monkeypatch):
+    """When the worktree DB already exists, ensure is a no-op (no CREATE)."""
+    secrets_dir = gitops_home / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "postgres-dev").write_text("POSTGRES_USER=admin\n")
+
+    calls = []
+
+    async def fake_run(*args, cwd=None):
+        calls.append(list(args))
+        joined = " ".join(args)
+        if "pg_database WHERE datname" in joined:
+            return "1", "", 0  # already exists
+        return "", "", 0
+
+    monkeypatch.setattr(bp_databases, "run_docker_command", fake_run)
+
+    def fake_get_service(svc_type, workspace, stage="production", **kw):
+        return FakeService(f"{workspace}__{svc_type}-{stage}")
+
+    monkeypatch.setattr("app.services.infra_service.get_service", fake_get_service)
+
+    name = await ensure_worktree_postgres_db("ws-test", "foo")
+    assert name == "postgres_wt_foo"
+    assert not any("CREATE DATABASE" in " ".join(c) for c in calls)
+
+
+async def test_ensure_worktree_db_raises_when_postgres_down(gitops_home, monkeypatch):
+    """Postgres dev not running is a hard failure — both the worktree-create
+    path and the deploy path surface it and abort rather than start a backend
+    against a missing database."""
+
+    def fake_get_service(svc_type, workspace, stage="production", **kw):
+        return FakeService("c", enabled=True, running=False)
+
+    monkeypatch.setattr("app.services.infra_service.get_service", fake_get_service)
+
+    with pytest.raises(RuntimeError, match="not running"):
+        await ensure_worktree_postgres_db("ws-test", "foo")
 
 
 # ---------------------------------------------------------------------------

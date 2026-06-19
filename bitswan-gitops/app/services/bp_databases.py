@@ -93,6 +93,18 @@ def bp_resource_names(bp_slug: str) -> dict:
     }
 
 
+def worktree_db_name(worktree_name: str) -> str:
+    """Postgres database backing a worktree's live-dev stage.
+
+    Single source of truth shared by three call sites that MUST agree, or a
+    backend connects to a database nobody created: worktree-create (clones it),
+    the deploy-path safety net (`ensure_worktree_postgres_db`), and the
+    POSTGRES_DB env injection in `generate_docker_compose`.
+    """
+    safe = re.sub(r"[^a-z0-9_]", "_", worktree_name.lower())
+    return f"postgres_wt_{safe}"
+
+
 def derive_bp_and_worktree(relative_path: str | None) -> tuple[str, str]:
     """Derive (bp_slug, copy_name) from a deployment's relative_path.
 
@@ -310,6 +322,97 @@ async def _create_postgres_db(container: str, user: str, db_name: str) -> None:
     )
     if rc != 0 and "already exists" not in (stderr or ""):
         raise RuntimeError(f"CREATE DATABASE {db_name} failed: {stderr.strip()}")
+
+
+async def _clone_postgres_db(
+    container: str, user: str, source_db: str, new_db: str
+) -> None:
+    """`CREATE DATABASE new_db WITH TEMPLATE source_db`.
+
+    Callers must have confirmed `new_db` does not yet exist. Postgres refuses
+    to template a database that has live sessions, so terminate other backends
+    on the source first.
+    """
+    terminate_sql = (
+        f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        f"WHERE datname = '{source_db}' AND pid <> pg_backend_pid();"
+    )
+    await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        terminate_sql,
+    )
+    _, stderr, rc = await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        f'CREATE DATABASE "{new_db}" WITH TEMPLATE "{source_db}";',
+    )
+    if rc != 0 and "already exists" not in (stderr or ""):
+        raise RuntimeError(
+            f"CREATE DATABASE {new_db} (template {source_db}) failed: {stderr.strip()}"
+        )
+
+
+async def ensure_worktree_postgres_db(workspace: str, worktree_name: str) -> str:
+    """Idempotently ensure a worktree's live-dev Postgres database exists.
+
+    A worktree's live-dev backends are wired (via the POSTGRES_DB override in
+    `generate_docker_compose`) to connect to `postgres_wt_<worktree>`. That DB
+    is cloned from dev's default database when the worktree is created, but it
+    can be absent later — a BP added to an already-existing worktree, or a
+    dev-postgres container recreated and the clone lost. Re-ensuring it keeps
+    such a backend from booting against a nonexistent database and crash-
+    looping with an opaque connection error.
+
+    Clones dev's default database into the worktree DB the first time; a no-op
+    once it exists. Returns the database name. Raises on hard failure (postgres
+    unavailable, clone error) — callers (worktree-create and the live-dev
+    deploy paths) treat a miss as fatal and abort rather than start a backend
+    against a missing database.
+    """
+    from app.services.infra_service import get_service
+
+    new_db = worktree_db_name(worktree_name)
+    svc = get_service("postgres", workspace, stage="dev")
+    if not svc.is_enabled():
+        raise RuntimeError("Postgres dev service is not enabled")
+    if not await svc.is_running():
+        raise RuntimeError(
+            f"Postgres dev container '{svc.container_name}' is not running"
+        )
+
+    secrets = get_service_secrets("postgres", "dev") or {}
+    user = secrets.get("POSTGRES_USER", "admin")
+    source_db = secrets.get("POSTGRES_DB", "postgres")
+    container = svc.container_name
+
+    # The container may have only just (re)started; wait for the server to
+    # accept connections before querying/cloning (returns fast once ready).
+    await _wait_for_postgres(container, user)
+    if await _postgres_db_exists(container, user, new_db):
+        return new_db
+    await _clone_postgres_db(container, user, source_db, new_db)
+    logger.info(
+        "Ensured worktree Postgres DB '%s' (cloned from '%s') for worktree '%s'",
+        new_db,
+        source_db,
+        worktree_name,
+    )
+    return new_db
 
 
 async def _create_minio_bucket(
