@@ -8,7 +8,7 @@ import json
 import os
 import subprocess
 
-from app.utils import read_bitswan_yaml, dump_bitswan_yaml
+from app.utils import dump_bitswan_yaml
 from app.services import automation_service as asvc
 from app.services import supply_chain_service as scs
 from app.services.automation_service import AutomationService
