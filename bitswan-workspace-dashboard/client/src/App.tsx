@@ -116,6 +116,9 @@ function Shell() {
   // eslint-disable-next-line no-restricted-syntax -- null = not yet resolved
   const [myCopy, setMyCopy] = useState<string | null>(null);
   const [myCopyResolved, setMyCopyResolved] = useState(false);
+  // The signed-in user's role (admin | auditor | member) — surfaced in the top
+  // bar so it's always clear which permissions the UI is showing.
+  const [role, setRole] = useState<'admin' | 'auditor' | 'member'>('member');
 
   // On load, resolve the user's personal copy (creating it on first login).
   useEffect(() => {
@@ -123,7 +126,10 @@ function Shell() {
     api
       .getMe()
       .then((me) => {
-        if (!cancelled) setMyCopy(me?.copy ?? null);
+        if (!cancelled) {
+          setMyCopy(me?.copy ?? null);
+          setRole(me?.role ?? 'member');
+        }
       })
       .catch(() => {
         // No identity / gitops down — fall back to default copy selection.
@@ -243,6 +249,7 @@ function Shell() {
         onSelectCopy={setCopy}
         tab={tab}
         onTab={handleTab}
+        role={role}
       />
       {isLoading ? (
         <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">

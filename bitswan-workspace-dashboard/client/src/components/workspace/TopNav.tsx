@@ -6,12 +6,32 @@ import {
   RefreshCw,
   Rocket,
   Server,
+  ShieldCheck,
   type LucideIcon,
 } from 'lucide-react';
 import { BpSwitcher } from '@/components/workspace/BpSwitcher';
 import { CopySwitcher } from '@/components/workspace/CopySwitcher';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess, FlowTab, Copy } from '@/types';
+
+type Role = 'admin' | 'auditor' | 'member';
+const ROLE_META: Record<Role, { label: string; cls: string; hint: string }> = {
+  admin: {
+    label: 'Admin',
+    cls: 'border-violet-300 bg-violet-50 text-violet-700',
+    hint: 'Admin — full access, including changing recovery-test cadence and other governance settings.',
+  },
+  auditor: {
+    label: 'Auditor',
+    cls: 'border-sky-300 bg-sky-50 text-sky-700',
+    hint: 'Auditor — can review everything and change governance settings such as the recovery-test cadence.',
+  },
+  member: {
+    label: 'Member',
+    cls: 'border-border bg-muted/60 text-muted-foreground',
+    hint: 'Member — day-to-day access. Governance settings (e.g. recovery-test cadence) are read-only for you.',
+  },
+};
 
 interface TopNavProps {
   bps: BusinessProcess[];
@@ -24,6 +44,7 @@ interface TopNavProps {
   onSelectCopy: (name: string) => void;
   tab: FlowTab;
   onTab: (t: FlowTab) => void;
+  role: Role;
 }
 
 const FLOW_STEPS: {
@@ -59,7 +80,9 @@ export function TopNav({
   onSelectCopy,
   tab,
   onTab,
+  role,
 }: TopNavProps) {
+  const roleMeta = ROLE_META[role] ?? ROLE_META.member;
   return (
     <div className="flex shrink-0 items-center gap-0 border-b border-border bg-background px-6 py-2.5">
       <BpSwitcher
@@ -117,7 +140,17 @@ export function TopNav({
         })}
       </div>
 
-      <div className="ml-auto shrink-0 pl-3">
+      <div className="ml-auto flex shrink-0 items-center gap-2 pl-3">
+        <span
+          title={roleMeta.hint}
+          className={cn(
+            'inline-flex h-[28px] items-center gap-1.5 rounded-full border px-2.5 text-[12px] font-medium',
+            roleMeta.cls,
+          )}
+        >
+          <ShieldCheck className="size-3.5" aria-hidden />
+          {roleMeta.label}
+        </span>
         <CopySwitcher
           copy={copy}
           copies={copies}
