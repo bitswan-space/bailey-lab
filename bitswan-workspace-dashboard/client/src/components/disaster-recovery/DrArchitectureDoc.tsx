@@ -133,11 +133,11 @@ export function DrArchitectureDoc() {
         title="Practising recovery"
       >
         <p>
-          A backup you’ve never restored is a guess, not a safety net. So on a regular schedule
-          someone runs the recovery for real — restore the latest backup onto the spare and confirm
-          the data is all there — and records that it worked. This page shows when a process is
-          overdue for that check. Practising only restores and verifies; it never switches live
-          traffic.
+          A backup you’ve never restored is a guess, not a safety net. So on a regular schedule —{' '}
+          <strong>quarterly by default</strong> — someone runs the recovery for real: restore the
+          latest backup onto the spare, open the standby app, and confirm the data is all there,
+          then record that it worked. This page shows when a process is overdue for that check.
+          Practising only restores and verifies; it never switches live traffic.
         </p>
       </Section>
 
