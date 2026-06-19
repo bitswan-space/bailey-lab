@@ -148,12 +148,15 @@ async def spawn_restore_snapshot(
     source_stage: str,
     target_stage: str,
     db: int | None = None,
+    by: str | None = None,
 ) -> dict:
     """Reserve source+target stages and restore in the background.
 
     `db` (1/2) restores into that production database instead of the
     single-backend one — the DR-restore path (target_stage is 'production',
-    db is the standby) that never touches the live db.
+    db is the standby) that never touches the live db. For that path the DR
+    "currently restored" pointer is recorded only after the restore succeeds,
+    so a failed restore never marks DR as loaded with this backup.
     """
     from app.services.snapshot_service import get_snapshot_service
     from app.dependencies import get_automation_service
@@ -183,9 +186,15 @@ async def spawn_restore_snapshot(
         )
 
     async def run(progress):
-        return await service.restore_snapshot(
+        result = await service.restore_snapshot(
             bp, snapshot_id, source_stage, target_stage, progress=progress, db=db
         )
+        # DR restore succeeded → record which backup is now loaded into the
+        # standby db (the only one eligible to be recovery-tested). Done here,
+        # not at request time, so a failed restore leaves DR honestly empty.
+        if db:
+            await get_automation_service().record_dr_restore(bp, snapshot_id, by)
+        return result
 
     dest = f"{target_stage} db{db}" if db else target_stage
     _spawn_bg(

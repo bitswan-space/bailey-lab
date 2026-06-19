@@ -40,9 +40,15 @@ def test_restore_to_dr_targets_production_standby_db(monkeypatch):
 
     captured = {}
 
-    async def fake_spawn(slug, snapshot_id, source_stage, target_stage, db=None):
+    async def fake_spawn(
+        slug, snapshot_id, source_stage, target_stage, db=None, by=None
+    ):
         captured.update(
-            slug=slug, target_stage=target_stage, db=db, snapshot_id=snapshot_id
+            slug=slug,
+            target_stage=target_stage,
+            db=db,
+            snapshot_id=snapshot_id,
+            by=by,
         )
         return {"task_id": "t-1"}
 
@@ -51,10 +57,6 @@ def test_restore_to_dr_targets_production_standby_db(monkeypatch):
             return 2
 
         async def record_backup_event(self, *a, **k):
-            return None
-
-        async def record_dr_restore(self, *a, **k):
-            captured.update(restored=a)
             return None
 
     monkeypatch.setattr(snaps, "spawn_restore_snapshot", fake_spawn)

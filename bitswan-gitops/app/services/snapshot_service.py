@@ -457,7 +457,14 @@ class SnapshotService:
                 elif svc_type == "couchdb":
                     await self._restore_couchdb(target_stage, names, in_file)
                 else:
-                    await self._restore_minio(target_stage, names, in_file)
+                    # The minio archive is rooted at the bucket it was taken
+                    # FROM; for a blue-green DR restore that source bucket (live
+                    # db) differs from the target bucket (standby db), so pass
+                    # it through rather than assuming it matches the target.
+                    src_bucket = (manifest["services"].get("minio") or {}).get(
+                        "bucket"
+                    ) or names["minio_bucket"]
+                    await self._restore_minio(target_stage, names, in_file, src_bucket)
         except Exception as e:
             hint = (
                 f" The target's pre-restore state was saved as snapshot "
@@ -862,13 +869,18 @@ class SnapshotService:
         finally:
             await run_docker_command("docker", "exec", container, "rm", "-rf", scratch)
 
-    async def _restore_minio(self, stage: str, names: dict, in_file: str) -> None:
+    async def _restore_minio(
+        self, stage: str, names: dict, in_file: str, src_bucket: str
+    ) -> None:
         container = self._container("minio", stage)
         bucket = names["minio_bucket"]
         await self._mc_alias(container, stage)
-        # The dump archive is rooted at `bpsnap-{bucket}`; `docker cp - :/tmp`
-        # recreates that dir under /tmp.
-        scratch = f"/tmp/bpsnap-{bucket}"
+        # The dump archive is rooted at `bpsnap-{src_bucket}` (the bucket it was
+        # taken from), which `docker cp - :/tmp` recreates under /tmp. That
+        # source bucket may differ from the target `bucket` (blue-green DR
+        # restores load the live db's snapshot into the standby db's bucket), so
+        # mirror FROM the archive's own root dir INTO the target bucket.
+        scratch = f"/tmp/bpsnap-{src_bucket}"
         try:
             await run_docker_command("docker", "exec", container, "rm", "-rf", scratch)
             # Stream the tar in via `docker cp` (gunzipped on our end; extraction

@@ -187,6 +187,7 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
             body.source_stage,
             service_target,
             db=restore_db,
+            by=body.by,
         )
     except BusyError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -201,6 +202,9 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
     )
     # A DR restore lands in the production standby db, so it surfaces on the
     # production timeline; dev/staging restores surface on their own stage.
+    # (The DR "currently restored" pointer that gates recovery-testing is set
+    # by the background task only once the restore actually succeeds — see
+    # spawn_restore_snapshot — so a failed restore never marks DR as loaded.)
     audit_stage = "production" if restore_db else body.target_stage
     await _audit_backup(
         slug,
@@ -209,14 +213,6 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
         body.by,
         stage=audit_stage,
     )
-    # A DR restore makes this backup the one loaded into the standby db, so it
-    # becomes the only backup eligible to be marked recovery-tested.
-    if restore_db:
-        from app.dependencies import get_automation_service
-
-        await get_automation_service().record_dr_restore(
-            slug, body.snapshot_id, body.by
-        )
     return JSONResponse(
         status_code=202,
         content={
