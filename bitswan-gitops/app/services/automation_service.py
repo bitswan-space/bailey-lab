@@ -2655,24 +2655,25 @@ class AutomationService:
         dc_yaml, infra_service_names = self.generate_docker_compose(bs_yaml)
         self._save_docker_compose(dc_yaml)
         dc_config = yaml.safe_load(dc_yaml)
-        present = set(dc_config.get("services", {}).keys())
+        services = dc_config.get("services", {})
 
-        # Compute each member's compose service name (same as deploy_automation).
-        svc_name_by_id: dict[str, str] = {}
-        for dep_id in deployment_ids:
-            dep_conf = bs_yaml.get("deployments", {}).get(dep_id, {}) or {}
-            svc_name_by_id[dep_id] = make_hostname_label(
-                self.workspace_name,
-                dep_conf.get("automation_name", dep_id),
-                dep_conf.get("context", ""),
-                dep_conf.get("stage", "production") or "production",
-            )
-
-        # Only bring up services that actually made it into the compose file
-        # (a live-dev member with no resolvable image is skipped at generation).
-        member_services = [
-            svc_name_by_id[d] for d in deployment_ids if svc_name_by_id[d] in present
-        ]
+        # Map each generated service back to the deployment it belongs to via its
+        # label. A production deployment emits MULTIPLE services (one per
+        # blue-green slot, `…-a`/`…-b`, labelled `<dep_id>` for the live slot and
+        # `<dep_id>@<slot>` for the others) — bring up every slot. A member with
+        # no resolvable image is simply absent from the compose and skipped.
+        want = set(deployment_ids)
+        member_services: list[str] = []
+        service_by_dep: dict[str, str] = {}
+        for name, svc in services.items():
+            base = ((svc.get("labels") or {}).get("gitops.deployment_id") or "").split(
+                "@"
+            )[0]
+            if base in want:
+                member_services.append(name)
+                # All of a deployment's slots share one image; any slot's service
+                # is fine for reading the resolved image tag back.
+                service_by_dep.setdefault(base, name)
 
         await _report("docker_compose_up", "Starting containers...")
         deployment_result = await docker_compose_up(
@@ -2707,10 +2708,10 @@ class AutomationService:
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
         changed = False
         for dep_id in deployment_ids:
-            svc_name = svc_name_by_id[dep_id]
-            if svc_name not in present:
+            svc_name = service_by_dep.get(dep_id)
+            if not svc_name:
                 continue
-            deployed_image = dc_config["services"][svc_name].get("image")
+            deployed_image = services[svc_name].get("image")
             image_tag = await self.get_tag(deployed_image)
             if image_tag and dep_id in bs_yaml.get("deployments", {}):
                 bs_yaml["deployments"][dep_id]["tag_checksum"] = image_tag
