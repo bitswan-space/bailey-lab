@@ -311,6 +311,58 @@ func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, n
 	return buf.String(), nil
 }
 
+// CreateProtectedProxyDockerComposeFile creates a docker-compose file for the
+// shared bitswan-protected-proxy (an oauth2-proxy instance). It sits between
+// platform-traefik and the daemon's protected gate: Traefik routes every
+// protected hostname to bitswan-protected-proxy:80, the proxy authenticates the
+// request against Keycloak and forwards the identity headers to the gate
+// (upstream). All oauth2-proxy settings come from env (the upstream image's
+// entrypoint is /bin/oauth2-proxy with no args), so the service needs no
+// volumes or published ports — Traefik reaches it over bitswan_network.
+//
+// env is the full OAUTH2_PROXY_* map; it's rendered sorted for deterministic
+// output so the daemon can compare against the on-disk file to detect drift.
+func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error) {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	envList := make([]string, 0, len(env))
+	for _, key := range keys {
+		envList = append(envList, fmt.Sprintf("%s=%s", key, env[key]))
+	}
+
+	proxyService := map[string]interface{}{
+		"image":          "quay.io/oauth2-proxy/oauth2-proxy:v7.7.1",
+		"restart":        "always",
+		"container_name": "bitswan-protected-proxy",
+		"networks":       []string{"bitswan_network"},
+		"environment":    envList,
+	}
+
+	dockerCompose := map[string]interface{}{
+		"version": "3.8",
+		"services": map[string]interface{}{
+			"bitswan-protected-proxy": proxyService,
+		},
+		"networks": map[string]interface{}{
+			"bitswan_network": map[string]interface{}{
+				"external": true,
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	encoder := yaml.NewEncoder(&buf)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(dockerCompose); err != nil {
+		return "", fmt.Errorf("failed to encode docker-compose data structure: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
 // CreateWorkspaceTraefikDockerComposeFile creates a docker-compose file for workspace sub-traefik.
 // workspaceName: name of the workspace (used for container name)
 // traefikPath: path to traefik config directory
