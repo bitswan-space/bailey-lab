@@ -209,6 +209,14 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
         body.by,
         stage=audit_stage,
     )
+    # A DR restore makes this backup the one loaded into the standby db, so it
+    # becomes the only backup eligible to be marked recovery-tested.
+    if restore_db:
+        from app.dependencies import get_automation_service
+
+        await get_automation_service().record_dr_restore(
+            slug, body.snapshot_id, body.by
+        )
     return JSONResponse(
         status_code=202,
         content={

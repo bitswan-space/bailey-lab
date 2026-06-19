@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { GitopsClient } from '../services/gitops.js';
+import { emailFromRequest } from '../lib/user.js';
 
 export interface SnapshotRoutesOptions {
   gitops: GitopsClient | null;
@@ -126,6 +127,9 @@ export function registerSnapshotRoutes(
           "target_stage must be 'dev', 'staging' or 'dr' — restoring onto live Production is not allowed",
       });
     }
+    // Attribute a DR restore to the signed-in user so the "in DR now" pointer
+    // records who loaded it (the client doesn't send `by`).
+    const by = (await emailFromRequest(req, app.log)) || undefined;
     try {
       return await forward(
         reply,
@@ -133,6 +137,7 @@ export function registerSnapshotRoutes(
           snapshot_id,
           source_stage,
           target_stage,
+          ...(by ? { by } : {}),
         }),
       );
     } catch (err) {

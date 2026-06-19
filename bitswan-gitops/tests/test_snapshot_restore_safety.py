@@ -53,6 +53,10 @@ def test_restore_to_dr_targets_production_standby_db(monkeypatch):
         async def record_backup_event(self, *a, **k):
             return None
 
+        async def record_dr_restore(self, *a, **k):
+            captured.update(restored=a)
+            return None
+
     monkeypatch.setattr(snaps, "spawn_restore_snapshot", fake_spawn)
     monkeypatch.setattr(deps, "get_automation_service", lambda: FakeAutomation())
 

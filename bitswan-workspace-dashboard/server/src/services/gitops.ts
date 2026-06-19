@@ -1165,7 +1165,12 @@ export class GitopsClient {
   /** `POST /snapshots/{bp}/restore` — restore a snapshot into a target stage. */
   restoreSnapshot(
     bp: string,
-    input: { snapshot_id: string; source_stage: string; target_stage: string },
+    input: {
+      snapshot_id: string;
+      source_stage: string;
+      target_stage: string;
+      by?: string;
+    },
   ) {
     return this.requestJson(
       'POST',

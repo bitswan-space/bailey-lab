@@ -1274,7 +1274,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     badges?: { n: number; cls: string; title: string }[];
   }[] = isDr
     ? [
-        { id: 'recovery', icon: LifeBuoy, label: 'Recovery tests' },
+        { id: 'recovery', icon: LifeBuoy, label: 'Recovery & rehearsal' },
         { id: 'architecture', icon: FileText, label: 'How it works' },
         { id: 'containers', icon: Boxes, label: 'Containers', count: members.length },
         { id: 'history', icon: History, label: 'Deployment history', count: history.length, locked: true },

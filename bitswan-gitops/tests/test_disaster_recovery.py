@@ -68,9 +68,10 @@ def test_write_dr_policy_rejects_unknown_policy(tmp_path, monkeypatch):
 
 
 def test_record_dr_test_clears_overdue_and_sets_last(tmp_path, monkeypatch):
-    """Recording a test today makes the BP not-overdue, sets `last`, and
-    `days_since` to 0."""
+    """Recording a test today (against the backup currently restored into DR)
+    makes the BP not-overdue, sets `last`, and `days_since` to 0."""
     svc = _svc(tmp_path, monkeypatch)
+    asyncio.run(svc.record_dr_restore("shop", "20260616-120000-abcd1234", by="tim@x"))
     dr = asyncio.run(
         svc.record_dr_test(
             "shop",
@@ -94,20 +95,40 @@ def test_record_dr_test_clears_overdue_and_sets_last(tmp_path, monkeypatch):
 
 
 def test_record_dr_test_defaults_by_and_note(tmp_path, monkeypatch):
-    """Missing `by`/`note` fall back to sane defaults; no snapshot prefix when
-    none given."""
+    """Missing `by`/`note` fall back to sane defaults; an omitted snapshot falls
+    back to the backup currently restored into DR."""
     svc = _svc(tmp_path, monkeypatch)
+    asyncio.run(svc.record_dr_restore("shop", "snapX", by="tim@x"))
     dr = asyncio.run(svc.record_dr_test("shop", by=None, note=None, snapshot=None))
     test = dr["tests"][0]
     assert test["by"] == "unknown"
-    assert test["note"] == "Recovery procedure performed and data verified by hand."
+    assert test["snapshot"] == "snapX"
+    assert "Recovery procedure performed and data verified by hand." in test["note"]
+
+
+def test_record_dr_test_requires_restored_backup(tmp_path, monkeypatch):
+    """A test can only be recorded once a backup is restored into DR, and only
+    against THAT backup — anything else is a ValueError."""
+    svc = _svc(tmp_path, monkeypatch)
+    # Nothing restored yet → can't test.
+    with pytest.raises(ValueError):
+        asyncio.run(svc.record_dr_test("shop", by="a@x", note="x", snapshot="snapA"))
+    # Restore snapA; testing a DIFFERENT backup still fails.
+    asyncio.run(svc.record_dr_restore("shop", "snapA", by="a@x"))
+    with pytest.raises(ValueError):
+        asyncio.run(svc.record_dr_test("shop", by="a@x", note="x", snapshot="snapB"))
+    # Testing the restored backup succeeds.
+    dr = asyncio.run(svc.record_dr_test("shop", by="a@x", note="x", snapshot="snapA"))
+    assert dr["tests"][0]["snapshot"] == "snapA"
+    assert dr["restored"]["snapshot"] == "snapA"
 
 
 def test_record_dr_test_prepends_newest_first(tmp_path, monkeypatch):
     """Multiple tests are stored newest-first."""
     svc = _svc(tmp_path, monkeypatch)
-    asyncio.run(svc.record_dr_test("shop", by="a@x", note="first", snapshot=None))
-    asyncio.run(svc.record_dr_test("shop", by="b@x", note="second", snapshot=None))
+    asyncio.run(svc.record_dr_restore("shop", "snapX", by="a@x"))
+    asyncio.run(svc.record_dr_test("shop", by="a@x", note="first", snapshot="snapX"))
+    asyncio.run(svc.record_dr_test("shop", by="b@x", note="second", snapshot="snapX"))
     dr = svc.read_dr("shop")
     assert [t["by"] for t in dr["tests"]] == ["b@x", "a@x"]
     assert dr["last"]["by"] == "b@x"

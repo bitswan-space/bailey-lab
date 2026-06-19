@@ -1589,6 +1589,10 @@ class AutomationService:
                 days_since = None
 
         overdue = days_since is None or days_since > window_days
+        # The Production backup currently restored into the DR standby db (set
+        # by record_dr_restore). Only this backup can be recovery-tested — you
+        # can only verify what is actually loaded into DR right now.
+        restored = record.get("restored") or None
         return {
             "policy": policy,
             "window_days": window_days,
@@ -1596,7 +1600,36 @@ class AutomationService:
             "last": last,
             "days_since": days_since,
             "overdue": overdue,
+            "restored": restored,
         }
+
+    async def record_dr_restore(
+        self, bp: str, snapshot: str, by: str | None, deployed_by: str | None = None
+    ) -> dict:
+        """Record which Production backup is currently restored into the DR
+        standby db. This is what gates recovery-testing: only the restored
+        backup may be marked recovery-tested. Versioned in bitswan.yaml."""
+        today = date.today()
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        record = bs.setdefault("disaster_recovery", {}).setdefault(bp, {})
+        record["restored"] = {
+            "snapshot": snapshot,
+            "by": by or "unknown",
+            "at": today.strftime("%b %-d, %Y"),
+            "date": today.isoformat(),
+        }
+        path = os.path.join(self.gitops_dir, "bitswan.yaml")
+        with open(path, "w") as f:
+            dump_bitswan_yaml(bs, f)
+        await update_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
+            "dr",
+            deployed_by=deployed_by,
+            message=f"dr restore {bp} → {snapshot}",
+        )
+        return self.read_dr(bp)
 
     async def write_dr_policy(
         self, bp: str, policy: str, deployed_by: str | None = None
@@ -1634,7 +1667,29 @@ class AutomationService:
     ) -> dict:
         """Record a hand-performed recovery test for a BP, versioned in
         bitswan.yaml as one commit. Prepended so the log is newest-first.
-        Returns the updated DR status."""
+        Returns the updated DR status.
+
+        A test may only be recorded against the backup that is *currently
+        restored* into the DR standby db — you can only verify what is actually
+        loaded into DR right now. Raises ValueError otherwise."""
+        bs_pre = read_bitswan_yaml(self.gitops_dir) or {}
+        restored = ((bs_pre.get("disaster_recovery") or {}).get(bp) or {}).get(
+            "restored"
+        ) or {}
+        restored_snap = restored.get("snapshot")
+        if not restored_snap:
+            raise ValueError(
+                "No backup is restored into Disaster Recovery yet. Restore a "
+                "Production backup into DR, verify the data, then mark it "
+                "recovery-tested."
+            )
+        if snapshot and snapshot != restored_snap:
+            raise ValueError(
+                "Only the backup currently restored into Disaster Recovery "
+                f"({restored_snap}) can be marked recovery-tested. Restore "
+                "this backup into DR first."
+            )
+        snapshot = snapshot or restored_snap
         today = date.today()
         note_text = (f'Tested against "{snapshot}". ' if snapshot else "") + (
             note or "Recovery procedure performed and data verified by hand."

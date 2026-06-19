@@ -191,10 +191,14 @@ async def post_bp_dr_test_route(
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """Record a hand-performed recovery test for a BP (versioned in bitswan.yaml,
-    prepended so the log stays newest-first)."""
-    return await automation_service.record_dr_test(
-        bp, body.by, body.note, body.snapshot, body.deployed_by
-    )
+    prepended so the log stays newest-first). Only the backup currently restored
+    into DR may be tested — otherwise 400."""
+    try:
+        return await automation_service.record_dr_test(
+            bp, body.by, body.note, body.snapshot, body.deployed_by
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 class BackupRetentionRequest(BaseModel):

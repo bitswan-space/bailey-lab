@@ -330,6 +330,11 @@ export interface DrStatus {
   // eslint-disable-next-line no-restricted-syntax -- null = never tested
   days_since: number | null;
   overdue: boolean;
+  /** The Production backup currently restored into the DR standby db — the
+   *  only backup that may be marked recovery-tested. Null when nothing has
+   *  been restored into DR yet. */
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing restored into DR
+  restored: { snapshot: string; by: string; at: string; date: string } | null;
 }
 
 /** One snapshot item from `bpSnapshots` (the gitops snapshot manifest). Alias
