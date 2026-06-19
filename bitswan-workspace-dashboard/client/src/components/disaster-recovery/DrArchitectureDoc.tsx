@@ -96,19 +96,29 @@ export function DrArchitectureDoc() {
       >
         <p>
           <Term>What:</Term> bring back good data after a corruption, a bad migration, or an
-          accidental deletion. <Term>Why it’s safe:</Term> the restore lands on the{' '}
-          <strong>spare database</strong>, so live Production is untouched while you work — and you
-          confirm the recovered data is actually good <em>before</em> it ever serves a user.
+          accidental deletion.
+        </p>
+        <p>
+          <Term>Why it’s safe — and the whole point of this stage:</Term> you never fail over blind.
+          The standby isn’t just a spare database; it’s a <strong>complete, running copy of the
+          app</strong> with its own address. You restore the backup onto it, then{' '}
+          <strong>open it and actually use it</strong> — log in, click through, confirm the data is
+          all there and correct — <em>while live Production carries on untouched</em>. Only once
+          you’ve seen with your own eyes that recovery worked do you switch traffic over.
         </p>
         <p>
           <Term>How:</Term>
         </p>
         <ol className="ml-1 flex list-none flex-col gap-1.5">
           <Step n={1}>Restore the backup onto the spare database. Live Production keeps running.</Step>
-          <Step n={2}>Open the standby copy of the app and check the data by hand.</Step>
+          <Step n={2}>
+            <strong>Open the standby app at its own URL and verify it by hand</strong> — it’s the
+            real, working application running on the recovered data, so you can check everything is
+            in place before anyone relies on it.
+          </Step>
           <Step n={3}>
-            Once you trust it, switch live traffic to the standby. The old live environment becomes
-            the new spare — so if you spot a problem, you switch straight back.
+            Only once it checks out, switch live traffic to the standby. The old live environment
+            becomes the new spare — so if you spot a problem, you switch straight back.
           </Step>
         </ol>
         <SwapDiagram />
