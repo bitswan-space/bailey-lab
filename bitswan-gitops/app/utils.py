@@ -432,6 +432,30 @@ def add_route_to_ingress(
         return False
 
 
+def repoint_route_in_ingress(
+    hostname: str, upstream: str, workspace_name: str = ""
+) -> bool:
+    """Atomically repoint an EXISTING route's upstream (the blue-green swap /
+    zero-downtime-promote primitive). Unlike add-route this does not touch TLS
+    certs, the Bailey ACL, or OAuth redirect URIs — the route already exists;
+    only the container it resolves to changes."""
+    body = {"hostname": hostname, "upstream": upstream, "workspace_name": workspace_name}
+    try:
+        client, base = _ingress_client_and_base()
+        with client:
+            response = client.post(f"{base}/ingress/repoint-route", json=body)
+        if response.status_code != 200:
+            logger.warning(
+                f"Ingress repoint-route failed for {hostname}: "
+                f"HTTP {response.status_code} — {response.text}"
+            )
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"Ingress repoint-route request failed for {hostname}: {e}")
+        return False
+
+
 def remove_route_from_ingress(
     automation_name: str, context: str, stage: str, workspace_name: str
 ) -> bool:

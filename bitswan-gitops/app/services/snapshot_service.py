@@ -376,7 +376,7 @@ class SnapshotService:
         target_stage: str,
         progress=None,
         pre_restore_snapshot: bool = True,
-        slot: str | None = None,
+        db: int | None = None,
     ) -> dict:
         """Replace the BP's data at `target_stage` with the snapshot's content.
 
@@ -414,14 +414,14 @@ class SnapshotService:
             manifest.get("bp_name") or bp_slug,
             target_stage,
             services=included,
-            slot=slot,
+            db=db,
         )
 
-        # A slot restore targets the production STANDBY slot — DR scratch data
-        # whose whole purpose is to be overwritten, so there is nothing worth
-        # auto-snapshotting first (and create_snapshot is slot-free anyway).
+        # A db-targeted restore writes the production STANDBY db — DR scratch
+        # data whose whole purpose is to be overwritten, so there is nothing
+        # worth auto-snapshotting first (and create_snapshot is db-free anyway).
         pre_id = None
-        if pre_restore_snapshot and slot is None:
+        if pre_restore_snapshot and db is None:
             await _report(
                 "pre_restore_snapshot",
                 f"Auto-snapshotting current {target_stage} data...",
@@ -441,7 +441,7 @@ class SnapshotService:
             await _report("pruning", "Pruning old auto-snapshots...")
             self.prune_auto_snapshots(bp_slug, target_stage, keep_ids={pre_id})
 
-        names = bp_resource_names(bp_slug, slot)
+        names = bp_resource_names(bp_slug, db)
         snap_dir = self._snapshot_dir(bp_slug, source_stage, snapshot_id)
         try:
             for svc_type in SNAPSHOT_DATA_SERVICES:

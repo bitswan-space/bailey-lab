@@ -32,23 +32,23 @@ def test_restore_into_production_blocked_regardless_of_source():
         assert e.value.status_code == 400
 
 
-def test_restore_to_dr_targets_production_standby_slot(monkeypatch):
-    """A 'dr' restore must hit the production instance + the STANDBY slot's own
-    logical DB — never the slot-free (live) name. The live slot is untouched."""
+def test_restore_to_dr_targets_production_standby_db(monkeypatch):
+    """A 'dr' restore must hit the production instance + the STANDBY database
+    (never the live db). The live db's data is untouched."""
     import app.dependencies as deps
     import app.routes.snapshots as snaps
 
     captured = {}
 
-    async def fake_spawn(slug, snapshot_id, source_stage, target_stage, slot=None):
+    async def fake_spawn(slug, snapshot_id, source_stage, target_stage, db=None):
         captured.update(
-            slug=slug, target_stage=target_stage, slot=slot, snapshot_id=snapshot_id
+            slug=slug, target_stage=target_stage, db=db, snapshot_id=snapshot_id
         )
         return {"task_id": "t-1"}
 
     class FakeAutomation:
-        def standby_slot(self, bp):  # live=a → standby=b
-            return "b"
+        def standby_db(self, bp):  # live_db=1 → standby=2
+            return 2
 
         async def record_backup_event(self, *a, **k):
             return None
@@ -61,8 +61,8 @@ def test_restore_to_dr_targets_production_standby_slot(monkeypatch):
     )
     resp = asyncio.run(restore_snapshot("MyBP", body))
 
-    # Routed to the production instance, standby slot 'b'.
+    # Routed to the production instance, standby db 2.
     assert captured["target_stage"] == "production"
-    assert captured["slot"] == "b"
+    assert captured["db"] == 2
     # The response still tells the UI it landed in DR.
     assert resp.status_code == 202

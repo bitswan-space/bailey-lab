@@ -75,7 +75,7 @@ def validate_bp_slug(slug: str) -> None:
         raise ValueError(f"Invalid BP slug: {slug!r}")
 
 
-def bp_resource_names(bp_slug: str, slot: str | None = None) -> dict:
+def bp_resource_names(bp_slug: str, db: int | None = None) -> dict:
     """Stage-independent per-BP resource names.
 
     Postgres identifiers are capped at 63 bytes; MinIO bucket names at 63
@@ -83,21 +83,21 @@ def bp_resource_names(bp_slug: str, slot: str | None = None) -> dict:
     but truncate defensively (collisions after truncation surface as a
     registry slug conflict, not silent data sharing).
 
-    `slot` ("a"/"b") selects one of a BP's two blue-green PRODUCTION data
-    backends: each slot is a fully separate logical DB/bucket/couch namespace,
-    so the live slot (Production) and the standby slot (DR) never share data.
-    `slot=None` is the single-backend scheme used everywhere else (dev/staging,
-    and any pre-blue-green production DB) — its names are byte-identical to
-    before, so existing data is untouched.
+    `db` (1 or 2) selects one of a BP's two persistent blue-green PRODUCTION
+    databases: each is a fully separate logical DB/bucket/couch namespace, so
+    the live db (Production) and the standby db (DR) never share data. The
+    app slots a/b/c connect to one of these two DBs; restores only ever write
+    the standby db. `db=None` is the single-backend scheme used everywhere
+    else (dev/staging) — names are byte-identical to the original scheme.
     """
     validate_bp_slug(bp_slug)
-    if slot:
-        if slot not in ("a", "b"):
-            raise ValueError(f"Invalid blue-green slot: {slot!r} (want 'a'/'b')")
-        # Reserve room for the "_<slot>"/"-<slot>" suffix within the 63-byte cap.
-        pg = (("bp_" + bp_slug.replace("-", "_"))[:61]) + f"_{slot}"
-        bucket = (("bp-" + bp_slug)[:61].rstrip("-")) + f"-{slot}"
-        couch = f"bp-{bp_slug}-{slot}-"
+    if db is not None:
+        if db not in (1, 2):
+            raise ValueError(f"Invalid blue-green db: {db!r} (want 1 or 2)")
+        # Reserve room for the "_<db>"/"-<db>" suffix within the 63-byte cap.
+        pg = (("bp_" + bp_slug.replace("-", "_"))[:61]) + f"_{db}"
+        bucket = (("bp-" + bp_slug)[:61].rstrip("-")) + f"-{db}"
+        couch = f"bp-{bp_slug}-{db}-"
     else:
         pg = ("bp_" + bp_slug.replace("-", "_"))[:63]
         bucket = ("bp-" + bp_slug)[:63].rstrip("-")
@@ -374,7 +374,7 @@ async def ensure_bp_databases(
     bp_name: str,
     realm: str,
     services: list[str] | None = None,
-    slot: str | None = None,
+    db: int | None = None,
 ) -> dict:
     """Create the per-BP objects for every requested service at one realm.
 
@@ -383,10 +383,10 @@ async def ensure_bp_databases(
     retried on the next deploy. Marks each successfully created service as
     provisioned in the registry. Returns a per-service result dict.
 
-    `slot` ('a'/'b') provisions a blue-green slot's own logical objects
-    (`bp_<slug>_<slot>` etc.) instead of the slot-free names, tracked under a
-    separate registry key. Used to stand up the production standby (DR) slot
-    so a backup can be restored into it without ever touching the live slot.
+    `db` (1/2) provisions one of a production BP's two blue-green databases
+    (`bp_<slug>_<db>` etc.) instead of the single-backend names, tracked under
+    a separate registry key. Both DBs are provisioned for a production BP; the
+    standby db is where restore-to-DR lands without touching the live db.
     """
     from app.services.infra_service import get_service
 
@@ -396,14 +396,14 @@ async def ensure_bp_databases(
             f"Invalid realm '{realm}': must be one of {sorted(SERVICE_REALMS)}"
         )
 
-    names = bp_resource_names(bp_slug, slot)
+    names = bp_resource_names(bp_slug, db)
     requested = [s for s in (services or BP_DATA_SERVICES) if s in BP_DATA_SERVICES]
 
     registry = load_registry()
     register_bp_stage(registry, bp_slug, bp_name, realm)
     stage_entry = registry["bps"][bp_slug]["stages"][realm]
-    if slot:
-        svc_state = stage_entry.setdefault("slots", {}).setdefault(slot, {})
+    if db is not None:
+        svc_state = stage_entry.setdefault("dbs", {}).setdefault(str(db), {})
     else:
         svc_state = stage_entry.setdefault("services", {})
 

@@ -156,15 +156,14 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
     _validate_stage(body.source_stage)
 
     # 'dr' is the safe recovery sink: restore into the production STANDBY
-    # slot's own logical DB (never the live slot), then hand-verify and swap.
-    # It maps to the production instance + the standby slot — the live slot's
-    # data is never touched by a restore.
+    # database (never the live db), then hand-verify and swap. It maps to the
+    # production instance + the standby db — the live db is never touched.
     service_target = body.target_stage
-    restore_slot: str | None = None
+    restore_db: int | None = None
     if body.target_stage == "dr":
         from app.dependencies import get_automation_service
 
-        restore_slot = get_automation_service().standby_slot(slug)
+        restore_db = get_automation_service().standby_db(slug)
         service_target = "production"
     else:
         _validate_stage(body.target_stage)
@@ -187,7 +186,7 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
             body.snapshot_id,
             body.source_stage,
             service_target,
-            slot=restore_slot,
+            db=restore_db,
         )
     except BusyError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -196,13 +195,13 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     audit_dest = (
-        f"Disaster Recovery (standby slot {restore_slot})"
-        if restore_slot
+        f"Disaster Recovery (standby db{restore_db})"
+        if restore_db
         else body.target_stage
     )
-    # A DR restore lands in the production standby slot, so it surfaces on the
+    # A DR restore lands in the production standby db, so it surfaces on the
     # production timeline; dev/staging restores surface on their own stage.
-    audit_stage = "production" if restore_slot else body.target_stage
+    audit_stage = "production" if restore_db else body.target_stage
     await _audit_backup(
         slug,
         "restored",

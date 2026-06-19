@@ -1643,32 +1643,63 @@ class AutomationService:
         )
         return self.read_dr(bp)
 
-    # ── Backups: blue-green production slots + retention + audit log ──────────
-    # Each production BP runs two self-contained slots (a/b): each has its own
-    # app containers wired to its own logical DB. `live_slot` is which slot the
-    # production ingress serves (= Production); the other slot is DR. A swap
-    # flips `live_slot` and repoints the production ingress to it — zero
-    # downtime, no data moved (DR ↔ Production). Restores only ever write the
-    # standby (DR) slot. State + an audit log live in bitswan.yaml under the
-    # top-level `backups` key (versioned like secrets/firewall/dr). The git log
-    # is the full audit trail; the in-yaml `log` is a bounded recent view for
-    # the UI's audit panel.
+    # ── Backups: blue-green production (3 app slots over 2 DBs) + audit ───────
+    # A production BP has TWO persistent logical databases (db 1 and db 2) and
+    # up to THREE app-container slots (a/b/c). Two pointers drive everything:
+    #   • live_db   (1|2)   — which DB is Production; the other is the DR standby.
+    #   • live_slot (a|b|c) — which app slot the production ingress serves.
+    # `slots` records each ACTIVE app slot's DB wiring ({a: {db: 1}, ...}); a
+    # slot absent from `slots` is idle (no containers). Steady state runs two
+    # slots — the live one (wired to live_db) and the DR one (wired to the
+    # standby db) — leaving one idle as the zero-downtime-promote buffer.
+    #
+    # Two operations, one ingress-repoint primitive:
+    #   • DR swap     — flip live_db, repoint ingress to the slot on that DB.
+    #                   DR ↔ Production trade places; no data moved.
+    #   • Zero-downtime promote — bring the idle slot up with the new image
+    #                   wired to the CURRENT live_db, repoint ingress to it,
+    #                   retire the old live slot (→ idle). The DB never moves.
+    # Restores only ever write the STANDBY db (never live). State + a bounded
+    # audit log live in bitswan.yaml under `backups` (versioned like
+    # secrets/firewall/dr); the git log is the full audit trail.
     BACKUP_DEFAULT_RETENTION = {"daily": 7, "weekly": 0, "monthly": 3}
+    APP_SLOTS = ("a", "b", "c")
 
     @staticmethod
-    def _other_slot(slot: str) -> str:
-        return "b" if slot == "a" else "a"
+    def _other_db(db: int) -> int:
+        return 2 if db == 1 else 1
 
     def read_backups(self, bp: str) -> dict:
-        """A BP's backup state: which production slot is live (Production) vs
-        standby (DR), the retention policy, and the recent audit log."""
+        """A BP's blue-green state: the live vs standby DB, which app slot is
+        live, the DR slot (active slot wired to the standby db), the idle
+        slots, the full slot→db wiring, retention policy, and audit log."""
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         rec = (bs.get("backups") or {}).get(bp) or {}
-        live = rec.get("live_slot") or "a"
+        live_db = int(rec.get("live_db") or 1)
+        standby_db = self._other_db(live_db)
+        # Default fresh wiring: slot a is live on db1, slot b is DR on db2,
+        # slot c idle (the promote buffer).
+        slots = rec.get("slots") or {"a": {"db": 1}, "b": {"db": 2}}
+        live_slot = rec.get("live_slot") or next(
+            (s for s, m in slots.items() if (m or {}).get("db") == live_db), "a"
+        )
+        dr_slot = next(
+            (
+                s
+                for s, m in slots.items()
+                if (m or {}).get("db") == standby_db and s != live_slot
+            ),
+            None,
+        )
+        idle_slots = [s for s in self.APP_SLOTS if s not in slots]
         return {
             "bp": bp,
-            "live_slot": live,
-            "standby_slot": self._other_slot(live),
+            "live_db": live_db,
+            "standby_db": standby_db,
+            "live_slot": live_slot,
+            "dr_slot": dr_slot,
+            "idle_slots": idle_slots,
+            "slots": {s: dict(m or {}) for s, m in slots.items()},
             "retention": {
                 **self.BACKUP_DEFAULT_RETENTION,
                 **(rec.get("retention") or {}),
@@ -1679,8 +1710,16 @@ class AutomationService:
     def live_slot(self, bp: str) -> str:
         return self.read_backups(bp)["live_slot"]
 
-    def standby_slot(self, bp: str) -> str:
-        return self.read_backups(bp)["standby_slot"]
+    def live_db(self, bp: str) -> int:
+        return self.read_backups(bp)["live_db"]
+
+    def standby_db(self, bp: str) -> int:
+        return self.read_backups(bp)["standby_db"]
+
+    def slot_db(self, bp: str, slot: str) -> int | None:
+        """Which DB (1|2) an app slot is wired to, or None if the slot is idle."""
+        m = self.read_backups(bp)["slots"].get(slot)
+        return int(m["db"]) if m and m.get("db") else None
 
     def _append_backup_log(
         self,
@@ -1764,42 +1803,165 @@ class AutomationService:
     async def swap_production_dr(
         self, bp: str, by: str | None = None, role: str | None = None
     ) -> dict:
-        """The DR go-live swap: flip which production slot (a/b) is live and
-        repoint the production ingress to it. Zero downtime, no data moved — DR
-        becomes Production and the old Production becomes DR. Versioned/audited.
+        """The DR go-live swap: flip live_db to the standby db and repoint the
+        production ingress to the DR slot (the app slot wired to that db). Zero
+        downtime, no data moved — DR and Production trade places. Audited.
 
-        The pointer flip + audit are authoritative here; the ingress repoint is
-        best-effort and only lands once the two-slot production deploy exists
-        (the blue-green deploy infra). A missing repoint target is logged, not
-        fatal — the recorded `live_slot` stays the source of truth."""
+        The pointer flip + audit are authoritative; the ingress repoint is
+        best-effort (a transient ingress error must not desync the recorded
+        state — the next deploy re-asserts it)."""
         cur = self.read_backups(bp)
-        new_live = cur["standby_slot"]
+        target_slot = cur["dr_slot"]
+        if not target_slot:
+            raise ValueError(
+                f"{bp} has no DR slot provisioned on the standby db "
+                f"(db {cur['standby_db']}) — nothing to swap to"
+            )
+        new_live_db = cur["standby_db"]
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         rec = bs.setdefault("backups", {}).setdefault(bp, {})
-        rec["live_slot"] = new_live
+        rec["live_db"] = new_live_db
+        rec["live_slot"] = target_slot
         self._append_backup_log(
             rec,
             "swapped",
-            f"production slot {cur['live_slot']} → {new_live} (DR ↔ Production)",
+            (
+                f"Production → slot {target_slot} on db{new_live_db} "
+                f"(was slot {cur['live_slot']} on db{cur['live_db']}); DR ↔ Production"
+            ),
             by,
         )
         await self._save_and_commit_backups(
-            bs, bp, by, f"swap production/DR {bp}: → slot {new_live}"
+            bs, bp, by, f"swap production/DR {bp}: → slot {target_slot} (db{new_live_db})"
         )
         try:
-            await self._repoint_production_to_slot(bp, new_live)
-        except Exception as e:  # noqa: BLE001 — best-effort until infra is live
+            await self._repoint_production_to_slot(bp, target_slot)
+        except Exception as e:  # noqa: BLE001 — best-effort; recorded state wins
             logging.warning(
-                "swap %s: ingress repoint to slot %s deferred (%s)", bp, new_live, e
+                "swap %s: ingress repoint to slot %s deferred (%s)", bp, target_slot, e
             )
         return self.read_backups(bp)
 
-    async def _repoint_production_to_slot(self, bp: str, slot: str) -> None:
-        """Point the production ingress at a slot's frontend container(s). Part
-        of the blue-green deploy infra (flagged — needs two-slot prod live)."""
-        raise NotImplementedError(
-            "two-slot production deploy not provisioned for this BP"
+    async def begin_zero_downtime_promote(
+        self, bp: str, by: str | None = None
+    ) -> dict:
+        """Record the slot transition for a zero-downtime promote and return
+        which idle slot the new version should be brought up on (wired to the
+        CURRENT live db — a promote never moves data). The caller deploys the
+        new image into that slot, health-checks it, then calls
+        `finish_zero_downtime_promote` to repoint ingress + retire the old slot."""
+        cur = self.read_backups(bp)
+        if not cur["idle_slots"]:
+            raise ValueError(
+                f"{bp} has no idle app slot free for a zero-downtime promote "
+                f"(slots in use: {sorted(cur['slots'])})"
+            )
+        target_slot = cur["idle_slots"][0]
+        live_db = cur["live_db"]
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rec = bs.setdefault("backups", {}).setdefault(bp, {})
+        rec.setdefault("slots", dict(cur["slots"]))
+        rec["slots"][target_slot] = {"db": live_db, "state": "staging"}
+        self._append_backup_log(
+            rec,
+            "promote-staging",
+            f"staging new version on slot {target_slot} (db{live_db})",
+            by,
         )
+        await self._save_and_commit_backups(
+            bs, bp, by, f"promote {bp}: staging slot {target_slot} (db{live_db})"
+        )
+        return {"target_slot": target_slot, "live_db": live_db, **self.read_backups(bp)}
+
+    async def finish_zero_downtime_promote(
+        self, bp: str, target_slot: str, by: str | None = None
+    ) -> dict:
+        """Cut over a staged promote: repoint the production ingress to
+        `target_slot`, make it live, and retire the previously-live slot to
+        idle. The db is unchanged (live_db stays)."""
+        cur = self.read_backups(bp)
+        old_live = cur["live_slot"]
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rec = bs.setdefault("backups", {}).setdefault(bp, {})
+        slots = rec.setdefault("slots", dict(cur["slots"]))
+        if target_slot in slots:
+            slots[target_slot] = {"db": cur["live_db"]}  # promoted to live
+        rec["live_slot"] = target_slot
+        if old_live != target_slot:
+            slots.pop(old_live, None)  # retire old live slot → idle
+        self._append_backup_log(
+            rec,
+            "promoted",
+            f"zero-downtime promote: slot {old_live} → {target_slot} (db{cur['live_db']})",
+            by,
+        )
+        await self._save_and_commit_backups(
+            bs, bp, by, f"promote {bp}: slot {old_live} → {target_slot}"
+        )
+        try:
+            await self._repoint_production_to_slot(bp, target_slot)
+        except Exception as e:  # noqa: BLE001 — best-effort; recorded state wins
+            logging.warning(
+                "promote %s: ingress repoint to slot %s deferred (%s)",
+                bp,
+                target_slot,
+                e,
+            )
+        return self.read_backups(bp)
+
+    def _production_frontend_routes(self, bp: str, slot: str) -> list[tuple[str, str]]:
+        """For each exposed (frontend) production deployment of `bp`, the
+        (canonical_hostname, slot_upstream) pair the ingress should map. The
+        canonical hostname is the stable production URL; the upstream is that
+        slot's frontend container. Repointing this pair is the swap/promote."""
+        if not (self.workspace_name and self.gitops_domain):
+            return []
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        out: list[tuple[str, str]] = []
+        for dep_id, conf in (bs.get("deployments") or {}).items():
+            conf = conf or {}
+            if (conf.get("stage") or "production") != "production":
+                continue
+            if conf.get("context", "") != bp and conf.get("automation_name") != bp:
+                # The BP a deployment belongs to is its context (production
+                # context == bp slug). Skip deployments of other BPs.
+                if conf.get("context", "") != bp:
+                    continue
+            try:
+                cfg = self.resolve_automation_config(conf)
+            except Exception:
+                continue
+            if not (cfg.expose and cfg.port):
+                continue
+            name = conf.get("automation_name", dep_id)
+            ctx = conf.get("context", "")
+            from app.utils import generate_workspace_url
+
+            hostname = generate_workspace_url(
+                self.workspace_name, name, ctx, "production", self.gitops_domain, False
+            )
+            upstream = (
+                make_hostname_label(self.workspace_name, name, ctx, "production", slot)
+                + f":{cfg.port}"
+            )
+            out.append((hostname, upstream))
+        return out
+
+    async def _repoint_production_to_slot(self, bp: str, slot: str) -> None:
+        """Point the production ingress at a slot's frontend container(s) via
+        the automation-server repoint primitive (no cert/ACL/redirect churn —
+        only the upstream changes). One repoint per exposed frontend."""
+        from app.utils import repoint_route_in_ingress
+
+        routes = self._production_frontend_routes(bp, slot)
+        if not routes:
+            raise RuntimeError(
+                f"no exposed production frontend found for {bp} — nothing to repoint"
+            )
+        for hostname, upstream in routes:
+            if not repoint_route_in_ingress(hostname, upstream, self.workspace_name):
+                raise RuntimeError(f"ingress repoint failed for {hostname} → {upstream}")
+            logging.info("repointed production %s → slot %s (%s)", hostname, slot, upstream)
 
     # ── Supply chain (SBOM + CVEs) ───────────────────────────────────────────
     def _supply_chain_waivers(self, bs: dict, bp: str, realm: str) -> dict:

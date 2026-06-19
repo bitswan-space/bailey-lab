@@ -26,11 +26,15 @@ def _git_svc(tmp_path, monkeypatch):
     return svc
 
 
-def test_default_live_slot_is_a(tmp_path, monkeypatch):
+def test_default_blue_green_state(tmp_path, monkeypatch):
     svc = _git_svc(tmp_path, monkeypatch)
     b = svc.read_backups("shop")
+    # Fresh wiring: slot a is live on db1, slot b is DR on db2, slot c idle.
+    assert b["live_db"] == 1 and b["standby_db"] == 2
     assert b["live_slot"] == "a"
-    assert b["standby_slot"] == "b"
+    assert b["dr_slot"] == "b"
+    assert b["idle_slots"] == ["c"]
+    assert b["slots"] == {"a": {"db": 1}, "b": {"db": 2}}
     assert b["retention"] == {"daily": 7, "weekly": 0, "monthly": 3}
     assert b["log"] == []
 
@@ -48,18 +52,35 @@ def test_retention_persists_and_audits(tmp_path, monkeypatch):
     assert raw["backups"]["shop"]["retention"]["daily"] == 14
 
 
-def test_swap_flips_live_slot_and_audits(tmp_path, monkeypatch):
+def test_swap_flips_live_db_and_slot_and_audits(tmp_path, monkeypatch):
     svc = _git_svc(tmp_path, monkeypatch)
-    assert svc.live_slot("shop") == "a"
-    # repoint hook raises NotImplementedError (infra not provisioned) → caught;
-    # the flip + audit are still authoritative.
+    assert svc.live_slot("shop") == "a" and svc.live_db("shop") == 1
+    # No production frontend deployed → repoint raises, caught; the pointer
+    # flip + audit are still authoritative.
     b = asyncio.run(svc.swap_production_dr("shop", by="tim@x"))
-    assert b["live_slot"] == "b" and b["standby_slot"] == "a"
+    # DR slot b (on db2) becomes live; db flips to 2.
+    assert b["live_slot"] == "b" and b["live_db"] == 2
+    assert b["dr_slot"] == "a" and b["standby_db"] == 1
     assert b["log"][0]["action"] == "swapped"
     # swap back
     b2 = asyncio.run(svc.swap_production_dr("shop", by="tim@x"))
-    assert b2["live_slot"] == "a"
+    assert b2["live_slot"] == "a" and b2["live_db"] == 1
     assert len(b2["log"]) == 2
+
+
+def test_zero_downtime_promote_uses_idle_slot_keeps_db(tmp_path, monkeypatch):
+    svc = _git_svc(tmp_path, monkeypatch)
+    cur = svc.read_backups("shop")
+    assert cur["live_slot"] == "a" and cur["idle_slots"] == ["c"]
+    # Stage the new version on the idle slot (wired to the CURRENT live db).
+    staged = asyncio.run(svc.begin_zero_downtime_promote("shop", by="tim@x"))
+    assert staged["target_slot"] == "c"
+    assert staged["slots"]["c"]["db"] == 1  # same live db — promote never moves data
+    # Cut over: c becomes live, old live slot a retires to idle, db unchanged.
+    done = asyncio.run(svc.finish_zero_downtime_promote("shop", "c", by="tim@x"))
+    assert done["live_slot"] == "c" and done["live_db"] == 1
+    assert "a" in done["idle_slots"]
+    assert done["log"][0]["action"] == "promoted"
 
 
 def test_record_backup_event(tmp_path, monkeypatch):
