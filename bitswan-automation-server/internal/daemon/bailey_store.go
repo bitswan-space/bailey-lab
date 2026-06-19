@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS endpoints (
   owner_email     TEXT NOT NULL COLLATE NOCASE,
   display_name    TEXT,
   parent_endpoint TEXT COLLATE NOCASE,
+  -- kind: 'workspace' | 'frontend' | 'service' (explicit launcher class).
+  kind            TEXT,
+  -- stage: deployment stage of the backing automation ('production',
+  -- 'staging', 'dev', 'live-dev', ...). Explicit data set at registration;
+  -- launcher/admin views filter on it (e.g. only production frontends).
+  stage           TEXT,
   created_at      TEXT NOT NULL
 );
 
@@ -83,6 +89,100 @@ CREATE TABLE IF NOT EXISTS protected_routes (
   upstream   TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- TOTP enrolment records. One row per email that has set up a second
+-- factor (admins always, other users optionally as recovery).
+CREATE TABLE IF NOT EXISTS totp_records (
+  email      TEXT PRIMARY KEY COLLATE NOCASE,
+  secret     TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- Paired devices. One row per browser/device a user has trusted; the
+-- device cookie carries (email, id) and the gate matches it here.
+-- last_seen is nullable (never-touched rows read back as '').
+CREATE TABLE IF NOT EXISTS devices (
+  id         TEXT PRIMARY KEY,
+  email      TEXT NOT NULL COLLATE NOCASE,
+  name       TEXT NOT NULL,
+  paired_at  TEXT NOT NULL,
+  last_seen  TEXT
+);
+CREATE INDEX IF NOT EXISTS devices_email_idx ON devices(email);
+
+-- Pending device-pairing requests. A new browser mints a 6-digit code
+-- here; a trusted browser or admin approves it; the new browser's poll
+-- claims the approval and is issued a device cookie. Shared between the
+-- proxy and daemon containers via the same bailey.db file.
+CREATE TABLE IF NOT EXISTS pending_pairs (
+  email         TEXT PRIMARY KEY COLLATE NOCASE,
+  code          TEXT NOT NULL,
+  issued_at     TEXT NOT NULL,
+  expires_at    TEXT NOT NULL,
+  approved_by   TEXT,
+  approver_info TEXT,
+  user_agent    TEXT
+);
+CREATE INDEX IF NOT EXISTS pending_pairs_code_idx ON pending_pairs(code);
+
+-- Server-wide key/value settings. Used today for default container
+-- images (default_gitops_image, default_dashboard_image) — the bailey
+-- admin Updates page writes here, and workspace_init reads the value
+-- before falling back to a Docker Hub latest-tag lookup. Free-form so
+-- future settings don't need their own table.
+CREATE TABLE IF NOT EXISTS server_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL COLLATE NOCASE
+);
+
+-- Per-user role, managed locally (NOT pulled from SSO). An admin assigns
+-- roles in People & roles; this is the authoritative source for a user's role
+-- and for the admin capability. Unset users default to "member" (the root
+-- admin defaults to "admin"); SSO is used only for the first-admin claim
+-- bootstrap, never for ongoing role/admin decisions.
+CREATE TABLE IF NOT EXISTS user_roles (
+  email      TEXT PRIMARY KEY COLLATE NOCASE,
+  role       TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT NOT NULL COLLATE NOCASE
+);
+
+-- Single-use backup recovery codes. An opt-in recovery shortcut set up
+-- alongside the authenticator in the console's Security & recovery. Each
+-- row is one hashed code; using it deletes the row (single-use). The
+-- recovery flow accepts a backup code OR a TOTP code to trust a device.
+CREATE TABLE IF NOT EXISTS backup_codes (
+  email      TEXT NOT NULL COLLATE NOCASE,
+  code_hash  TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (email, code_hash)
+);
+CREATE INDEX IF NOT EXISTS backup_codes_email_idx ON backup_codes(email);
+
+-- Per-server singletons (the HMAC signing key for session cookies).
+-- value is a BLOB so the raw 32-byte key round-trips without encoding.
+CREATE TABLE IF NOT EXISTS singletons (
+  key   TEXT PRIMARY KEY,
+  value BLOB NOT NULL
+);
+
+-- Append-only security audit log. One row per security-relevant
+-- mutation (device approve/revoke, workspace create/trash, server
+-- claim, TOTP enrol). Powers the Server Console overview's recent
+-- security-activity feed. Never updated or deleted in normal operation
+-- — it is the record of what happened, in order. ts is RFC3339 UTC;
+-- actor is the email that performed the action ('' for system); action
+-- is a short stable verb (see audit* constants); target is the thing
+-- acted on (a device id, workspace name, or affected email).
+CREATE TABLE IF NOT EXISTS events (
+  ts     TEXT NOT NULL,
+  actor  TEXT NOT NULL COLLATE NOCASE,
+  action TEXT NOT NULL,
+  target TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_ts_idx ON events(ts);
 `
 
 // baileyDBPath returns the absolute on-disk location of the daemon's
@@ -125,6 +225,72 @@ func openBaileyDB() (*sql.DB, error) {
 			!strings.Contains(err.Error(), "duplicate column name") {
 			db.Close()
 			baileyDBErr = fmt.Errorf("migrate endpoints.parent_endpoint: %w", err)
+			return
+		}
+		// Migration for databases created before kind existed. kind classifies
+		// endpoints for the Bailey launcher ("workspace"|"frontend"|"service").
+		if _, err := db.Exec(`ALTER TABLE endpoints ADD COLUMN kind TEXT`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate endpoints.kind: %w", err)
+			return
+		}
+		// Migration for databases created before stage existed. stage is the
+		// deployment stage of the endpoint's automation; views filter on it.
+		if _, err := db.Exec(`ALTER TABLE endpoints ADD COLUMN stage TEXT`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate endpoints.stage: %w", err)
+			return
+		}
+		// Migration for databases created before devices.origin existed. origin
+		// records HOW a device became trusted ("root" = the claim/TOFU
+		// bootstrap device; "linked" = approved/self-trusted later). The device
+		// list uses it for the per-device badge — it must NOT be inferred from
+		// "is this the current device", which is a different axis entirely.
+		if _, err := db.Exec(`ALTER TABLE devices ADD COLUMN origin TEXT NOT NULL DEFAULT ''`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate devices.origin: %w", err)
+			return
+		}
+		// Backfill: the root admin's earliest device is, by definition, the one
+		// minted during claim — mark it "root" so pre-existing installs show the
+		// right badge. No-op on a fresh/unclaimed server (subselect is empty).
+		if _, err := db.Exec(`UPDATE devices SET origin='root' WHERE origin='' AND id = (
+			SELECT id FROM devices
+			WHERE email = (SELECT value FROM server_settings WHERE key='root_admin_email')
+			ORDER BY paired_at ASC LIMIT 1)`); err != nil {
+			db.Close()
+			baileyDBErr = fmt.Errorf("backfill devices.origin: %w", err)
+			return
+		}
+		// Migration for databases created before pending_pairs.user_agent
+		// existed. It records the requesting device's self-reported User-Agent
+		// so the approver can see what kind of device/browser is asking — real
+		// data captured at pairing time, not inferred. Old rows simply have no
+		// UA (the approval UI shows "Unknown device").
+		if _, err := db.Exec(`ALTER TABLE pending_pairs ADD COLUMN user_agent TEXT`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate pending_pairs.user_agent: %w", err)
+			return
+		}
+		// Backfill claimed_at for servers whose root admin was recorded without
+		// the claim flow stamping a time (older installs, or a seeded root
+		// admin). The root-origin device was, by definition, minted at the
+		// bootstrap — so its paired_at IS the claim time. This is the real
+		// bootstrap moment recovered from device data, not a fabricated value;
+		// only runs when claimed_at is absent and a root device exists.
+		if _, err := db.Exec(`INSERT INTO server_settings(key, value, updated_at, updated_by)
+			SELECT 'claimed_at', d.paired_at, d.paired_at, 'backfill'
+			FROM devices d
+			WHERE d.origin='root'
+			  AND NOT EXISTS (SELECT 1 FROM server_settings WHERE key='claimed_at')
+			ORDER BY d.paired_at ASC
+			LIMIT 1`); err != nil {
+			db.Close()
+			baileyDBErr = fmt.Errorf("backfill claimed_at: %w", err)
 			return
 		}
 		baileyDB = db

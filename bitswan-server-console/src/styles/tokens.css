@@ -1,0 +1,234 @@
+/* ===========================================================
+   shadcn/ui (New York) — Colors & Typography
+   Light + dark themes. Apply [data-theme="dark"] on <html> for dark.
+   Loaded fonts: Inter (sans), Roboto (display headings, optional),
+   Geist Mono (mono).
+   =========================================================== */
+
+/* Fonts (Inter, Geist Mono) are vendored via @fontsource and imported in
+   main.jsx — Bailey's inner CSP forbids external font origins, so the original
+   Google Fonts / jsDelivr @import + @font-face are intentionally dropped. */
+
+:root {
+  /* ────────────── Tailwind raw ramps (the base palette) ────────────── */
+  --white:    #ffffff;
+  --black:    #000000;
+
+  --zinc-50:  #fafafa;
+  --zinc-100: #f4f4f5;
+  --zinc-200: #e4e4e7;
+  --zinc-300: #d4d4d8;
+  --zinc-400: #a1a1aa;
+  --zinc-500: #71717a;
+  --zinc-600: #52525b;
+  --zinc-700: #3f3f46;
+  --zinc-800: #27272a;
+  --zinc-900: #18181b;
+  --zinc-950: #09090b;
+
+  --gray-300: #d1d5db;
+
+  /* Primary ramp (Bitswan blue — pinned to a vivid 600) */
+  --primary-50:  #eef2ff;
+  --primary-100: #e0e7ff;
+  --primary-500: #1f4dff;
+  --primary-600: #093df5;   /* the headline brand color */
+  --primary-700: #0735d0;
+  --primary-900: #1e1b4b;
+  --primary-950: #030927;
+
+  /* Semantic / chart */
+  --red-50:    #fef2f2;
+  --red-500:   #ef4444;
+  --red-600:   #dc2626;
+  --red-700:   #b91c1c;
+
+  --green-500: #22c55e;
+  --green-600: #16a34a;
+
+  --amber-500: #f59e0b;
+  --blue-500:  #3b82f6;
+  --purple-500:#a855f7;
+  --teal-600:  #2a9d90;
+
+  /* Chart palette (matches Figma chart usage) */
+  --chart-1: #dc2626;
+  --chart-2: #f59e0b;
+  --chart-3: #16a34a;
+  --chart-4: #3b82f6;
+  --chart-5: #a855f7;
+
+  /* ────────────── Semantic tokens (LIGHT) ────────────── */
+  --background:        var(--white);
+  --foreground:        var(--zinc-900);
+
+  --card:              var(--white);
+  --card-foreground:   var(--zinc-900);
+
+  --popover:           var(--white);
+  --popover-foreground:var(--zinc-900);
+
+  --primary:           var(--primary-600);
+  --primary-foreground:#fafafa;
+
+  --secondary:         var(--zinc-100);
+  --secondary-foreground: var(--primary-600);  /* Figma override — secondary text is brand blue */
+
+  --muted:             var(--zinc-100);
+  --muted-foreground:  var(--zinc-500);
+
+  --accent:            var(--zinc-100);
+  --accent-foreground: var(--zinc-900);
+
+  --destructive:       var(--red-600);
+  --destructive-foreground: #fef2f2;
+
+  --border:            var(--zinc-200);
+  --input:             var(--zinc-200);
+  --ring:              var(--primary-600);
+
+  /* ────────────── Type tokens ────────────── */
+  --font-sans:    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-display: 'Roboto', 'Inter', ui-sans-serif, system-ui, sans-serif; /* Figma uses Roboto on H1/H2 */
+  --font-mono:    'Geist Mono', 'Roboto Mono', ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+
+  /* Text size / line-height pairs (Tailwind names) */
+  --text-xs:   12px; --leading-xs:   16px;
+  --text-sm:   14px; --leading-sm:   20px;   /* body workhorse */
+  --text-base: 16px; --leading-base: 24px;
+  --text-lg:   18px; --leading-lg:   28px;
+  --text-xl:   20px; --leading-xl:   28px;
+  --text-2xl:  24px; --leading-2xl:  32px;
+  --text-3xl:  30px; --leading-3xl:  36px;
+  --text-4xl:  36px; --leading-4xl:  40px;
+  --text-5xl:  48px; --leading-5xl:  1;
+  --text-6xl:  60px; --leading-6xl:  1;
+
+  /* ────────────── Radius scale ────────────── */
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   8px;
+  --radius-xl:  12px;
+  --radius-2xl: 16px;
+  --radius-full: 9999px;
+  --radius:     var(--radius-md);   /* default button/input radius */
+
+  /* ────────────── Spacing (Tailwind 4px scale, partial) ────────────── */
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
+  --space-12: 48px; --space-16: 64px; --space-20: 80px; --space-24: 96px;
+
+  /* ────────────── Shadows ────────────── */
+  --shadow-xs: 0 1px 2px 0 rgba(0,0,0,0.05);
+  --shadow-sm: 0 1px 3px 0 rgba(0,0,0,0.1), 0 1px 2px -1px rgba(0,0,0,0.1);
+  --shadow:    0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -2px rgba(0,0,0,0.06);
+  --shadow-md: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1);
+  --shadow-lg: 0 25px 50px -12px rgba(0,0,0,0.25);
+
+  /* ────────────── Motion ────────────── */
+  --ease:        cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast:   150ms;
+  --duration-medium: 200ms;
+  --duration-slow:   300ms;
+}
+
+/* ────────────── Dark theme overrides ────────────── */
+[data-theme="dark"], .dark {
+  --background:        var(--zinc-950);
+  --foreground:        var(--zinc-50);
+
+  --card:              var(--zinc-950);
+  --card-foreground:   var(--zinc-50);
+
+  --popover:           var(--zinc-950);
+  --popover-foreground:var(--zinc-50);
+
+  --primary:           var(--primary-500);
+  --primary-foreground:var(--zinc-50);
+
+  --secondary:         var(--zinc-800);
+  --secondary-foreground: var(--zinc-50);
+
+  --muted:             var(--zinc-800);
+  --muted-foreground:  var(--zinc-400);
+
+  --accent:            var(--zinc-800);
+  --accent-foreground: var(--zinc-50);
+
+  --destructive:       #7f1d1d;
+  --destructive-foreground: #fef2f2;
+
+  --border:            var(--zinc-800);
+  --input:             var(--zinc-800);
+  --ring:              var(--primary-500);
+}
+
+/* ===========================================================
+   Semantic typographic styles (use as classes, e.g. <h1 class="ds-h1">)
+   =========================================================== */
+html { font-family: var(--font-sans); color: var(--foreground); background: var(--background); }
+body { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+
+.ds-h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--text-5xl);
+  line-height: var(--leading-5xl);
+  letter-spacing: -0.4px;
+  color: var(--foreground);
+  margin: 0;
+}
+.ds-h2 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--text-3xl);
+  line-height: var(--leading-3xl);
+  letter-spacing: -0.4px;
+  color: var(--foreground);
+  margin: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.ds-h3 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: var(--text-2xl);
+  line-height: var(--leading-2xl);
+  color: var(--foreground);
+  margin: 0;
+}
+.ds-h4 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: var(--text-xl);
+  line-height: var(--leading-xl);
+  color: var(--foreground);
+  margin: 0;
+}
+.ds-lead {
+  font-size: var(--text-xl);
+  line-height: 28px;
+  color: var(--muted-foreground);
+}
+.ds-p {
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+  color: var(--foreground);
+}
+.ds-large { font-size: var(--text-lg); font-weight: 600; line-height: var(--leading-lg); }
+.ds-small { font-size: var(--text-sm); font-weight: 500; line-height: 14px; }
+.ds-muted { font-size: var(--text-sm); color: var(--muted-foreground); }
+.ds-code  {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--muted);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+.ds-blockquote {
+  border-left: 2px solid var(--border);
+  padding-left: 24px;
+  font-style: italic;
+  color: var(--muted-foreground);
+  margin: 0;
+}

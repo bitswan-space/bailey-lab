@@ -32,7 +32,7 @@ func TestEnforceEndpointACL_UnregisteredHostIsOpen(t *testing.T) {
 
 func TestEnforceEndpointACL_OwnerPasses(t *testing.T) {
 	host := "gate-owner.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
@@ -44,7 +44,7 @@ func TestEnforceEndpointACL_OwnerPasses(t *testing.T) {
 
 func TestEnforceEndpointACL_StrangerDeniedAndRequestRecorded(t *testing.T) {
 	host := "gate-stranger.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
@@ -56,8 +56,13 @@ func TestEnforceEndpointACL_StrangerDeniedAndRequestRecorded(t *testing.T) {
 		t.Errorf("status = %d, want 403", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "owner@example.com") || !strings.Contains(body, "Request access") {
-		t.Errorf("denied page missing owner / request button:\n%s", body)
+	// The page must be generic — it must NOT leak the endpoint hostname,
+	// its owner, or offer a request-access affordance to an outsider.
+	if !strings.Contains(body, "not a member of this organization") {
+		t.Errorf("denied page missing the generic message:\n%s", body)
+	}
+	if strings.Contains(body, "owner@example.com") || strings.Contains(body, host) || strings.Contains(body, "Request access") {
+		t.Errorf("denied page leaks endpoint/owner or offers request-access:\n%s", body)
 	}
 	// The attempt is recorded so the owner sees it in the share dialog.
 	reqs, err := listAccessRequests(host)
@@ -77,7 +82,7 @@ func TestEnforceEndpointACL_StrangerDeniedAndRequestRecorded(t *testing.T) {
 
 func TestEnforceEndpointACL_InnerHostUsesOuterACL(t *testing.T) {
 	host := "gate-inner.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
@@ -89,7 +94,7 @@ func TestEnforceEndpointACL_InnerHostUsesOuterACL(t *testing.T) {
 
 func TestEnforceEndpointACL_GroupGrantPasses(t *testing.T) {
 	host := "gate-group.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addGrant(host, "group", "/Acme/devs", "access", "owner@example.com"); err != nil {
@@ -134,7 +139,7 @@ func TestEnforceProtectedGate_NoIdentityPassesThrough(t *testing.T) {
 	// through so the upstream's own 401 surfaces instead of a confusing
 	// gate page.
 	host := "gate-noident.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
@@ -146,7 +151,7 @@ func TestEnforceProtectedGate_NoIdentityPassesThrough(t *testing.T) {
 
 func TestEnforceProtectedGate_DisableEnv(t *testing.T) {
 	host := "gate-disabled.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("BAILEY_GATE_DISABLE", "1")

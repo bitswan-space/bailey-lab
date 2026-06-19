@@ -21,7 +21,11 @@ jobs:
     strategy:
       matrix:
         go-version: [1.25.x]
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The automation-server daemon only ever runs on Linux (it reads
+        # /proc + statfs and ships as a Linux container). macOS stays for
+        # general cross-Unix portability; Windows is dropped — it can't build
+        # the Unix-only syscalls and is not a supported runtime.
+        os: [ubuntu-latest, macos-latest]
 
     runs-on: ${{ matrix.os }}
 
@@ -33,6 +37,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The daemon embeds the Server Console via go:embed; its build output is
+      # not committed. Build the SPA so `go test` exercises the real assets.
+      - name: Build Server Console (embedded SPA)
+        working-directory: ${{ github.workspace }}
+        run: |
+          npm --prefix bitswan-server-console install --no-audit --no-fund
+          npm --prefix bitswan-server-console run build
+          rm -rf bitswan-automation-server/internal/daemon/serverconsole_dist
+          mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
+          cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
 
       - name: go get
         run: go get ./...

@@ -7,7 +7,7 @@ import (
 
 func TestRegisterEndpoint_Idempotent(t *testing.T) {
 	host := "acl-register.example.com"
-	rec, err := registerEndpoint(host, "alice@example.com", "My App", "")
+	rec, err := registerEndpoint(host, "alice@example.com", "My App", "", "", "")
 	if err != nil {
 		t.Fatalf("registerEndpoint: %v", err)
 	}
@@ -16,7 +16,7 @@ func TestRegisterEndpoint_Idempotent(t *testing.T) {
 	}
 
 	// Re-registering with a different owner must NOT steal the endpoint.
-	rec2, err := registerEndpoint(host, "mallory@example.com", "Stolen", "")
+	rec2, err := registerEndpoint(host, "mallory@example.com", "Stolen", "", "", "")
 	if err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
@@ -29,17 +29,17 @@ func TestRegisterEndpoint_Idempotent(t *testing.T) {
 }
 
 func TestRegisterEndpoint_RequiresOwner(t *testing.T) {
-	if _, err := registerEndpoint("no-owner.example.com", "", "", ""); err == nil {
+	if _, err := registerEndpoint("no-owner.example.com", "", "", "", "", ""); err == nil {
 		t.Error("expected error for empty owner")
 	}
-	if _, err := registerEndpoint("", "a@b.c", "", ""); err == nil {
+	if _, err := registerEndpoint("", "a@b.c", "", "", "", ""); err == nil {
 		t.Error("expected error for empty hostname")
 	}
 }
 
 func TestRoleFor(t *testing.T) {
 	host := "acl-rolefor.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addGrant(host, "email", "friend@example.com", "access", "owner@example.com"); err != nil {
@@ -85,7 +85,7 @@ func TestRoleFor(t *testing.T) {
 
 func TestRemoveGrant(t *testing.T) {
 	host := "acl-revoke.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addGrant(host, "email", "temp@example.com", "access", "owner@example.com"); err != nil {
@@ -104,7 +104,7 @@ func TestRemoveGrant(t *testing.T) {
 
 func TestAddGrant_Validation(t *testing.T) {
 	host := "acl-validate.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addGrant(host, "robot", "x", "access", "o"); err == nil {
@@ -117,7 +117,7 @@ func TestAddGrant_Validation(t *testing.T) {
 
 func TestAccessRequests(t *testing.T) {
 	host := "acl-requests.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addAccessRequest(host, "wantsin@example.com"); err != nil {
@@ -144,7 +144,7 @@ func TestAccessRequests(t *testing.T) {
 
 func TestDeleteEndpoint_Cascades(t *testing.T) {
 	host := "acl-delete.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addGrant(host, "email", "g@example.com", "access", "owner@example.com"); err != nil {
@@ -174,7 +174,7 @@ func TestRoleFor_ParentDelegation(t *testing.T) {
 	// the automations they deploy.
 	dashboard := "delegate-dashboard.example.com"
 	child := "delegate-bp-frontend.example.com"
-	if _, err := registerEndpoint(dashboard, "wsowner@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(dashboard, "wsowner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addGrant(dashboard, "email", "member@example.com", "access", "wsowner@example.com"); err != nil {
@@ -183,7 +183,7 @@ func TestRoleFor_ParentDelegation(t *testing.T) {
 	if err := addGrant(dashboard, "group", "/Acme/devs", "access", "wsowner@example.com"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registerEndpoint(child, "wsowner@example.com", "BP frontend", dashboard); err != nil {
+	if _, err := registerEndpoint(child, "wsowner@example.com", "BP frontend", dashboard, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -217,7 +217,7 @@ func TestRoleFor_ParentDelegation(t *testing.T) {
 
 func TestRoleFor_SelfParentDoesNotRecurse(t *testing.T) {
 	host := "delegate-self.example.com"
-	if _, err := registerEndpoint(host, "owner@example.com", "", host); err != nil {
+	if _, err := registerEndpoint(host, "owner@example.com", "", host, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if role, err := roleFor(host, "stranger@example.com", nil); err != nil || role != roleNone {
@@ -227,11 +227,11 @@ func TestRoleFor_SelfParentDoesNotRecurse(t *testing.T) {
 
 func TestRegisterEndpoint_PreservesParent(t *testing.T) {
 	host := "delegate-preserve.example.com"
-	if _, err := registerEndpoint(host, "a@example.com", "", "parent.example.com"); err != nil {
+	if _, err := registerEndpoint(host, "a@example.com", "", "parent.example.com", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Re-registration must not overwrite the recorded parent.
-	rec, err := registerEndpoint(host, "b@example.com", "", "other.example.com")
+	rec, err := registerEndpoint(host, "b@example.com", "", "other.example.com", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,13 +244,13 @@ func TestListEndpointsWhereUserCanShare(t *testing.T) {
 	owned := "acl-share-owned.example.com"
 	granted := "acl-share-granted.example.com"
 	other := "acl-share-other.example.com"
-	if _, err := registerEndpoint(owned, "sharer@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(owned, "sharer@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registerEndpoint(granted, "someoneelse@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(granted, "someoneelse@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registerEndpoint(other, "someoneelse@example.com", "", ""); err != nil {
+	if _, err := registerEndpoint(other, "someoneelse@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := addGrant(granted, "email", "sharer@example.com", "owner", "someoneelse@example.com"); err != nil {

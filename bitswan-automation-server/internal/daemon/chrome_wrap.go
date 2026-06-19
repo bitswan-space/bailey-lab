@@ -52,9 +52,16 @@ func serveBaileyChrome(w http.ResponseWriter, r *http.Request) {
 	// authority to change sharing rules, so the button would be a dead
 	// end. roleFor returns "" if the endpoint isn't registered yet;
 	// treat that as "no Share button". ACL is keyed by the outer host.
+	//
+	// The Server Console host (bailey.<domain>) and the public onboarding
+	// host are reachable by every verified user by design — there's no
+	// per-endpoint access to grant or revoke, so no Share button belongs
+	// here even for whoever happens to own the endpoint record.
 	isOwner := false
-	if role, _ := roleFor(host, email, groups); role == roleOwner {
-		isOwner = true
+	if !isServerConsoleHost(host) && !isServerConsoleOnboardHost(host) {
+		if role, _ := roleFor(host, email, groups); role == roleOwner {
+			isOwner = true
+		}
 	}
 
 	// CSP pins the iframe to exactly the paired inner subdomain.
@@ -76,10 +83,14 @@ func serveBaileyChrome(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
-	fmt.Fprint(w, baileyChromeHTML(email, host, innerURL, isOwner))
+	// Launcher menu, filtered to what this user can reach (AOC, the Bailey
+	// dashboard, their workspaces and frontends). Top-level link navigation
+	// isn't governed by this page's CSP, so the menu can point anywhere.
+	launcher := baileyLauncherData(email, groups)
+	fmt.Fprint(w, baileyChromeHTML(email, host, innerURL, isOwner, launcher))
 }
 
-func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
+func baileyChromeHTML(email, host, iframeSrc string, isOwner bool, launcher launcherData) string {
 	emailDisp := "anonymous"
 	if email != "" {
 		emailDisp = email
@@ -134,10 +145,12 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
   }
   footer.bailey-footer a.btn-primary:hover { background: #E4E4E7; color: #18181B; }
 %[9]s
+%[15]s
 </style>
 </head><body>
 <iframe class="bailey-content" src="%[6]s" allow="clipboard-read; clipboard-write; fullscreen; camera; microphone; geolocation"></iframe>
 <footer class="bailey-footer">
+  %[16]s
   <span class="brand">%[7]s Protected by Bitswan <b>Bailey</b></span>
   <span class="dot">·</span>
   <span class="who"><b>%[8]s</b></span>
@@ -145,6 +158,8 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
   %[10]s
   <a class="btn" href="%[13]s" target="_top">Logout</a>
 </footer>
+%[17]s
+<script>%[18]s</script>
 %[11]s
 <script>%[12]s</script>
 <script>
@@ -195,7 +210,11 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool) string {
 		shareModal,
 		shareScript,
 		html.EscapeString(logoutURLForHost(host)),
-		jsString("https://"+toInnerHost(host)))
+		jsString("https://"+toInnerHost(host)),
+		launcherCSS,                       // %[15]s
+		baileyLauncherButtonHTML(),        // %[16]s
+		baileyLauncherMenuHTML(launcher),  // %[17]s
+		launcherJS)                        // %[18]s
 }
 
 // jsString renders s as a double-quoted JS string literal, safe to

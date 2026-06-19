@@ -27,7 +27,49 @@ import (
 func chromeWrapMiddleware(inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := requestEndpointHost(r)
+
+		// Bailey device-trust gate (phase 1). Runs before the console /
+		// inner / chrome branches so it covers the Server Console, the
+		// chrome wrap, AND the proxied apps (which flow through
+		// inner.ServeHTTP → mux → gateHandler). An un-trusted device is
+		// redirected to /2fa-gate/pending-pair (or auto-paired if it's
+		// the first admin on a fresh server); an admin without a TOTP
+		// session is sent to the challenge. The oauth2 + /2fa-gate paths
+		// are exempt inside enforceMFAGate so the redirect target itself
+		// stays reachable. The per-endpoint ACL is NOT run here — it's
+		// enforced separately in enforceProtectedGate.
+		if !enforceMFAGate(w, r) {
+			return
+		}
+
+		// Public device-trust onboarding host (bailey-onboard.<domain>): the
+		// external half of the two-endpoint split. It serves the gate SPA
+		// DIRECTLY — no chrome wrap, no iframe, no launcher (an untrusted
+		// device must not see any of that). Its bootstrap/data APIs and the
+		// legacy /2fa-gate pages route to the daemon (inner → gateHandler);
+		// everything else is the SPA shell + its static assets, which render
+		// the device-trust scene and, once trusted, redirect to ?return=.
+		if isServerConsoleOnboardHost(toOuterHost(host)) {
+			if strings.HasPrefix(r.URL.Path, "/oauth2/") || isBaileyDataPath(r.URL.Path) {
+				inner.ServeHTTP(w, r)
+				return
+			}
+			serveServerConsole(w, r)
+			return
+		}
+
 		if isInnerHost(host) {
+			// The Server Console's inner host serves the embedded SPA instead
+			// of proxying to an upstream. The outer bailey.<domain> host falls
+			// through to the normal chrome wrap below, with its iframe pointed
+			// here — so the console window carries the Bailey bar (and the
+			// launcher) like every other protected app.
+			if isServerConsoleHost(toOuterHost(host)) &&
+				!strings.HasPrefix(r.URL.Path, "/oauth2/") &&
+				!isBaileyDataPath(r.URL.Path) {
+				serveServerConsole(w, r)
+				return
+			}
 			inner.ServeHTTP(w, r)
 			return
 		}
@@ -54,11 +96,23 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		if email, _ := identityFromHeaders(r); email == "" {
+		email, groups := identityFromHeaders(r)
+		if email == "" {
 			// Should be impossible — oauth2-proxy upstream sets the
 			// header. If we get here without it, oauth failed; fall
 			// through and let the inner handler reject.
 			inner.ServeHTTP(w, r)
+			return
+		}
+		// Per-endpoint ACL on the OUTER host. A signed-in user with no
+		// role gets the standalone denial page rendered HERE rather than
+		// the chrome wrap. Two reasons it must be the outer host, not the
+		// iframe: (1) the inner host's 403 isn't frameable, so wrapping it
+		// would show a blank frame; (2) the wrap carries the launcher and
+		// "signed in as" bar, which would leak reachable endpoints to
+		// someone with no access. enforceEndpointACL keys on the outer
+		// host and passes bailey.<domain> and unregistered hosts through.
+		if !enforceEndpointACL(w, r, email, groups) {
 			return
 		}
 		serveBaileyChrome(w, r)

@@ -234,8 +234,36 @@ func (s *Server) Run() error {
 	// gate's own pages (share, request-access, whoami) must be mounted
 	// on this mux — they are what the wrap iframe shows on the Bailey
 	// management hostname.
+	//
+	// SECURITY / STAGE-4 GAP (critical, known): handleBailey and
+	// handleGatePathRoot below decide authorization entirely from the
+	// request's X-Forwarded-* / X-Auth-Request-* identity headers (see
+	// identityFromHeaders). This listener MUST therefore only ever be
+	// reachable via the trusted oauth2-proxy/gate chain. Today it is NOT:
+	// the listener is bound to all interfaces (net.Listen("tcp", ":8080")
+	// below) on the shared bitswan_network, so any container — including
+	// user-controlled workspace apps — can connect directly with forged
+	// identity headers and impersonate an arbitrary user or admin. The
+	// accepted fix is the stage-4 proxy split: bind this listener to
+	// loopback / a non-routable daemon<->gate-only network so the gate is
+	// the sole reachable path. It is NOT re-bound here because the ACME
+	// DNS-01 bridge (acmeBridgePath, served on this same mux) and the
+	// docs ingress are reached cross-container by docker DNS name
+	// (bitswan-automation-server-daemon:8080); binding to 127.0.0.1
+	// without the proxy split would break them. Partial mitigation lives
+	// in the gate Director (startProtectedGate) which strips
+	// client-supplied identity headers before proxying. TODO(stage-4):
+	// split the bailey/gate handlers onto a loopback/internal-network-only
+	// listener and route container-to-container calls through an
+	// authenticated path.
 	docsMux := http.NewServeMux()
 	docsMux.HandleFunc(gatePathPrefix+"/", handleGatePathRoot)
+	// Bailey management surface (JSON/API + favicon + static + sign-out).
+	// The React Server Console (the HTML) is served by serveServerConsole
+	// in chromeWrapMiddleware on the console inner host; these are the
+	// data endpoints it fetches, proxied here through the gate.
+	docsMux.HandleFunc("/bailey", s.handleBailey)
+	docsMux.HandleFunc("/bailey/", s.handleBailey)
 	docsMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// "/" on the Bailey hostname is also the post-logout landing
 		// page (Keycloak does exact redirect-URI matching). Until the
@@ -340,4 +368,3 @@ func (s *Server) Run() error {
 	fmt.Println("Server stopped")
 	return nil
 }
-

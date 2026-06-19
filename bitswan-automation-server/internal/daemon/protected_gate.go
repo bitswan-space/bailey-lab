@@ -47,6 +47,15 @@ const (
 // wrong.
 func upstreamForHost(host string) *url.URL {
 	host = strings.ToLower(host)
+	// The onboarding host is served on its OUTER hostname (no inner/iframe
+	// split), so resolve it to the daemon directly — its bootstrap/data API
+	// calls (proxied via chromeWrapMiddleware) need an upstream even though
+	// it isn't an inner host. The SPA shell itself is served in-process by
+	// serveServerConsole and never reaches here.
+	if isServerConsoleOnboardHost(toOuterHost(host)) {
+		u, _ := url.Parse("http://" + upstreamDaemonHost() + ":8080")
+		return u
+	}
 	if !isInnerHost(host) {
 		return nil
 	}
@@ -101,11 +110,17 @@ func workspaceFromLabel(label string) string {
 	return ""
 }
 
-// isBaileyHost matches both the outer (bailey.<domain>) and inner
-// (bailey--inner.<domain>) subdomains of the management surface.
+// isBaileyHost matches the daemon-served management hosts: the console outer
+// (bailey.<domain>) and inner (bailey--inner.<domain>) subdomains, plus the
+// public device-trust onboarding host (bailey-onboard.<domain>). All three are
+// served by the daemon itself (SPA + bootstrap/data APIs), so they get the ACL
+// free pass, receive the gate-resolved identity, and keep their Bailey auth
+// cookies (which an app upstream would have stripped).
 func isBaileyHost(host string) bool {
 	h := strings.ToLower(host)
-	return strings.HasPrefix(h, "bailey.") || strings.HasPrefix(h, "bailey"+innerHostSuffix+".")
+	return strings.HasPrefix(h, "bailey.") ||
+		strings.HasPrefix(h, "bailey"+innerHostSuffix+".") ||
+		strings.HasPrefix(h, "bailey-onboard.")
 }
 
 // startProtectedGate boots the gate's HTTP listener. Called from
@@ -114,7 +129,33 @@ func startProtectedGate() error {
 	// Per-request Director — picks the upstream by hostname.
 	proxy := &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
-			up := upstreamForHost(requestEndpointHost(r))
+			// SECURITY (defence-in-depth, identity header injection):
+			// Re-anchor the forwarded-identity headers before proxying.
+			// We (1) capture the identity as resolved from the request
+			// the gate received (set by the trusted oauth2-proxy hop,
+			// bitswan-protected-proxy, in FRONT of this listener), (2)
+			// strip every client-supplied identity header, then (3) only
+			// re-apply the trusted identity on the leg to the daemon's
+			// own :8080 Bailey upstream. For all other upstreams (the
+			// user-controlled workspace apps) the identity headers stay
+			// stripped, so a malicious/compromised upstream can never see
+			// or have injected a forged X-Forwarded-Email/-Groups, and a
+			// client talking straight to :9080 (bypassing oauth2-proxy)
+			// cannot inject identity that flows downstream.
+			//
+			// NOTE: this does not by itself close the stage-4 gap — the
+			// daemon's :8080 listener still trusts X-Forwarded-* with no
+			// proof the request came through the gate (see the comment at
+			// identityFromHeaders and at the docsServer wiring in
+			// server.go). The full fix is the stage-4 proxy split that
+			// makes :8080 reachable only via the gate. This strip is the
+			// conservative, non-breaking mitigation against identity
+			// injection into/through upstream apps.
+			endpointHost := requestEndpointHost(r)
+			email, groups := identityFromHeaders(r)
+			stripForwardedIdentityHeaders(r)
+
+			up := upstreamForHost(endpointHost)
 			if up == nil {
 				// Force a 502 by pointing the request at an unreachable
 				// sentinel — the simplest way to surface "no upstream
@@ -127,6 +168,26 @@ func startProtectedGate() error {
 			r.URL.Host = up.Host
 			if h := r.Header.Get("X-Forwarded-Host"); h != "" {
 				r.Host = h
+			}
+			// Re-apply the gate-trusted identity ONLY to the Bailey
+			// daemon upstream, which legitimately consumes it. Other
+			// upstreams never receive forwarded identity.
+			if isBaileyHost(toOuterHost(endpointHost)) && email != "" {
+				r.Header.Set("X-Forwarded-Email", email)
+				if len(groups) > 0 {
+					r.Header.Set("X-Forwarded-Groups", strings.Join(groups, ","))
+				}
+			} else {
+				// App upstream (user-controlled, possibly untrusted code).
+				// Strip Bailey's auth cookies so a malicious or compromised
+				// workspace app can never read — and then replay — the
+				// device-trust credential. The browser sends _bailey_device to
+				// the gate so the gate can enforce trust on every protected
+				// host, but it MUST NOT reach an upstream app: the gate has
+				// already enforced trust by this point, so the app needs the
+				// request, never the credential. This is what keeps the cookie
+				// un-stealable by the apps running behind Bailey.
+				stripBaileyAuthCookies(r)
 			}
 		},
 		// Flush immediately after every chunk so streaming upstream
@@ -210,6 +271,19 @@ func setupBaileyRoutes() {
 			fmt.Printf("Warning: register platform route for %s: %v\n", h, err)
 		}
 	}
+
+	// Public device-trust onboarding host (the external half of the
+	// two-endpoint split). It has no inner/iframe form — the SPA is served
+	// directly on this single outer hostname — so only one route is needed.
+	// Same oauth2-proxy in front; its OAuth callback URI is registered too.
+	onboard := serverConsoleOnboardHost(domain)
+	if err := registerProtectedRedirectURI(onboard); err != nil {
+		fmt.Printf("Warning: AOC didn't accept protected-client redirect URIs for %s: %v\n", onboard, err)
+	}
+	oResolver, oTLSDomains := certResolverForHostname(onboard)
+	if err := traefikapi.AddRouteWithTLSDomains(onboard, "bitswan-protected-proxy:80", "", oResolver, oTLSDomains); err != nil {
+		fmt.Printf("Warning: register platform route for %s: %v\n", onboard, err)
+	}
 }
 
 func gateHandler(w http.ResponseWriter, r *http.Request, proxy *httputil.ReverseProxy) {
@@ -263,7 +337,7 @@ func enforceEndpointACL(w http.ResponseWriter, r *http.Request, email string, gr
 	host = toOuterHost(host)
 	if isBaileyHost(host) {
 		if ep, _ := getEndpoint(host); ep == nil {
-			_, _ = registerEndpoint(host, email, "Bailey ("+host+")", "")
+			_, _ = registerEndpoint(host, email, "Bailey ("+host+")", "", "", "")
 		}
 		return true
 	}
@@ -285,11 +359,12 @@ func enforceEndpointACL(w http.ResponseWriter, r *http.Request, email string, gr
 	}
 	if role == roleNone {
 		// Record the attempt so the owner sees it as a pending request
-		// in the share dialog, then explain the situation.
+		// in their approvals view, then show a generic denial that leaks
+		// nothing about the endpoint or its owner (accessDeniedHTML).
 		_ = addAccessRequest(host, email)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprint(w, accessDeniedHTML(host, ep, email))
+		fmt.Fprint(w, accessDeniedHTML(email))
 		return false
 	}
 	return true
@@ -328,6 +403,45 @@ func handleGatePath(w http.ResponseWriter, r *http.Request) {
 
 	case strings.HasPrefix(r.URL.Path, gatePathPrefix+"/request-access/"):
 		handleRequestAccess(w, r, email)
+
+	// --- Device-trust gate pages (assigned in mfa_pair.go /
+	// mfa_account.go / mfa_claim.go init()). Each takes the resolved
+	// email. ---
+
+	// One-time CLAIM / bootstrap (BootstrapScene). Only works while the
+	// server is unclaimed; claims root admin + TOFU-trusts this device.
+	case r.URL.Path == gatePathPrefix+"/claim":
+		handleClaim(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/pending-pair":
+		handlePendingPair(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/pending-pair/poll":
+		handlePendingPairPoll(w, r, email)
+
+	// Authenticator self-trust path on the trust-this-device page
+	// (ApprovalScene's "Authenticator" tab): a user with TOTP enrolled
+	// can trust this browser with their current 6-digit code, no admin.
+	case r.URL.Path == gatePathPrefix+"/self-trust":
+		handleSelfTrust(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/approve":
+		handleApprovePair(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/recovery":
+		handleRecovery(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/account/devices":
+		handleAccountDevices(w, r, email)
+
+	case r.URL.Path == gatePathPrefix+"/account/2fa":
+		handleAccountTOTP(w, r, email)
+
+	// TOTP enrol/challenge for admins. handleTOTPGate decides enrol vs
+	// challenge from the path suffix.
+	case strings.HasPrefix(r.URL.Path, gatePathPrefix+enrollPathSuffix),
+		strings.HasPrefix(r.URL.Path, gatePathPrefix+challengePathSuffix):
+		handleTOTPGate(w, r, gatePathPrefix, email)
 
 	default:
 		http.NotFound(w, r)

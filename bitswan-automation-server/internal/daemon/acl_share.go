@@ -258,23 +258,29 @@ func handleRequestAccess(w http.ResponseWriter, r *http.Request, email string) {
 
 // accessDeniedHTML is the page the gate renders when a signed-in user
 // has no role on a registered endpoint.
-func accessDeniedHTML(host string, ep *endpointRecord, email string) string {
-	ownerLine := "unknown"
-	if ep != nil && ep.OwnerEmail != "" {
-		ownerLine = ep.OwnerEmail
+//
+// It deliberately reveals NOTHING about the endpoint: not its hostname,
+// not its display name, not who owns it. A user from a different org (or
+// any signed-in user without a grant) must not be able to learn which
+// org/workspace/app sits behind the URL, nor who to pester for access —
+// disclosing that to an outsider is itself a leak. We also can't reliably
+// tell "different org" from "same org, no access to this app" from
+// explicit data (group paths carry an org *name*, the server only knows
+// its Keycloak org *id*, and inferring org from email/name is off the
+// table), so every denial gets the same generic message. The owner still
+// sees the attempt in their approvals view (the caller records it); there
+// is intentionally no request-access affordance on this page.
+func accessDeniedHTML(email string) string {
+	emailDisp := email
+	if emailDisp == "" {
+		emailDisp = "an unrecognized account"
 	}
-	requestPath := gatePathPrefix + "/request-access/" + url.PathEscape(host)
 	body := fmt.Sprintf(`
 <div class="header">%s<h1>Access required</h1></div>
 <div class="card">
-  <p>You're signed in as <code>%s</code>, but you don't have access to <code>%s</code>.</p>
-  <p class="note">This endpoint is owned by <code>%s</code>. They can grant you access from their share dialog.</p>
-  <form method="POST" action="%s">
-    <button type="submit">Request access</button>
-  </form>
-</div>`,
-		bitswanLogoSVG, html.EscapeString(email), html.EscapeString(host),
-		html.EscapeString(ownerLine), html.EscapeString(requestPath))
+  <p>You're signed in as <code>%s</code>, but you're not a member of this organization.</p>
+  <p class="note">Contact your administrator if you believe this is a mistake.</p>
+</div>`, bitswanLogoSVG, html.EscapeString(emailDisp))
 	return fmt.Sprintf(`<!doctype html><html><head><meta charset="utf-8"><title>Access required</title><style>%s</style></head><body>%s</body></html>`,
 		bitswanPageCSS, body)
 }
