@@ -1,118 +1,144 @@
 import {
   ArrowLeftRight,
   Boxes,
-  Database,
   FileClock,
   LifeBuoy,
-  Lock,
   Rocket,
   ShieldCheck,
 } from 'lucide-react';
 
 /**
  * "How this works" — an in-product explainer for the blue-green production
- * architecture (3 app slots over 2 databases), shown as a tab on the DR page so
- * operators understand zero-downtime promotion and DR recovery before they act.
+ * architecture, shown as a tab on the DR page. Written what/why before how:
+ * lead with the problem each capability solves, then the mechanics.
  * Static content; no data.
  */
 export function DrArchitectureDoc() {
   return (
     <div className="flex flex-col gap-5 text-[13px] leading-relaxed text-foreground">
       <Section
-        icon={<Boxes className="size-4 text-primary" aria-hidden />}
-        title="Two databases, three app slots"
+        icon={<ShieldCheck className="size-4 text-primary" aria-hidden />}
+        title="What this is for"
       >
         <p>
-          Each production business process has <Term>two persistent databases</Term> — <Db n={1} />{' '}
-          and <Db n={2} /> — and up to <Term>three app slots</Term> (<Slot>a</Slot> <Slot>b</Slot>{' '}
-          <Slot>c</Slot>), where an app slot is a full set of app containers (frontend + backend).
-          Two pointers say what is what:
+          Two things you’ll eventually need to do in production are dangerous if you do them the
+          obvious way:
         </p>
-        <ul className="ml-1 flex flex-col gap-1.5">
-          <Bullet icon={<Database className="size-3.5 text-emerald-600" aria-hidden />}>
-            <Code>live_db</Code> — which database is <strong>Production</strong>. The other is the{' '}
-            <strong>DR standby</strong> (where restores land).
-          </Bullet>
+        <ul className="ml-1 flex flex-col gap-2">
           <Bullet icon={<Rocket className="size-3.5 text-emerald-600" aria-hidden />}>
-            <Code>live_slot</Code> — which app slot the production ingress serves.
+            <strong>Ship a new version</strong> — restarting the app in place means downtime, and a
+            bad release takes live users down with it.
+          </Bullet>
+          <Bullet icon={<LifeBuoy className="size-3.5 text-amber-600" aria-hidden />}>
+            <strong>Recover lost or corrupted data</strong> — restoring a backup straight onto the
+            live database overwrites it. If the backup is wrong, you’ve made the outage worse, with
+            no way back.
           </Bullet>
         </ul>
         <p>
-          Steady state runs <Term>two slots</Term>: the live one (on <Code>live_db</Code>) and the DR
-          one (on the standby db). The third slot sits <Term>idle</Term> — it is the buffer that makes
-          zero-downtime promotion possible.
+          This setup lets you do both <Term>with no downtime</Term> and{' '}
+          <Term>without ever overwriting what’s live</Term>. If a change is wrong, you undo it
+          instantly.
+        </p>
+      </Section>
+
+      <Section
+        icon={<ArrowLeftRight className="size-4 text-primary" aria-hidden />}
+        title="The idea: don’t change what’s live — switch to a copy"
+      >
+        <p>
+          The live environment is never edited in place. Instead there’s always a spare copy beside
+          it. You prepare your change on the spare — off to the side, where it can’t affect anyone —
+          and when it’s ready you <Term>switch which copy serves traffic</Term>. The switch is
+          instant, and the old copy stays exactly as it was, so undoing is just switching back.
+        </p>
+        <p>Concretely, that means a production business process is made of:</p>
+        <ul className="ml-1 flex flex-col gap-1.5">
+          <Bullet icon={<Boxes className="size-3.5 text-sky-600" aria-hidden />}>
+            <Term>Two databases</Term> — at any moment one holds the live data and the other is a
+            spare. Backups are recovered onto the spare, never the live one.
+          </Bullet>
+          <Bullet icon={<Boxes className="size-3.5 text-emerald-600" aria-hidden />}>
+            <Term>Three app slots</Term> — interchangeable copies of the app’s containers
+            (<Slot>a</Slot> <Slot>b</Slot> <Slot>c</Slot>). One serves live traffic, one stands by
+            for recovery, and one is kept free as room to stage the next release.
+          </Bullet>
+        </ul>
+        <p>
+          Two markers track the current arrangement: <Code>live_db</Code> (which database is live)
+          and <Code>live_slot</Code> (which app slot traffic reaches). Switching either is the only
+          operation that ever changes what’s live.
         </p>
         <SteadyStateDiagram />
       </Section>
 
       <Section
-        icon={<ArrowLeftRight className="size-4 text-primary" aria-hidden />}
-        title="One primitive: repoint the ingress"
-      >
-        <p>
-          There is only ever <Term>one operation</Term>: switch which app slot the production ingress
-          points at. No data is moved and nothing is rebuilt to change it — the app keeps serving. Two
-          flows use this same primitive.
-        </p>
-      </Section>
-
-      <Section
         icon={<Rocket className="size-4 text-primary" aria-hidden />}
-        title="Zero-downtime promotion (new code)"
+        title="Shipping a new version"
       >
         <p>
-          To ship a new version with no downtime: bring it up on the <Term>idle slot</Term>, wired to
-          the <strong>current live database</strong> — a promote <strong>never moves data</strong>.
-          Health-check it, repoint the ingress to it, then retire the old slot (it becomes the new
-          idle buffer).
+          <Term>What:</Term> roll out new code while users keep using the app, with an instant
+          rollback if it misbehaves. <Term>Why it’s safe:</Term> the new version runs on the free
+          slot first — real users never touch it until you’ve switched — and it talks to the{' '}
+          <strong>same live database</strong>, so a release never risks your data.
+        </p>
+        <p>
+          <Term>How:</Term> bring the new version up on the free slot, check it’s healthy, then point
+          the ingress at it. The old slot is left running for a moment as your instant rollback, then
+          retired to become the new free slot.
         </p>
         <PromoteDiagram />
       </Section>
 
       <Section
         icon={<LifeBuoy className="size-4 text-primary" aria-hidden />}
-        title="Disaster recovery (data)"
+        title="Recovering from a disaster"
       >
-        <p>You never restore onto live Production. Recovery flows the safe way:</p>
+        <p>
+          <Term>What:</Term> bring back good data after a corruption, a bad migration, or an
+          accidental deletion. <Term>Why it’s safe:</Term> the restore lands on the{' '}
+          <strong>spare database</strong>, so live Production is untouched while you work — and you
+          confirm the recovered data is actually good <em>before</em> it ever serves a user.
+        </p>
+        <p>
+          <Term>How:</Term>
+        </p>
         <ol className="ml-1 flex list-none flex-col gap-1.5">
-          <Step n={1}>
-            Restore a backup into the <DrTag /> — the <Term>standby database</Term>. Live Production is
-            untouched.
-          </Step>
-          <Step n={2}>Open the DR slot’s app and verify the data by hand.</Step>
+          <Step n={1}>Restore the backup onto the spare database. Live Production keeps running.</Step>
+          <Step n={2}>Open the standby copy of the app and check the data by hand.</Step>
           <Step n={3}>
-            <strong>Swap</strong>: flip <Code>live_db</Code> to the standby and repoint the ingress to
-            the DR slot. Production and DR trade places — zero downtime, no data moved.
+            Once you trust it, switch live traffic to the standby. The old live environment becomes
+            the new spare — so if you spot a problem, you switch straight back.
           </Step>
         </ol>
         <SwapDiagram />
         <p className="text-muted-foreground">
-          Restores into <Code>dev</Code> and <Code>staging</Code> stay allowed (those aren’t live
-          Production). Restoring directly onto the live database is refused by the server.
+          Restoring directly onto the live database is refused by the server. Restores into{' '}
+          <Code>dev</Code> and <Code>staging</Code> are fine — those aren’t live Production.
         </p>
       </Section>
 
       <Section
         icon={<ShieldCheck className="size-4 text-primary" aria-hidden />}
-        title="Quarterly recovery tests (CISO policy)"
+        title="Practising recovery"
       >
         <p>
-          Backups are only trustworthy if you’ve proven they restore. On a cadence (quarterly by
-          default) someone restores Production’s latest backup into DR, verifies it, and records the
-          test. This page warns when a BP is <strong>overdue</strong>. Testing restores &amp; verifies
-          — it does <strong>not</strong> swap.
+          A backup you’ve never restored is a guess, not a safety net. So on a regular schedule
+          someone runs the recovery for real — restore the latest backup onto the spare and confirm
+          the data is all there — and records that it worked. This page shows when a process is
+          overdue for that check. Practising only restores and verifies; it never switches live
+          traffic.
         </p>
       </Section>
 
       <Section
         icon={<FileClock className="size-4 text-primary" aria-hidden />}
-        title="Everything is audited"
+        title="Everything is audit logged"
       >
         <p>
-          Every backup, restore, retention change, swap and promote is written to{' '}
-          <Code>bitswan.yaml</Code> and committed to git — who, when, what — and shows up in this
-          page’s audit log and the deployment history.{' '}
-          <Database className="inline size-3.5 align-text-bottom" aria-hidden />
+          Every backup, restore, retention change, version switch and recovery swap is recorded in
+          git — who did it, when, and what changed. It shows up in this page’s audit log and in the
+          deployment history, and because it’s in git it’s a permanent, reviewable record.
         </p>
       </Section>
     </div>
@@ -149,16 +175,16 @@ function SteadyStateDiagram() {
   return (
     <DiagramBox>
       <div className="flex items-center gap-2">
-        <span className="text-muted-foreground">production ingress ──▶</span>
-        <Pill tone="live">slot a → db1</Pill>
-        <Tag tone="live">live · production</Tag>
+        <span className="text-muted-foreground">live traffic ──▶</span>
+        <Pill tone="live">slot a → database 1</Pill>
+        <Tag tone="live">live</Tag>
       </div>
-      <div className="flex items-center gap-2 pl-[8.6rem]">
-        <Pill tone="dr">slot b → db2</Pill>
-        <Tag tone="dr">standby · dr</Tag>
+      <div className="flex items-center gap-2 pl-[6.4rem]">
+        <Pill tone="dr">slot b → database 2</Pill>
+        <Tag tone="dr">standby</Tag>
       </div>
-      <div className="flex items-center gap-2 pl-[8.6rem]">
-        <Pill tone="idle">slot c · idle (promote buffer)</Pill>
+      <div className="flex items-center gap-2 pl-[6.4rem]">
+        <Pill tone="idle">slot c · free (room for the next release)</Pill>
       </div>
     </DiagramBox>
   );
@@ -167,19 +193,19 @@ function SteadyStateDiagram() {
 function PromoteDiagram() {
   return (
     <DiagramBox>
-      <div className="text-muted-foreground">1 · bring new code up on the idle slot, same db1</div>
+      <div className="text-muted-foreground">1 · new version comes up on the free slot, same database</div>
       <div className="flex items-center gap-2 pl-4">
-        <Pill tone="live">slot a → db1</Pill>
+        <Pill tone="live">slot a → db 1</Pill>
         <Tag tone="live">live</Tag>
-        <Pill tone="idle">slot c (new) → db1</Pill>
+        <Pill tone="idle">slot c (new version) → db 1</Pill>
       </div>
-      <div className="pt-1 text-muted-foreground">2 · repoint ingress ──▶ slot c, retire slot a</div>
+      <div className="pt-1 text-muted-foreground">2 · switch traffic ──▶ slot c, retire slot a</div>
       <div className="flex items-center gap-2 pl-4">
-        <Pill tone="live">slot c → db1</Pill>
+        <Pill tone="live">slot c → db 1</Pill>
         <Tag tone="live">live</Tag>
-        <Pill tone="idle">slot a · idle</Pill>
+        <Pill tone="idle">slot a · now free</Pill>
       </div>
-      <div className="pt-1 text-[11px] text-emerald-700">db never moves — new code, same data</div>
+      <div className="pt-1 text-[11px] text-emerald-700">same database throughout — new code, same data</div>
     </DiagramBox>
   );
 }
@@ -187,21 +213,21 @@ function PromoteDiagram() {
 function SwapDiagram() {
   return (
     <DiagramBox>
-      <div className="text-muted-foreground">before — restore landed in db2 (standby), verified</div>
+      <div className="text-muted-foreground">restore landed on database 2 (the spare); verified by hand</div>
       <div className="flex items-center gap-2 pl-4">
-        <Pill tone="live">slot a → db1</Pill>
+        <Pill tone="live">slot a → db 1</Pill>
         <Tag tone="live">live</Tag>
-        <Pill tone="dr">slot b → db2</Pill>
-        <Tag tone="dr">dr</Tag>
+        <Pill tone="dr">slot b → db 2</Pill>
+        <Tag tone="dr">standby</Tag>
       </div>
-      <div className="pt-1 text-muted-foreground">swap — flip live_db→db2, repoint ingress──▶slot b</div>
+      <div className="pt-1 text-muted-foreground">switch traffic ──▶ slot b (now serving the recovered data)</div>
       <div className="flex items-center gap-2 pl-4">
-        <Pill tone="dr">slot a → db1</Pill>
-        <Tag tone="dr">dr</Tag>
-        <Pill tone="live">slot b → db2</Pill>
+        <Pill tone="dr">slot a → db 1</Pill>
+        <Tag tone="dr">spare</Tag>
+        <Pill tone="live">slot b → db 2</Pill>
         <Tag tone="live">live</Tag>
       </div>
-      <div className="pt-1 text-[11px] text-emerald-700">zero downtime — Production and DR trade places</div>
+      <div className="pt-1 text-[11px] text-emerald-700">no downtime — the old live environment becomes the spare</div>
     </DiagramBox>
   );
 }
@@ -254,14 +280,4 @@ const Code = ({ children }: { children: React.ReactNode }) => (
 );
 const Slot = ({ children }: { children: React.ReactNode }) => (
   <span className="rounded bg-muted px-1 font-mono font-semibold">{children}</span>
-);
-const Db = ({ n }: { n: number }) => (
-  <span className="rounded bg-sky-100 px-1.5 py-0.5 font-mono text-[12px] font-semibold text-sky-700">
-    db{n}
-  </span>
-);
-const DrTag = () => (
-  <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-700">
-    standby (DR)
-  </span>
 );
