@@ -21,10 +21,10 @@ import (
 // endpoints.
 
 type accessibleWorkspace struct {
-	Name          string `json:"name"`
-	DashboardURL  string `json:"dashboard_url"` // the workspace's primary UI — what "Open" launches
-	EditorURL     string `json:"editor_url"`
-	GitopsURL     string `json:"gitops_url"`
+	Name          string   `json:"name"`
+	DashboardURL  string   `json:"dashboard_url"` // the workspace's primary UI — what "Open" launches
+	EditorURL     string   `json:"editor_url"`
+	GitopsURL     string   `json:"gitops_url"`
 	DashboardRole string   `json:"dashboard_role,omitempty"` // owner | access | none
 	EditorRole    string   `json:"editor_role,omitempty"`
 	GitopsRole    string   `json:"gitops_role,omitempty"`
@@ -513,15 +513,15 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request, email 
 	// streaming relay so each line becomes a `log` event.
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
+	// relayDone closes when the pipe-reader goroutine below has drained all
+	// output and stopped calling writeEvent. The handler must wait for it
+	// before returning, otherwise the relay can still be writing to w while
+	// the caller (or a test) reads the response body — a data race.
+	relayDone := make(chan struct{})
 	go func() {
 		done <- EmptyTrashFor(email, groups, serverOwner, pw)
 		pw.Close()
 	}()
-	// The relay goroutine writes `log` events to `w` as output streams in. We
-	// MUST wait for it to finish before writing the terminal event and
-	// returning — otherwise the relay races the handler's final write (and any
-	// caller, e.g. a test, reading the response body after the handler returns).
-	relayDone := make(chan struct{})
 	go func() {
 		defer close(relayDone)
 		buf := make([]byte, 4096)
@@ -548,8 +548,9 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request, email 
 		}
 	}()
 	err := <-done
-	// EmptyTrashFor has returned and pw is closed, so the relay will hit EOF and
-	// finish; wait for it before any further write to `w`.
+	// Wait for the relay to flush every buffered line before emitting the
+	// terminal event and returning: once this handler returns, no goroutine
+	// may still be writing to w.
 	<-relayDone
 	if err != nil {
 		writeEvent(map[string]any{"event": "error", "error": err.Error()})

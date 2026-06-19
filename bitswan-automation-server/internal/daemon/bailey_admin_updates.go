@@ -242,7 +242,12 @@ func (s *Server) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, e
 		pr, pw := io.Pipe()
 		cmd.Stdout = pw
 		cmd.Stderr = pw
+		// Closes when the reader goroutine has drained all output and stopped
+		// calling writeEvent, so we never return (and let the caller read the
+		// response body) while a relay write is still in flight — a data race.
+		relayDone := make(chan struct{})
 		go func() {
+			defer close(relayDone)
 			buf := make([]byte, 4096)
 			var partial []byte
 			for {
@@ -268,6 +273,7 @@ func (s *Server) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, e
 		}()
 		err := cmd.Run()
 		_ = pw.Close()
+		<-relayDone
 		return err
 	}
 

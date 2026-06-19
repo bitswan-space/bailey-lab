@@ -382,7 +382,7 @@ function AddButton({
     <button
       onClick={onClick}
       disabled={disabled}
-      className="mt-1 flex h-[30px] items-center justify-center gap-1.5 rounded-md border-[1.5px] border-dashed border-border bg-background text-xs font-medium text-muted-foreground hover:border-primary hover:text-foreground disabled:opacity-40"
+      className="mt-1 flex h-[30px] w-full items-center justify-center gap-1.5 rounded-md border-[1.5px] border-dashed border-border bg-background text-xs font-medium text-muted-foreground hover:border-primary hover:text-foreground disabled:opacity-40"
     >
       <Plus className="size-3" aria-hidden />
       {label}
