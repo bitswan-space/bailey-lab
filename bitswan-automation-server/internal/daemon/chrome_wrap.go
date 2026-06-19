@@ -211,10 +211,10 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool, launcher laun
 		shareScript,
 		html.EscapeString(logoutURLForHost(host)),
 		jsString("https://"+toInnerHost(host)),
-		launcherCSS,                       // %[15]s
-		baileyLauncherButtonHTML(),        // %[16]s
-		baileyLauncherMenuHTML(launcher),  // %[17]s
-		launcherJS)                        // %[18]s
+		launcherCSS,                      // %[15]s
+		baileyLauncherButtonHTML(),       // %[16]s
+		baileyLauncherMenuHTML(launcher), // %[17]s
+		launcherJS)                       // %[18]s
 }
 
 // jsString renders s as a double-quoted JS string literal, safe to

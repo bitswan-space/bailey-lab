@@ -25,7 +25,8 @@ def svc(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     import app.services.automation_service as asvc
 
-    monkeypatch.setattr(asvc, "add_workspace_route_to_ingress", lambda *a, **k: True)
+    # generate_docker_compose is pure (collects routes; no daemon call), so no
+    # ingress stub is needed.
     s = asvc.AutomationService()
     os.makedirs(s.gitops_dir, exist_ok=True)
     return s
@@ -53,7 +54,7 @@ def test_baked_deploy_does_not_require_materialized_dir(svc):
     image_tag = "internal/ws-test-bp-backend-app:sha0000"
     # Previously raised HTTPException 500 ("Deployment directory ... does not
     # exist"); now it composes fine and uses the baked image.
-    dc_yaml, _ = svc.generate_docker_compose(_baked_bp(image_tag))
+    dc_yaml, _, _ = svc.generate_docker_compose(_baked_bp(image_tag))
     services = yaml.safe_load(dc_yaml)["services"]
     assert any(e.get("image") == image_tag for e in services.values())
 

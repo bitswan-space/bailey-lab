@@ -50,7 +50,7 @@ func saveTOTPRecord(rec *totpRecord) error {
 	}
 	return err
 }
-func signingKey() ([]byte, error)                      { return dbSigningKey() }
+func signingKey() ([]byte, error) { return dbSigningKey() }
 
 // signedSessionCookie packs (email, expiry) and HMACs them with the
 // per-server signing key. The email is embedded so a cookie minted

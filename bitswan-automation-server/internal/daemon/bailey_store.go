@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS endpoints (
   -- 'staging', 'dev', 'live-dev', ...). Explicit data set at registration;
   -- launcher/admin views filter on it (e.g. only production frontends).
   stage           TEXT,
+  -- source: route provenance. 'gitops' = registered by gitops reconcile from
+  -- bitswan.yaml (declarative, prunable on reconcile); 'manual' = added by a
+  -- human via the add-route CLI or workspace-init infra. The ingress reconcile
+  -- only ever prunes 'gitops' routes — manual routes are preserved.
+  source          TEXT NOT NULL DEFAULT 'manual',
   created_at      TEXT NOT NULL
 );
 
@@ -241,6 +246,16 @@ func openBaileyDB() (*sql.DB, error) {
 			!strings.Contains(err.Error(), "duplicate column name") {
 			db.Close()
 			baileyDBErr = fmt.Errorf("migrate endpoints.stage: %w", err)
+			return
+		}
+		// Migration for databases created before source existed. source is the
+		// route's provenance ('gitops' | 'manual'); the ingress reconcile prunes
+		// only 'gitops' routes. Existing rows default to 'manual' so a reconcile
+		// never removes a pre-existing route until gitops re-registers it.
+		if _, err := db.Exec(`ALTER TABLE endpoints ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate endpoints.source: %w", err)
 			return
 		}
 		// Migration for databases created before devices.origin existed. origin

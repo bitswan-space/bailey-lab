@@ -78,5 +78,3 @@ func streamLinesAsNDJSON(w io.Writer, r io.Reader, level string) {
 		_ = WriteLogEntry(w, "error", fmt.Sprintf("stream read error: %v", err))
 	}
 }
-
-

@@ -83,6 +83,24 @@ type IngressAddRouteResponse struct {
 	Message string `json:"message"`
 }
 
+// IngressReconcileRequest is the declarative ingress apply: the COMPLETE set of
+// gitops-managed routes a workspace should have. The daemon converges to it —
+// upserts each route (marking it source='gitops'), then prunes any gitops route
+// for the workspace that is NOT in the set. Manual routes are never touched.
+// This is the "kubectl apply" of ingress: re-sending the same set is a no-op.
+type IngressReconcileRequest struct {
+	WorkspaceName string                   `json:"workspace_name"`
+	Routes        []IngressAddRouteRequest `json:"routes"`
+}
+
+// IngressReconcileResponse reports what converging did.
+type IngressReconcileResponse struct {
+	Success  bool     `json:"success"`
+	Applied  int      `json:"applied"`
+	Pruned   []string `json:"pruned"`
+	Warnings []string `json:"warnings,omitempty"`
+}
+
 // IngressListRoutesResponse represents the response from listing routes
 type IngressListRoutesResponse struct {
 	Routes []RouteInfo `json:"routes"`
@@ -134,6 +152,8 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 		s.handleIngressAddRoute(w, r)
 	case path == "repoint-route":
 		s.handleIngressRepointRoute(w, r)
+	case path == "reconcile":
+		s.handleIngressReconcile(w, r)
 	case path == "list-routes":
 		s.handleIngressListRoutes(w, r)
 	case strings.HasPrefix(path, "remove-route/"):
@@ -1421,6 +1441,101 @@ func (s *Server) handleIngressRepointRoute(w http.ResponseWriter, r *http.Reques
 		Success: true,
 		Message: fmt.Sprintf("Repointed route: %s -> %s", req.Hostname, req.Upstream),
 	})
+}
+
+// upstreamsEqual compares the daemon's recorded upstream for a route with a
+// desired upstream, ignoring any scheme. Used by reconcile to skip a route that
+// is already resolving to the right place (so re-applying an in-sync workspace
+// is a fast no-op) while re-applying one that drifted or is missing.
+func upstreamsEqual(recorded, desired string) bool {
+	if recorded == "" || desired == "" {
+		return false
+	}
+	strip := func(s string) string {
+		s = strings.TrimPrefix(s, "http://")
+		s = strings.TrimPrefix(s, "https://")
+		return strings.TrimSuffix(s, "/")
+	}
+	return strip(recorded) == strip(desired)
+}
+
+// handleIngressReconcile handles POST /ingress/reconcile — the declarative
+// ingress apply. It converges the workspace's gitops-managed routes to exactly
+// the desired set: upsert each (addRouteToIngress + mark source='gitops'), then
+// prune any gitops route for the workspace not in the set. Manual routes (added
+// by a human via add-route, or workspace-init infra) are never pruned. Idempotent.
+func (s *Server) handleIngressReconcile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req IngressReconcileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.WorkspaceName) == "" {
+		writeJSONError(w, "workspace_name is required", http.StatusBadRequest)
+		return
+	}
+
+	jwtToken := r.Header.Get("BITSWAN_AUTOMATION_SERVER_DAEMON_TOKEN")
+	resp := IngressReconcileResponse{Success: true, Pruned: []string{}}
+
+	// 1. Upsert every desired route and mark it gitops-managed. Skip the
+	//    (multi-write, ~1s) re-apply only when the route is ALREADY resolving to
+	//    the right upstream — checked against the daemon's recorded
+	//    protected_routes upstream, not a cache. So re-applying an in-sync
+	//    workspace is a fast no-op, but a route that drifted (manual repoint) or
+	//    went missing (lost on a restart) is re-applied — "re-apply to fix it".
+	desired := make(map[string]bool) // outer hostnames in the desired set
+	for _, route := range req.Routes {
+		if route.WorkspaceName == "" {
+			route.WorkspaceName = req.WorkspaceName
+		}
+		outer := toOuterHost(route.Hostname)
+		desired[strings.ToLower(outer)] = true
+
+		live, _ := lookupProtectedRouteUpstream(outer)
+		ep, _ := getEndpoint(outer)
+		inSync := ep != nil && ep.Source == "gitops" &&
+			upstreamsEqual(live, route.Upstream)
+		if inSync {
+			continue // already resolving to the right upstream — nothing to do
+		}
+		if err := addRouteToIngress(route, jwtToken); err != nil {
+			resp.Warnings = append(resp.Warnings,
+				fmt.Sprintf("apply %s: %v", route.Hostname, err))
+			continue
+		}
+		if err := setEndpointSource(outer, "gitops"); err != nil {
+			resp.Warnings = append(resp.Warnings,
+				fmt.Sprintf("mark %s gitops: %v", outer, err))
+		}
+		resp.Applied++
+	}
+
+	// 2. Prune gitops-managed routes for this workspace that are no longer
+	//    desired. Manual routes are not in this list, so they're never pruned.
+	managed, err := listGitopsManagedHosts(req.WorkspaceName)
+	if err != nil {
+		resp.Warnings = append(resp.Warnings, "list managed: "+err.Error())
+	}
+	for _, host := range managed {
+		if desired[strings.ToLower(host)] {
+			continue
+		}
+		if err := removeRouteFromIngress(host); err != nil {
+			resp.Warnings = append(resp.Warnings,
+				fmt.Sprintf("prune %s: %v", host, err))
+			continue
+		}
+		resp.Pruned = append(resp.Pruned, host)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handleIngressListRoutes handles GET /ingress/list-routes

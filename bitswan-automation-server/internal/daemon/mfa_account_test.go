@@ -266,11 +266,11 @@ func TestCandidateSecretForAccount_ReusesCookie(t *testing.T) {
 
 func TestSafeReturnTo(t *testing.T) {
 	cases := map[string]string{
-		"":                  "/fallback",
-		"/ok":               "/ok",
-		"//evil.com":        "/fallback",
-		"https://evil.com":  "/fallback",
-		"relative":          "/fallback",
+		"":                 "/fallback",
+		"/ok":              "/ok",
+		"//evil.com":       "/fallback",
+		"https://evil.com": "/fallback",
+		"relative":         "/fallback",
 	}
 	for in, want := range cases {
 		if got := safeReturnTo(in, "/fallback"); got != want {

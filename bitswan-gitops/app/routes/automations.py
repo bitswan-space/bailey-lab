@@ -811,6 +811,18 @@ async def deploy_automations(
     return await automation_service.deploy_automations()
 
 
+@router.post("/apply")
+async def apply_workspace(
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Re-apply bitswan.yaml to the live system (kubectl apply / nixos-rebuild
+    switch): regenerate compose for every active deployment, bring it up, and
+    reconcile ingress to the routes derived from the file. Idempotent — safe to
+    re-run any time to repair drift (a broken or stale ingress route, a missing
+    container). The whole system state is a function of bitswan.yaml."""
+    return await automation_service.deploy_automations()
+
+
 @router.post("/pull-and-deploy/{branch_name}")
 async def pull_and_deploy(
     branch_name: str,

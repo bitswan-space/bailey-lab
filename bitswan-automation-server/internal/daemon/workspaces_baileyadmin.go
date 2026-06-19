@@ -21,10 +21,10 @@ import (
 // endpoints.
 
 type accessibleWorkspace struct {
-	Name          string `json:"name"`
-	DashboardURL  string `json:"dashboard_url"` // the workspace's primary UI — what "Open" launches
-	EditorURL     string `json:"editor_url"`
-	GitopsURL     string `json:"gitops_url"`
+	Name          string   `json:"name"`
+	DashboardURL  string   `json:"dashboard_url"` // the workspace's primary UI — what "Open" launches
+	EditorURL     string   `json:"editor_url"`
+	GitopsURL     string   `json:"gitops_url"`
 	DashboardRole string   `json:"dashboard_role,omitempty"` // owner | access | none
 	EditorRole    string   `json:"editor_role,omitempty"`
 	GitopsRole    string   `json:"gitops_role,omitempty"`

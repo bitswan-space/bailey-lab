@@ -17,11 +17,11 @@ import (
 // missing newer dirs (e.g. snapshots, worktrees), so we ensure the full set
 // exists before (re)generating a workspace's deployment.
 var workspaceVolumeSubdirs = []string{
-	"workspace",       // legacy shared working tree (kept for the gitops state worktree)
-	"gitops",          // promoted-deployment materialization/state
-	"repo.git",        // canonical bare repo (real content created by init/migration)
-	"copies",          // per-copy checkouts base
-	"copies/main",     // the main copy (editor working tree / main live-dev source)
+	"workspace",   // legacy shared working tree (kept for the gitops state worktree)
+	"gitops",      // promoted-deployment materialization/state
+	"repo.git",    // canonical bare repo (real content created by init/migration)
+	"copies",      // per-copy checkouts base
+	"copies/main", // the main copy (editor working tree / main live-dev source)
 	"secrets",
 	"snapshots",
 	"ssh",

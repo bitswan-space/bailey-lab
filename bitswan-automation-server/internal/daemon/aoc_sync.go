@@ -56,4 +56,3 @@ func syncWorkspaceListToAOC() error {
 	fmt.Printf("Successfully synced workspace list to AOC: %d workspaces\n", len(workspaceEntries))
 	return nil
 }
-

@@ -27,10 +27,9 @@ def svc(gitops_home, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     import app.services.automation_service as asvc
 
-    # Exposed automations try to register an ingress route; stub it so the
-    # test stays hermetic and fast (no socket / DNS).
-    monkeypatch.setattr(asvc, "add_workspace_route_to_ingress", lambda *a, **k: True)
-
+    # generate_docker_compose is pure now (it only COLLECTS desired routes; the
+    # daemon is touched by the separate reconcile step), so no ingress stub is
+    # needed for it to stay hermetic.
     s = asvc.AutomationService()
     os.makedirs(s.gitops_dir, exist_ok=True)
     return s

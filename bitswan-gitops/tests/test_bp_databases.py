@@ -432,7 +432,7 @@ def _compose_env(svc, bs_yaml, slot=None):
     """Environment dict of one automation service. A production deployment now
     emits two app slots (a/b); `slot` picks one, else the live slot (the one
     whose deployment_id is canonical — no '@slot' suffix) is returned."""
-    dc_yaml, _ = svc.generate_docker_compose(bs_yaml)
+    dc_yaml, _, _ = svc.generate_docker_compose(bs_yaml)
     dc = yaml.safe_load(dc_yaml)
     svcs = _automation_services(dc)
     if slot is not None:
@@ -532,7 +532,7 @@ def test_production_emits_two_slots_wired_to_two_dbs(gitops_home, automation_ser
             }
         }
     }
-    dc_yaml, _ = automation_service.generate_docker_compose(bs_yaml)
+    dc_yaml, _, _ = automation_service.generate_docker_compose(bs_yaml)
     dc = yaml.safe_load(dc_yaml)
     svcs = _automation_services(dc)
     # Two distinct container sets, one per active slot.
@@ -574,7 +574,7 @@ def test_copy_override_wins_over_bp_injection(gitops_home, automation_service):
             }
         }
     }
-    dc_yaml, _ = automation_service.generate_docker_compose(bs_yaml)
+    dc_yaml, _, _ = automation_service.generate_docker_compose(bs_yaml)
     dc = yaml.safe_load(dc_yaml)
     (service_name,) = [s for s in dc["services"]]
     env = dc["services"][service_name]["environment"]
@@ -600,7 +600,7 @@ def test_compose_live_dev_main_injects(gitops_home, automation_service):
             }
         }
     }
-    dc_yaml, _ = automation_service.generate_docker_compose(bs_yaml)
+    dc_yaml, _, _ = automation_service.generate_docker_compose(bs_yaml)
     dc = yaml.safe_load(dc_yaml)
     (service_name,) = [s for s in dc["services"]]
     env = dc["services"][service_name]["environment"]

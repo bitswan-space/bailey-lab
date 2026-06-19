@@ -354,6 +354,58 @@ def generate_workspace_url(
     return f"https://{url}" if full else url
 
 
+def workspace_route(
+    automation_name: str,
+    context: str,
+    stage: str,
+    port: str,
+    slot: str | None = None,
+    upstream_slot: str | None = None,
+    host_stage: str | None = None,
+) -> dict:
+    """PURE: the daemon ingress route an exposed automation should have — no
+    I/O. This is the single derivation of (hostname, upstream) for an exposed
+    automation; `desired_ingress_routes` collects these into the declarative set
+    the reconcile converges to, and `add_workspace_route_to_ingress` POSTs one.
+
+    The HOSTNAME and the CONTAINER it resolves to are decoupled so a stable
+    user-facing host can point at a blue-green slot's container:
+      • host_stage overrides the hostname's stage — the DR host is `…-dr` while
+        its container lives in the `production` realm.
+      • slot adds a `-<slot>` suffix to the hostname (per-slot hosts only; the
+        stable production/DR hosts pass slot=None).
+      • upstream_slot picks the container's slot (defaults to slot) — the
+        production host → the live slot, the DR host → the standby slot.
+    """
+    from app.services.automation_service import make_hostname_label
+
+    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
+    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+    container_slot = upstream_slot if upstream_slot is not None else slot
+    hostname = generate_workspace_url(
+        workspace_name,
+        automation_name,
+        context,
+        host_stage or stage,
+        gitops_domain,
+        False,
+        slot,
+    )
+    svc_name = make_hostname_label(
+        workspace_name, automation_name, context, stage, container_slot
+    )
+    return {
+        "hostname": hostname,
+        "upstream": f"{svc_name}:{port}",
+        "workspace_name": workspace_name,
+        # Frontends inherit the workspace's Bailey ACL from the dashboard
+        # endpoint, so every workspace member can share what they deploy.
+        "parent_endpoint": f"{workspace_name}-dashboard.{gitops_domain}",
+        "kind": "frontend",
+        "stage": stage,
+    }
+
+
 def add_workspace_route_to_ingress(
     automation_name: str,
     context: str,
@@ -486,6 +538,41 @@ def add_route_to_ingress(
         return True
     except Exception as e:
         logger.warning(f"Ingress add-route request failed for {hostname}: {e}")
+        return False
+
+
+def reconcile_ingress(workspace_name: str, routes: list[dict]) -> bool:
+    """Declaratively converge the workspace's gitops-managed ingress routes to
+    `routes` (the COMPLETE desired set, from `desired_ingress_routes`). The
+    daemon adds/repoints each and prunes any gitops route not in the set; manual
+    routes are preserved. Idempotent — a re-apply with no change is a fast no-op
+    (the daemon skips routes already pointing at the right upstream). This is the
+    single ingress side effect of `apply`; nothing else touches the daemon."""
+    body = {"workspace_name": workspace_name, "routes": routes}
+    try:
+        client, base = _ingress_client_and_base()
+        with client:
+            # Generous timeout: the first reconcile of a workspace applies every
+            # route (each a ~1s Traefik write); later reconciles skip in-sync
+            # routes and finish near-instantly.
+            response = client.post(f"{base}/ingress/reconcile", json=body, timeout=180)
+        if response.status_code != 200:
+            logger.warning(
+                f"Ingress reconcile failed: HTTP {response.status_code} — {response.text}"
+            )
+            return False
+        result = response.json() if response.content else {}
+        pruned = result.get("pruned") or []
+        if result.get("applied") or pruned or result.get("warnings"):
+            logger.info(
+                "Ingress reconcile: applied=%s pruned=%s warnings=%s",
+                result.get("applied", 0),
+                pruned,
+                result.get("warnings") or [],
+            )
+        return True
+    except Exception as e:
+        logger.warning(f"Ingress reconcile request failed: {e}")
         return False
 
 

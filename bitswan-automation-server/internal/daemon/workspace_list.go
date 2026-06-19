@@ -158,4 +158,3 @@ func getGitOpsSecret(workspace string, workspacesDir string) (string, error) {
 
 	return "", fmt.Errorf("GitOps secret not found")
 }
-

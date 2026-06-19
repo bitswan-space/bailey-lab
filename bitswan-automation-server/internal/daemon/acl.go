@@ -43,7 +43,11 @@ type endpointRecord struct {
 	// "staging", "dev", "live-dev", ...). Explicit data set at registration;
 	// launcher/admin views filter on it (e.g. only production frontends).
 	// Empty for endpoints with no stage (workspace dashboards, services).
-	Stage     string
+	Stage string
+	// Source is the route's provenance: "gitops" (registered by gitops
+	// reconcile from bitswan.yaml — prunable) or "manual" (added by a human /
+	// workspace init — never pruned by reconcile). Defaults to "manual".
+	Source    string
 	CreatedAt string
 }
 
@@ -91,10 +95,10 @@ func getEndpoint(hostname string) (*endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), created_at
+	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), COALESCE(source,'manual'), created_at
 	                    FROM endpoints WHERE hostname = ? COLLATE NOCASE`, hostname)
 	var e endpointRecord
-	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.CreatedAt); err != nil {
+	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.Source, &e.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -119,6 +123,10 @@ func registerEndpoint(hostname, ownerEmail, displayName, parentEndpoint, kind, s
 		return nil, fmt.Errorf("hostname and owner are required")
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	// `source` is intentionally omitted — the column default ('manual')
+	// applies. Routes gitops manages are promoted to 'gitops' afterwards via
+	// setEndpointSource (only the ingress reconcile does that), so existing
+	// callers stay unchanged and a manual route is never auto-captured.
 	_, err = db.Exec(`INSERT OR IGNORE INTO endpoints (hostname, owner_email, display_name, parent_endpoint, kind, stage, created_at)
 	                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		hostname, ownerEmail, displayName, parentEndpoint, kind, stage, now)
@@ -393,7 +401,7 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), created_at FROM endpoints`)
+	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), COALESCE(source,'manual'), created_at FROM endpoints`)
 	if err != nil {
 		return nil, err
 	}
@@ -401,10 +409,51 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	var out []endpointRecord
 	for rows.Next() {
 		var e endpointRecord
-		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.Source, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// setEndpointSource promotes (or sets) a registered endpoint's provenance —
+// used by the ingress reconcile to mark a route 'gitops' (declarative, prunable)
+// after registering it. No-op if the endpoint row doesn't exist yet.
+func setEndpointSource(hostname, source string) error {
+	db, err := openBaileyDB()
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE endpoints SET source = ? WHERE hostname = ? COLLATE NOCASE`,
+		source, strings.TrimSpace(hostname))
+	return err
+}
+
+// listGitopsManagedHosts returns the outer hostnames of every endpoint with
+// source='gitops' that belongs to a workspace (its hostname starts with
+// "<workspace>-"). The ingress reconcile uses this to find which managed
+// routes to prune — those no longer in the desired set. Manual routes are
+// never returned, so reconcile can never remove a human-added route.
+func listGitopsManagedHosts(workspaceName string) ([]string, error) {
+	db, err := openBaileyDB()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(
+		`SELECT hostname FROM endpoints WHERE source = 'gitops' AND hostname LIKE ? COLLATE NOCASE`,
+		workspaceName+"-%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
 	}
 	return out, rows.Err()
 }

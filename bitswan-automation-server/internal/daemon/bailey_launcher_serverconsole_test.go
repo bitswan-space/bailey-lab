@@ -11,11 +11,11 @@ import (
 
 func TestAOCFrontendURL(t *testing.T) {
 	cases := map[string]string{
-		"":                          "",
-		"https://api.acme.bswn.io":  "https://aoc.acme.bswn.io/",
+		"":                                "",
+		"https://api.acme.bswn.io":        "https://aoc.acme.bswn.io/",
 		"https://api.acme.bswn.io/v2?x=1": "https://aoc.acme.bswn.io/",
-		"https://custom.example.com": "https://custom.example.com/",
-		"::::not a url":              "::::not a url",
+		"https://custom.example.com":      "https://custom.example.com/",
+		"::::not a url":                   "::::not a url",
 	}
 	for in, want := range cases {
 		if got := aocFrontendURL(in); got != want {

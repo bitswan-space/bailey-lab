@@ -397,4 +397,3 @@ func callGitopsService(workspaceName, serviceType, action string, body interface
 
 	return nil
 }
-

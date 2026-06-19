@@ -61,7 +61,7 @@ func getSwaggerUIHTML() string {
 		encoded, _ := json.Marshal(spec)
 		openAPISpecJSON = string(encoded)
 	}
-	
+
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
@@ -130,7 +130,7 @@ func getOpenAPISpec() string {
 	// Escape the description for JSON
 	escapedDesc := strings.ReplaceAll(apiDesc, `"`, `\"`)
 	escapedDesc = strings.ReplaceAll(escapedDesc, "\n", "\\n")
-	
+
 	return `{
 		"openapi": "3.0.0",
 		"info": {
@@ -601,4 +601,3 @@ func commandExists(cmd string) bool {
 	_, err := exec.LookPath(cmd)
 	return err == nil
 }
-

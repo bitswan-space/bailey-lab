@@ -81,8 +81,8 @@ func removeDevice(email, id string) error {
 	}
 	return err
 }
-func findDevice(email, id string) (*deviceRecord, error)  { return dbFindDevice(email, id) }
-func touchDevice(email, id string)                        { dbTouchDevice(email, id) }
+func findDevice(email, id string) (*deviceRecord, error) { return dbFindDevice(email, id) }
+func touchDevice(email, id string)                       { dbTouchDevice(email, id) }
 
 // signedDeviceCookie packs (email, device_id, issued_at) and HMACs
 // them with the per-server signing key so a tampered cookie is

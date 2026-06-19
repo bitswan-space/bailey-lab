@@ -126,15 +126,19 @@ def test_write_bp_deploy_sets_only_commit_no_history(tmp_path, monkeypatch):
     with open(tmp_path / "bitswan.yaml", "w") as f:
         dump_bitswan_yaml(_flat_yaml(), f)
 
+    # In a real deploy/promote the node's git_commit equals the deployed
+    # members' source_commit (both are the deployed source version) — here the
+    # fixture's shop/dev members carry "c0ffee1234", so that is what surfaces on
+    # the node (the deployed source is the single source of truth for history).
     asyncio.run(
-        svc.write_bp_deploy("shop", "dev", "commit-one", [], "tim@x", source="deploy")
+        svc.write_bp_deploy("shop", "dev", "c0ffee1234", [], "tim@x", source="deploy")
     )
 
     import yaml
 
     raw = yaml.safe_load(open(tmp_path / "bitswan.yaml"))
     node = raw["business_processes"]["shop"]["dev"]
-    assert node["git_commit"] == "commit-one"
+    assert node["git_commit"] == "c0ffee1234"
     assert "history" not in node  # history lives in git, not the file
     assert "deployed_at" not in node and "deployed_by" not in node
 

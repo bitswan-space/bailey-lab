@@ -183,7 +183,6 @@ func onboardGateURL(r *http.Request) string {
 	return "https://" + serverConsoleOnboardHost(dom) + "/?return=" + url.QueryEscape(originForHost(r)+ret)
 }
 
-
 // originForHost reconstructs the outer scheme://host the untrusted request
 // hit, so the return path the console hands back can rebuild a full URL to
 // the original app host (the console lives on a different host).

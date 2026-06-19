@@ -20,7 +20,7 @@ type CertAuthorityInfo struct {
 // CertAuthorityListResponse represents the response from listing certificate authorities
 type CertAuthorityListResponse struct {
 	CertAuthorities []CertAuthorityInfo `json:"cert_authorities"`
-	Directory       string               `json:"directory"`
+	Directory       string              `json:"directory"`
 }
 
 // CertAuthorityAddRequest represents the request to add a certificate authority
@@ -272,7 +272,7 @@ func installCertificateInDaemon(certName, certPath string) error {
 func removeCertificateFromDaemon(certName string) error {
 	// Determine the installed certificate name (may be .crt even if original was .pem)
 	targetDir := "/usr/local/share/ca-certificates"
-	
+
 	// Try both .crt and .pem variants
 	var targetPath string
 	if strings.HasSuffix(certName, ".pem") {
@@ -332,4 +332,3 @@ func installAllCertificatesInDaemon() error {
 
 	return nil
 }
-

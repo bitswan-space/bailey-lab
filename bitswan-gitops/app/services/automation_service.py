@@ -17,16 +17,16 @@ from functools import lru_cache
 from typing import Any, Callable
 from app.models import DeployedAutomation
 from app.utils import (
-    add_workspace_route_to_ingress,
     AutomationConfig,
     calculate_git_tree_hash,
     docker_compose_up,
     generate_workspace_url,
     read_bitswan_yaml,
+    reconcile_ingress,
+    workspace_route,
     dump_bitswan_yaml,
     load_yaml,
     read_automation_config,
-    remove_route_from_ingress,
     sanitize_automation_name,
     update_git,
     call_git_command,
@@ -1878,16 +1878,31 @@ class AutomationService:
         )
         return self.read_backups(bp)
 
+    def _apply_ingress(self) -> None:
+        """Reconcile the daemon's ingress to the routes derived from the CURRENT
+        bitswan.yaml. This is how ingress changes after a state write (swap /
+        promote): the route moves because the desired set changed — `-production`
+        follows `live_slot`, `-dr` follows the standby slot — NOT because we poke
+        the daemon out of band. Best-effort: the recorded state is authoritative,
+        and re-applying bitswan.yaml repairs any ingress that lagged."""
+        try:
+            bs_yaml = read_bitswan_yaml(self.gitops_dir) or {}
+            _dc, _infra, routes = self.generate_docker_compose(bs_yaml)
+            reconcile_ingress(self.workspace_name, routes)
+        except Exception as e:  # noqa: BLE001 — recorded state wins; re-apply fixes
+            logging.warning("ingress apply deferred: %s", e)
+
     async def swap_production_dr(
         self, bp: str, by: str | None = None, role: str | None = None
     ) -> dict:
-        """The DR go-live swap: flip live_db to the standby db and repoint the
-        production ingress to the DR slot (the app slot wired to that db). Zero
-        downtime, no data moved — DR and Production trade places. Audited.
+        """The DR go-live swap: flip live_db/live_slot in bitswan.yaml so the
+        standby (DR) slot becomes Production, then APPLY — the ingress reconcile
+        repoints `-production` → the new live slot and `-dr` → the new standby.
+        Zero downtime, no data moved — DR and Production trade places. Audited.
 
-        The pointer flip + audit are authoritative; the ingress repoint is
+        The pointer flip + audit are authoritative; the ingress apply is
         best-effort (a transient ingress error must not desync the recorded
-        state — the next deploy re-asserts it)."""
+        state — re-applying bitswan.yaml re-asserts it)."""
         cur = self.read_backups(bp)
         target_slot = cur["dr_slot"]
         if not target_slot:
@@ -1915,12 +1930,10 @@ class AutomationService:
             by,
             f"swap production/DR {bp}: → slot {target_slot} (db{new_live_db})",
         )
-        try:
-            # Repoint BOTH stable hosts: -production → new live slot, -dr → the
-            # new standby. Pure ingress cutover — no rename, no data move.
-            await self._repoint_blue_green(bp)
-        except Exception as e:  # noqa: BLE001 — best-effort; recorded state wins
-            logging.warning("swap %s: ingress repoint deferred (%s)", bp, e)
+        # Apply: the ingress reconcile repoints both stable hosts from the new
+        # backups state (-production → new live slot, -dr → new standby). No
+        # out-of-band repoint — applying bitswan.yaml moves the routes.
+        self._apply_ingress()
         return self.read_backups(bp)
 
     async def begin_zero_downtime_promote(self, bp: str, by: str | None = None) -> dict:
@@ -1977,15 +1990,10 @@ class AutomationService:
         await self._save_and_commit_backups(
             bs, bp, by, f"promote {bp}: slot {old_live} → {target_slot}"
         )
-        try:
-            await self._repoint_production_to_slot(bp, target_slot)
-        except Exception as e:  # noqa: BLE001 — best-effort; recorded state wins
-            logging.warning(
-                "promote %s: ingress repoint to slot %s deferred (%s)",
-                bp,
-                target_slot,
-                e,
-            )
+        # Apply: the ingress reconcile repoints -production → the new live slot
+        # from the updated backups state. (The orchestrator also re-applies
+        # compose afterwards to retire the old slot's containers.)
+        self._apply_ingress()
         return self.read_backups(bp)
 
     async def zero_downtime_promote(
@@ -2017,85 +2025,6 @@ class AutomationService:
         # Retire the old slot's now-idle containers on the next apply.
         await self.apply_compose_for_deployments(dep_ids, deployed_by=by, report=report)
         return result
-
-    def _production_frontend_routes(
-        self, bp: str, slot: str, host_stage: str = "production"
-    ) -> list[tuple[str, str]]:
-        """For each exposed (frontend) production deployment of `bp`, the
-        (hostname, upstream) pair the ingress should map. `host_stage` picks the
-        stable host — 'production' (the live URL) or 'dr' (the standby URL) —
-        and `slot` picks the container it resolves to. Repointing these is the
-        swap (production→live slot, dr→standby slot) and the promote cutover."""
-        if not (self.workspace_name and self.gitops_domain):
-            return []
-        bs = read_bitswan_yaml(self.gitops_dir) or {}
-        out: list[tuple[str, str]] = []
-        for dep_id, conf in (bs.get("deployments") or {}).items():
-            conf = conf or {}
-            if (conf.get("stage") or "production") != "production":
-                continue
-            if conf.get("context", "") != bp:
-                continue  # production context == bp slug
-            try:
-                cfg = self.resolve_automation_config(conf)
-            except Exception:
-                continue
-            if not (cfg.expose and cfg.port):
-                continue
-            name = conf.get("automation_name", dep_id)
-            ctx = conf.get("context", "")
-            from app.utils import generate_workspace_url
-
-            hostname = generate_workspace_url(
-                self.workspace_name, name, ctx, host_stage, self.gitops_domain, False
-            )
-            upstream = (
-                make_hostname_label(self.workspace_name, name, ctx, "production", slot)
-                + f":{cfg.port}"
-            )
-            out.append((hostname, upstream))
-        return out
-
-    async def _repoint_production_to_slot(self, bp: str, slot: str) -> None:
-        """Point the production ingress at a slot's frontend container(s) via
-        the automation-server repoint primitive (no cert/ACL/redirect churn —
-        only the upstream changes). One repoint per exposed frontend."""
-        from app.utils import repoint_route_in_ingress
-
-        routes = self._production_frontend_routes(bp, slot)
-        if not routes:
-            raise RuntimeError(
-                f"no exposed production frontend found for {bp} — nothing to repoint"
-            )
-        for hostname, upstream in routes:
-            if not repoint_route_in_ingress(hostname, upstream, self.workspace_name):
-                raise RuntimeError(
-                    f"ingress repoint failed for {hostname} → {upstream}"
-                )
-            logging.info(
-                "repointed production %s → slot %s (%s)", hostname, slot, upstream
-            )
-
-    async def _repoint_blue_green(self, bp: str) -> None:
-        """Repoint both stable production hosts to the current slots: `-production`
-        → the live slot, `-dr` → the standby slot. The swap primitive — pure
-        ingress cutover, no rename and no data move."""
-        from app.utils import repoint_route_in_ingress
-
-        state = self.read_backups(bp)
-        routes = self._production_frontend_routes(bp, state["live_slot"], "production")
-        if state["dr_slot"]:
-            routes += self._production_frontend_routes(bp, state["dr_slot"], "dr")
-        if not routes:
-            raise RuntimeError(
-                f"no exposed production frontend found for {bp} — nothing to repoint"
-            )
-        for hostname, upstream in routes:
-            if not repoint_route_in_ingress(hostname, upstream, self.workspace_name):
-                raise RuntimeError(
-                    f"ingress repoint failed for {hostname} → {upstream}"
-                )
-            logging.info("repointed %s → %s", hostname, upstream)
 
     # ── Supply chain (SBOM + CVEs) ───────────────────────────────────────────
     def read_supply_chain(self, bp: str, stage: str) -> dict:
@@ -2751,13 +2680,15 @@ class AutomationService:
         await _report(
             "generating_compose", "Generating docker-compose configuration..."
         )
-        # Only (re-)register ingress routes for the deployments being applied —
-        # not every frontend in the workspace. Re-registering the whole fleet
-        # made a single-BP promote do ~21 serial ~1s daemon add-route calls.
-        dc_yaml, infra_service_names = self.generate_docker_compose(
-            bs_yaml, ingress_scope=set(deployment_ids)
+        dc_yaml, infra_service_names, desired_routes = self.generate_docker_compose(
+            bs_yaml
         )
         self._save_docker_compose(dc_yaml)
+        # Reconcile the daemon's ingress to the FULL desired route set derived
+        # from bitswan.yaml (adds/repoints/prunes only gitops routes; manual
+        # routes preserved; in-sync routes skipped). This is the only place
+        # ingress is touched — applying bitswan.yaml is what converges it.
+        reconcile_ingress(self.workspace_name, desired_routes)
         dc_config = yaml.safe_load(dc_yaml)
         services = dc_config.get("services", {})
 
@@ -3725,29 +3656,21 @@ fi
         return success
 
     async def delete_automation(self, deployment_id: str):
-        # Read components before removing from bitswan.yaml
-        bs_yaml = read_bitswan_yaml(self.gitops_dir) or {}
-        dep_conf = bs_yaml.get("deployments", {}).get(deployment_id, {})
-        dep_an = dep_conf.get("automation_name", deployment_id)
-        dep_ctx = dep_conf.get("context", "")
-        dep_stg = dep_conf.get("stage", "production") or "production"
-
+        # Drop the deployment from bitswan.yaml, then APPLY: the ingress reconcile
+        # prunes the now-absent gitops route (it's no longer in the desired set).
+        # No out-of-band remove-route — the route disappears because the file no
+        # longer declares it.
         await self.remove_automation_from_bitswan(deployment_id)
-
         await update_git(self.gitops_dir, self.gitops_dir_host, deployment_id, "delete")
-        result = remove_route_from_ingress(
-            dep_an, dep_ctx, dep_stg, self.workspace_name
-        )
-
-        if not result:
-            message = f"Deployment {deployment_id} deleted successfully, but failed to remove route from ingress"
-        else:
-            message = f"Deployment {deployment_id} deleted successfully"
+        self._apply_ingress()
 
         containers = await self.get_container(deployment_id)
         if containers:
             await self.remove_automation(deployment_id)
-        return {"status": "success", "message": message}
+        return {
+            "status": "success",
+            "message": f"Deployment {deployment_id} deleted successfully",
+        }
 
     async def get_tag(self, deployed_image: str):
         """Get the sha tag for a deployed image using async Docker client."""
@@ -3968,8 +3891,11 @@ fi
         await _report(
             "generating_compose", "Generating docker-compose configuration..."
         )
-        dc_yaml, infra_service_names = self.generate_docker_compose(bs_yaml)
+        dc_yaml, infra_service_names, desired_routes = self.generate_docker_compose(
+            bs_yaml
+        )
         self._save_docker_compose(dc_yaml)
+        reconcile_ingress(self.workspace_name, desired_routes)
         deployments = bs_yaml.get("deployments", {})
 
         dc_config = yaml.safe_load(dc_yaml)
@@ -4092,8 +4018,11 @@ fi
             if dep_services:
                 await self.enable_services(dep_services, dep_stage)
 
-        dc_yaml, infra_names = self.generate_docker_compose(filtered_bs_yaml)
+        dc_yaml, infra_names, desired_routes = self.generate_docker_compose(
+            filtered_bs_yaml
+        )
         self._save_docker_compose(dc_yaml)
+        reconcile_ingress(self.workspace_name, desired_routes)
         deployments = active_deployments
 
         # deploy_automations starts all services (no filter), so infra services
@@ -4183,8 +4112,11 @@ fi
 
         # Regenerate docker-compose and deploy
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
-        dc_yaml, infra_service_names = self.generate_docker_compose(bs_yaml)
+        dc_yaml, infra_service_names, desired_routes = self.generate_docker_compose(
+            bs_yaml
+        )
         self._save_docker_compose(dc_yaml)
+        reconcile_ingress(self.workspace_name, desired_routes)
 
         dep_conf = bs_yaml.get("deployments", {}).get(deployment_id, {})
         compose_svc = make_hostname_label(
@@ -4821,20 +4753,18 @@ fi
 
         return secret_names
 
-    def generate_docker_compose(
-        self, bs_yaml: dict, ingress_scope: set[str] | None = None
-    ):
-        """Render the workspace docker-compose from bitswan.yaml.
+    def generate_docker_compose(self, bs_yaml: dict):
+        """Render the workspace docker-compose from bitswan.yaml — PURE: no
+        daemon/docker side effects.
 
-        `ingress_scope`, when given, limits which deployments have their ingress
-        routes (re-)registered with the daemon to that set of deployment_ids —
-        every other exposed automation's route is left untouched. A single-BP
-        deploy/promote regenerates the WHOLE compose (one file per workspace),
-        but it must NOT re-register the entire fleet's routes: each daemon
-        add-route is a ~1s Traefik round-trip, so re-registering N unrelated
-        frontends serially dominated promote latency (~22s of a ~34s promote).
-        `None` keeps the original behavior (register every route) for the
-        full-rebuild paths where that is intended.
+        Returns `(dc_yaml, infra_service_names, desired_routes)`. `desired_routes`
+        is the COMPLETE set of gitops-managed ingress routes the workspace should
+        have (one per exposed automation, expanded per blue-green slot with the
+        stable `-production`/`-dr` hosts) — a deterministic function of
+        bitswan.yaml. The caller passes it to `reconcile_ingress`, which converges
+        the daemon to match (the single place ingress is applied). Generation no
+        longer talks to the daemon, so it can be called freely and the apply step
+        is an idempotent reconcile of the file.
         """
         from app.services.bp_databases import (
             bp_resource_names,
@@ -4862,6 +4792,10 @@ fi
         }
         external_networks = {"bitswan_network"}
         deployments = bs_yaml.get("deployments", {})
+        # The desired ingress route set, collected as we emit services. Returned
+        # to the caller, which reconciles the daemon to it — no route is applied
+        # here. Each exposed automation/slot contributes exactly one route.
+        desired_routes: list[dict] = []
 
         # Worker-host discovery: every worker container (expose=false) in a
         # business process is reachable by that BP's frontends and peer
@@ -5307,28 +5241,20 @@ fi
                 entry["labels"]["gitops.intended_exposed"] = (
                     "true" if publish else "false"
                 )
-                # Only (re-)register the route when this deployment is in scope.
-                # A single-BP deploy/promote regenerates the whole compose but
-                # must not pay a ~1s daemon add-route round-trip for every other
-                # frontend in the workspace (scope=None = register all, for the
-                # full-rebuild paths). The route already exists for out-of-scope
-                # deployments — their containers are untouched here.
-                in_scope = ingress_scope is None or deployment_id in ingress_scope
-                if (
-                    publish
-                    and in_scope
-                    and not add_workspace_route_to_ingress(
-                        dep_automation_name,
-                        dep_context,
-                        dep_stage,
-                        port,
-                        upstream_slot=slot,
-                        host_stage=role_stage,
-                    )
-                ):
-                    logger.warning(
-                        f"Failed to add ingress route for {deployment_id} "
-                        f"(role {role_stage}, slot {slot})"
+                # Collect (don't apply) the route this exposed automation should
+                # have. The whole desired set is reconciled once by the caller —
+                # generation stays pure, and a deploy/promote/swap is just "write
+                # bitswan.yaml, then reconcile what it derives".
+                if publish:
+                    desired_routes.append(
+                        workspace_route(
+                            dep_automation_name,
+                            dep_context,
+                            dep_stage,
+                            port,
+                            upstream_slot=slot,
+                            host_stage=role_stage,
+                        )
                     )
 
             # Add the public hostname as a network alias so other containers
@@ -5525,7 +5451,7 @@ fi
             dc["volumes"][bitswan_volume_name] = {"external": True}
 
         dc_yaml = yaml.dump(dc)
-        return dc_yaml, infra_service_names
+        return dc_yaml, infra_service_names, desired_routes
 
     def _save_docker_compose(self, dc_yaml: str) -> None:
         """Save the generated docker-compose.yaml to the gitops directory for debugging."""
