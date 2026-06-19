@@ -661,6 +661,38 @@ func (c *Client) InitIngress(verbose bool, ingressType ...string) (*IngressInitR
 	return &result, nil
 }
 
+// ProvisionProtectedProxy asks the daemon to bring up the shared
+// bitswan-protected-proxy (oauth2-proxy) container that fronts every protected
+// endpoint. Requires a configured domain + reachable AOC; safe to call again
+// (idempotent `docker compose up -d`).
+func (c *Client) ProvisionProtectedProxy() error {
+	req, err := http.NewRequest("POST", "http://unix/ingress/provision-protected-proxy", nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.doLongRunningRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("authentication failed: invalid or missing token")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
 // AddIngressRoute adds a route to the ingress proxy. ownerEmail (may
 // be empty) records the endpoint's owner in the Bailey ACL.
 func (c *Client) AddIngressRoute(hostname, upstream string, mkcert bool, certsDir, ownerEmail string) (*IngressAddRouteResponse, error) {

@@ -75,6 +75,38 @@ func runInitCmd(cmd *cobra.Command, args []string) error {
 		ensureInotifyLimits()
 	}
 
+	alreadyRunning, err := ensureDaemonRunning()
+	if err != nil {
+		return err
+	}
+	if alreadyRunning {
+		fmt.Println("Automation server daemon is already running")
+	}
+
+	installCompletions()
+	return nil
+}
+
+// EnsureDaemonRunning makes sure the automation-server daemon container is up,
+// creating and starting it if needed. It is idempotent — a no-op when the
+// container is already running. This lets a single command (e.g. `bitswan
+// register`) bring the daemon up from nothing rather than requiring a separate
+// `automation-server-daemon init` first.
+//
+// Requires Docker to be available; it does not prompt to install Docker (that
+// interactive path lives in `init`).
+func EnsureDaemonRunning() error {
+	if !docker.IsDockerAvailable() {
+		return fmt.Errorf("Docker is required but not available; install Docker and retry: https://docs.docker.com/engine/install/")
+	}
+	_, err := ensureDaemonRunning()
+	return err
+}
+
+// ensureDaemonRunning does the work behind EnsureDaemonRunning and runInitCmd.
+// It returns (alreadyRunning, err): alreadyRunning is true when the container
+// was already up so callers can tailor their messaging.
+func ensureDaemonRunning() (bool, error) {
 	// Generate and save the authentication token to the config file
 	cfg := config.NewAutomationServerConfig()
 	existingToken, err := cfg.GetLocalServerToken()
@@ -82,14 +114,14 @@ func runInitCmd(cmd *cobra.Command, args []string) error {
 		// Generate a new random token (64 characters)
 		token := uniuri.NewLen(64)
 		if err := cfg.SetLocalServerToken(token); err != nil {
-			return fmt.Errorf("failed to save token to config: %w", err)
+			return false, fmt.Errorf("failed to save token to config: %w", err)
 		}
 		fmt.Println("Generated new authentication token")
 
 		// Set restrictive permissions on the config file (owner read/write only)
 		configPath := cfg.GetConfigPath()
 		if err := os.Chmod(configPath, 0600); err != nil {
-			return fmt.Errorf("failed to set config file permissions: %w", err)
+			return false, fmt.Errorf("failed to set config file permissions: %w", err)
 		}
 	}
 
@@ -103,25 +135,22 @@ func runInitCmd(cmd *cobra.Command, args []string) error {
 		if err == nil && len(runningOutput) > 0 {
 			// Container is running. Storage now lives in named Docker volumes,
 			// so there's no host bind mount that can go stale — just report it.
-			fmt.Println("Automation server daemon is already running")
-			installCompletions()
-			return nil
+			return true, nil
 		} else {
 			// Container exists but is not running, remove it first
 			fmt.Println("Removing existing stopped container...")
 			removeCmd := exec.Command("docker", "rm", "bitswan-automation-server-daemon")
 			if err := removeCmd.Run(); err != nil {
-				return fmt.Errorf("failed to remove existing container: %w", err)
+				return false, fmt.Errorf("failed to remove existing container: %w", err)
 			}
 		}
 	}
 
 	if err := startDaemonContainer("Starting automation server daemon container...", "Automation server daemon started successfully"); err != nil {
-		return err
+		return false, err
 	}
 
-	installCompletions()
-	return nil
+	return false, nil
 }
 
 // startDaemonContainer sets up and starts the daemon container with the current binary
