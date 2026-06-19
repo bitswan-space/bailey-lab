@@ -418,12 +418,33 @@ def automation_service(gitops_home, monkeypatch):
     return svc
 
 
-def _compose_env(svc, bs_yaml):
-    """Environment dict of the single automation service in the compose."""
+def _automation_services(dc):
+    """The automation (non-gateway/infra) services in a generated compose."""
+    return {
+        n: s
+        for n, s in dc["services"].items()
+        if (s.get("labels", {}) or {}).get("gitops.firewall_gateway") != "true"
+        and "BITSWAN_AUTOMATION_STAGE" in (s.get("environment") or {})
+    }
+
+
+def _compose_env(svc, bs_yaml, slot=None):
+    """Environment dict of one automation service. A production deployment now
+    emits two app slots (a/b); `slot` picks one, else the live slot (the one
+    whose deployment_id is canonical — no '@slot' suffix) is returned."""
     dc_yaml, _ = svc.generate_docker_compose(bs_yaml)
     dc = yaml.safe_load(dc_yaml)
-    (service_name,) = list(dc["services"])
-    return dc["services"][service_name].get("environment", {})
+    svcs = _automation_services(dc)
+    if slot is not None:
+        for s in svcs.values():
+            if (s.get("labels", {}) or {}).get("gitops.slot") == slot:
+                return s.get("environment", {})
+        raise AssertionError(f"no service for slot {slot!r}")
+    for s in svcs.values():
+        lbl = s.get("labels", {}) or {}
+        if "@" not in (lbl.get("gitops.deployment_id") or ""):
+            return s.get("environment", {})
+    return next(iter(svcs.values())).get("environment", {})
 
 
 def test_compose_injects_env_for_registered_bp(gitops_home, automation_service):
@@ -489,6 +510,51 @@ def test_compose_injection_gated_per_realm(gitops_home, automation_service):
     }
     env = _compose_env(automation_service, bs_yaml)
     assert "POSTGRES_DB" not in env
+
+
+def test_production_emits_two_slots_wired_to_two_dbs(gitops_home, automation_service):
+    """A registered production BP emits two app slots (a/b), each a distinct
+    container wired to its own logical DB (bp_<slug>_1 / bp_<slug>_2). The live
+    slot keeps the canonical deployment_id + owns the canonical hostname."""
+    reg = load_registry()
+    register_bp_stage(reg, "my-bp", "My BP", "production")
+    save_registry(reg)
+
+    os.makedirs(os.path.join(automation_service.gitops_dir, "abc123"), exist_ok=True)
+    bs_yaml = {
+        "deployments": {
+            "backend-my-bp": {
+                "stage": "production",
+                "checksum": "abc123",
+                "relative_path": "My BP/backend",
+                "automation_name": "backend",
+                "context": "my-bp",
+            }
+        }
+    }
+    dc_yaml, _ = automation_service.generate_docker_compose(bs_yaml)
+    dc = yaml.safe_load(dc_yaml)
+    svcs = _automation_services(dc)
+    # Two distinct container sets, one per active slot.
+    slots = {(s.get("labels", {}) or {}).get("gitops.slot") for s in svcs.values()}
+    assert slots == {"a", "b"}, slots
+    # Slot a → db1, slot b → db2 — never the same DB.
+    env_a = _compose_env(automation_service, bs_yaml, slot="a")
+    env_b = _compose_env(automation_service, bs_yaml, slot="b")
+    assert env_a["POSTGRES_DB"] == "bp_my_bp_1"
+    assert env_b["POSTGRES_DB"] == "bp_my_bp_2"
+    assert env_a["MINIO_BUCKET"] == "bp-my-bp-1"
+    assert env_b["MINIO_BUCKET"] == "bp-my-bp-2"
+    # Live slot (a, by default) keeps the canonical deployment_id; the DR slot
+    # (b) is slot-suffixed.
+    by_slot = {(s["labels"] or {}).get("gitops.slot"): s for s in svcs.values()}
+    assert by_slot["a"]["labels"]["gitops.deployment_id"] == "backend-my-bp"
+    assert by_slot["b"]["labels"]["gitops.deployment_id"] == "backend-my-bp@b"
+    # Same-slot peer discovery: each slot's URL template is slot-scoped, so a
+    # slot's containers resolve their own slot's peers (never the other slot).
+    if env_a.get("BITSWAN_URL_TEMPLATE"):
+        assert "-a." in env_a["BITSWAN_URL_TEMPLATE"]
+        assert "-b." in env_b["BITSWAN_URL_TEMPLATE"]
 
 
 def test_copy_override_wins_over_bp_injection(gitops_home, automation_service):

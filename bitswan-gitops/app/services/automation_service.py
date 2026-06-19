@@ -4693,7 +4693,38 @@ fi
         # otherwise). live-dev is never gated (the edit loop). Workers with
         # replicas>1 can't share one netns, so the gateway is disabled for that
         # group (logged) rather than silently leaving a hole half-applied.
-        fw_scope: dict[tuple[str, str], dict] = {}
+        # Blue-green production: a production deployment is emitted once per
+        # ACTIVE app slot (a/b/c), each wired to its own logical DB (1/2), per
+        # the BP's `backups` wiring. Non-production deployments are a single
+        # (slot=None, db=None) backend, byte-identical to before. The idle slot
+        # (the zero-downtime-promote buffer) is simply not in the wiring, so it
+        # emits no containers. Every slot dimension below keys off this.
+        def _slot_db_pairs(_conf: dict) -> list[tuple[str | None, int | None]]:
+            st = _conf.get("stage", "production") or "production"
+            if st != "production":
+                return [(None, None)]
+            bp_slug, _ = derive_bp_and_copy(_conf.get("relative_path"))
+            if not bp_slug:
+                return [(None, None)]
+            rec = (bs_yaml.get("backups") or {}).get(bp_slug) or {}
+            slots = rec.get("slots") or {"a": {"db": 1}, "b": {"db": 2}}
+            pairs = [
+                (s, int((slots[s] or {}).get("db")))
+                for s in AutomationService.APP_SLOTS
+                if slots.get(s) and (slots[s] or {}).get("db")
+            ]
+            return pairs or [(None, None)]
+
+        def _live_slot_for(_conf: dict) -> str:
+            bp_slug, _ = derive_bp_and_copy(_conf.get("relative_path"))
+            rec = (bs_yaml.get("backups") or {}).get(bp_slug or "") or {}
+            slots = rec.get("slots") or {"a": {"db": 1}, "b": {"db": 2}}
+            live_db = int(rec.get("live_db") or 1)
+            return rec.get("live_slot") or next(
+                (s for s, m in slots.items() if (m or {}).get("db") == live_db), "a"
+            )
+
+        fw_scope: dict[tuple[str, str, str | None], dict] = {}
         for _dep_id, _conf in deployments.items():
             if not _conf:
                 continue
@@ -4705,34 +4736,37 @@ fi
             fwnode = ((bs_yaml.get("firewall") or {}).get(_ctx) or {}).get(_realm)
             if not fwnode:
                 continue
-            key = (_ctx, _stage)
-            fw = fw_scope.setdefault(
-                key,
-                {
-                    "gw": make_hostname_label(
-                        self.workspace_name, "fwgw", _ctx, _stage
-                    ),
-                    "mode": fwnode.get("posture")
-                    or firewall_service.posture_for(_realm),
-                    "allow": firewall_service.allowed_hosts(bs_yaml, _ctx, _realm),
-                    "realm": _realm,
-                    "ok": True,
-                },
-            )
-            if (_conf.get("replicas") or 1) > 1:
-                fw["ok"] = False
-                logger.warning(
-                    "firewall: %s/%s has a replicas>1 member; egress gateway disabled "
-                    "for this group (shared netns can't host replicas)",
-                    _ctx,
-                    _realm,
+            for _slot, _db in _slot_db_pairs(_conf):
+                key = (_ctx, _stage, _slot)
+                fw = fw_scope.setdefault(
+                    key,
+                    {
+                        # Each slot gets its OWN egress gateway so two slots'
+                        # workers never collide in one netns.
+                        "gw": make_hostname_label(
+                            self.workspace_name, "fwgw", _ctx, _stage, _slot
+                        ),
+                        "mode": fwnode.get("posture")
+                        or firewall_service.posture_for(_realm),
+                        "allow": firewall_service.allowed_hosts(bs_yaml, _ctx, _realm),
+                        "realm": _realm,
+                        "ok": True,
+                    },
                 )
+                if (_conf.get("replicas") or 1) > 1:
+                    fw["ok"] = False
+                    logger.warning(
+                        "firewall: %s/%s has a replicas>1 member; egress gateway "
+                        "disabled for this group (shared netns can't host replicas)",
+                        _ctx,
+                        _realm,
+                    )
 
-        def _fw_active(ctx: str, stage: str) -> dict | None:
-            fw = fw_scope.get((ctx, stage))
+        def _fw_active(ctx: str, stage: str, slot: str | None) -> dict | None:
+            fw = fw_scope.get((ctx, stage, slot))
             return fw if fw and fw["ok"] else None
 
-        worker_hosts_by_scope: dict[tuple[str, str], list[str]] = {}
+        worker_hosts_by_scope: dict[tuple[str, str, str | None], list[str]] = {}
         for _dep_id, _conf in deployments.items():
             if not _conf:
                 continue
@@ -4745,19 +4779,28 @@ fi
                 continue
             if _cfg.expose:
                 continue  # frontends are not workers
-            # When firewalled, the worker lives in the gateway's netns, so peers
-            # reach it at the gateway's hostname (the gateway is on bitswan_network).
-            _fw = _fw_active(_ctx, _stage)
-            _host = (
-                _fw["gw"]
-                if _fw
-                else make_hostname_label(self.workspace_name, _name, _ctx, _stage)
-            )
-            worker_hosts_by_scope.setdefault((_ctx, _stage), []).append(
-                f"{_name}={_host}:{_cfg.port}"
-            )
+            for _slot, _db in _slot_db_pairs(_conf):
+                # Same-slot discovery: slot 'a' frontend reaches slot 'a'
+                # backend. When firewalled, the worker lives in its slot's
+                # gateway netns, so peers reach it at the gateway's hostname.
+                _fw = _fw_active(_ctx, _stage, _slot)
+                _host = (
+                    _fw["gw"]
+                    if _fw
+                    else make_hostname_label(
+                        self.workspace_name, _name, _ctx, _stage, _slot
+                    )
+                )
+                worker_hosts_by_scope.setdefault((_ctx, _stage, _slot), []).append(
+                    f"{_name}={_host}:{_cfg.port}"
+                )
 
-        for deployment_id, conf in deployments.items():
+        work_items = [
+            (deployment_id, conf, slot, db)
+            for deployment_id, conf in deployments.items()
+            for slot, db in _slot_db_pairs(conf or {})
+        ]
+        for deployment_id, conf, slot, db in work_items:
             if conf is None:
                 conf = {}
                 deployments[deployment_id] = conf
@@ -4766,8 +4809,11 @@ fi
             dep_automation_name = conf.get("automation_name", deployment_id)
             dep_context = conf.get("context", "")
             service_name = make_hostname_label(
-                self.workspace_name, dep_automation_name, dep_context, dep_stage
+                self.workspace_name, dep_automation_name, dep_context, dep_stage, slot
             )
+            # Slot-distinct deployment identity so each production slot's
+            # containers are individually addressable in labels/introspection.
+            slot_deployment_id = f"{deployment_id}@{slot}" if slot else deployment_id
 
             entry = {}
 
@@ -4813,18 +4859,27 @@ fi
                     for svc_name, svc_dep in automation_config.services.items()
                 }
 
-            entry["environment"] = {"DEPLOYMENT_ID": deployment_id}
+            # The LIVE slot (and every non-production deployment) keeps the
+            # canonical deployment_id so existing introspection / history /
+            # member views resolve it unchanged; non-live slots (DR, staging)
+            # carry a slot-suffixed id. live_slot can change on a swap without a
+            # redeploy — the next compose-gen re-asserts this mapping.
+            is_live_slot = slot is None or slot == _live_slot_for(conf)
+            effective_dep_id = deployment_id if is_live_slot else slot_deployment_id
+
+            entry["environment"] = {"DEPLOYMENT_ID": effective_dep_id}
             replicas = conf.get("replicas", 1)
             if replicas <= 1:
                 entry["container_name"] = f"{service_name}"
             entry["restart"] = "always"
             entry["ulimits"] = {"nofile": {"soft": 65536, "hard": 65536}}
             entry["labels"] = {
-                "gitops.deployment_id": deployment_id,
+                "gitops.deployment_id": effective_dep_id,
                 "gitops.workspace": self.workspace_name,
                 "gitops.automation_name": dep_automation_name,
                 "gitops.context": dep_context,
                 "gitops.stage": dep_stage,
+                "gitops.slot": slot or "",
                 "gitops.intended_exposed": "false",
             }
             entry["image"] = "bitswan/pipeline-runtime-environment:latest"
@@ -4833,12 +4888,13 @@ fi
             if "environment" not in entry:
                 entry["environment"] = {}
             entry["environment"]["BITSWAN_AUTOMATION_STAGE"] = stage
-            entry["environment"]["BITSWAN_DEPLOYMENT_ID"] = deployment_id
+            entry["environment"]["BITSWAN_DEPLOYMENT_ID"] = effective_dep_id
 
             # Private worker containers reachable by this BP (see the
             # worker-host pre-pass). Frontends proxy /api to the "backend"
-            # entry; any container can reach peers by name.
-            _worker_hosts = worker_hosts_by_scope.get((dep_context, dep_stage), [])
+            # entry; any container can reach peers by name. Slot-scoped so a
+            # slot's frontend only ever sees its OWN slot's workers.
+            _worker_hosts = worker_hosts_by_scope.get((dep_context, dep_stage, slot), [])
             if _worker_hosts:
                 entry["environment"]["BITSWAN_WORKER_HOSTS"] = ",".join(_worker_hosts)
             if self.workspace_name:
@@ -4875,7 +4931,9 @@ fi
             if bp_sanitized and is_registered(
                 bp_registry, bp_sanitized, stage_for_deployment(stage)
             ):
-                bp_names = bp_resource_names(bp_sanitized)
+                # Production slots wire to their own DB (1/2); other stages use
+                # the single-backend names (db=None).
+                bp_names = bp_resource_names(bp_sanitized, db)
                 entry["environment"]["POSTGRES_DB"] = bp_names["postgres_db"]
                 entry["environment"]["COUCHDB_DB_PREFIX"] = bp_names["couchdb_prefix"]
                 entry["environment"]["MINIO_BUCKET"] = bp_names["minio_bucket"]
@@ -4897,6 +4955,11 @@ fi
                     ctx_suffix = f"-{dep_stage}"
                 else:
                     ctx_suffix = ""
+                # Same-slot peer discovery: a slot's containers resolve each
+                # other at slot-suffixed hostnames (the network alias below is
+                # set to match), so slot 'a' never talks to slot 'b'.
+                if slot:
+                    ctx_suffix = f"{ctx_suffix}-{slot}"
                 entry["environment"]["BITSWAN_URL_TEMPLATE"] = (
                     f"https://{self.workspace_name}-"
                     "{name}"
@@ -4922,7 +4985,7 @@ fi
             # dropped so container-root can't alter the gateway's iptables. Only
             # workers are gated — a frontend's egress is the iframe's, enforced
             # via CSP. The gateway service itself is emitted after the loop.
-            _fw = _fw_active(dep_context, dep_stage)
+            _fw = _fw_active(dep_context, dep_stage, slot)
             if _fw and not automation_config.expose:
                 network_mode = f"service:{_fw['gw']}"
                 entry["cap_drop"] = sorted(
@@ -5021,8 +5084,12 @@ fi
                 # enough, and add_workspace_route_to_ingress records the
                 # workspace dashboard as the endpoint's ACL parent so every
                 # workspace member can share it via the Bailey share button.
+                # Slot-stable identity: each slot is reachable at its own
+                # `…-<slot>` hostname (used for same-slot discovery + DR
+                # verification of the standby). The live slot ALSO owns the
+                # canonical production hostname below.
                 url_label = make_hostname_label(
-                    self.workspace_name, dep_automation_name, dep_context, dep_stage
+                    self.workspace_name, dep_automation_name, dep_context, dep_stage, slot
                 )
                 url_prefix = f"https://{self.workspace_name}-"
                 url_suffix = f".{self.gitops_domain}"
@@ -5034,17 +5101,28 @@ fi
 
                 entry["labels"]["gitops.intended_exposed"] = "true"
                 if not add_workspace_route_to_ingress(
-                    dep_automation_name, dep_context, dep_stage, port
+                    dep_automation_name, dep_context, dep_stage, port, slot=slot
                 ):
                     logger.warning(
                         f"Failed to add ingress route for {deployment_id} — "
                         "deployment will proceed but may not be externally reachable"
                     )
+                # The live production slot owns the canonical (slot-free)
+                # hostname — the URL users hit. A DR swap / zero-downtime
+                # promote repoints this canonical hostname to another slot.
+                if slot and is_live_slot:
+                    if not add_workspace_route_to_ingress(
+                        dep_automation_name, dep_context, dep_stage, port
+                    ):
+                        logger.warning(
+                            "Failed to add canonical production route for "
+                            f"{deployment_id} (live slot {slot})"
+                        )
 
             # Add the public hostname as a network alias so other containers
             # on the same Docker network can reach this automation by its URL.
             if expose and port and self.gitops_domain and not network_mode:
-                url_host = f"{make_hostname_label(self.workspace_name, dep_automation_name, dep_context, dep_stage)}.{self.gitops_domain}"
+                url_host = f"{make_hostname_label(self.workspace_name, dep_automation_name, dep_context, dep_stage, slot)}.{self.gitops_domain}"
                 networks = entry.get("networks")
                 if isinstance(networks, dict):
                     for net_conf in networks.values():
@@ -5182,10 +5260,13 @@ fi
                 os.path.dirname(self.gitops_dir_host), "firewall"
             )
             os.makedirs(firewall_service.firewall_dir(), exist_ok=True)
-            for (ctx, stage), fw in fw_scope.items():
+            for (ctx, stage, slot), fw in fw_scope.items():
                 if not fw["ok"]:
                     continue
                 gw, realm = fw["gw"], fw["realm"]
+                # Per-slot attempts file so each blue-green slot's gateway logs
+                # to its own feed (the gateway name is already slot-suffixed).
+                slot_tag = f"__{slot}" if slot else ""
                 dc["services"][gw] = {
                     "image": gw_image,
                     "container_name": gw,
@@ -5195,13 +5276,16 @@ fi
                     "environment": {
                         "BITSWAN_FW_MODE": fw["mode"],
                         "BITSWAN_FW_ALLOW": ",".join(fw["allow"]),
-                        "BITSWAN_FW_ATTEMPTS": f"/firewall/{ctx}__{realm}.attempts.jsonl",
+                        "BITSWAN_FW_ATTEMPTS": (
+                            f"/firewall/{ctx}__{realm}{slot_tag}.attempts.jsonl"
+                        ),
                     },
                     "volumes": [f"{fw_host_dir}:/firewall"],
                     "labels": {
                         "gitops.firewall_gateway": "true",
                         "gitops.bp": ctx,
                         "gitops.stage": realm,
+                        "gitops.slot": slot or "",
                     },
                 }
                 external_networks.add("bitswan_network")

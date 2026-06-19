@@ -335,25 +335,31 @@ def generate_workspace_url(
     stage: str,
     gitops_domain: str,
     full: bool = False,
+    slot: str | None = None,
 ) -> str:
     from app.services.automation_service import make_hostname_label
 
-    label = make_hostname_label(workspace_name, automation_name, context, stage)
+    label = make_hostname_label(workspace_name, automation_name, context, stage, slot)
     url = f"{label}.{gitops_domain}"
     return f"https://{url}" if full else url
 
 
 def add_workspace_route_to_ingress(
-    automation_name: str, context: str, stage: str, port: str
+    automation_name: str, context: str, stage: str, port: str, slot: str | None = None
 ) -> bool:
     from app.services.automation_service import make_hostname_label
 
     gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+    # slot=None → canonical hostname/upstream (the production URL users hit, and
+    # every non-prod route). slot set → that slot's own `…-<slot>` hostname +
+    # container, so each blue-green slot is independently addressable.
     hostname = generate_workspace_url(
-        workspace_name, automation_name, context, stage, gitops_domain, False
+        workspace_name, automation_name, context, stage, gitops_domain, False, slot
     )
-    svc_name = make_hostname_label(workspace_name, automation_name, context, stage)
+    svc_name = make_hostname_label(
+        workspace_name, automation_name, context, stage, slot
+    )
     upstream = f"{svc_name}:{port}"
     # Frontends inherit the workspace's Bailey ACL from the dashboard
     # endpoint, so every workspace member can share what they deploy (see

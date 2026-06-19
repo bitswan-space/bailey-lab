@@ -570,12 +570,35 @@ async def provision_for_deployments(
             entry = get_bp_entry(registry, bp_slug)
             if not entry or realm not in entry.get("stages", {}):
                 continue
-            svc_state = entry["stages"][realm].get("services", {})
-            if all(svc_state.get(s, {}).get("provisioned") for s in BP_DATA_SERVICES):
-                continue
-            results = await ensure_bp_databases(
-                workspace, bp_slug, entry.get("bp_name", bp_slug), realm
-            )
-            logger.info("Per-BP databases for '%s' at %s: %s", bp_slug, realm, results)
+            name = entry.get("bp_name", bp_slug)
+            stage_entry = entry["stages"][realm]
+            if realm == "production":
+                # Blue-green: provision BOTH databases (1 and 2). The app slots
+                # a/b/c wire to one of these; the standby is where restore-to-DR
+                # lands. Tracked under the per-db "dbs" registry key.
+                dbs_state = stage_entry.get("dbs", {})
+                for db in (1, 2):
+                    db_svc = dbs_state.get(str(db), {})
+                    if all(
+                        (db_svc.get(s, {}) or {}).get("provisioned")
+                        for s in BP_DATA_SERVICES
+                    ):
+                        continue
+                    results = await ensure_bp_databases(
+                        workspace, bp_slug, name, realm, db=db
+                    )
+                    logger.info(
+                        "Per-BP db%s for '%s' at %s: %s", db, bp_slug, realm, results
+                    )
+            else:
+                svc_state = stage_entry.get("services", {})
+                if all(
+                    svc_state.get(s, {}).get("provisioned") for s in BP_DATA_SERVICES
+                ):
+                    continue
+                results = await ensure_bp_databases(workspace, bp_slug, name, realm)
+                logger.info(
+                    "Per-BP databases for '%s' at %s: %s", bp_slug, realm, results
+                )
     except Exception as e:
         logger.warning("Per-BP database provisioning failed (non-fatal): %s", e)
