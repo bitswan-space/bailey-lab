@@ -1909,6 +1909,34 @@ class AutomationService:
             )
         return self.read_backups(bp)
 
+    async def zero_downtime_promote(
+        self, bp: str, by: str | None = None, report: Callable[..., Any] | None = None
+    ) -> dict:
+        """Zero-downtime production promote, end to end:
+
+        1. stage the new version on the idle app slot, wired to the CURRENT
+           live db (begin_zero_downtime_promote);
+        2. regenerate + apply compose — brings the staged slot's containers up
+           beside the live slot (it is NOT on the production ingress yet);
+        3. cut the ingress over to the staged slot + retire the old live slot
+           (finish_zero_downtime_promote — the repoint);
+        4. re-apply compose to remove the retired slot's containers.
+
+        The db never moves: the new code talks to the same live db throughout.
+        """
+        staged = await self.begin_zero_downtime_promote(bp, by)
+        target_slot = staged["target_slot"]
+        dep_ids = list(self._bp_stage_members(bp, "production").keys())
+        if report:
+            await report("staging", f"Bringing up new version on slot {target_slot}…")
+        await self.apply_compose_for_deployments(dep_ids, deployed_by=by, report=report)
+        if report:
+            await report("cutover", f"Repointing production ingress to slot {target_slot}…")
+        result = await self.finish_zero_downtime_promote(bp, target_slot, by)
+        # Retire the old slot's now-idle containers on the next apply.
+        await self.apply_compose_for_deployments(dep_ids, deployed_by=by, report=report)
+        return result
+
     def _production_frontend_routes(self, bp: str, slot: str) -> list[tuple[str, str]]:
         """For each exposed (frontend) production deployment of `bp`, the
         (canonical_hostname, slot_upstream) pair the ingress should map. The

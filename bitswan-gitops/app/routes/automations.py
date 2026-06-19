@@ -241,7 +241,25 @@ async def post_bp_backup_swap_route(
 ):
     """DR go-live swap: flip which production slot is live and repoint the
     production ingress to it (zero downtime, no data moved)."""
-    return await automation_service.swap_production_dr(bp, body.by, body.role)
+    try:
+        return await automation_service.swap_production_dr(bp, body.by, body.role)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/business-processes/{bp}/backups/promote")
+async def post_bp_zero_downtime_promote_route(
+    bp: str,
+    body: BackupSwapRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Zero-downtime production promote: stage the new version on the idle app
+    slot (wired to the current live db), bring it up, repoint the ingress to
+    it, and retire the old slot. The database never moves."""
+    try:
+        return await automation_service.zero_downtime_promote(bp, body.by)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 class SupplyChainWaiverRequest(BaseModel):
