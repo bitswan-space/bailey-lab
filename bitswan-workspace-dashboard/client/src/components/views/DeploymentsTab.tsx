@@ -487,9 +487,22 @@ function ContainersSection({
   );
 }
 
+const BACKUP_EVENT_LABEL: Record<string, string> = {
+  created: 'Backup created',
+  restored: 'Restored to DR',
+  swapped: 'DR ↔ Production swap',
+  retention: 'Retention changed',
+};
+
 function entryTone(e: BpHistoryEntry, isCurrent: boolean) {
   if (e.source === 'firewall')
     return { dot: 'bg-violet-500', label: 'Firewall change', cls: 'bg-violet-100 text-violet-700' };
+  if (e.source === 'backup')
+    return {
+      dot: 'bg-sky-500',
+      label: BACKUP_EVENT_LABEL[e.backup?.action ?? ''] ?? 'Backup',
+      cls: 'bg-sky-100 text-sky-700',
+    };
   if (e.status === 'rolled-back')
     return { dot: 'bg-amber-500', label: 'Rolled back', cls: 'bg-amber-100 text-amber-700' };
   if (e.status === 'failed')
@@ -859,6 +872,7 @@ function DeploymentCard({
 }) {
   const tone = entryTone(entry, isCurrent);
   const isFw = entry.source === 'firewall';
+  const isBackup = entry.source === 'backup';
   const ver = entry.source_commit ?? entry.commit;
   const members = Object.entries(entry.members ?? {});
   const firstImg = members.find(([, m]) => m.image_id)?.[1]?.image_id;
@@ -877,7 +891,11 @@ function DeploymentCard({
         </span>
         <span className="ml-auto text-[11px] text-muted-foreground">{entry.deployed_at}</span>
         <div className="flex items-center gap-1.5">
-          {isFw ? (
+          {isBackup ? (
+            // Backup-domain audit record — read-only here (swaps/restores are
+            // driven from the Backups + Disaster Recovery panels).
+            null
+          ) : isFw ? (
             // Firewall audit-log entry: restore the rule set to this commit.
             <Button variant="outline" size="sm" disabled={busy} onClick={onRollback}>
               <Undo2 className="size-3.5" aria-hidden />
@@ -915,7 +933,12 @@ function DeploymentCard({
             {entry.deployed_by}
           </span>
         )}
-        {isFw ? (
+        {isBackup ? (
+          <span className="inline-flex items-center gap-1.5">
+            <DatabaseBackup className="size-3" aria-hidden />
+            {entry.backup?.detail ?? entry.backup?.summary ?? 'backup event'}
+          </span>
+        ) : isFw ? (
           <>
             <span className="inline-flex items-center gap-1.5">
               <ShieldCheck className="size-3" aria-hidden />

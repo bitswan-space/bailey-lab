@@ -90,6 +90,15 @@ def _parse_revision_firewall_realm(
     return ((fw.get(bp) or {}).get(realm) or {}) if isinstance(fw, dict) else {}
 
 
+def _parse_revision_backups(gitops_dir: str, sha: str, bp: str) -> dict:
+    """The `backups[bp]` node (live_slot + retention + audit log) at a git
+    commit, or {}. Backup-domain actions (create/restore/swap/retention) are
+    versioned in bitswan.yaml like deployments and firewall, so each distinct
+    state across commits is one audit-log entry in the deployment history."""
+    bk = _parse_revision_bitswan(gitops_dir, sha).get("backups") or {}
+    return (bk.get(bp) or {}) if isinstance(bk, dict) else {}
+
+
 def _short_hash(context: str) -> str:
     """Deterministic 4-char hash for a context string."""
     return hashlib.sha256(context.encode()).hexdigest()[:4]
@@ -237,20 +246,33 @@ MAX_NAME_LEN = 24
 
 
 def make_hostname_label(
-    workspace_name: str, automation_name: str, context: str, stage: str
+    workspace_name: str,
+    automation_name: str,
+    context: str,
+    stage: str,
+    slot: str | None = None,
 ) -> str:
     """Build a DNS hostname label from structured components.
 
     No string parsing — components are passed in directly.
     workspace_name and automation_name are each capped at 24 chars to
     guarantee the result fits within the 63-char DNS label limit.
+
+    `slot` ('a'/'b') is the blue-green production slot. It is appended as a
+    trailing segment so each slot's containers get a distinct, stable name
+    (`…-a` / `…-b`); the ingress repoint switches which slot the production
+    hostname resolves to. Non-production deployments pass slot=None and are
+    byte-identical to before.
     """
     ws = workspace_name[:MAX_NAME_LEN]
     an = automation_name[:MAX_NAME_LEN]
+    suffix = f"-{slot}" if slot else ""
     if context:
         h = _short_hash(context)
-        return f"{ws}-{an}-{h}-{stage}" if stage else f"{ws}-{an}-{h}"
-    return f"{ws}-{an}-{stage}" if stage else f"{ws}-{an}"
+        base = f"{ws}-{an}-{h}-{stage}" if stage else f"{ws}-{an}-{h}"
+    else:
+        base = f"{ws}-{an}-{stage}" if stage else f"{ws}-{an}"
+    return f"{base}{suffix}"
 
 
 class AutomationService:
@@ -1216,6 +1238,7 @@ class AutomationService:
         entries: list[dict] = []
         prev_dep_key = None
         prev_fw_key: tuple | None = None
+        prev_bk_key: str | None = None
         for line in (out or "").splitlines():
             parts = line.split("\x1f")
             if len(parts) != 4:
@@ -1300,9 +1323,44 @@ class AutomationService:
                     }
                 )
             prev_fw_key = fw_key
+
+            # ── backup event: a new backup-domain action for this BP ───────────
+            # created/restored/swapped/retention, detected by the newest audit
+            # log entry's id changing. Production-domain actions (restore-to-DR,
+            # swap, retention) surface on the production timeline; a `created`
+            # snapshot surfaces on the stage it captured. Older entries with no
+            # stage default to production (where the blue-green/DR UI lives).
+            bk_node = _parse_revision_backups(self.gitops_dir, sha, bp)
+            bk_log = bk_node.get("log") or []
+            bk_top = bk_log[0] if bk_log else None
+            bk_key = (bk_top or {}).get("id")
+            if (
+                bk_top
+                and bk_key != prev_bk_key
+                and not emitted_deploy
+                and (bk_top.get("stage") or "production") == stage_key
+            ):
+                entries.append(
+                    {
+                        "commit": sha,
+                        "source_commit": None,
+                        "deployed_at": date,
+                        "deployed_by": author,
+                        "status": "backup",
+                        "source": "backup",
+                        "members": {},
+                        "backup": {
+                            "action": bk_top.get("action"),
+                            "detail": bk_top.get("detail"),
+                            "summary": subject,
+                        },
+                    }
+                )
+            prev_bk_key = bk_key
         entries.reverse()  # newest-first
         current = next(
-            (e["commit"] for e in entries if e["source"] != "firewall"), None
+            (e["commit"] for e in entries if e["source"] not in ("firewall", "backup")),
+            None,
         )
         return {
             "bp": bp,
@@ -1625,7 +1683,12 @@ class AutomationService:
         return self.read_backups(bp)["standby_slot"]
 
     def _append_backup_log(
-        self, rec: dict, action: str, detail: str, by: str | None
+        self,
+        rec: dict,
+        action: str,
+        detail: str,
+        by: str | None,
+        stage: str | None = None,
     ) -> None:
         today = date.today()
         rec.setdefault("log", []).insert(
@@ -1635,6 +1698,10 @@ class AutomationService:
                 "action": action,  # created | restored | swapped | retention
                 "detail": detail,
                 "by": by or "unknown",
+                # Which stage's deployment-history timeline this event belongs
+                # to. Production-domain actions (restore-to-DR, swap, retention)
+                # are "production"; a `created` snapshot carries its own stage.
+                "stage": stage or "production",
                 "at": today.strftime("%b %-d, %Y"),
                 "date": today.isoformat(),
             },
@@ -1657,12 +1724,17 @@ class AutomationService:
         )
 
     async def record_backup_event(
-        self, bp: str, action: str, detail: str, by: str | None = None
+        self,
+        bp: str,
+        action: str,
+        detail: str,
+        by: str | None = None,
+        stage: str | None = None,
     ) -> dict:
         """Audit a backup-domain event (created/restored) in bitswan.yaml."""
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         rec = bs.setdefault("backups", {}).setdefault(bp, {})
-        self._append_backup_log(rec, action, detail, by)
+        self._append_backup_log(rec, action, detail, by, stage)
         await self._save_and_commit_backups(
             bs, bp, by, f"backup {action} {bp}: {detail}"
         )

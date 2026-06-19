@@ -55,13 +55,18 @@ def _validate_stage(stage: str) -> None:
         )
 
 
-async def _audit_backup(slug: str, action: str, detail: str, by: str | None) -> None:
+async def _audit_backup(
+    slug: str, action: str, detail: str, by: str | None, stage: str | None = None
+) -> None:
     """Append a backup/restore event to bitswan.yaml (versioned audit log).
+    `stage` selects which deployment-history timeline it surfaces on.
     Best-effort: an audit failure must never fail the snapshot operation."""
     try:
         from app.dependencies import get_automation_service
 
-        await get_automation_service().record_backup_event(slug, action, detail, by)
+        await get_automation_service().record_backup_event(
+            slug, action, detail, by, stage
+        )
     except Exception as e:  # noqa: BLE001
         import logging
 
@@ -195,11 +200,15 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
         if restore_slot
         else body.target_stage
     )
+    # A DR restore lands in the production standby slot, so it surfaces on the
+    # production timeline; dev/staging restores surface on their own stage.
+    audit_stage = "production" if restore_slot else body.target_stage
     await _audit_backup(
         slug,
         "restored",
         f"{body.source_stage} snapshot → {audit_dest}",
         body.by,
+        stage=audit_stage,
     )
     return JSONResponse(
         status_code=202,
@@ -261,7 +270,7 @@ async def create_snapshot(bp: str, stage: str, body: SnapshotCreateRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     await _audit_backup(
-        slug, "created", f"{body.label or 'snapshot'} ({stage})", body.by
+        slug, "created", f"{body.label or 'snapshot'} ({stage})", body.by, stage=stage
     )
     return JSONResponse(
         status_code=202,

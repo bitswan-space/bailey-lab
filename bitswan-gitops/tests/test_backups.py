@@ -69,3 +69,27 @@ def test_record_backup_event(tmp_path, monkeypatch):
     )
     assert b["log"][0]["action"] == "created"
     assert "manual snapshot" in b["log"][0]["detail"]
+
+
+def test_backup_events_surface_in_deployment_history(tmp_path, monkeypatch):
+    """Backup-domain events show up in bp_history on the right stage timeline:
+    production-domain actions (swap) on production; a created snapshot on the
+    stage it captured. Each is a read-only audit row (source == 'backup')."""
+    svc = _git_svc(tmp_path, monkeypatch)
+    asyncio.run(
+        svc.record_backup_event("shop", "created", "snap (dev)", by="tim@x", stage="dev")
+    )
+    asyncio.run(svc.swap_production_dr("shop", by="tim@x"))  # production-domain
+
+    prod = asyncio.run(svc.bp_history("shop", "production"))
+    prod_bk = [e for e in prod["history"] if e["source"] == "backup"]
+    assert any(e["backup"]["action"] == "swapped" for e in prod_bk)
+    # the dev-created event must NOT leak onto the production timeline
+    assert not any(e["backup"]["action"] == "created" for e in prod_bk)
+    # backup events never become the "current" (live) version pointer
+    assert prod["current"] is None
+
+    dev = asyncio.run(svc.bp_history("shop", "dev"))
+    dev_bk = [e for e in dev["history"] if e["source"] == "backup"]
+    assert any(e["backup"]["action"] == "created" for e in dev_bk)
+    assert not any(e["backup"]["action"] == "swapped" for e in dev_bk)

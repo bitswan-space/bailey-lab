@@ -261,8 +261,8 @@ export interface BpHistoryEntry {
   deployed_at: string;
   // eslint-disable-next-line no-restricted-syntax -- nullable wire field
   deployed_by: string | null;
-  status: string; // "deployed" | "rolled-back" | "firewall"
-  source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall"
+  status: string; // "deployed" | "rolled-back" | "firewall" | "backup"
+  source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall" | "backup"
   members: Record<string, BpHistoryMember>;
   /** Present on firewall-change events: the realm + a one-line summary of the
    *  change and the resulting allowed/denied counts (for the audit-log row). */
@@ -271,6 +271,14 @@ export interface BpHistoryEntry {
     summary: string;
     allowed: number;
     denied: number;
+  };
+  /** Present on backup-domain events (snapshot create / restore-to-DR / DR
+   *  swap / retention change): the action + a one-line detail for the row. */
+  backup?: {
+    action: string; // created | restored | swapped | retention
+    // eslint-disable-next-line no-restricted-syntax -- nullable wire field
+    detail: string | null;
+    summary: string;
   };
 }
 
