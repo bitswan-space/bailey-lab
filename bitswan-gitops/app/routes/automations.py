@@ -263,7 +263,9 @@ async def post_bp_zero_downtime_promote_route(
 
 
 class SupplyChainWaiverRequest(BaseModel):
-    stage: str
+    # Out-of-scope markings live in the source tree, so they're authored against
+    # a COPY (from the Checks tab) — never a deployment stage.
+    copy: str | None = None
     package: str
     cve: str
     comment: str | None = None
@@ -300,9 +302,10 @@ async def post_bp_supply_chain_waiver(
     body: SupplyChainWaiverRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    """Mark a CVE out of scope (versioned in bitswan.yaml with who/when/why)."""
-    return await automation_service.add_supply_chain_waiver(
-        bp, body.stage, body.package, body.cve, body.comment or "", body.by
+    """Mark a CVE out of scope — stored in the copy's source tree (cve-waivers.yaml,
+    committed) so it rides Sync & Deploy to main with the code."""
+    return await automation_service.set_cve_waiver(
+        bp, body.copy, body.package, body.cve, body.comment or "", body.by
     )
 
 
@@ -312,9 +315,9 @@ async def delete_bp_supply_chain_waiver(
     body: SupplyChainWaiverRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    """Restore a previously-waived CVE to in-scope (its own commit)."""
-    return await automation_service.remove_supply_chain_waiver(
-        bp, body.stage, body.package, body.cve, body.by
+    """Restore a previously out-of-scope CVE to in-scope (commit in the copy)."""
+    return await automation_service.unset_cve_waiver(
+        bp, body.copy, body.package, body.cve, body.by
     )
 
 

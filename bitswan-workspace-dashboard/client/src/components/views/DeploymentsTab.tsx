@@ -1507,7 +1507,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 bp={bp.name}
                 stage={isDr ? 'production' : activeStage}
                 stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
-                readOnly={isDr}
+                readOnly
               />
             )}
           </div>

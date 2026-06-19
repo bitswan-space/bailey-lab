@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Check, EyeOff, Loader2, ShieldOff, Undo2 } from 'lucide-react';
+import { AlertTriangle, Check, ExternalLink, EyeOff, Loader2, ShieldOff, Undo2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, type CveSeverity, type SupplyChainReport } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -22,11 +22,25 @@ const SEV: Record<CveSeverity, { pill: string; dot: string; label: string }> = {
 };
 const SEV_ORDER: CveSeverity[] = ['critical', 'high', 'medium', 'low'];
 
+/** External advisory links for a vulnerability id — osv.dev covers everything;
+ *  the others are added when the id namespace matches (CVE / GHSA / Go). */
+function advisoryLinks(id: string): { label: string; href: string }[] {
+  const links = [{ label: 'osv.dev', href: `https://osv.dev/vulnerability/${id}` }];
+  if (id.startsWith('CVE-'))
+    links.push({ label: 'NVD', href: `https://nvd.nist.gov/vuln/detail/${id}` });
+  if (id.startsWith('GHSA-'))
+    links.push({ label: 'GitHub advisory', href: `https://github.com/advisories/${id}` });
+  if (id.startsWith('GO-'))
+    links.push({ label: 'Go vuln DB', href: `https://pkg.go.dev/vuln/${id}` });
+  return links;
+}
+
 export function SupplyChainPanel({
   bp,
   stage,
   stageLabel,
   readOnly = false,
+  copy,
   fetcher,
   emptyHint,
   intro,
@@ -35,6 +49,9 @@ export function SupplyChainPanel({
   stage: string;
   stageLabel: string;
   readOnly?: boolean;
+  /** Copy whose source tree out-of-scope markings are written to (Checks tab).
+   *  Required for editing; the read-only Supply chain tab omits it. */
+  copy?: string | null;
   /** Override how the report is loaded (defaults to the deployed-image scan).
    *  The Checks tab passes a preview fetch of the about-to-be-built image. */
   fetcher?: () => Promise<SupplyChainReport>;
@@ -47,7 +64,12 @@ export function SupplyChainPanel({
   const [report, setReport] = useState<SupplyChainReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [showClean, setShowClean] = useState(false);
-  const [dialog, setDialog] = useState<{ package: string; cve: string; severity: CveSeverity } | null>(null);
+  const [dialog, setDialog] = useState<{
+    package: string;
+    version: string;
+    cve: string;
+    severity: CveSeverity;
+  } | null>(null);
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -92,22 +114,22 @@ export function SupplyChainPanel({
   const waive = useCallback(() => {
     if (!dialog || !comment.trim()) return;
     setBusy(true);
-    const work = api.addCveWaiver(bp, { stage, package: dialog.package, cve: dialog.cve, comment: comment.trim() });
+    const work = api.addCveWaiver(bp, { copy: copy ?? null, package: dialog.package, cve: dialog.cve, comment: comment.trim() });
     toast.promise(work, {
       loading: 'Recording…',
       success: `${dialog.cve} marked out of scope — logged in bitswan.yaml`,
       error: (e: unknown) => `Failed: ${String(e)}`,
     });
     work.then((r) => { setReport(r); setDialog(null); setComment(''); }).catch(() => {}).finally(() => setBusy(false));
-  }, [bp, stage, dialog, comment]);
+  }, [bp, copy, dialog, comment]);
 
   const restore = useCallback(
     (pkg: string, cve: string) => {
-      const work = api.removeCveWaiver(bp, { stage, package: pkg, cve });
+      const work = api.removeCveWaiver(bp, { copy: copy ?? null, package: pkg, cve });
       toast.promise(work, { loading: 'Restoring…', success: `${cve} restored to in-scope`, error: (e: unknown) => `Failed: ${String(e)}` });
       work.then(setReport).catch(() => {});
     },
-    [bp, stage],
+    [bp, copy],
   );
 
   if (loading) {
@@ -134,6 +156,9 @@ export function SupplyChainPanel({
 
   const waivers = report.waivers ?? [];
   const scannedAt = report.scanned_at ? new Date(report.scanned_at).toLocaleString() : 'unknown';
+  const dialogWaiver = dialog
+    ? waivers.find((w) => w.package === dialog.package && w.cve === dialog.cve)
+    : undefined;
 
   return (
     <div className="relative flex flex-col gap-3">
@@ -145,12 +170,17 @@ export function SupplyChainPanel({
               Packages in the image{report.image_count > 1 ? 's' : ''} deployed to {stageLabel} and
               known vulnerabilities (CVEs) against them.{' '}
               {readOnly
-                ? 'Mirrored from Production — read-only.'
-                : 'Click a CVE to mark it out of scope.'}
+                ? 'Out-of-scope decisions are made from Sync & Deploy → Checks and ship with the code.'
+                : 'Click a CVE to view it or mark it out of scope.'}
             </>
           )}
         </p>
         <div className="flex flex-wrap gap-1.5">
+          {waivers.length > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-dashed border-border px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">
+              <EyeOff className="size-3" aria-hidden /> {waivers.length} out of scope
+            </span>
+          )}
           {SEV_ORDER.map((k) =>
             counts[k] ? (
               <span key={k} className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', SEV[k].pill)}>
@@ -193,25 +223,19 @@ export function SupplyChainPanel({
                       <button
                         key={c.id}
                         type="button"
-                        disabled={readOnly}
-                        title={
-                          readOnly
-                            ? c.id
-                            : waived
-                              ? 'Out of scope — click to restore'
-                              : 'Click to mark out of scope'
-                        }
-                        onClick={
-                          readOnly
-                            ? undefined
-                            : waived
-                              ? () => restore(p.name, c.id)
-                              : () => { setDialog({ package: p.name, cve: c.id, severity: c.severity }); setComment(''); }
-                        }
+                        title={`${c.id} — view details${waived ? ' (out of scope)' : ''}`}
+                        onClick={() => {
+                          setDialog({
+                            package: p.name,
+                            version: p.version,
+                            cve: c.id,
+                            severity: c.severity,
+                          });
+                          setComment('');
+                        }}
                         className={cn(
-                          'inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px] font-semibold',
+                          'inline-flex cursor-pointer items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px] font-semibold',
                           waived ? 'border border-dashed border-border text-muted-foreground line-through' : SEV[c.severity].pill,
-                          !readOnly && 'cursor-pointer',
                         )}
                       >
                         <span className={cn('size-1.5 rounded-full', waived ? 'bg-muted-foreground' : SEV[c.severity].dot)} />
@@ -276,43 +300,102 @@ export function SupplyChainPanel({
       {/* Mark-out-of-scope dialog */}
       {dialog && (
         <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/45 p-10" onClick={() => setDialog(null)}>
-          <div className="w-[480px] max-w-[96%] overflow-hidden rounded-xl border border-border bg-background shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="w-[520px] max-w-[96%] overflow-hidden rounded-xl border border-border bg-background shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-3 border-b border-border px-5 py-4">
               <span className={cn('flex size-8 shrink-0 items-center justify-center rounded-lg', SEV[dialog.severity].pill)}>
-                <ShieldOff className="size-4" aria-hidden />
+                <AlertTriangle className="size-4" aria-hidden />
               </span>
               <div className="min-w-0 flex-1">
-                <div className="text-[15px] font-bold text-foreground">Mark CVE out of scope</div>
-                <div className="mt-0.5 font-mono text-[12px] text-muted-foreground">{dialog.cve} · {dialog.package}</div>
+                <div className="font-mono text-[15px] font-bold text-foreground">{dialog.cve}</div>
+                <div className="mt-0.5 font-mono text-[12px] text-muted-foreground">
+                  {dialog.package} @ {dialog.version}
+                </div>
               </div>
+              <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', SEV[dialog.severity].pill)}>
+                {SEV[dialog.severity].label}
+              </span>
             </div>
-            <div className="flex flex-col gap-2.5 px-5 py-4">
-              <p className="text-[13px] leading-relaxed text-zinc-600">
-                This CVE will be ignored in the {stageLabel} risk rollup. A justification is required and
-                recorded in the audit log (in <code>bitswan.yaml</code>) against your name.
-              </p>
-              <textarea
-                autoFocus
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-                rows={3}
-                placeholder="Why is this not exploitable here? e.g. the vulnerable code path is never reached…"
-                className="w-full resize-y rounded-md border border-border px-3 py-2 text-[13px] leading-relaxed outline-none focus:border-primary"
-              />
+            <div className="flex flex-col gap-3 px-5 py-4">
+              <div>
+                <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Look up this vulnerability
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {advisoryLinks(dialog.cve).map((l) => (
+                    <a
+                      key={l.label}
+                      href={l.href}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-[12px] font-medium text-foreground hover:bg-muted"
+                    >
+                      <ExternalLink className="size-3" aria-hidden />
+                      {l.label}
+                    </a>
+                  ))}
+                </div>
+                <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground">
+                  Affects <span className="font-mono">{dialog.package}</span> at the installed
+                  version <span className="font-mono">{dialog.version}</span>. Open an advisory above
+                  for the description, CVSS score and the version that fixes it.
+                </p>
+              </div>
+
+              {dialogWaiver ? (
+                <div className="flex flex-col gap-1 rounded-md border border-dashed border-border bg-muted/40 px-3 py-2.5">
+                  <div className="flex items-center gap-1.5 text-[12px] font-semibold text-muted-foreground">
+                    <EyeOff className="size-3.5" aria-hidden /> Marked out of scope
+                  </div>
+                  <div className="text-[12.5px] leading-snug text-zinc-700">{dialogWaiver.comment}</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    by <strong className="font-semibold text-foreground">{dialogWaiver.by}</strong> · {dialogWaiver.at}
+                  </div>
+                </div>
+              ) : !readOnly ? (
+                <div className="flex flex-col gap-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Mark out of scope
+                  </div>
+                  <p className="text-[12px] leading-relaxed text-muted-foreground">
+                    Excludes this CVE from the risk rollup. The decision is saved in the source tree
+                    (<code>cve-waivers.yaml</code>) with your justification and name, and ships to all
+                    stages on Sync &amp; Deploy.
+                  </p>
+                  <textarea
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    rows={3}
+                    placeholder="Why is this not exploitable here? e.g. the vulnerable code path is never reached…"
+                    className="w-full resize-y rounded-md border border-border px-3 py-2 text-[13px] leading-relaxed outline-none focus:border-primary"
+                  />
+                </div>
+              ) : null}
             </div>
             <div className="flex justify-end gap-2 border-t border-border bg-muted/30 px-5 py-3">
               <button type="button" onClick={() => setDialog(null)} className="inline-flex h-8 items-center rounded-md px-3 text-[13px] font-medium text-muted-foreground hover:text-foreground">
-                Cancel
+                Close
               </button>
-              <button
-                type="button"
-                disabled={!comment.trim() || busy}
-                onClick={waive}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-foreground px-3.5 text-[13px] font-semibold text-background hover:bg-foreground/90 disabled:opacity-40"
-              >
-                {busy ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <EyeOff className="size-3.5" aria-hidden />}
-                Mark out of scope
-              </button>
+              {dialogWaiver
+                ? !readOnly && (
+                    <button
+                      type="button"
+                      onClick={() => { restore(dialog.package, dialog.cve); setDialog(null); }}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-background px-3.5 text-[13px] font-semibold text-foreground hover:bg-muted"
+                    >
+                      <Undo2 className="size-3.5" aria-hidden /> Restore to in-scope
+                    </button>
+                  )
+                : !readOnly && (
+                    <button
+                      type="button"
+                      disabled={!comment.trim() || busy}
+                      onClick={waive}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-md bg-foreground px-3.5 text-[13px] font-semibold text-background hover:bg-foreground/90 disabled:opacity-40"
+                    >
+                      {busy ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <EyeOff className="size-3.5" aria-hidden />}
+                      Mark out of scope
+                    </button>
+                  )}
             </div>
           </div>
         </div>

@@ -1999,16 +1999,15 @@ class AutomationService:
             )
 
     # ── Supply chain (SBOM + CVEs) ───────────────────────────────────────────
-    def _supply_chain_waivers(self, bs: dict, bp: str, realm: str) -> dict:
-        return (((bs.get("supply_chain") or {}).get(bp) or {}).get(realm) or {}).get(
-            "waivers"
-        ) or {}
-
     def read_supply_chain(self, bp: str, stage: str) -> dict:
         """SBOM + CVE rollup for the image(s) deployed to a BP stage, with the
-        out-of-scope waiver log. Packages and CVEs are merged (deduped) across the
-        stage's member images; waivers live in bitswan.yaml (versioned, audited).
+        out-of-scope markings. Packages and CVEs are merged (deduped) across the
+        stage's member images. Out-of-scope markings are a CODE property — they
+        live in the source tree (`cve-waivers.yaml`) and are read here from
+        `main` (read-only; they are authored from the Checks tab on a copy).
         `status`: ok | pending (scan not done yet) | unavailable | not-deployed."""
+        from app.services import cve_waivers
+
         realm = bp_secrets.realm_for_stage(stage)
         deployments = self._bp_stage_node(bp, stage).get("deployments") or {}
         image_ids = [
@@ -2016,13 +2015,18 @@ class AutomationService:
             for d in deployments.values()
             if (d or {}).get("image_id")
         ]
-        return self._supply_chain_report(bp, realm, image_ids)
+        return self._supply_chain_report(
+            bp, realm, image_ids, cve_waivers.waiver_list(bp, None)
+        )
 
-    def _supply_chain_report(self, bp: str, realm: str, image_ids: list[str]) -> dict:
+    def _supply_chain_report(
+        self, bp: str, realm: str, image_ids: list[str], waivers: list[dict]
+    ) -> dict:
         """Merge the cached SBOM + CVE scans of `image_ids` into one deduped
-        report with the realm's out-of-scope waivers. Shared by the deployed-
-        image rollup (read_supply_chain) and the pre-build preview (Checks tab),
-        so both render through the identical SupplyChainReport shape."""
+        report, carrying the source-tree out-of-scope markings. Shared by the
+        deployed-image rollup (read_supply_chain) and the pre-build preview
+        (Checks tab), so both render through the identical SupplyChainReport
+        shape."""
         merged: dict[tuple, dict] = {}
         statuses: list[str] = []
         scanned_ats: list[str] = []
@@ -2063,18 +2067,6 @@ class AutomationService:
             status = "unavailable"
         else:
             status = "pending"
-        bs = read_bitswan_yaml(self.gitops_dir) or {}
-        waivers = self._supply_chain_waivers(bs, bp, realm)
-        waiver_list = [
-            {
-                "package": v.get("package"),
-                "cve": v.get("cve"),
-                "by": v.get("by"),
-                "at": v.get("at"),
-                "comment": v.get("comment"),
-            }
-            for v in waivers.values()
-        ]
         return {
             "bp": bp,
             "stage": realm,
@@ -2082,7 +2074,7 @@ class AutomationService:
             "scanned_at": min(scanned_ats) if scanned_ats else None,
             "image_count": len(image_ids),
             "packages": packages,
-            "waivers": waiver_list,
+            "waivers": waivers,
         }
 
     async def _bake_source_for_scan(
@@ -2119,8 +2111,9 @@ class AutomationService:
         deploy produces and reuses the cache when unchanged — kicks off a
         syft+grype scan, and merges via the shared `_supply_chain_report` so it
         renders through the identical SupplyChainReport shape as the deployed
-        rollup. Pre-deploy, so waivers are scoped to the dev realm."""
+        rollup. Out-of-scope markings are read from this copy's source tree."""
         from app.services.bp_databases import derive_bp_and_copy
+        from app.services import cve_waivers
 
         sources = scan_workspace_sources(self.workspace_repo_dir, copy=copy)
         members = [
@@ -2132,63 +2125,44 @@ class AutomationService:
             if image and image_id:
                 supply_chain_service.spawn_scan(image, image_id)
                 image_ids.append(image_id)
-        return self._supply_chain_report(bp, "dev", image_ids)
+        return self._supply_chain_report(
+            bp, "dev", image_ids, cve_waivers.waiver_list(bp, copy)
+        )
 
-    async def add_supply_chain_waiver(
+    async def set_cve_waiver(
         self,
         bp: str,
-        stage: str,
+        copy: str | None,
         package: str,
         cve: str,
         comment: str,
         by: str | None = None,
     ) -> dict:
-        """Mark a CVE out of scope for a BP stage — recorded in bitswan.yaml
-        (versioned) with who/when/why, so there's a permanent audit log."""
-        realm = bp_secrets.realm_for_stage(stage)
-        bs = read_bitswan_yaml(self.gitops_dir) or {}
-        sc = bs.setdefault("supply_chain", {}).setdefault(bp, {}).setdefault(realm, {})
-        sc.setdefault("waivers", {})[f"{package}|{cve}"] = {
-            "package": package,
-            "cve": cve,
-            "by": by or "unknown",
-            "at": date.today().strftime("%b %-d, %Y"),
-            "comment": (comment or "").strip(),
-        }
-        path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(path, "w") as f:
-            dump_bitswan_yaml(bs, f)
-        await update_git(
-            self.gitops_dir,
-            self.gitops_dir_host,
-            bp,
-            "supply-chain",
-            deployed_by=by,
-            message=f"supply-chain: {cve} ({package}) out of scope for {bp}/{realm}",
-        )
-        return self.read_supply_chain(bp, stage)
+        """Mark a CVE out of scope for a BP, stored in the copy's source tree
+        (`cve-waivers.yaml`) and committed — it rides Sync & Deploy to main with
+        the code. Returns the refreshed Checks preview."""
+        from app.services import cve_waivers
 
-    async def remove_supply_chain_waiver(
-        self, bp: str, stage: str, package: str, cve: str, by: str | None = None
+        await cve_waivers.set_waiver(
+            bp,
+            copy,
+            package,
+            cve,
+            (comment or "").strip(),
+            by,
+            date.today().strftime("%b %-d, %Y"),
+        )
+        return await self.preview_supply_chain(bp, copy)
+
+    async def unset_cve_waiver(
+        self, bp: str, copy: str | None, package: str, cve: str, by: str | None = None
     ) -> dict:
-        """Restore a previously-waived CVE to in-scope (its own commit)."""
-        realm = bp_secrets.realm_for_stage(stage)
-        bs = read_bitswan_yaml(self.gitops_dir) or {}
-        waivers = self._supply_chain_waivers(bs, bp, realm)
-        if f"{package}|{cve}" in waivers:
-            del waivers[f"{package}|{cve}"]
-            path = os.path.join(self.gitops_dir, "bitswan.yaml")
-            with open(path, "w") as f:
-                dump_bitswan_yaml(bs, f)
-            await update_git(
-                self.gitops_dir,
-                self.gitops_dir_host,
-                bp,
-                "supply-chain",
-                deployed_by=by,
-                message=f"supply-chain: restore {cve} ({package}) to in-scope for {bp}/{realm}",
-            )
-        return self.read_supply_chain(bp, stage)
+        """Restore a previously out-of-scope CVE to in-scope (commit in the
+        copy's source tree). Returns the refreshed Checks preview."""
+        from app.services import cve_waivers
+
+        await cve_waivers.unset_waiver(bp, copy, package, cve)
+        return await self.preview_supply_chain(bp, copy)
 
     async def rescan_deployed_images(self) -> dict:
         """Daily job: refresh the grype vuln DB (best-effort) and re-run grype

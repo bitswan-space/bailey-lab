@@ -762,7 +762,13 @@ export class GitopsClient {
   async supplyChainWaiver(
     bp: string,
     method: 'POST' | 'DELETE',
-    payload: { stage: string; package: string; cve: string; comment?: string; by?: string },
+    payload: {
+      copy: string | null;
+      package: string;
+      cve: string;
+      comment?: string;
+      by?: string;
+    },
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/waivers`,

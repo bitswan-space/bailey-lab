@@ -685,17 +685,19 @@ export const api = {
     getJson<SupplyChainReport>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/preview${copy ? `?copy=${encodeURIComponent(copy)}` : ''}`,
     ),
-  /** Supply chain: mark a CVE out of scope (versioned + audited in bitswan.yaml). */
+  /** Supply chain: mark a CVE out of scope. Stored in the copy's source tree
+   *  (cve-waivers.yaml, committed) — authored from the Checks tab, so it carries
+   *  to main with the code. Returns the refreshed Checks preview. */
   addCveWaiver: (
     bp: string,
-    body: { stage: string; package: string; cve: string; comment: string },
+    body: { copy: string | null; package: string; cve: string; comment: string },
   ) =>
     postJson<SupplyChainReport>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/waivers`,
       body,
     ),
-  /** Supply chain: restore a previously-waived CVE to in-scope. */
-  removeCveWaiver: (bp: string, body: { stage: string; package: string; cve: string }) =>
+  /** Supply chain: restore a previously out-of-scope CVE to in-scope (in the copy). */
+  removeCveWaiver: (bp: string, body: { copy: string | null; package: string; cve: string }) =>
     delJson<SupplyChainReport>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/waivers`,
       body,

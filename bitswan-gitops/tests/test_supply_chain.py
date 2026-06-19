@@ -1,11 +1,12 @@
 """Supply-chain: syft/grype JSON parsing, the SBOM+CVE merge, and the
-bitswan.yaml-versioned out-of-scope waiver log. Real binaries are not invoked —
-parsing is exercised against fixture JSON and git writes are stubbed.
+source-tree out-of-scope markings (cve-waivers.yaml, committed in the copy).
+Real binaries are not invoked — parsing is exercised against fixture JSON.
 """
 
 import asyncio
 import json
 import os
+import subprocess
 
 from app.utils import read_bitswan_yaml, dump_bitswan_yaml
 from app.services import automation_service as asvc
@@ -173,29 +174,54 @@ def test_supply_chain_not_deployed_when_no_images(tmp_path, monkeypatch):
     assert svc.read_supply_chain("shop", "production")["status"] == "not-deployed"
 
 
-def test_waiver_add_remove_roundtrip_versioned(tmp_path, monkeypatch):
-    svc, _ = _svc(tmp_path, monkeypatch)
-    sc = asyncio.run(
-        svc.add_supply_chain_waiver(
-            "shop", "dev", "openssl", "CVE-2023-5678", "not reachable", by="tim@x"
+def test_waivers_live_in_the_source_tree_and_commit(tmp_path, monkeypatch):
+    """Out-of-scope markings are stored in the copy's source tree
+    (`<copy>/<bp>/cve-waivers.yaml`), committed — not in bitswan.yaml."""
+    from app.services import cve_waivers
+
+    copies = tmp_path / "copies"
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(copies))
+    main = copies / "main"
+    (main / "shop").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.email", "ci@x"], cwd=main, check=True)
+    subprocess.run(["git", "config", "user.name", "ci"], cwd=main, check=True)
+
+    out = asyncio.run(
+        cve_waivers.set_waiver(
+            "shop",
+            None,
+            "openssl",
+            "CVE-2023-5678",
+            "not reachable",
+            "tim@x",
+            "Jun 1, 2026",
         )
     )
-    assert len(sc["waivers"]) == 1
-    w = sc["waivers"][0]
+    assert len(out) == 1
+    w = out[0]
     assert w["package"] == "openssl" and w["cve"] == "CVE-2023-5678"
     assert w["by"] == "tim@x" and w["comment"] == "not reachable"
 
-    # Persisted in bitswan.yaml (audit log), coexisting with other keys.
-    raw = read_bitswan_yaml(str(tmp_path))
-    assert (
-        raw["supply_chain"]["shop"]["dev"]["waivers"]["openssl|CVE-2023-5678"]["by"]
-        == "tim@x"
-    )
-    assert raw["secrets"] == {"keep": "me"}
+    # Stored in the source tree, committed in the copy — not in bitswan.yaml.
+    waiver_file = main / "shop" / "cve-waivers.yaml"
+    assert waiver_file.is_file()
+    log = subprocess.run(
+        ["git", "log", "--oneline"], cwd=main, capture_output=True, text=True
+    ).stdout
+    assert "CVE-2023-5678" in log
+    assert cve_waivers.read_waivers("shop", None) == {
+        "openssl|CVE-2023-5678": {
+            "package": "openssl",
+            "cve": "CVE-2023-5678",
+            "comment": "not reachable",
+            "by": "tim@x",
+            "at": "Jun 1, 2026",
+        }
+    }
 
-    sc2 = asyncio.run(
-        svc.remove_supply_chain_waiver(
-            "shop", "dev", "openssl", "CVE-2023-5678", by="tim@x"
-        )
+    assert (
+        asyncio.run(cve_waivers.unset_waiver("shop", None, "openssl", "CVE-2023-5678"))
+        == []
     )
-    assert sc2["waivers"] == []
+    assert cve_waivers.read_waivers("shop", None) == {}

@@ -357,21 +357,21 @@ export function registerAutomationRoutes(
   for (const method of ['POST', 'DELETE'] as const) {
     app.route<{
       Params: { bp: string };
-      Body: { stage?: string; package?: string; cve?: string; comment?: string };
+      Body: { copy?: string | null; package?: string; cve?: string; comment?: string };
     }>({
       method,
       url: '/api/automations/business-processes/:bp/supply-chain/waivers',
       handler: async (req, reply) => {
         reply.header('Cache-Control', 'no-store');
         if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-        const { stage, package: pkg, cve, comment } = req.body ?? {};
-        if (!stage || !pkg || !cve) {
-          return reply.code(400).send({ error: 'stage, package and cve are required' });
+        const { copy, package: pkg, cve, comment } = req.body ?? {};
+        if (!pkg || !cve) {
+          return reply.code(400).send({ error: 'package and cve are required' });
         }
         const by = (await emailFromRequest(req, app.log)) || undefined;
         try {
           const r = await gitops.supplyChainWaiver(req.params.bp, method, {
-            stage,
+            copy: copy ?? null,
             package: pkg,
             cve,
             ...(comment ? { comment } : {}),

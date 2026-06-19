@@ -258,7 +258,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
               bp={bp.name}
               stage="dev"
               stageLabel="this build"
-              readOnly
+              copy={wt.name}
               fetcher={checksFetcher}
               emptyHint={`No buildable automation source found for ${bp.name} in ${wt.name}.`}
               intro={
@@ -267,7 +267,8 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
                   <strong className="font-mono font-semibold text-foreground">{wt.name}</strong>’s
                   current source — the same artifact{' '}
                   <strong className="text-foreground">Sync &amp; Deploy</strong> ships. Built and
-                  scanned on demand (first run for new code takes a moment to build).
+                  scanned on demand. Click a CVE to view it or mark it out of scope — that decision
+                  is saved with the code and ships on Sync &amp; Deploy.
                 </>
               }
             />
