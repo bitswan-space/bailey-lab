@@ -281,6 +281,19 @@ async def get_bp_supply_chain(
     return automation_service.read_supply_chain(bp, stage)
 
 
+@router.get("/business-processes/{bp}/supply-chain/preview")
+async def get_bp_supply_chain_preview(
+    bp: str,
+    copy: str | None = Query(None),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Pre-deploy SBOM + CVEs for the image(s) a deploy of this BP WOULD build
+    from the current source (Sync & Deploy → Checks). Builds the content-
+    addressed image (cache hit when unchanged) and scans it; same response
+    shape as the deployed supply-chain rollup."""
+    return await automation_service.preview_supply_chain(bp, copy)
+
+
 @router.post("/business-processes/{bp}/supply-chain/waivers")
 async def post_bp_supply_chain_waiver(
     bp: str,

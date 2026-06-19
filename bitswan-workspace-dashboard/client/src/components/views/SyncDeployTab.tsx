@@ -5,6 +5,7 @@ import { useSessions } from '@/components/agents/SessionProvider';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
 import { DiffTab } from '@/components/diff/DiffTab';
 import { CopyHistoryView } from '@/components/views/CopyHistoryView';
+import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess, Copy } from '@/types';
 import { Button } from '@/components/ui/button';
@@ -37,7 +38,15 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
   const { startSyncSession, setSelectedFor, agentStatus, ensureAgent } =
     useSessions();
   const [busy, setBusy] = useState(false);
-  const [view, setView] = useUrlEnum('view', ['diff', 'history'] as const, 'diff');
+  const [view, setView] = useUrlEnum('view', ['diff', 'history', 'checks'] as const, 'diff');
+
+  // Checks: scan the image a deploy of this BP WOULD build from this copy's
+  // source (built + scanned on demand). Memoised so the panel doesn't refetch
+  // on every render.
+  const checksFetcher = useCallback(
+    () => api.supplyChainPreview(bp.name, wt.name),
+    [bp.name, wt.name],
+  );
 
   // Scope the change summary to this BP — only its changes get synced/deployed,
   // so the counts here match the BP-scoped diff below.
@@ -222,7 +231,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
 
       {/* Diff (what becomes main) / History (copy + main commits, deploy tags). */}
       <div className="flex shrink-0 items-center gap-4 border-b border-border bg-background px-7">
-        {(['diff', 'history'] as const).map((id) => (
+        {(['diff', 'history', 'checks'] as const).map((id) => (
           <button
             key={id}
             type="button"
@@ -241,8 +250,26 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
       <div className="flex min-h-0 flex-1 flex-col">
         {view === 'diff' ? (
           <DiffTab copy={wt.name} pathPrefix={bp.name} />
-        ) : (
+        ) : view === 'history' ? (
           <CopyHistoryView copy={wt.name} />
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto px-7 py-5">
+            <p className="mb-4 max-w-2xl text-[13px] leading-relaxed text-muted-foreground">
+              Vulnerabilities in the image this business process would build from{' '}
+              <strong className="font-mono font-semibold text-foreground">{wt.name}</strong>’s
+              current source — the same artifact <strong className="text-foreground">Sync &amp;
+              Deploy</strong> ships. Built and scanned on demand (first run for new code takes a
+              moment to build).
+            </p>
+            <SupplyChainPanel
+              bp={bp.name}
+              stage="dev"
+              stageLabel="this build"
+              readOnly
+              fetcher={checksFetcher}
+              emptyHint={`No buildable automation source found for ${bp.name} in ${wt.name}.`}
+            />
+          </div>
         )}
       </div>
     </div>

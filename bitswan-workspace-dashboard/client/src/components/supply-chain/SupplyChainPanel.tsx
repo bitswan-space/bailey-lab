@@ -27,11 +27,18 @@ export function SupplyChainPanel({
   stage,
   stageLabel,
   readOnly = false,
+  fetcher,
+  emptyHint,
 }: {
   bp: string;
   stage: string;
   stageLabel: string;
   readOnly?: boolean;
+  /** Override how the report is loaded (defaults to the deployed-image scan).
+   *  The Checks tab passes a preview fetch of the about-to-be-built image. */
+  fetcher?: () => Promise<SupplyChainReport>;
+  /** Message shown when there's nothing to scan (status not-deployed). */
+  emptyHint?: string;
 }) {
   const [report, setReport] = useState<SupplyChainReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -43,15 +50,14 @@ export function SupplyChainPanel({
   const load = useCallback(() => {
     let alive = true;
     setLoading(true);
-    api
-      .supplyChain(bp, stage)
+    (fetcher ? fetcher() : api.supplyChain(bp, stage))
       .then((r) => alive && setReport(r))
       .catch(() => alive && setReport(null))
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
-  }, [bp, stage]);
+  }, [bp, stage, fetcher]);
   useEffect(() => load(), [load]);
 
   const waivedKeys = useMemo(
@@ -108,7 +114,12 @@ export function SupplyChainPanel({
     );
   }
   if (!report || report.status === 'not-deployed') {
-    return <Notice icon={ShieldOff} text={`Nothing deployed to ${stageLabel} yet — no image to scan.`} />;
+    return (
+      <Notice
+        icon={ShieldOff}
+        text={emptyHint ?? `Nothing deployed to ${stageLabel} yet — no image to scan.`}
+      />
+    );
   }
   if (report.status === 'pending') {
     return <Notice icon={Loader2} text="Scan pending — the SBOM/CVE scan runs in the background after an image is built. Check back shortly." />;

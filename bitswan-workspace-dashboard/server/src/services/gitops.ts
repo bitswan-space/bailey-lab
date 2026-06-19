@@ -737,6 +737,26 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** `GET .../supply-chain/preview?copy=` — SBOM + CVEs for the image a deploy
+   *  of this BP WOULD build from the current source (Checks tab). */
+  async supplyChainPreview(
+    bp: string,
+    copy: string | null,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const q = copy ? `?copy=${encodeURIComponent(copy)}` : '';
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/preview${q}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /** Mark a CVE out of scope (POST) or restore it (DELETE) — body carries
    *  {stage, package, cve, comment?, by?}; gitops versions it in bitswan.yaml. */
   async supplyChainWaiver(

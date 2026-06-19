@@ -330,6 +330,28 @@ export function registerAutomationRoutes(
     },
   );
 
+  // Supply chain preview → SBOM + CVEs for the image a deploy of this BP would
+  // build from the current source (Sync & Deploy → Checks). Builds + scans.
+  app.get<{ Params: { bp: string }; Querystring: { copy?: string } }>(
+    '/api/automations/business-processes/:bp/supply-chain/preview',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.supplyChainPreview(req.params.bp, req.query.copy ?? null);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'supply-chain preview failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   // Supply chain → mark a CVE out of scope (POST) / restore it (DELETE),
   // attributed to the signed-in user and versioned in bitswan.yaml.
   for (const method of ['POST', 'DELETE'] as const) {

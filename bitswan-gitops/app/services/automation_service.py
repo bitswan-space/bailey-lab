@@ -2016,6 +2016,13 @@ class AutomationService:
             for d in deployments.values()
             if (d or {}).get("image_id")
         ]
+        return self._supply_chain_report(bp, realm, image_ids)
+
+    def _supply_chain_report(self, bp: str, realm: str, image_ids: list[str]) -> dict:
+        """Merge the cached SBOM + CVE scans of `image_ids` into one deduped
+        report with the realm's out-of-scope waivers. Shared by the deployed-
+        image rollup (read_supply_chain) and the pre-build preview (Checks tab),
+        so both render through the identical SupplyChainReport shape."""
         merged: dict[tuple, dict] = {}
         statuses: list[str] = []
         scanned_ats: list[str] = []
@@ -2077,6 +2084,55 @@ class AutomationService:
             "packages": packages,
             "waivers": waiver_list,
         }
+
+    async def _bake_source_for_scan(
+        self, relative_path: str
+    ) -> tuple[str | None, str | None]:
+        """Bake one automation source's content-addressed image and return
+        (image_ref, image_id). Resolves base image + merge dirs exactly as the
+        deploy path does, so the produced tag/hash is identical — an unchanged
+        source is a cache hit, and the result IS the image a deploy would ship."""
+        source_dir = os.path.realpath(
+            os.path.join(self.workspace_repo_dir, relative_path)
+        )
+        ws_root_real = os.path.realpath(self.workspace_repo_dir)
+        if not (
+            source_dir == ws_root_real or source_dir.startswith(ws_root_real + os.sep)
+        ):
+            raise HTTPException(status_code=400, detail="Source escapes workspace")
+        bitswan_lib_dir = os.path.join(self.workspace_repo_dir, "bitswan_lib")
+        dirs_to_merge = [source_dir]
+        if os.path.isdir(bitswan_lib_dir):
+            dirs_to_merge.append(bitswan_lib_dir)
+        base_tag = await self._ensure_automation_image(source_dir)
+        auto_conf = read_automation_config(source_dir)
+        base_image = base_tag or auto_conf.image
+        checksum = await calculate_git_tree_hash(dirs_to_merge)
+        return await self._bake_source_image(
+            source_dir, dirs_to_merge, base_image, auto_conf.mount_path, checksum
+        )
+
+    async def preview_supply_chain(self, bp: str, copy: str | None = None) -> dict:
+        """SBOM + CVE preview for the image(s) a deploy of `bp` WOULD build from
+        the current source (the Sync & Deploy → Checks tab). Bakes each member
+        automation's image — content-addressed, so it's the exact artifact a
+        deploy produces and reuses the cache when unchanged — kicks off a
+        syft+grype scan, and merges via the shared `_supply_chain_report` so it
+        renders through the identical SupplyChainReport shape as the deployed
+        rollup. Pre-deploy, so waivers are scoped to the dev realm."""
+        from app.services.bp_databases import derive_bp_and_copy
+
+        sources = scan_workspace_sources(self.workspace_repo_dir, copy=copy)
+        members = [
+            s for s in sources if derive_bp_and_copy(s.get("relative_path"))[0] == bp
+        ]
+        image_ids: list[str] = []
+        for s in members:
+            image, image_id = await self._bake_source_for_scan(s["relative_path"])
+            if image and image_id:
+                supply_chain_service.spawn_scan(image, image_id)
+                image_ids.append(image_id)
+        return self._supply_chain_report(bp, "dev", image_ids)
 
     async def add_supply_chain_waiver(
         self,

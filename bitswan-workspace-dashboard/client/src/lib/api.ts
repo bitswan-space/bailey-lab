@@ -679,6 +679,12 @@ export const api = {
     getJson<SupplyChainReport>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}`,
     ),
+  /** Supply chain: CVEs for the image a deploy of this BP would build from the
+   *  current copy's source (Sync & Deploy → Checks). Builds + scans on demand. */
+  supplyChainPreview: (bp: string, copy: string | null) =>
+    getJson<SupplyChainReport>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/preview${copy ? `?copy=${encodeURIComponent(copy)}` : ''}`,
+    ),
   /** Supply chain: mark a CVE out of scope (versioned + audited in bitswan.yaml). */
   addCveWaiver: (
     bp: string,
