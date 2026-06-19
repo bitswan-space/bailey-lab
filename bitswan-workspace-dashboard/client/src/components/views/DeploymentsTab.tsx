@@ -1433,14 +1433,16 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             {isDr && (visibleSection === 'history' || visibleSection === 'secrets' || visibleSection === 'firewall' || visibleSection === 'supply') && (
               <MirrorBanner />
             )}
-            {!loaded ? (
+            {/* The architecture explainer is static — never gate it on
+                deployment data (a never-deployed DR BP would hang on Loading). */}
+            {visibleSection === 'architecture' ? (
+              <DrArchitectureDoc />
+            ) : !loaded ? (
               <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
                 <Loader2 className="size-4 animate-spin" aria-hidden /> Loading…
               </div>
             ) : visibleSection === 'recovery' ? (
               <DisasterRecoveryPanel bp={bp.name} frontends={frontends} />
-            ) : visibleSection === 'architecture' ? (
-              <DrArchitectureDoc />
             ) : visibleSection === 'history' ? (
               history.length === 0 ? (
                 <div className="px-3 py-10 text-center text-sm text-muted-foreground">
