@@ -1315,28 +1315,19 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 {next && (
                   <>
                     <div className="h-0.5 flex-1 bg-border" aria-hidden />
-                    <div className="shrink-0">
-                      {next.id === 'dr' ? (
-                        // DR isn't promoted into — it's seeded by restoring
-                        // Production's data. The pill just selects the DR stage.
-                        <button
-                          type="button"
-                          onClick={() => setActiveStage('dr')}
-                          title="Disaster Recovery — restore & verify Production's data"
-                          className="inline-flex h-[30px] items-center gap-1.5 rounded-full border border-dashed border-border bg-background px-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-muted-foreground hover:border-primary/40 hover:text-foreground"
-                        >
-                          <DatabaseBackup className="size-3.5" aria-hidden />
-                          Restore
-                        </button>
-                      ) : (
+                    {/* DR isn't promoted into — it's the standby slot, reached
+                        via its stage button and made live from the DR panel's
+                        swap. No action pill between Production and DR. */}
+                    {next.id !== 'dr' && (
+                      <div className="shrink-0">
                         <PromoteButton
                           canPromote={canPromote}
                           label={next.label}
                           busy={busy}
                           onClick={() => void runPromote(next.id as 'staging' | 'production')}
                         />
-                      )}
-                    </div>
+                      </div>
+                    )}
                     <div className="h-0.5 flex-1 bg-border" aria-hidden />
                   </>
                 )}
