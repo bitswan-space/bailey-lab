@@ -81,6 +81,7 @@ func validRole(role string) bool {
 //   - an explicit role in user_roles (set by an admin) wins;
 //   - otherwise the recorded root admin is "admin" (bootstrap, no lockout);
 //   - otherwise "member".
+//
 // It is never derived from SSO groups — SSO only seeds the first admin via the
 // one-time claim flow, after which roles live entirely in user_roles.
 func effectiveRole(email string) string {
@@ -335,4 +336,3 @@ func handleBaileyPeopleInvite(w http.ResponseWriter, r *http.Request) {
 		"inviting people is not available on this server: it requires a Keycloak realm admin client that is not configured. Invite users directly in Keycloak / the AOC for now.",
 		http.StatusNotImplemented)
 }
-
