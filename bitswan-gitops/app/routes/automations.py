@@ -875,6 +875,11 @@ async def _run_deploy_with_progress(
             message="Deployment failed",
         )
         await _broadcast_task()
+    finally:
+        # Safety net: free the deployment lock however this ends — including
+        # cancellation, which `except Exception` cannot catch and which would
+        # otherwise leak the lock and 409 every future deploy.
+        deploy_manager.release(task_id)
 
 
 async def _run_bp_deploy_with_progress(
@@ -946,6 +951,11 @@ async def _run_bp_deploy_with_progress(
             message="Business process deployment failed",
         )
         await _broadcast_task()
+    finally:
+        # Safety net: free every member lock however this ends — including
+        # cancellation, which `except Exception` cannot catch and which would
+        # otherwise leak the locks and 409 every future deploy of this BP.
+        deploy_manager.release(task_id)
 
 
 async def _run_bp_promote_with_progress(
@@ -1014,6 +1024,11 @@ async def _run_bp_promote_with_progress(
             message="Business process promotion failed",
         )
         await _broadcast_task()
+    finally:
+        # Safety net: free every member lock however this ends — including
+        # cancellation, which `except Exception` cannot catch and which would
+        # otherwise leak the locks and 409 every future promote of this BP.
+        deploy_manager.release(task_id)
 
 
 @router.get("/deploy-status/{task_id}")

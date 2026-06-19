@@ -157,6 +157,24 @@ class DeployManager:
                 else:
                     self._active_deploys.pop(task.deployment_id, None)
 
+    def release(self, task_id: str) -> None:
+        """Free every deployment lock held by a task, idempotently.
+
+        Deliberately SYNC (no await) so it is safe to call from a ``finally`` /
+        cancellation path: ``asyncio.CancelledError`` is a BaseException, not an
+        Exception, so a cancelled deploy runner skips its ``except Exception``
+        terminal-status update and would otherwise leak its member locks —
+        permanently 409-ing every future deploy of that BP. Dict pops are atomic
+        under the single-threaded event loop, so no lock is needed here."""
+        task = self._tasks.get(task_id)
+        if not task:
+            return
+        if task.members:
+            for did in task.members:
+                self._active_deploys.pop(did, None)
+        else:
+            self._active_deploys.pop(task.deployment_id, None)
+
     def get_task(self, task_id: str) -> DeployTask | None:
         return self._tasks.get(task_id)
 
