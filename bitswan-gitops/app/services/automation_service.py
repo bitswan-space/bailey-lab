@@ -2751,7 +2751,12 @@ class AutomationService:
         await _report(
             "generating_compose", "Generating docker-compose configuration..."
         )
-        dc_yaml, infra_service_names = self.generate_docker_compose(bs_yaml)
+        # Only (re-)register ingress routes for the deployments being applied —
+        # not every frontend in the workspace. Re-registering the whole fleet
+        # made a single-BP promote do ~21 serial ~1s daemon add-route calls.
+        dc_yaml, infra_service_names = self.generate_docker_compose(
+            bs_yaml, ingress_scope=set(deployment_ids)
+        )
         self._save_docker_compose(dc_yaml)
         dc_config = yaml.safe_load(dc_yaml)
         services = dc_config.get("services", {})
@@ -4816,7 +4821,21 @@ fi
 
         return secret_names
 
-    def generate_docker_compose(self, bs_yaml: dict):
+    def generate_docker_compose(
+        self, bs_yaml: dict, ingress_scope: set[str] | None = None
+    ):
+        """Render the workspace docker-compose from bitswan.yaml.
+
+        `ingress_scope`, when given, limits which deployments have their ingress
+        routes (re-)registered with the daemon to that set of deployment_ids —
+        every other exposed automation's route is left untouched. A single-BP
+        deploy/promote regenerates the WHOLE compose (one file per workspace),
+        but it must NOT re-register the entire fleet's routes: each daemon
+        add-route is a ~1s Traefik round-trip, so re-registering N unrelated
+        frontends serially dominated promote latency (~22s of a ~34s promote).
+        `None` keeps the original behavior (register every route) for the
+        full-rebuild paths where that is intended.
+        """
         from app.services.bp_databases import (
             bp_resource_names,
             derive_bp_and_copy,
@@ -5288,13 +5307,24 @@ fi
                 entry["labels"]["gitops.intended_exposed"] = (
                     "true" if publish else "false"
                 )
-                if publish and not add_workspace_route_to_ingress(
-                    dep_automation_name,
-                    dep_context,
-                    dep_stage,
-                    port,
-                    upstream_slot=slot,
-                    host_stage=role_stage,
+                # Only (re-)register the route when this deployment is in scope.
+                # A single-BP deploy/promote regenerates the whole compose but
+                # must not pay a ~1s daemon add-route round-trip for every other
+                # frontend in the workspace (scope=None = register all, for the
+                # full-rebuild paths). The route already exists for out-of-scope
+                # deployments — their containers are untouched here.
+                in_scope = ingress_scope is None or deployment_id in ingress_scope
+                if (
+                    publish
+                    and in_scope
+                    and not add_workspace_route_to_ingress(
+                        dep_automation_name,
+                        dep_context,
+                        dep_stage,
+                        port,
+                        upstream_slot=slot,
+                        host_stage=role_stage,
+                    )
                 ):
                     logger.warning(
                         f"Failed to add ingress route for {deployment_id} "
