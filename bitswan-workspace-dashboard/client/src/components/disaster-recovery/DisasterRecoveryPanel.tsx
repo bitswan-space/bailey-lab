@@ -1,30 +1,27 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
-  ArrowLeftRight,
   Check,
   ClipboardCheck,
   ExternalLink,
   Globe,
-  LifeBuoy,
   Loader2,
-  Play,
+  Pencil,
   ShieldCheck,
-  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, type BpSnapshot, type DrPolicy, type DrStatus } from '@/lib/api';
+import { api, type BpSnapshot, type DrPolicy, type DrStatus, type DrTest } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 /**
- * Disaster Recovery panel (wireframe: Deployments → DR stage → Recovery tests).
+ * Disaster Recovery panel (Deployments → DR stage → Recovery tests).
  *
- * DR mirrors Production but runs against its own isolated database. Recovery is
- * rehearsed by hand — restore a Production snapshot, verify the data, and record
- * a verified test. We persist the cadence policy + the manual-test log
- * (versioned in bitswan.yaml); there is no automated failover backend, so the
- * "tested against" snapshot picker lists real Production snapshots and the swap
- * is gated behind an honest "not configured" notice rather than a fake success.
+ * DR mirrors Production against its own isolated database. Recovery is rehearsed
+ * by hand: restore a Production backup into DR, open the DR app and verify the
+ * data, then mark that backup recovery-tested. Tests are per-backup and shown
+ * inline in the backup list — no modal. The cadence policy (quarterly default)
+ * is admin/auditor-only and edited behind a pencil so it can't be changed by
+ * accident. Going live (swap) is the "Restore" action on the stage row.
  */
 
 const POLICY_LABEL: Record<DrPolicy, string> = {
@@ -58,12 +55,12 @@ export function DisasterRecoveryPanel({
 }) {
   const [dr, setDr] = useState<DrStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [savingPolicy, setSavingPolicy] = useState(false);
-  const [run, setRun] = useState<{ snapId: string; didVerify: boolean; note: string } | null>(
-    null,
-  );
   const [snapshots, setSnapshots] = useState<BpSnapshot[]>([]);
-  const [recording, setRecording] = useState(false);
+  const [role, setRole] = useState('member');
+  const [editingPolicy, setEditingPolicy] = useState(false);
+  const [savingPolicy, setSavingPolicy] = useState(false);
+  // eslint-disable-next-line no-restricted-syntax -- null = none being recorded
+  const [testingId, setTestingId] = useState<string | null>(null);
 
   const reload = useCallback(() => {
     let alive = true;
@@ -81,39 +78,59 @@ export function DisasterRecoveryPanel({
       alive = false;
     };
   }, [bp]);
-
   useEffect(() => reload(), [reload]);
+
+  // Cadence is admin/auditor-only (gated server-side too).
+  useEffect(() => {
+    let alive = true;
+    api
+      .getMe()
+      .then((m) => alive && setRole(m.role || 'member'))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const canEditPolicy = role === 'admin' || role === 'auditor';
+
+  // Newest recovery test per backup id — drives the "Tested" badge in the list.
+  const testBySnap = useMemo(() => {
+    const m: Record<string, DrTest> = {};
+    for (const t of dr?.tests ?? []) if (t.snapshot && !m[t.snapshot]) m[t.snapshot] = t;
+    return m;
+  }, [dr]);
 
   const setPolicy = (policy: DrPolicy) => {
     setSavingPolicy(true);
     api
       .setDrPolicy(bp, policy)
-      .then(setDr)
+      .then((d) => {
+        setDr(d);
+        setEditingPolicy(false);
+      })
       .catch((e: unknown) => toast.error(`Couldn't update policy: ${String(e)}`))
       .finally(() => setSavingPolicy(false));
   };
 
-  const recordTest = useCallback(() => {
-    if (!run) return;
-    setRecording(true);
-    const snap = snapshots.find((s) => s.id === run.snapId);
-    const work = api.recordDrTest(bp, {
-      note: run.note.trim(),
-      snapshot: snap?.label || undefined,
-    });
-    toast.promise(work, {
-      loading: 'Recording recovery test…',
-      success: 'Recovery test recorded — versioned in bitswan.yaml',
-      error: (e: unknown) => `Couldn't record test: ${String(e)}`,
-    });
-    work
-      .then((d) => {
-        setDr(d);
-        setRun(null);
-      })
-      .catch(() => {})
-      .finally(() => setRecording(false));
-  }, [bp, run, snapshots]);
+  const testSnapshot = useCallback(
+    (snap: BpSnapshot) => {
+      setTestingId(snap.id);
+      const work = api.recordDrTest(bp, {
+        snapshot: snap.id,
+        note: `Recovery of "${snap.label || snap.id}" verified by hand.`,
+      });
+      toast.promise(work, {
+        loading: 'Recording recovery test…',
+        success: `Marked “${snap.label || snap.id}” recovery-tested`,
+        error: (e: unknown) => `Couldn't record: ${String(e)}`,
+      });
+      work
+        .then(setDr)
+        .catch(() => {})
+        .finally(() => setTestingId(null));
+    },
+    [bp],
+  );
 
   if (loading || !dr) {
     return (
@@ -128,19 +145,16 @@ export function DisasterRecoveryPanel({
 
   return (
     <div className="relative flex flex-col gap-3.5">
-      {/* What DR is (the architecture explainer is its own "How it works" tab) */}
       <p className="text-[12.5px] leading-relaxed text-muted-foreground">
-        Disaster Recovery mirrors <strong className="text-foreground">Production</strong> — same
-        code, secrets and firewall rules — but runs against its{' '}
-        <strong className="text-foreground">own isolated database</strong>. Restoring copies
-        Production&apos;s data <em>into DR</em> (Production is untouched) so you can rehearse
-        recovery and confirm, by hand, that nothing is missing. Only if you ever need to go live do
-        you then <strong className="text-foreground">swap DR with Production</strong>. Routine
-        testing restores &amp; verifies — it does <strong className="text-foreground">not</strong>{' '}
-        swap.
+        Disaster Recovery mirrors <strong className="text-foreground">Production</strong> against its{' '}
+        <strong className="text-foreground">own isolated database</strong>. To rehearse recovery,
+        restore a Production backup into DR, open the DR app and confirm the data by hand, then mark
+        that backup <strong className="text-foreground">recovery-tested</strong> below. Going live
+        (swapping DR with Production) is the <strong className="text-foreground">Restore</strong>{' '}
+        action on the stage row — testing never swaps.
       </p>
 
-      {/* Status + policy banner */}
+      {/* Status + cadence policy */}
       <div
         className={cn(
           'flex flex-wrap items-center gap-3.5 rounded-[10px] border px-4 py-3.5',
@@ -160,259 +174,139 @@ export function DisasterRecoveryPanel({
                 : `Recovery test overdue by ${dr.days_since - dr.window_days} days`
               : `Recovery verified · last tested ${dr.days_since} days ago`}
           </div>
-          <div className={cn('mt-0.5 text-[12px]', overdue ? 'text-amber-800' : 'text-emerald-700')}>
-            Last manual check: {lastTxt} · policy: {POLICY_LABEL[dr.policy]}
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <label className="text-[11px] font-semibold text-muted-foreground">Check every</label>
-          <select
-            value={dr.policy}
-            disabled={savingPolicy}
-            onChange={(e) => setPolicy(e.target.value as DrPolicy)}
-            className="h-8 rounded-md border border-border bg-white px-2 text-[12px] font-medium outline-none focus:border-primary"
-          >
-            {POLICIES.map((p) => (
-              <option key={p} value={p}>
-                {POLICY_LABEL[p]}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={() => setRun({ snapId: snapshots[0]?.id ?? '', didVerify: false, note: '' })}
+          <div
             className={cn(
-              'inline-flex h-8 items-center gap-1.5 rounded-md px-3.5 text-[12.5px] font-semibold text-white',
-              overdue ? 'bg-amber-600 hover:bg-amber-700' : 'bg-primary hover:bg-primary/90',
+              'mt-0.5 flex flex-wrap items-center gap-1.5 text-[12px]',
+              overdue ? 'text-amber-800' : 'text-emerald-700',
             )}
           >
-            <Play className="size-3.5" aria-hidden />
-            Test recovery
-          </button>
+            <span>Last manual check: {lastTxt}</span>
+            <span aria-hidden>·</span>
+            {editingPolicy && canEditPolicy ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span>test every</span>
+                <select
+                  autoFocus
+                  value={dr.policy}
+                  disabled={savingPolicy}
+                  onChange={(e) => setPolicy(e.target.value as DrPolicy)}
+                  className="h-7 rounded-md border border-border bg-white px-2 text-[12px] font-medium text-foreground outline-none focus:border-primary"
+                >
+                  {POLICIES.map((p) => (
+                    <option key={p} value={p}>
+                      {POLICY_LABEL[p]}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setEditingPolicy(false)}
+                  className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                >
+                  Done
+                </button>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1">
+                <span>
+                  tested every <strong className="font-semibold">{POLICY_LABEL[dr.policy]}</strong>
+                </span>
+                {canEditPolicy && (
+                  <button
+                    type="button"
+                    onClick={() => setEditingPolicy(true)}
+                    title="Change the recovery-test cadence (admin / auditor)"
+                    className="inline-flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-black/5 hover:text-foreground"
+                  >
+                    <Pencil className="size-3" aria-hidden />
+                  </button>
+                )}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Going live on the recovered environment is the "Restore" action on the
-          stage row (a slot swap) — no separate swap button here. */}
+      {/* DR app links — open these to verify the recovered data before marking tested. */}
+      {frontends.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+          <span className="font-medium">Verify in the DR app:</span>
+          {frontends.map((f) => (
+            <a
+              key={f.id}
+              href={f.url ?? '#'}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-[28px] items-center gap-1.5 rounded-md border border-border bg-background px-2.5 font-medium text-foreground hover:border-primary/40"
+            >
+              <Globe className="size-3.5 text-muted-foreground" aria-hidden />
+              {f.name}
+              <ExternalLink className="size-3 text-muted-foreground" aria-hidden />
+            </a>
+          ))}
+        </div>
+      )}
 
-      {/* Manual-test log */}
+      {/* Backups — pick one to recovery-test; tested ones are badged in place. */}
       <div className="overflow-hidden rounded-[10px] border border-border bg-background">
         <div className="flex items-center gap-1.5 border-b border-border bg-muted/40 px-3.5 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           <ClipboardCheck className="size-3" aria-hidden />
-          Manual recovery tests
+          Production backups — recovery tests
           <span className="ml-auto text-[11px] font-medium normal-case tracking-normal text-muted-foreground">
-            {dr.tests.length} recorded
+            {Object.keys(testBySnap).length} of {snapshots.length} tested
           </span>
         </div>
-        {dr.tests.length === 0 ? (
+        {snapshots.length === 0 ? (
           <div className="px-4 py-6 text-center text-[13px] text-muted-foreground">
-            No recovery tests recorded yet.
+            No Production backups yet — create one from the Backups tab, then recovery-test it here.
           </div>
         ) : (
-          dr.tests.map((t, i) => (
-            <div
-              key={t.id}
-              className={cn(
-                'flex items-start gap-3 px-3.5 py-3',
-                i < dr.tests.length - 1 && 'border-b border-border',
-              )}
-            >
-              <span className="flex size-[30px] shrink-0 items-center justify-center rounded-full bg-emerald-100">
-                <Check className="size-[15px] text-emerald-600" aria-hidden />
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="text-[13px] text-foreground">
-                  <strong className="font-semibold">{t.by}</strong>
-                  <span className="font-normal text-muted-foreground"> verified the recovery</span>
-                </div>
-                {t.note && (
-                  <div className="mt-1 border-l-2 border-border pl-2.5 text-[12px] leading-relaxed text-zinc-600">
-                    {t.note}
-                  </div>
+          snapshots.map((s, i) => {
+            const test = testBySnap[s.id];
+            return (
+              <div
+                key={s.id}
+                className={cn(
+                  'flex flex-wrap items-center gap-3 px-3.5 py-3',
+                  i < snapshots.length - 1 && 'border-b border-border',
                 )}
-              </div>
-              <span className="whitespace-nowrap text-[11px] text-muted-foreground">{t.at}</span>
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* Run-test wizard */}
-      {run && (
-        <Modal onClose={() => setRun(null)}>
-          <div className="flex items-center gap-3 border-b border-border px-5 py-4">
-            <span className="flex size-[34px] shrink-0 items-center justify-center rounded-lg bg-muted">
-              <LifeBuoy className="size-[17px] text-foreground" aria-hidden />
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="text-[15px] font-bold text-foreground">Test disaster recovery</div>
-              <div className="mt-0.5 text-[12px] text-muted-foreground">{bp} · DR environment</div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setRun(null)}
-              className="flex size-7 items-center justify-center rounded text-muted-foreground hover:text-foreground"
-            >
-              <X className="size-4" aria-hidden />
-            </button>
-          </div>
-
-          <div className="flex flex-col gap-3.5 px-5 py-4">
-            {/* Step 1 — restore (manual, out of band) */}
-            <div className="flex gap-3">
-              <StepDot n={1} />
-              <div className="flex-1">
-                <div className="text-[13.5px] font-semibold text-foreground">
-                  Restore the Production snapshot you tested
-                </div>
-                <div className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
-                  Restore a Production Postgres + MinIO snapshot into the isolated DR database, then
-                  pick which one you used. Production is untouched.
-                </div>
-                <div className="mt-2.5 flex flex-col gap-1.5">
-                  <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    Snapshot tested
-                  </label>
-                  {snapshots.length === 0 ? (
-                    <div className="rounded-md border border-dashed border-border px-3 py-3 text-[12px] text-muted-foreground">
-                      No Production snapshots found — create one from the Backups workflow, or record
-                      the test with notes only.
-                    </div>
-                  ) : (
-                    snapshots.map((s) => {
-                      const sel = run.snapId === s.id;
-                      return (
-                        <button
-                          key={s.id}
-                          type="button"
-                          onClick={() => setRun((r) => r && { ...r, snapId: s.id })}
-                          className={cn(
-                            'flex items-center gap-2.5 rounded-md border px-2.5 py-2 text-left',
-                            sel ? 'border-primary bg-primary/5' : 'border-border bg-background',
-                          )}
-                        >
-                          <span
-                            className={cn(
-                              'flex size-4 shrink-0 items-center justify-center rounded-full border-2',
-                              sel ? 'border-primary' : 'border-border',
-                            )}
-                          >
-                            {sel && <span className="size-[7px] rounded-full bg-primary" />}
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="text-[13px] font-semibold text-foreground">
-                              {s.label || s.id}
-                            </span>
-                            <span className="ml-2 font-mono text-[11px] text-muted-foreground">
-                              {s.created_at?.slice(0, 10)} · {fmtSize(s.total_size_bytes)}
-                            </span>
-                          </span>
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Step 2 — verify */}
-            <div className="flex gap-3">
-              <StepDot n={2} />
-              <div className="flex-1">
-                <div className="text-[13.5px] font-semibold text-foreground">
-                  Verify the data by hand
-                </div>
-                <div className="mt-0.5 text-[12px] leading-snug text-muted-foreground">
-                  Open each DR frontend and confirm the data that should be there really is.
-                </div>
-                {frontends.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {frontends.map((f) => (
-                      <a
-                        key={f.id}
-                        href={f.url ?? '#'}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex h-[30px] items-center gap-1.5 rounded-md border border-border bg-background px-3 text-[12px] font-medium text-foreground hover:border-primary/40"
-                      >
-                        <Globe className="size-3.5 text-muted-foreground" aria-hidden />
-                        {f.name}
-                        <ExternalLink className="size-3 text-muted-foreground" aria-hidden />
-                      </a>
-                    ))}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[13px] font-semibold text-foreground">
+                    {s.label || s.id}
                   </div>
-                )}
-                <label className="mt-2.5 flex cursor-pointer items-start gap-2.5">
-                  <input
-                    type="checkbox"
-                    checked={run.didVerify}
-                    onChange={(e) => setRun((r) => r && { ...r, didVerify: e.target.checked })}
-                    className="mt-0.5 cursor-pointer"
-                  />
-                  <span className="text-[13px] leading-snug text-foreground">
-                    I performed the recovery procedure and confirmed in the UI that the expected
-                    data is present and correct.
+                  <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
+                    {s.created_at?.slice(0, 10)} · {fmtSize(s.total_size_bytes)}
+                  </div>
+                </div>
+                {test ? (
+                  <span
+                    className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2.5 py-1 text-[11.5px] font-semibold text-emerald-700"
+                    title={test.note || undefined}
+                  >
+                    <Check className="size-3.5" aria-hidden />
+                    Tested {test.at} · {test.by}
                   </span>
-                </label>
-                <textarea
-                  value={run.note}
-                  onChange={(e) => setRun((r) => r && { ...r, note: e.target.value })}
-                  placeholder="Optional notes — what you checked, anything unexpected…"
-                  rows={2}
-                  className="mt-2.5 w-full resize-y rounded-md border border-border px-2.5 py-2 text-[13px] leading-relaxed outline-none focus:border-primary"
-                />
+                ) : (
+                  <button
+                    type="button"
+                    disabled={testingId === s.id}
+                    onClick={() => testSnapshot(s)}
+                    title="Record that you restored this backup into DR and verified the data"
+                    className="inline-flex h-[30px] shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-3 text-[12.5px] font-semibold text-foreground hover:border-primary/40 hover:bg-muted disabled:opacity-50"
+                  >
+                    {testingId === s.id ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <ClipboardCheck className="size-3.5 text-muted-foreground" aria-hidden />
+                    )}
+                    Mark recovery-tested
+                  </button>
+                )}
               </div>
-            </div>
-          </div>
-
-          <div className="flex justify-end gap-2 border-t border-border bg-muted/30 px-5 py-3">
-            <button
-              type="button"
-              onClick={() => setRun(null)}
-              className="inline-flex h-8 items-center rounded-md px-3 text-[13px] font-medium text-muted-foreground hover:text-foreground"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              disabled={!run.didVerify || recording}
-              onClick={recordTest}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-emerald-600 px-3.5 text-[13px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-40"
-            >
-              {recording ? (
-                <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              ) : (
-                <Check className="size-3.5" aria-hidden />
-              )}
-              Record verified test
-            </button>
-          </div>
-        </Modal>
-      )}
-
-    </div>
-  );
-}
-
-function StepDot({ n }: { n: number }) {
-  return (
-    <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-[12px] font-bold text-muted-foreground">
-      {n}
-    </span>
-  );
-}
-
-function Modal({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
-  return (
-    <div
-      className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/45 p-10"
-      onClick={onClose}
-    >
-      <div
-        className="w-[520px] max-w-[96%] overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {children}
+            );
+          })
+        )}
       </div>
     </div>
   );

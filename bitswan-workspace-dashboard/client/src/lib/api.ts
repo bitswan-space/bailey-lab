@@ -312,6 +312,8 @@ export interface DrTest {
   by: string;
   at: string;
   date: string;
+  // eslint-disable-next-line no-restricted-syntax -- null = test without a specific backup
+  snapshot: string | null;
   note: string;
   verified: boolean;
 }

@@ -1644,6 +1644,9 @@ class AutomationService:
             "by": by or "unknown",
             "at": today.strftime("%b %-d, %Y"),
             "date": today.isoformat(),
+            # The specific backup that was recovery-tested, so the Backups list
+            # can mark it tested. None when a test is recorded without one.
+            "snapshot": snapshot,
             "note": note_text,
             "verified": True,
         }

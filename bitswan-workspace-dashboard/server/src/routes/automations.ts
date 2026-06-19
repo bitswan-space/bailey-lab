@@ -214,6 +214,15 @@ export function registerAutomationRoutes(
     if (!policy || typeof policy !== 'string') {
       return reply.code(400).send({ error: 'policy is required' });
     }
+    // The recovery-test cadence is a compliance control — only admins/auditors
+    // may change it. Resolve the role from the validated token (never trust the
+    // client) and reject everyone else.
+    const role = await fwRoleFromRequest(req, app.log);
+    if (role !== 'admin' && role !== 'auditor') {
+      return reply
+        .code(403)
+        .send({ error: 'Changing the recovery-test cadence requires an admin or auditor role.' });
+    }
     try {
       const r = await gitops.setDrPolicy(req.params.bp, policy);
       if (!r.ok) {
