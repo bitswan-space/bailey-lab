@@ -122,6 +122,7 @@ async def spawn_create_snapshot(bp: str, stage: str, label: str = "") -> dict:
     Returns {"task_id": ...} or raises ValueError (busy → caller maps to 409).
     """
     from app.services.snapshot_service import get_snapshot_service
+    from app.dependencies import get_automation_service
 
     task, conflict = await snapshot_manager.create_task(
         "create", bp, [stage], source_stage=stage
@@ -132,10 +133,14 @@ async def spawn_create_snapshot(bp: str, stage: str, label: str = "") -> dict:
         )
 
     service = get_snapshot_service()
+    # Production data lives in the blue-green LIVE db (db1/db2), not the
+    # slot-free name dev/staging use. Snapshot whichever db Production is
+    # currently serving so a backup captures the real live data.
+    db = get_automation_service().live_db(bp) if stage == "production" else None
 
     async def run(progress):
         return await service.create_snapshot(
-            bp, stage, label=label, kind="manual", progress=progress
+            bp, stage, label=label, kind="manual", progress=progress, db=db
         )
 
     _spawn_bg(_run_task(task.task_id, f"Snapshot of {bp} ({stage})", run))

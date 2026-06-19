@@ -274,12 +274,18 @@ class SnapshotService:
         kind: str = "manual",
         source: dict | None = None,
         progress=None,
+        db: int | None = None,
     ) -> dict:
         """Snapshot the BP's data at `stage`. Returns the manifest.
 
         Includes every data service that is currently available; raises
         ValueError when none is. Files are written into a temp dir first and
         renamed into place, so a crashed snapshot never lists.
+
+        `db` (1|2) snapshots a specific blue-green PRODUCTION database — the
+        manual production-backup path passes the LIVE db so a backup captures
+        what Production is actually serving (not the unused slot-free name).
+        `db=None` is the single-backend scheme dev/staging use.
         """
         if kind not in ("manual", "auto"):
             raise ValueError(f"Invalid snapshot kind: {kind!r}")
@@ -298,7 +304,7 @@ class SnapshotService:
 
         registry = load_registry()
         entry = get_bp_entry(registry, bp_slug) or {}
-        names = bp_resource_names(bp_slug)
+        names = bp_resource_names(bp_slug, db)
         snapshot_id = new_snapshot_id()
 
         stage_dir = self._stage_dir(bp_slug, stage)
