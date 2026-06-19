@@ -90,7 +90,12 @@ export function WorkspaceView({ bp, wt, tab, onTab }: WorkspaceViewProps) {
 
       {tab === 'sync-deploy' &&
         (wt && bpInWt ? (
-          <SyncDeployTab bp={bp} wt={wt} onShowAgents={() => onTab('agent')} />
+          <SyncDeployTab
+            bp={bp}
+            wt={wt}
+            onShowAgents={() => onTab('agent')}
+            onDeployed={() => onTab('deployments')}
+          />
         ) : (
           <CopyGate bp={bp} wt={wt} what="sync and deploy" />
         ))}

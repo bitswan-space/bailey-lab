@@ -290,9 +290,19 @@ def _flat_to_tree(bs_yaml: dict) -> dict:
             stage = "production"
         node = tree.setdefault(bp, {}).setdefault(stage, {})
         ex = (existing.get(bp, {}) or {}).get(stage, {}) or {}
-        # Only the shared source git_commit is metadata on the node; deployment
-        # HISTORY is derived from the git log of bitswan.yaml, not stored here.
-        if "git_commit" in ex:
+        # The node's git_commit is the deployed source version — the key
+        # bp_history uses to surface a deploy (see bp_history). Prefer the
+        # source_commit recorded on the deployment itself: EVERY deploy path
+        # stamps it (write_deployment_entries), whereas the node-level git_commit
+        # is only set by write_bp_deploy. Without this, deploys made via the
+        # set-deploy path (Sync & Deploy's auto-deploy, the editor) carried a
+        # source_commit on the deployment but left the node's git_commit empty,
+        # so they never appeared in the Deployments history ("not deployed yet").
+        # Fall back to an existing tree value when a deployment has no
+        # source_commit (e.g. live-dev).
+        if conf.get("source_commit"):
+            node["git_commit"] = conf["source_commit"]
+        elif "git_commit" in ex and "git_commit" not in node:
             node["git_commit"] = ex["git_commit"]
         node.setdefault("deployments", {})[dep_id] = conf
     return tree

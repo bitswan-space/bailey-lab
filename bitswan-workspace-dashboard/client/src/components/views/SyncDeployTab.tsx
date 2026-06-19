@@ -18,6 +18,9 @@ interface SyncDeployTabProps {
   wt: Copy;
   /** Flips the shell to the Coding Agent tab (the rebase session runs there). */
   onShowAgents: () => void;
+  /** Called once the dev deploy finishes successfully — used to jump to the
+   *  Deployments tab (Development stage) so the user sees the result. */
+  onDeployed: () => void;
 }
 
 /**
@@ -33,7 +36,12 @@ interface SyncDeployTabProps {
  * Sync & Deploy again, which now fast-forwards. main is never advanced by a
  * direct push — only by this user-gated deploy.
  */
-export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
+export function SyncDeployTab({
+  bp,
+  wt,
+  onShowAgents,
+  onDeployed,
+}: SyncDeployTabProps) {
   const { changed } = useCopyStatus(wt.name);
   const { startSyncSession, setSelectedFor, agentStatus, ensureAgent } =
     useSessions();
@@ -137,11 +145,14 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
       // progress") every time.
       const toastId = `bp-deploy-main-${bp.name}`;
       if (result.deploy_task_id) {
-        await watchDeployTask(result.deploy_task_id, toastId, {
+        const outcome = await watchDeployTask(result.deploy_task_id, toastId, {
           loading: `Synced — deploying ${bp.name} to dev…`,
           success: `${bp.name} synced and deployed to dev`,
           failurePrefix: `Synced into main, but deploy to dev failed for ${bp.name}`,
         });
+        // Once it's fully deployed, jump to the Deployments tab's Development
+        // stage so the user lands on the result of what they just shipped.
+        if (outcome === 'completed') onDeployed();
       } else {
         // Synced, but the sync deployed nothing (no deployable containers in
         // this BP, or no net change to deploy).
@@ -150,7 +161,7 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
     } finally {
       setBusy(false);
     }
-  }, [wt.name, bp.name, handoffToAgent]);
+  }, [wt.name, bp.name, handoffToAgent, onDeployed]);
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-background">
