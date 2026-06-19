@@ -468,6 +468,12 @@ export interface SyncCopyResult {
   /** "fast-forward" when synced server-side. */
   method?: string | null;
   message: string;
+  /** Task id of the dev-stage redeploy the sync ALREADY spawned server-side so
+   *  the deployed dev stage tracks main. The client must TRACK this task — not
+   *  fire its own deploy, which would collide with it (409). Null when nothing
+   *  was deployed (no change, or no deployable members). */
+  // eslint-disable-next-line no-restricted-syntax -- null = sync deployed nothing
+  deploy_task_id?: string | null;
 }
 
 /** Gitops `GET /copies/{name}/divergence?bp=` — commit counts vs main, split

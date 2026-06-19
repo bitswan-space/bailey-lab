@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils';
 import type { BusinessProcess, Copy } from '@/types';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
-import { deployBpWithToast } from '@/lib/deployBp';
+import { watchDeployTask } from '@/lib/deployBp';
 import { useUrlEnum } from '@/lib/urlState';
 
 interface SyncDeployTabProps {
@@ -130,17 +130,23 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
         await handoffToAgent();
         return;
       }
-      // Fast-forwarded into main — now deploy the business process to the
-      // shared `dev` stage (scanned from main, NOT the copy's live-dev). This
-      // is what the Deployments tab shows and what staging/production promote
-      // from; the copy's own live-dev preview keeps running independently.
-      await deployBpWithToast({
-        bp: bp.name,
-        stage: 'dev',
-        loading: `Synced — deploying ${bp.name} to dev…`,
-        success: `${bp.name} synced and deployed to dev`,
-        failurePrefix: `Synced into main, but deploy to dev failed for ${bp.name}`,
-      });
+      // Fast-forwarded into main. The sync endpoint ALREADY spawned the
+      // dev-stage redeploy (so the deployed dev stage tracks main) and returned
+      // its task id — TRACK that task. Do NOT fire a second deploy: it would
+      // collide with the one the sync just started and 409 ("already in
+      // progress") every time.
+      const toastId = `bp-deploy-main-${bp.name}`;
+      if (result.deploy_task_id) {
+        await watchDeployTask(result.deploy_task_id, toastId, {
+          loading: `Synced — deploying ${bp.name} to dev…`,
+          success: `${bp.name} synced and deployed to dev`,
+          failurePrefix: `Synced into main, but deploy to dev failed for ${bp.name}`,
+        });
+      } else {
+        // Synced, but the sync deployed nothing (no deployable containers in
+        // this BP, or no net change to deploy).
+        toast.success(`${bp.name} synced to main`);
+      }
     } finally {
       setBusy(false);
     }
