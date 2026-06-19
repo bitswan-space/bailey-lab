@@ -15,7 +15,6 @@ import {
 import { toast } from 'sonner';
 import { api, type BpSnapshot, type DrPolicy, type DrStatus } from '@/lib/api';
 import { cn } from '@/lib/utils';
-import { DrArchitectureDoc } from './DrArchitectureDoc';
 
 /**
  * Disaster Recovery panel (wireframe: Deployments → DR stage → Recovery tests).
@@ -67,8 +66,6 @@ export function DisasterRecoveryPanel({
   const [swapping, setSwapping] = useState(false);
   const [snapshots, setSnapshots] = useState<BpSnapshot[]>([]);
   const [recording, setRecording] = useState(false);
-  // 'recovery' = the live recovery panel; 'docs' = the architecture explainer.
-  const [view, setView] = useState<'recovery' | 'docs'>('recovery');
 
   const reload = useCallback(() => {
     let alive = true;
@@ -133,21 +130,7 @@ export function DisasterRecoveryPanel({
 
   return (
     <div className="relative flex flex-col gap-3.5">
-      {/* Recovery | How it works (architecture docs) */}
-      <div className="flex items-center gap-4 border-b border-border">
-        <DocTab active={view === 'recovery'} onClick={() => setView('recovery')}>
-          Recovery
-        </DocTab>
-        <DocTab active={view === 'docs'} onClick={() => setView('docs')}>
-          How it works
-        </DocTab>
-      </div>
-
-      {view === 'docs' && <DrArchitectureDoc />}
-
-      {view === 'recovery' && (
-        <>
-      {/* What DR is */}
+      {/* What DR is (the architecture explainer is its own "How it works" tab) */}
       <p className="text-[12.5px] leading-relaxed text-muted-foreground">
         Disaster Recovery mirrors <strong className="text-foreground">Production</strong> — same
         code, secrets and firewall rules — but runs against its{' '}
@@ -274,8 +257,6 @@ export function DisasterRecoveryPanel({
           ))
         )}
       </div>
-        </>
-      )}
 
       {/* Run-test wizard */}
       {run && (
@@ -516,31 +497,6 @@ export function DisasterRecoveryPanel({
         </Modal>
       )}
     </div>
-  );
-}
-
-function DocTab({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        '-mb-px border-b-2 px-1 py-2 text-[13px] transition-colors',
-        active
-          ? 'border-foreground font-semibold text-foreground'
-          : 'border-transparent font-medium text-muted-foreground hover:text-foreground',
-      )}
-    >
-      {children}
-    </button>
   );
 }
 

@@ -1832,7 +1832,10 @@ class AutomationService:
             by,
         )
         await self._save_and_commit_backups(
-            bs, bp, by, f"swap production/DR {bp}: → slot {target_slot} (db{new_live_db})"
+            bs,
+            bp,
+            by,
+            f"swap production/DR {bp}: → slot {target_slot} (db{new_live_db})",
         )
         try:
             await self._repoint_production_to_slot(bp, target_slot)
@@ -1842,9 +1845,7 @@ class AutomationService:
             )
         return self.read_backups(bp)
 
-    async def begin_zero_downtime_promote(
-        self, bp: str, by: str | None = None
-    ) -> dict:
+    async def begin_zero_downtime_promote(self, bp: str, by: str | None = None) -> dict:
         """Record the slot transition for a zero-downtime promote and return
         which idle slot the new version should be brought up on (wired to the
         CURRENT live db — a promote never moves data). The caller deploys the
@@ -1931,7 +1932,9 @@ class AutomationService:
             await report("staging", f"Bringing up new version on slot {target_slot}…")
         await self.apply_compose_for_deployments(dep_ids, deployed_by=by, report=report)
         if report:
-            await report("cutover", f"Repointing production ingress to slot {target_slot}…")
+            await report(
+                "cutover", f"Repointing production ingress to slot {target_slot}…"
+            )
         result = await self.finish_zero_downtime_promote(bp, target_slot, by)
         # Retire the old slot's now-idle containers on the next apply.
         await self.apply_compose_for_deployments(dep_ids, deployed_by=by, report=report)
@@ -1988,8 +1991,12 @@ class AutomationService:
             )
         for hostname, upstream in routes:
             if not repoint_route_in_ingress(hostname, upstream, self.workspace_name):
-                raise RuntimeError(f"ingress repoint failed for {hostname} → {upstream}")
-            logging.info("repointed production %s → slot %s (%s)", hostname, slot, upstream)
+                raise RuntimeError(
+                    f"ingress repoint failed for {hostname} → {upstream}"
+                )
+            logging.info(
+                "repointed production %s → slot %s (%s)", hostname, slot, upstream
+            )
 
     # ── Supply chain (SBOM + CVEs) ───────────────────────────────────────────
     def _supply_chain_waivers(self, bs: dict, bp: str, realm: str) -> dict:
@@ -4922,7 +4929,9 @@ fi
             # worker-host pre-pass). Frontends proxy /api to the "backend"
             # entry; any container can reach peers by name. Slot-scoped so a
             # slot's frontend only ever sees its OWN slot's workers.
-            _worker_hosts = worker_hosts_by_scope.get((dep_context, dep_stage, slot), [])
+            _worker_hosts = worker_hosts_by_scope.get(
+                (dep_context, dep_stage, slot), []
+            )
             if _worker_hosts:
                 entry["environment"]["BITSWAN_WORKER_HOSTS"] = ",".join(_worker_hosts)
             if self.workspace_name:
@@ -5117,7 +5126,11 @@ fi
                 # verification of the standby). The live slot ALSO owns the
                 # canonical production hostname below.
                 url_label = make_hostname_label(
-                    self.workspace_name, dep_automation_name, dep_context, dep_stage, slot
+                    self.workspace_name,
+                    dep_automation_name,
+                    dep_context,
+                    dep_stage,
+                    slot,
                 )
                 url_prefix = f"https://{self.workspace_name}-"
                 url_suffix = f".{self.gitops_domain}"

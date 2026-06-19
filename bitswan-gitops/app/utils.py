@@ -445,7 +445,11 @@ def repoint_route_in_ingress(
     zero-downtime-promote primitive). Unlike add-route this does not touch TLS
     certs, the Bailey ACL, or OAuth redirect URIs — the route already exists;
     only the container it resolves to changes."""
-    body = {"hostname": hostname, "upstream": upstream, "workspace_name": workspace_name}
+    body = {
+        "hostname": hostname,
+        "upstream": upstream,
+        "workspace_name": workspace_name,
+    }
     try:
         client, base = _ingress_client_and_base()
         with client:

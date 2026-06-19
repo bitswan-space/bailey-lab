@@ -98,7 +98,9 @@ def test_backup_events_surface_in_deployment_history(tmp_path, monkeypatch):
     stage it captured. Each is a read-only audit row (source == 'backup')."""
     svc = _git_svc(tmp_path, monkeypatch)
     asyncio.run(
-        svc.record_backup_event("shop", "created", "snap (dev)", by="tim@x", stage="dev")
+        svc.record_backup_event(
+            "shop", "created", "snap (dev)", by="tim@x", stage="dev"
+        )
     )
     asyncio.run(svc.swap_production_dr("shop", by="tim@x"))  # production-domain
 

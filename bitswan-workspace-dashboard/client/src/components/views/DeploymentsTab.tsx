@@ -43,6 +43,7 @@ import { DiffView } from '@/components/diff/DiffView';
 import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
 import { DisasterRecoveryPanel } from '@/components/disaster-recovery/DisasterRecoveryPanel';
+import { DrArchitectureDoc } from '@/components/disaster-recovery/DrArchitectureDoc';
 import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
 import { FirewallPanel } from '@/components/firewall/FirewallPanel';
 import { LogsPane } from '@/components/automations/inspect/LogsPane';
@@ -106,7 +107,8 @@ type Section =
   | 'backups'
   | 'firewall'
   | 'supply'
-  | 'recovery';
+  | 'recovery'
+  | 'architecture';
 
 const STAGE_IDS = STAGES.map((s) => s.id);
 const SECTION_IDS: Section[] = [
@@ -117,6 +119,7 @@ const SECTION_IDS: Section[] = [
   'firewall',
   'supply',
   'recovery',
+  'architecture',
 ];
 
 function short(sha: string | null | undefined, n = 12): string {
@@ -1218,6 +1221,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   }[] = isDr
     ? [
         { id: 'recovery', icon: LifeBuoy, label: 'Recovery tests' },
+        { id: 'architecture', icon: FileText, label: 'How it works' },
         { id: 'containers', icon: Boxes, label: 'Containers', count: members.length },
         { id: 'history', icon: History, label: 'Deployment history', count: history.length, locked: true },
         { id: 'secrets', icon: KeyRound, label: 'Secrets', locked: true },
@@ -1435,6 +1439,8 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
               </div>
             ) : visibleSection === 'recovery' ? (
               <DisasterRecoveryPanel bp={bp.name} frontends={frontends} />
+            ) : visibleSection === 'architecture' ? (
+              <DrArchitectureDoc />
             ) : visibleSection === 'history' ? (
               history.length === 0 ? (
                 <div className="px-3 py-10 text-center text-sm text-muted-foreground">
