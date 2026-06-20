@@ -80,7 +80,7 @@ docker run -d --name bitswan-protected-proxy --network bitswan_network \
   -e OAUTH2_PROXY_CLIENT_SECRET=bailey-e2e-secret \
   -e OAUTH2_PROXY_COOKIE_SECRET=0123456789abcdef0123456789abcdef \
   -e OAUTH2_PROXY_EMAIL_DOMAINS='*' \
-  -e OAUTH2_PROXY_SCOPE="openid email profile groups" \
+  -e OAUTH2_PROXY_SCOPE="openid email profile" \
   -e OAUTH2_PROXY_UPSTREAMS="http://${DAEMON_CTR}:9080" \
   -e OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:80 \
   -e OAUTH2_PROXY_REVERSE_PROXY=true \
