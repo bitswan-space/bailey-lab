@@ -88,6 +88,15 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const popup = await popupP;
     if (popup) dashPage = popup;
     await dashPage.waitForLoadState('networkidle');
+    // The dashboard host may still be coming up right after creation; give it a
+    // few reloads before accepting whatever's there (a real 404 will persist).
+    for (let i = 0; i < 10; i++) {
+      const body = (await dashPage.locator('body').textContent().catch(() => '')) || '';
+      if (!/404 page not found/i.test(body)) break;
+      await dashPage.waitForTimeout(6_000);
+      await dashPage.reload().catch(() => {});
+      await dashPage.waitForLoadState('networkidle').catch(() => {});
+    }
     await capture(dashPage, 'dashboard-open');
   });
 

@@ -126,6 +126,24 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+      # Always dump routing + container state — the walkthrough is best-effort, so
+      # it can "pass" while a workspace app (the dashboard host) 404s. This shows
+      # the real ingress routes and which containers are up.
+      - name: Routing + container diagnostics
+        if: always()
+        run: |
+          echo "::group::docker ps"
+          docker ps --format '{{.Names}}\t{{.Status}}\t{{.Image}}' || true
+          echo "::endgroup::"
+          echo "::group::ingress routes"
+          ./bitswan-automation-server/bitswan ingress list-routes || true
+          echo "::endgroup::"
+          echo "::group::dashboard container logs (if any)"
+          for c in $(docker ps -a --format '{{.Names}}' | grep -iE 'dashboard|meridian|gitops' || true); do
+            echo "--- $c ---"; docker logs --tail 60 "$c" 2>&1 || true
+          done
+          echo "::endgroup::"
+
       - name: Upload Playwright report + traces
         if: always()
         uses: actions/upload-artifact@v4
