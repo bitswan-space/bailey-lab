@@ -16,6 +16,9 @@ import { test, expect, capture, oidcLogin, dashboard, ENV, type FrameOrPage } fr
 import { BP, WORKSPACE, COMPANY } from '../scenario';
 
 const misses: string[] = [];
+// Set once the dashboard is open, so a failed chapter still screenshots the
+// blocked state (named dbg-<chapter>) for diagnosis.
+let dbgPage: import('@playwright/test').Page | null = null;
 
 async function chapter(name: string, fn: () => Promise<void>): Promise<void> {
   await test.step(name, async () => {
@@ -25,6 +28,7 @@ async function chapter(name: string, fn: () => Promise<void>): Promise<void> {
       misses.push(`${name}: ${(e as Error).message.split('\n')[0]}`);
       // eslint-disable-next-line no-console
       console.warn(`⚠️  chapter "${name}" incomplete — ${(e as Error).message.split('\n')[0]}`);
+      if (dbgPage) await capture(dbgPage, 'dbg-' + name).catch(() => {});
     }
   });
 }
@@ -90,6 +94,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const popup = await popupP;
     if (popup) dashPage = popup;
     d = await dashboard(dashPage);
+    dbgPage = dashPage;
     // Wait for the dashboard chrome to render (the BP switcher / nav).
     await expect(d.getByText(/Business process/i).first()).toBeVisible({ timeout: 120_000 });
     await capture(dashPage, 'dashboard-open');
@@ -129,22 +134,30 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await settle(8_000);
   });
 
-  // Open the Deployments tab robustly: the TopNav tab is disabled while a deploy
-  // is in flight, so retry until the pipeline (the stage labels) is visible.
-  const openDeployments = async () => {
-    for (let i = 0; i < 30; i++) {
-      await tab(/^Deployments$/).click({ timeout: 5_000 }).catch(() => {});
-      if (await d.getByText(/DEVELOPMENT/i).first().isVisible().catch(() => false)) return;
-      await settle(5_000);
+  // Deep-link straight to a Deployments stage/section via the dashboard's own
+  // URL params — far more robust than clicking pipeline nodes. The dashboard is a
+  // query-driven SPA (?bp=&copy=&tab=&stage=&section=).
+  const dashOrigin = new URL(dashPage.url()).origin;
+  const deepLink = async (params: Record<string, string>) => {
+    const q = new URLSearchParams({ bp: BP.slug, copy: 'rollout', tab: 'deployments', ...params }).toString();
+    await dashPage.goto(`${dashOrigin}/?${q}`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    d = await dashboard(dashPage);
+    await settle(2_500);
+    await waitLoaded();
+  };
+
+  // Sync & Deploy commits the copy onto main and deploys dev — this is what puts
+  // the BP into main so the Deployments pipeline is populated.
+  const deployToMain = async () => {
+    await tab(/Sync & Deploy/).click();
+    await settle();
+    const btn = d.getByRole('button', { name: /^Sync & Deploy$/ }).last();
+    if (await btn.isEnabled().catch(() => false)) {
+      await btn.click();
+      await d.getByText(/Working/i).first().waitFor({ state: 'hidden', timeout: 12 * 60_000 }).catch(() => {});
+      await settle(3_000);
     }
   };
-  const goStage = async (label: RegExp) => { await openDeployments(); await d.getByRole('button', { name: label }).first().click(); await settle(1200); };
-  const goSection = async (label: RegExp) => { await d.getByRole('button', { name: label }).first().click(); await settle(1200); };
-
-  // NB: the BP scaffolding auto-deploys dev in the background. We do NOT trigger
-  // a second deploy here (it races the scaffolding deploy and collides on
-  // container names). Navigation to Deployments is deferred to the promote step,
-  // by which point the other tabs have given the scaffolding deploy time.
 
   // ---- Description ----
   await chapter('description', async () => {
@@ -175,32 +188,29 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     if (await checks.count()) { await checks.click(); await waitLoaded(); await settle(2_000); await capture(dashPage, 'checks-cve'); }
   });
 
-  // ---- Promote dev → staging → production (the scaffolding already deployed dev) ----
+  // ---- Deploy the copy onto main + dev (populates the Deployments pipeline) ----
+  await chapter('deploy', async () => { await deployToMain(); });
+
+  // ---- Promote dev → staging → production ----
   await chapter('promote', async () => {
-    await openDeployments();
-    await waitHealthy(); // let the scaffolding dev deploy finish first
-    await settle(2_000);
+    await deepLink({ stage: 'dev' });
+    await waitHealthy();
     for (let i = 0; i < 2; i++) {
       const promote = d.getByRole('button', { name: /^Promote$/ }).first();
-      if (await promote.isEnabled().catch(() => false)) {
-        await promote.click();
-        await waitHealthy();
-        await settle(2_000);
-      }
+      if (await promote.isEnabled().catch(() => false)) { await promote.click(); await waitHealthy(); await settle(2_000); }
     }
   });
 
-  // ---- Deployments: production + each section (wait for content before shooting) ----
-  await chapter('deployments-prod', async () => { await goStage(/Production/); await waitLoaded(); await capture(dashPage, 'deployments-prod'); });
-  await chapter('supply-chain', async () => { await goStage(/Production/); await goSection(/Supply chain/); await waitLoaded(); await capture(dashPage, 'supply-chain'); });
-  await chapter('secrets', async () => { await goStage(/Production/); await goSection(/^Secrets$/); await capture(dashPage, 'secrets'); });
-  await chapter('history', async () => { await goStage(/Production/); await goSection(/Deployment history/); await capture(dashPage, 'history'); });
-  await chapter('firewall', async () => { await goStage(/Production/); await goSection(/^Firewall$/); await capture(dashPage, 'firewall'); });
+  // ---- Deployment sections (deep-linked) ----
+  await chapter('deployments-prod', async () => { await deepLink({ stage: 'production' }); await capture(dashPage, 'deployments-prod'); });
+  await chapter('supply-chain', async () => { await deepLink({ stage: 'production', section: 'supply' }); await capture(dashPage, 'supply-chain'); });
+  await chapter('secrets', async () => { await deepLink({ stage: 'production', section: 'secrets' }); await capture(dashPage, 'secrets'); });
+  await chapter('history', async () => { await deepLink({ stage: 'production', section: 'history' }); await capture(dashPage, 'history'); });
+  await chapter('firewall', async () => { await deepLink({ stage: 'production', section: 'firewall' }); await capture(dashPage, 'firewall'); });
 
-  // ---- Backups: enable snapshots if needed, then take a production snapshot ----
+  // ---- Backups: take a production snapshot ----
   await chapter('backups', async () => {
-    await goStage(/Production/);
-    await goSection(/^Backups$/);
+    await deepLink({ stage: 'production', section: 'backups' });
     const enable = d.getByRole('button', { name: /Enable snapshots/i }).first();
     if (await enable.count()) { await enable.click(); await waitLoaded(); await settle(2_000); }
     const snap = d.getByRole('button', { name: /Create snapshot/i }).first();
@@ -216,8 +226,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
 
   // ---- Disaster Recovery: restore into DR + mark recovery-tested ----
   await chapter('dr-rehearse', async () => {
-    await goStage(/Disaster Recovery/);
-    await goSection(/Rehearse & restore/);
+    await deepLink({ stage: 'dr', section: 'recovery' });
     const restore = d.getByRole('button', { name: /Restore into DR/i }).first();
     if (await restore.count()) {
       await restore.click();
