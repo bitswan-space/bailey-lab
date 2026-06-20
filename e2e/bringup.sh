@@ -30,7 +30,16 @@ GITOPS_IMAGE="bitswan/gitops-local:latest"
 DASHBOARD_IMAGE="bitswan/workspace-dashboard-local:latest"
 CODING_AGENT_IMAGE="bitswan/coding-agent-local:latest"
 
-echo "=== [1/7] Build the bitswan CLI + component images from this checkout ==="
+echo "=== [1/7] Build the Server Console SPA + the bitswan CLI + component images ==="
+# The daemon embeds the Server Console SPA via go:embed from
+# internal/daemon/serverconsole_dist (not committed). Build it into the embed
+# dir BEFORE compiling the CLI, or the gate serves an empty console (a directory
+# listing) instead of the real onboarding/console UI.
+npm --prefix bitswan-server-console install --no-audit --no-fund
+npm --prefix bitswan-server-console run build
+rm -rf bitswan-automation-server/internal/daemon/serverconsole_dist
+mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
+cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
 ( cd bitswan-automation-server && go build -o bitswan ./main.go )
 BITSWAN="$REPO_ROOT/bitswan-automation-server/bitswan"
 docker build -t "$GITOPS_IMAGE"       -f "$REPO_ROOT/bitswan-gitops/Dockerfile" "$REPO_ROOT"

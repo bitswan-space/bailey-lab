@@ -16,8 +16,9 @@ export const MANUAL = {
   tagline: 'Business processes on infrastructure that defends itself.',
   blurb:
     'Blue-green production. One-click disaster-recovery rehearsals. Supply-chain ' +
-    'scanning before anything ships. Access control an auditor will actually like. ' +
-    'This is the platform — and this manual, printed straight from a live system.',
+    'scanning before anything ships. A GDPR record of processing that writes itself. ' +
+    'Access control an auditor will actually like. This is the platform — and this ' +
+    'manual, printed straight from a live system.',
   docNo: 'No. BSW-OH-01',
   coverShot: { id: 'cover' },
 
@@ -196,13 +197,15 @@ export const MANUAL = {
       lede: 'An egress allow-list with a GDPR data-processing record for every external host — approval workflow, versioning and the DPA on file.',
       slots: [{ id: 'firewall', label: 'Live capture', caption: 'Firewall · egress allow-list with GDPR records' }],
       sell: [
-        'Meridian’s invoice flow may reach its vendor portals, the Czech business register and a payment gateway — and nothing else. Each allowed host carries a data-processing record: purpose, whether personal data flows, and the signed DPA.',
-        'Egress is default-deny. New destinations need review before they go live.',
+        'Meridian’s invoice flow may reach its vendor portals, the Czech business register and a payment gateway — and nothing else. Each allowed host carries a <strong>GDPR data-processing record</strong>: the purpose, whether personal data flows to that recipient, and the signed <strong>Data Processing Agreement</strong> on file.',
+        'Egress is default-deny. A new destination can’t go live until someone completes its processing record — so your Article 30 register builds itself as the system is operated, instead of being reconstructed under audit pressure.',
       ],
-      steps: ['Open a stage → <b>Firewall</b>.', 'Review hosts waiting for approval.', 'Complete the GDPR data-processing record.', 'Approve — the host is recorded and allowed.'],
+      steps: ['Open a stage → <b>Firewall</b>.', 'Review hosts waiting for approval.', 'Complete the <b>GDPR data-processing record</b> (purpose, personal data, lawful basis).', 'Attach the processor’s <b>DPA</b> and approve — the host is recorded and allowed.'],
+      callout: { kind: 'GDPR, by construction', text: 'Every external recipient of data is recorded with its purpose and contract at the moment it’s allowed. The record of processing activities (Art. 30) and the processor agreements (Art. 28) are a by-product of running the system — not a spreadsheet someone keeps separately.' },
       standards: [
-        { code: 'GDPR', clause: 'Art. 30 / 28', demand: '<b>Records of processing & processor contracts.</b> Each external recipient is recorded with purpose and a DPA on file.' },
-        { code: 'NIS2', clause: 'Art. 21(2)(a)', demand: '<b>Risk-analysis & network security policies.</b> Default-deny egress with reviewed exceptions.' },
+        { code: 'GDPR', clause: 'Art. 30', demand: '<b>Records of processing activities.</b> Each external recipient is logged with its purpose and whether personal data is transferred — the register maintained automatically.' },
+        { code: 'GDPR', clause: 'Art. 28', demand: '<b>Processor obligations.</b> A Data Processing Agreement is stored on file for every host that processes personal data before egress is allowed.' },
+        { code: 'NIS2', clause: 'Art. 21(2)(a)', demand: '<b>Risk-analysis & network security policies.</b> Default-deny egress with reviewed, documented exceptions.' },
         { code: 'ISO/IEC 27001', clause: 'A.8.20–8.21', demand: '<b>Network & network-service security.</b> Outbound connections are controlled per service.' },
       ],
     },
