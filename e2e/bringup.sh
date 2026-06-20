@@ -1,55 +1,56 @@
 #!/usr/bin/env bash
-# Stand up the REAL bitswan stack for the BP-lifecycle E2E: the daemon, traefik,
-# a disposable Keycloak (the only "mock" — a real Keycloak with a seeded realm),
-# gitops, the dashboard and the coding-agent — then create a workspace with the
-# dashboard wired to that Keycloak. Everything else is real docker: real
-# deploys, real snapshots, real blue-green slots, real ingress reconcile.
+# Stand up the REAL Bailey platform with its protected gate, so a browser can go
+# through the actual onboarding (OIDC sign-in → claim the server → device trust)
+# and then create a workspace through the Server Console UI — exactly as an
+# operator would. Everything is real docker: the daemon, traefik, the protected
+# proxy, gitops, the dashboard. The ONLY stand-in is the identity provider: a
+# disposable Keycloak with a seeded realm (the Meridian Foods cast).
 #
-# Prereqs the CI workflow sets up (see .github/workflows/bp-lifecycle-e2e.yml):
-#   - docker + docker compose, dnsmasq resolving *.localhost -> 127.0.0.1,
-#   - mkcert CA installed (so traefik serves trusted *.bs-e2e.localhost certs),
-#   - run as a user that can `sudo` the daemon init.
+# Topology (faithful to production):
+#   platform-traefik → bitswan-protected-proxy (oauth2-proxy + Keycloak)
+#                    → :9080 Bailey gate (device trust) → daemon / workspace apps
 #
-# Usage: e2e/bringup.sh   (run from the repo root)
-# Outputs the workspace URLs and writes e2e/.env for the Playwright suite.
+# Prereqs the runner/VM provides: docker + compose, dnsmasq (*.localhost→127.0.0.1),
+# mkcert CA installed, sudo for the daemon init.
+#
+# Usage: e2e/bringup.sh   (from the repo root). Writes e2e/.env for Playwright.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-WS="e2e"
 DOMAIN="bs-e2e.localhost"
 KC_HOST="keycloak.${DOMAIN}"
 KC_PORT="8088"
-DASHBOARD_URL="https://${WS}-dashboard.${DOMAIN}"
+BAILEY_URL="https://bailey.${DOMAIN}"
+ONBOARD_URL="https://bailey-onboard.${DOMAIN}"
+DAEMON_CTR="bitswan-automation-server-daemon"
 
 GITOPS_IMAGE="bitswan/gitops-local:latest"
 DASHBOARD_IMAGE="bitswan/workspace-dashboard-local:latest"
 CODING_AGENT_IMAGE="bitswan/coding-agent-local:latest"
 
-echo "=== [1/6] Build the bitswan CLI + component images from this checkout ==="
+echo "=== [1/7] Build the bitswan CLI + component images from this checkout ==="
 ( cd bitswan-automation-server && go build -o bitswan ./main.go )
 BITSWAN="$REPO_ROOT/bitswan-automation-server/bitswan"
-docker build -t "$GITOPS_IMAGE"        -f "$REPO_ROOT/bitswan-gitops/Dockerfile" "$REPO_ROOT"
-docker build -t "$DASHBOARD_IMAGE"     -f "$REPO_ROOT/bitswan-workspace-dashboard/Dockerfile" "$REPO_ROOT/bitswan-workspace-dashboard"
-docker build -t "$CODING_AGENT_IMAGE"  -f "$REPO_ROOT/bitswan-coding-agent/Dockerfile" "$REPO_ROOT/bitswan-coding-agent"
+docker build -t "$GITOPS_IMAGE"       -f "$REPO_ROOT/bitswan-gitops/Dockerfile" "$REPO_ROOT"
+docker build -t "$DASHBOARD_IMAGE"    -f "$REPO_ROOT/bitswan-workspace-dashboard/Dockerfile" "$REPO_ROOT/bitswan-workspace-dashboard"
+docker build -t "$CODING_AGENT_IMAGE" -f "$REPO_ROOT/bitswan-coding-agent/Dockerfile" "$REPO_ROOT/bitswan-coding-agent"
 
-echo "=== [2/6] Daemon + traefik ingress ==="
+echo "=== [2/7] Daemon + traefik ingress ==="
 sudo "$BITSWAN" automation-server-daemon init
-sudo chmod 644 "${HOME}/.config/bitswan/automation_server_config.toml" 2>/dev/null || true
 sleep 5
 "$BITSWAN" automation-server-daemon status
 "$BITSWAN" ingress init --type traefik -v
 docker ps | grep -q traefik || { echo "ERROR: traefik not running"; exit 1; }
 
-echo "=== [3/6] Disposable Keycloak (seeded realm) on :${KC_PORT} ==="
-# Published on the host port so both the browser (via dnsmasq -> 127.0.0.1) and
-# the in-container oauth2-proxy/dashboard (via extra_hosts -> host-gateway) reach
-# the SAME issuer URL — so the iss claim matches on both legs. http only
-# (sslRequired=none in the realm) to avoid a cert dance for the auth server.
+echo "=== [3/7] Disposable Keycloak (seeded realm: the Meridian Foods cast) on :${KC_PORT} ==="
+# Published on the host port so the BROWSER (dnsmasq→127.0.0.1) and the
+# oauth2-proxy CONTAINER (extra_hosts→host-gateway) reach the SAME issuer URL,
+# so the iss claim matches on both legs. http only (sslRequired=none).
 docker rm -f bitswan-e2e-keycloak >/dev/null 2>&1 || true
 docker run -d --name bitswan-e2e-keycloak --network bitswan_network \
-  -p "${KC_PORT}:8088" \
+  -p "${KC_PORT}:${KC_PORT}" \
   -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
   -e KC_HTTP_ENABLED=true -e KC_HTTP_PORT="${KC_PORT}" \
   -e KC_HOSTNAME="http://${KC_HOST}:${KC_PORT}" -e KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true \
@@ -60,58 +61,72 @@ docker run -d --name bitswan-e2e-keycloak --network bitswan_network \
 
 echo "Waiting for Keycloak realm to be ready..."
 for i in $(seq 1 60); do
-  if curl -fsS "http://localhost:${KC_PORT}/realms/bitswan/.well-known/openid-configuration" >/dev/null 2>&1; then
-    echo "Keycloak ready"; break
-  fi
+  curl -fsS "http://localhost:${KC_PORT}/realms/bitswan/.well-known/openid-configuration" >/dev/null 2>&1 && { echo "Keycloak ready"; break; }
   sleep 3
   [ "$i" = 60 ] && { echo "ERROR: Keycloak did not become ready"; docker logs --tail 50 bitswan-e2e-keycloak; exit 1; }
 done
 
-echo "=== [4/6] Create the workspace (dashboard + oauth -> the test Keycloak) ==="
-# The daemon runs inside a container with the host filesystem bind-mounted at
-# /host (`-v /:/host`), and it opens --oauth-config literally (no translation).
-# So the path must be the in-container view of the file: /host + its host path.
-OAUTH_CONFIG_HOST="/host${REPO_ROOT}/e2e/oauth-config.json"
-"$BITSWAN" workspace init \
-  --local --domain "$DOMAIN" \
-  --oauth-config "$OAUTH_CONFIG_HOST" \
-  --gitops-image "$GITOPS_IMAGE" \
-  --dashboard-image "$DASHBOARD_IMAGE" \
-  "$WS"
+echo "=== [4/7] bitswan-protected-proxy (oauth2-proxy) in front of the gate ==="
+# This is the production chain's first hop. It runs the OIDC handshake against
+# Keycloak and forwards the verified identity to the :9080 gate as
+# X-Forwarded-Email / X-Forwarded-Groups. cookie domain .${DOMAIN} so the session
+# is shared across bailey. / bailey--inner. / bailey-onboard.
+docker rm -f bitswan-protected-proxy >/dev/null 2>&1 || true
+docker run -d --name bitswan-protected-proxy --network bitswan_network \
+  --add-host "${KC_HOST}:host-gateway" \
+  -e OAUTH2_PROXY_PROVIDER=oidc \
+  -e OAUTH2_PROXY_OIDC_ISSUER_URL="http://${KC_HOST}:${KC_PORT}/realms/bitswan" \
+  -e OAUTH2_PROXY_CLIENT_ID=bailey \
+  -e OAUTH2_PROXY_CLIENT_SECRET=bailey-e2e-secret \
+  -e OAUTH2_PROXY_COOKIE_SECRET=0123456789abcdef0123456789abcdef \
+  -e OAUTH2_PROXY_EMAIL_DOMAINS='*' \
+  -e OAUTH2_PROXY_SCOPE="openid email profile groups" \
+  -e OAUTH2_PROXY_UPSTREAMS="http://${DAEMON_CTR}:9080" \
+  -e OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:80 \
+  -e OAUTH2_PROXY_REVERSE_PROXY=true \
+  -e OAUTH2_PROXY_PASS_HOST_HEADER=true \
+  -e OAUTH2_PROXY_PASS_USER_HEADERS=true \
+  -e OAUTH2_PROXY_SET_XAUTHREQUEST=true \
+  -e OAUTH2_PROXY_PASS_ACCESS_TOKEN=true \
+  -e OAUTH2_PROXY_SKIP_PROVIDER_BUTTON=true \
+  -e OAUTH2_PROXY_REDIRECT_URL="${BAILEY_URL}/oauth2/callback" \
+  -e OAUTH2_PROXY_COOKIE_DOMAINS=".${DOMAIN}" \
+  -e OAUTH2_PROXY_WHITELIST_DOMAINS=".${DOMAIN},${KC_HOST}:${KC_PORT}" \
+  -e OAUTH2_PROXY_COOKIE_SECURE=true \
+  -e OAUTH2_PROXY_COOKIE_SAMESITE=none \
+  -e OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL=true \
+  quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+sleep 3
+docker ps | grep -q bitswan-protected-proxy || { echo "ERROR: protected proxy not running"; docker logs --tail 50 bitswan-protected-proxy; exit 1; }
 
-# The coding-agent is a separate service (not a workspace-init flag). Enable it
-# with the locally-built image so the stack is complete. It is not on the deploy
-# lifecycle's critical path, so a failure here is a warning, not fatal.
-"$BITSWAN" service coding-agent enable --workspace "$WS" --coding-agent-image "$CODING_AGENT_IMAGE" \
-  || echo "NOTE: coding-agent enable failed — not on the lifecycle critical path, continuing"
+echo "=== [5/7] Point Bailey at this domain + register the gate routes ==="
+# protected_domain drives ProtectedHostnameDomain(); on (re)start the daemon's
+# setupBaileyRoutes registers bailey. / bailey--inner. / bailey-onboard. →
+# bitswan-protected-proxy:80, but ONLY when the proxy is already running. So we
+# set the domain and restart the daemon now that the proxy is up.
+docker exec "$DAEMON_CTR" sh -c \
+  'CFG=/root/.config/bitswan/automation_server_config.toml; touch "$CFG"; \
+   grep -q "^protected_domain" "$CFG" || { printf "protected_domain = \"bs-e2e.localhost\"\n%s" "$(cat "$CFG")" > "$CFG.new" && mv "$CFG.new" "$CFG"; }'
+docker restart "$DAEMON_CTR" >/dev/null
+sleep 8
 
-echo "=== [5/6] Seed the test user as root admin (so swaps/firewall are allowed) ==="
-# effectiveRole() returns admin for server_settings['root_admin_email'] without
-# needing the interactive device-trust claim flow. Seed it straight into the
-# daemon's bailey.db (in the `bitswan` docker volume) so the e2e user is admin.
-KCDB="$(docker volume inspect bitswan -f '{{ .Mountpoint }}' 2>/dev/null)/bailey.db"
-if command -v sqlite3 >/dev/null 2>&1 && sudo test -f "$KCDB"; then
-  sudo sqlite3 "$KCDB" \
-    "INSERT INTO server_settings(key,value) VALUES('root_admin_email','e2e-admin@example.com') ON CONFLICT(key) DO UPDATE SET value=excluded.value;" \
-    && echo "seeded root admin = e2e-admin@example.com"
-else
-  echo "NOTE: sqlite3/bailey.db unavailable — role badge may show Member; admin-gated steps (swap, prod firewall) will be skipped by the spec."
-fi
-
-echo "=== [6/6] Wait for the dashboard to answer ==="
+echo "=== [6/7] Wait for the onboarding host to answer through the chain ==="
 for i in $(seq 1 60); do
-  code="$(curl -sk -o /dev/null -w '%{http_code}' "${DASHBOARD_URL}/" || true)"
-  case "$code" in 200|302|401|403) echo "dashboard reachable (HTTP $code)"; break;; esac
+  code="$(curl -sk -o /dev/null -w '%{http_code}' "${ONBOARD_URL}/" || true)"
+  # 302→Keycloak (unauthenticated) or 200 both mean the chain is wired.
+  case "$code" in 200|302|401|403) echo "onboarding reachable (HTTP $code)"; break;; esac
   sleep 3
-  [ "$i" = 60 ] && { echo "ERROR: dashboard not reachable"; docker ps -a; exit 1; }
+  [ "$i" = 60 ] && { echo "ERROR: onboarding host not reachable"; docker ps; docker logs --tail 40 bitswan-protected-proxy; exit 1; }
 done
 
+echo "=== [7/7] Write e2e/.env for the walkthrough ==="
 cat > "$REPO_ROOT/e2e/.env" <<ENV
-E2E_DASHBOARD_URL=${DASHBOARD_URL}
 E2E_DOMAIN=${DOMAIN}
-E2E_WORKSPACE=${WS}
-E2E_USER=e2e-admin@example.com
-E2E_PASSWORD=e2e-admin-password
+E2E_BAILEY_URL=${BAILEY_URL}
+E2E_ONBOARD_URL=${ONBOARD_URL}
+E2E_KEYCLOAK_URL=http://${KC_HOST}:${KC_PORT}
+E2E_OPERATOR_EMAIL=tomas.novak@meridianfoods.cz
+E2E_OPERATOR_PASSWORD=meridian-operator
 ENV
 echo "=== bring-up complete ==="
 cat "$REPO_ROOT/e2e/.env"

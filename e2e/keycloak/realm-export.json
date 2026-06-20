@@ -2,70 +2,81 @@
   "realm": "bitswan",
   "enabled": true,
   "sslRequired": "none",
-  "registrationAllowed": false,
-  "loginWithEmailAllowed": true,
-  "duplicateEmailsAllowed": false,
-  "users": [
-    {
-      "username": "e2e-admin@example.com",
-      "email": "e2e-admin@example.com",
-      "emailVerified": true,
-      "enabled": true,
-      "firstName": "E2E",
-      "lastName": "Admin",
-      "credentials": [
-        { "type": "password", "value": "e2e-admin-password", "temporary": false }
-      ],
-      "realmRoles": ["offline_access"]
-    }
+  "loginTheme": "keycloak",
+  "groups": [
+    { "name": "admin", "path": "/admin" }
   ],
-  "clients": [
+  "clientScopes": [
     {
-      "clientId": "bitswan-e2e",
-      "enabled": true,
+      "name": "groups",
       "protocol": "openid-connect",
-      "publicClient": false,
-      "secret": "e2e-client-secret",
-      "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": true,
-      "redirectUris": [
-        "https://*.bs-e2e.localhost/oauth2/callback",
-        "https://*.bs-e2e.localhost/*"
-      ],
-      "webOrigins": ["+"],
-      "attributes": {
-        "post.logout.redirect.uris": "https://*.bs-e2e.localhost/*"
-      },
+      "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" },
       "protocolMappers": [
-        {
-          "name": "email",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-property-mapper",
-          "consentRequired": false,
-          "config": {
-            "user.attribute": "email",
-            "claim.name": "email",
-            "jsonType.label": "String",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "userinfo.token.claim": "true"
-          }
-        },
         {
           "name": "groups",
           "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "protocolMapper": "oidc-group-membership-mapper",
           "consentRequired": false,
           "config": {
-            "claim.name": "groups",
-            "jsonType.label": "String",
-            "multivalued": "true",
+            "full.path": "false",
             "id.token.claim": "true",
             "access.token.claim": "true",
-            "userinfo.token.claim": "true"
+            "userinfo.token.claim": "true",
+            "claim.name": "groups"
           }
         }
       ]
+    }
+  ],
+  "defaultDefaultClientScopes": ["groups"],
+  "clients": [
+    {
+      "clientId": "bailey",
+      "name": "Bailey Server Console",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "bailey-e2e-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": [
+        "https://bailey.bs-e2e.localhost/oauth2/callback",
+        "https://bailey-onboard.bs-e2e.localhost/oauth2/callback",
+        "https://*.bs-e2e.localhost/oauth2/callback"
+      ],
+      "webOrigins": ["https://bailey.bs-e2e.localhost", "https://bailey-onboard.bs-e2e.localhost"],
+      "defaultClientScopes": ["openid", "email", "profile", "groups"],
+      "attributes": { "post.logout.redirect.uris": "https://*.bs-e2e.localhost/*" }
+    }
+  ],
+  "users": [
+    {
+      "username": "tomas.novak@meridianfoods.cz",
+      "email": "tomas.novak@meridianfoods.cz",
+      "firstName": "Tomáš",
+      "lastName": "Novák",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "meridian-operator", "temporary": false }],
+      "groups": ["/admin"]
+    },
+    {
+      "username": "eva.mueller@meridianfoods.cz",
+      "email": "eva.mueller@meridianfoods.cz",
+      "firstName": "Eva",
+      "lastName": "Müller",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "meridian-auditor", "temporary": false }]
+    },
+    {
+      "username": "marek.horvath@meridianfoods.cz",
+      "email": "marek.horvath@meridianfoods.cz",
+      "firstName": "Marek",
+      "lastName": "Horváth",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "meridian-member", "temporary": false }]
     }
   ]
 }

@@ -1,64 +1,70 @@
-import { test as base, expect, type Page, type FrameLocator } from '@playwright/test';
-import { execSync } from 'node:child_process';
-
-const USER = process.env.E2E_USER || 'e2e-admin@example.com';
-const PASSWORD = process.env.E2E_PASSWORD || 'e2e-admin-password';
-
 /**
- * Log in through the REAL (disposable) Keycloak login form — the same flow as
- * production, just against the seeded test realm. The dashboard then renders
- * inside the Bailey wrap's iframe, so `dashboard()` returns that frame.
+ * Fixtures for the real-stack Bailey walkthrough. The suite drives the actual
+ * onboarding (OIDC → claim → device trust), creates a workspace through the
+ * Server Console UI, and walks every feature — capturing a screenshot at each
+ * beat into e2e/manual/build/shots/<slotId>.png. Those screenshots are the raw
+ * material the manual generator assembles afterward.
  */
-async function login(page: Page) {
-  await page.goto('/');
-  // Keycloak presents a username/password form. (Already-authenticated reloads
-  // skip straight to the app, so the form is optional.)
-  const username = page.locator('#username');
-  try {
-    await username.waitFor({ state: 'visible', timeout: 15_000 });
-    await username.fill(USER);
-    await page.locator('#password').fill(PASSWORD);
-    await Promise.all([
-      page.waitForNavigation({ timeout: 45_000 }).catch(() => {}),
-      page.locator('#kc-login, input[type=submit], button[type=submit]').first().click(),
-    ]);
-  } catch {
-    // No login form — assume an existing session.
-  }
-  // The SPA loads inside the protected-wrap iframe; wait for it to mount.
-  await page.locator('iframe').first().waitFor({ state: 'attached', timeout: 60_000 });
+import { test as base, expect, type Page, type Locator, type FrameLocator } from '@playwright/test';
+import { execSync } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+export const SHOTS_DIR = join(__dirname, '..', 'manual', 'build', 'shots');
+mkdirSync(SHOTS_DIR, { recursive: true });
+
+export const ENV = {
+  domain: process.env.E2E_DOMAIN || 'bs-e2e.localhost',
+  baileyUrl: process.env.E2E_BAILEY_URL || 'https://bailey.bs-e2e.localhost',
+  onboardUrl: process.env.E2E_ONBOARD_URL || 'https://bailey-onboard.bs-e2e.localhost',
+  keycloakUrl: process.env.E2E_KEYCLOAK_URL || 'http://keycloak.bs-e2e.localhost:8088',
+  operatorEmail: process.env.E2E_OPERATOR_EMAIL || 'tomas.novak@meridianfoods.cz',
+  operatorPassword: process.env.E2E_OPERATOR_PASSWORD || 'meridian-operator',
+};
+
+/** Run a host shell command (for asserting real backend effects). */
+export function sh(cmd: string): string {
+  return execSync(cmd, { encoding: 'utf8', shell: '/bin/bash' });
 }
 
-/** The dashboard SPA frame (it lives inside the Bailey chrome-wrap iframe). */
-function dashboard(page: Page): FrameLocator {
+/**
+ * Capture a screenshot into the slot the manual references by id. The generator
+ * picks these up by filename (shots/<slotId>.png). Keep slotIds in sync with
+ * the slot ids in e2e/manual/content.mjs.
+ */
+export async function capture(
+  page: Page,
+  slotId: string,
+  opts: { fullPage?: boolean; settleMs?: number; locator?: Locator } = {},
+): Promise<void> {
+  await page.waitForTimeout(opts.settleMs ?? 450); // let transitions settle
+  const path = join(SHOTS_DIR, `${slotId}.png`);
+  if (opts.locator) await opts.locator.screenshot({ path });
+  else await page.screenshot({ path, fullPage: !!opts.fullPage });
+  // eslint-disable-next-line no-console
+  console.log(`📸 captured ${slotId}`);
+}
+
+/** Fill and submit the Keycloak login form (whatever the realm's theme renders). */
+export async function oidcLogin(page: Page, email: string, password: string): Promise<void> {
+  await page.waitForLoadState('domcontentloaded');
+  const user = page.locator('#username, input[name="username"]').first();
+  await user.waitFor({ state: 'visible', timeout: 30_000 });
+  await user.fill(email);
+  await page.locator('#password, input[name="password"]').first().fill(password);
+  await page.locator('#kc-login, input[type="submit"], button[type="submit"]').first().click();
+  await page.waitForLoadState('networkidle');
+}
+
+/** The Bailey Server Console SPA renders inside the chrome-wrap iframe. */
+export function consoleFrame(page: Page): FrameLocator {
   return page.frameLocator('iframe').first();
 }
 
-/** Drive the dashboard by its URL state (bp / copy / tab / stage / section). */
-async function goToView(
-  page: Page,
-  q: { bp?: string; copy?: string; tab?: string; stage?: string; section?: string },
-) {
-  const params = new URLSearchParams(
-    Object.entries(q).filter(([, v]) => v != null) as [string, string][],
-  );
-  await page.goto('/?' + params.toString());
-  await page.locator('iframe').first().waitFor({ state: 'attached', timeout: 60_000 });
+/** The workspace dashboard, itself rendered in an iframe within the console. */
+export function dashboard(page: Page): FrameLocator {
+  return page.frameLocator('iframe').last();
 }
 
-/** Run a shell command on the host (for asserting REAL backend effects). */
-function sh(cmd: string): string {
-  return execSync(cmd, { encoding: 'utf8', timeout: 60_000 });
-}
-
-export const test = base.extend<{ login: void }>({
-  login: [
-    async ({ page }, use) => {
-      await login(page);
-      await use();
-    },
-    { auto: true },
-  ],
-});
-
-export { expect, dashboard, goToView, sh, USER };
+export const test = base;
+export { expect };

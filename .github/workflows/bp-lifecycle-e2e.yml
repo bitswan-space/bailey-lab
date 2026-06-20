@@ -101,11 +101,30 @@ jobs:
       # The mkcert CA is already trusted on the runner; pass it to Chromium too so
       # the browser trusts traefik's *.bs-e2e.localhost certs (config also sets
       # ignoreHTTPSErrors as a belt-and-braces fallback).
-      - name: Run the BP lifecycle E2E
+      - name: Walk the product (gather screenshots)
         working-directory: e2e
         run: |
           export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"
           npm test
+
+      # Assemble the Operator's Handbook from the editorial content + the
+      # screenshots just captured. Chromium (installed above) prints the PDF.
+      - name: Generate the Operator's Handbook (HTML + PDF)
+        if: always()
+        working-directory: e2e
+        run: node manual/generate.mjs
+
+      - name: Upload the Operator's Handbook
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operators-handbook
+          path: |
+            e2e/manual/build/handbook.html
+            e2e/manual/build/handbook.pdf
+            e2e/manual/build/shots/
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Upload Playwright report + traces
         if: always()

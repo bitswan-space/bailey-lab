@@ -13,8 +13,8 @@ if (existsSync(envPath)) {
   }
 }
 
-const DASHBOARD_URL =
-  process.env.E2E_DASHBOARD_URL || 'https://e2e-dashboard.bs-e2e.localhost';
+const BAILEY_URL =
+  process.env.E2E_BAILEY_URL || 'https://bailey.bs-e2e.localhost';
 
 export default defineConfig({
   testDir: './tests',
@@ -27,15 +27,18 @@ export default defineConfig({
   retries: 0,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: DASHBOARD_URL,
+    baseURL: BAILEY_URL,
     // Traefik serves trusted mkcert certs, but keep this on so the suite is
     // robust to the CI cert setup.
     ignoreHTTPSErrors: true,
+    // A fixed, generous viewport so the manual's screenshots are crisp and
+    // consistent rather than whatever a random run happened to size to.
+    viewport: { width: 1440, height: 900 },
     trace: 'on',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
     actionTimeout: 60_000,
     navigationTimeout: 90_000,
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } }],
 });
