@@ -73,8 +73,13 @@ echo "=== [4/6] Create the workspace (dashboard + oauth -> the test Keycloak) ==
   --oauth-config "$REPO_ROOT/e2e/oauth-config.json" \
   --gitops-image "$GITOPS_IMAGE" \
   --dashboard-image "$DASHBOARD_IMAGE" \
-  --coding-agent-image "$CODING_AGENT_IMAGE" \
   "$WS"
+
+# The coding-agent is a separate service (not a workspace-init flag). Enable it
+# with the locally-built image so the stack is complete. It is not on the deploy
+# lifecycle's critical path, so a failure here is a warning, not fatal.
+"$BITSWAN" service coding-agent enable --workspace "$WS" --coding-agent-image "$CODING_AGENT_IMAGE" \
+  || echo "NOTE: coding-agent enable failed — not on the lifecycle critical path, continuing"
 
 echo "=== [5/6] Seed the test user as root admin (so swaps/firewall are allowed) ==="
 # effectiveRole() returns admin for server_settings['root_admin_email'] without
