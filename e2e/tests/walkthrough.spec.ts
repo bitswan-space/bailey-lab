@@ -77,54 +77,47 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     });
   }
 
-  // ---- Open the workspace dashboard (its 'Open' button likely opens a new tab) ----
+  // ---- Open the workspace dashboard (its 'Open' button opens a new tab) ----
+  // NB: the dashboard holds SSE connections, so never wait for 'networkidle' —
+  // wait on real elements instead.
   let dashPage = page;
-  await chapter('open-dashboard', async () => {
+  let d: FrameOrPage = page;
+  await test.step('open the workspace dashboard', async () => {
     await page.goto(ENV.onboardUrl + '/workspaces');
-    await page.waitForLoadState('networkidle');
     const open = page.getByRole('button', { name: /^Open$/ }).or(page.getByRole('link', { name: /^Open$/ })).first();
     const popupP = page.context().waitForEvent('page', { timeout: 15_000 }).catch(() => null);
     await open.click();
     const popup = await popupP;
     if (popup) dashPage = popup;
-    await dashPage.waitForLoadState('networkidle');
-    // The dashboard host may still be coming up right after creation; give it a
-    // few reloads before accepting whatever's there (a real 404 will persist).
-    for (let i = 0; i < 10; i++) {
-      const body = (await dashPage.locator('body').textContent().catch(() => '')) || '';
-      if (!/404 page not found/i.test(body)) break;
-      await dashPage.waitForTimeout(6_000);
-      await dashPage.reload().catch(() => {});
-      await dashPage.waitForLoadState('networkidle').catch(() => {});
-    }
+    d = await dashboard(dashPage);
+    // Wait for the dashboard chrome to render (the BP switcher / nav).
+    await expect(d.getByText(/Business process/i).first()).toBeVisible({ timeout: 120_000 });
     await capture(dashPage, 'dashboard-open');
   });
 
-  // ---- Dashboard feature chapters (best-effort; selectors refined per trace) ----
-  const d: FrameOrPage = await dashboard(dashPage);
+  // ---- Create the invoice-processing business process ----
+  await chapter('create-bp', async () => {
+    await d.getByRole('button', { name: /Business process/i }).first().click();
+    await capture(dashPage, 'bp-switcher');
+    await d.getByText(/New business process/i).first().click();
+    await d.getByRole('textbox').first().fill(BP.slug);
+    await capture(dashPage, 'bp-create');
+    await d.getByRole('button', { name: /^(Create|Add|New business process)$/i }).last().click();
+    await dashPage.waitForTimeout(4_000);
+  });
+
+  // ---- Description (with the BP selected) ----
   await chapter('description', async () => {
-    await d.getByRole('button', { name: /Description/i }).first().click();
+    await d.getByRole('button', { name: /^Description$/i }).first().click();
+    const editor = d.getByRole('textbox').first();
+    if (await editor.count()) await editor.fill(BP.description).catch(() => {});
     await capture(dashPage, 'description');
   });
-  await chapter('requirements', async () => {
-    await d.getByRole('button', { name: /Requirements/i }).first().click();
-    await capture(dashPage, 'requirements');
-  });
-  await chapter('sync-deploy', async () => {
-    await d.getByRole('button', { name: /Sync & Deploy/i }).first().click();
-    await capture(dashPage, 'sync-deploy');
-    await d.getByRole('button', { name: /checks/i }).first().click();
-    await capture(dashPage, 'checks-cve');
-  });
+
+  // ---- Deployments (whatever state exists; lifecycle captures come next) ----
   await chapter('deployments', async () => {
-    await d.getByRole('button', { name: /Deployments/i }).first().click();
+    await d.getByRole('button', { name: /^Deployments$/i }).first().click();
     await capture(dashPage, 'deployments-prod');
-    for (const [section, slot] of [['supply', 'supply-chain'], ['secrets', 'secrets'], ['backups', 'backups'], ['history', 'history'], ['firewall', 'firewall'], ['recovery', 'dr-rehearse']] as const) {
-      await chapter(slot, async () => {
-        await d.getByRole('button', { name: new RegExp(`^${section}$`, 'i') }).first().click();
-        await capture(dashPage, slot);
-      });
-    }
   });
 
   // eslint-disable-next-line no-console
