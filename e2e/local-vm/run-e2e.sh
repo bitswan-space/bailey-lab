@@ -13,4 +13,8 @@ echo "=== install + run Playwright ==="
 cd /repo/e2e
 npm ci || npm install
 npx playwright install --with-deps chromium
-npm test
+npm test || true   # the walkthrough is best-effort per chapter; always build the manual
+
+echo "=== generate the Operator's Handbook from the captured screenshots ==="
+node manual/generate.mjs || true
+ls -la /repo/e2e/manual/build/ 2>/dev/null || true

@@ -43,6 +43,7 @@ export const MANUAL = {
       callout: { kind: 'Why it matters', text: 'Identity is enforced once, at the gate. Your business processes never have to reinvent authentication.' },
       standards: [
         { code: 'NIS2', clause: 'Art. 21(2)(j)', demand: '<b>Multi-factor authentication & secured access.</b> Device trust is a strong second factor bound to hardware — exactly the “MFA or continuous authentication” the directive expects.' },
+        { code: 'SOC 2', clause: 'CC6.1', demand: '<b>Logical access security.</b> The gate authenticates and authorizes every request before it reaches a workspace app.' },
         { code: 'ISO/IEC 27001', clause: 'A.5.15 / A.8.5', demand: '<b>Access control & secure authentication.</b> Access is granted per identity and per device, and centrally revocable.' },
         { code: 'DORA', clause: 'Art. 9(3)', demand: '<b>Strong authentication mechanisms.</b> Protection of ICT systems requires robust access control — the gate provides it uniformly.' },
       ],
@@ -115,6 +116,7 @@ export const MANUAL = {
       steps: ['Open a stage → <b>Supply chain</b>.', 'Sort by severity; open a CVE.', 'Record any out-of-scope decision.'],
       standards: [
         { code: 'NIS2', clause: 'Art. 21(2)(d)', demand: '<b>Supply-chain security.</b> You can produce, on demand, exactly what is inside what you run.' },
+        { code: 'SOC 2', clause: 'CC7.1', demand: '<b>Vulnerability detection.</b> The SBOM and CVE scan run on the image that actually ships.' },
         { code: 'ISO/IEC 27001', clause: 'A.5.7 / A.8.8', demand: '<b>Threat intelligence & vulnerability management.</b> Continuous visibility of known vulnerabilities in your dependencies.' },
       ],
     },
@@ -173,6 +175,7 @@ export const MANUAL = {
       specs: [{ v: '0 s', l: 'downtime on a swap' }, { v: 'Quarterly', l: 'default test cadence' }, { v: 'Verified', l: 'test only what’s loaded' }],
       standards: [
         { code: 'DORA', clause: 'Art. 11–12', demand: '<b>Response, recovery & restoration testing.</b> You must regularly test your ability to restore — here it’s a routine, and the last pass is recorded.' },
+        { code: 'SOC 2', clause: 'A1.2 / A1.3', demand: '<b>Backup & recovery testing.</b> Restores are rehearsed into an isolated DR slot and the test is recorded.' },
         { code: 'ISO/IEC 27001', clause: 'A.5.30 / A.8.13', demand: '<b>ICT readiness for continuity.</b> Backups are verified by restoration into an isolated slot.' },
         { code: 'NIS2', clause: 'Art. 21(2)(c)', demand: '<b>Business continuity & crisis management.</b> A zero-downtime swap means recovery doesn’t cost an outage.' },
       ],
@@ -220,8 +223,88 @@ export const MANUAL = {
       steps: ['Open <b>People &amp; roles</b> in the console.', 'Review roles across the team.', 'Approve or revoke devices per person.'],
       standards: [
         { code: 'ISO/IEC 27001', clause: 'A.5.18 / A.5.3', demand: '<b>Access rights & segregation of duties.</b> Operator, auditor and member are distinct roles with least privilege.' },
+        { code: 'SOC 2', clause: 'CC6.2 / CC6.3', demand: '<b>Access provisioning & de-provisioning.</b> Roles and per-person trusted devices are granted and revoked centrally.' },
         { code: 'NIS2', clause: 'Art. 21(2)(i)', demand: '<b>Human-resources security & access control.</b> Access is role-based and reviewable.' },
         { code: 'DORA', clause: 'Art. 9(4)', demand: '<b>Access management on a need-to-know basis.</b> Auditors get oversight without write power.' },
+      ],
+    },
+  ],
+
+  // ----------------------------------------------------------------------------
+  // Reference appendix: per-standard technical-controls guides. At a glance, what
+  // Bailey gives you vs. what you operate yourself, with a pointer to the chapter
+  // that shows it. Status: 'provided' (✓), 'partial' (◑), 'yours' (○).
+  // ----------------------------------------------------------------------------
+  controlGuides: [
+    {
+      standard: 'ISO/IEC 27001:2022',
+      blurb: 'Annex A technical controls. Bailey implements the platform-side controls below; the management-system controls (policies, risk assessment, HR, physical) remain yours.',
+      rows: [
+        { control: 'A.5.15 / A.8.5', req: 'Access control & secure authentication', status: 'provided', bailey: 'Device-trust gate + OIDC at the platform edge', ch: '01', yours: 'Your IdP, joiner/leaver process' },
+        { control: 'A.5.18', req: 'Access rights (least privilege, review)', status: 'provided', bailey: 'Operator / auditor / member roles, server-enforced', ch: '13', yours: 'Periodic access reviews' },
+        { control: 'A.8.8', req: 'Management of technical vulnerabilities', status: 'provided', bailey: 'Pre-deploy CVE scan + in-tree waivers', ch: '05 · 06', yours: 'Triage & remediation SLAs' },
+        { control: 'A.8.9', req: 'Configuration management', status: 'partial', bailey: 'bitswan.yaml as declarative source of truth', ch: '07', yours: 'Baseline definition & review' },
+        { control: 'A.8.13', req: 'Information backup', status: 'provided', bailey: 'Per-stage snapshots + retention policy', ch: '09', yours: 'Offsite copy & retention targets' },
+        { control: 'A.8.15 / A.8.16', req: 'Logging & monitoring', status: 'partial', bailey: 'Versioned deployment & event history', ch: '11', yours: 'SIEM aggregation, alerting' },
+        { control: 'A.8.20 / A.8.21', req: 'Network & network-services security', status: 'provided', bailey: 'Default-deny egress allow-list per service', ch: '12', yours: 'Perimeter & internal segmentation policy' },
+        { control: 'A.8.24', req: 'Use of cryptography & secrets', status: 'provided', bailey: 'Stage secrets, injected not committed; TLS at edge', ch: '08', yours: 'Key-management policy' },
+        { control: 'A.8.31', req: 'Separation of dev/test/production', status: 'provided', bailey: 'Isolated workspaces + dev/staging/prod stages', ch: '02 · 07', yours: '—' },
+        { control: 'A.8.32', req: 'Change management', status: 'provided', bailey: 'Reversible blue-green promotion path', ch: '07', yours: 'Change approval workflow' },
+        { control: 'A.5.30', req: 'ICT readiness for business continuity', status: 'provided', bailey: 'DR slot + rehearsed, recorded recovery tests', ch: '10', yours: 'BCP/DR plan & RTO/RPO targets' },
+      ],
+    },
+    {
+      standard: 'SOC 2 (Trust Services Criteria)',
+      blurb: 'The common-criteria and availability TSCs Bailey supports as a service component. Your audit still covers the organizational criteria (CC1–CC5), risk assessment and vendor management.',
+      rows: [
+        { control: 'CC6.1', req: 'Logical access security', status: 'provided', bailey: 'Device-trust gate fronting every endpoint', ch: '01', yours: 'Access policy & ownership' },
+        { control: 'CC6.2 / CC6.3', req: 'Access provisioning & removal', status: 'provided', bailey: 'Central role + device grant/revoke', ch: '13', yours: 'Timely de-provisioning process' },
+        { control: 'CC6.6', req: 'Boundary protection', status: 'provided', bailey: 'Default-deny egress allow-list', ch: '12', yours: 'Network perimeter design' },
+        { control: 'CC6.7', req: 'Data in transit protection', status: 'partial', bailey: 'TLS-terminating ingress', ch: '01', yours: 'Cert lifecycle, data-at-rest encryption' },
+        { control: 'CC7.1', req: 'Vulnerability detection', status: 'provided', bailey: 'SBOM + CVE scan on the image that ships', ch: '06', yours: 'Remediation tracking' },
+        { control: 'CC7.2', req: 'System monitoring', status: 'partial', bailey: 'Container health + event history', ch: '11', yours: 'Alerting & on-call' },
+        { control: 'CC8.1', req: 'Change management', status: 'provided', bailey: 'Promotion pipeline + immutable deploy history', ch: '07 · 11', yours: 'Change authorization' },
+        { control: 'A1.2', req: 'Backup & environmental protection', status: 'provided', bailey: 'Snapshots + standby DR slot', ch: '09 · 10', yours: 'Backup off-platform' },
+        { control: 'A1.3', req: 'Recovery testing', status: 'provided', bailey: 'Rehearse-into-DR + recorded recovery tests', ch: '10', yours: 'Test cadence sign-off' },
+      ],
+    },
+    {
+      standard: 'DORA (Regulation (EU) 2022/2554)',
+      blurb: 'The ICT risk-management articles Bailey operationalizes for financial entities. Governance, incident reporting to authorities, and third-party registers remain your obligation.',
+      rows: [
+        { control: 'Art. 8', req: 'Identification of ICT risk', status: 'provided', bailey: 'Pre-deploy supply-chain / CVE identification', ch: '06', yours: 'Risk register & classification' },
+        { control: 'Art. 9(3)', req: 'Strong authentication & protection', status: 'provided', bailey: 'Device-trust gate', ch: '01', yours: 'Identity governance' },
+        { control: 'Art. 9', req: 'Protection & prevention (change impact)', status: 'provided', bailey: 'Zero-downtime blue-green change path', ch: '07', yours: 'Segregation policy' },
+        { control: 'Art. 10', req: 'Detection of anomalous activity', status: 'partial', bailey: 'Health + deployment/event history', ch: '11', yours: 'Detection thresholds & alerting' },
+        { control: 'Art. 11', req: 'Response & recovery', status: 'provided', bailey: 'One-cutover DR swap, no data move', ch: '10', yours: 'Crisis-management plan' },
+        { control: 'Art. 12', req: 'Backup, restoration & testing', status: 'provided', bailey: 'Snapshots + rehearsed DR restores', ch: '09 · 10', yours: 'RTO/RPO & offsite policy' },
+        { control: 'Art. 13', req: 'Learning & evolving', status: 'provided', bailey: 'Complete, inspectable deploy audit trail', ch: '11', yours: 'Post-incident review process' },
+        { control: 'Art. 24–26', req: 'Resilience testing programme', status: 'partial', bailey: 'Runnable requirement tests + DR rehearsals', ch: '04 · 10', yours: 'TLPT for significant entities' },
+      ],
+    },
+    {
+      standard: 'NIS2 (Directive (EU) 2022/2555)',
+      blurb: 'The Article 21(2) cybersecurity-risk-management measures Bailey delivers technically. Governance, training and incident notification to your CSIRT stay with you.',
+      rows: [
+        { control: 'Art. 21(2)(a)', req: 'Risk analysis & network security', status: 'partial', bailey: 'Default-deny egress with reviewed exceptions', ch: '12', yours: 'Risk-analysis methodology' },
+        { control: 'Art. 21(2)(b)', req: 'Incident handling', status: 'partial', bailey: 'Reconstruct events from the audit trail', ch: '11', yours: 'Incident response & notification' },
+        { control: 'Art. 21(2)(c)', req: 'Business continuity & backups', status: 'provided', bailey: 'Backups + zero-downtime DR swap', ch: '09 · 10', yours: 'BCP & crisis comms' },
+        { control: 'Art. 21(2)(d)', req: 'Supply-chain security', status: 'provided', bailey: 'SBOM + CVE visibility per image', ch: '06', yours: 'Supplier assessment' },
+        { control: 'Art. 21(2)(e)', req: 'Secure development & vuln handling', status: 'provided', bailey: 'Pre-deploy checks + versioned waivers', ch: '05', yours: 'SDLC policy' },
+        { control: 'Art. 21(2)(h)', req: 'Cryptography', status: 'provided', bailey: 'Secret handling + TLS at the edge', ch: '08', yours: 'Crypto policy' },
+        { control: 'Art. 21(2)(i)', req: 'Access control & asset management', status: 'provided', bailey: 'Roles + workspace/endpoint inventory', ch: '02 · 13', yours: 'Asset ownership' },
+        { control: 'Art. 21(2)(j)', req: 'Multi-factor authentication', status: 'provided', bailey: 'Hardware-bound device trust', ch: '01', yours: 'Enrolment policy' },
+      ],
+    },
+    {
+      standard: 'GDPR (Regulation (EU) 2016/679)',
+      blurb: 'The security-of-processing and accountability articles Bailey supports. Lawful basis, data-subject rights, DPIAs and breach notification remain controller obligations.',
+      rows: [
+        { control: 'Art. 30', req: 'Records of processing activities', status: 'provided', bailey: 'Per-egress data-processing record, auto-maintained', ch: '12', yours: 'Controller-level register' },
+        { control: 'Art. 28', req: 'Processor obligations / DPAs', status: 'provided', bailey: 'DPA stored before egress is allowed', ch: '12', yours: 'Contract terms & due diligence' },
+        { control: 'Art. 32', req: 'Security of processing', status: 'provided', bailey: 'Access control, secrets, backup & resilience', ch: '08 · 09 · 10', yours: 'Risk-based measures & review' },
+        { control: 'Art. 5(1)(f)', req: 'Integrity & confidentiality', status: 'provided', bailey: 'Gated access + default-deny egress', ch: '01 · 12', yours: 'Data-handling policy' },
+        { control: 'Art. 33', req: 'Breach notification', status: 'partial', bailey: 'Audit trail to reconstruct what happened', ch: '11', yours: '72-hour notification process' },
       ],
     },
   ],

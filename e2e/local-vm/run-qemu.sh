@@ -46,7 +46,7 @@ cloud-localds "$WORK/seed.iso" "$WORK/user-data" "$WORK/meta-data"
 
 echo "=== boot KVM guest ($CPUS vCPU, ${MEM_MB}MB) ==="
 qemu-system-x86_64 -enable-kvm -cpu host -smp "$CPUS" -m "$MEM_MB" \
-  -nographic -serial none -monitor none \
+  -display none -serial file:"$WORK/serial.log" -monitor none \
   -drive file="$OVERLAY",if=virtio,format=qcow2 \
   -drive file="$WORK/seed.iso",if=virtio,format=raw \
   -netdev user,id=n0,hostfwd=tcp::${SSH_PORT}-:22 -device virtio-net-pci,netdev=n0 \
@@ -70,7 +70,10 @@ $SSH ubuntu@127.0.0.1 'sudo bash /repo/e2e/local-vm/provision.sh'
 # Re-login so the docker group membership applies, then run the suite.
 $SSH ubuntu@127.0.0.1 'bash /repo/e2e/local-vm/run-e2e.sh' || RC=$? || true
 
-echo "=== copy the Playwright report back ==="
+echo "=== copy the Operator's Handbook + Playwright report back ==="
+mkdir -p "$REPO_ROOT/e2e/manual/build"
+rsync -a -e "$SSH" ubuntu@127.0.0.1:/repo/e2e/manual/build/ \
+  "$REPO_ROOT/e2e/manual/build/" 2>/dev/null || true
 rsync -a -e "$SSH" ubuntu@127.0.0.1:/repo/e2e/playwright-report/ \
   "$REPO_ROOT/e2e/playwright-report/" 2>/dev/null || true
 

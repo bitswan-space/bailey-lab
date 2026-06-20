@@ -106,6 +106,23 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 .matrix th{ text-align:left; font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); padding:0 12px 10px; border-bottom:2px solid var(--ink) }
 .matrix td{ padding:13px 12px; border-bottom:1px solid var(--line); color:#33404d; vertical-align:top }
 .matrix td b{ color:var(--ink) }
+.guide .ghead{ font-size:13px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--amber) }
+.guide h2{ font-size:34px; letter-spacing:-.02em; margin:8px 0 0; color:var(--ink) }
+.guide .gblurb{ font-size:15px; color:#39454f; margin:14px 0 0; max-width:680px }
+.guide table{ width:100%; border-collapse:collapse; margin-top:22px; font-size:12.5px }
+.guide th{ text-align:left; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); padding:0 10px 9px; border-bottom:2px solid var(--ink) }
+.guide td{ padding:11px 10px; border-bottom:1px solid var(--line); color:#39454f; vertical-align:top }
+.guide td.ctl{ font-weight:800; color:var(--ink); white-space:nowrap }
+.guide td.ch{ font-weight:700; color:var(--steel); white-space:nowrap; text-align:center }
+.cov{ display:inline-flex; align-items:center; gap:5px; font-weight:700; font-size:11px; padding:3px 8px; border-radius:999px; white-space:nowrap }
+.cov.provided{ color:#15803d; background:#dcfce7 } .cov.partial{ color:#b45309; background:#fef3c7 } .cov.yours{ color:#475569; background:#e7ecf1 }
+.scorecards{ display:grid; gap:12px; margin-top:24px }
+.scorecard{ display:grid; grid-template-columns:1fr auto auto auto; gap:14px; align-items:center; padding:16px 20px; border:1px solid var(--line); border-radius:12px; background:#fff }
+.scorecard .sname{ font-weight:800; color:var(--ink); font-size:16px }
+.scorecard .sn{ text-align:center; min-width:84px }
+.scorecard .sn b{ display:block; font-size:24px; font-weight:800; line-height:1 }
+.scorecard .sn span{ font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted) }
+.legend{ display:flex; gap:16px; margin-top:18px; font-size:12px; color:#39454f; flex-wrap:wrap }
 .brand-lock{ display:flex; align-items:flex-end; gap:14px }
 .brand-lock .brand-bailey{ font-size:31px; font-weight:800; color:#fff; letter-spacing:-.01em; line-height:.82 }
 @media print{
@@ -194,9 +211,59 @@ function renderMatrix(m) {
   return `<section class="page matrix"><div class="pad">
     <div class="chapter-head"><span class="chapter-num">REF</span><span class="chapter-eyebrow">Compliance at a glance</span></div>
     <h2 style="font-size:40px;letter-spacing:-.025em;margin:8px 0 0;color:var(--ink)">Standards → features</h2>
-    <p class="lede">One page for your auditor: the controls ISO 27001, DORA and NIS2 ask for, and the Bitswan feature that delivers each.</p>
+    <p class="lede">One page for your auditor: the controls ISO 27001, SOC 2, DORA, NIS2 and GDPR ask for, and the Bitswan feature that delivers each.</p>
     <table><thead><tr><th>Standard &amp; clause</th><th>What it asks of you</th><th>Delivered by</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="runfoot"><span class="brand">${glyph('var(--ink)')}Bitswan Bailey · The Operator's Handbook</span><span>Bailey is best practice</span></div>
+  </div></section>`;
+}
+
+const COV = {
+  provided: ['✓', 'Provided'],
+  partial: ['◑', 'Partial'],
+  yours: ['○', 'Your part'],
+};
+const covPill = (s) => `<span class="cov ${s}">${(COV[s] || COV.yours)[0]} ${(COV[s] || COV.yours)[1]}</span>`;
+
+function renderAtAGlance(m) {
+  const guides = m.controlGuides || [];
+  if (!guides.length) return '';
+  const cards = guides.map((g) => {
+    const n = (st) => (g.rows || []).filter((r) => r.status === st).length;
+    return `<div class="scorecard">
+      <div class="sname">${esc(g.standard)}</div>
+      <div class="sn" style="color:#15803d"><b>${n('provided')}</b><span>Provided</span></div>
+      <div class="sn" style="color:#b45309"><b>${n('partial')}</b><span>Partial</span></div>
+      <div class="sn" style="color:#475569"><b>${n('yours')}</b><span>Your part</span></div>
+    </div>`;
+  }).join('');
+  return `<section class="page guide"><div class="pad">
+    <div class="ghead">Technical-controls guide</div>
+    <h2>What Bailey gives you — at a glance</h2>
+    <p class="gblurb">For each standard, how many technical controls Bailey provides outright, supports in part, or leaves to you to operate. The pages that follow break each down control-by-control, with a pointer to the chapter that shows it working.</p>
+    <div class="scorecards">${cards}</div>
+    <div class="legend">${covPill('provided')} delivered by the platform &nbsp; ${covPill('partial')} platform supports it; you complete it &nbsp; ${covPill('yours')} your organization operates it</div>
+    <div class="runfoot"><span class="brand">${glyph('var(--ink)')}Bitswan Bailey · The Operator's Handbook</span><span>Controls · at a glance</span></div>
+  </div></section>`;
+}
+
+function renderGuide(g) {
+  const rows = (g.rows || []).map((r) => `<tr>
+    <td class="ctl">${esc(r.control)}</td>
+    <td>${esc(r.req)}</td>
+    <td>${covPill(r.status)}</td>
+    <td>${r.status === 'yours' ? '<span style="color:var(--muted)">—</span>' : esc(r.bailey)}</td>
+    <td>${r.yours && r.yours !== '—' ? esc(r.yours) : '<span style="color:var(--muted)">—</span>'}</td>
+    <td class="ch">${r.ch ? esc(r.ch) : '—'}</td>
+  </tr>`).join('');
+  return `<section class="page guide"><div class="pad">
+    <div class="ghead">Technical-controls guide</div>
+    <h2>${esc(g.standard)}</h2>
+    <p class="gblurb">${esc(g.blurb || '')}</p>
+    <table>
+      <thead><tr><th>Control</th><th>What it requires</th><th>Status</th><th>Bailey gives you</th><th>Your part</th><th>Ch.</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="runfoot"><span class="brand">${glyph('var(--ink)')}Bitswan Bailey · The Operator's Handbook</span><span>${esc(g.standard)}</span></div>
   </div></section>`;
 }
 
@@ -211,5 +278,7 @@ ${renderCover(m)}
 ${renderManifesto(m)}
 ${chapters}
 ${renderMatrix(m)}
+${renderAtAGlance(m)}
+${(m.controlGuides || []).map(renderGuide).join('\n')}
 </body></html>`;
 }
