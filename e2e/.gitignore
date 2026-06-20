@@ -3,3 +3,4 @@ package-lock.json
 .env
 playwright-report/
 test-results/
+manual/build/
