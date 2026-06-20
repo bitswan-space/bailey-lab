@@ -3,32 +3,6 @@
   "enabled": true,
   "sslRequired": "none",
   "loginTheme": "keycloak",
-  "groups": [
-    { "name": "admin", "path": "/admin" }
-  ],
-  "clientScopes": [
-    {
-      "name": "groups",
-      "protocol": "openid-connect",
-      "attributes": { "include.in.token.scope": "true", "display.on.consent.screen": "false" },
-      "protocolMappers": [
-        {
-          "name": "groups",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-group-membership-mapper",
-          "consentRequired": false,
-          "config": {
-            "full.path": "false",
-            "id.token.claim": "true",
-            "access.token.claim": "true",
-            "userinfo.token.claim": "true",
-            "claim.name": "groups"
-          }
-        }
-      ]
-    }
-  ],
-  "defaultDefaultClientScopes": ["groups"],
   "clients": [
     {
       "clientId": "bailey",
@@ -45,7 +19,6 @@
         "https://*.bs-e2e.localhost/oauth2/callback"
       ],
       "webOrigins": ["https://bailey.bs-e2e.localhost", "https://bailey-onboard.bs-e2e.localhost"],
-      "defaultClientScopes": ["openid", "email", "profile", "groups"],
       "attributes": { "post.logout.redirect.uris": "https://*.bs-e2e.localhost/*" }
     }
   ],
@@ -57,8 +30,7 @@
       "lastName": "Novák",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "meridian-operator", "temporary": false }],
-      "groups": ["/admin"]
+      "credentials": [{ "type": "password", "value": "meridian-operator", "temporary": false }]
     },
     {
       "username": "eva.mueller@meridianfoods.cz",
