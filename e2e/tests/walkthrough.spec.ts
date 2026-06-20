@@ -77,38 +77,43 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     });
   }
 
-  // ---- Open the workspace dashboard ----
+  // ---- Open the workspace dashboard (its 'Open' button likely opens a new tab) ----
+  let dashPage = page;
   await chapter('open-dashboard', async () => {
     await page.goto(ENV.onboardUrl + '/workspaces');
     await page.waitForLoadState('networkidle');
-    await page.getByText(new RegExp(WORKSPACE.name, 'i')).first().click();
-    await page.waitForLoadState('networkidle');
-    await capture(page, 'dashboard-open');
+    const open = page.getByRole('button', { name: /^Open$/ }).or(page.getByRole('link', { name: /^Open$/ })).first();
+    const popupP = page.context().waitForEvent('page', { timeout: 15_000 }).catch(() => null);
+    await open.click();
+    const popup = await popupP;
+    if (popup) dashPage = popup;
+    await dashPage.waitForLoadState('networkidle');
+    await capture(dashPage, 'dashboard-open');
   });
 
   // ---- Dashboard feature chapters (best-effort; selectors refined per trace) ----
-  const d: FrameOrPage = await dashboard(page);
+  const d: FrameOrPage = await dashboard(dashPage);
   await chapter('description', async () => {
     await d.getByRole('button', { name: /Description/i }).first().click();
-    await capture(page, 'description');
+    await capture(dashPage, 'description');
   });
   await chapter('requirements', async () => {
     await d.getByRole('button', { name: /Requirements/i }).first().click();
-    await capture(page, 'requirements');
+    await capture(dashPage, 'requirements');
   });
   await chapter('sync-deploy', async () => {
     await d.getByRole('button', { name: /Sync & Deploy/i }).first().click();
-    await capture(page, 'sync-deploy');
+    await capture(dashPage, 'sync-deploy');
     await d.getByRole('button', { name: /checks/i }).first().click();
-    await capture(page, 'checks-cve');
+    await capture(dashPage, 'checks-cve');
   });
   await chapter('deployments', async () => {
     await d.getByRole('button', { name: /Deployments/i }).first().click();
-    await capture(page, 'deployments-prod');
+    await capture(dashPage, 'deployments-prod');
     for (const [section, slot] of [['supply', 'supply-chain'], ['secrets', 'secrets'], ['backups', 'backups'], ['history', 'history'], ['firewall', 'firewall'], ['recovery', 'dr-rehearse']] as const) {
       await chapter(slot, async () => {
         await d.getByRole('button', { name: new RegExp(`^${section}$`, 'i') }).first().click();
-        await capture(page, slot);
+        await capture(dashPage, slot);
       });
     }
   });
