@@ -30,7 +30,7 @@ async function chapter(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
-  test.setTimeout(35 * 60_000);
+  test.setTimeout(55 * 60_000);
 
   // ---- Onboarding (hard-asserted) ----
   await test.step('onboarding: sign in + claim the server', async () => {
@@ -95,29 +95,120 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'dashboard-open');
   });
 
+  const tab = (re: RegExp) => d.getByRole('button', { name: re }).first();
+  const settle = (ms = 1200) => dashPage.waitForTimeout(ms);
+
+  // ---- A copy (worktree) is required before a BP can be created ----
+  await chapter('create-copy', async () => {
+    await d.getByRole('button', { name: /^Copy/ }).first().click();
+    const newCopy = d.getByRole('button', { name: /New copy/i });
+    if (await newCopy.count()) {
+      await newCopy.click();
+      await d.getByPlaceholder('my-feature').fill('rollout');
+      await d.getByRole('button', { name: /^Create$/ }).click();
+      await settle(4_000);
+    } else {
+      await dashPage.keyboard.press('Escape');
+    }
+  });
+
   // ---- Create the invoice-processing business process ----
   await chapter('create-bp', async () => {
     await d.getByRole('button', { name: /Business process/i }).first().click();
     await capture(dashPage, 'bp-switcher');
-    await d.getByText(/New business process/i).first().click();
-    await d.getByRole('textbox').first().fill(BP.slug);
+    await d.getByRole('button', { name: /New business process/i }).click();
+    await d.getByPlaceholder('my-process').fill(BP.slug);
     await capture(dashPage, 'bp-create');
-    await d.getByRole('button', { name: /^(Create|Add|New business process)$/i }).last().click();
-    await dashPage.waitForTimeout(4_000);
+    await d.getByRole('button', { name: /^Create$/ }).click();
+    // Scaffolding deploys in the background; give it a moment to settle.
+    await settle(8_000);
   });
 
-  // ---- Description (with the BP selected) ----
+  // ---- Description ----
   await chapter('description', async () => {
-    await d.getByRole('button', { name: /^Description$/i }).first().click();
+    await tab(/^Description$/).click();
     const editor = d.getByRole('textbox').first();
-    if (await editor.count()) await editor.fill(BP.description).catch(() => {});
+    if (await editor.count()) {
+      await editor.click();
+      await editor.fill(BP.description).catch(() => {});
+      const save = d.getByRole('button', { name: /^Save$/ });
+      if (await save.count()) await save.first().click().catch(() => {});
+    }
     await capture(dashPage, 'description');
   });
 
-  // ---- Deployments (whatever state exists; lifecycle captures come next) ----
-  await chapter('deployments', async () => {
-    await d.getByRole('button', { name: /^Deployments$/i }).first().click();
-    await capture(dashPage, 'deployments-prod');
+  // ---- Requirements & tests ----
+  await chapter('requirements', async () => {
+    await tab(/Requirements/).click();
+    await settle();
+    await capture(dashPage, 'requirements');
+  });
+
+  // ---- Sync & Deploy: the Checks/Supply-chain CVE scan works pre-deploy ----
+  await chapter('sync-deploy', async () => {
+    await tab(/Sync & Deploy/).click();
+    await settle();
+    await capture(dashPage, 'sync-deploy');
+    const checks = d.getByRole('button', { name: /^checks$/ });
+    if (await checks.count()) { await checks.click(); await settle(2_000); await capture(dashPage, 'checks-cve'); }
+  });
+
+  // ---- Deploy to dev, then promote dev → staging → production (best-effort, slow) ----
+  await chapter('deploy', async () => {
+    await tab(/Sync & Deploy/).click();
+    const deploy = d.getByRole('button', { name: /^(Sync & Deploy|Working…)$/ }).last();
+    await deploy.click();
+    // Real image build + compose up — wait for the dev deploy to report Healthy.
+    await d.getByText(/Healthy/i).first().waitFor({ timeout: 8 * 60_000 }).catch(() => {});
+  });
+
+  const goStage = async (label: RegExp) => { await tab(/^Deployments$/).click(); await d.getByRole('button', { name: label }).first().click(); await settle(); };
+  const goSection = async (label: RegExp) => { await d.getByRole('button', { name: label }).first().click(); await settle(); };
+
+  await chapter('promote', async () => {
+    await tab(/^Deployments$/).click();
+    for (let i = 0; i < 2; i++) {
+      const promote = d.getByRole('button', { name: /^Promote$/ }).first();
+      if (await promote.isEnabled().catch(() => false)) {
+        await promote.click();
+        await d.getByText(/Healthy/i).first().waitFor({ timeout: 8 * 60_000 }).catch(() => {});
+      }
+    }
+  });
+
+  // ---- Deployments: production + each section ----
+  await chapter('deployments-prod', async () => { await goStage(/Production/); await capture(dashPage, 'deployments-prod'); });
+  await chapter('supply-chain', async () => { await goStage(/Production/); await goSection(/Supply chain/); await capture(dashPage, 'supply-chain'); });
+  await chapter('secrets', async () => { await goStage(/Production/); await goSection(/^Secrets$/); await capture(dashPage, 'secrets'); });
+  await chapter('history', async () => { await goStage(/Production/); await goSection(/Deployment history/); await capture(dashPage, 'history'); });
+  await chapter('firewall', async () => { await goStage(/Production/); await goSection(/^Firewall$/); await capture(dashPage, 'firewall'); });
+
+  // ---- Backups: take a production snapshot ----
+  await chapter('backups', async () => {
+    await goStage(/Production/);
+    await goSection(/^Backups$/);
+    const snap = d.getByRole('button', { name: /Create snapshot/i }).first();
+    if (await snap.count()) {
+      await snap.click();
+      const confirm = d.getByRole('button', { name: /Create snapshot/i }).last();
+      if (await confirm.count()) await confirm.click();
+      await d.getByText(/\d{4}-\d{2}-\d{2}/).first().waitFor({ timeout: 4 * 60_000 }).catch(() => {});
+    }
+    await capture(dashPage, 'backups');
+  });
+
+  // ---- Disaster Recovery: restore into DR + mark recovery-tested ----
+  await chapter('dr-rehearse', async () => {
+    await goStage(/Disaster Recovery/);
+    await goSection(/Rehearse & restore/);
+    const restore = d.getByRole('button', { name: /Restore into DR/i }).first();
+    if (await restore.count()) {
+      await restore.click();
+      await d.getByText(/In DR now/i).first().waitFor({ timeout: 4 * 60_000 }).catch(() => {});
+      const mark = d.getByRole('button', { name: /Mark recovery-tested/i }).first();
+      if (await mark.count()) await mark.click().catch(() => {});
+    }
+    await capture(dashPage, 'dr-rehearse');
   });
 
   // eslint-disable-next-line no-console
