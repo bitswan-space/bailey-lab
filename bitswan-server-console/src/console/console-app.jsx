@@ -228,6 +228,7 @@ function ageLabel(secs) {
 const NAV = [
   { group: 'Workspace', items: [
     { id: 'workspaces', label: 'Workspaces', icon: 'layout-grid' },
+    { id: 'handbook',   label: 'Handbook',   icon: 'book-open' },
   ]},
   { group: 'Your account', items: [
     { id: 'devices',  label: 'Your devices',        icon: 'laptop' },
@@ -251,7 +252,7 @@ const NAV = [
 // routing works end-to-end. A second path segment carries a view's open
 // "drawer" (the workspace being managed, the person whose devices you're
 // viewing) — e.g. /workspaces/acme, /users/jane@x.
-const ROUTES = ['workspaces', 'overview', 'users', 'acl', 'devices', 'security'];
+const ROUTES = ['workspaces', 'handbook', 'overview', 'users', 'acl', 'devices', 'security'];
 
 function parseLocation() {
   const segs = (window.location.pathname || '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
@@ -336,7 +337,7 @@ function Console({ data, setData, toast, refresh }) {
 
   const views = {
     workspaces: WorkspacesView, overview: OverviewView, users: UsersView,
-    acl: EndpointAccessView, devices: DevicesView, security: SecurityView,
+    acl: EndpointAccessView, devices: DevicesView, security: SecurityView, handbook: HandbookView,
   };
   const View = views[route] || WorkspacesView;
 
@@ -436,6 +437,45 @@ function WaitingScene() {
         <p style={{ margin: '8px auto 0', fontSize: 13.5, color: AC.muted, lineHeight: '20px', maxWidth: 340 }}>
           This Bailey server hasn't been claimed yet, and your account isn't eligible to claim it. Ask the person setting up this server to sign in first.
         </p>
+      </div>
+    </div>
+  );
+}
+
+// The Operator's Handbook — a splashy, illustrated manual generated from a live
+// product walkthrough (see e2e/manual). Served as static assets alongside the
+// console (/handbook/handbook.html + .pdf). Opened in a new tab to avoid nested
+// iframes / the inner CSP.
+function HandbookView() {
+  const card = { background: AC.surface, border: `1px solid ${AC.border}`, borderRadius: 14, padding: '34px 36px', maxWidth: 760 };
+  const btn = (primary) => ({
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderRadius: 9,
+    fontSize: 14, fontWeight: 600, textDecoration: 'none', cursor: 'pointer',
+    border: `1px solid ${primary ? AC.fg : AC.border}`, background: primary ? AC.fg : 'transparent',
+    color: primary ? '#fff' : AC.fg,
+  });
+  return (
+    <div>
+      <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: 0.6, textTransform: 'uppercase', color: AC.muted, marginBottom: 6 }}>Documentation</div>
+      <h1 style={{ fontSize: 26, fontWeight: 800, color: AC.fg, margin: '0 0 4px' }}>The Operator's Handbook</h1>
+      <p style={{ color: AC.muted, fontSize: 14, margin: '0 0 24px', maxWidth: 620 }}>
+        A guided tour of Bitswan Bailey — onboarding, workspaces, Sync &amp; Deploy, blue-green
+        production, disaster-recovery rehearsals and access control — with a technical-controls
+        guide mapping ISO&nbsp;27001, SOC&nbsp;2, DORA, NIS2 and GDPR to the features that deliver them.
+      </p>
+      <div style={card}>
+        <div style={{ fontSize: 19, fontWeight: 800, color: AC.fg }}>Bitswan Bailey — Operator's Handbook</div>
+        <div style={{ color: AC.muted, fontSize: 13, margin: '6px 0 22px' }}>
+          Every screenshot was captured live, walking the real product. Bailey is best practice.
+        </div>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <a style={btn(true)} href="/handbook/handbook.html" target="_blank" rel="noopener noreferrer">
+            <AIcon name="book-open" size={16} color="#fff" /> Read the handbook
+          </a>
+          <a style={btn(false)} href="/handbook/handbook.pdf" target="_blank" rel="noopener noreferrer" download>
+            <AIcon name="download" size={16} color={AC.fg} /> Download PDF
+          </a>
+        </div>
       </div>
     </div>
   );

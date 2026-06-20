@@ -16,7 +16,7 @@
  *   - handbook.html .............. one self-contained file (screenshots inlined)
  *   - handbook.pdf ............... print-rendered via headless Chromium
  */
-import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, copyFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { MANUAL } from './content.mjs';
@@ -87,13 +87,25 @@ async function main() {
   writeFileSync(htmlPath, html);
   console.log('Wrote ' + htmlPath);
 
+  const pdfPath = join(BUILD, 'handbook.pdf');
   if (process.env.MANUAL_NO_PDF === '1') {
     console.log('MANUAL_NO_PDF=1 — skipping PDF.');
-    return;
+  } else {
+    await renderPdf(htmlPath, pdfPath);
+    console.log('Wrote ' + pdfPath);
   }
-  const pdfPath = join(BUILD, 'handbook.pdf');
-  await renderPdf(htmlPath, pdfPath);
-  console.log('Wrote ' + pdfPath);
+
+  // Publish into the Server Console so the manual is built INTO the product:
+  // the console serves these as static assets (/handbook/handbook.{html,pdf})
+  // behind its "Handbook" nav item.
+  const consoleDir = join(HERE, '..', '..', 'bitswan-server-console');
+  if (existsSync(consoleDir)) {
+    const pub = join(consoleDir, 'public', 'handbook');
+    mkdirSync(pub, { recursive: true });
+    copyFileSync(htmlPath, join(pub, 'handbook.html'));
+    if (existsSync(pdfPath)) copyFileSync(pdfPath, join(pub, 'handbook.pdf'));
+    console.log('Published handbook into the Server Console (' + pub + ').');
+  }
 }
 
 main().catch((e) => {
