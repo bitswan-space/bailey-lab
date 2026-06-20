@@ -9,7 +9,7 @@
  */
 
 export const MANUAL = {
-  title: "Bitswan — The Operator's Handbook",
+  title: "Bitswan Bailey — The Operator's Handbook",
   subtitle: "The Operator's Handbook",
   edition: '2026 Edition',
   headline: 'Run it like it matters.',

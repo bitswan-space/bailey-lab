@@ -25,9 +25,13 @@ const CSS = `
   --amber:#ff7a18; --amber2:#ffb43d; --teal:#36c5b0; --muted:#6f7b88; --maxw:920px; }
 body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   color:#0c1722; background:#33414f; line-height:1.55; -webkit-font-smoothing:antialiased; }
-.page{ width:100%; max-width:var(--maxw); margin:26px auto; background:var(--paper);
-  box-shadow:0 24px 60px rgba(0,0,0,.35); border-radius:6px; overflow:hidden; position:relative; }
-.pad{ padding:64px 68px } @media (max-width:680px){ .pad{padding:40px 28px} }
+/* Every page is a real A4 sheet (210×297mm) so the manual is uniform on screen
+   and prints clean to A4. Dense chapters may flow to a second sheet; short ones
+   stay a full page rather than collapsing to their content height. */
+.page{ width:210mm; min-height:297mm; margin:16px auto; background:var(--paper);
+  box-shadow:0 24px 60px rgba(0,0,0,.35); border-radius:2px; overflow:hidden; position:relative; }
+.pad{ padding:22mm 20mm; min-height:297mm; box-sizing:border-box }
+@media (max-width:820px){ .page{ width:100%; min-height:0 } .pad{ padding:32px 24px; min-height:0 } }
 .logo{display:inline-block;line-height:0} .logo svg{height:30px;width:auto;display:block}
 .cover .logo svg{height:34px}
 .glyph{display:inline-block;line-height:0;vertical-align:middle} .glyph svg{height:16px;width:auto;display:block}
@@ -102,8 +106,10 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 .matrix th{ text-align:left; font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); padding:0 12px 10px; border-bottom:2px solid var(--ink) }
 .matrix td{ padding:13px 12px; border-bottom:1px solid var(--line); color:#33404d; vertical-align:top }
 .matrix td b{ color:var(--ink) }
+.brand-lock{ display:flex; align-items:flex-end; gap:14px }
+.brand-lock .brand-bailey{ font-size:31px; font-weight:800; color:#fff; letter-spacing:-.01em; line-height:.82 }
 @media print{
-  body{ background:#fff } .page{ box-shadow:none; border-radius:0; margin:0; max-width:none; page-break-after:always }
+  body{ background:#fff } .page{ box-shadow:none; border-radius:0; margin:0; width:210mm; min-height:297mm; page-break-after:always }
   .page:last-child{ page-break-after:auto }
   @page{ size:A4; margin:0 }
 }
@@ -118,8 +124,8 @@ function renderCover(m) {
   return `<section class="page cover">
   <div class="cover-watermark">${glyph('#9fd9ce')}</div>
   <div class="pad">
-    <span class="logo" style="color:#fff">${WORDMARK}</span>
-    <span class="kicker" style="margin-top:24px"><span class="dot"></span> ${esc(m.subtitle || "The Operator's Handbook")} · ${esc(m.edition || '2026 Edition')}</span>
+    <span class="brand-lock"><span class="logo" style="color:#fff">${WORDMARK}</span><span class="brand-bailey">Bailey</span></span>
+    <span class="kicker" style="margin-top:22px"><span class="dot"></span> Bitswan Bailey · ${esc(m.subtitle || "The Operator's Handbook")} · ${esc(m.edition || '2026 Edition')}</span>
     <h1>${esc(m.headline || 'Run it like it matters.')}</h1>
     <div class="sub">${esc(m.tagline || 'Business processes on infrastructure that defends itself.')}</div>
     <p class="tag">${esc(m.blurb || '')}</p>
@@ -176,7 +182,7 @@ function renderChapter(ch, idx) {
     ${specs}
     ${extraShots}
     ${renderStandards(ch.standards)}
-    <div class="runfoot"><span class="brand">${glyph('var(--ink)')}Bitswan · The Operator's Handbook</span><span>${esc(ch.title)} — ${esc(num)}</span></div>
+    <div class="runfoot"><span class="brand">${glyph('var(--ink)')}Bitswan Bailey · The Operator's Handbook</span><span>${esc(ch.title)} — ${esc(num)}</span></div>
   </div></section>`;
 }
 
@@ -190,7 +196,7 @@ function renderMatrix(m) {
     <h2 style="font-size:40px;letter-spacing:-.025em;margin:8px 0 0;color:var(--ink)">Standards → features</h2>
     <p class="lede">One page for your auditor: the controls ISO 27001, DORA and NIS2 ask for, and the Bitswan feature that delivers each.</p>
     <table><thead><tr><th>Standard &amp; clause</th><th>What it asks of you</th><th>Delivered by</th></tr></thead><tbody>${rows}</tbody></table>
-    <div class="runfoot"><span class="brand">${glyph('var(--ink)')}Bitswan · The Operator's Handbook</span><span>Bailey is best practice</span></div>
+    <div class="runfoot"><span class="brand">${glyph('var(--ink)')}Bitswan Bailey · The Operator's Handbook</span><span>Bailey is best practice</span></div>
   </div></section>`;
 }
 

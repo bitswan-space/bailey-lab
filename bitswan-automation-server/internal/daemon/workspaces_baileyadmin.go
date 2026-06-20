@@ -212,7 +212,11 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 	// line as a "log" event. Two pipes (one per stream) so we don't
 	// interleave bytes at the buffer boundary. Tagged streams let the
 	// frontend treat stderr differently if it cares.
-	args := []string{"workspace", "init", name, "--domain", domain, "--owner", email}
+	// Flags MUST precede the positional workspace name: runWorkspaceInit parses
+	// with the stdlib flag package, which stops at the first non-flag argument.
+	// With the name first, --domain/--owner were silently dropped, so workspace
+	// routes registered against an empty domain (e.g. "<name>-dashboard.").
+	args := []string{"workspace", "init", "--domain", domain, "--owner", email, name}
 	confirmCh := make(chan struct{}, 1)
 	confirmCh <- struct{}{}
 
