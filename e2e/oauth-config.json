@@ -1,0 +1,11 @@
+{
+  "client_id": "bitswan-e2e",
+  "client_secret": "e2e-client-secret",
+  "issuer_url": "http://keycloak.bs-e2e.localhost:8088/realms/bitswan",
+  "redirect_url": "https://e2e-dashboard.bs-e2e.localhost/oauth2/callback",
+  "cookie_secret": "ZTJlLWNvb2tpZS1zZWNyZXQtMzItYnl0ZXMt9g==",
+  "email_domains": ["*"],
+  "allowed_groups": [],
+  "provider": "oidc",
+  "groups_claim": "groups"
+}
