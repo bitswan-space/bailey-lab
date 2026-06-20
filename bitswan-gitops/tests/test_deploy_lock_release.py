@@ -63,9 +63,9 @@ async def test_cancelled_bp_deploy_releases_member_locks(fresh_dm):
             members=[],
         )
 
-    assert not any(fresh_dm.is_deploying(i) for i in _IDS), (
-        "cancelled deploy leaked its member locks → future deploys 409 forever"
-    )
+    assert not any(
+        fresh_dm.is_deploying(i) for i in _IDS
+    ), "cancelled deploy leaked its member locks → future deploys 409 forever"
 
     # The leak's real symptom: a fresh deploy of the same BP must succeed.
     task2, conflict2 = await fresh_dm.create_bp_task("jklj", _IDS)
