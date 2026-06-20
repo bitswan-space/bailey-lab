@@ -50,36 +50,37 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await page.getByRole('textbox').first().fill(WORKSPACE.name);
     await capture(page, 'workspace-create');
     await page.getByRole('button', { name: /^(Create|Create workspace)$/i }).last().click();
-    // Creation streams progress; wait until the workspace is listed/active.
-    await expect(page.getByText(new RegExp(WORKSPACE.name, 'i')).first()).toBeVisible({ timeout: 12 * 60_000 });
+    // Creation streams an NDJSON progress log in the modal. Wait for it to FINISH
+    // (the 'Creating…' state clears) — not just for the name to appear in the log.
+    await expect(page.getByRole('button', { name: /Creating/i })).toBeHidden({ timeout: 12 * 60_000 });
+    // Dismiss the modal via whatever terminal action it offers.
+    for (const re of [/Open dashboard/i, /^Done$/i, /^Close$/i, /^Open$/i]) {
+      const b = page.getByRole('button', { name: re });
+      if (await b.count()) { await b.first().click(); break; }
+    }
+    await page.getByRole('dialog').waitFor({ state: 'hidden', timeout: 30_000 }).catch(() => {});
+    await expect(page.getByText(new RegExp(WORKSPACE.name, 'i')).first()).toBeVisible({ timeout: 30_000 });
     await capture(page, 'cover');
   });
 
-  // ---- Console chapters (top-level, best-effort) ----
-  await chapter('people-roles', async () => {
-    await page.getByRole('link', { name: /People & roles/i }).click();
-    await page.waitForLoadState('networkidle');
-    await capture(page, 'people-roles');
-  });
-  await chapter('server-overview', async () => {
-    await page.getByRole('link', { name: /Server overview/i }).click();
-    await page.waitForLoadState('networkidle');
-    await capture(page, 'server-overview');
-  });
-  await chapter('endpoint-access', async () => {
-    await page.getByRole('link', { name: /Endpoint access/i }).click();
-    await page.waitForLoadState('networkidle');
-    await capture(page, 'endpoint-access');
-  });
-  await chapter('devices', async () => {
-    await page.getByRole('link', { name: /Your devices/i }).click();
-    await page.waitForLoadState('networkidle');
-    await capture(page, 'devices');
-  });
+  // ---- Console chapters: navigate by SPA route (robust; no sidebar clicks) ----
+  for (const [route, slot] of [
+    ['/users', 'people-roles'],
+    ['/overview', 'server-overview'],
+    ['/acl', 'endpoint-access'],
+    ['/devices', 'devices'],
+  ] as const) {
+    await chapter(slot, async () => {
+      await page.goto(ENV.onboardUrl + route);
+      await page.waitForLoadState('networkidle');
+      await capture(page, slot);
+    });
+  }
 
   // ---- Open the workspace dashboard ----
   await chapter('open-dashboard', async () => {
-    await page.getByRole('link', { name: /^Workspaces$/i }).click();
+    await page.goto(ENV.onboardUrl + '/workspaces');
+    await page.waitForLoadState('networkidle');
     await page.getByText(new RegExp(WORKSPACE.name, 'i')).first().click();
     await page.waitForLoadState('networkidle');
     await capture(page, 'dashboard-open');
