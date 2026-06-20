@@ -261,7 +261,8 @@ func startDaemonContainer(startMessage, successMessage string) error {
 
 	// HOST_HOME still tells the daemon the host home directory (used for the few
 	// remaining host-path operations, e.g. local-repo remotes via /host).
-	dockerCmd := exec.Command("docker", "run",
+	runArgs := []string{
+		"run",
 		"-d",
 		"--name", "bitswan-automation-server-daemon",
 		"--restart", "unless-stopped",
@@ -269,6 +270,17 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		"-e", "BITSWAN_CADDY_HOST=caddy:2019",
 		"-e", "BITSWAN_TRAEFIK_HOST=traefik:8080",
 		"-e", fmt.Sprintf("HOST_HOME=%s", homeDir),
+	}
+	// Forward any pinned component-image overrides into the daemon so workspaces
+	// it creates (incl. via the Server Console UI) use them instead of the Docker
+	// Hub "latest". Lets operators run a private registry — and CI test images
+	// built from this checkout.
+	for _, key := range []string{"BITSWAN_GITOPS_IMAGE", "BITSWAN_DASHBOARD_IMAGE", "BITSWAN_EDITOR_IMAGE", "BITSWAN_CODING_AGENT_IMAGE"} {
+		if v := os.Getenv(key); v != "" {
+			runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%s", key, v))
+		}
+	}
+	runArgs = append(runArgs,
 		"-v", fmt.Sprintf("%s:/usr/local/bin/bitswan:ro", binaryPath),
 		"-v", fmt.Sprintf("%s:/root/.config/bitswan", configVolume),
 		"-v", fmt.Sprintf("%s:/root/.local/share/mkcert", mkcertVolume),
@@ -279,6 +291,7 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		daemonImage,
 		"/usr/local/bin/bitswan", "automation-server-daemon", "__run",
 	)
+	dockerCmd := exec.Command("docker", runArgs...)
 
 	dockerCmd.Stdout = os.Stdout
 	dockerCmd.Stderr = os.Stderr

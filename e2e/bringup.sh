@@ -47,7 +47,15 @@ docker build -t "$DASHBOARD_IMAGE"    -f "$REPO_ROOT/bitswan-workspace-dashboard
 docker build -t "$CODING_AGENT_IMAGE" -f "$REPO_ROOT/bitswan-coding-agent/Dockerfile" "$REPO_ROOT/bitswan-coding-agent"
 
 echo "=== [2/7] Daemon + traefik ingress ==="
-sudo "$BITSWAN" automation-server-daemon init
+# Pin the daemon to THIS checkout's images so workspaces it creates via the
+# Server Console UI run the branch's gitops/dashboard/coding-agent (with the
+# features the manual documents) instead of Docker Hub 'latest'. sudo strips the
+# environment, so set it explicitly on the command via `env`.
+sudo env \
+  BITSWAN_GITOPS_IMAGE="$GITOPS_IMAGE" \
+  BITSWAN_DASHBOARD_IMAGE="$DASHBOARD_IMAGE" \
+  BITSWAN_CODING_AGENT_IMAGE="$CODING_AGENT_IMAGE" \
+  "$BITSWAN" automation-server-daemon init
 sleep 5
 "$BITSWAN" automation-server-daemon status
 "$BITSWAN" ingress init --type traefik -v

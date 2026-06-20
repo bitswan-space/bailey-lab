@@ -6,8 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 )
+
+// imageOverride returns a pinned image set via environment, or "". Operators
+// running a private/air-gapped registry (or CI testing locally-built images)
+// set e.g. BITSWAN_DASHBOARD_IMAGE to bypass the Docker Hub "latest" lookup.
+func imageOverride(envVar string) string {
+	return os.Getenv(envVar)
+}
 
 func GetLatestDockerHubVersion(url string) (string, error) {
 	// Get the latest version of the bitswan-gitops image by looking it up on dockerhub
@@ -89,6 +97,9 @@ func GetLatestGitopsStagingVersion() (string, error) {
 
 // ResolveGitopsImage returns the full gitops image string based on the staging flag.
 func ResolveGitopsImage(staging bool) (string, error) {
+	if img := imageOverride("BITSWAN_GITOPS_IMAGE"); img != "" {
+		return img, nil
+	}
 	if staging {
 		version, err := GetLatestGitopsStagingVersion()
 		if err != nil {
@@ -115,6 +126,9 @@ func GetLatestDashboardStagingVersion() (string, error) {
 
 // ResolveDashboardImage returns the full workspace-dashboard image string based on the staging flag.
 func ResolveDashboardImage(staging bool) (string, error) {
+	if img := imageOverride("BITSWAN_DASHBOARD_IMAGE"); img != "" {
+		return img, nil
+	}
 	if staging {
 		version, err := GetLatestDashboardStagingVersion()
 		if err != nil {
@@ -131,6 +145,9 @@ func ResolveDashboardImage(staging bool) (string, error) {
 
 // ResolveEditorImage returns the full editor image string based on the staging flag.
 func ResolveEditorImage(staging bool) (string, error) {
+	if img := imageOverride("BITSWAN_EDITOR_IMAGE"); img != "" {
+		return img, nil
+	}
 	if staging {
 		version, err := GetLatestEditorStagingVersion()
 		if err != nil {
@@ -157,6 +174,9 @@ func GetLatestCodingAgentStagingVersion() (string, error) {
 
 // ResolveCodingAgentImage returns the full coding-agent image string based on the staging flag.
 func ResolveCodingAgentImage(staging bool) (string, error) {
+	if img := imageOverride("BITSWAN_CODING_AGENT_IMAGE"); img != "" {
+		return img, nil
+	}
 	if staging {
 		version, err := GetLatestCodingAgentStagingVersion()
 		if err != nil {
