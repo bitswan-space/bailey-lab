@@ -112,6 +112,12 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     }
   });
 
+  // Wait for in-flight "Loading…/Preparing…/Working…" spinners to clear.
+  const waitLoaded = async () =>
+    d.getByText(/Loading|Preparing|Working/i).first().waitFor({ state: 'hidden', timeout: 8 * 60_000 }).catch(() => {});
+  const waitHealthy = async () =>
+    d.getByText(/Healthy|Current on|Deployed/i).first().waitFor({ timeout: 8 * 60_000 }).catch(() => {});
+
   // ---- Create the invoice-processing business process ----
   await chapter('create-bp', async () => {
     await d.getByRole('button', { name: /Business process/i }).first().click();
@@ -120,9 +126,16 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await d.getByPlaceholder('my-process').fill(BP.slug);
     await capture(dashPage, 'bp-create');
     await d.getByRole('button', { name: /^Create$/ }).click();
-    // Scaffolding deploys in the background; give it a moment to settle.
     await settle(8_000);
   });
+
+  const goStage = async (label: RegExp) => { await tab(/^Deployments$/).click(); await settle(800); await d.getByRole('button', { name: label }).first().click(); await settle(1200); };
+  const goSection = async (label: RegExp) => { await d.getByRole('button', { name: label }).first().click(); await settle(1200); };
+
+  // ---- Let the BP scaffolding deploy land on Development (NO second deploy —
+  //      a second Sync & Deploy here races the scaffolding deploy and collides
+  //      on container names). ----
+  await chapter('await-scaffold', async () => { await goStage(/Development/); await waitHealthy(); });
 
   // ---- Description ----
   await chapter('description', async () => {
@@ -150,48 +163,42 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await settle();
     await capture(dashPage, 'sync-deploy');
     const checks = d.getByRole('button', { name: /^checks$/ });
-    if (await checks.count()) { await checks.click(); await settle(2_000); await capture(dashPage, 'checks-cve'); }
+    if (await checks.count()) { await checks.click(); await waitLoaded(); await settle(2_000); await capture(dashPage, 'checks-cve'); }
   });
 
-  // ---- Deploy to dev, then promote dev → staging → production (best-effort, slow) ----
-  await chapter('deploy', async () => {
-    await tab(/Sync & Deploy/).click();
-    const deploy = d.getByRole('button', { name: /^(Sync & Deploy|Working…)$/ }).last();
-    await deploy.click();
-    // Real image build + compose up — wait for the dev deploy to report Healthy.
-    await d.getByText(/Healthy/i).first().waitFor({ timeout: 8 * 60_000 }).catch(() => {});
-  });
-
-  const goStage = async (label: RegExp) => { await tab(/^Deployments$/).click(); await d.getByRole('button', { name: label }).first().click(); await settle(); };
-  const goSection = async (label: RegExp) => { await d.getByRole('button', { name: label }).first().click(); await settle(); };
-
+  // ---- Promote dev → staging → production (the scaffolding already deployed dev) ----
   await chapter('promote', async () => {
     await tab(/^Deployments$/).click();
+    await settle();
     for (let i = 0; i < 2; i++) {
       const promote = d.getByRole('button', { name: /^Promote$/ }).first();
       if (await promote.isEnabled().catch(() => false)) {
         await promote.click();
-        await d.getByText(/Healthy/i).first().waitFor({ timeout: 8 * 60_000 }).catch(() => {});
+        await waitHealthy();
+        await settle(2_000);
       }
     }
   });
 
-  // ---- Deployments: production + each section ----
-  await chapter('deployments-prod', async () => { await goStage(/Production/); await capture(dashPage, 'deployments-prod'); });
-  await chapter('supply-chain', async () => { await goStage(/Production/); await goSection(/Supply chain/); await capture(dashPage, 'supply-chain'); });
+  // ---- Deployments: production + each section (wait for content before shooting) ----
+  await chapter('deployments-prod', async () => { await goStage(/Production/); await waitLoaded(); await capture(dashPage, 'deployments-prod'); });
+  await chapter('supply-chain', async () => { await goStage(/Production/); await goSection(/Supply chain/); await waitLoaded(); await capture(dashPage, 'supply-chain'); });
   await chapter('secrets', async () => { await goStage(/Production/); await goSection(/^Secrets$/); await capture(dashPage, 'secrets'); });
   await chapter('history', async () => { await goStage(/Production/); await goSection(/Deployment history/); await capture(dashPage, 'history'); });
   await chapter('firewall', async () => { await goStage(/Production/); await goSection(/^Firewall$/); await capture(dashPage, 'firewall'); });
 
-  // ---- Backups: take a production snapshot ----
+  // ---- Backups: enable snapshots if needed, then take a production snapshot ----
   await chapter('backups', async () => {
     await goStage(/Production/);
     await goSection(/^Backups$/);
+    const enable = d.getByRole('button', { name: /Enable snapshots/i }).first();
+    if (await enable.count()) { await enable.click(); await waitLoaded(); await settle(2_000); }
     const snap = d.getByRole('button', { name: /Create snapshot/i }).first();
     if (await snap.count()) {
       await snap.click();
       const confirm = d.getByRole('button', { name: /Create snapshot/i }).last();
       if (await confirm.count()) await confirm.click();
+      await waitLoaded();
       await d.getByText(/\d{4}-\d{2}-\d{2}/).first().waitFor({ timeout: 4 * 60_000 }).catch(() => {});
     }
     await capture(dashPage, 'backups');
