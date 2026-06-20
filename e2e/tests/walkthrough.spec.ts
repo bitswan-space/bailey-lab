@@ -129,13 +129,22 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await settle(8_000);
   });
 
-  const goStage = async (label: RegExp) => { await tab(/^Deployments$/).click(); await settle(800); await d.getByRole('button', { name: label }).first().click(); await settle(1200); };
+  // Open the Deployments tab robustly: the TopNav tab is disabled while a deploy
+  // is in flight, so retry until the pipeline (the stage labels) is visible.
+  const openDeployments = async () => {
+    for (let i = 0; i < 30; i++) {
+      await tab(/^Deployments$/).click({ timeout: 5_000 }).catch(() => {});
+      if (await d.getByText(/DEVELOPMENT/i).first().isVisible().catch(() => false)) return;
+      await settle(5_000);
+    }
+  };
+  const goStage = async (label: RegExp) => { await openDeployments(); await d.getByRole('button', { name: label }).first().click(); await settle(1200); };
   const goSection = async (label: RegExp) => { await d.getByRole('button', { name: label }).first().click(); await settle(1200); };
 
-  // ---- Let the BP scaffolding deploy land on Development (NO second deploy —
-  //      a second Sync & Deploy here races the scaffolding deploy and collides
-  //      on container names). ----
-  await chapter('await-scaffold', async () => { await goStage(/Development/); await waitHealthy(); });
+  // NB: the BP scaffolding auto-deploys dev in the background. We do NOT trigger
+  // a second deploy here (it races the scaffolding deploy and collides on
+  // container names). Navigation to Deployments is deferred to the promote step,
+  // by which point the other tabs have given the scaffolding deploy time.
 
   // ---- Description ----
   await chapter('description', async () => {
@@ -168,8 +177,9 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
 
   // ---- Promote dev → staging → production (the scaffolding already deployed dev) ----
   await chapter('promote', async () => {
-    await tab(/^Deployments$/).click();
-    await settle();
+    await openDeployments();
+    await waitHealthy(); // let the scaffolding dev deploy finish first
+    await settle(2_000);
     for (let i = 0; i < 2; i++) {
       const promote = d.getByRole('button', { name: /^Promote$/ }).first();
       if (await promote.isEnabled().catch(() => false)) {
