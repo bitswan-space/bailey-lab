@@ -68,9 +68,13 @@ for i in $(seq 1 60); do
 done
 
 echo "=== [4/6] Create the workspace (dashboard + oauth -> the test Keycloak) ==="
+# The daemon runs inside a container with the host filesystem bind-mounted at
+# /host (`-v /:/host`), and it opens --oauth-config literally (no translation).
+# So the path must be the in-container view of the file: /host + its host path.
+OAUTH_CONFIG_HOST="/host${REPO_ROOT}/e2e/oauth-config.json"
 "$BITSWAN" workspace init \
   --local --domain "$DOMAIN" \
-  --oauth-config "$REPO_ROOT/e2e/oauth-config.json" \
+  --oauth-config "$OAUTH_CONFIG_HOST" \
   --gitops-image "$GITOPS_IMAGE" \
   --dashboard-image "$DASHBOARD_IMAGE" \
   "$WS"
