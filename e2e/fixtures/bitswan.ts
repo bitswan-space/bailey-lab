@@ -56,14 +56,15 @@ export async function oidcLogin(page: Page, email: string, password: string): Pr
   await page.waitForLoadState('networkidle');
 }
 
-/** The Bailey Server Console SPA renders inside the chrome-wrap iframe. */
-export function consoleFrame(page: Page): FrameLocator {
-  return page.frameLocator('iframe').first();
-}
+export type FrameOrPage = Page | FrameLocator;
 
-/** The workspace dashboard, itself rendered in an iframe within the console. */
-export function dashboard(page: Page): FrameLocator {
-  return page.frameLocator('iframe').last();
+/**
+ * The workspace dashboard root. It may be embedded in an iframe (chrome-wrap) or
+ * served top-level depending on the host, so resolve to whichever is present.
+ */
+export async function dashboard(page: Page): Promise<FrameOrPage> {
+  const frames = await page.locator('iframe').count();
+  return frames > 0 ? page.frameLocator('iframe').last() : page;
 }
 
 export const test = base;
