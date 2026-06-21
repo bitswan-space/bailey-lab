@@ -9,5 +9,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0"
+  },
+  "dependencies": {
+    "pagedjs": "^0.4.3"
   }
 }

@@ -19,6 +19,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Step profiler — continues the timeline begun in run-e2e.sh (shared state file),
+# so each build sub-step below shows up in the slowest-first profile. `mark` is a
+# no-op-safe if sourced standalone. Fall back to a stub if the helper is absent.
+if [ -f "$REPO_ROOT/e2e/local-vm/timeline.sh" ]; then
+  source "$REPO_ROOT/e2e/local-vm/timeline.sh"
+else
+  mark() { :; }
+fi
+
 DOMAIN="bs-e2e.localhost"
 KC_HOST="keycloak.${DOMAIN}"
 KC_PORT="8088"
@@ -36,15 +45,21 @@ echo "=== [1/7] Build the Server Console SPA + the bitswan CLI + component image
 # dir BEFORE compiling the CLI, or the gate serves an empty console (a directory
 # listing) instead of the real onboarding/console UI.
 npm --prefix bitswan-server-console install --no-audit --no-fund
+mark "[1/7] server-console: npm install"
 npm --prefix bitswan-server-console run build
+mark "[1/7] server-console: vite build"
 rm -rf bitswan-automation-server/internal/daemon/serverconsole_dist
 mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
 cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
 ( cd bitswan-automation-server && go build -o bitswan ./main.go )
+mark "[1/7] bitswan CLI: go build"
 BITSWAN="$REPO_ROOT/bitswan-automation-server/bitswan"
 docker build -t "$GITOPS_IMAGE"       -f "$REPO_ROOT/bitswan-gitops/Dockerfile" "$REPO_ROOT"
+mark "[1/7] docker build: gitops image"
 docker build -t "$DASHBOARD_IMAGE"    -f "$REPO_ROOT/bitswan-workspace-dashboard/Dockerfile" "$REPO_ROOT/bitswan-workspace-dashboard"
+mark "[1/7] docker build: dashboard image"
 docker build -t "$CODING_AGENT_IMAGE" -f "$REPO_ROOT/bitswan-coding-agent/Dockerfile" "$REPO_ROOT/bitswan-coding-agent"
+mark "[1/7] docker build: coding-agent image"
 
 echo "=== [2/7] Daemon + traefik ingress ==="
 # Pin the daemon to THIS checkout's images so workspaces it creates via the
@@ -67,6 +82,7 @@ for i in 1 2 3 4 5; do
 done
 docker ps | grep -q traefik || { echo "ERROR: traefik not running"; exit 1; }
 
+mark "[2/7] daemon + traefik ingress"
 echo "=== [3/7] Disposable Keycloak (seeded realm: the Meridian Foods cast) on :${KC_PORT} ==="
 # Published on the host port so the BROWSER (dnsmasq→127.0.0.1) and the
 # oauth2-proxy CONTAINER (extra_hosts→host-gateway) reach the SAME issuer URL,
@@ -89,6 +105,7 @@ for i in $(seq 1 60); do
   [ "$i" = 60 ] && { echo "ERROR: Keycloak did not become ready"; docker logs --tail 50 bitswan-e2e-keycloak; exit 1; }
 done
 
+mark "[3/7] keycloak (seeded realm)"
 echo "=== [4/7] bitswan-protected-proxy (oauth2-proxy) in front of the gate ==="
 # This is the production chain's first hop. It runs the OIDC handshake against
 # Keycloak and forwards the verified identity to the :9080 gate as
@@ -122,6 +139,7 @@ docker run -d --name bitswan-protected-proxy --network bitswan_network \
 sleep 3
 docker ps | grep -q bitswan-protected-proxy || { echo "ERROR: protected proxy not running"; docker logs --tail 50 bitswan-protected-proxy; exit 1; }
 
+mark "[4/7] protected-proxy (oauth2-proxy)"
 echo "=== [5/7] Point Bailey at this domain + register the gate routes ==="
 # protected_domain drives ProtectedHostnameDomain(); on (re)start the daemon's
 # setupBaileyRoutes registers bailey. / bailey--inner. / bailey-onboard. →
@@ -133,6 +151,7 @@ docker exec "$DAEMON_CTR" sh -c \
 docker restart "$DAEMON_CTR" >/dev/null
 sleep 8
 
+mark "[5/7] point Bailey at domain + restart"
 echo "=== [6/7] Wait for the onboarding host to answer through the chain ==="
 for i in $(seq 1 60); do
   code="$(curl -sk -o /dev/null -w '%{http_code}' "${ONBOARD_URL}/" || true)"
@@ -142,6 +161,7 @@ for i in $(seq 1 60); do
   [ "$i" = 60 ] && { echo "ERROR: onboarding host not reachable"; docker ps; docker logs --tail 40 bitswan-protected-proxy; exit 1; }
 done
 
+mark "[6/7] wait onboarding chain ready"
 echo "=== [7/7] Write e2e/.env for the walkthrough ==="
 cat > "$REPO_ROOT/e2e/.env" <<ENV
 E2E_DOMAIN=${DOMAIN}
@@ -151,5 +171,6 @@ E2E_KEYCLOAK_URL=http://${KC_HOST}:${KC_PORT}
 E2E_OPERATOR_EMAIL=tomas.novak@meridianfoods.cz
 E2E_OPERATOR_PASSWORD=meridian-operator
 ENV
+mark "[7/7] write e2e/.env"
 echo "=== bring-up complete ==="
 cat "$REPO_ROOT/e2e/.env"

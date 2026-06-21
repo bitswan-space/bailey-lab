@@ -122,11 +122,60 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 .legend{ display:flex; gap:16px; margin-top:18px; font-size:12px; color:#39454f; flex-wrap:wrap }
 .brand-lock{ display:flex; align-items:flex-end; gap:14px }
 .brand-lock .brand-bailey{ font-size:31px; font-weight:800; color:#fff; letter-spacing:-.01em; line-height:.82 }
+/* ── Table of contents ─────────────────────────────────────────────────────
+   The TOC lives on its own sheet. Page numbers are filled by Paged.js via
+   target-counter() at print time (real, post-layout page numbers — not a
+   render-time guess). On screen the leader/number simply collapse. */
+.toc .toc-h{ font-size:13px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--amber) }
+.toc h2{ font-size:40px; letter-spacing:-.025em; margin:8px 0 24px; color:var(--ink) }
+.toc ol{ list-style:none; margin:0; padding:0; counter-reset:none }
+.toc .toc-row{ display:flex; align-items:baseline; gap:10px; padding:11px 0; border-bottom:1px solid var(--line) }
+.toc .toc-row.group{ margin-top:22px; border-bottom:2px solid var(--ink); padding-bottom:8px }
+.toc .toc-num{ font-weight:800; color:var(--steel); font-size:13px; min-width:38px; letter-spacing:.04em }
+.toc .toc-title{ font-weight:600; color:var(--ink); font-size:16px }
+.toc .toc-row.group .toc-title{ font-size:13px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; color:var(--muted) }
+.toc .toc-sub{ color:var(--muted); font-size:13.5px; font-weight:500 }
+.toc .toc-dots{ flex:1; border-bottom:1.5px dotted var(--line); transform:translateY(-4px); min-width:20px }
+.toc .toc-pg{ font-weight:700; color:var(--ink); font-size:13.5px; font-variant-numeric:tabular-nums }
+.toc a{ display:flex; align-items:baseline; gap:10px; flex:1; text-decoration:none; color:inherit }
+.toc a.toc-pg{ flex:none; text-decoration:none }
+.toc a.toc-pg::after{ content:target-counter(attr(href), page); }
+
+@media screen{ .toc .toc-dots, .toc .toc-pg{ display:none } }
+
 @media print{
-  body{ background:#fff } .page{ box-shadow:none; border-radius:0; margin:0; width:210mm; min-height:297mm; page-break-after:always }
-  .page:last-child{ page-break-after:auto }
-  @page{ size:A4; margin:0 }
+  body{ background:#fff }
+  .page{ box-shadow:none; border-radius:0; margin:0; width:auto; min-height:auto; break-after:page; overflow:visible }
+  .page:last-child{ break-after:auto }
+  .pad{ min-height:auto }
+  /* The cover is a single full-bleed sheet: tighten its rhythm and cap the hero
+     screenshot so the whole composition fits one A4 page (no spill). */
+  .cover .pad{ padding:18mm 16mm }
+  .cover h1{ font-size:62px; margin-top:20px }
+  .cover .sub{ font-size:21px }
+  .cover .tag{ margin-top:16px }
+  .bpmark{ margin-top:22px; font-size:28px }
+  .hero-shot{ margin-top:24px }
+  .hero-shot img{ max-height:118mm; width:100%; object-fit:cover; object-position:top }
+  .cover-foot{ margin-top:22px; padding-top:14px }
 }
+
+/* ── Paged.js paged-media: A4 sheets with a running footer + page numbers ────
+   Paged.js (injected by the generator) honours these @page margin boxes. The
+   cover is its own named page with no footer; every other page shows the
+   handbook footer on the left and the page number on the right. */
+@page{
+  size:A4; margin:14mm 13mm 16mm 13mm;
+  @bottom-left{ content:"Bitswan Bailey · The Operator's Handbook"; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; font-size:8.5pt; color:#8a93a0; }
+  @bottom-right{ content:counter(page); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; font-size:9pt; font-weight:700; color:#0c1722; }
+}
+@page :first{ margin:0; @bottom-left{ content:none } @bottom-right{ content:none } }
+@page cover{ margin:0; @bottom-left{ content:none } @bottom-right{ content:none } }
+.cover{ page:cover }
+/* Paged.js renders each sheet as .pagedjs_page; let full-bleed sections paint
+   their dark backgrounds to the edge by neutralising the page margin visually
+   on the cover/manifesto via their own padding (.pad). */
+.pagedjs_page{ background:#fff }
 `;
 
 function coverShot(shot) {
@@ -156,7 +205,7 @@ function renderCover(m) {
 function renderManifesto(m) {
   if (!m.promises || !m.promises.length) return '';
   const items = m.promises.map((p, i) => `<div class="promise"><div class="num">${String(i + 1).padStart(2, '0')}</div><div><h3>${esc(p.title)}</h3><p>${esc(p.body)}</p></div></div>`).join('');
-  return `<section class="page manifesto"><div class="pad">
+  return `<section class="page manifesto" id="manifesto"><div class="pad">
     <h2>${esc(m.manifestoTitle || 'Why teams put Bitswan in front of what matters')}</h2>
     <div class="promises">${items}</div></div></section>`;
 }
@@ -174,6 +223,43 @@ function renderStandards(standards) {
   return `<div class="std"><div class="std-h">${glyph('#ffb43d')} Bailey is best practice — what the standards ask of you, and how this does it</div><ul>${rows}</ul></div>`;
 }
 
+// Stable anchor ids so the TOC's target-counter() can resolve each page number.
+const chapterAnchor = (ch, idx) => `ch-${ch.num || String(idx + 1).padStart(2, '0')}`;
+const guideAnchor = (g, i) => `guide-${i}`;
+
+function renderToc(m) {
+  const rows = [];
+  rows.push(
+    `<li class="toc-row"><a href="#manifesto"><span class="toc-num">·</span><span class="toc-title">Why teams put Bitswan in front of what matters</span><span class="toc-dots"></span></a><a class="toc-pg" href="#manifesto"></a></li>`,
+  );
+  rows.push(`<li class="toc-row group"><span class="toc-title">The walkthrough</span></li>`);
+  (m.chapters || []).forEach((ch, idx) => {
+    const a = chapterAnchor(ch, idx);
+    rows.push(
+      `<li class="toc-row"><a href="#${a}"><span class="toc-num">CH ${esc(ch.num || String(idx + 1).padStart(2, '0'))}</span><span class="toc-title">${esc(ch.title)}</span> <span class="toc-sub">— ${esc(ch.eyebrow || '')}</span><span class="toc-dots"></span></a><a class="toc-pg" href="#${a}"></a></li>`,
+    );
+  });
+  rows.push(`<li class="toc-row group"><span class="toc-title">Compliance reference</span></li>`);
+  rows.push(
+    `<li class="toc-row"><a href="#matrix"><span class="toc-num">REF</span><span class="toc-title">Standards → features</span><span class="toc-dots"></span></a><a class="toc-pg" href="#matrix"></a></li>`,
+  );
+  rows.push(
+    `<li class="toc-row"><a href="#glance"><span class="toc-num">REF</span><span class="toc-title">What Bailey gives you — at a glance</span><span class="toc-dots"></span></a><a class="toc-pg" href="#glance"></a></li>`,
+  );
+  (m.controlGuides || []).forEach((g, i) => {
+    const a = guideAnchor(g, i);
+    rows.push(
+      `<li class="toc-row"><a href="#${a}"><span class="toc-num">REF</span><span class="toc-title">${esc(g.standard)}</span><span class="toc-dots"></span></a><a class="toc-pg" href="#${a}"></a></li>`,
+    );
+  });
+  return `<section class="page toc"><div class="pad">
+    <div class="toc-h">Contents</div>
+    <h2>The Operator's Handbook</h2>
+    <ol>${rows.join('')}</ol>
+    <div class="runfoot"><span class="brand">${glyph('var(--ink)')}Bitswan Bailey · The Operator's Handbook</span><span>Contents</span></div>
+  </div></section>`;
+}
+
 function renderChapter(ch, idx) {
   const num = ch.num || String(idx + 1).padStart(2, '0');
   const shots = (ch.shots || []).map(renderShot);
@@ -185,7 +271,7 @@ function renderChapter(ch, idx) {
   const callout = ch.callout ? `<div class="callout"><span class="c-k">${esc(ch.callout.kind || 'Why it matters')}</span><p>${ch.callout.text}</p></div>` : '';
   const specs = (ch.specs && ch.specs.length) ? `<div class="specs">${ch.specs.map((s) => `<div class="spec"><div class="v">${s.v}</div><div class="l">${esc(s.l)}</div></div>`).join('')}</div>` : '';
   const extraShots = shots.join('');
-  return `<section class="page chapter"><div class="pad">
+  return `<section class="page chapter" id="${chapterAnchor(ch, idx)}"><div class="pad">
     <div class="chapter-head"><span class="chapter-num">CH ${esc(num)}</span><span class="chapter-eyebrow">${esc(ch.eyebrow || '')}</span></div>
     <h2>${esc(ch.title)}</h2>
     ${ch.lede ? `<p class="lede">${esc(ch.lede)}</p>` : ''}
@@ -204,7 +290,7 @@ function renderMatrix(m) {
   (m.chapters || []).forEach((ch) => (ch.standards || []).forEach((s) => all.push({ ...s, feature: ch.title })));
   if (!all.length) return '';
   const rows = all.map((s) => `<tr><td><b>${esc(s.code)}</b><br><span style="color:var(--amber);font-size:12px">${esc(s.clause)}</span></td><td>${s.demand}</td><td><b>${esc(s.feature)}</b></td></tr>`).join('');
-  return `<section class="page matrix"><div class="pad">
+  return `<section class="page matrix" id="matrix"><div class="pad">
     <div class="chapter-head"><span class="chapter-num">REF</span><span class="chapter-eyebrow">Compliance at a glance</span></div>
     <h2 style="font-size:40px;letter-spacing:-.025em;margin:8px 0 0;color:var(--ink)">Standards → features</h2>
     <p class="lede">One page for your auditor: the controls ISO 27001, SOC 2, DORA, NIS2 and GDPR ask for, and the Bitswan feature that delivers each.</p>
@@ -232,7 +318,7 @@ function renderAtAGlance(m) {
       <div class="sn" style="color:#475569"><b>${n('yours')}</b><span>Your part</span></div>
     </div>`;
   }).join('');
-  return `<section class="page guide"><div class="pad">
+  return `<section class="page guide" id="glance"><div class="pad">
     <div class="ghead">Technical-controls guide</div>
     <h2>What Bailey gives you — at a glance</h2>
     <p class="gblurb">For each standard, how many technical controls Bailey provides outright, supports in part, or leaves to you to operate. The pages that follow break each down control-by-control, with a pointer to the chapter that shows it working.</p>
@@ -242,7 +328,7 @@ function renderAtAGlance(m) {
   </div></section>`;
 }
 
-function renderGuide(g) {
+function renderGuide(g, i) {
   const rows = (g.rows || []).map((r) => `<tr>
     <td class="ctl">${esc(r.control)}</td>
     <td>${esc(r.req)}</td>
@@ -251,7 +337,7 @@ function renderGuide(g) {
     <td>${r.yours && r.yours !== '—' ? esc(r.yours) : '<span style="color:var(--muted)">—</span>'}</td>
     <td class="ch">${r.ch ? esc(r.ch) : '—'}</td>
   </tr>`).join('');
-  return `<section class="page guide"><div class="pad">
+  return `<section class="page guide" id="${guideAnchor(g, i)}"><div class="pad">
     <div class="ghead">Technical-controls guide</div>
     <h2>${esc(g.standard)}</h2>
     <p class="gblurb">${esc(g.blurb || '')}</p>
@@ -271,6 +357,7 @@ export function renderHandbook(m) {
 <title>${esc(m.title || "Bitswan — The Operator's Handbook")}</title>
 <style>${CSS}</style></head><body>
 ${renderCover(m)}
+${renderToc(m)}
 ${renderManifesto(m)}
 ${chapters}
 ${renderMatrix(m)}

@@ -26,6 +26,14 @@ KEEP=0; [ "${1:-}" = "--keep" ] && KEEP=1
 [ -e /dev/kvm ] || { echo "ERROR: /dev/kvm not present — enable virtualization."; exit 1; }
 ip link show "$BRIDGE" >/dev/null 2>&1 || { echo "ERROR: bridge $BRIDGE missing (start libvirt 'default' net)."; exit 1; }
 
+# Step profiler for the HOST-side phases (boot / rsync / provision / run / copy).
+# The guest keeps its own timeline (build steps, test, manual gen); both are
+# merged into one slowest-first profile at the end.
+mkdir -p "$WORK"
+export TL_FILE="$WORK/timeline-host.tsv" TL_STATE="$WORK/.tl-host-state"
+source "$(dirname "${BASH_SOURCE[0]}")/timeline.sh"
+tl_begin
+
 # On hosts that also run Docker, Docker sets the FORWARD policy to DROP, which
 # strangles the bridged guest's NAT (throughput collapses to ~1 KB/s). Insert
 # ACCEPT rules for the bridge ABOVE Docker's chains (idempotent, additive — does
@@ -40,6 +48,7 @@ echo "=== fetch Ubuntu 24.04 cloud image (cached) ==="
 IMG="$WORK/noble-server-cloudimg-amd64.img"
 [ -f "$IMG" ] || curl -fsSL -o "$IMG" \
   https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+mark "host: fetch Ubuntu cloud image (cached)"
 OVERLAY="$WORK/disk.qcow2"
 qemu-img create -f qcow2 -F qcow2 -b "$IMG" "$OVERLAY" 60G >/dev/null
 
@@ -103,20 +112,38 @@ echo "=== wait for SSH ($VM) ==="
 # Poll SSH readiness — there is no event to hook for a guest finishing boot.
 for i in $(seq 1 90); do $SSH "$VM" true 2>/dev/null && break; sleep 4; \
   [ "$i" = 90 ] && { echo "ERROR: guest SSH never came up"; tail -40 "$WORK/serial.log" 2>/dev/null; exit 1; }; done
+mark "host: boot guest + wait for SSH"
 
 echo "=== sync repo into guest ==="
 $SSH "$VM" 'sudo mkdir -p /repo && sudo chown ubuntu /repo'
 rsync -a -e "$SSH" --exclude node_modules --exclude .git --exclude 'dist/' \
   --exclude 'e2e/manual/build/' --exclude 'e2e/playwright-report/' "$REPO_ROOT/" "$VM:/repo/"
+mark "host: rsync repo into guest"
 
 echo "=== provision + run E2E in guest ==="
 $SSH "$VM" 'sudo bash /repo/e2e/local-vm/provision.sh'
+mark "guest: provision (apt deps)"
 $SSH "$VM" 'bash /repo/e2e/local-vm/run-e2e.sh' || RC=$? || true
+# NB: no aggregate mark here — run-e2e's time is captured in full, step by step,
+# in the guest timeline (bringup builds + npm ci + playwright + walkthrough +
+# manual). Marking it again would double-count it in the merged total below.
 
 echo "=== copy the Operator's Handbook + Playwright report back ==="
 mkdir -p "$REPO_ROOT/e2e/manual/build"
 rsync -a -e "$SSH" "$VM:/repo/e2e/manual/build/" "$REPO_ROOT/e2e/manual/build/" 2>/dev/null || true
 rsync -a -e "$SSH" "$VM:/repo/e2e/playwright-report/" "$REPO_ROOT/e2e/playwright-report/" 2>/dev/null || true
+mark "host: copy artifacts back"
+
+# Merge host + guest timelines into one slowest-first profile. The guest one
+# (fine-grained build/test steps) arrives with the copy-back above.
+GUEST_TL="$REPO_ROOT/e2e/manual/build/timeline.tsv"
+echo
+echo "############ FULL RUN PROFILE (host + guest, slowest first) ############"
+{ tail -n +2 "$TL_FILE" 2>/dev/null; tail -n +2 "$GUEST_TL" 2>/dev/null; } \
+  | sort -t"$(printf '\t')" -k2 -nr \
+  | awk -F"$(printf '\t')" 'BEGIN{t=0} {t+=$2; printf "  %8.1fs  %s\n", $2, $4} END{printf "  --------\n  %8.1fs  TOTAL (sum of recorded steps)\n", t}'
+echo "########################################################################"
+echo "(timeline TSVs: host=$TL_FILE  guest=$GUEST_TL)"
 
 [ "$KEEP" = 1 ] && echo "VM left running: $SSH $VM"
 exit "${RC:-0}"

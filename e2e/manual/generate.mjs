@@ -63,13 +63,36 @@ function attachShots(manual, shots) {
   };
 }
 
+// Paged.js turns the document's CSS paged-media (@page margin boxes, the TOC's
+// target-counter() page numbers) into a real, numbered A4 layout BEFORE we
+// print. We run the polyfill inside the headless browser, wait for it to finish
+// chunking the flow into .pagedjs_page sheets, then PDF the paginated result.
 async function renderPdf(htmlPath, pdfPath) {
   const { chromium } = await import('@playwright/test');
+  const polyfill = join(HERE, '..', 'node_modules', 'pagedjs', 'dist', 'paged.polyfill.js');
+  if (!existsSync(polyfill)) {
+    throw new Error(`Paged.js polyfill not found at ${polyfill} — cannot number pages.`);
+  }
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
+    // Auto-running is disabled so we can await the 'rendered' promise ourselves.
+    await page.addInitScript(() => {
+      window.PagedConfig = { auto: false };
+    });
     await page.goto('file://' + htmlPath, { waitUntil: 'networkidle' });
-    await page.pdf({ path: pdfPath, format: 'A4', printBackground: true, preferCSSPageSize: true });
+    await page.addScriptTag({ path: polyfill });
+    // Run Paged.js and resolve once the whole book is laid out into numbered
+    // sheets. previewer.preview() returns a flow with the final page count.
+    const pages = await page.evaluate(async () => {
+      const previewer = new window.Paged.Previewer();
+      const flow = await previewer.preview();
+      return flow.total;
+    });
+    console.log(`Paged.js: laid out ${pages} numbered A4 pages.`);
+    await page.emulateMedia({ media: 'print' });
+    // Paged.js sized each .pagedjs_page to A4 already; print at that size.
+    await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
   } finally {
     await browser.close();
   }
