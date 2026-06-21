@@ -25,6 +25,43 @@ export const BP = {
     'Ingests vendor invoices (PDF + EDI), validates totals and VAT against the ' +
     'purchase order, routes anything over €5,000 for human approval, and posts ' +
     'approved invoices to the ledger. Runs for Meridian Foods s.r.o.',
+  // The README the walkthrough writes into the Description editor — Markdown
+  // with a Mermaid flowchart (the editor renders fenced ```mermaid blocks). Built
+  // as a line array so the triple-backtick fences don't clash with TS template
+  // literals.
+  readme: [
+    '# Invoice Processing',
+    '',
+    'Automated accounts-payable for **Meridian Foods s.r.o.** — ingest vendor invoices,',
+    'validate them against the purchase order, route the big ones for a human, and post',
+    'the rest straight to the ledger.',
+    '',
+    '## What it does',
+    '',
+    '1. **Ingest** — pull invoices (PDF + EDI) from vendor portals and the shared inbox.',
+    '2. **Validate** — match totals and VAT against the purchase order.',
+    '3. **Approve** — anything over **€5,000** is held for a human; the rest auto-approves.',
+    '4. **Post** — approved invoices post to the ledger and the vendor is paid via the gateway.',
+    '',
+    '## The flow',
+    '',
+    '```mermaid',
+    'flowchart TD',
+    '    A[Vendor invoice<br/>PDF / EDI] --> B{Valid?<br/>totals + VAT vs PO}',
+    '    B -- No --> R[Reject and notify vendor]',
+    '    B -- Yes --> C{Amount > 5000 EUR?}',
+    '    C -- Yes --> H[Hold for approval]',
+    '    C -- No --> D[Post to ledger]',
+    '    H --> D',
+    '    D --> P[Pay via gateway]',
+    '```',
+    '',
+    '## Rules it must keep',
+    '',
+    '- VAT total must match the purchase order within €0.01.',
+    '- Invoices over €5,000 require human approval before posting.',
+    '- A duplicate invoice number must never post twice.',
+  ].join('\n'),
 };
 
 /** The workspace created via the Bailey Server Console. */

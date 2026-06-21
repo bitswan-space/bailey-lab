@@ -74,8 +74,6 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 .shot.empty{ aspect-ratio:16/10; display:flex; align-items:center; justify-content:center }
 .shot img{ width:100%; display:block }
 .shot.dark{ background:linear-gradient(135deg,#0e2435,#0a1826); border-color:rgba(255,255,255,.08) }
-.shot .frame-label{ position:absolute; top:14px; left:14px; font-size:11px; font-weight:700; letter-spacing:.05em;
-  text-transform:uppercase; color:#fff; background:var(--amber); padding:5px 10px; border-radius:5px; box-shadow:0 4px 12px rgba(255,122,24,.4); z-index:2 }
 .shot .cap{ position:absolute; bottom:0; left:0; right:0; padding:14px 16px; font-size:12.5px; font-weight:600; color:#fff;
   background:linear-gradient(0deg,rgba(8,17,28,.82),transparent); z-index:2 }
 .shot .ph{ text-align:center; color:#9aa7b3; font-size:14px; font-weight:600; padding:20px }
@@ -166,10 +164,9 @@ function renderManifesto(m) {
 
 function renderShot(s) {
   const dark = s.dark ? ' dark' : '';
-  const label = `<span class="frame-label">${esc(s.label || 'Live capture')}</span>`;
   const cap = s.caption ? `<div class="cap">${esc(s.caption)}</div>` : '';
-  if (s.dataUri) return `<div class="shot${dark}">${label}<img src="${s.dataUri}" alt="${esc(s.caption || '')}">${cap}</div>`;
-  return `<div class="shot empty${dark}">${label}<div class="ph">${glyph(s.dark ? '#6f8ba2' : '#9aa7b3')}<div style="margin-top:10px">${esc(s.caption || 'capture pending')}</div></div></div>`;
+  if (s.dataUri) return `<div class="shot${dark}"><img src="${s.dataUri}" alt="${esc(s.caption || '')}">${cap}</div>`;
+  return `<div class="shot empty${dark}"><div class="ph">${glyph(s.dark ? '#6f8ba2' : '#9aa7b3')}<div style="margin-top:10px">${esc(s.caption || 'capture pending')}</div></div></div>`;
 }
 
 function renderStandards(standards) {

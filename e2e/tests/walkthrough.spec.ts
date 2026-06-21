@@ -159,24 +159,46 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     }
   };
 
-  // ---- Description ----
+  // ---- Description: write a real README (Markdown + a Mermaid flowchart) ----
   await chapter('description', async () => {
     await tab(/^Description$/).click();
-    const editor = d.getByRole('textbox').first();
-    if (await editor.count()) {
-      await editor.click();
-      await editor.fill(BP.description).catch(() => {});
-      const save = d.getByRole('button', { name: /^Save$/ });
-      if (await save.count()) await save.first().click().catch(() => {});
+    await settle(1_500);
+    // Paste the Markdown into the ProseMirror editor (in the dashboard iframe) so
+    // its clipboard parser renders headings, lists and the fenced ```mermaid
+    // block as a diagram — rather than a literal value set.
+    const dashFrame =
+      dashPage.frames().find((f) => /dashboard/.test(f.url())) || dashPage.mainFrame();
+    const pasted = await dashFrame.evaluate((md) => {
+      const el = document.querySelector('.ProseMirror, [contenteditable="true"]');
+      if (!el) return false;
+      el.focus();
+      const sel = window.getSelection();
+      sel.selectAllChildren(el);
+      sel.collapseToEnd();
+      const dt = new DataTransfer();
+      dt.setData('text/plain', md);
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+      return true;
+    }, BP.readme).catch(() => false);
+    if (!pasted) {
+      // Fallback: type it in (still substantial, even if Mermaid stays literal).
+      const editor = d.getByRole('textbox').first();
+      if (await editor.count()) { await editor.click(); await editor.fill(BP.readme).catch(() => {}); }
     }
+    await settle(2_500);
+    const save = d.getByRole('button', { name: /^Save$/ });
+    if (await save.count()) await save.first().click().catch(() => {});
+    // Give Mermaid a moment to render the flowchart before shooting.
+    await d.locator('svg').first().waitFor({ timeout: 30_000 }).catch(() => {});
+    await settle(1_500);
     await capture(dashPage, 'description');
   });
 
-  // ---- Requirements & tests ----
-  await chapter('requirements', async () => {
-    await tab(/Requirements/).click();
-    await settle();
-    await capture(dashPage, 'requirements');
+  // ---- Coding Agent (builds the automation, inside the workspace sandbox) ----
+  await chapter('coding-agent', async () => {
+    await tab(/Coding Agent/).click();
+    await settle(2_500);
+    await capture(dashPage, 'coding-agent');
   });
 
   // ---- Sync & Deploy: the Checks/Supply-chain CVE scan works pre-deploy ----
