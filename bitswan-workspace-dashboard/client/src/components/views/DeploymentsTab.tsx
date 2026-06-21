@@ -1059,6 +1059,14 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   // environment real users hit.
   const [swapConfirm, setSwapConfirm] = useState(false);
   const [swapping, setSwapping] = useState(false);
+  // Persistent surfacing of a failed deploy/promote for THIS stage. A toast is
+  // transient; the deployments view must SHOW the failure on screen rather than
+  // silently falling back to "Not deployed yet" (which forces you to go dig in
+  // container logs). Cleared when the stage view changes or a new attempt starts.
+  const [deployError, setDeployError] = useState<{ stage: string; msg: string } | null>(null);
+  useEffect(() => {
+    setDeployError(null);
+  }, [activeStage]);
   const runSwap = useCallback(async () => {
     setSwapping(true);
     const work = api.swapProductionDr(bp.name);
@@ -1190,12 +1198,15 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   const runPromote = useCallback(
     async (target: 'staging' | 'production') => {
       setBusy(true);
+      setDeployError(null);
       await promoteBpWithToast({
         bp: bp.name,
         stage: target,
         loading: `Promoting ${bp.name} to ${target}…`,
         success: `${bp.name} promoted to ${target}`,
         failurePrefix: `Failed to promote ${bp.name} to ${target}`,
+        // Keep the failure on screen for the target stage, not just a toast.
+        onError: (msg) => setDeployError({ stage: target, msg }),
       });
       setBusy(false);
       refresh();
@@ -1423,6 +1434,11 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                     {currentEntry?.deployed_at ? ` · updated ${currentEntry.deployed_at}` : ' · never deployed'}
                   </span>
                 </div>
+                {deployError && deployError.stage === activeStage && (
+                  <div className="mt-1.5 rounded-md bg-red-50 px-2.5 py-1.5 text-[12px] font-medium text-red-700 ring-1 ring-red-200">
+                    Last deploy to {STAGE_LABEL[activeStage]} failed: {deployError.msg}
+                  </div>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-3.5 text-[12px] text-muted-foreground">

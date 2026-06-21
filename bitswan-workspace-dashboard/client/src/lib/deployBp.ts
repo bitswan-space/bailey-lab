@@ -16,6 +16,10 @@ export interface DeployToastCopy {
   loading: string;
   success: string;
   failurePrefix: string;
+  /** Called with the failure detail when the deploy ends badly, so callers can
+   *  surface it PERSISTENTLY on the screen (the toast is transient — the
+   *  deployments view must not silently fall back to "Not deployed yet"). */
+  onError?: (message: string) => void;
 }
 
 /**
@@ -50,10 +54,9 @@ export async function watchDeployTask(
     } catch {
       failures += 1;
       if (failures >= MAX_POLL_FAILURES) {
-        toast.error(
-          `${copy.failurePrefix}: lost track of the deploy task — check the cards for the real state`,
-          { id: toastId, duration: 8000 },
-        );
+        const msg = 'lost track of the deploy task — check the container logs';
+        toast.error(`${copy.failurePrefix}: ${msg}`, { id: toastId, duration: 8000 });
+        copy.onError?.(msg);
         return 'lost';
       }
       continue;
@@ -63,10 +66,9 @@ export async function watchDeployTask(
       return 'completed';
     }
     if (status.status === 'failed') {
-      toast.error(
-        `${copy.failurePrefix}: ${status.error || status.message || 'deployment failed'}`,
-        { id: toastId, duration: 10000 },
-      );
+      const msg = status.error || status.message || 'deployment failed';
+      toast.error(`${copy.failurePrefix}: ${msg}`, { id: toastId, duration: 10000 });
+      copy.onError?.(msg);
       return 'failed';
     }
     if (status.message) {
@@ -74,10 +76,9 @@ export async function watchDeployTask(
     }
   }
 
-  toast.error(`${copy.failurePrefix}: timed out waiting for deploy status`, {
-    id: toastId,
-    duration: 8000,
-  });
+  const timeoutMsg = 'timed out waiting for the deploy to finish';
+  toast.error(`${copy.failurePrefix}: ${timeoutMsg}`, { id: toastId, duration: 8000 });
+  copy.onError?.(timeoutMsg);
   return 'timeout';
 }
 
@@ -143,6 +144,7 @@ export async function promoteBpWithToast(opts: {
   loading: string;
   success: string;
   failurePrefix: string;
+  onError?: (message: string) => void;
 }): Promise<BpDeployOutcome> {
   const toastId = `bp-promote-${opts.stage}-${opts.bp}`;
   toast.loading(opts.loading, { id: toastId, duration: Infinity });
@@ -167,6 +169,7 @@ export async function promoteBpWithToast(opts: {
       id: toastId,
       duration: 8000,
     });
+    opts.onError?.(String(err));
     return 'failed';
   }
 
@@ -174,5 +177,6 @@ export async function promoteBpWithToast(opts: {
     loading: opts.loading,
     success: opts.success,
     failurePrefix: opts.failurePrefix,
+    onError: opts.onError,
   });
 }
