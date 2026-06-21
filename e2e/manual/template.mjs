@@ -51,11 +51,11 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 .bpmark{ margin:30px 0 0; font-size:34px; font-weight:800; letter-spacing:-.02em; color:#dfeaf2 }
 .bpmark span{ color:var(--amber2); position:relative }
 .bpmark span::after{ content:""; position:absolute; left:0; right:0; bottom:2px; height:8px; background:rgba(255,122,24,.22); z-index:-1 }
-.hero-shot{ margin:40px 0 0; border-radius:10px; aspect-ratio:16/9; position:relative;
-  background:linear-gradient(135deg,#0e2435,#0a1826); border:1px solid rgba(255,255,255,.10);
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 30px 60px rgba(0,0,0,.45); overflow:hidden; }
-.hero-shot img{width:100%;height:100%;object-fit:cover;object-position:top;display:block}
-.hero-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#7fa0ba;font-size:13px;font-weight:600}
+.hero-shot{ margin:40px 0 0; position:relative;
+  background:#0a1826; border:1px solid rgba(255,255,255,.10);
+  box-shadow:0 30px 60px rgba(0,0,0,.45); overflow:hidden; }
+.hero-shot img{width:100%;height:auto;display:block}
+.hero-ph{min-height:340px;display:flex;align-items:center;justify-content:center;color:#7fa0ba;font-size:13px;font-weight:600}
 .cover-foot{ display:flex; justify-content:space-between; align-items:center; gap:16px; margin-top:40px;
   padding-top:22px; border-top:1px solid rgba(255,255,255,.10); font-size:13px; color:#8ba3b6; }
 .live-badge{ color:#bfe9e0; display:inline-flex; gap:8px; align-items:center; font-weight:600 }
@@ -69,13 +69,12 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 .chapter-eyebrow{ font-size:13px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--amber) }
 .chapter h2{ font-size:46px; line-height:1.02; letter-spacing:-.025em; margin:8px 0 0; color:var(--ink) }
 .lede{ font-size:20px; color:#33404d; margin:20px 0 0; max-width:640px; font-weight:500 }
-.shot{ margin:34px 0; border-radius:12px; position:relative; overflow:hidden; background:linear-gradient(135deg,#eef1f4,#dfe5ea);
+.shot{ margin:30px 0 8px; position:relative; overflow:hidden; background:#f1f4f7;
   border:1px solid var(--line); box-shadow:0 18px 40px rgba(12,30,48,.12); }
-.shot.empty{ aspect-ratio:16/10; display:flex; align-items:center; justify-content:center }
-.shot img{ width:100%; display:block }
-.shot.dark{ background:linear-gradient(135deg,#0e2435,#0a1826); border-color:rgba(255,255,255,.08) }
-.shot .cap{ position:absolute; bottom:0; left:0; right:0; padding:14px 16px; font-size:12.5px; font-weight:600; color:#fff;
-  background:linear-gradient(0deg,rgba(8,17,28,.82),transparent); z-index:2 }
+.shot.empty{ min-height:300px; display:flex; align-items:center; justify-content:center }
+.shot img{ width:100%; height:auto; display:block }
+.shot.dark{ background:#0a1826; border-color:rgba(255,255,255,.08) }
+.shotcap{ font-size:12px; font-style:italic; color:var(--muted); margin:0 0 26px }
 .shot .ph{ text-align:center; color:#9aa7b3; font-size:14px; font-weight:600; padding:20px }
 .two{ display:grid; grid-template-columns:1.1fr .9fr; gap:40px; margin-top:8px }
 @media (max-width:680px){ .two{ grid-template-columns:1fr; gap:26px } .cover h1{font-size:54px} .chapter h2{font-size:34px} }
@@ -148,7 +147,7 @@ function renderCover(m) {
     <div class="hero-shot">${coverShot(m.coverShot)}</div>
     <div class="cover-foot">
       <span class="live-badge"><span class="dot"></span> Every screenshot in this manual was captured live, walking the real product${m.generatedAt ? ' on ' + esc(m.generatedAt) : ''}.</span>
-      <span>${esc(m.docNo || 'No. BSW-OH-01')}</span>
+      ${m.docNo ? `<span>${esc(m.docNo)}</span>` : ''}
     </div>
   </div>
 </section>`;
@@ -164,9 +163,9 @@ function renderManifesto(m) {
 
 function renderShot(s) {
   const dark = s.dark ? ' dark' : '';
-  const cap = s.caption ? `<div class="cap">${esc(s.caption)}</div>` : '';
-  if (s.dataUri) return `<div class="shot${dark}"><img src="${s.dataUri}" alt="${esc(s.caption || '')}">${cap}</div>`;
-  return `<div class="shot empty${dark}"><div class="ph">${glyph(s.dark ? '#6f8ba2' : '#9aa7b3')}<div style="margin-top:10px">${esc(s.caption || 'capture pending')}</div></div></div>`;
+  const cap = s.caption ? `<div class="shotcap">${esc(s.caption)}</div>` : '';
+  if (s.dataUri) return `<div class="shot${dark}"><img src="${s.dataUri}" alt="${esc(s.caption || '')}"></div>${cap}`;
+  return `<div class="shot empty${dark}"><div class="ph">${glyph(s.dark ? '#6f8ba2' : '#9aa7b3')}<div style="margin-top:10px">${esc(s.caption || 'capture pending')}</div></div></div>${cap}`;
 }
 
 function renderStandards(standards) {

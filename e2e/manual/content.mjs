@@ -19,7 +19,6 @@ export const MANUAL = {
     'scanning before anything ships. A GDPR record of processing that writes itself. ' +
     'Access control an auditor will actually like. This is the platform — and this ' +
     'manual, printed straight from a live system.',
-  docNo: 'No. BSW-OH-01',
   coverShot: { id: 'cover' },
 
   manifestoTitle: 'Why teams put Bitswan in front of what matters',
@@ -168,7 +167,7 @@ export const MANUAL = {
     },
     {
       num: '10', eyebrow: 'Sleep at night', title: 'Rehearse & restore',
-      lede: 'A backup you’ve never restored is a rumor. Bitswan makes the rehearsal a routine — and the real thing a single swap.',
+      lede: 'A backup you’ve never restored is a rumor. Bitswan makes the rehearsal a routine — and the real thing a single click.',
       slots: [{ id: 'dr-rehearse', label: 'Live capture', caption: 'Disaster Recovery · backup loaded into DR, recovery-tested' }],
       sell: [
         'Restore a production backup <strong>into the DR slot</strong> — never onto live production. Open it, confirm it’s whole. Only the backup actually loaded into DR can be <strong>marked recovery-tested</strong>.',
