@@ -5,9 +5,9 @@ set -euo pipefail
 # extra CAs (see internal/certauthority/mount.go in bitswan-automation-server
 # — `trustCA=true` mounts ~/.config/bitswan/certauthorities into
 # /usr/local/share/ca-certificates/custom and sets UPDATE_CA_CERTIFICATES=true).
-# Without this oauth2-proxy can't verify Keycloak certs signed by a private
-# CA — Go's crypto/x509 reads /etc/ssl/certs/ca-certificates.crt and that
-# file is only rebuilt by `update-ca-certificates`, which needs root.
+# Without this the dashboard server can't verify Keycloak/gitops certs signed by
+# a private CA — update-ca-certificates rebuilds /etc/ssl/certs/ca-certificates.crt
+# and needs root.
 if [ "$(id -u)" = "0" ]; then
     if [ "${UPDATE_CA_CERTIFICATES:-false}" = "true" ] \
        && [ -d /usr/local/share/ca-certificates/custom ]; then
@@ -26,12 +26,11 @@ if [ "$(id -u)" = "0" ]; then
     fi
     # Drop privileges and re-exec the same script as coder. `runuser` is in
     # util-linux (always present on Debian); -- and -p preserve env vars
-    # like OAUTH_ENABLED / BITSWAN_DEV_MODE / PORT.
+    # like BITSWAN_DEV_MODE / PORT.
     exec runuser -u coder -- "$0" "$@"
 fi
 
 EXTERNAL_PORT="${PORT:-8080}"
-INTERNAL_PORT="${INTERNAL_PORT:-8081}"
 DEV_BACKEND_PORT="${DEV_BACKEND_PORT:-8082}"
 
 # Detect dev mode: a host source dir is mounted and BITSWAN_DEV_MODE is on.
@@ -42,16 +41,10 @@ if [ "${BITSWAN_DEV_MODE:-false}" = "true" ] \
     DEV_MODE=true
 fi
 
-# Where the user-facing app must end up listening:
-#   - with OAuth: on INTERNAL_PORT (loopback) so oauth2-proxy fronts it on EXTERNAL_PORT
-#   - without OAuth: directly on EXTERNAL_PORT (all interfaces)
-if [ "${OAUTH_ENABLED:-false}" = "true" ]; then
-    APP_LISTEN_PORT="${INTERNAL_PORT}"
-    APP_LISTEN_HOST="127.0.0.1"
-else
-    APP_LISTEN_PORT="${EXTERNAL_PORT}"
-    APP_LISTEN_HOST="0.0.0.0"
-fi
+# The dashboard listens directly on EXTERNAL_PORT (all interfaces). Auth is
+# enforced upstream by the Bailey gate — the dashboard runs no oauth2-proxy.
+APP_LISTEN_PORT="${EXTERNAL_PORT}"
+APP_LISTEN_HOST="0.0.0.0"
 
 start_app() {
     if $DEV_MODE; then
@@ -105,37 +98,7 @@ start_app() {
     APP_PID=$!
 }
 
-if [ "${OAUTH_ENABLED:-false}" = "true" ]; then
-    echo "OAuth enabled: oauth2-proxy on :${EXTERNAL_PORT}, dashboard on :${INTERNAL_PORT}"
-
-    export OAUTH2_PROXY_HTTP_ADDRESS="0.0.0.0:${EXTERNAL_PORT}"
-    export OAUTH2_PROXY_UPSTREAMS="http://127.0.0.1:${INTERNAL_PORT}"
-    : "${OAUTH2_PROXY_REVERSE_PROXY:=true}"
-    : "${OAUTH2_PROXY_PASS_HOST_HEADER:=true}"
-    : "${OAUTH2_PROXY_COOKIE_SECURE:=true}"
-    # Cross-site iframe usage requires SameSite=None on the session cookie.
-    : "${OAUTH2_PROXY_COOKIE_SAMESITE:=none}"
-    # The SPA shell + assets must load unauthenticated so the in-page sign-in
-    # flow can render. Protected routes (the websocket etc.) stay gated.
-    : "${OAUTH2_PROXY_SKIP_AUTH_ROUTES:=^/$,^/index\\.html$,^/assets/,^/favicon\\.ico$,^/vite\\.svg$,^/@vite/,^/@react-refresh,^/@fs/,^/@id/,^/src/,^/node_modules/}"
-    export OAUTH2_PROXY_REVERSE_PROXY OAUTH2_PROXY_PASS_HOST_HEADER \
-           OAUTH2_PROXY_COOKIE_SECURE OAUTH2_PROXY_COOKIE_SAMESITE \
-           OAUTH2_PROXY_SKIP_AUTH_ROUTES
-
-    start_app
-
-    oauth2-proxy &
-    OAUTH_PID=$!
-
-    trap 'kill -TERM "${APP_PID}" "${OAUTH_PID}" 2>/dev/null || true' TERM INT
-    wait -n "${APP_PID}" "${OAUTH_PID}"
-    EXIT_CODE=$?
-    kill -TERM "${APP_PID}" "${OAUTH_PID}" 2>/dev/null || true
-    wait || true
-    exit "${EXIT_CODE}"
-else
-    echo "OAuth disabled: dashboard on :${EXTERNAL_PORT}"
-    start_app
-    trap 'kill -TERM "${APP_PID}" 2>/dev/null || true' TERM INT
-    wait "${APP_PID}"
-fi
+echo "[entrypoint] dashboard on :${EXTERNAL_PORT} (auth enforced upstream by the Bailey gate)"
+start_app
+trap 'kill -TERM "${APP_PID}" 2>/dev/null || true' TERM INT
+wait "${APP_PID}"
