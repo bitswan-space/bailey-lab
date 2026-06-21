@@ -9,6 +9,11 @@ export DEBIAN_FRONTEND=noninteractive
 echo "=== /etc/hosts: resolve own hostname (silences sudo warnings) ==="
 grep -q "$(hostname)" /etc/hosts 2>/dev/null || echo "127.0.1.1 $(hostname)" >> /etc/hosts
 
+echo "=== disable unattended-upgrades / auto-reboot (belt-and-braces) ==="
+systemctl stop unattended-upgrades.service 2>/dev/null || true
+systemctl mask unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+apt-get -y purge unattended-upgrades 2>/dev/null || true
+
 echo "=== apt deps ==="
 apt-get update -y
 apt-get install -y ca-certificates curl gnupg dnsmasq libnss3-tools sqlite3 rsync jq

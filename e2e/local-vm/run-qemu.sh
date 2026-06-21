@@ -50,6 +50,20 @@ PUB="$(cat "$KEY.pub")"
 cat > "$WORK/user-data" <<EOF
 #cloud-config
 hostname: bitswan-e2e
+# Ubuntu cloud images auto-reboot after unattended-upgrades installs updates,
+# which kills the bring-up mid-run. Disable it the moment the guest boots
+# (before it can fire) — bootcmd runs early on every boot.
+bootcmd:
+  - [ systemctl, stop, unattended-upgrades.service ]
+  - [ systemctl, mask, unattended-upgrades.service, apt-daily.service, apt-daily-upgrade.service ]
+write_files:
+  - path: /etc/apt/apt.conf.d/99-bitswan-no-auto-reboot
+    content: |
+      Unattended-Upgrade::Automatic-Reboot "false";
+      APT::Periodic::Update-Package-Lists "0";
+      APT::Periodic::Unattended-Upgrade "0";
+package_update: false
+package_upgrade: false
 users:
   - name: ubuntu
     sudo: ALL=(ALL) NOPASSWD:ALL
