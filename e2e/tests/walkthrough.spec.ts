@@ -1,23 +1,26 @@
 /**
- * The product walkthrough — driven through the REAL Bailey stack in a browser.
+ * The product walkthrough — driven through the REAL Bailey stack in a browser,
+ * and the source of the Operator's Handbook screenshots.
  *
- * The genuine operator journey, screenshotting each beat into the manual's
- * slots: onboarding (OIDC → claim → device trust) → create the Meridian Foods
- * workspace through the Server Console → open its dashboard → walk the features.
- * The screenshots are the raw material the manual is written from, so the
- * critical path is hard-asserted; breadth captures are attempted and any miss is
- * logged + summarized (so one off selector doesn't cost every later screenshot
- * while the suite stabilizes against real traces).
+ * Journey: onboarding (OIDC → claim → device trust) → create the Meridian Foods
+ * workspace via the Server Console → create the invoice-processing BP → describe
+ * it → Coding Agent → Sync & Deploy (+ CVE Checks) → deploy to dev → promote to
+ * production → backups → rehearse recovery into DR.
  *
- * Observed truth: the Server Console renders top-level (no iframe) on the
- * onboard host; the workspace dashboard is embedded — see dash().
+ * RULES:
+ *  - NO sleeps. Ever. Every wait is on a specific Playwright signal (an element
+ *    becoming visible/hidden, navigation, a deploy reaching Healthy). A test that
+ *    sleeps is a test that lies.
+ *  - The deploy lifecycle is REAL: we wait for each stage to actually report
+ *    Healthy before moving on (and before shooting a screenshot), so no
+ *    in-flight progress toasts leak into the manual.
  */
 import { test, expect, capture, oidcLogin, dashboard, ENV, type FrameOrPage } from '../fixtures/bitswan';
 import { BP, WORKSPACE, COMPANY } from '../scenario';
 
+const DEPLOY_TIMEOUT = 14 * 60_000; // a real image build + compose up
+
 const misses: string[] = [];
-// Set once the dashboard is open, so a failed chapter still screenshots the
-// blocked state (named dbg-<chapter>) for diagnosis.
 let dbgPage: import('@playwright/test').Page | null = null;
 
 async function chapter(name: string, fn: () => Promise<void>): Promise<void> {
@@ -34,7 +37,7 @@ async function chapter(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
-  test.setTimeout(55 * 60_000);
+  test.setTimeout(60 * 60_000);
 
   // ---- Onboarding (hard-asserted) ----
   await test.step('onboarding: sign in + claim the server', async () => {
@@ -44,7 +47,6 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await expect(claim).toBeVisible({ timeout: 30_000 });
     await capture(page, 'onboard-claim');
     await claim.click();
-    // The console's Workspaces view renders once the device is trusted.
     await expect(page.getByRole('heading', { name: /Workspaces/i })).toBeVisible({ timeout: 30_000 });
   });
 
@@ -54,54 +56,66 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await page.getByRole('textbox').first().fill(WORKSPACE.name);
     await capture(page, 'workspace-create');
     await page.getByRole('button', { name: /^(Create|Create workspace)$/i }).last().click();
-    // Creation streams an NDJSON progress log in the modal. Wait for it to FINISH
-    // (the 'Creating…' state clears) — not just for the name to appear in the log.
+    // Wait for the streamed creation to FINISH (the 'Creating…' state clears).
     await expect(page.getByRole('button', { name: /Creating/i })).toBeHidden({ timeout: 12 * 60_000 });
-    // Dismiss the modal via whatever terminal action it offers.
     for (const re of [/Open dashboard/i, /^Done$/i, /^Close$/i, /^Open$/i]) {
       const b = page.getByRole('button', { name: re });
       if (await b.count()) { await b.first().click(); break; }
     }
     await page.getByRole('dialog').waitFor({ state: 'hidden', timeout: 30_000 }).catch(() => {});
     await expect(page.getByText(new RegExp(WORKSPACE.name, 'i')).first()).toBeVisible({ timeout: 30_000 });
-    await capture(page, 'cover');
   });
 
-  // ---- Console chapters: navigate by SPA route (robust; no sidebar clicks) ----
-  for (const [route, slot] of [
-    ['/users', 'people-roles'],
-    ['/overview', 'server-overview'],
-    ['/acl', 'endpoint-access'],
-    ['/devices', 'devices'],
+  // ---- Console chapters: navigate by SPA route, wait on the heading ----
+  for (const [route, slot, heading] of [
+    ['/users', 'people-roles', /People & roles/i],
+    ['/overview', 'server-overview', /Server overview|Overview/i],
+    ['/acl', 'endpoint-access', /Endpoint access/i],
+    ['/devices', 'devices', /devices/i],
   ] as const) {
     await chapter(slot, async () => {
       await page.goto(ENV.onboardUrl + route);
-      await page.waitForLoadState('networkidle');
+      await expect(page.getByRole('heading', { name: heading }).first()).toBeVisible({ timeout: 30_000 });
       await capture(page, slot);
     });
   }
 
   // ---- Open the workspace dashboard (its 'Open' button opens a new tab) ----
-  // NB: the dashboard holds SSE connections, so never wait for 'networkidle' —
-  // wait on real elements instead.
   let dashPage = page;
   let d: FrameOrPage = page;
   await test.step('open the workspace dashboard', async () => {
     await page.goto(ENV.onboardUrl + '/workspaces');
     const open = page.getByRole('button', { name: /^Open$/ }).or(page.getByRole('link', { name: /^Open$/ })).first();
-    const popupP = page.context().waitForEvent('page', { timeout: 15_000 }).catch(() => null);
+    const popupP = page.context().waitForEvent('page', { timeout: 20_000 }).catch(() => null);
     await open.click();
     const popup = await popupP;
     if (popup) dashPage = popup;
     d = await dashboard(dashPage);
     dbgPage = dashPage;
-    // Wait for the dashboard chrome to render (the BP switcher / nav).
     await expect(d.getByText(/Business process/i).first()).toBeVisible({ timeout: 120_000 });
     await capture(dashPage, 'dashboard-open');
   });
 
+  const dashOrigin = new URL(dashPage.url()).origin;
+
+  // Navigate to a dashboard view via its own URL params, then wait for the SPA
+  // nav to be ready and any in-flight spinner to clear — no fixed delays.
+  const go = async (params: Record<string, string>) => {
+    const q = new URLSearchParams({ bp: BP.slug, copy: 'rollout', ...params }).toString();
+    await dashPage.goto(`${dashOrigin}/?${q}`, { waitUntil: 'domcontentloaded' });
+    d = await dashboard(dashPage);
+    await expect(d.getByText(/Business process/i).first()).toBeVisible({ timeout: 120_000 });
+    // A "Loading…" element resolves to hidden immediately if it isn't present.
+    await d.getByText(/^Loading/i).first().waitFor({ state: 'hidden', timeout: 3 * 60_000 }).catch(() => {});
+  };
   const tab = (re: RegExp) => d.getByRole('button', { name: re }).first();
-  const settle = (ms = 1200) => dashPage.waitForTimeout(ms);
+  // A deploy is done when the dev/stage card reports Healthy / Current on (and no
+  // "deploying/preparing/building" progress toast remains).
+  const waitDeployDone = async () => {
+    await d.getByText(/Deploying|Preparing|Building|Pulling|Working/i).first()
+      .waitFor({ state: 'hidden', timeout: DEPLOY_TIMEOUT }).catch(() => {});
+    await expect(d.getByText(/Healthy|Current on/i).first()).toBeVisible({ timeout: DEPLOY_TIMEOUT });
+  };
 
   // ---- A copy (worktree) is required before a BP can be created ----
   await chapter('create-copy', async () => {
@@ -111,17 +125,12 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await newCopy.click();
       await d.getByPlaceholder('my-feature').fill('rollout');
       await d.getByRole('button', { name: /^Create$/ }).click();
-      await settle(4_000);
+      // Wait until the new copy is the active one (its name shows in the switcher).
+      await expect(d.getByText(/rollout/).first()).toBeVisible({ timeout: 60_000 });
     } else {
       await dashPage.keyboard.press('Escape');
     }
   });
-
-  // Wait for in-flight "Loading…/Preparing…/Working…" spinners to clear.
-  const waitLoaded = async () =>
-    d.getByText(/Loading|Preparing|Working/i).first().waitFor({ state: 'hidden', timeout: 8 * 60_000 }).catch(() => {});
-  const waitHealthy = async () =>
-    d.getByText(/Healthy|Current on|Deployed/i).first().waitFor({ timeout: 8 * 60_000 }).catch(() => {});
 
   // ---- Create the invoice-processing business process ----
   await chapter('create-bp', async () => {
@@ -131,130 +140,130 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await d.getByPlaceholder('my-process').fill(BP.slug);
     await capture(dashPage, 'bp-create');
     await d.getByRole('button', { name: /^Create$/ }).click();
-    await settle(8_000);
+    // The BP is selected once its name shows in the switcher.
+    await expect(d.getByText(new RegExp(BP.slug)).first()).toBeVisible({ timeout: 60_000 });
   });
 
-  // Deep-link straight to a Deployments stage/section via the dashboard's own
-  // URL params — far more robust than clicking pipeline nodes. The dashboard is a
-  // query-driven SPA (?bp=&copy=&tab=&stage=&section=).
-  const dashOrigin = new URL(dashPage.url()).origin;
-  const deepLink = async (params: Record<string, string>) => {
-    const q = new URLSearchParams({ bp: BP.slug, copy: 'rollout', tab: 'deployments', ...params }).toString();
-    await dashPage.goto(`${dashOrigin}/?${q}`, { waitUntil: 'domcontentloaded' }).catch(() => {});
-    d = await dashboard(dashPage);
-    await settle(2_500);
-    await waitLoaded();
-  };
-
-  // Sync & Deploy commits the copy onto main and deploys dev — this is what puts
-  // the BP into main so the Deployments pipeline is populated.
-  const deployToMain = async () => {
-    await tab(/Sync & Deploy/).click();
-    await settle();
-    const btn = d.getByRole('button', { name: /^Sync & Deploy$/ }).last();
-    if (await btn.isEnabled().catch(() => false)) {
-      await btn.click();
-      await d.getByText(/Working/i).first().waitFor({ state: 'hidden', timeout: 12 * 60_000 }).catch(() => {});
-      await settle(3_000);
-    }
-  };
+  // ---- Wait for the scaffolding deploy to land on dev BEFORE anything else, so
+  //      no progress toasts leak into later screenshots. ----
+  await chapter('await-scaffold-deploy', async () => {
+    await go({ tab: 'deployments', stage: 'dev' });
+    await waitDeployDone();
+  });
 
   // ---- Description: write a real README (Markdown + a Mermaid flowchart) ----
   await chapter('description', async () => {
-    await tab(/^Description$/).click();
-    await settle(1_500);
-    // Paste the Markdown into the ProseMirror editor (in the dashboard iframe) so
-    // its clipboard parser renders headings, lists and the fenced ```mermaid
-    // block as a diagram — rather than a literal value set.
-    const dashFrame =
-      dashPage.frames().find((f) => /dashboard/.test(f.url())) || dashPage.mainFrame();
+    await go({ tab: 'description' });
+    const dashFrame = dashPage.frames().find((f) => /dashboard/.test(f.url())) || dashPage.mainFrame();
+    await dashFrame.waitForSelector('.ProseMirror, [contenteditable="true"]', { timeout: 60_000 });
     const pasted = await dashFrame.evaluate((md) => {
-      const el = document.querySelector('.ProseMirror, [contenteditable="true"]');
+      const el = document.querySelector('.ProseMirror, [contenteditable="true"]') as HTMLElement | null;
       if (!el) return false;
       el.focus();
       const sel = window.getSelection();
-      sel.selectAllChildren(el);
-      sel.collapseToEnd();
+      if (sel) { sel.selectAllChildren(el); sel.collapseToEnd(); }
       const dt = new DataTransfer();
       dt.setData('text/plain', md);
       el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
       return true;
     }, BP.readme).catch(() => false);
     if (!pasted) {
-      // Fallback: type it in (still substantial, even if Mermaid stays literal).
       const editor = d.getByRole('textbox').first();
       if (await editor.count()) { await editor.click(); await editor.fill(BP.readme).catch(() => {}); }
     }
-    await settle(2_500);
     const save = d.getByRole('button', { name: /^Save$/ });
-    if (await save.count()) await save.first().click().catch(() => {});
-    // Give Mermaid a moment to render the flowchart before shooting.
-    await d.locator('svg').first().waitFor({ timeout: 30_000 }).catch(() => {});
-    await settle(1_500);
+    if (await save.count()) {
+      await save.first().click().catch(() => {});
+      // Saved → the button leaves its 'Saving…' state.
+      await d.getByRole('button', { name: /Saving/i }).first().waitFor({ state: 'hidden', timeout: 60_000 }).catch(() => {});
+    }
+    // The Mermaid flowchart renders to an <svg>; wait for it before shooting.
+    await d.locator('svg').first().waitFor({ state: 'visible', timeout: 60_000 }).catch(() => {});
     await capture(dashPage, 'description');
   });
 
-  // ---- Coding Agent (builds the automation, inside the workspace sandbox) ----
+  // ---- Coding Agent ----
   await chapter('coding-agent', async () => {
-    await tab(/Coding Agent/).click();
-    await settle(2_500);
+    await go({ tab: 'agent' });
     await capture(dashPage, 'coding-agent');
   });
 
   // ---- Sync & Deploy: the Checks/Supply-chain CVE scan works pre-deploy ----
   await chapter('sync-deploy', async () => {
-    await tab(/Sync & Deploy/).click();
-    await settle();
+    await go({ tab: 'sync-deploy' });
     await capture(dashPage, 'sync-deploy');
-    const checks = d.getByRole('button', { name: /^checks$/ });
-    if (await checks.count()) { await checks.click(); await waitLoaded(); await settle(2_000); await capture(dashPage, 'checks-cve'); }
+    await go({ tab: 'sync-deploy', view: 'checks' });
+    // Wait for the supply-chain scan to finish loading before shooting.
+    await d.getByText(/Loading supply chain/i).first().waitFor({ state: 'hidden', timeout: 5 * 60_000 }).catch(() => {});
+    await capture(dashPage, 'checks-cve');
   });
 
-  // ---- Deploy the copy onto main + dev (populates the Deployments pipeline) ----
-  await chapter('deploy', async () => { await deployToMain(); });
-
-  // ---- Promote dev → staging → production ----
-  await chapter('promote', async () => {
-    await deepLink({ stage: 'dev' });
-    await waitHealthy();
-    for (let i = 0; i < 2; i++) {
-      const promote = d.getByRole('button', { name: /^Promote$/ }).first();
-      if (await promote.isEnabled().catch(() => false)) { await promote.click(); await waitHealthy(); await settle(2_000); }
+  // ---- Deploy the copy onto main + dev (commits to main; the pipeline lights up) ----
+  await chapter('deploy', async () => {
+    await go({ tab: 'sync-deploy' });
+    const btn = d.getByRole('button', { name: /^Sync & Deploy$/ }).last();
+    if (await btn.isEnabled().catch(() => false)) {
+      await btn.click();
+      await go({ tab: 'deployments', stage: 'dev' });
+      await waitDeployDone();
     }
   });
 
-  // ---- Deployment sections (deep-linked) ----
-  await chapter('deployments-prod', async () => { await deepLink({ stage: 'production' }); await capture(dashPage, 'deployments-prod'); });
-  await chapter('supply-chain', async () => { await deepLink({ stage: 'production', section: 'supply' }); await capture(dashPage, 'supply-chain'); });
-  await chapter('secrets', async () => { await deepLink({ stage: 'production', section: 'secrets' }); await capture(dashPage, 'secrets'); });
-  await chapter('history', async () => { await deepLink({ stage: 'production', section: 'history' }); await capture(dashPage, 'history'); });
-  await chapter('firewall', async () => { await deepLink({ stage: 'production', section: 'firewall' }); await capture(dashPage, 'firewall'); });
+  // ---- Promote dev → staging → production, waiting for each to be Healthy ----
+  await chapter('promote', async () => {
+    await go({ tab: 'deployments', stage: 'dev' });
+    for (let i = 0; i < 2; i++) {
+      const promote = d.getByRole('button', { name: /^Promote$/ }).first();
+      if (await promote.isEnabled().catch(() => false)) {
+        await promote.click();
+        await waitDeployDone();
+      }
+    }
+  });
 
-  // ---- Backups: take a production snapshot ----
+  // ---- Deployment sections (deep-linked); the cover hero is the live Production view ----
+  await chapter('deployments-prod', async () => {
+    await go({ tab: 'deployments', stage: 'production' });
+    await waitDeployDone();
+    await capture(dashPage, 'deployments-prod');
+    await capture(dashPage, 'cover');
+  });
+  await chapter('supply-chain', async () => { await go({ tab: 'deployments', stage: 'production', section: 'supply' }); await capture(dashPage, 'supply-chain'); });
+  await chapter('secrets', async () => { await go({ tab: 'deployments', stage: 'production', section: 'secrets' }); await capture(dashPage, 'secrets'); });
+  await chapter('history', async () => { await go({ tab: 'deployments', stage: 'production', section: 'history' }); await capture(dashPage, 'history'); });
+  await chapter('firewall', async () => { await go({ tab: 'deployments', stage: 'production', section: 'firewall' }); await capture(dashPage, 'firewall'); });
+
+  // ---- Backups: take a real production snapshot, wait for it to appear ----
   await chapter('backups', async () => {
-    await deepLink({ stage: 'production', section: 'backups' });
+    await go({ tab: 'deployments', stage: 'production', section: 'backups' });
     const enable = d.getByRole('button', { name: /Enable snapshots/i }).first();
-    if (await enable.count()) { await enable.click(); await waitLoaded(); await settle(2_000); }
+    if (await enable.count()) {
+      await enable.click();
+      await d.getByRole('button', { name: /Create snapshot/i }).first().waitFor({ state: 'visible', timeout: 2 * 60_000 }).catch(() => {});
+    }
     const snap = d.getByRole('button', { name: /Create snapshot/i }).first();
     if (await snap.count()) {
       await snap.click();
       const confirm = d.getByRole('button', { name: /Create snapshot/i }).last();
       if (await confirm.count()) await confirm.click();
-      await waitLoaded();
-      await d.getByText(/\d{4}-\d{2}-\d{2}/).first().waitFor({ timeout: 4 * 60_000 }).catch(() => {});
+      // The snapshot row (a date-stamped id) appears once it completes.
+      await d.getByText(/\d{4}-\d{2}-\d{2}/).first().waitFor({ state: 'visible', timeout: 6 * 60_000 }).catch(() => {});
     }
     await capture(dashPage, 'backups');
   });
 
-  // ---- Disaster Recovery: restore into DR + mark recovery-tested ----
+  // ---- Disaster Recovery: restore the backup into DR + mark recovery-tested ----
   await chapter('dr-rehearse', async () => {
-    await deepLink({ stage: 'dr', section: 'recovery' });
+    await go({ tab: 'deployments', stage: 'dr', section: 'recovery' });
     const restore = d.getByRole('button', { name: /Restore into DR/i }).first();
     if (await restore.count()) {
       await restore.click();
-      await d.getByText(/In DR now/i).first().waitFor({ timeout: 4 * 60_000 }).catch(() => {});
+      await d.getByText(/In DR now/i).first().waitFor({ state: 'visible', timeout: 6 * 60_000 }).catch(() => {});
       const mark = d.getByRole('button', { name: /Mark recovery-tested/i }).first();
-      if (await mark.count()) await mark.click().catch(() => {});
+      if (await mark.count()) {
+        await mark.click();
+        await d.getByText(/Tested/i).first().waitFor({ state: 'visible', timeout: 60_000 }).catch(() => {});
+      }
     }
     await capture(dashPage, 'dr-rehearse');
   });

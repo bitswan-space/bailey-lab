@@ -35,9 +35,13 @@ export function sh(cmd: string): string {
 export async function capture(
   page: Page,
   slotId: string,
-  opts: { fullPage?: boolean; settleMs?: number; locator?: Locator } = {},
+  opts: { fullPage?: boolean; locator?: Locator } = {},
 ): Promise<void> {
-  await page.waitForTimeout(opts.settleMs ?? 450); // let transitions settle
+  // No settle/sleep here on purpose: callers wait on a specific signal (an
+  // element visible/hidden, a deploy Healthy) before capturing. If a shot ever
+  // needs a blind delay, the UI is missing a state indicator — fix that, not this.
+  // Wait for fonts so text isn't mid-swap in the shot (a real readiness signal).
+  await page.evaluate(() => (document as Document).fonts?.ready).catch(() => {});
   const path = join(SHOTS_DIR, `${slotId}.png`);
   if (opts.locator) await opts.locator.screenshot({ path });
   else await page.screenshot({ path, fullPage: !!opts.fullPage });
