@@ -50,9 +50,17 @@ RUN apt-get update && apt-get install -y curl jq tar restic awscli && rm -rf /va
 RUN curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh  | sh -s -- -b /usr/local/bin \
  && curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
-# Download oauth2-proxy
-RUN LATEST_VERSION=$(curl -s https://api.github.com/repos/bitswan-space/bitswan-aoc-oauth2/releases/latest | jq -r '.tag_name') \
-    && curl -L -o /usr/local/bin/oauth2-proxy https://github.com/bitswan-space/bitswan-aoc-oauth2/releases/download/${LATEST_VERSION}/oauth2-proxy-mqtt \
+# Download oauth2-proxy. Pin the version via a build arg so the build does NOT
+# depend on the unauthenticated GitHub "latest release" API at build time — that
+# call is rate-limited to 60/hr/IP and makes cold builds flaky (jq chokes on the
+# rate-limit body → exit 4). Override with --build-arg OAUTH2_PROXY_VERSION=…;
+# leave it empty to fall back to querying latest.
+ARG OAUTH2_PROXY_VERSION=v2026.03.09.5
+RUN VERSION="$OAUTH2_PROXY_VERSION"; \
+    if [ -z "$VERSION" ]; then \
+      VERSION=$(curl -s https://api.github.com/repos/bitswan-space/bitswan-aoc-oauth2/releases/latest | jq -r '.tag_name'); \
+    fi \
+    && curl -fL -o /usr/local/bin/oauth2-proxy "https://github.com/bitswan-space/bitswan-aoc-oauth2/releases/download/${VERSION}/oauth2-proxy-mqtt" \
     && chmod +x /usr/local/bin/oauth2-proxy
 
 # Bitswan Automation Server CLI, built from this repo's source (builder stage).

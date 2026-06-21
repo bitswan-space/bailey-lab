@@ -107,8 +107,7 @@ def _short_hash(context: str) -> str:
 def update_automation_toml_image(toml_path: str, new_image_value: str) -> None:
     """Rewrite the `image` field under `[deployment]` in `automation.toml`,
     preserving the rest of the file's formatting. Creates the file (and the
-    section) if missing. Mirrors `updateAutomationTomlImageValue` in
-    `bitswan-editor/Extension/src/utils/automationImageBuilder.ts`.
+    section) if missing.
     """
     if not os.path.exists(toml_path):
         os.makedirs(os.path.dirname(toml_path), exist_ok=True)
@@ -169,7 +168,7 @@ _SCAN_SKIP_DIRS = {"templates", ".git"}
 def _copies_dir() -> str:
     """Base directory (inside the gitops container) holding the per-copy
     checkouts. Each copy is an independent clone of the canonical repo; the
-    `main` copy is the editor's working tree and the default-branch scope."""
+    `main` copy is the default-branch scope."""
     return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
 
 
@@ -181,7 +180,7 @@ def scan_workspace_sources(workspace_root: str, copy: str | None = None) -> list
     deploy-time use and dashboard discovery.
 
     Each entry:
-        deployment_id  — id matching the editor's existing live-dev format
+        deployment_id  — id matching the existing live-dev format
         automation_name — sanitized basename
         display_name    — original directory name (unsanitized)
         context         — BP name (or "copy-{name}-{bp}" for non-main copies)
@@ -730,19 +729,19 @@ class AutomationService:
     async def _ensure_automation_image(
         self,
         source_dir: str,
+        progress_callback: Callable[..., Any] | None = None,
     ) -> str | None:
         """Build the automation's image from `<source_dir>/image/Dockerfile` and
         write the resulting tag into `<source_dir>/automation.toml`.
 
-        Mirrors `ensureAutomationImageReady` in
-        `bitswan-editor/Extension/src/utils/automationImageBuilder.ts`:
+        Build algorithm:
 
           * Image content-addressed by the git-tree hash of the `image/`
             subdirectory.
           * Tag template: `internal/{workspace}-{bp}-{automation}:sha{checksum}`.
           * Skips the build if an image with the same tag is already present.
-          * Updates `automation.toml` so subsequent deploys (and the existing
-            editor flow) pick up the freshly-built tag.
+          * Updates `automation.toml` so subsequent deploys pick up the
+            freshly-built tag.
 
         Returns the resolved image tag, or `None` if the automation has no
         `image/` directory (in which case `deploy_automation` falls back to
@@ -781,8 +780,15 @@ class AutomationService:
 
         if not already_built:
             # Poll until the build finishes (or fails). The 5-minute deadline
-            # matches the editor-side helper.
+            # bounds a stuck build. On every tick we surface the latest build
+            # log line as progress — a docker build of a real image takes
+            # minutes, and without this the deploy task message would stay on
+            # "Preparing …" the whole time and the dashboard toast would go dark
+            # (no on-screen progress for >15s). Reporting the build-step tail
+            # every ~2s keeps the operator informed without changing what the
+            # build itself does.
             deadline = asyncio.get_event_loop().time() + 5 * 60
+            last_reported = None
             while True:
                 status = image_service._get_build_status(image_checksum)
                 if status == "ready":
@@ -797,10 +803,25 @@ class AutomationService:
                         status_code=504,
                         detail=f"Image build timed out for {full_tag}",
                     )
+                if progress_callback is not None:
+                    tail = image_service.build_log_tail(image_checksum)
+                    msg = (
+                        f"Building image for {auto_name}: {tail}"
+                        if tail
+                        else f"Building image for {auto_name}…"
+                    )
+                    if msg != last_reported:
+                        last_reported = msg
+                        try:
+                            await progress_callback("building_images", msg, None)
+                        except Exception:
+                            # Progress is best-effort telemetry — never let a
+                            # reporting hiccup abort a real build.
+                            logger.debug("build progress report failed", exc_info=True)
                 await asyncio.sleep(2)
 
         # Write the resolved tag into automation.toml so the rest of the
-        # deploy pipeline (and the editor) sees the up-to-date image.
+        # deploy pipeline sees the up-to-date image.
         update_automation_toml_image(
             os.path.join(source_dir, "automation.toml"), full_tag
         )
@@ -885,8 +906,8 @@ class AutomationService:
         """Resolve the deployment_id for a scanned source at a given stage.
 
         The scanner's `deployment_id` always ends with `-live-dev`; for the
-        `dev` stage rewrite the suffix so the id matches what bitswan-editor
-        produces (sanitized-{bp_prefix}{stage}).
+        `dev` stage rewrite the suffix to the canonical id format
+        (sanitized-{bp_prefix}{stage}).
         """
         if stage == "dev":
             return source["deployment_id"].removesuffix("-live-dev") + "-dev"
@@ -897,12 +918,13 @@ class AutomationService:
         relative_path: str,
         stage: str,
         copy: str | None = None,
+        progress_callback: Callable[..., Any] | None = None,
     ) -> dict:
         """Build + materialize one automation source, ready for deployment.
 
         Pure prep — NO deploy task, NO bitswan.yaml write, NO compose-up:
           * discover the source via `scan_workspace_sources` (so the
-            deployment_id format matches the editor's),
+            deployment_id format stays canonical),
           * build the per-automation runtime image if it ships an
             `image/Dockerfile` (`_ensure_automation_image`),
           * compute the merged-tree checksum (with `bitswan_lib`) and
@@ -956,7 +978,9 @@ class AutomationService:
         # afterwards would materialize a stale config and silently fall back to
         # the default runtime image.
         try:
-            base_tag = await self._ensure_automation_image(source_dir)
+            base_tag = await self._ensure_automation_image(
+                source_dir, progress_callback=progress_callback
+            )
         except HTTPException:
             raise
         except Exception as exc:
@@ -1515,7 +1539,7 @@ class AutomationService:
         """Encrypt + version a BP's secrets in bitswan.yaml as ONE commit.
 
         Secret *names* are shared across stages; *values* are per stage, so the
-        editor sends every realm's {KEY: value} map and we persist them together
+        caller sends every realm's {KEY: value} map and we persist them together
         — one rollback point captures the whole secret state. Each realm gets its
         own AES blob (per-stage storage), and we re-derive each realm's plaintext
         env file. Values apply on the next deploy of that stage."""
@@ -2711,11 +2735,12 @@ class AutomationService:
                 service_by_dep.setdefault(base, name)
 
         await _report("docker_compose_up", "Starting containers...")
+        infra_to_up = await self._infra_services_to_bring_up(infra_service_names)
         deployment_result = await docker_compose_up(
             self.gitops_dir,
             dc_yaml,
             container_name=None,
-            extra_services=member_services + infra_service_names,
+            extra_services=member_services + infra_to_up,
         )
         await self._post_deploy_infra_services(bs_yaml)
         await self._provision_bp_databases(bs_yaml, deployment_ids)
@@ -2810,7 +2835,16 @@ class AutomationService:
                 f"Preparing {i}/{total}: {src.get('display_name', src['relative_path'])}",
                 current=i - 1,
             )
-            prep = await self.prep_deploy_source(src["relative_path"], stage, copy)
+
+            # Surface granular image-build progress for THIS member while it
+            # builds (minutes for a real image). Pin the per-member counter so
+            # the build-log tail updates don't reset the i/total progress.
+            async def _build_report(step: str, message: str, _current=None, _i=i):
+                await _report(step, message, current=_i - 1)
+
+            prep = await self.prep_deploy_source(
+                src["relative_path"], stage, copy, progress_callback=_build_report
+            )
             prepped.append(prep)
 
         await _report(
@@ -2907,7 +2941,7 @@ class AutomationService:
         Promotion re-deploys the source stage's recorded checksum — no scan,
         no image build, no materialize (the asset tree already lives under
         `<gitops_dir>/<checksum>/`). Target deployment ids follow the same
-        convention as the dashboard/editor per-automation promote flow:
+        convention as the dashboard per-automation promote flow:
         `{automation}-{bp}-staging` for staging and `{automation}-{bp}`
         (no suffix) for production.
         """
@@ -3510,6 +3544,69 @@ class AutomationService:
 
         return success
 
+    async def _infra_services_to_bring_up(
+        self, infra_service_names: list[str]
+    ) -> list[str]:
+        """Filter infra services so an already-present one is SHARED, not recreated.
+
+        Shared infra (postgres/minio/…) is per-REALM and shared across every
+        stage in that realm — notably ``dev`` and ``live-dev`` both map to the
+        ``dev`` realm and therefore to the SAME fixed-named container
+        (``{ws}__postgres-dev`` etc.). Once that container exists, every stage in
+        the realm must REUSE it: re-listing it in ``docker compose up`` would try
+        to recreate the fixed-name container and fail with
+        ``Container … is already in use`` (the live-dev → dev collision).
+
+        So we drop already-present infra from the up-list. A present-but-stopped
+        container is started in place (never recreated). BP containers reach infra
+        over ``bitswan_network`` by name and have no compose ``depends_on`` on it,
+        so leaving it out of the up-list never strands a dependency.
+        """
+        if not infra_service_names:
+            return []
+        docker_client = get_async_docker_client()
+        to_up: list[str] = []
+        for svc_name in infra_service_names:
+            container = f"{self.workspace_name}__{svc_name}"
+            try:
+                found = await docker_client.list_containers(
+                    all=True, filters={"name": [container]}
+                )
+                match = next(
+                    (c for c in found if f"/{container}" in (c.get("Names") or [])),
+                    None,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not check infra container '{container}' ({e}); "
+                    "letting compose manage it."
+                )
+                to_up.append(svc_name)
+                continue
+            if match is None:
+                to_up.append(svc_name)  # absent → compose creates it
+                continue
+            if (match.get("State") or "").lower() != "running":
+                # Present but stopped: start it in place rather than recreating.
+                try:
+                    await docker_client.start_container(match.get("Id") or container)
+                    logger.info(
+                        f"Shared infra '{container}' was stopped — started it "
+                        "in place (not recreated)."
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Could not start existing infra '{container}' ({e}); "
+                        "letting compose manage it."
+                    )
+                    to_up.append(svc_name)
+            else:
+                logger.info(
+                    f"Shared infra '{container}' already running — reusing it "
+                    "(dev/live-dev share one container)."
+                )
+        return to_up
+
     async def start_oauth2_proxy_in_infra_services(
         self, infra_service_names: list[str]
     ):
@@ -3909,11 +4006,12 @@ fi
 
         # deploy the automation and its infra services
         await _report("docker_compose_up", "Starting containers...")
+        infra_to_up = await self._infra_services_to_bring_up(infra_service_names)
         deployment_result = await docker_compose_up(
             self.gitops_dir,
             dc_yaml,
             compose_service_name,
-            extra_services=infra_service_names,
+            extra_services=infra_to_up,
         )
         await self._post_deploy_infra_services(bs_yaml)
         await self._provision_bp_databases(bs_yaml, [deployment_id])
@@ -4125,11 +4223,12 @@ fi
             dep_conf.get("context", ""),
             dep_conf.get("stage", "production") or "production",
         )
+        infra_to_up = await self._infra_services_to_bring_up(infra_service_names)
         deployment_result = await docker_compose_up(
             self.gitops_dir,
             dc_yaml,
             compose_svc,
-            extra_services=infra_service_names,
+            extra_services=infra_to_up,
         )
         await self._post_deploy_infra_services(bs_yaml)
         await self._provision_bp_databases(bs_yaml, [deployment_id])
