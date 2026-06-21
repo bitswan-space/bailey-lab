@@ -386,13 +386,31 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	gitConfigGlobalCmd = exec.Command("su", "-s", "/bin/sh", "user1000", "-c", "git config --global user.email 'workspace@bitswan.local'") //nolint:gosec
 	gitConfigGlobalCmd.Run()                                                                                                               // Ignore errors, might already be set
 
-	// Add GitOps worktree as user1000
+	// GitOps deploy STATE lives on its own disjoint branch (bitswan.yaml only),
+	// separate from the source on `main`. It used to be a git WORKTREE of the
+	// workspace repo, relying on that repo's `.git` being bind-mounted into the
+	// gitops container. Commit 490ff63 ("Replace shared-.git worktrees with a
+	// ff-only git server + per-copy clones") stopped mounting that `.git` (and
+	// dropped the orphan-worktree gitdir rewrite) when it moved `main` to
+	// repo.git/copies — but it never migrated THIS state branch, so the worktree's
+	// gitdir pointed at an unmounted path and every in-container git op failed
+	// (deploy history never rendered → "Not deployed yet"; BP creation 400s).
+	//
+	// Make it a SELF-CONTAINED repo on the same disjoint branch so its git works
+	// regardless of what's mounted (only /gitops/gitops itself is). Mirror the
+	// workspace repo's origin, if any, so the remote-repo push path below still
+	// works; the empty state branch is fine — the first deploy writes bitswan.yaml.
 	gitopsWorktree := gitopsConfig + "/gitops"
-	worktreeAddCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("git -C %s worktree add --orphan -b %s %s", gitopsWorkspace, workspaceName, gitopsWorktree)) //nolint:gosec
+	initStateRepo := fmt.Sprintf(
+		"mkdir -p %[1]s && git -C %[1]s init -q -b %[2]s && "+
+			"O=$(git -C %[3]s remote get-url origin 2>/dev/null || true); "+
+			"[ -n \"$O\" ] && git -C %[1]s remote add origin \"$O\" || true",
+		gitopsWorktree, workspaceName, gitopsWorkspace)
+	worktreeAddCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", initStateRepo) //nolint:gosec
 
-	fmt.Println("Setting up GitOps worktree...")
+	fmt.Println("Setting up GitOps state repo...")
 	if err := util.RunCommandVerbose(worktreeAddCom, *verbose); err != nil {
-		return fmt.Errorf("failed to create GitOps worktree: %w", err)
+		return fmt.Errorf("failed to create GitOps state repo: %w", err)
 	}
 
 	if *remoteRepo != "" {
