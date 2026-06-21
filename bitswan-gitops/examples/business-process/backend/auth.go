@@ -122,6 +122,12 @@ func (p *JWKSProvider) getKey(kid string) (*rsa.PublicKey, error) {
 // requireAuth returns middleware that validates a Bearer JWT and stores claims in context.
 func (app *App) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simple mode (no JWKS provider configured): the Bailey gate has already
+		// authenticated this request upstream, so trust it and pass through.
+		if app.jwks == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
 			writeError(w, http.StatusUnauthorized, "Missing authorization token")

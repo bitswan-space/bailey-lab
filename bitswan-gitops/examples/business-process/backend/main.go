@@ -80,8 +80,15 @@ func main() {
 	ensureBucket(mc)
 	preseedLogo(mc, db)
 
-	issuerURL := mustEnv("KEYCLOAK_ISSUER_URL")
-	jwks := NewJWKSProvider(issuerURL)
+	// In AOC mode KEYCLOAK_ISSUER_URL is injected and the backend validates JWTs
+	// itself. In simple/no-AOC mode it's absent — the Bailey gate authenticates
+	// upstream — so run without a JWKS provider rather than refusing to start.
+	var jwks *JWKSProvider
+	if issuerURL := os.Getenv("KEYCLOAK_ISSUER_URL"); issuerURL != "" {
+		jwks = NewJWKSProvider(issuerURL)
+	} else {
+		log.Println("KEYCLOAK_ISSUER_URL not set — simple mode: the Bailey gate authenticates upstream; backend does not validate JWTs itself.")
+	}
 
 	app := &App{db: db, mc: mc, jwks: jwks}
 
