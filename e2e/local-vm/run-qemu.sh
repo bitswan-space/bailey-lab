@@ -25,6 +25,15 @@ KEEP=0; [ "${1:-}" = "--keep" ] && KEEP=1
 
 [ -e /dev/kvm ] || { echo "ERROR: /dev/kvm not present — enable virtualization."; exit 1; }
 ip link show "$BRIDGE" >/dev/null 2>&1 || { echo "ERROR: bridge $BRIDGE missing (start libvirt 'default' net)."; exit 1; }
+
+# On hosts that also run Docker, Docker sets the FORWARD policy to DROP, which
+# strangles the bridged guest's NAT (throughput collapses to ~1 KB/s). Insert
+# ACCEPT rules for the bridge ABOVE Docker's chains (idempotent, additive — does
+# not touch Docker's own rules). This is what makes the guest's network usable.
+if command -v iptables >/dev/null 2>&1; then
+  iptables -C FORWARD -i "$BRIDGE" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$BRIDGE" -j ACCEPT || true
+  iptables -C FORWARD -o "$BRIDGE" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -o "$BRIDGE" -j ACCEPT || true
+fi
 mkdir -p "$WORK"
 
 echo "=== fetch Ubuntu 24.04 cloud image (cached) ==="
