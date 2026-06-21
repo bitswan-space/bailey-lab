@@ -211,7 +211,7 @@ func TestGatherPeople_AttributesWorkspaceOwnership(t *testing.T) {
 	// per-person workspace-count branch runs.
 	ws := "peoplews"
 	mkWorkspaceDir(t, ws, true)
-	if _, err := registerEndpoint(ws+"-editor."+domain, owner, "", "", "", ""); err != nil {
+	if _, err := registerEndpoint(ws+"-gitops."+domain, owner, "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	people, _ := gatherPeople(baileyReq(http.MethodGet, "/x", "boss@example.com", adminGrp))

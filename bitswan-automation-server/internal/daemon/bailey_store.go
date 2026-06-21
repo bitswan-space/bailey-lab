@@ -30,7 +30,7 @@ var (
 const baileySchema = `
 -- Per-endpoint ACL. One row per protected (outer) hostname; owner is
 -- the user whose action created the endpoint (the workspace creator
--- for editor/gitops/dashboard, the deployer for automations, the
+-- for gitops/dashboard, the deployer for automations, the
 -- first signed-in user for the bailey management surface).
 --
 -- parent_endpoint links a workspace-spawned endpoint (automation,
@@ -38,7 +38,7 @@ const baileySchema = `
 -- endpoint, recorded explicitly at registration time; membership of
 -- the parent delegates to the child (see roleFor). A soft reference,
 -- not a foreign key: the parent may be registered after the child
--- (workspace init creates gitops/editor before the dashboard).
+-- (workspace init creates gitops before the dashboard).
 CREATE TABLE IF NOT EXISTS endpoints (
   hostname        TEXT PRIMARY KEY COLLATE NOCASE,
   owner_email     TEXT NOT NULL COLLATE NOCASE,

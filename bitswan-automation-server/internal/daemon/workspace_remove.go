@@ -71,7 +71,7 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 		fmt.Fprintln(writer, "No automations to remove.")
 	}
 
-	// 3. Remove GitOps and Editor docker containers and volumes
+	// 3. Remove GitOps docker containers and volumes
 	fmt.Fprintln(writer, "Removing docker containers and volumes...")
 	workspacesFolder := filepath.Join(bitswanPath, "workspaces")
 	dockerComposePath := filepath.Join(workspacesFolder, workspaceName, "deployment")
@@ -102,7 +102,7 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	if _, err := os.Stat(dockerComposePath); os.IsNotExist(err) {
 		fmt.Fprintf(writer, "Warning: Deployment directory %s does not exist, skipping docker compose down.\n", dockerComposePath)
 		// Still try to remove containers by project name in case they exist
-		for _, projSuffix := range []string{"-site", "-editor", "-dashboard", "-coding-agent"} {
+		for _, projSuffix := range []string{"-site", "-dashboard", "-coding-agent"} {
 			cmd := exec.Command("docker", "compose", "-p", projectName+projSuffix, "down", "--volumes")
 			cmd.Stdout = writer
 			cmd.Stderr = writer
@@ -114,10 +114,9 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 		composeArgs := [][]string{
 			{"-p", projectName + "-site", "down", "--volumes"},
 		}
-		// Editor, dashboard, and coding-agent each have their own compose file
+		// Dashboard and coding-agent each have their own compose file
 		// and project; tear down whichever are present.
 		for _, svc := range []struct{ file, suffix string }{
-			{"docker-compose-editor.yml", "-editor"},
 			{"docker-compose-dashboard.yml", "-dashboard"},
 			{"docker-compose-coding-agent.yml", "-coding-agent"},
 		} {
@@ -140,7 +139,7 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	// 4. Remove images used by docker-compose
 	fmt.Fprintln(writer, "Removing images used by docker-compose...")
 	composeFiles := []string{"docker-compose.yml"}
-	for _, f := range []string{"docker-compose-editor.yml", "docker-compose-dashboard.yml", "docker-compose-coding-agent.yml"} {
+	for _, f := range []string{"docker-compose-dashboard.yml", "docker-compose-coding-agent.yml"} {
 		if _, err := os.Stat(filepath.Join(dockerComposePath, f)); err == nil {
 			composeFiles = append(composeFiles, f)
 		}
@@ -298,7 +297,6 @@ func deleteHostsEntry(workspaceName string, writer io.Writer) error {
 	// Define the entries to be removed
 	hostsEntries := []string{
 		"127.0.0.1 " + workspaceName + "-gitops.bitswan.local",
-		"127.0.0.1 " + workspaceName + "-editor.bitswan.local",
 	}
 
 	found := false

@@ -28,11 +28,8 @@ func syncWorkspaceListToAOC() error {
 			entry["id"] = *metadata.WorkspaceId
 		}
 
-		// Add editor_url and domain if available in metadata
+		// Add domain if available in metadata
 		if metadata, err := config.GetWorkspaceMetadata(ws.Name); err == nil {
-			if metadata.EditorURL != nil {
-				entry["editor_url"] = *metadata.EditorURL
-			}
 			if metadata.Domain != "" {
 				entry["domain"] = metadata.Domain
 			}

@@ -18,8 +18,7 @@ import (
 )
 
 // DashboardService manages the workspace-dashboard sidecar deployment for a workspace.
-// It owns its own docker-compose-dashboard.yml file and lifecycle, fully independent
-// from EditorService
+// It owns its own docker-compose-dashboard.yml file and lifecycle.
 type DashboardService struct {
 	WorkspaceName string
 	WorkspacePath string
@@ -88,9 +87,9 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			// the workspace's copies tree at /workspace/workspace/copies. (The
 			// old shared `workspace/` working tree is gone in the copy model.)
 			wsVolume("copies", "/workspace/workspace/copies", false),
-			// SSH key for connecting to the coding-agent container. Shared
-			// with bitswan-editor — the dashboard authenticates as the same
-			// principal that's already in the agent's authorized_keys.
+			// SSH key for connecting to the coding-agent container. The
+			// dashboard authenticates as the same principal that's already
+			// in the agent's authorized_keys.
 			wsVolume("ssh", "/workspace/.ssh", true),
 			// Read-only view of session transcripts (.meta.json + .cast)
 			// written by the coding-agent wrapper, for the dashboard's

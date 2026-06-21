@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/automations"
@@ -22,7 +21,6 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 	// Parse flags
 	fs := flag.NewFlagSet("workspace-update", flag.ContinueOnError)
 	gitopsImage := fs.String("gitops-image", "", "")
-	editorImage := fs.String("editor-image", "", "")
 	dashboardImage := fs.String("dashboard-image", "", "")
 	kafkaImage := fs.String("kafka-image", "", "")
 	zookeeperImage := fs.String("zookeeper-image", "", "")
@@ -32,7 +30,6 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 	devMode := fs.Bool("dev-mode", false, "")
 	disableDevMode := fs.Bool("disable-dev-mode", false, "")
 	gitopsDevSourceDir := fs.String("gitops-dev-source-dir", "", "")
-	editorDevSourceDir := fs.String("editor-dev-source-dir", "", "")
 	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
 
 	// Go's flag package stops parsing at the first non-flag token, so a flag
@@ -66,7 +63,7 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 	metadataPath := filepath.Join(workspacePath, "metadata.yaml")
 
 	// Handle dev mode settings - update metadata if dev mode flags are provided
-	if *devMode || *disableDevMode || *gitopsDevSourceDir != "" || *editorDevSourceDir != "" || *dashboardDevSourceDir != "" {
+	if *devMode || *disableDevMode || *gitopsDevSourceDir != "" || *dashboardDevSourceDir != "" {
 		fmt.Println("Updating dev mode settings...")
 		metadata, err := config.GetWorkspaceMetadata(workspaceName)
 		if err != nil {
@@ -81,7 +78,6 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 			metadata.DevMode = false
 			// Clear dev source directories when disabling dev mode
 			metadata.GitopsDevSourceDir = nil
-			metadata.EditorDevSourceDir = nil
 			metadata.DashboardDevSourceDir = nil
 			fmt.Println("Dev mode disabled")
 		}
@@ -89,11 +85,6 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 			metadata.GitopsDevSourceDir = gitopsDevSourceDir
 			metadata.DevMode = true
 			fmt.Printf("GitOps dev source directory set to: %s\n", *gitopsDevSourceDir)
-		}
-		if *editorDevSourceDir != "" {
-			metadata.EditorDevSourceDir = editorDevSourceDir
-			metadata.DevMode = true
-			fmt.Printf("Editor dev source directory set to: %s\n", *editorDevSourceDir)
 		}
 		if *dashboardDevSourceDir != "" {
 			metadata.DashboardDevSourceDir = dashboardDevSourceDir
@@ -115,7 +106,7 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 
 	// 3. Update services if they are enabled
 	fmt.Println("Checking for enabled services to update...")
-	if err := updateServices(workspaceName, *editorImage, *dashboardImage, *kafkaImage, *zookeeperImage, *couchdbImage, *staging, *trustCA); err != nil {
+	if err := updateServices(workspaceName, *dashboardImage, *kafkaImage, *zookeeperImage, *couchdbImage, *staging, *trustCA); err != nil {
 		fmt.Printf("Warning: some services failed to update: %v\n", err)
 	}
 
@@ -124,15 +115,7 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 }
 
 // updateServices updates all enabled services for the workspace
-func updateServices(workspaceName, editorImage, dashboardImage, kafkaImage, zookeeperImage, couchdbImage string, staging, trustCA bool) error {
-	// Always try to update editor service if enabled
-	fmt.Println("Checking editor service...")
-	if err := updateEditorService(workspaceName, editorImage, staging, trustCA); err != nil {
-		fmt.Printf("Warning: failed to update editor service: %v\n", err)
-	} else {
-		fmt.Println("Editor service updated successfully!")
-	}
-
+func updateServices(workspaceName, dashboardImage, kafkaImage, zookeeperImage, couchdbImage string, staging, trustCA bool) error {
 	// Always try to update dashboard service if enabled
 	fmt.Println("Checking dashboard service...")
 	if err := updateDashboardService(workspaceName, dashboardImage, staging, trustCA); err != nil {
@@ -204,48 +187,8 @@ func updateCodingAgentService(workspaceName string) error {
 	return nil
 }
 
-// updateEditorService updates the editor service for a specific workspace
-func updateEditorService(workspaceName, editorImage string, staging bool, trustCA bool) error {
-	editorService, err := services.NewEditorService(workspaceName)
-	if err != nil {
-		return fmt.Errorf("failed to create Editor service: %w", err)
-	}
-
-	if !editorService.IsEnabled() {
-		fmt.Printf("Editor service is not enabled for workspace '%s', skipping update\n", workspaceName)
-		return nil
-	}
-
-	fmt.Println("Stopping current editor container...")
-	if err := editorService.StopContainer(); err != nil {
-		return fmt.Errorf("failed to stop current editor container: %w", err)
-	}
-
-	fmt.Println("Fixing volume permissions...")
-	if err := fixEditorPermissions(workspaceName); err != nil {
-		return fmt.Errorf("failed to fix permissions: %w", err)
-	}
-
-	fmt.Println("Regenerating editor docker-compose configuration...")
-	if err := editorService.RegenerateDockerCompose(editorImage, staging, trustCA); err != nil {
-		return fmt.Errorf("failed to regenerate docker-compose file: %w", err)
-	}
-
-	fmt.Println("Starting editor container...")
-	if err := editorService.StartContainer(); err != nil {
-		return fmt.Errorf("failed to start editor container: %w", err)
-	}
-
-	fmt.Println("Waiting for editor to be ready...")
-	if err := editorService.WaitForEditorReady(); err != nil {
-		return fmt.Errorf("editor failed to start properly: %w", err)
-	}
-
-	return nil
-}
-
 // updateDashboardService updates the workspace-dashboard service for a specific workspace.
-// Mirrors updateEditorService: stop, fix permissions, regenerate compose, start.
+// Stop, regenerate compose, start.
 func updateDashboardService(workspaceName, dashboardImage string, staging bool, trustCA bool) error {
 	dashboardService, err := services.NewDashboardService(workspaceName)
 	if err != nil {
@@ -270,75 +213,6 @@ func updateDashboardService(workspaceName, dashboardImage string, staging bool, 
 	fmt.Println("Starting dashboard container...")
 	if err := dashboardService.StartContainer(); err != nil {
 		return fmt.Errorf("failed to start dashboard container: %w", err)
-	}
-
-	return nil
-}
-
-// fixEditorPermissions fixes ownership of editor service volumes
-// Uses the host home directory (not the container's /root) since docker-compose runs on the host
-func fixEditorPermissions(workspaceName string) error {
-	// Get the host home directory from environment variable (set by daemon init)
-	homeDir := os.Getenv("HOST_HOME")
-	if homeDir == "" {
-		// Fallback: if not set, try to detect if we're in container
-		containerHome := os.Getenv("HOME")
-		if containerHome == "/root" {
-			// We're in the daemon container but HOST_HOME not set, use /root (bind mount)
-			homeDir = "/root"
-		} else {
-			// Not in container, use GetRealUserHomeDir to handle sudo cases
-			var err error
-			homeDir, err = config.GetRealUserHomeDir()
-			if err != nil {
-				homeDir = os.Getenv("HOME")
-			}
-		}
-	}
-
-	workspacePath := filepath.Join(homeDir, ".config", "bitswan", "workspaces", workspaceName)
-	secretsDir := filepath.Join(workspacePath, "secrets")
-	coderHomeDir := filepath.Join(workspacePath, "coder-home")
-	gitopsWorkspace := filepath.Join(workspacePath, "workspace")
-
-	// We're running as root in the daemon, so no need for sudo
-	// Fix permissions on all directories that are mounted into the container
-	dirs := []struct {
-		name string
-		path string
-	}{
-		{"secrets", secretsDir},
-		{"coder-home", coderHomeDir},
-		{"workspace", gitopsWorkspace},
-	}
-
-	for _, dir := range dirs {
-		// Check if directory exists before trying to chown
-		if _, err := os.Stat(dir.path); os.IsNotExist(err) {
-			// Directory doesn't exist, create it with correct permissions
-			if err := os.MkdirAll(dir.path, 0755); err != nil {
-				return fmt.Errorf("failed to create %s directory: %w", dir.name, err)
-			}
-		}
-
-		// Chown the directory and all its contents to 1000:1000
-		if err := chownRecursive(dir.path); err != nil {
-			return fmt.Errorf("failed to chown %s dir (%s): %w", dir.name, dir.path, err)
-		}
-
-		// Set permissions: 755 for directories, 644 for files
-		// This ensures the coder user (UID 1000) can read/write/execute directories and read/write files
-		chmodCom := exec.Command("find", dir.path, "-type", "d", "-exec", "chmod", "755", "{}", "+")
-		if output, err := chmodCom.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to chmod directories in %s (%s): %w, output: %s", dir.name, dir.path, err, string(output))
-		}
-
-		chmodCom = exec.Command("find", dir.path, "-type", "f", "-exec", "chmod", "644", "{}", "+")
-		if output, err := chmodCom.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to chmod files in %s (%s): %w, output: %s", dir.name, dir.path, err, string(output))
-		}
-
-		fmt.Printf("Fixed permissions for %s directory\n", dir.name)
 	}
 
 	return nil

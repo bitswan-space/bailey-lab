@@ -295,7 +295,7 @@ def _flat_to_tree(bs_yaml: dict) -> dict:
         # source_commit recorded on the deployment itself: EVERY deploy path
         # stamps it (write_deployment_entries), whereas the node-level git_commit
         # is only set by write_bp_deploy. Without this, deploys made via the
-        # set-deploy path (Sync & Deploy's auto-deploy, the editor) carried a
+        # set-deploy path (Sync & Deploy's auto-deploy) carried a
         # source_commit on the deployment but left the node's git_commit empty,
         # so they never appeared in the Deployments history ("not deployed yet").
         # Fall back to an existing tree value when a deployment has no
@@ -765,7 +765,7 @@ def _calculate_git_tree_hash_recursive(
         else:
             blob_hash = _calculate_git_blob_hash(item_path)
             # Match git's executable detection: any of u/g/o +x flips the
-            # mode to 100755. Mirrors the editor-side checksum so the
+            # mode to 100755. Keeps the checksum stable so the
             # deploy cache reacts to chmod +x/-x on files whose bits
             # round-trip through the tarball intact.
             file_mode = os.stat(item_path).st_mode
@@ -794,8 +794,8 @@ def _calculate_git_tree_hash_recursive(
 async def calculate_git_tree_hash(dir_paths: list[str]) -> str:
     """
     Calculate git tree hash for one or more directories using git's tree object
-    format. Multiple directories are overlaid later-wins-on-collision (mirrors
-    the editor's pre-merged-tar checksum). Implementation calculates the hash
+    format. Multiple directories are overlaid later-wins-on-collision
+    (pre-merged-tar checksum). Implementation calculates the hash
     directly without spawning git processes, making it much more efficient.
     """
     import logging

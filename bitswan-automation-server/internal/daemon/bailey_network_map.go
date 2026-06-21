@@ -159,7 +159,7 @@ func buildNetworkMap() nmGraph {
 		if ws := workspaceForEndpoint(ep.Hostname, containerToWorkspace); ws != "" {
 			service := serviceLabelForEndpoint(ep.Hostname, ws)
 			if service != "" {
-				// e.g. bailey-e2e-editor → container bailey-e2e-editor
+				// e.g. bailey-e2e-gitops → container bailey-e2e-gitops
 				cID := "container:" + ws + "-" + service
 				if containsNode(nodes, cID) {
 					edges = append(edges, nmEdge{

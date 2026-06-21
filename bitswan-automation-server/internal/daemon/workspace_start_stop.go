@@ -177,15 +177,6 @@ func (s *Server) runWorkspaceStart(workspaceName string, automationsOnly bool, w
 			return fmt.Errorf("GitOps did not become reachable: %w", err)
 		}
 		fmt.Fprintln(writer, "GitOps is reachable.")
-
-		// 3. Start editor if enabled
-		fmt.Fprintln(writer, "Starting editor service...")
-		if err := s.startEditorService(workspaceName); err != nil {
-			// Non-fatal: editor might not be enabled
-			fmt.Fprintf(writer, "Note: Editor service not started: %v\n", err)
-		} else {
-			fmt.Fprintln(writer, "Editor service started.")
-		}
 	}
 
 	// 4. Deploy all automations
@@ -220,15 +211,7 @@ func (s *Server) runWorkspaceStop(workspaceName string, automationsOnly bool, wr
 		return nil
 	}
 
-	// 2. Stop editor if enabled
-	fmt.Fprintln(writer, "Stopping editor service...")
-	if err := s.stopEditorService(workspaceName); err != nil {
-		fmt.Fprintf(writer, "Note: Editor service not stopped: %v\n", err)
-	} else {
-		fmt.Fprintln(writer, "Editor service stopped.")
-	}
-
-	// 3. Stop the GitOps container
+	// 2. Stop the GitOps container
 	fmt.Fprintln(writer, "Stopping GitOps container...")
 	homeDir, err := config.GetRealUserHomeDir()
 	if err != nil {

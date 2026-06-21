@@ -27,7 +27,7 @@ func newStartCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "start [workspace]",
 		Short:        "Start all services in a workspace",
-		Long:         "Start the GitOps container, editor service, and deploy all automations in a workspace. If no workspace is specified, the active workspace is used.",
+		Long:         "Start the GitOps container and deploy all automations in a workspace. If no workspace is specified, the active workspace is used.",
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -51,7 +51,7 @@ func newStartCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&automationsOnly, "automations", false, "Only start automations and their dependent services (skip GitOps and editor)")
+	cmd.Flags().BoolVar(&automationsOnly, "automations", false, "Only start automations and their dependent services (skip GitOps)")
 
 	return cmd
 }
@@ -62,7 +62,7 @@ func newStopCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "stop [workspace]",
 		Short:        "Stop all services in a workspace",
-		Long:         "Stop all automations, the editor service, and the GitOps container in a workspace. If no workspace is specified, the active workspace is used.",
+		Long:         "Stop all automations and the GitOps container in a workspace. If no workspace is specified, the active workspace is used.",
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -86,7 +86,7 @@ func newStopCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&automationsOnly, "automations", false, "Only stop automations (skip editor and GitOps)")
+	cmd.Flags().BoolVar(&automationsOnly, "automations", false, "Only stop automations (skip GitOps)")
 
 	return cmd
 }
@@ -121,7 +121,7 @@ func newRestartCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&automationsOnly, "automations", false, "Only restart automations (skip editor and GitOps)")
+	cmd.Flags().BoolVar(&automationsOnly, "automations", false, "Only restart automations (skip GitOps)")
 
 	return cmd
 }

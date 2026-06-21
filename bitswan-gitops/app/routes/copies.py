@@ -2,8 +2,8 @@
 
 A "copy" is an independent ``git clone`` of the workspace's canonical bare repo
 (``repo.git``), checked out on its own branch, living at
-``${BITSWAN_COPIES_DIR}/<name>``. The ``main`` copy is the editor's working tree
-and the default-branch scope; other copies are per-agent / per-task checkouts.
+``${BITSWAN_COPIES_DIR}/<name>``. The ``main`` copy is the default-branch
+scope; other copies are per-agent / per-task checkouts.
 Each copy's ``origin`` points at the embedded smart-HTTP git server so agents
 push/pull with normal git (fast-forward only).
 
@@ -41,7 +41,7 @@ def _copies_dir() -> str:
 
 
 def _git_remote_url() -> str:
-    """The smart-HTTP URL agents/editor use as ``origin`` for a copy."""
+    """The smart-HTTP URL agents use as ``origin`` for a copy."""
     url = os.environ.get("BITSWAN_GIT_REMOTE")
     if url:
         return url
@@ -262,8 +262,8 @@ async def create_copy(body: CreateCopyRequest):
 
     # Clone from the local bare repo (fast, direct disk access), branch off the
     # base, publish the new branch back to the bare (the pre-receive hook allows
-    # new branches), then repoint origin at the smart-HTTP URL that the agent /
-    # editor containers use at runtime.
+    # new branches), then repoint origin at the smart-HTTP URL that the agent
+    # containers use at runtime.
     if not await call_git_command("git", "clone", bare, copy_path):
         raise HTTPException(status_code=500, detail="Failed to clone canonical repo")
 
@@ -388,8 +388,8 @@ async def _compute_copies() -> list[dict]:
     """Enumerate the copies directory and assemble the listing.
 
     Each copy is an independent clone with its own .git, so state is read
-    per-copy. The `main` copy is excluded from the list (it's the editor's
-    working tree / default scope, not a user-managed copy).
+    per-copy. The `main` copy is excluded from the list (it's the
+    default scope, not a user-managed copy).
     """
     copies_base = _copies_dir()
     if not os.path.isdir(copies_base):
@@ -1029,8 +1029,8 @@ async def _own_container_id() -> str | None:
 async def _rm_rf_as_root_in_container(path: str) -> bool:
     """Wipe `path` as root via docker exec into our own container.
 
-    A copy's working tree contains files created by other containers (editor,
-    live-dev automations, build outputs) that uid 1000 often can't unlink. We
+    A copy's working tree contains files created by other containers
+    (live-dev automations, build outputs) that uid 1000 often can't unlink. We
     have the Docker socket, so re-enter our own container as root to remove it.
     """
     container_id = await _own_container_id()
@@ -1077,7 +1077,7 @@ class CommitRequest(BaseModel):
 @router.post("/commit")
 async def commit_changes(body: CommitRequest):
     """Stage and commit changes in a copy (or the main copy when copy is
-    None). Used by the editor UI to record filesystem changes it just made."""
+    None). Used by the dashboard UI to record filesystem changes it just made."""
     copy = body.copy or "main"
     repo_path = _resolve_copy_path(copy)
     if not os.path.exists(repo_path):

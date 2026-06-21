@@ -65,11 +65,6 @@ func GetLatestDockerHubVersion(url string) (string, error) {
 	return "latest", errors.New("No valid version found")
 }
 
-// GetLatestEditorVersion gets the latest version of the bitswan-editor image
-func GetLatestEditorVersion() (string, error) {
-	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/bitswan-editor/tags/")
-}
-
 // GetLatestKafkaVersion gets the latest version of the bitswan-kafka image
 func GetLatestKafkaVersion() (string, error) {
 	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/bitswan-kafka/tags/")
@@ -83,11 +78,6 @@ func GetLatestZookeeperVersion() (string, error) {
 // GetLatestCouchDBVersion gets the latest version of the bitswan-couchdb image
 func GetLatestCouchDBVersion() (string, error) {
 	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/bitswan-couchdb/tags/")
-}
-
-// GetLatestEditorStagingVersion gets the latest version of the bitswan-editor-staging image
-func GetLatestEditorStagingVersion() (string, error) {
-	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/bitswan-editor-staging/tags/")
 }
 
 // GetLatestGitopsStagingVersion gets the latest version of the gitops-staging image
@@ -141,25 +131,6 @@ func ResolveDashboardImage(staging bool) (string, error) {
 		return "", err
 	}
 	return "bitswan/workspace-dashboard:" + version, nil
-}
-
-// ResolveEditorImage returns the full editor image string based on the staging flag.
-func ResolveEditorImage(staging bool) (string, error) {
-	if img := imageOverride("BITSWAN_EDITOR_IMAGE"); img != "" {
-		return img, nil
-	}
-	if staging {
-		version, err := GetLatestEditorStagingVersion()
-		if err != nil {
-			return "", err
-		}
-		return "bitswan/bitswan-editor-staging:" + version, nil
-	}
-	version, err := GetLatestEditorVersion()
-	if err != nil {
-		return "", err
-	}
-	return "bitswan/bitswan-editor:" + version, nil
 }
 
 // GetLatestCodingAgentVersion gets the latest version of the coding-agent image

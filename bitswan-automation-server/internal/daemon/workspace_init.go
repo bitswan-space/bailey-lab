@@ -36,17 +36,14 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	certsDir := fs.String("certs-dir", "", "")
 	verbose := fs.Bool("verbose", false, "")
 	mkCerts := fs.Bool("mkcerts", false, "")
-	noIde := fs.Bool("no-ide", false, "")
 	noDashboard := fs.Bool("no-dashboard", false, "")
 	noCodingAgent := fs.Bool("no-coding-agent", false, "")
 	setHosts := fs.Bool("set-hosts", false, "")
 	local := fs.Bool("local", false, "")
 	gitopsImage := fs.String("gitops-image", "", "")
-	editorImage := fs.String("editor-image", "", "")
 	dashboardImage := fs.String("dashboard-image", "", "")
 	codingAgentImage := fs.String("coding-agent-image", "", "")
 	gitopsDevSourceDir := fs.String("gitops-dev-source-dir", "", "")
-	editorDevSourceDir := fs.String("editor-dev-source-dir", "", "")
 	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
 	codingAgentDevSourceDir := fs.String("coding-agent-dev-source-dir", "", "")
 	oauthConfigFile := fs.String("oauth-config", "", "")
@@ -54,7 +51,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	sshPort := fs.String("ssh-port", "", "")
 	staging := fs.Bool("staging", false, "")
 	// Email of the user creating the workspace. Passed through to
-	// route registration so the workspace's endpoints (gitops, editor,
+	// route registration so the workspace's endpoints (gitops,
 	// dashboard) are recorded under this owner in the Bailey ACL.
 	owner := fs.String("owner", "", "")
 
@@ -519,7 +516,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 
 	// Set hosts to /etc/hosts file
 	if *setHosts {
-		err := setHostsFile(workspaceName, *domain, *noIde)
+		err := setHostsFile(workspaceName, *domain)
 		if err != nil {
 			fmt.Printf("\033[33m%s\033[0m\n", err)
 		}
@@ -535,20 +532,8 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	// Resolve service images lazily — only hit Docker Hub for services we'll
-	// actually deploy. Otherwise `bitswan workspace init --no-ide --no-dashboard`
-	// fails if the editor or dashboard image repo isn't reachable.
-	var bitswanEditorImage string
-	if !*noIde {
-		bitswanEditorImage = *editorImage
-		if bitswanEditorImage == "" {
-			var err error
-			bitswanEditorImage, err = dockerhub.ResolveEditorImage(*staging)
-			if err != nil {
-				return fmt.Errorf("failed to get latest BitSwan Editor image: %w", err)
-			}
-		}
-	}
-
+	// actually deploy. Otherwise `bitswan workspace init --no-dashboard`
+	// fails if the dashboard image repo isn't reachable.
 	var bitswanDashboardImage string
 	if !*noDashboard {
 		bitswanDashboardImage = *dashboardImage
@@ -638,13 +623,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		} else {
 			fmt.Println("Automation server token received successfully!")
 
-			var editorURL *string
-			if !*noIde {
-				url := fmt.Sprintf("https://%s-editor.%s", workspaceName, *domain)
-				editorURL = &url
-			}
-
-			workspaceId, err = aocClient.RegisterWorkspace(workspaceName, editorURL, *domain)
+			workspaceId, err = aocClient.RegisterWorkspace(workspaceName, *domain)
 			if err != nil {
 				return fmt.Errorf("failed to register workspace: %w", err)
 			}
@@ -716,7 +695,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	fmt.Println("GitOps deployment set up successfully!")
 
 	// Save metadata to file
-	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noIde, *noDashboard, *noCodingAgent, &workspaceId, *gitopsDevSourceDir, *editorDevSourceDir, *dashboardDevSourceDir, *codingAgentDevSourceDir, codingAgentSecret); err != nil {
+	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noDashboard, *noCodingAgent, &workspaceId, *gitopsDevSourceDir, *dashboardDevSourceDir, *codingAgentDevSourceDir, codingAgentSecret); err != nil {
 		fmt.Printf("Warning: Failed to save metadata: %v\n", err)
 	}
 
@@ -737,55 +716,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		fmt.Printf("Warning: Failed to sync workspace list to AOC: %v\n", err)
 	}
 
-	// Setup editor service if not disabled
-	if !*noIde {
-		fmt.Println("Setting up editor service...")
-
-		editorService, err := services.NewEditorService(workspaceName)
-		if err != nil {
-			return fmt.Errorf("failed to create editor service: %w", err)
-		}
-
-		if err := editorService.Enable(token, bitswanEditorImage, *domain, oauthConfig, true); err != nil {
-			return fmt.Errorf("failed to enable editor service: %w", err)
-		}
-
-		editorHostname := fmt.Sprintf("%s-editor.%s", workspaceName, *domain)
-		editorUpstream := fmt.Sprintf("%s-editor:9999", workspaceName)
-		if err := addRouteToIngress(IngressAddRouteRequest{
-			Hostname:       editorHostname,
-			Upstream:       editorUpstream,
-			Mkcert:         *mkCerts,
-			CertsDir:       *certsDir,
-			WorkspaceName:  workspaceName,
-			OwnerEmail:     *owner,
-			DisplayName:    workspaceName + " (editor)",
-			ParentEndpoint: workspaceParent,
-		}, ""); err != nil {
-			return fmt.Errorf("failed to register Editor service: %w", err)
-		}
-
-		if err := editorService.StartContainer(); err != nil {
-			return fmt.Errorf("failed to start editor container: %w", err)
-		}
-
-		fmt.Println("Downloading and installing editor...")
-		if err := editorService.WaitForEditorReady(); err != nil {
-			return fmt.Errorf("failed to wait for editor to be ready: %w", err)
-		}
-
-		fmt.Println("------------BITSWAN EDITOR INFO------------")
-		fmt.Printf("Bitswan Editor URL: https://%s-editor.%s\n", workspaceName, *domain)
-		if oauthConfig == nil {
-			editorPassword, err := editorService.GetEditorPassword()
-			if err != nil {
-				return fmt.Errorf("failed to get Bitswan Editor password: %w", err)
-			}
-			fmt.Printf("Bitswan Editor Password: %s\n", editorPassword)
-		}
-	}
-
-	// Setup dashboard service if not disabled — fully independent from the editor.
+	// Setup dashboard service if not disabled.
 	if !*noDashboard {
 		fmt.Println("Setting up workspace-dashboard service...")
 
@@ -870,7 +801,7 @@ type RepositoryInfo struct {
 	IsSSH    bool
 }
 
-func setHostsFile(workspaceName, domain string, noIde bool) error {
+func setHostsFile(workspaceName, domain string) error {
 	fmt.Println("Checking if the user has permission to write to /etc/hosts...")
 	fileInfo, err := os.Stat("/etc/hosts")
 	if err != nil {
@@ -884,10 +815,6 @@ func setHostsFile(workspaceName, domain string, noIde bool) error {
 
 	hostsEntries := []string{
 		"127.0.0.1 " + workspaceName + "-gitops." + domain,
-	}
-
-	if !noIde {
-		hostsEntries = append(hostsEntries, "127.0.0.1 "+workspaceName+"-editor."+domain)
 	}
 
 	for _, entry := range hostsEntries {
@@ -909,7 +836,7 @@ func setHostsFile(workspaceName, domain string, noIde bool) error {
 	return nil
 }
 
-func saveMetadata(gitopsConfig, workspaceName, token, domain string, noIde, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, editorDevSourceDir, dashboardDevSourceDir, codingAgentDevSourceDir, codingAgentSecret string) error {
+func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentDevSourceDir, codingAgentSecret string) error {
 	metadata := config.WorkspaceMetadata{
 		Domain:       domain,
 		GitopsURL:    fmt.Sprintf("https://%s-gitops.%s", workspaceName, domain),
@@ -918,11 +845,6 @@ func saveMetadata(gitopsConfig, workspaceName, token, domain string, noIde, noDa
 
 	if workspaceId != nil {
 		metadata.WorkspaceId = workspaceId
-	}
-
-	if !noIde {
-		editorURL := fmt.Sprintf("https://%s-editor.%s", workspaceName, domain)
-		metadata.EditorURL = &editorURL
 	}
 
 	if !noDashboard {
@@ -934,14 +856,9 @@ func saveMetadata(gitopsConfig, workspaceName, token, domain string, noIde, noDa
 		metadata.GitopsDevSourceDir = &gitopsDevSourceDir
 	}
 
-	// Dev mode for editor / dashboard is implied by their source dirs being set.
+	// Dev mode for the dashboard is implied by its source dir being set.
 	// The DevMode bool is still written for backward-compat consumers but no
 	// longer gates the per-service dev-mode behavior.
-	if editorDevSourceDir != "" {
-		metadata.EditorDevSourceDir = &editorDevSourceDir
-		metadata.DevMode = true
-	}
-
 	if dashboardDevSourceDir != "" {
 		metadata.DashboardDevSourceDir = &dashboardDevSourceDir
 		metadata.DevMode = true

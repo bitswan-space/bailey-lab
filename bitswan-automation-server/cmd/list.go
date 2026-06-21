@@ -39,9 +39,6 @@ func newListCmd() *cobra.Command {
 					if workspace.Domain != "" {
 						fmt.Fprintf(cmd.OutOrStdout(), "  Workspace Domain: %s\n", workspace.Domain)
 					}
-					if workspace.EditorURL != "" {
-						fmt.Fprintf(cmd.OutOrStdout(), "  Editor URL: %s\n", workspace.EditorURL)
-					}
 					if workspace.GitopsURL != "" {
 						fmt.Fprintf(cmd.OutOrStdout(), "  Gitops URL: %s\n", workspace.GitopsURL)
 					}
@@ -51,9 +48,6 @@ func newListCmd() *cobra.Command {
 				}
 
 				if showPasswords {
-					if workspace.VSCodePassword != "" {
-						fmt.Fprintf(cmd.OutOrStdout(), "  VSCode Password: %s\n", workspace.VSCodePassword)
-					}
 					if workspace.GitopsSecret != "" {
 						fmt.Fprintf(cmd.OutOrStdout(), "  GitOps Secret: %s\n", workspace.GitopsSecret)
 					}

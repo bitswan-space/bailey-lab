@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
-	"github.com/bitswan-space/bitswan-workspaces/internal/services"
 	"github.com/bitswan-space/bitswan-workspaces/internal/workspace"
 	"gopkg.in/yaml.v3"
 )
@@ -48,35 +47,12 @@ func (s *Server) runDisconnectFromAOC() error {
 	return nil
 }
 
-// restartWorkspace regenerates docker-compose files and restarts gitops + editor
-// for a single workspace. Unlike runWorkspaceUpdate this skips example updates
-// and does not wait for the editor health check.
+// restartWorkspace regenerates docker-compose files and restarts gitops
+// for a single workspace. Unlike runWorkspaceUpdate this skips example updates.
 func restartWorkspace(workspaceName string) error {
 	// Regenerate and restart gitops
 	if err := workspace.UpdateWorkspaceDeployment(workspaceName, "", false, false); err != nil {
 		return fmt.Errorf("gitops: %w", err)
-	}
-
-	// Regenerate and restart editor if enabled
-	editorService, err := services.NewEditorService(workspaceName)
-	if err != nil {
-		return nil // workspace doesn't exist or isn't set up, skip
-	}
-	if !editorService.IsEnabled() {
-		return nil
-	}
-
-	if err := editorService.StopContainer(); err != nil {
-		return fmt.Errorf("editor stop: %w", err)
-	}
-	if err := fixEditorPermissions(workspaceName); err != nil {
-		return fmt.Errorf("editor permissions: %w", err)
-	}
-	if err := editorService.RegenerateDockerCompose("", false, false); err != nil {
-		return fmt.Errorf("editor regenerate: %w", err)
-	}
-	if err := editorService.StartContainer(); err != nil {
-		return fmt.Errorf("editor start: %w", err)
 	}
 
 	return nil

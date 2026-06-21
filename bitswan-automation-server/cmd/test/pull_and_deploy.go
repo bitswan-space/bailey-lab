@@ -14,18 +14,16 @@ import (
 
 func newPullAndDeployCmd() *cobra.Command {
 	var gitopsImage string
-	var editorImage string
 
 	cmd := &cobra.Command{
 		Use:   "pull-and-deploy",
 		Short: "Test pull-and-deploy functionality across two workspaces",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTestPullAndDeploy(gitopsImage, editorImage)
+			return runTestPullAndDeploy(gitopsImage)
 		},
 	}
 
 	cmd.Flags().StringVar(&gitopsImage, "gitops-image", "", "Custom GitOps image to use (default: production image)")
-	cmd.Flags().StringVar(&editorImage, "editor-image", "", "Custom editor image to use (default: production image)")
 
 	return cmd
 }
@@ -40,7 +38,7 @@ func newPullAndDeployCmd() *cobra.Command {
 // Re-implement the initial deploy with createAutomationFromTemplate + startDeploy
 // + waitForDeployTask (see init.go), then exercise client.PullAndDeploy on
 // workspace 2. Not wired into CI (see .github/workflows/test.yml).
-func runTestPullAndDeploy(gitopsImage, editorImage string) error {
+func runTestPullAndDeploy(gitopsImage string) error {
 	fmt.Println("=== BitSwan Test Suite: Pull and Deploy ===")
 	fmt.Println()
 
@@ -82,14 +80,10 @@ func runTestPullAndDeploy(gitopsImage, editorImage string) error {
 	initArgs1 := []string{
 		"workspace", "init",
 		"--local",
-		"--no-ide",
 		"--no-oauth",
 	}
 	if gitopsImage != "" {
 		initArgs1 = append(initArgs1, "--gitops-image", gitopsImage)
-	}
-	if editorImage != "" {
-		initArgs1 = append(initArgs1, "--editor-image", editorImage)
 	}
 	initArgs1 = append(initArgs1, workspace1Name)
 
@@ -242,16 +236,12 @@ func runTestPullAndDeploy(gitopsImage, editorImage string) error {
 	initArgs2 := []string{
 		"workspace", "init",
 		"--local",
-		"--no-ide",
 		"--no-oauth",
 		"--remote", containerRepoPath,
 		"--branch", branchName,
 	}
 	if gitopsImage != "" {
 		initArgs2 = append(initArgs2, "--gitops-image", gitopsImage)
-	}
-	if editorImage != "" {
-		initArgs2 = append(initArgs2, "--editor-image", editorImage)
 	}
 	initArgs2 = append(initArgs2, workspace2Name)
 

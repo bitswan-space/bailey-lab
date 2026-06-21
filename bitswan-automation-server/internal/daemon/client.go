@@ -1038,7 +1038,7 @@ func (c *Client) GetIngressType() (string, error) {
 	return result["type"], nil
 }
 
-// EnableService enables a service (editor, kafka, or couchdb) with streaming logs
+// EnableService enables a service (dashboard, kafka, or couchdb) with streaming logs
 func (c *Client) EnableService(serviceType, workspace string, options map[string]interface{}) (*ServiceResponse, error) {
 	reqBody := ServiceEnableRequest{
 		ServiceType: serviceType,
@@ -1048,9 +1048,6 @@ func (c *Client) EnableService(serviceType, workspace string, options map[string
 	// Set service-specific options
 	if stage, ok := options["stage"].(string); ok {
 		reqBody.Stage = stage
-	}
-	if editorImage, ok := options["editor_image"].(string); ok {
-		reqBody.EditorImage = editorImage
 	}
 	if dashboardImage, ok := options["dashboard_image"].(string); ok {
 		reqBody.DashboardImage = dashboardImage
@@ -1726,9 +1723,6 @@ func (c *Client) UpdateService(serviceType, workspace string, options map[string
 	// Set service-specific options
 	if stage, ok := options["stage"].(string); ok {
 		reqBody.Stage = stage
-	}
-	if editorImage, ok := options["editor_image"].(string); ok {
-		reqBody.EditorImage = editorImage
 	}
 	if dashboardImage, ok := options["dashboard_image"].(string); ok {
 		reqBody.DashboardImage = dashboardImage

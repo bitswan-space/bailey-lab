@@ -48,10 +48,7 @@ func TestRecordWorkspaceOwnership_CreatorIsOwnerAndListed(t *testing.T) {
 		t.Errorf("dashboard kind = %q, want %q", dash.Kind, endpointKindWorkspace)
 	}
 
-	// The creator's editor/gitops roles must resolve to owner.
-	if role, _ := roleFor(ws+"-editor."+domain, creator, nil); role != roleOwner {
-		t.Errorf("editor roleFor = %q, want owner", role)
-	}
+	// The creator's gitops role must resolve to owner.
 	if role, _ := roleFor(ws+"-gitops."+domain, creator, nil); role != roleOwner {
 		t.Errorf("gitops roleFor = %q, want owner", role)
 	}
@@ -108,8 +105,8 @@ func TestListAccessibleWorkspaces_OwnerSeesEntry(t *testing.T) {
 	owner := "lawowner@example.com"
 	ws := "lawworkspace"
 	mkWorkspaceDir(t, ws, true)
-	// Owner of the editor endpoint → the workspace is visible with role.
-	if _, err := registerEndpoint(ws+"-editor."+domain, owner, "", "", "", ""); err != nil {
+	// Owner of the gitops endpoint → the workspace is visible with role.
+	if _, err := registerEndpoint(ws+"-gitops."+domain, owner, "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	w := dispatch(baileyReq(http.MethodGet, "/bailey/api/workspaces", owner))
@@ -129,7 +126,7 @@ func TestListAccessibleWorkspaces_OwnerSeesEntry(t *testing.T) {
 	if entry == nil {
 		t.Fatalf("owned workspace not listed: %+v", resp.Workspaces)
 	}
-	if !entry.IsOwner || entry.EditorRole != "owner" {
+	if !entry.IsOwner || entry.GitopsRole != "owner" {
 		t.Errorf("entry roles wrong: %+v", entry)
 	}
 	// The primary "Open" target is the workspace dashboard, not gitops.
@@ -153,7 +150,7 @@ func TestListAccessibleWorkspaces_ServerOwnerAuditView(t *testing.T) {
 	// A workspace owned by someone else — the server owner still sees it.
 	ws := "lawaudit"
 	mkWorkspaceDir(t, ws, true)
-	if _, err := registerEndpoint(ws+"-editor."+domain, "other@example.com", "", "", "", ""); err != nil {
+	if _, err := registerEndpoint(ws+"-gitops."+domain, "other@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	r := baileyReq(http.MethodGet, "/bailey/api/workspaces", "lawsrv@example.com")

@@ -17,16 +17,14 @@ import (
 // /bailey/api/workspaces — open to any authenticated user.
 // GET returns workspaces the caller has any ACL relationship with
 // (owner, grantee, or in a granted group). POST creates a new
-// workspace with the caller as the owner of its editor + gitops
-// endpoints.
+// workspace with the caller as the owner of its gitops
+// endpoint.
 
 type accessibleWorkspace struct {
 	Name          string   `json:"name"`
 	DashboardURL  string   `json:"dashboard_url"` // the workspace's primary UI — what "Open" launches
-	EditorURL     string   `json:"editor_url"`
 	GitopsURL     string   `json:"gitops_url"`
 	DashboardRole string   `json:"dashboard_role,omitempty"` // owner | access | none
-	EditorRole    string   `json:"editor_role,omitempty"`
 	GitopsRole    string   `json:"gitops_role,omitempty"`
 	IsOwner       bool     `json:"is_owner"`
 	IsTrashed     bool     `json:"is_trashed,omitempty"`
@@ -41,7 +39,7 @@ type listAccessibleResponse struct {
 
 // handleListAccessibleWorkspaces returns the workspaces the caller
 // can see. A workspace is visible if the caller has any ACL on its
-// editor or gitops endpoint, OR is its owner. Server owners see
+// gitops endpoint, OR is its owner. Server owners see
 // every workspace (audit view).
 func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, email string) {
 	_, groups := identityFromHeaders(r)
@@ -66,29 +64,25 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 		for _, ws := range full.Workspaces {
 			name := ws.Name
 			dashboardHost := name + "-dashboard." + domain
-			editorHost := name + "-editor." + domain
 			gitopsHost := name + "-gitops." + domain
 			dashboardRole, _ := roleFor(dashboardHost, email, groups)
-			editorRole, _ := roleFor(editorHost, email, groups)
 			gitopsRole, _ := roleFor(gitopsHost, email, groups)
-			isOwner := dashboardRole == roleOwner || editorRole == roleOwner || gitopsRole == roleOwner
+			isOwner := dashboardRole == roleOwner || gitopsRole == roleOwner
 			// Visible to: caller with any role on the dashboard (the
-			// membership surface) or either sub-endpoint, OR the server
+			// membership surface) or the gitops sub-endpoint, OR the server
 			// owner (audit view).
-			if dashboardRole == roleNone && editorRole == roleNone && gitopsRole == roleNone && !serverOwner {
+			if dashboardRole == roleNone && gitopsRole == roleNone && !serverOwner {
 				continue
 			}
 			entry := accessibleWorkspace{
 				Name:          name,
 				DashboardURL:  "https://" + dashboardHost,
-				EditorURL:     "https://" + editorHost,
 				GitopsURL:     "https://" + gitopsHost,
 				DashboardRole: string(dashboardRole),
-				EditorRole:    string(editorRole),
 				GitopsRole:    string(gitopsRole),
 				IsOwner:       isOwner,
 				IsTrashed:     IsWorkspaceTrashed(name),
-				OwnerEmail:    workspaceOwnerEmail(dashboardHost, editorHost, gitopsHost),
+				OwnerEmail:    workspaceOwnerEmail(dashboardHost, gitopsHost),
 				Members:       workspaceMemberEmails(dashboardHost),
 			}
 			out.Workspaces = append(out.Workspaces, entry)
@@ -131,12 +125,12 @@ func workspaceMemberEmails(dashboardHost string) []string {
 
 // workspaceOwnerEmail returns the recorded owner of the workspace's
 // membership surface. The dashboard endpoint is the canonical surface; if
-// it has no owner recorded (e.g. --no-dashboard), fall back to the editor
-// then gitops endpoint so a real owner is still surfaced. This is the
+// it has no owner recorded (e.g. --no-dashboard), fall back to the gitops
+// endpoint so a real owner is still surfaced. This is the
 // authoritative owner shown to every member (owners and non-owners alike),
 // independent of the parent-delegated is_owner capability.
-func workspaceOwnerEmail(dashboardHost, editorHost, gitopsHost string) string {
-	for _, host := range []string{dashboardHost, editorHost, gitopsHost} {
+func workspaceOwnerEmail(dashboardHost, gitopsHost string) string {
+	for _, host := range []string{dashboardHost, gitopsHost} {
 		if ep, _ := getEndpoint(host); ep != nil && strings.TrimSpace(ep.OwnerEmail) != "" {
 			return ep.OwnerEmail
 		}
@@ -348,11 +342,11 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 // fails is logged, not fatal — the workspace itself was created).
 //
 // The dashboard endpoint is the workspace's membership surface
-// (kind=workspace, parentless); the editor/gitops endpoints register it as
-// their ACL parent, so owning the dashboard makes roleFor(editor|gitops)
-// resolve to owner via parent delegation. We register editor + gitops
+// (kind=workspace, parentless); the gitops endpoint registers it as
+// its ACL parent, so owning the dashboard makes roleFor(gitops)
+// resolve to owner via parent delegation. We register gitops
 // directly with the caller as owner too, so the list (which resolves
-// roleFor on exactly those two hosts) returns the workspace as owned even
+// roleFor on that host) returns the workspace as owned even
 // when the dashboard is disabled (--no-dashboard) or its row is missing.
 //
 // registerEndpoint is idempotent and never downgrades an existing owner, so
@@ -360,13 +354,11 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 func recordWorkspaceOwnership(name, domain, email string) []string {
 	var warnings []string
 	dashboardHost := name + "-dashboard." + domain
-	editorHost := name + "-editor." + domain
 	gitopsHost := name + "-gitops." + domain
 	regs := []struct {
 		host, display, parent, kind string
 	}{
 		{dashboardHost, name + " (dashboard)", "", endpointKindWorkspace},
-		{editorHost, name + " (editor)", dashboardHost, endpointKindService},
 		{gitopsHost, name + " (gitops)", dashboardHost, endpointKindService},
 	}
 	for _, reg := range regs {

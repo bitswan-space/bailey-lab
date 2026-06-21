@@ -227,7 +227,7 @@ func gatherPeople(r *http.Request) ([]personDTO, error) {
 	// construction handleListAccessibleWorkspaces uses (workspace name +
 	// known service suffix + domain) rather than reverse-parsing endpoint
 	// hostnames. A person "has" a workspace if they are the recorded
-	// owner of, or an email grantee on, any of its editor/gitops/dashboard
+	// owner of, or an email grantee on, any of its gitops/dashboard
 	// endpoints. Group grants can't be expanded to individuals without the
 	// Keycloak query, so they don't contribute to per-person counts.
 	domain := configuredProtectedDomain()
@@ -248,7 +248,7 @@ func gatherPeople(r *http.Request) ([]personDTO, error) {
 		noteErr(wErr)
 		if full != nil {
 			for _, ws := range full.Workspaces {
-				for _, svc := range []string{"editor", "gitops", "dashboard"} {
+				for _, svc := range []string{"gitops", "dashboard"} {
 					host := ws.Name + "-" + svc + "." + domain
 					ep, epErr := getEndpoint(host)
 					noteErr(epErr)

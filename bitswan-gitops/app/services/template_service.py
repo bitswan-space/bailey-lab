@@ -5,7 +5,7 @@ Ported from the dashboard server's `services/templates.ts` so gitops owns the
 single write path into `/workspace-repo` and can broadcast `automations`
 events inline (no filesystem-watcher round-trip).
 
-The `examples/` directory the editor uses is bind-mounted at
+The shared `examples/` directory is bind-mounted at
 `/workspace/examples`; workspace-local overrides live at
 `<workspace_repo>/templates/`. Workspace overrides win on id collision.
 """
@@ -62,10 +62,10 @@ def _discover_builtins() -> tuple[list["TemplateInfo"], list["TemplateGroupInfo"
     return list(by_id_t.values()), list(by_id_g.values())
 
 
-# Editor-compatible automation directory naming.
+# Automation directory naming.
 _AUTOMATION_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
-# Same regex extraction strategy as the editor and the dashboard server. A real
+# Same regex extraction strategy as the dashboard server. A real
 # TOML parser would be overkill for three fields and would lose the option of
 # preserving authoring conventions when we rewrite `automation.toml`.
 _NAME_RE = re.compile(r'\bname\s*=\s*"([^"]+)"')
@@ -201,7 +201,7 @@ def discover_templates(workspace_root: str) -> dict:
     """Return the merged `{templates, groups}` listing.
 
     Workspace overrides at `<workspace_root>/templates/` win against built-ins
-    of the same id, matching the editor's behaviour.
+    of the same id, matching the dashboard's behaviour.
     """
     builtin_t, builtin_g = _discover_builtins()
     override_t, override_g = _discover_in_root(
@@ -250,7 +250,7 @@ def _ensure_automation_id(target_dir: str) -> None:
     """Add `[deployment] id = "<uuid>"` to `automation.toml` if missing.
 
     Targeted string edit (not a TOML round-trip) so authoring conventions
-    (comments, blank lines) survive. Mirrors the editor + dashboard logic.
+    (comments, blank lines) survive. Mirrors the dashboard logic.
     """
     toml_path = os.path.join(target_dir, "automation.toml")
     new_id = str(uuid.uuid4())

@@ -16,24 +16,22 @@ import (
 func newUpdateCmd() *cobra.Command {
 	var noRemove bool
 	var gitopsImage string
-	var editorImage string
 
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Test workspace update command",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTestUpdate(noRemove, gitopsImage, editorImage)
+			return runTestUpdate(noRemove, gitopsImage)
 		},
 	}
 
 	cmd.Flags().BoolVar(&noRemove, "no-remove", false, "Leave workspace running (skip cleanup)")
 	cmd.Flags().StringVar(&gitopsImage, "gitops-image", "", "Custom GitOps image to use for initial setup (default: uses an older tag)")
-	cmd.Flags().StringVar(&editorImage, "editor-image", "", "Custom editor image to use for initial setup (default: uses an older tag)")
 
 	return cmd
 }
 
-func runTestUpdate(noRemove bool, customGitopsImage, customEditorImage string) error {
+func runTestUpdate(noRemove bool, customGitopsImage string) error {
 	fmt.Println("=== BitSwan Test Suite: Update ===")
 	fmt.Println()
 
@@ -68,12 +66,7 @@ func runTestUpdate(noRemove bool, customGitopsImage, customEditorImage string) e
 	if err != nil {
 		return fmt.Errorf("failed to get latest gitops version: %w", err)
 	}
-	latestEditorVersion, err := dockerhub.GetLatestEditorVersion()
-	if err != nil {
-		return fmt.Errorf("failed to get latest editor version: %w", err)
-	}
 	fmt.Printf("Latest gitops version: %s\n", latestGitopsVersion)
-	fmt.Printf("Latest editor version: %s\n", latestEditorVersion)
 
 	// Step 2: Initialize workspace with custom/older images
 	fmt.Println("\n[2/6] Initializing workspace with custom images...")
@@ -88,18 +81,12 @@ func runTestUpdate(noRemove bool, customGitopsImage, customEditorImage string) e
 		// Use the latest version we just fetched - update will re-fetch and ensure it's still latest
 		initGitopsImage = fmt.Sprintf("bitswan/gitops:%s", latestGitopsVersion)
 	}
-	initEditorImage := customEditorImage
-	if initEditorImage == "" {
-		// Use the latest version we just fetched - update will re-fetch and ensure it's still latest
-		initEditorImage = fmt.Sprintf("bitswan/bitswan-editor:%s", latestEditorVersion)
-	}
 
 	initArgs := []string{
 		"workspace", "init",
 		"--local",
 		"--no-oauth",
 		"--gitops-image", initGitopsImage,
-		"--editor-image", initEditorImage,
 	}
 	initArgs = append(initArgs, workspaceName)
 
@@ -122,15 +109,6 @@ func runTestUpdate(noRemove bool, customGitopsImage, customEditorImage string) e
 		return fmt.Errorf("failed to get gitops image: %w", err)
 	}
 	fmt.Printf("Initial gitops image: %s\n", gitopsImage)
-
-	// Check editor image in docker-compose-editor.yml (if it exists)
-	editorImage, err := getImageFromCompose(filepath.Join(workspacePath, "deployment", "docker-compose-editor.yml"), "bitswan-editor")
-	if err != nil {
-		// Editor might not be enabled, that's okay
-		fmt.Printf("Editor service not enabled or file not found: %v\n", err)
-	} else {
-		fmt.Printf("Initial editor image: %s\n", editorImage)
-	}
 
 	// Step 4: Run update command
 	fmt.Println("\n[4/6] Running update command...")
@@ -157,11 +135,6 @@ func runTestUpdate(noRemove bool, customGitopsImage, customEditorImage string) e
 		fmt.Printf("Warning: failed to re-fetch latest gitops version, using previous: %v\n", err)
 		updatedLatestGitopsVersion = latestGitopsVersion
 	}
-	updatedLatestEditorVersion, err := dockerhub.GetLatestEditorVersion()
-	if err != nil {
-		fmt.Printf("Warning: failed to re-fetch latest editor version, using previous: %v\n", err)
-		updatedLatestEditorVersion = latestEditorVersion
-	}
 
 	// Check gitops image
 	updatedGitopsImage, err := getImageFromCompose(filepath.Join(workspacePath, "deployment", "docker-compose.yml"), "bitswan-gitops")
@@ -181,22 +154,6 @@ func runTestUpdate(noRemove bool, customGitopsImage, customEditorImage string) e
 		return fmt.Errorf("gitops image not updated correctly. Expected: %s, Got: %s", expectedGitopsImage, updatedGitopsImage)
 	}
 	fmt.Println("✓ Gitops image updated to latest")
-
-	// Check editor image (if enabled)
-	updatedEditorImage, err := getImageFromCompose(filepath.Join(workspacePath, "deployment", "docker-compose-editor.yml"), "bitswan-editor")
-	if err == nil {
-		fmt.Printf("Updated editor image: %s\n", updatedEditorImage)
-		expectedEditorImage := fmt.Sprintf("bitswan/bitswan-editor:%s", updatedLatestEditorVersion)
-		if updatedEditorImage != expectedEditorImage {
-			if !noRemove {
-				cleanupWorkspace(workspaceName)
-			}
-			return fmt.Errorf("editor image not updated correctly. Expected: %s, Got: %s", expectedEditorImage, updatedEditorImage)
-		}
-		fmt.Println("✓ Editor image updated to latest")
-	} else {
-		fmt.Println("Editor service not enabled, skipping editor image verification")
-	}
 
 	if noRemove {
 		fmt.Println("\n[6/6] Skipping cleanup (--no-remove flag set)...")

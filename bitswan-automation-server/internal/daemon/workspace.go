@@ -35,10 +35,8 @@ type WorkspaceListResponse struct {
 type WorkspaceInfo struct {
 	Name           string `json:"name"`
 	Domain         string `json:"domain,omitempty"`
-	EditorURL      string `json:"editor_url,omitempty"`
 	GitopsURL      string `json:"gitops_url,omitempty"`
 	SSHPublicKey   string `json:"ssh_public_key,omitempty"`
-	VSCodePassword string `json:"vscode_password,omitempty"`
 	GitopsSecret   string `json:"gitops_secret,omitempty"`
 }
 
