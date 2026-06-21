@@ -154,8 +154,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // ---- Description: write a real README (Markdown + a Mermaid flowchart) ----
   await chapter('description', async () => {
     await go({ tab: 'description' });
+    // Wait for the editor via its role (robust across editor internals) before
+    // reaching into the frame to paste.
+    await d.getByRole('textbox').first().waitFor({ state: 'visible', timeout: 60_000 });
     const dashFrame = dashPage.frames().find((f) => /dashboard/.test(f.url())) || dashPage.mainFrame();
-    await dashFrame.waitForSelector('.ProseMirror, [contenteditable="true"]', { timeout: 60_000 });
     const pasted = await dashFrame.evaluate((md) => {
       const el = document.querySelector('.ProseMirror, [contenteditable="true"]') as HTMLElement | null;
       if (!el) return false;

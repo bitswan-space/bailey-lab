@@ -17,12 +17,18 @@ import (
 	jwtv5 "github.com/golang-jwt/jwt/v5"
 )
 
-var allowedGroup string
+var (
+	allowedGroup      string
+	groupCheckEnabled bool
+)
 
 func init() {
 	allowedGroup = os.Getenv("BITSWAN_ALLOWED_GROUP")
-	if allowedGroup == "" {
-		log.Fatal("BITSWAN_ALLOWED_GROUP is not set — cannot verify group membership")
+	groupCheckEnabled = allowedGroup != ""
+	if !groupCheckEnabled {
+		// Simple-mode (no AOC): the Bailey gate already authenticates; run
+		// without per-request group gating rather than refusing to start.
+		log.Println("BITSWAN_ALLOWED_GROUP not set — simple mode: skipping per-request group membership checks (the Bailey gate enforces access).")
 	}
 }
 
@@ -140,7 +146,7 @@ func (app *App) requireAuth(next http.Handler) http.Handler {
 		}
 
 		// Verify group membership
-		if !hasGroup(claims, allowedGroup) {
+		if groupCheckEnabled && !hasGroup(claims, allowedGroup) {
 			writeError(w, http.StatusForbidden, "User not in required group: "+allowedGroup)
 			return
 		}

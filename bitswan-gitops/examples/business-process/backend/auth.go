@@ -17,12 +17,20 @@ import (
 	jwtv5 "github.com/golang-jwt/jwt/v5"
 )
 
-var allowedGroup string
+var (
+	allowedGroup      string
+	groupCheckEnabled bool
+)
 
 func init() {
 	allowedGroup = os.Getenv("BITSWAN_ALLOWED_GROUP")
-	if allowedGroup == "" {
-		log.Fatal("BITSWAN_ALLOWED_GROUP is not set — cannot verify group membership")
+	groupCheckEnabled = allowedGroup != ""
+	if !groupCheckEnabled {
+		// Simple-mode (no AOC): gitops does not inject BITSWAN_ALLOWED_GROUP
+		// because the Bailey protected gate in front already authenticates every
+		// request. Run without per-request group gating rather than refusing to
+		// start — the example must work in the default simple deployment.
+		log.Println("BITSWAN_ALLOWED_GROUP not set — simple mode: the Bailey gate enforces access; skipping per-request group membership checks.")
 	}
 }
 
@@ -139,8 +147,8 @@ func (app *App) requireAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// Verify group membership
-		if !hasGroup(claims, allowedGroup) {
+		// Verify group membership — only when a group is configured (AOC mode).
+		if groupCheckEnabled && !hasGroup(claims, allowedGroup) {
 			writeError(w, http.StatusForbidden, "User not in required group: "+allowedGroup)
 			return
 		}
