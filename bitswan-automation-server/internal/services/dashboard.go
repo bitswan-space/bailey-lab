@@ -13,7 +13,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/certauthority"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
-	"github.com/bitswan-space/bitswan-workspaces/internal/oauth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -105,30 +104,14 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		},
 	}
 
-	// The dashboard deliberately runs NO oauth2-proxy of its own. It is only
-	// ever reached inside the Bailey chrome-wrap iframe, on the workspace's
-	// protected (inner) host, which the platform protected-proxy
-	// (bitswan-protected-proxy) already authenticates. A second, per-container
-	// oauth2-proxy here was the cause of the SPA's /api/* XHRs being 302'd to
-	// Keycloak (a redirect the cross-origin iframe can't follow under the inner
-	// CSP, and whose callback 403s on the outer host). Like the business-process
-	// frontend shim, the dashboard relies solely on the platform proxy for auth
-	// — OAUTH_ENABLED stays unset and the app listens directly on PORT.
-	//
-	// Because the gate strips forwarded-identity request headers from app
-	// upstreams, the dashboard learns the user the same way a BP frontend does:
-	// the SPA pulls the access token from the platform proxy's /oauth2/auth and
-	// the backend validates it against Keycloak's userinfo endpoint. That needs
-	// the realm (issuer) URL, which we read from the saved OAuth config and pass
-	// in as BITSWAN_OIDC_ISSUER_URL. This is token-validation config, NOT an
-	// oauth2-proxy.
-	if oauthConfig, err := oauth.GetOauthConfig(d.WorkspaceName); err == nil &&
-		oauthConfig != nil && oauthConfig.IssuerUrl != "" {
-		bitswanDashboard["environment"] = append(
-			bitswanDashboard["environment"].([]string),
-			"BITSWAN_OIDC_ISSUER_URL="+oauthConfig.IssuerUrl,
-		)
-	}
+	// The dashboard runs NO auth of its own — no oauth2-proxy and no OIDC token
+	// validation. It is a first-party app reached only inside the Bailey
+	// chrome-wrap iframe on the workspace's protected (inner) host. The gate
+	// (bitswan-protected-proxy → the daemon's :9080 gate) authenticates every
+	// request and forwards the verified identity to the dashboard as a trusted
+	// X-Forwarded-Email; the dashboard server simply reads that header. So
+	// OAUTH_ENABLED stays unset (the app listens directly on PORT) and there is
+	// no BITSWAN_OIDC_ISSUER_URL to inject — all protection comes from the gate.
 
 	caVolumes, caEnvVars := certauthority.GetCACertMountConfig(trustCA)
 	if len(caVolumes) > 0 {

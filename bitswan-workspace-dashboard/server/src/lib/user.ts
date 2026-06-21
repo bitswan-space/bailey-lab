@@ -1,109 +1,41 @@
 import type { FastifyRequest } from 'fastify';
 
 /**
- * Identity for the dashboard comes from the user's Keycloak access token, NOT
- * from forwarded request headers. The dashboard runs inside the Bailey iframe
- * behind the platform protected-proxy, and the Bailey gate deliberately STRIPS
- * forwarded-identity headers (x-forwarded-email / x-auth-request-email) from
- * every app upstream as an anti-spoofing measure — so those headers never
- * reach us. Instead, like a business-process frontend, the SPA fetches the
- * access token from the platform proxy's `/oauth2/auth` endpoint and sends it
- * as a Bearer token (or, for WebSockets which can't set headers, as the
- * `access_token` query param). We validate that token against Keycloak's
- * userinfo endpoint, which both proves the token is genuine (Keycloak checks
- * the signature + expiry) and returns the email — so the identity cannot be
- * forged by a workspace member.
- *
- * BITSWAN_OIDC_ISSUER_URL is the Keycloak realm URL (e.g.
- * https://keycloak.example.com/realms/master), injected by the daemon. With no
- * issuer configured we cannot validate, so we fail closed (return null →
- * caller 401s) rather than trust an unverified token.
+ * Auth model: the dashboard does NO authentication of its own. All protection
+ * comes from the automation-server daemon's oauth gate (the Bailey gate, in
+ * front via bitswan-protected-proxy). The gate authenticates every request,
+ * strips any client-supplied identity headers (anti-spoofing), then forwards
+ * the verified identity to this first-party dashboard as `X-Forwarded-Email`.
+ * We simply trust that header — no Keycloak, no token validation, no OIDC
+ * issuer. A request that reached the dashboard is, by construction, already
+ * authenticated by the gate.
  */
 
-const ISSUER = (process.env.BITSWAN_OIDC_ISSUER_URL ?? '').replace(/\/+$/, '');
-const USERINFO_URL = ISSUER ? `${ISSUER}/protocol/openid-connect/userinfo` : '';
-
-// Validated token → { email, expiry } cache, so we hit Keycloak once per token
-// rather than on every request. Keyed on the opaque token string.
-const tokenEmailCache = new Map<string, { email: string; expMs: number }>();
-const MAX_CACHE_MS = 5 * 60 * 1000;
-
-function bearerToken(req: FastifyRequest): string | null {
-  const auth = req.headers['authorization'];
-  const header = Array.isArray(auth) ? auth[0] : auth;
-  if (header && header.startsWith('Bearer ')) {
-    const t = header.slice('Bearer '.length).trim();
-    if (t) return t;
-  }
-  // WebSocket upgrades can't carry an Authorization header, so the client
-  // passes the token as a query param there.
-  const q = (req.query as Record<string, unknown> | undefined)?.['access_token'];
-  if (typeof q === 'string' && q) return q;
-  return null;
-}
-
-// Best-effort read of the JWT `exp` (seconds) for cache TTL only — never used
-// for trust (that's userinfo's job). Returns 0 if unparseable.
-function tokenExpMs(token: string): number {
-  try {
-    const part = token.split('.')[1];
-    if (!part) return 0;
-    const payload = JSON.parse(Buffer.from(part, 'base64').toString('utf8'));
-    return typeof payload.exp === 'number' ? payload.exp * 1000 : 0;
-  } catch {
-    return 0;
-  }
-}
-
 /**
- * Resolve the authenticated user's email by validating their access token
- * against Keycloak. Returns null when there's no token, no issuer is
- * configured, or the token is invalid/expired — callers must treat null as
- * "not authenticated" and 401. `log` is an optional logger so validation
- * failures are surfaced rather than swallowed.
+ * The authenticated user's email, taken from the identity the Bailey gate
+ * forwards. ALL protection comes from the automation-server daemon's oauth gate
+ * (bitswan-protected-proxy → the :9080 gate): it authenticates every request,
+ * strips any client-supplied identity headers (anti-spoofing), and then sets a
+ * trusted `X-Forwarded-Email` on the leg to this first-party dashboard. The
+ * dashboard does NO OIDC of its own — no Keycloak, no token validation, no
+ * issuer. A request that reached us is already authenticated by the gate.
+ *
+ * Returns null only when the header is absent (request that didn't come through
+ * the gate) — callers treat null as unauthenticated.
  */
 export async function emailFromRequest(
   req: FastifyRequest,
   log?: { warn: (obj: unknown, msg?: string) => void },
 ): Promise<string | null> {
-  const token = bearerToken(req);
-  if (!token) return null;
-
-  const cached = tokenEmailCache.get(token);
-  if (cached && cached.expMs > Date.now()) return cached.email;
-
-  if (!USERINFO_URL) {
-    log?.warn(
-      {},
-      'BITSWAN_OIDC_ISSUER_URL not set — cannot validate access token, denying',
-    );
-    return null;
-  }
-
-  let res: Response;
-  try {
-    res = await fetch(USERINFO_URL, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-  } catch (err) {
-    log?.warn({ err }, 'Keycloak userinfo request failed');
-    return null;
-  }
-  if (!res.ok) {
-    log?.warn({ status: res.status }, 'access token rejected by Keycloak userinfo');
-    return null;
-  }
-  const info = (await res.json()) as { email?: string };
-  if (!info.email) {
-    log?.warn({}, 'Keycloak userinfo returned no email claim');
-    return null;
-  }
-
-  const exp = tokenExpMs(token);
-  const ttl =
-    exp > Date.now() ? Math.min(exp, Date.now() + MAX_CACHE_MS) : Date.now() + MAX_CACHE_MS;
-  tokenEmailCache.set(token, { email: info.email, expMs: ttl });
-  return info.email;
+  const raw =
+    req.headers['x-forwarded-email'] ?? req.headers['x-auth-request-email'];
+  const email = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+  if (email) return email;
+  log?.warn(
+    {},
+    'no X-Forwarded-Email from the Bailey gate — request not authenticated',
+  );
+  return null;
 }
 
 /**

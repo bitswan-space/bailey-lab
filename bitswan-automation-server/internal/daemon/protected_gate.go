@@ -123,6 +123,18 @@ func isBaileyHost(host string) bool {
 		strings.HasPrefix(h, "bailey-onboard.")
 }
 
+// isTrustedWorkspaceAppHost reports whether the endpoint host is a FIRST-PARTY
+// workspace app the gate trusts with the forwarded identity — i.e. the
+// workspace dashboard, registered with endpoint kind "workspace". This is
+// BitSwan code, not user-deployed automations, so forwarding the verified
+// X-Forwarded-Email to it is safe and lets the dashboard rely on the gate for
+// auth instead of doing OIDC itself. User-deployed business-process apps
+// (kind "frontend"/"service") return false and never receive identity.
+func isTrustedWorkspaceAppHost(endpointHost string) bool {
+	ep, err := getEndpoint(toOuterHost(endpointHost))
+	return err == nil && ep != nil && ep.Kind == endpointKindWorkspace
+}
+
 // startProtectedGate boots the gate's HTTP listener. Called from
 // Server.Run once at startup.
 func startProtectedGate() error {
@@ -169,23 +181,29 @@ func startProtectedGate() error {
 			if h := r.Header.Get("X-Forwarded-Host"); h != "" {
 				r.Host = h
 			}
-			// Re-apply the gate-trusted identity ONLY to the Bailey
-			// daemon upstream, which legitimately consumes it. Other
-			// upstreams never receive forwarded identity.
-			if isBaileyHost(toOuterHost(endpointHost)) && email != "" {
+			// Re-apply the gate-trusted identity to the upstreams that
+			// legitimately consume it: the Bailey daemon upstream AND the
+			// first-party workspace dashboard (endpoint kind "workspace"),
+			// which is BitSwan code, not user-deployed automations. The
+			// dashboard relies solely on this header for identity — it does
+			// no OIDC of its own. User-deployed business-process apps
+			// (kind "frontend"/"service") are NOT trusted and never receive
+			// forwarded identity.
+			isBailey := isBaileyHost(toOuterHost(endpointHost))
+			if email != "" && (isBailey || isTrustedWorkspaceAppHost(endpointHost)) {
 				r.Header.Set("X-Forwarded-Email", email)
 				if len(groups) > 0 {
 					r.Header.Set("X-Forwarded-Groups", strings.Join(groups, ","))
 				}
-			} else {
-				// App upstream (user-controlled, possibly untrusted code).
-				// Strip Bailey's auth cookies so a malicious or compromised
-				// workspace app can never read — and then replay — the
-				// device-trust credential. The browser sends _bailey_device to
-				// the gate so the gate can enforce trust on every protected
-				// host, but it MUST NOT reach an upstream app: the gate has
-				// already enforced trust by this point, so the app needs the
-				// request, never the credential. This is what keeps the cookie
+			}
+			if !isBailey {
+				// App upstream (including the first-party dashboard). Strip
+				// Bailey's auth cookies so an upstream can never read — and then
+				// replay — the device-trust credential. The browser sends
+				// _bailey_device to the gate so the gate can enforce trust on
+				// every protected host, but it MUST NOT reach an upstream: the
+				// gate has already enforced trust by this point, so the app needs
+				// the request, never the credential. This keeps the cookie
 				// un-stealable by the apps running behind Bailey.
 				stripBaileyAuthCookies(r)
 			}
