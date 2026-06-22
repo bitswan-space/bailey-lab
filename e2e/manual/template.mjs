@@ -62,6 +62,10 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 .manifesto{ background:linear-gradient(165deg,#0c1f30,#0a1622); color:#e8eff5 }
 .manifesto h2{ font-size:15px; letter-spacing:.2em; text-transform:uppercase; color:var(--amber2); margin:0 0 30px; font-weight:700 }
 .promises{ display:grid; gap:30px } .promise{ display:grid; grid-template-columns:64px 1fr; gap:22px; align-items:start }
+.thesis .pad{ display:flex; flex-direction:column; justify-content:center; height:100% }
+.thesis-title{ font-size:46px; line-height:1.05; letter-spacing:-.02em; margin:18px 0 26px; max-width:14ch }
+.thesis-body{ max-width:60ch } .thesis-body p{ font-size:18px; line-height:1.6; margin:0 0 18px; color:#33414d }
+.thesis-body p:first-child{ font-size:21px; color:#1a2730 } .thesis-body strong{ color:#0f7a6a; font-weight:650 }
 .promise .num{ font-size:40px; font-weight:800; color:transparent; -webkit-text-stroke:1.4px rgba(255,180,61,.55); line-height:1 }
 .promise h3{ font-size:26px; margin:0 0 6px; letter-spacing:-.01em; color:#fff } .promise p{ margin:0; color:#a9bccd; font-size:16px }
 .chapter-head{ display:flex; align-items:baseline; gap:18px; margin-bottom:8px }
@@ -200,6 +204,16 @@ function renderCover(m) {
     </div>
   </div>
 </section>`;
+}
+
+function renderThesis(m) {
+  if (!m.thesis) return '';
+  const t = m.thesis;
+  const paras = (t.body || []).map((p) => `<p>${p}</p>`).join('');
+  return `<section class="page thesis" id="thesis"><div class="pad">
+    <span class="kicker"><span class="dot"></span> ${esc(t.kicker || 'The thesis')}</span>
+    <h2 class="thesis-title">${esc(t.title || '')}</h2>
+    <div class="thesis-body">${paras}</div></div></section>`;
 }
 
 function renderManifesto(m) {
@@ -357,6 +371,7 @@ export function renderHandbook(m) {
 <title>${esc(m.title || "Bitswan — The Operator's Handbook")}</title>
 <style>${CSS}</style></head><body>
 ${renderCover(m)}
+${renderThesis(m)}
 ${renderToc(m)}
 ${renderManifesto(m)}
 ${chapters}

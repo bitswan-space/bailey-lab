@@ -67,21 +67,38 @@ function attachShots(manual, shots) {
 // target-counter() page numbers) into a real, numbered A4 layout BEFORE we
 // print. We run the polyfill inside the headless browser, wait for it to finish
 // chunking the flow into .pagedjs_page sheets, then PDF the paginated result.
+// Inline the Paged.js polyfill INTO the saved HTML so the standalone file (the
+// published Artifact, opened directly in a browser) paginates itself on load:
+// real @page footers + a page number on EVERY sheet, and the TOC's
+// target-counter() page numbers resolve. Opened standalone it auto-runs (default
+// PagedConfig.auto); during PDF generation we set auto:false first so it never
+// double-paginates. Without this the raw HTML doesn't run Paged.js at all — so
+// only chapter numbers show (ending at the last chapter) and the index has no
+// page numbers, which is exactly what was reported.
+const PAGED_POLYFILL_PATH = join(HERE, '..', 'node_modules', 'pagedjs', 'dist', 'paged.polyfill.js');
+function withPagedjs(html) {
+  if (!existsSync(PAGED_POLYFILL_PATH)) {
+    throw new Error(`Paged.js polyfill not found at ${PAGED_POLYFILL_PATH} — cannot paginate the handbook.`);
+  }
+  // Escape any literal </script> so the inlined polyfill can't close its own tag.
+  const polyfill = readFileSync(PAGED_POLYFILL_PATH, 'utf8').replace(/<\/script>/gi, '<\\/script>');
+  return html.replace('</body>', `<script>${polyfill}</script></body>`);
+}
+
 async function renderPdf(htmlPath, pdfPath) {
   const { chromium } = await import('@playwright/test');
-  const polyfill = join(HERE, '..', 'node_modules', 'pagedjs', 'dist', 'paged.polyfill.js');
-  if (!existsSync(polyfill)) {
-    throw new Error(`Paged.js polyfill not found at ${polyfill} — cannot number pages.`);
-  }
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
-    // Auto-running is disabled so we can await the 'rendered' promise ourselves.
+    // Disable auto-run so we drive + await the layout ourselves (one pass).
     await page.addInitScript(() => {
       window.PagedConfig = { auto: false };
     });
     await page.goto('file://' + htmlPath, { waitUntil: 'networkidle' });
-    await page.addScriptTag({ path: polyfill });
+    // The PDF is rendered from the CLEAN HTML (the inline-polyfill copy is written
+    // afterward, only for the standalone Artifact), so inject the polyfill here so
+    // window.Paged.Previewer exists for the manual layout below.
+    await page.addScriptTag({ path: PAGED_POLYFILL_PATH });
     // Run Paged.js and resolve once the whole book is laid out into numbered
     // sheets. previewer.preview() returns a flow with the final page count.
     const pages = await page.evaluate(async () => {
@@ -105,9 +122,11 @@ async function main() {
   const slots = (MANUAL.chapters || []).reduce((n, c) => n + (c.slots ? c.slots.length : 0), 0) + (MANUAL.coverShot ? 1 : 0);
   console.log(`Handbook: ${manual.chapters.length} chapters, ${present}/${slots} screenshot slots filled.`);
 
-  const html = renderHandbook(manual);
+  // Write the CLEAN HTML first — it's the source the PDF is rendered from
+  // (renderPdf injects + drives Paged.js itself).
+  const cleanHtml = renderHandbook(manual);
   const htmlPath = join(BUILD, 'handbook.html');
-  writeFileSync(htmlPath, html);
+  writeFileSync(htmlPath, cleanHtml);
   console.log('Wrote ' + htmlPath);
 
   const pdfPath = join(BUILD, 'handbook.pdf');
@@ -117,6 +136,12 @@ async function main() {
     await renderPdf(htmlPath, pdfPath);
     console.log('Wrote ' + pdfPath);
   }
+
+  // Re-write the saved HTML WITH the inline Paged.js polyfill so the standalone
+  // file (the published Artifact) paginates itself in the browser on open —
+  // page numbers on every sheet + resolved TOC page numbers.
+  writeFileSync(htmlPath, withPagedjs(cleanHtml));
+  console.log('Embedded Paged.js into ' + htmlPath + ' for standalone pagination.');
 
   // Publish into the Server Console so the manual is built INTO the product:
   // the console serves these as static assets (/handbook/handbook.{html,pdf})

@@ -22,16 +22,27 @@ export const MANUAL = {
   blurb:
     'Staged deployment. One-click disaster-recovery rehearsals. Supply-chain ' +
     'scanning before anything ships. A GDPR record of processing that writes itself. ' +
-    'Access control an auditor will actually like. This is the platform — and this ' +
-    'manual, printed straight from a live system.',
+    'Access control an auditor will actually like.',
   coverShot: { id: 'cover' },
+
+  // The opening thesis — the first page after the cover. Why Bailey exists.
+  thesis: {
+    kicker: 'The thesis',
+    title: 'You shouldn’t have to build the car.',
+    body: [
+      'For years, “business-process automation” has meant <strong>sheet-metal products</strong>: all the parts you need to build a car. A pile of screws, brackets and sub-assemblies — with a manual that quietly assumes you’ll weld the chassis, wire the loom and certify the brakes yourself. You wanted to move goods; you got a parts catalogue.',
+      'The “off-the-shelf” platforms that promised to spare you the assembly were designed <strong>before the agentic-coding era</strong>. Next to what’s now possible, they’re <strong>toy cars</strong> — fine on a showroom floor, never built for the road you actually drive.',
+      'Bailey is a real, fully functional <strong>business-process automation platform</strong> — ready and <strong>compliant</strong> out of the box, not a kit you assemble and certify yourself. Staged deployment, one-click disaster-recovery rehearsals, supply-chain scanning, device-bound access and a self-writing GDPR record are already in the chassis.',
+      'So you can think about <strong>where you’re driving</strong> — not how to install the engine.',
+    ],
+  },
 
   manifestoTitle: 'Why teams put Bitswan in front of what matters',
   promises: [
     { title: 'Ship without holding your breath', body: 'Promote dev → staging → production across three blue-green slots over two persistent databases. The live slot never blinks; the standby is always one cutover away.' },
     { title: 'Rehearse the disaster before it happens', body: 'Restore any production backup into an isolated DR slot, verify it by hand, mark it recovery-tested, then swap it live with a single ingress cutover. No data move. No downtime.' },
     { title: 'Know what’s inside before it runs', body: 'Every image is scanned for CVEs before deploy. Waivers live in your source tree, not buried in config. Auditors get a clean, signed story.' },
-    { title: 'Trust the device, not just the password', body: 'The first operator claims the server; every device after is approved. Identity is enforced at the gate — your processes run safely behind it.' },
+    { title: 'Trust the device, not just the password', body: 'The first operator claims the server; every device after is explicitly approved. Bailey practises defence in depth — your processes stay protected even if a password leaks or your identity provider is compromised.' },
   ],
 
   chapters: [
@@ -45,7 +56,7 @@ export const MANUAL = {
         'From then on a new device must be <strong>approved by someone who already holds one</strong>: it shows a six-digit code and waits, and a trusted operator links it from <em>Your devices → Link a device</em>. The gate sits in front of everything — the console and every workspace app run behind it.',
       ],
       steps: ['Sign in at the onboarding host.', 'Click <b>Claim this server</b> — you become root admin and this device is trusted.', 'A new device shows a code and waits for approval.', 'Approve it from a trusted device, or revoke it from <b>People &amp; roles</b>.'],
-      callout: { kind: 'Why it matters', text: 'Identity is enforced once, at the gate. Your business processes never have to reinvent authentication — and a stolen password alone never reaches them.' },
+      callout: { kind: 'Why it matters', text: 'Bailey practises defence in depth. It is an isolated, self-protecting system using what we call end-to-end authentication — so a stolen password, or even a fully compromised identity-provider / SSO account, does not compromise Bailey or reach the business processes behind it.' },
       standards: [
         { code: 'NIS2', clause: 'Art. 21(2)(j)', demand: '<b>Multi-factor authentication & secured access.</b> Device trust is a strong second factor bound to hardware — exactly the “MFA or continuous authentication” the directive expects.' },
         { code: 'SOC 2', clause: 'CC6.1', demand: '<b>Logical access security.</b> The gate authenticates and authorizes every request before it reaches a workspace app.' },
@@ -55,10 +66,10 @@ export const MANUAL = {
     },
     {
       num: '02', eyebrow: 'Draw the boundary', title: 'Workspaces',
-      lede: 'A workspace is the access-control boundary — an isolated tenancy with an explicit owner and members. Who can see and do what is decided per workspace.',
-      slots: [{ id: 'workspace-create', caption: 'Server Console · the Workspaces view with the Meridian Foods workspace' }],
+      lede: 'A workspace is a thematic access-control boundary — an isolated tenancy, scoped to a body of work and the team that does it. Who can see and do what is decided per workspace.',
+      slots: [{ id: 'workspace-create', caption: 'Server Console · the Workspaces view with the Finance workspace' }],
       sell: [
-        'From the Bailey Server Console, Tomáš creates the <strong>Meridian Foods</strong> workspace and becomes its owner. Creation is a live, streamed operation — you watch gitops, ingress and the dashboard come up before the workspace appears with an <em>Open</em> button.',
+        'Workspaces are <strong>thematic, not per-company</strong>. Meridian Foods automates invoice-processing as part of its finance work, so Tomáš creates a <strong>Finance</strong> workspace from the Bailey Server Console and becomes its owner. It is shared only with the people automating finance processes; a separate <em>Logistics</em> workspace would be its own tenancy, invisible to them. Creation is a live, streamed operation — you watch gitops, ingress and the dashboard come up before the workspace appears with an <em>Open</em> button.',
         'A workspace is a blast radius for <strong>access</strong>: its own processes, its own data, and its own roster. Only the people granted into it — at the role you give them — can reach its apps. (Promoting code through dev → staging → production happens <em>inside</em> a process; that’s the stages, not the workspace — see Ch&nbsp;09.)',
       ],
       steps: ['Open <b>Workspaces</b> in the console.', 'Click <b>New workspace</b>, name it (lowercase, hyphenated) — you’re the owner.', 'Watch it provision; press <b>Open</b> to enter its dashboard.', 'Invite members at the role they need.'],
@@ -113,7 +124,7 @@ export const MANUAL = {
       ],
       sell: [
         'Every operator gets a <strong>personal copy</strong> of the workspace — auto-created and auto-selected the moment you open the dashboard. It’s your private branch: edit, build and preview without disturbing anyone else’s work or the live <em>main</em>.',
-        'The <strong>copy switcher</strong> (top-right) shows which copy is active, whether it’s synced with main, and lets you spin up a <em>New copy</em>. Promotion of your work into main happens deliberately, through Sync &amp; Deploy (Ch&nbsp;08) — never by accident.',
+        'The <strong>copy switcher</strong> (top-right) shows which copy is active, whether it’s synced with main, and lets you spin up a <em>New copy</em>. Promotion of your work into main happens deliberately, through Sync &amp; Deploy (Ch&nbsp;10) — never by accident.',
       ],
       steps: ['Press <b>Open</b> on the workspace to enter its dashboard.', 'Your personal copy is selected automatically.', 'Use the <b>copy switcher</b> to see sync state or start a new copy.', 'Everything you build stays in your copy until you Sync &amp; Deploy.'],
       callout: { kind: 'Why it matters', text: 'Isolated copies are environment separation by default: experimentation never risks the shared main, and every change reaches production only through a reviewed, deliberate path.' },
@@ -160,14 +171,14 @@ export const MANUAL = {
       lede: 'Describe the process, then let a coding agent build it — inside the workspace’s isolated sandbox — and pin the rules it must keep as runnable requirements.',
       slots: [
         { id: 'coding-agent', caption: 'Coding Agent · the automations of the invoice flow, each with its live-dev preview' },
-        { id: 'live-dev', label: 'Live capture', caption: 'Live-dev · the automation running its live preview in your copy, Open one click away' },
+        { id: 'live-dev', label: 'Live capture', caption: 'Live-dev · the automation running its live preview in your copy — click its frontend to open it' },
         { id: 'requirements', label: 'Live capture', caption: 'Requirements & tests · the rules the process must keep, as runnable specs' },
       ],
       sell: [
-        'The <strong>Coding Agent</strong> works straight from your specification: a terminal and a file tree right in the workspace, writing the invoice-processing automation in your isolated copy you review before it ever reaches main. The point isn’t that there’s an agent — it’s <strong>where</strong> it runs. The agent runs <em>inside</em> Bailey, not beside it: it can only reach hosts the firewall allows, sees only the secrets you’ve granted, and everything it produces still passes Sync &amp; Deploy and the CVE checks before it ships.',
-        'Each automation in your copy also gets a <strong>live-dev</strong> deployment — a running preview that auto-builds as you change code, so you can <em>Open</em> it and click through the real thing in your copy before it touches main. The <strong>Requirements &amp; tests</strong> tab turns the spec’s rules into runnable checks — VAT matches the PO, invoices over €5,000 are held, duplicate invoice numbers never post twice — so “does it still do what we promised?” is a button, not a meeting.',
+        'The <strong>Coding Agent</strong> works straight from your specification: a terminal and a file tree right in the workspace, writing the invoice-processing automation in your isolated copy you review before it ever reaches main. The point isn’t that there’s an agent — it’s <strong>where</strong> it runs. The agent runs <em>inside</em> Bailey, not beside it: it works in an isolated copy and, while it can reach the internet to do its job, it is <strong>walled off from your production data</strong> — it cannot reach the production database or the user data in it. Everything it produces still passes Sync &amp; Deploy and the CVE checks before it ships.',
+        'Each automation in your copy also gets a <strong>live-dev</strong> deployment — a running preview that auto-builds as you change code. To open a running automation you click its <strong>frontend</strong> (the frontend automation’s open link in the Environment panel) and click through the real thing in your copy before it touches main. The <strong>Requirements &amp; tests</strong> tab turns the spec’s rules into runnable checks — VAT matches the PO, invoices over €5,000 are held, duplicate invoice numbers never post twice — so “does it still do what we promised?” is a button, not a meeting.',
       ],
-      steps: ['Open the <b>Coding Agent</b> tab; start a session against your copy.', 'It builds the automation from the Description; the <b>live-dev</b> preview comes up.', 'Press <b>Open</b> on a running live-dev automation to click through it.', 'Open <b>Requirements &amp; tests</b>; record the rules as runnable specs, then <b>Sync &amp; Deploy</b>.'],
+      steps: ['Open the <b>Coding Agent</b> tab; start a session against your copy.', 'It builds the automation from the Description; the <b>live-dev</b> preview comes up.', 'Click a running automation’s <b>frontend</b> to open it and click through it.', 'Open <b>Requirements &amp; tests</b>; record the rules as runnable specs, then <b>Sync &amp; Deploy</b>.'],
       standards: [
         { code: 'ISO/IEC 27001', clause: 'A.8.25 / A.8.31', demand: '<b>Secure development lifecycle & environment separation.</b> The agent builds in an isolated copy/sandbox, never touching production directly.' },
         { code: 'NIS2', clause: 'Art. 21(2)(e)', demand: '<b>Security in development.</b> Agent output is CVE-scanned and reviewed before deploy.' },
@@ -176,11 +187,26 @@ export const MANUAL = {
       ],
     },
     {
-      num: '09', eyebrow: 'Ship changes', title: 'Sync & Deploy',
+      num: '09', eyebrow: 'Separate the blast radius', title: 'Dev, staging & production',
+      lede: 'A business process promotes through three stages — Development, Staging and Production — and each one runs on its own database, its own file store and its own isolated Docker network. The data of one stage is never the data of another, and the stages literally cannot reach each other.',
+      slots: [{ id: 'stages', label: 'Live capture', caption: 'Deployments · the dev → staging → production pipeline, each stage its own isolated database + file store' }],
+      sell: [
+        'Meridian’s invoice-processing process doesn’t go straight to production. It promotes through three stages — <strong>Development → Staging → Production</strong> — and the point of the split is isolation: each stage has <strong>its own database, its own file store and its own Docker network</strong>, so the records, attachments and ledger entries in one stage are never the records of another — and because the networks are separate, the stages <strong>literally cannot talk to each other</strong>. User and production data is <strong>never shared</strong> across the line. That means you can run the application in dev and exercise it hard in staging — wrong totals, malformed VAT numbers, deliberate edge cases — <strong>without ever touching real production data</strong>, because the data simply isn’t there to touch.',
+        'The split is also <strong>who</strong>, not just <strong>where</strong>. Because production is its own stage with its own gate, an experienced team member can <strong>audit and review the code before it reaches production</strong>: a member builds and ships through dev and staging, and promotion to production is a deliberate, reviewable step rather than an accident. That separation of duties — build over here, sign off over there — is exactly what an auditor expects to see, and it falls out of the stage model rather than being bolted on.',
+      ],
+      steps: ['Open <b>Deployments</b> and read the pipeline: <b>Development</b>, <b>Staging</b>, <b>Production</b>.', 'Build and test in <b>Development</b> against its own isolated database and file store.', 'Promote to <b>Staging</b> and exercise the app on staging’s own data — never production’s.', 'Have an experienced reviewer sign off before the deliberate promotion to <b>Production</b>.'],
+      callout: { kind: 'Why it matters', text: 'Three stages, three databases, three file stores, three isolated Docker networks — the stages cannot even reach one another. Testing in dev and staging can never expose or corrupt real production data, and production changes pass through a reviewable promotion — separation of duties and environment isolation, by construction.' },
+      standards: [
+        { code: 'ISO/IEC 27001', clause: 'A.8.31', demand: '<b>Separation of development, test and production environments.</b> Dev, staging and production each run on their own database, file store and Docker network — the stages cannot reach one another and production data is never present in a test stage.' },
+        { code: 'SOC 2', clause: 'CC8.1', demand: '<b>Change management.</b> Changes are built and tested in lower stages and reach production only through a deliberate, reviewable promotion.' },
+        { code: 'GDPR', clause: 'Art. 5(1)(c)', demand: '<b>Data minimisation.</b> Real personal data lives only in production; dev and staging are tested without using production user data.' },
+      ],
+    },
+    {
+      num: '10', eyebrow: 'Ship changes', title: 'Sync & Deploy',
       lede: 'From a working copy to a healthy deployment — with the diff, the history and a security check standing between you and production.',
       slots: [
         { id: 'sync-deploy', label: 'Live capture', caption: 'Sync & Deploy · ready to ship invoice-processing to development' },
-        { id: 'sync-deploy-diff', label: 'Live capture', caption: 'Diff sub-tab · the files that become the new main' },
         { id: 'sync-deploy-history', label: 'Live capture', caption: 'History sub-tab · copy + main commits with deploy markers' },
         { id: 'checks-cve', label: 'Live capture', caption: 'Checks sub-tab · CVEs of the image this deploy would build' },
       ],
@@ -198,27 +224,11 @@ export const MANUAL = {
       ],
     },
     {
-      num: '10', eyebrow: 'Know your ingredients', title: 'Supply chain',
-      lede: 'A full software bill of materials for what you run — vulnerabilities ranked, advisories one click away, accepted risks recorded.',
-      slots: [
-        { id: 'supply-chain', label: 'Live capture', caption: 'Supply chain · the SBOM/CVE panel for the deployed image' },
-      ],
-      sell: [
-        'Every deployed image carries an SBOM. The <strong>Supply chain</strong> view ranks vulnerabilities by severity and shows the affected package; opening a CVE links straight to osv.dev, NVD and GitHub advisories so triage starts with the facts.',
-        'Out-of-scope decisions are explicit, attributable and stored in source — not a screenshot in someone’s inbox. The scan runs on the image that actually ships, so the picture is never stale.',
-      ],
-      steps: ['Open a stage → <b>Supply chain</b>.', 'Sort by severity; open a CVE for its advisory.', 'Record any out-of-scope decision in-tree.'],
-      standards: [
-        { code: 'NIS2', clause: 'Art. 21(2)(d)', demand: '<b>Supply-chain security.</b> You can produce, on demand, exactly what is inside what you run.' },
-        { code: 'SOC 2', clause: 'CC7.1', demand: '<b>Vulnerability detection.</b> The SBOM and CVE scan run on the image that actually ships.' },
-        { code: 'ISO/IEC 27001', clause: 'A.5.7 / A.8.8', demand: '<b>Threat intelligence & vulnerability management.</b> Continuous visibility of known vulnerabilities in your dependencies.' },
-      ],
-    },
-    {
       num: '11', eyebrow: 'Promote with confidence', title: 'Blue-green production',
       lede: 'Three app slots over two persistent databases. The live slot owns production; the standby owns DR; the third is your zero-downtime buffer.',
       slots: [
-        { id: 'promote-progress', label: 'Live capture', caption: 'Promotion in flight · the idle slot coming up, the live step streaming, before the cutover' },
+        { id: 'promote-progress', label: 'Live capture', caption: 'Promotion in flight (dev → staging) · the idle slot coming up, the live step streaming, before the cutover' },
+        { id: 'promote-progress-prod', label: 'Live capture', caption: 'Promotion in flight (staging → production) · the standby slot building on the live database before the production cutover' },
         { id: 'deployments-prod', label: 'Live capture', caption: 'Deployments · Production Healthy after promote, every stage green' },
       ],
       sell: [
@@ -234,18 +244,27 @@ export const MANUAL = {
       ],
     },
     {
-      num: '12', eyebrow: 'See what’s running', title: 'Containers',
-      lede: 'The live container roster for a stage — every service of the deployment, its health, and per-container Logs, Inspect, and start/stop controls.',
-      slots: [{ id: 'containers', label: 'Live capture', caption: 'Production · the live containers of the current deployment' }],
-      sell: [
-        'The <strong>Containers</strong> section is the operator’s ground truth for a stage: each member of the deployment as a real running container, with its status. Open <em>Logs</em> to read what it’s doing, <em>Inspect</em> for its configuration, or restart/stop a single service without touching the rest.',
-        'On Disaster Recovery, each container resolves to the standby slot’s own instance — so you operate the recovered app, not the live one.',
+      num: '12', eyebrow: 'Show your work', title: 'Deployment history & inspect',
+      lede: 'A versioned, immutable audit log: every deploy, promotion, swap, backup and firewall change — and a per-deployment Inspect with the files, diff and secrets in force at the time.',
+      slots: [
+        { id: 'history', label: 'Live capture', caption: 'Deployment history · the audit trail of every event, with Inspect and Roll back per entry' },
+        { id: 'inspect-modal', label: 'Live capture', caption: 'Inspect · the source file tree of exactly what this deployment ran' },
+        { id: 'inspect-diff', label: 'Live capture', caption: 'Inspect → Diff vs current · what changed between this deployment and what’s live now' },
+        { id: 'inspect-image', label: 'Live capture', caption: 'Inspect → Download image · the built image + schema bundle for offline audit' },
+        { id: 'rollback-modal', label: 'Live capture', caption: 'Roll back · the confirmation before re-deploying a prior recorded version' },
       ],
-      steps: ['Open a stage → <b>Containers</b>.', 'Read status per service.', 'Use <b>Logs</b> / <b>Inspect</b> to investigate.', 'Restart or stop a single container if needed.'],
+      sell: [
+        'Who shipped what, when, on which commit, and what changed — including backup, restore, swap and retention events. The history is derived from the versioned record, so it can’t be quietly edited. Each entry is a rollback point: <strong>Roll back</strong> re-deploys that exact recorded version (its image, verbatim) and records the action as a new <em>rolled back</em> entry at the top of the timeline — so recovering from a bad change is a click and a confirmation, not a scramble, and the recovery itself is auditable.',
+        'What makes the trail trustworthy is the canonical <code>main</code> branch itself: it is a <strong>protected branch that accepts only fast-forward merges</strong>. Every deploy advances <code>main</code> forward — never a force-push, never a rebase that rewrites what came before — so history can only be <strong>appended to, never rewritten</strong>. There is no <code>git push --force</code> that quietly erases a deploy, and no way for the operator (or anyone) to go back and edit the record of what shipped. The append-only commit graph <em>is</em> the audit log: it is immutable by construction, not by policy, so when an auditor asks whether the deployment history could have been tampered with, the answer is that the branch protection makes it impossible.',
+        'Open <strong>Inspect</strong> on any deployment and you get the receipts across several tabs — <em>Files</em> (the exact source tree it ran), <em>Diff vs current</em> (what changed versus what’s live), <em>Secrets snapshot</em> (the secret set in force), <em>Download image</em> (the built image + schema bundle), and, on the current deployment, <em>Scale</em>. When an auditor asks “show me”, you open a tab.',
+      ],
+      steps: ['Open a stage → <b>Deployment history</b>.', 'Read the timeline of events.', 'Press <b>Inspect</b> on a prior entry; step through <b>Files</b>, <b>Diff vs current</b> (a real diff against what’s live) and <b>Download image</b>.', 'Press <b>Roll back</b> on a prior entry and confirm to re-deploy that exact recorded version.'],
+      callout: { kind: 'An audit log you can’t tamper with', text: 'The canonical <code>main</code> branch is protected and <strong>fast-forward-only</strong> — every deploy advances it forward, never a force-push or a rewrite. History can only be appended to, so the deployment record is immutable <em>by construction</em>. Even the operator cannot quietly edit what shipped: the branch protection, not a promise, is what makes the trail tamper-proof.' },
       standards: [
-        { code: 'SOC 2', clause: 'CC7.2', demand: '<b>System monitoring.</b> Container health is visible per service, per stage.' },
-        { code: 'DORA', clause: 'Art. 10', demand: '<b>Detection.</b> Operators can observe the live state of every running service.' },
-        { code: 'ISO/IEC 27001', clause: 'A.8.16', demand: '<b>Monitoring activities.</b> The running estate is observable in real time.' },
+        { code: 'ISO/IEC 27001', clause: 'A.8.15', demand: '<b>Logging (integrity & tamper-protection).</b> Operational events are recorded on a fast-forward-only protected <code>main</code> — append-only and rewrite-proof, so the log is protected from tampering by construction, including by the operator.' },
+        { code: 'DORA', clause: 'Art. 13', demand: '<b>Learning and evolving.</b> A complete record supports post-incident review.' },
+        { code: 'NIS2', clause: 'Art. 21(2)(b)', demand: '<b>Incident handling.</b> Reconstruct exactly what happened from the audit trail.' },
+        { code: 'SOC 2', clause: 'CC8.1', demand: '<b>Change management.</b> Every change is recorded with its diff and the config in force.' },
       ],
     },
     {
@@ -267,7 +286,26 @@ export const MANUAL = {
       ],
     },
     {
-      num: '14', eyebrow: 'Capture the truth', title: 'Backups & retention',
+      num: '14', eyebrow: 'See what’s running', title: 'Containers',
+      lede: 'The live container roster for a stage — every service of the deployment, its health, and per-container Logs, Inspect, and start/stop controls.',
+      slots: [
+        { id: 'containers', label: 'Live capture', caption: 'Production · the live containers of the current deployment' },
+        { id: 'container-logs', label: 'Live capture', caption: 'Container logs · the live log stream of a running service, read straight from the deployment' },
+        { id: 'container-inspect', label: 'Live capture', caption: 'Container inspect · the service’s configuration — identity, image, network — at a glance' },
+      ],
+      sell: [
+        'The <strong>Containers</strong> section is the operator’s ground truth for a stage: each member of the deployment as a real running container, with its status. Open <em>Logs</em> to read what it’s doing, <em>Inspect</em> for its configuration, or restart/stop a single service without touching the rest.',
+        'On Disaster Recovery, each container resolves to the standby slot’s own instance — so you operate the recovered app, not the live one.',
+      ],
+      steps: ['Open a stage → <b>Containers</b>.', 'Read status per service.', 'Use <b>Logs</b> / <b>Inspect</b> to investigate.', 'Restart or stop a single container if needed.'],
+      standards: [
+        { code: 'SOC 2', clause: 'CC7.2', demand: '<b>System monitoring.</b> Container health is visible per service, per stage.' },
+        { code: 'DORA', clause: 'Art. 10', demand: '<b>Detection.</b> Operators can observe the live state of every running service.' },
+        { code: 'ISO/IEC 27001', clause: 'A.8.16', demand: '<b>Monitoring activities.</b> The running estate is observable in real time.' },
+      ],
+    },
+    {
+      num: '15', eyebrow: 'Capture the truth', title: 'Backups & retention',
       lede: 'Point-in-time snapshots of the live database and object storage, with a retention policy and an audit trail.',
       slots: [
         { id: 'snapshot-create', label: 'Live capture', caption: 'Create snapshot · label and stage, before it runs' },
@@ -285,7 +323,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '15', eyebrow: 'Sleep at night', title: 'Rehearse & restore (DR)',
+      num: '16', eyebrow: 'Sleep at night', title: 'Rehearse & restore (DR)',
       lede: 'A backup you’ve never restored is a rumor. Bitswan makes the rehearsal a routine, the architecture legible, and the real cutover a single click.',
       slots: [
         { id: 'dr-rehearse', label: 'Live capture', caption: 'Disaster Recovery · backup loaded into DR, recovery-tested' },
@@ -295,36 +333,13 @@ export const MANUAL = {
         'Restore a production backup <strong>into the DR slot</strong> — never onto live production. The restore streams its progress per store; when it lands, the slot is marked <em>In DR now</em>. Open it, confirm it’s whole, and only the backup actually loaded into DR can be <strong>marked recovery-tested</strong>. The <em>How it works</em> tab explains the blue-green slots and the cutover in plain terms.',
         'When you must go live, the <strong>Restore</strong> pill performs an ingress cutover — <em>Make Disaster Recovery the live Production?</em> — and <code>-production</code> repoints to the verified slot. No data migration, no redeploy, no downtime. (In a rehearsal you open that dialog to see it, then cancel.)',
       ],
-      steps: ['Take a production snapshot (Ch&nbsp;14).', 'Go to <b>Disaster Recovery → Rehearse &amp; restore</b>.', '<b>Restore into DR</b>, verify, <b>Mark recovery-tested</b>.', 'Use the <b>Restore</b> pill to swap live when needed.'],
+      steps: ['Take a production snapshot (Ch&nbsp;15).', 'Go to <b>Disaster Recovery → Rehearse &amp; restore</b>.', '<b>Restore into DR</b>, verify, <b>Mark recovery-tested</b>.', 'Use the <b>Restore</b> pill to swap live when needed.'],
       specs: [{ v: '0 s', l: 'downtime on a swap' }, { v: 'Quarterly', l: 'default test cadence' }, { v: 'Verified', l: 'test only what’s loaded' }],
       standards: [
         { code: 'DORA', clause: 'Art. 11–12', demand: '<b>Response, recovery & restoration testing.</b> You must regularly test your ability to restore — here it’s a routine, and the last pass is recorded.' },
         { code: 'SOC 2', clause: 'A1.2 / A1.3', demand: '<b>Backup & recovery testing.</b> Restores are rehearsed into an isolated DR slot and the test is recorded.' },
         { code: 'ISO/IEC 27001', clause: 'A.5.30 / A.8.13', demand: '<b>ICT readiness for continuity.</b> Backups are verified by restoration into an isolated slot.' },
         { code: 'NIS2', clause: 'Art. 21(2)(c)', demand: '<b>Business continuity & crisis management.</b> A zero-downtime swap means recovery doesn’t cost an outage.' },
-      ],
-    },
-    {
-      num: '16', eyebrow: 'Show your work', title: 'Deployment history & inspect',
-      lede: 'A versioned, immutable audit log: every deploy, promotion, swap, backup and firewall change — and a per-deployment Inspect with the files, diff and secrets in force at the time.',
-      slots: [
-        { id: 'history', label: 'Live capture', caption: 'Deployment history · the audit trail of every event, with Inspect and Roll back per entry' },
-        { id: 'inspect-modal', label: 'Live capture', caption: 'Inspect · the source file tree of exactly what this deployment ran' },
-        { id: 'inspect-diff', label: 'Live capture', caption: 'Inspect → Diff vs current · what changed between this deployment and what’s live now' },
-        { id: 'inspect-image', label: 'Live capture', caption: 'Inspect → Download image · the built image + schema bundle for offline audit' },
-        { id: 'rollback-modal', label: 'Live capture', caption: 'Roll back · the confirmation before re-deploying a prior recorded version' },
-        { id: 'rollback', label: 'Live capture', caption: 'Rolled back · the prior version re-deployed and a new “rolled back” entry recorded at the top of the history' },
-      ],
-      sell: [
-        'Who shipped what, when, on which commit, and what changed — including backup, restore, swap and retention events. The history is derived from the versioned record, so it can’t be quietly edited. Each entry is a rollback point: <strong>Roll back</strong> re-deploys that exact recorded version (its image, verbatim) and records the action as a new <em>rolled back</em> entry at the top of the timeline — so recovering from a bad change is a click and a confirmation, not a scramble, and the recovery itself is auditable.',
-        'Open <strong>Inspect</strong> on any deployment and you get the receipts across several tabs — <em>Files</em> (the exact source tree it ran), <em>Diff vs current</em> (what changed versus what’s live), <em>Secrets snapshot</em> (the secret set in force), <em>Download image</em> (the built image + schema bundle), and, on the current deployment, <em>Scale</em>. When an auditor asks “show me”, you open a tab.',
-      ],
-      steps: ['Open a stage → <b>Deployment history</b>.', 'Read the timeline of events.', 'Press <b>Inspect</b>; step through <b>Files</b>, <b>Diff vs current</b> and <b>Download image</b>.', 'Press <b>Roll back</b> on a prior entry to re-deploy it — confirm and watch it land.'],
-      standards: [
-        { code: 'ISO/IEC 27001', clause: 'A.8.15', demand: '<b>Logging.</b> Operational events are recorded and protected from tampering.' },
-        { code: 'DORA', clause: 'Art. 13', demand: '<b>Learning and evolving.</b> A complete record supports post-incident review.' },
-        { code: 'NIS2', clause: 'Art. 21(2)(b)', demand: '<b>Incident handling.</b> Reconstruct exactly what happened from the audit trail.' },
-        { code: 'SOC 2', clause: 'CC8.1', demand: '<b>Change management.</b> Every change is recorded with its diff and the config in force.' },
       ],
     },
     {
@@ -348,7 +363,25 @@ export const MANUAL = {
       ],
     },
     {
-      num: '18', eyebrow: 'Right people, right rights', title: 'People & roles',
+      num: '18', eyebrow: 'Know your ingredients', title: 'Supply chain',
+      lede: 'A full software bill of materials for what you run — vulnerabilities ranked, advisories one click away, accepted risks recorded.',
+      slots: [
+        { id: 'supply-chain', label: 'Live capture', caption: 'Supply chain · the SBOM/CVE panel for the deployed image' },
+        { id: 'supply-chain-cve', label: 'Live capture', caption: 'CVE advisory detail · severity, CVSS score and description — what the operator triages before waiving or patching' },
+      ],
+      sell: [
+        'Every deployed image carries an SBOM. The <strong>Supply chain</strong> view ranks vulnerabilities by severity and shows the affected package; opening a CVE links straight to osv.dev, NVD and GitHub advisories so triage starts with the facts.',
+        'Out-of-scope decisions are explicit, attributable and stored in source — not a screenshot in someone’s inbox. The scan runs on the image that actually ships, so the picture is never stale.',
+      ],
+      steps: ['Open a stage → <b>Supply chain</b>.', 'Sort by severity; open a CVE for its advisory.', 'Record any out-of-scope decision in-tree.'],
+      standards: [
+        { code: 'NIS2', clause: 'Art. 21(2)(d)', demand: '<b>Supply-chain security.</b> You can produce, on demand, exactly what is inside what you run.' },
+        { code: 'SOC 2', clause: 'CC7.1', demand: '<b>Vulnerability detection.</b> The SBOM and CVE scan run on the image that actually ships.' },
+        { code: 'ISO/IEC 27001', clause: 'A.5.7 / A.8.8', demand: '<b>Threat intelligence & vulnerability management.</b> Continuous visibility of known vulnerabilities in your dependencies.' },
+      ],
+    },
+    {
+      num: '19', eyebrow: 'Right people, right rights', title: 'People & roles',
       lede: 'A roster with explicit roles — operator, auditor, member — and per-person trusted devices you can approve or revoke.',
       slots: [{ id: 'people-roles', label: 'Live capture', caption: 'People & roles · the Meridian Foods roster' }],
       sell: [
@@ -365,16 +398,16 @@ export const MANUAL = {
       ],
     },
     {
-      num: '19', eyebrow: 'Let the right people in', title: 'Sharing an endpoint',
-      lede: 'Every protected app the gate fronts can be shared, by its owner, with named people or groups — at view or owner level — without touching anyone else’s access.',
+      num: '20', eyebrow: 'Let the right people in', title: 'Sharing an endpoint',
+      lede: 'Every protected app the gate fronts — including the frontends your operators build and deploy — can be shared, by its owner, with named people or groups, at view or owner level, without touching anyone else’s access.',
       slots: [
-        { id: 'share-modal', label: 'Live capture', caption: 'Share endpoint · invite a person at User or Owner level; the owner is listed, access is explicit' },
+        { id: 'share-modal', label: 'Live capture', caption: 'Share endpoint · sharing a deployed automation’s own frontend (a Bailey-protected endpoint) with a teammate at User level' },
       ],
       sell: [
-        'Access is deny-by-default: only people you invite can open an endpoint. From any endpoint the gate fronts, its <strong>owner</strong> opens <strong>Share</strong> and grants access to a person (by email) or a whole identity-provider group, choosing <em>User</em> (open and use it) or <em>Owner</em> (also manage who else can). Grants are recorded with who granted them and when, and a user who hits a wall can <em>request access</em>, which surfaces to the owner to approve or deny — so access is a deliberate decision with a trail, not a shared password.',
-        'Workspace membership is the same mechanism: adding a member to the Meridian Foods workspace is a grant on the workspace’s own endpoint. Because every grant is per-endpoint and owner-managed, there is no god-mode admin quietly reading everything — least privilege is the default, and revoking is as immediate as granting.',
+        'Access is deny-by-default: only people you invite can open an endpoint. Crucially, this is not just the dashboard — the <strong>frontend Meridian’s invoice-processing automation deploys is itself a Bailey-protected endpoint</strong>. Open that frontend and Bailey’s own chrome wraps it, with a <strong>Share</strong> button for its owner. From there the owner grants access to a person (by email) or a whole identity-provider group, choosing <em>User</em> (open and use it) or <em>Owner</em> (also manage who else can). Grants are recorded with who granted them and when, and a user who hits a wall can <em>request access</em>, which surfaces to the owner to approve or deny — so access is a deliberate decision with a trail, not a shared password.',
+        'The same mechanism fronts everything: a workspace dashboard, gitops, and every automation frontend an operator creates. Adding a member to the Meridian Foods workspace is a grant on the workspace’s endpoint; letting a teammate into a deployed invoice app is a grant on that app’s endpoint. Because every grant is per-endpoint and owner-managed, there is no god-mode admin quietly reading everything — least privilege is the default, and revoking is as immediate as granting.',
       ],
-      steps: ['Open the endpoint you own; click <b>Share</b>.', 'Type a person’s email (or a <code>/group</code>); pick <b>User</b> or <b>Owner</b>.', 'Press <b>Add</b> — access is effective immediately and recorded.', 'Approve or deny any pending access requests; <b>Remove</b> to revoke.'],
+      steps: ['Open a deployed automation’s <b>frontend</b> (it’s a Bailey-protected endpoint); click <b>Share</b> in its chrome.', 'Type a person’s email (or a <code>/group</code>); pick <b>User</b> or <b>Owner</b>.', 'Press <b>Add</b> — access is effective immediately and recorded.', 'Approve or deny any pending access requests; <b>Remove</b> to revoke.'],
       callout: { kind: 'Why it matters', text: 'Sharing is per-endpoint, owner-driven and recorded. Access control isn’t a central list someone forgets to prune — it’s the owner of each app deciding, in the open, exactly who can reach it, and revoking the instant they shouldn’t.' },
       standards: [
         { code: 'ISO/IEC 27001', clause: 'A.5.15 / A.8.3', demand: '<b>Access control & information access restriction.</b> Access to each endpoint is granted explicitly, per principal, by its owner.' },
@@ -384,14 +417,16 @@ export const MANUAL = {
       ],
     },
     {
-      num: '20', eyebrow: 'Feed the watchtower', title: 'SIEM export & monitoring',
+      num: '21', eyebrow: 'Feed the watchtower', title: 'SIEM export & monitoring',
       lede: 'Stream the server’s security audit log — access approvals, role and device changes, workspace events — to your SIEM over OpenTelemetry, as it happens.',
       slots: [
-        { id: 'siem', label: 'Live capture', caption: 'SIEM forwarding · point Bailey at your OTLP ingestor; the same audit events, forwarded live' },
+        { id: 'siem-form', label: 'Live capture', caption: 'SIEM forwarding · the config form — the OTLP endpoint base URL and the protocol, filled in before Save & connect' },
+        { id: 'siem', label: 'Live capture', caption: 'SIEM forwarding · connected — the connectivity test passed; the same audit events, forwarded live' },
       ],
       sell: [
-        'Bailey keeps its own security audit trail, but your SOC wants everything in one place. The <strong>SIEM forwarding</strong> card (Server overview) points Bailey at an external <strong>OpenTelemetry</strong> ingestor — OTLP over HTTP or gRPC, with an optional bearer token — and mirrors every security event there in real time: device-trust changes, role changes, workspace creation, access approvals. Enabling it runs a live connectivity test so you see <em>Connected</em> (or the exact error) before you rely on it, and the card shows when the last event was delivered.',
-        'This is how Bailey’s audit story plugs into the monitoring and detection your standards expect: the events exist regardless, and the export makes them available to correlation, alerting and long-term retention in the system your analysts already watch.',
+        'Bailey keeps its own security audit trail, but your SOC wants everything in one place. The <strong>SIEM forwarding</strong> card (Server overview) points Bailey at an external <strong>OpenTelemetry</strong> ingestor and mirrors every security event there in real time: device-trust changes, role changes, workspace creation, access approvals.',
+        'You give it two things. The <strong>Ingestor URL</strong> is your collector’s <strong>OTLP base URL</strong> — just the host (and port), e.g. <code>https://collector.example.com</code>; Bailey appends the <code>/v1/logs</code> path itself, so you never spell out the signal path. The <strong>Protocol</strong> picks how the logs are framed: <strong>OTLP/HTTP</strong> (protobuf over HTTPS, the simplest to route through a proxy) or <strong>OTLP/gRPC</strong> (a streaming gRPC channel, lower-overhead at volume) — match whichever your collector listens on. An optional bearer <em>Auth token</em> authenticates the stream.',
+        'Press <strong>Save &amp; connect</strong> and Bailey runs a live connectivity test, so you see <em>Connected</em> (or the exact error) before you rely on it, and the card then shows when the last event was delivered. This is how Bailey’s audit story plugs into the monitoring and detection your standards expect: the events exist regardless, and the export makes them available to correlation, alerting and long-term retention in the system your analysts already watch.',
       ],
       steps: ['Open <b>Server overview</b>; find <b>SIEM forwarding</b>.', 'Click <b>Configure ingestor</b>; enter the <b>Ingestor URL</b>, pick the <b>Protocol</b>, add an <b>Auth token</b> if needed.', 'Press <b>Save &amp; connect</b> — it tests the connection and shows Connected or the error.', 'Watch the live status and last-delivered time; <b>Edit</b> or <b>Disable</b> as needed.'],
       callout: { kind: 'Monitoring, where you already look', text: 'The audit events are produced no matter what; SIEM export simply forwards them, live, into your existing detection and retention pipeline — so monitoring and alerting happen in the tool your team already runs, not in a console they have to remember to open.' },
@@ -400,6 +435,65 @@ export const MANUAL = {
         { code: 'SOC 2', clause: 'CC7.2', demand: '<b>System monitoring.</b> Audit events feed an external SIEM for correlation and alerting.' },
         { code: 'DORA', clause: 'Art. 10', demand: '<b>Detection of anomalous activities.</b> Real-time event export enables continuous detection in your SOC.' },
         { code: 'NIS2', clause: 'Art. 21(2)(b)', demand: '<b>Incident handling.</b> Centralized, exported events shorten detection and support reconstruction.' },
+      ],
+    },
+
+    // ─────────────────────── Onboarding a teammate ──────────────────────────
+    // The other side of the gate (Ch 01/04): a real second user (Marek
+    // Horváth) arriving on a new device, and the admin (Tomáš) deciding —
+    // deliberately, in the open — whether he and his device get in.
+    {
+      num: '22', eyebrow: 'Deny by default', title: 'A teammate’s first login',
+      lede: 'A new teammate signs in through your identity provider from their own laptop — and gets nothing. Identity alone is not access: Bailey is deny-by-default, and an unknown device waits at the gate.',
+      slots: [{ id: 'onboard-newuser-pending', label: 'Live capture', caption: 'New device · Marek is signed in, but the device isn’t trusted — a 6-digit code and “Waiting for an admin…”' }],
+      sell: [
+        'Marek Horváth joins Meridian as a process developer. He opens Bailey on his own laptop and signs in with his Meridian identity — a perfectly valid login. He still sees <strong>none of the product</strong>. Instead the gate stops him with <em>“Trust this device”</em>: “You’re signed in, but this device isn’t trusted yet.” His browser shows a large <strong>6-digit code</strong> labelled <em>“Your code”</em>, the prompt to <em>“Read this code to an admin”</em>, and a spinner: <em>“Waiting for an admin…”</em>',
+        'This is <strong>deny-by-default</strong> made concrete. A leaked or phished password is not enough to reach anything, because access is bound to <em>this hardware</em>, not just the credential — and this hardware is unknown. The code is a <strong>presence proof</strong>: an admin will only let the device in after Marek reads them the number off his own screen, so a stolen identity-provider account on an attacker’s machine never clears the gate. Nothing — no workspace, no app, no console — is reachable until someone who already holds trust says yes.',
+      ],
+      steps: ['A new teammate signs in at the Bailey host on their own device.', 'The gate shows <b>Trust this device</b> — they are signed in but not trusted.', 'Their device displays a <b>6-digit code</b> and waits.', 'Nothing in the product is reachable until an admin approves the device.'],
+      callout: { kind: 'Why it matters', text: 'A valid login is not access. By binding trust to the device and requiring a present, trusted admin to admit it, a stolen password — or a whole compromised identity-provider account — still reaches nothing on its own.' },
+      standards: [
+        { code: 'NIS2', clause: 'Art. 21(2)(j)', demand: '<b>Multi-factor authentication & secured access.</b> Device trust is a hardware-bound second factor; identity alone never grants access.' },
+        { code: 'ISO/IEC 27001', clause: 'A.5.15 / A.8.5', demand: '<b>Access control & secure authentication.</b> Access is deny-by-default and granted per device, not per credential.' },
+        { code: 'SOC 2', clause: 'CC6.1', demand: '<b>Logical access security.</b> A new principal is denied at the gate until explicitly authorized.' },
+        { code: 'DORA', clause: 'Art. 9(3)', demand: '<b>Strong authentication mechanisms.</b> Robust access control gates every new device before it reaches a system.' },
+      ],
+    },
+    {
+      num: '23', eyebrow: 'You decide who gets in', title: 'Approve the person & trust the device',
+      lede: 'Approval is a deliberate, present-tense act. The admin sees the pending device in People & roles, confirms the person is really there by the code on their screen, and trusts the device — admitting the user in one move.',
+      slots: [
+        { id: 'onboard-admin-approve', label: 'Live capture', caption: 'People & roles · Marek’s “Device awaiting approval” bar — the admin types the code from his screen' },
+        { id: 'onboard-admin-approved', label: 'Live capture', caption: 'People & roles · the device trusted, the pending request cleared' },
+      ],
+      sell: [
+        'Back in the Server Console, Tomáš opens <strong>People &amp; roles</strong>. Marek’s request surfaces inline, under his name, as a <em>“Device awaiting approval”</em> bar — badged <em>First device</em>, with how long it’s been waiting. The prompt is explicit: <em>ask Marek to read you the code shown on his device, then type it below</em>. The code is never sent to the admin by the server — that is the whole point. Tomáš must hear it from Marek (in person, on a call), which proves Marek is physically present at that device.',
+        'Tomáš types the six digits and presses <strong>Trust this device</strong>. In one action this <strong>enrols the user and trusts the device</strong>: Marek becomes a real device owner and his laptop is now a trusted device, badged and revocable like any other (Ch&nbsp;04). The request clears. There is no quiet auto-admit and no “deny” to forget about — unapproved devices simply expire. Who gets in, and on which hardware, is a decision a trusted admin makes in the open, with a presence check — exactly the control an auditor wants to see.',
+      ],
+      steps: ['Open <b>People &amp; roles</b> in the console.', 'Find the teammate’s <b>Device awaiting approval</b> bar.', 'Ask them to read you the <b>6-digit code</b> on their screen; type it in.', 'Press <b>Trust this device</b> — the person is enrolled and the device trusted.'],
+      callout: { kind: 'A presence check, not a rubber stamp', text: 'The server never reveals the code to the approver — the admin has to get it from the person, in real time. That converts “approve a request” into “confirm a present, identified human on a specific device”, so a remote attacker holding only stolen credentials can’t be approved.' },
+      standards: [
+        { code: 'SOC 2', clause: 'CC6.2 / CC6.3', demand: '<b>Access provisioning.</b> A new principal and device are granted access centrally, by an authorized admin, with a presence check.' },
+        { code: 'ISO/IEC 27001', clause: 'A.5.16 / A.5.18', demand: '<b>Identity & access-rights management.</b> Enrolment of a user and device is an explicit, authorized, recorded act.' },
+        { code: 'NIS2', clause: 'Art. 21(2)(j)', demand: '<b>Secured access.</b> Device trust is admitted only by an already-trusted admin, with out-of-band code confirmation.' },
+        { code: 'DORA', clause: 'Art. 9(4)', demand: '<b>Access on a need-to-know basis.</b> Access is conferred deliberately by an admin, not assumed from a login.' },
+      ],
+    },
+    {
+      num: '24', eyebrow: 'In, on a trusted device', title: 'Access granted',
+      lede: 'The moment the admin trusts it, the teammate’s device is let through — no re-login, no second step. And the same console that admitted the device is where you cut it, the instant a laptop is lost or a person leaves.',
+      slots: [{ id: 'onboard-newuser-granted', label: 'Live capture', caption: 'New device · approved and redirected through the gate — access now granted on Marek’s laptop' }],
+      sell: [
+        'Marek’s laptop never stopped waiting at the gate. The instant Tomáš trusts the device, the gate clears it — Marek’s screen leaves the <em>“Waiting for an admin…”</em> state and he lands on exactly what he was reaching for. From now on his device carries its own trust cookie: he comes and goes without re-approval, alongside the operator, each on their own trusted hardware.',
+        'Crucially, trust is <strong>per-device and reversible from one place</strong>. Marek’s laptop now appears in the roster like any other trusted device — and the same People &amp; roles / Your devices surface that admitted it is where you <strong>remove</strong> it. If that laptop is lost or stolen, or Marek leaves Meridian, you don’t scramble to rotate passwords across a dozen apps: you find the device (or the person) and revoke it, and its access to the console and every workspace app is gone instantly (Ch&nbsp;04). Onboarding and offboarding are the same lever, pulled in opposite directions — admit a device to let someone in, cut a device to lock a stolen laptop or a departing employee out.',
+      ],
+      steps: ['The teammate’s device, still waiting, is admitted the moment it’s trusted.', 'It redirects straight into what they were granted — no re-login.', 'The device now appears in the roster, badged and revocable.', '<b>Lost device or leaver?</b> Remove the device (or person) here — access is revoked everywhere, instantly.'],
+      callout: { kind: 'Onboarding and offboarding are one lever', text: 'Admitting a device and revoking it are the same control. A stolen laptop or a departing employee isn’t a password-reset fire drill — it’s one click to remove the device, and its access to the console and every workspace app ends immediately.' },
+      standards: [
+        { code: 'SOC 2', clause: 'CC6.2 / CC6.3', demand: '<b>Access provisioning & de-provisioning.</b> A device is admitted and, just as immediately, revocable centrally when lost or on a leaver.' },
+        { code: 'ISO/IEC 27001', clause: 'A.5.15 / A.8.1', demand: '<b>Access control & user-endpoint devices.</b> Per-device trust is granted, badged and revoked from one place.' },
+        { code: 'NIS2', clause: 'Art. 21(2)(j)', demand: '<b>Secured access.</b> Hardware-bound trust is admitted and revoked per device and per person.' },
+        { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> Immediate device revocation contains a lost device or a departing insider.' },
       ],
     },
   ],
@@ -416,17 +510,17 @@ export const MANUAL = {
       rows: [
         { control: 'A.5.9', req: 'Inventory of assets', status: 'provided', bailey: 'Workspaces, endpoints and processes enumerated from live state', ch: '03 · 06', yours: 'Asset classification policy' },
         { control: 'A.5.15 / A.8.5', req: 'Access control & secure authentication', status: 'provided', bailey: 'Device-trust gate + OIDC at the platform edge', ch: '01 · 04', yours: 'Your IdP, joiner/leaver process' },
-        { control: 'A.5.18', req: 'Access rights (least privilege, review)', status: 'provided', bailey: 'Operator / auditor / member roles, server-enforced', ch: '18', yours: 'Periodic access reviews' },
-        { control: 'A.8.8', req: 'Management of technical vulnerabilities', status: 'provided', bailey: 'Pre-deploy CVE scan + in-tree waivers', ch: '09 · 10', yours: 'Triage & remediation SLAs' },
+        { control: 'A.5.18', req: 'Access rights (least privilege, review)', status: 'provided', bailey: 'Operator / auditor / member roles, server-enforced', ch: '19', yours: 'Periodic access reviews' },
+        { control: 'A.8.8', req: 'Management of technical vulnerabilities', status: 'provided', bailey: 'Pre-deploy CVE scan + in-tree waivers', ch: '10 · 18', yours: 'Triage & remediation SLAs' },
         { control: 'A.8.9', req: 'Configuration management', status: 'partial', bailey: 'bitswan.yaml as declarative source of truth', ch: '11', yours: 'Baseline definition & review' },
-        { control: 'A.8.13', req: 'Information backup', status: 'provided', bailey: 'Per-stage snapshots + retention policy', ch: '14', yours: 'Offsite copy & retention targets' },
-        { control: 'A.8.15 / A.8.16', req: 'Logging & monitoring', status: 'provided', bailey: 'Versioned deploy/event history, live container health, real-time SIEM export (OTLP)', ch: '12 · 16 · 20', yours: 'SIEM correlation rules, alerting' },
+        { control: 'A.8.13', req: 'Information backup', status: 'provided', bailey: 'Per-stage snapshots + retention policy', ch: '15', yours: 'Offsite copy & retention targets' },
+        { control: 'A.8.15 / A.8.16', req: 'Logging & monitoring', status: 'provided', bailey: 'Versioned deploy/event history, live container health, real-time SIEM export (OTLP)', ch: '12 · 14 · 21', yours: 'SIEM correlation rules, alerting' },
         { control: 'A.8.20 / A.8.21', req: 'Network & network-services security', status: 'provided', bailey: 'Default-deny egress allow-list per service', ch: '17', yours: 'Perimeter & internal segmentation policy' },
         { control: 'A.8.24', req: 'Use of cryptography & secrets', status: 'provided', bailey: 'Stage secrets, injected not committed; TLS at edge', ch: '13', yours: 'Key-management policy' },
-        { control: 'A.8.31', req: 'Separation of dev/test/production', status: 'provided', bailey: 'Isolated copies + dev / staging / production stages', ch: '05 · 11', yours: '—' },
-        { control: 'A.8.3', req: 'Information access restriction', status: 'provided', bailey: 'Workspaces scope access per tenancy + role; per-endpoint owner-managed sharing', ch: '02 · 19', yours: 'Membership reviews' },
-        { control: 'A.8.32', req: 'Change management', status: 'provided', bailey: 'Reversible blue-green promotion path + immutable history', ch: '11 · 16', yours: 'Change approval workflow' },
-        { control: 'A.5.30', req: 'ICT readiness for business continuity', status: 'provided', bailey: 'DR slot + rehearsed, recorded recovery tests', ch: '15', yours: 'BCP/DR plan & RTO/RPO targets' },
+        { control: 'A.8.31', req: 'Separation of dev/test/production', status: 'provided', bailey: 'Isolated copies + dev / staging / production stages', ch: '05 · 09 · 11', yours: '—' },
+        { control: 'A.8.3', req: 'Information access restriction', status: 'provided', bailey: 'Workspaces scope access per tenancy + role; per-endpoint owner-managed sharing', ch: '02 · 20', yours: 'Membership reviews' },
+        { control: 'A.8.32', req: 'Change management', status: 'provided', bailey: 'Reversible blue-green promotion path + immutable history', ch: '11 · 12', yours: 'Change approval workflow' },
+        { control: 'A.5.30', req: 'ICT readiness for business continuity', status: 'provided', bailey: 'DR slot + rehearsed, recorded recovery tests', ch: '16', yours: 'BCP/DR plan & RTO/RPO targets' },
       ],
     },
     {
@@ -434,28 +528,28 @@ export const MANUAL = {
       blurb: 'The common-criteria and availability TSCs Bailey supports as a service component. Your audit still covers the organizational criteria (CC1–CC5), risk assessment and vendor management.',
       rows: [
         { control: 'CC6.1', req: 'Logical access security', status: 'provided', bailey: 'Device-trust gate fronting every endpoint', ch: '01 · 03', yours: 'Access policy & ownership' },
-        { control: 'CC6.2 / CC6.3', req: 'Access provisioning & removal', status: 'provided', bailey: 'Central role + device grant/revoke', ch: '04 · 18', yours: 'Timely de-provisioning process' },
+        { control: 'CC6.2 / CC6.3', req: 'Access provisioning & removal', status: 'provided', bailey: 'Central role + device grant/revoke', ch: '04 · 19', yours: 'Timely de-provisioning process' },
         { control: 'CC6.6', req: 'Boundary protection', status: 'provided', bailey: 'Default-deny egress allow-list', ch: '17', yours: 'Network perimeter design' },
-        { control: 'CC6.7', req: 'Data in transit & at rest', status: 'provided', bailey: 'TLS at the edge (traefik) with managed cert lifecycle; backups encrypted', ch: '01 · 14', yours: 'Disk encryption on the Bailey host (at rest)' },
-        { control: 'CC7.1', req: 'Vulnerability detection', status: 'provided', bailey: 'SBOM + CVE scan on the image that ships', ch: '10', yours: 'Remediation tracking' },
-        { control: 'CC7.2', req: 'System monitoring', status: 'provided', bailey: 'Container health + event history + real-time SIEM export', ch: '12 · 16 · 20', yours: 'Alerting & on-call' },
-        { control: 'CC8.1', req: 'Change management', status: 'provided', bailey: 'Promotion pipeline + immutable deploy history', ch: '09 · 11 · 16', yours: 'Change authorization' },
-        { control: 'A1.2', req: 'Backup & environmental protection', status: 'provided', bailey: 'Snapshots + standby DR slot', ch: '14 · 15', yours: 'Backup off-platform' },
-        { control: 'A1.3', req: 'Recovery testing', status: 'provided', bailey: 'Rehearse-into-DR + recorded recovery tests', ch: '15', yours: 'Test cadence sign-off' },
+        { control: 'CC6.7', req: 'Data in transit & at rest', status: 'provided', bailey: 'TLS at the edge (traefik) with managed cert lifecycle; backups encrypted', ch: '01 · 15', yours: 'Disk encryption on the Bailey host (at rest)' },
+        { control: 'CC7.1', req: 'Vulnerability detection', status: 'provided', bailey: 'SBOM + CVE scan on the image that ships', ch: '18', yours: 'Remediation tracking' },
+        { control: 'CC7.2', req: 'System monitoring', status: 'provided', bailey: 'Container health + event history + real-time SIEM export', ch: '12 · 14 · 21', yours: 'Alerting & on-call' },
+        { control: 'CC8.1', req: 'Change management', status: 'provided', bailey: 'Promotion pipeline + immutable deploy history', ch: '10 · 11 · 12', yours: 'Change authorization' },
+        { control: 'A1.2', req: 'Backup & environmental protection', status: 'provided', bailey: 'Snapshots + standby DR slot', ch: '15 · 16', yours: 'Backup off-platform' },
+        { control: 'A1.3', req: 'Recovery testing', status: 'provided', bailey: 'Rehearse-into-DR + recorded recovery tests', ch: '16', yours: 'Test cadence sign-off' },
       ],
     },
     {
       standard: 'DORA (Regulation (EU) 2022/2554)',
       blurb: 'The ICT risk-management articles Bailey operationalizes for financial entities. Governance, incident reporting to authorities, and third-party registers remain your obligation.',
       rows: [
-        { control: 'Art. 8', req: 'Identification of ICT risk', status: 'provided', bailey: 'Pre-deploy supply-chain / CVE identification', ch: '10', yours: 'Risk register & classification' },
+        { control: 'Art. 8', req: 'Identification of ICT risk', status: 'provided', bailey: 'Pre-deploy supply-chain / CVE identification', ch: '18', yours: 'Risk register & classification' },
         { control: 'Art. 9(3)', req: 'Strong authentication & protection', status: 'provided', bailey: 'Device-trust gate', ch: '01', yours: 'Identity governance' },
         { control: 'Art. 9', req: 'Protection & prevention (change impact)', status: 'provided', bailey: 'Zero-downtime blue-green change path', ch: '11', yours: 'Segregation policy' },
-        { control: 'Art. 10', req: 'Detection of anomalous activity', status: 'provided', bailey: 'Container health + deploy/event history + real-time SIEM export', ch: '12 · 16 · 20', yours: 'Detection thresholds & alerting' },
-        { control: 'Art. 11', req: 'Response & recovery', status: 'provided', bailey: 'One-cutover DR swap, no data move', ch: '15', yours: 'Crisis-management plan' },
-        { control: 'Art. 12', req: 'Backup, restoration & testing', status: 'provided', bailey: 'Snapshots + rehearsed DR restores', ch: '14 · 15', yours: 'RTO/RPO & offsite policy' },
-        { control: 'Art. 13', req: 'Learning & evolving', status: 'provided', bailey: 'Complete, inspectable deploy audit trail', ch: '16', yours: 'Post-incident review process' },
-        { control: 'Art. 24–26', req: 'Resilience testing programme', status: 'partial', bailey: 'Runnable requirement tests + DR rehearsals', ch: '08 · 15', yours: 'TLPT for significant entities' },
+        { control: 'Art. 10', req: 'Detection of anomalous activity', status: 'provided', bailey: 'Container health + deploy/event history + real-time SIEM export', ch: '12 · 14 · 21', yours: 'Detection thresholds & alerting' },
+        { control: 'Art. 11', req: 'Response & recovery', status: 'provided', bailey: 'One-cutover DR swap, no data move', ch: '16', yours: 'Crisis-management plan' },
+        { control: 'Art. 12', req: 'Backup, restoration & testing', status: 'provided', bailey: 'Snapshots + rehearsed DR restores', ch: '15 · 16', yours: 'RTO/RPO & offsite policy' },
+        { control: 'Art. 13', req: 'Learning & evolving', status: 'provided', bailey: 'Complete, inspectable deploy audit trail', ch: '12', yours: 'Post-incident review process' },
+        { control: 'Art. 24–26', req: 'Resilience testing programme', status: 'partial', bailey: 'Runnable requirement tests + DR rehearsals', ch: '08 · 16', yours: 'TLPT for significant entities' },
       ],
     },
     {
@@ -463,12 +557,12 @@ export const MANUAL = {
       blurb: 'The Article 21(2) cybersecurity-risk-management measures Bailey delivers technically. Governance, training and incident notification to your CSIRT stay with you.',
       rows: [
         { control: 'Art. 21(2)(a)', req: 'Risk analysis & network security', status: 'partial', bailey: 'Default-deny egress with reviewed exceptions', ch: '17', yours: 'Risk-analysis methodology' },
-        { control: 'Art. 21(2)(b)', req: 'Incident handling', status: 'partial', bailey: 'Reconstruct events from the audit trail', ch: '16', yours: 'Incident response & notification' },
-        { control: 'Art. 21(2)(c)', req: 'Business continuity & backups', status: 'provided', bailey: 'Backups + zero-downtime DR swap', ch: '14 · 15', yours: 'BCP & crisis comms' },
-        { control: 'Art. 21(2)(d)', req: 'Supply-chain security', status: 'provided', bailey: 'SBOM + CVE visibility per image', ch: '10', yours: 'Supplier assessment' },
-        { control: 'Art. 21(2)(e)', req: 'Secure development & vuln handling', status: 'provided', bailey: 'Pre-deploy checks + versioned waivers', ch: '09', yours: 'SDLC policy' },
+        { control: 'Art. 21(2)(b)', req: 'Incident handling', status: 'partial', bailey: 'Reconstruct events from the audit trail', ch: '12', yours: 'Incident response & notification' },
+        { control: 'Art. 21(2)(c)', req: 'Business continuity & backups', status: 'provided', bailey: 'Backups + zero-downtime DR swap', ch: '15 · 16', yours: 'BCP & crisis comms' },
+        { control: 'Art. 21(2)(d)', req: 'Supply-chain security', status: 'provided', bailey: 'SBOM + CVE visibility per image', ch: '18', yours: 'Supplier assessment' },
+        { control: 'Art. 21(2)(e)', req: 'Secure development & vuln handling', status: 'provided', bailey: 'Pre-deploy checks + versioned waivers', ch: '10', yours: 'SDLC policy' },
         { control: 'Art. 21(2)(h)', req: 'Cryptography', status: 'provided', bailey: 'Secret handling + TLS at the edge', ch: '13', yours: 'Crypto policy' },
-        { control: 'Art. 21(2)(i)', req: 'Access control & asset management', status: 'provided', bailey: 'Roles + workspace/endpoint inventory + per-endpoint sharing', ch: '02 · 03 · 18 · 19', yours: 'Asset ownership' },
+        { control: 'Art. 21(2)(i)', req: 'Access control & asset management', status: 'provided', bailey: 'Roles + workspace/endpoint inventory + per-endpoint sharing', ch: '02 · 03 · 19 · 20', yours: 'Asset ownership' },
         { control: 'Art. 21(2)(j)', req: 'Multi-factor authentication', status: 'provided', bailey: 'Hardware-bound device trust', ch: '01 · 04', yours: 'Enrolment policy' },
       ],
     },
@@ -478,9 +572,9 @@ export const MANUAL = {
       rows: [
         { control: 'Art. 30', req: 'Records of processing activities', status: 'provided', bailey: 'Per-egress data-processing record, auto-maintained', ch: '17', yours: 'Controller-level register' },
         { control: 'Art. 28', req: 'Processor obligations / DPAs', status: 'provided', bailey: 'DPA stored before egress is allowed', ch: '17', yours: 'Contract terms & due diligence' },
-        { control: 'Art. 32', req: 'Security of processing', status: 'provided', bailey: 'Access control, secrets, backup & resilience', ch: '13 · 14 · 15', yours: 'Risk-based measures & review' },
+        { control: 'Art. 32', req: 'Security of processing', status: 'provided', bailey: 'Access control, secrets, backup & resilience', ch: '13 · 15 · 16', yours: 'Risk-based measures & review' },
         { control: 'Art. 5(1)(f)', req: 'Integrity & confidentiality', status: 'provided', bailey: 'Gated access + default-deny egress', ch: '01 · 17', yours: 'Data-handling policy' },
-        { control: 'Art. 33', req: 'Breach notification', status: 'partial', bailey: 'Audit trail to reconstruct what happened', ch: '16', yours: '72-hour notification process' },
+        { control: 'Art. 33', req: 'Breach notification', status: 'partial', bailey: 'Audit trail to reconstruct what happened', ch: '12', yours: '72-hour notification process' },
       ],
     },
   ],
