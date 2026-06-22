@@ -45,6 +45,15 @@ CODING_AGENT_IMAGE="bitswan/coding-agent-local:latest"
 # can't start and no egress is ever observed.
 EGRESS_GATEWAY_IMAGE="bitswan/egress-gateway:latest"
 
+# The SIEM target: a real, lightweight OpenTelemetry collector with an OTLP
+# receiver (gRPC :4317 + HTTP :4318) and a debug exporter. Bailey's SIEM
+# forwarding points here so the connectivity test succeeds and audit events
+# actually flow. NOTE: this image is NOT built locally — it is pulled from the
+# registry, so it must be added to the base-image seed tarball
+# (/tmp/bitswan-e2e-vm/base-images.tar) or the VM may 429 pulling it.
+OTEL_COLLECTOR_IMAGE="otel/opentelemetry-collector:0.115.1"
+OTEL_CTR="bitswan-e2e-otel"
+
 echo "=== [1/7] Build the Server Console SPA + the bitswan CLI + component images ==="
 # The daemon embeds the Server Console SPA via go:embed from
 # internal/daemon/serverconsole_dist (not committed). Build it into the embed
@@ -117,6 +126,22 @@ for i in $(seq 1 60); do
 done
 
 mark "[3/7] keycloak (seeded realm)"
+echo "=== [3b/7] Real OTLP ingestor (otel-collector) — the SIEM forwarding target ==="
+# A genuine OpenTelemetry collector on the shared bitswan_network so the daemon
+# reaches it by container name (bitswan-e2e-otel) over OTLP/HTTP :4318 (the
+# POST /v1/logs path Bailey uses) and OTLP/gRPC :4317. A debug exporter logs
+# every received record to the collector's stdout, so forwarding SUCCEEDS (the
+# SIEM card shows Connected) instead of the connection error you get pointing
+# at a dead endpoint. Surfaced to the walkthrough via E2E_OTLP_* in e2e/.env.
+docker rm -f "$OTEL_CTR" >/dev/null 2>&1 || true
+docker pull "$OTEL_COLLECTOR_IMAGE" >/dev/null 2>&1 || true
+docker run -d --name "$OTEL_CTR" --network bitswan_network \
+  -v "$REPO_ROOT/e2e/otel/collector-config.yaml:/etc/otelcol/config.yaml:ro" \
+  "$OTEL_COLLECTOR_IMAGE" --config /etc/otelcol/config.yaml
+sleep 3
+docker ps | grep -q "$OTEL_CTR" || { echo "ERROR: otel-collector not running"; docker logs --tail 50 "$OTEL_CTR"; exit 1; }
+
+mark "[3b/7] otel-collector (SIEM target)"
 echo "=== [4/7] bitswan-protected-proxy (oauth2-proxy) in front of the gate ==="
 # This is the production chain's first hop. It runs the OIDC handshake against
 # Keycloak and forwards the verified identity to the :9080 gate as
@@ -181,6 +206,10 @@ E2E_ONBOARD_URL=${ONBOARD_URL}
 E2E_KEYCLOAK_URL=http://${KC_HOST}:${KC_PORT}
 E2E_OPERATOR_EMAIL=tomas.novak@meridianfoods.cz
 E2E_OPERATOR_PASSWORD=meridian-operator
+E2E_TEAMMATE_EMAIL=marek.horvath@meridianfoods.cz
+E2E_TEAMMATE_PASSWORD=meridian-member
+E2E_OTLP_HTTP_ENDPOINT=http://${OTEL_CTR}:4318
+E2E_OTLP_GRPC_ENDPOINT=http://${OTEL_CTR}:4317
 ENV
 mark "[7/7] write e2e/.env"
 echo "=== bring-up complete ==="

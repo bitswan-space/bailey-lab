@@ -20,7 +20,24 @@ export const ENV = {
   keycloakUrl: process.env.E2E_KEYCLOAK_URL || 'http://keycloak.bs-e2e.localhost:8088',
   operatorEmail: process.env.E2E_OPERATOR_EMAIL || 'tomas.novak@meridianfoods.cz',
   operatorPassword: process.env.E2E_OPERATOR_PASSWORD || 'meridian-operator',
+  // The second, NON-admin login identity for the onboarding story (Marek
+  // Horváth). A brand-new user with no Bailey access until the admin approves
+  // him + his device. Seeded in the mock Keycloak realm; surfaced by bringup.sh.
+  teammateEmail: process.env.E2E_TEAMMATE_EMAIL || 'marek.horvath@meridianfoods.cz',
+  teammatePassword: process.env.E2E_TEAMMATE_PASSWORD || 'meridian-member',
+  // The REAL OTLP ingestor stood up by bringup.sh for the SIEM chapter. The
+  // daemon reaches the collector by container name on bitswan_network. Bailey
+  // appends /v1/logs to the HTTP base; the gRPC target is host:port only.
+  otlpHttpEndpoint: process.env.E2E_OTLP_HTTP_ENDPOINT || 'http://bitswan-e2e-otel:4318',
+  otlpGrpcEndpoint: process.env.E2E_OTLP_GRPC_ENDPOINT || 'http://bitswan-e2e-otel:4317',
 };
+
+// A brief settle applied before every screenshot. Callers still wait on a real
+// readiness signal first; this just lets the last frame of a transition (panel
+// mount, modal slide-in, list reflow, a spinner's final tick) finish so the
+// manual never shows a half-rendered frame. Screenshots only — it never gates a
+// product interaction, so it cannot mask slowness in the product itself.
+export const SETTLE_MS = Number(process.env.E2E_SETTLE_MS) || 650;
 
 /** Run a host shell command (for asserting real backend effects). */
 export function sh(cmd: string): string {
@@ -37,9 +54,12 @@ export async function capture(
   slotId: string,
   opts: { fullPage?: boolean; locator?: Locator } = {},
 ): Promise<void> {
-  // No settle/sleep here on purpose: callers wait on a specific signal (an
-  // element visible/hidden, a deploy Healthy) before capturing. If a shot ever
-  // needs a blind delay, the UI is missing a state indicator — fix that, not this.
+  // Callers wait on a specific readiness signal (element visible/hidden, a
+  // deploy Healthy) before capturing, but a brief settle on TOP of that yields a
+  // much cleaner manual: it lets the last frame of a transition (panel mount,
+  // modal slide-in, list reflow, a spinner's final tick) finish before the
+  // shutter, so we never capture a half-rendered frame.
+  await page.waitForTimeout(SETTLE_MS);
   // Wait for fonts so text isn't mid-swap in the shot (a real readiness signal).
   await page.evaluate(() => (document as Document).fonts?.ready).catch(() => {});
   const path = join(SHOTS_DIR, `${slotId}.png`);

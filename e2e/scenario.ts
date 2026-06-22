@@ -54,12 +54,33 @@ export const BP = {
     '- Invoices over €5,000 require human approval before posting.',
     '- A duplicate invoice number must never post twice.',
   ].join('\n'),
+  // The MEANINGFUL v2 source change the walkthrough makes after v1 is deployed:
+  // a concrete new business rule (manager approval tier) plus a new recorded
+  // field. Appended to the Description so it produces a NON-trivial diff that
+  // shows up in Deployment history → Inspect → "Diff vs current" and gives the
+  // rollback rehearsal a genuine prior version to roll back to. Editorial copy
+  // lives here in version control, not inline in the spec.
+  readmeV2Addition: [
+    '',
+    '## Manager approval tier (v2)',
+    '',
+    'Invoices over **€5,000** are held for **manager approval** before posting —',
+    'they are routed to the assigned approving manager and recorded as *pending*',
+    'until signed off. The approving manager and the approval timestamp are stored',
+    'on the invoice record.',
+    '',
+    '- New field: `approving_manager` — the manager who must sign off a held invoice.',
+    '- New field: `approved_at` — when the hold was cleared (null while pending).',
+  ].join('\n'),
 };
 
-/** The workspace created via the Bailey Server Console. */
+/** The workspace created via the Bailey Server Console. Workspaces are THEMATIC,
+ * not per-company: Meridian Foods runs a "finance" workspace for its finance-
+ * automation team (invoice-processing lives here), and would run a separate
+ * "logistics" workspace — shared with, and visible to, different people. */
 export const WORKSPACE = {
-  name: 'meridian-foods',
-  title: 'Meridian Foods',
+  name: 'finance',
+  title: 'Finance',
 };
 
 /**
@@ -83,10 +104,34 @@ export const OPERATOR: Person = {
   origin: 'CZ',
 };
 
+/**
+ * The SECOND login identity used for the onboarding story: a regular Meridian
+ * teammate who is NOT the server root admin. Tomáš claims the server first (and
+ * so becomes root admin); Marek is just another identity in the OIDC realm with
+ * no Bailey access until the admin approves him and his device under the
+ * deny-by-default posture. The walkthrough logs in AS Marek from a "new device"
+ * to drive the self-request → admin-approve flow for real.
+ *
+ * These are real, seeded credentials in the mock Keycloak realm
+ * (e2e/keycloak/realm-export.json) and are surfaced into e2e/.env by
+ * e2e/bringup.sh as E2E_TEAMMATE_EMAIL / E2E_TEAMMATE_PASSWORD (see
+ * e2e/fixtures/bitswan.ts ENV.teammateEmail / ENV.teammatePassword).
+ */
+export const TEAMMATE: Person = {
+  name: 'Marek Horváth',
+  email: 'marek.horvath@meridianfoods.cz',
+  role: 'member',
+  title: 'Process developer — onboards as a new, unprivileged user + device',
+  origin: 'SK',
+};
+
+/** Marek's mock-Keycloak password (matches realm-export.json). */
+export const TEAMMATE_PASSWORD = 'meridian-member';
+
 export const CAST: Person[] = [
   OPERATOR,
   { name: 'Eva Müller', email: 'eva.mueller@meridianfoods.cz', role: 'auditor', title: 'Compliance auditor — read-only oversight, sets recovery cadence', origin: 'DE' },
-  { name: 'Marek Horváth', email: 'marek.horvath@meridianfoods.cz', role: 'member', title: 'Process developer — builds and ships the invoice flow', origin: 'SK' },
+  TEAMMATE,
   { name: 'Jana Dvořáková', email: 'jana.dvorakova@meridianfoods.cz', role: 'member', title: 'Finance operations', origin: 'CZ' },
   { name: 'Lukas Bauer', email: 'lukas.bauer@meridianfoods.cz', role: 'member', title: 'Treasury & payments', origin: 'DE' },
 ];
@@ -132,6 +177,32 @@ export const SECRETS: { key: string; value: string; note: string }[] = [
   { key: 'LEDGER_DSN', value: 'postgres://ledger.internal/meridian', note: 'Ledger database' },
   { key: 'APPROVAL_THRESHOLD_EUR', value: '5000', note: 'Above this, route for human approval' },
 ];
+
+/**
+ * SIEM forwarding target for the security chapter. The bring-up stands up a
+ * REAL, lightweight OpenTelemetry collector (otel/opentelemetry-collector) on
+ * the shared bitswan_network with an OTLP receiver + a debug exporter, so when
+ * the admin points Bailey's SIEM forwarding at this endpoint the connectivity
+ * test SUCCEEDS and the audit events actually flow (no on-screen errors).
+ *
+ * The daemon container reaches the collector by container name on
+ * bitswan_network. Bailey's SIEM config (bailey_siem.go) takes a base endpoint
+ * and a protocol:
+ *   - otlp-http (default): POSTs to <endpoint>/v1/logs        → port 4318
+ *   - otlp-grpc:           LogsService/Export over gRPC        → port 4317
+ * The HTTP form is what the SIEM card's URL field expects. Surfaced into
+ * e2e/.env by e2e/bringup.sh as E2E_OTLP_HTTP_ENDPOINT / E2E_OTLP_GRPC_ENDPOINT
+ * (see e2e/fixtures/bitswan.ts ENV.otlpHttpEndpoint / ENV.otlpGrpcEndpoint).
+ */
+export const SIEM = {
+  collectorHost: 'bitswan-e2e-otel',
+  /** OTLP/HTTP base URL the daemon POSTs audit logs to (Bailey appends /v1/logs). */
+  httpEndpoint: 'http://bitswan-e2e-otel:4318',
+  /** OTLP/gRPC target (LogsService/Export), for the otlp-grpc protocol. */
+  grpcEndpoint: 'http://bitswan-e2e-otel:4317',
+  /** Default protocol for the SIEM card (matches Bailey's siemProtocolHTTP). */
+  protocol: 'otlp-http' as const,
+};
 
 /** Testable requirements for the Requirements & tests feature. */
 export const REQUIREMENTS: { title: string; body: string }[] = [

@@ -1,0 +1,36 @@
+# OpenTelemetry Collector config for the E2E bring-up's SIEM target.
+#
+# Bailey's SIEM forwarding (bitswan-automation-server/internal/daemon/bailey_siem.go)
+# mirrors its security audit log to an OTLP ingestor. The walkthrough points it
+# here so the connectivity test SUCCEEDS and the audit events actually flow —
+# no on-screen connection errors.
+#
+# This is a REAL receiver, not a mock: it accepts OTLP over both gRPC (:4317)
+# and HTTP/JSON (:4318, the POST /v1/logs path Bailey uses by default) and
+# exports everything it receives to the collector's own stdout via the debug
+# exporter, so `docker logs bitswan-e2e-otel` shows the forwarded audit records.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  # Logs every received span/metric/log to stdout (verbose = full record bodies
+  # + attributes), so the bring-up can prove audit events arrived.
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]
