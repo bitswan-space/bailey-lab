@@ -439,6 +439,7 @@ export class GitopsClient {
     bp: string;
     stage: 'dev' | 'live-dev';
     copy?: string;
+    deployed_by?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/automations/deploy-bp`, {
       method: 'POST',
@@ -466,6 +467,7 @@ export class GitopsClient {
   async promoteBusinessProcess(input: {
     bp: string;
     stage: 'staging' | 'production';
+    deployed_by?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/automations/promote-bp`, {
       method: 'POST',
@@ -1177,7 +1179,7 @@ export class GitopsClient {
   }
 
   /** `POST /snapshots/{bp}/{stage}` — start a background snapshot (202 + task_id). */
-  createSnapshot(bp: string, stage: string, input: { label?: string }) {
+  createSnapshot(bp: string, stage: string, input: { label?: string; by?: string }) {
     return this.requestJson(
       'POST',
       `/snapshots/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}`,

@@ -66,11 +66,13 @@ export function registerAutomationRoutes(
         .code(400)
         .send({ error: "stage must be 'dev' or 'live-dev'" });
     }
+    const deployed_by = (await emailFromRequest(req, app.log)) || undefined;
     try {
       const r = await gitops.deployBusinessProcess({
         bp,
         stage,
         ...(copy ? { copy } : {}),
+        ...(deployed_by ? { deployed_by } : {}),
       });
       if (!r.ok) {
         return reply
@@ -99,8 +101,13 @@ export function registerAutomationRoutes(
         .code(400)
         .send({ error: "stage must be 'staging' or 'production'" });
     }
+    const deployed_by = (await emailFromRequest(req, app.log)) || undefined;
     try {
-      const r = await gitops.promoteBusinessProcess({ bp, stage });
+      const r = await gitops.promoteBusinessProcess({
+        bp,
+        stage,
+        ...(deployed_by ? { deployed_by } : {}),
+      });
       if (!r.ok) {
         return reply
           .code(r.status >= 400 && r.status < 500 ? r.status : 502)

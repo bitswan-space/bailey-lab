@@ -189,11 +189,13 @@ export function registerSnapshotRoutes(
           .code(400)
           .send({ error: "stage must be 'dev', 'staging' or 'production'" });
       }
+      const by = (await emailFromRequest(req, app.log)) || undefined;
       try {
         return await forward(
           reply,
           gitops.createSnapshot(req.params.bp, stage, {
             label: req.body?.label ?? '',
+            ...(by ? { by } : {}),
           }),
         );
       } catch (err) {
