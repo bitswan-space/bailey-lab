@@ -13,8 +13,20 @@
 # Usage (from e2e/local-vm/):  ./run-qemu.sh   (add --keep to leave the VM up)
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${TMPDIR:-/tmp}/bitswan-e2e-vm"
+
+# Single-instance guard: re-exec ourselves holding an exclusive, non-blocking
+# flock so a SECOND concurrent run-qemu can never start and wipe a running VM's
+# disk out from under it (a stray duplicate launch just no-ops instead of
+# reaping the active run). The FLOCKED env marker prevents an infinite re-exec.
+mkdir -p "$WORK"
+if [ -z "${RUNQEMU_FLOCKED:-}" ]; then
+  exec env RUNQEMU_FLOCKED=1 flock -n "$WORK/run-qemu.singleton.lock" "$0" "$@" || {
+    echo "another run-qemu is already running (singleton lock held) — exiting."; exit 0;
+  }
+fi
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CPUS="${E2E_VM_CPUS:-8}"
 MEM_MB="${E2E_VM_MEMORY_MB:-8192}"
 BRIDGE="${E2E_VM_BRIDGE:-virbr0}"
@@ -123,6 +135,22 @@ mark "host: rsync repo into guest"
 echo "=== provision + run E2E in guest ==="
 $SSH "$VM" 'sudo bash /repo/e2e/local-vm/provision.sh'
 mark "guest: provision (apt deps)"
+
+# Seed the guest's docker with the base images the bringup builds FROM, if a
+# host-side seed tarball exists. The guest is a fresh VM whose anonymous Docker
+# Hub pulls are easily rate-limited (HTTP 429) on a busy host — seeding the
+# common base images (python/golang/node/alpine/debian/ubuntu) from the host
+# (which can pull them) makes the build hermetic and 429-proof. Best-effort: a
+# missing/partial tarball just falls back to pulling.
+if [ -f "$WORK/base-images.tar" ]; then
+  echo "--- seeding guest docker with base images ($WORK/base-images.tar) ---"
+  scp -i "$WORK/id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "$WORK/base-images.tar" "$VM:/tmp/base-images.tar" 2>/dev/null \
+    && $SSH "$VM" 'sudo docker load -i /tmp/base-images.tar 2>&1 | tail -3; rm -f /tmp/base-images.tar' \
+    || echo "--- base-image seed failed (continuing; build will pull) ---"
+  mark "guest: seed base images"
+fi
+
 $SSH "$VM" 'bash /repo/e2e/local-vm/run-e2e.sh' || RC=$? || true
 # NB: no aggregate mark here — run-e2e's time is captured in full, step by step,
 # in the guest timeline (bringup builds + npm ci + playwright + walkthrough +

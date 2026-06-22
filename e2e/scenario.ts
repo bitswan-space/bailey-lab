@@ -25,10 +25,11 @@ export const BP = {
     'Ingests vendor invoices (PDF + EDI), validates totals and VAT against the ' +
     'purchase order, routes anything over €5,000 for human approval, and posts ' +
     'approved invoices to the ledger. Runs for Meridian Foods s.r.o.',
-  // The README the walkthrough writes into the Description editor — Markdown
-  // with a Mermaid flowchart (the editor renders fenced ```mermaid blocks). Built
-  // as a line array so the triple-backtick fences don't clash with TS template
-  // literals.
+  // The README the walkthrough TYPES into the Description editor — prose +
+  // Markdown shortcuts only. The process FLOW is NOT typed as a mermaid block;
+  // the walkthrough DRAWS it with the flowchart editor (the toolbar "Insert
+  // flowchart" button → FlowchartEditorModal → Save diagram), which is how a
+  // real operator builds the diagram. Built as a line array for readability.
   readme: [
     '# Invoice Processing',
     '',
@@ -45,16 +46,7 @@ export const BP = {
     '',
     '## The flow',
     '',
-    '```mermaid',
-    'flowchart TD',
-    '    A[Vendor invoice<br/>PDF / EDI] --> B{Valid?<br/>totals + VAT vs PO}',
-    '    B -- No --> R[Reject and notify vendor]',
-    '    B -- Yes --> C{Amount > 5000 EUR?}',
-    '    C -- Yes --> H[Hold for approval]',
-    '    C -- No --> D[Post to ledger]',
-    '    H --> D',
-    '    D --> P[Pay via gateway]',
-    '```',
+    'The lifecycle is drawn below as a flowchart.',
     '',
     '## Rules it must keep',
     '',

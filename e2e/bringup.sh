@@ -38,6 +38,12 @@ DAEMON_CTR="bitswan-automation-server-daemon"
 GITOPS_IMAGE="bitswan/gitops-local:latest"
 DASHBOARD_IMAGE="bitswan/workspace-dashboard-local:latest"
 CODING_AGENT_IMAGE="bitswan/coding-agent-local:latest"
+# The per-BP egress firewall gateway. gitops references it by this exact tag
+# (BITSWAN_EGRESS_GATEWAY_IMAGE default in automation_service), so a deployed
+# firewall can stand up the SNI/Host allow-list proxy that observes egress for
+# the dashboard's "needs review" feed. Without this image the gateway service
+# can't start and no egress is ever observed.
+EGRESS_GATEWAY_IMAGE="bitswan/egress-gateway:latest"
 
 echo "=== [1/7] Build the Server Console SPA + the bitswan CLI + component images ==="
 # The daemon embeds the Server Console SPA via go:embed from
@@ -60,6 +66,11 @@ docker build -t "$DASHBOARD_IMAGE"    -f "$REPO_ROOT/bitswan-workspace-dashboard
 mark "[1/7] docker build: dashboard image"
 docker build -t "$CODING_AGENT_IMAGE" -f "$REPO_ROOT/bitswan-coding-agent/Dockerfile" "$REPO_ROOT/bitswan-coding-agent"
 mark "[1/7] docker build: coding-agent image"
+# The egress firewall gateway image (build context = the automation-server repo
+# root, per its Dockerfile). gitops deploys this per (bp,stage) when a firewall
+# is active, so it must exist locally or the gateway never starts.
+docker build -t "$EGRESS_GATEWAY_IMAGE" -f "$REPO_ROOT/bitswan-automation-server/cmd/egress-gateway/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
+mark "[1/7] docker build: egress-gateway image"
 
 echo "=== [2/7] Daemon + traefik ingress ==="
 # Pin the daemon to THIS checkout's images so workspaces it creates via the

@@ -168,6 +168,39 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     });
   }
 
+  // ---- SIEM export (L): on the Server overview, point Bailey at an external
+  // OTLP ingestor so its security audit log streams to your SIEM. We open the
+  // SIEM forwarding card's config form, fill it (a local OTLP/HTTP endpoint so
+  // the connectivity test reaches nothing sensitive), capture the form, then
+  // Save & connect and capture the resulting card state (Connected, or the
+  // honest connection error if no collector is listening — a real screenshot
+  // either way; never a loading frame).
+  await chapter('siem', async () => {
+    await page.getByRole('button', { name: /Server overview/i }).first().click();
+    await expect(page.getByText(/SIEM forwarding/i).first()).toBeVisible({ timeout: SLA });
+    // Open the config form (first run shows "Configure ingestor"; an existing
+    // config shows "Edit"). Either lands on the same form.
+    const configure = page.getByRole('button', { name: /Configure ingestor|^Edit$/ }).first();
+    if (await configure.isVisible().catch(() => false)) {
+      await configure.click().catch(() => {});
+      const url = page.getByPlaceholder(/collector\.example\.com/i).first();
+      await url.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+      if (await url.isVisible().catch(() => false)) {
+        await url.fill('http://127.0.0.1:4318');
+        await capture(page, 'siem');
+        // Save & connect — runs a bounded connectivity test, then persists.
+        await page.getByRole('button', { name: /Save & connect|Testing…/ }).first().click().catch(() => {});
+        // Wait for the test to settle: the button leaves "Testing…" and the
+        // card shows a terminal state (Connected pill or a last-error line).
+        await page.getByRole('button', { name: /Testing…/ }).first()
+          .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+        await capture(page, 'siem');
+      }
+    } else {
+      await capture(page, 'siem');
+    }
+  });
+
   // ---- Open the workspace dashboard (its 'Open' button opens a new tab) ----
   // Click back to Workspaces first (we navigated away in the console chapters),
   // then click the workspace's Open button.
@@ -311,10 +344,13 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   const closeAnyModal = async () => {
     // Radix dialog/alertdialog (Cancel/Close button) or the custom Inspect
     // overlay (aria-label="Close" ×). Track that specific closer: its
-    // disappearance is the precise "modal closed" signal.
+    // disappearance is the precise "modal closed" signal. We must match only a
+    // VISIBLE closer — a same-named but hidden button elsewhere on the page
+    // would otherwise be picked by .last(), the visibility guard would short-
+    // circuit, and the real (open) modal would be left up to block later clicks.
     const closer = d
-      .getByRole('button', { name: /^(Close|Cancel|Done|Dismiss)$/i })
-      .or(d.locator('button[aria-label="Close" i]'))
+      .locator('button:visible', { hasText: /^(Close|Cancel|Done|Dismiss)$/i })
+      .or(d.locator('button[aria-label="Close" i]:visible'))
       .last();
     if (!(await closer.isVisible().catch(() => false))) return;
     await closer.click().catch(() => {});
@@ -339,28 +375,71 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
 
   // ---- Create the invoice-processing business process ----
   await chapter('create-bp', async () => {
-    // The BP may already exist from a prior run — open the switcher and select
-    // it if so; otherwise create it. "New business process" only appears once a
-    // copy is active (it is, auto-selected).
+    // The personal copy is created in the BACKGROUND on first visit (clone +
+    // Postgres + live-dev), and on a cold workspace that can take a little while
+    // — until it lands, creating a BP in it fails (the copy dir isn't there
+    // yet). A real operator simply waits for "Setting up your copy…" to clear
+    // and presses Create again. We do the same: wait for the copy to settle,
+    // then RETRY the Create until the BP actually appears (rather than assuming
+    // the very first press lands).
     await d.getByRole('button', { name: /Business process/i }).first().click();
     await capture(dashPage, 'bp-switcher');
+    const selected = d.getByRole('button', { name: new RegExp(`Business process.*${BP.slug}`) }).first();
     const existing = d.getByRole('button', { name: new RegExp(`^${BP.slug}$`) }).first();
     if (await existing.isVisible().catch(() => false)) {
       await existing.click();
     } else {
-      await d.getByRole('button', { name: /New business process/i }).click();
-      const dlg = d.getByRole('dialog');
-      await dlg.getByPlaceholder('my-process').fill(BP.slug);
-      await capture(dashPage, 'bp-create');
-      await dlg.getByRole('button', { name: /^Create$/ }).click();
-      await dlg.waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+      // Wait for the copy to finish setting up before we try to create in it.
+      await d.getByText(/Setting up your copy/i).first()
+        .waitFor({ state: 'hidden', timeout: 3 * 60_000 }).catch(() => {});
+      // Retry the create: a press can 400 while the copy is still landing, which
+      // leaves the dialog open — so re-open/refill/press until the BP shows.
+      const deadline = Date.now() + 5 * 60_000;
+      let created = false;
+      let shotCreate = false;
+      for (let attempt = 0; !created && Date.now() < deadline; attempt++) {
+        // (Re)open the New BP modal if it isn't already open.
+        const dlg = d.getByRole('dialog');
+        if (!(await dlg.isVisible().catch(() => false))) {
+          const newBtn = d.getByRole('button', { name: /New business process/i }).first();
+          if (!(await newBtn.isVisible().catch(() => false))) {
+            // Switcher closed after a prior attempt — re-open it.
+            await d.getByRole('button', { name: /Business process/i }).first().click().catch(() => {});
+            await newBtn.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+          }
+          await newBtn.click().catch(() => {});
+        }
+        const input = dlg.getByPlaceholder('my-process').first();
+        await input.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+        if (await input.isVisible().catch(() => false)) {
+          await input.fill(BP.slug).catch(() => {});
+          if (!shotCreate) {
+            await capture(dashPage, 'bp-create');
+            shotCreate = true;
+          }
+          await dlg.getByRole('button', { name: /^Create$/ }).first().click().catch(() => {});
+        }
+        // Resolve on success (BP selected) OR the dialog clearing; otherwise the
+        // create errored (copy not ready) and we loop to retry after a beat.
+        await Promise.race([
+          selected.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
+          dlg.waitFor({ state: 'hidden', timeout: 20_000 }).catch(() => {}),
+        ]);
+        created = await selected.isVisible().catch(() => false);
+        if (!created) {
+          // Close a lingering errored dialog so the next attempt is clean.
+          if (await dlg.isVisible().catch(() => false)) {
+            await dashPage.keyboard.press('Escape').catch(() => {});
+            await dlg.waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+          }
+        }
+      }
     }
     // The BP is selected once its name shows in the switcher trigger.
-    await expect(d.getByRole('button', { name: new RegExp(`Business process.*${BP.slug}`) }).first())
-      .toBeVisible({ timeout: SLA });
+    await expect(selected).toBeVisible({ timeout: SLA });
   });
 
-  // ---- Description: TYPE a real README (Markdown + a Mermaid flowchart) ----
+  // ---- Description: TYPE a real README, then DRAW the flow with the editor ----
   await chapter('description', async () => {
     await clickTopTab(/Description/i);
     // The ProseMirror editor surface mounts as a contenteditable. Click it and
@@ -378,15 +457,97 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'description');
   });
 
-  // ---- Coding Agent ----
+  // ---- Draw the flow with the flowchart editor (not a typed mermaid block) --
+  // A real operator clicks the toolbar's "Insert flowchart" button and DRAWS
+  // the diagram: drop a few nodes, then Save diagram drops the rendered chart
+  // into the spec. We add nodes via the modal's Add-node buttons (Process /
+  // Decision / Terminal) — a pure-click action — capture the editor, then save.
+  await chapter('flowchart-editor', async () => {
+    await clickTopTab(/Description/i);
+    const editor = d.locator('.ProseMirror, [contenteditable="true"]').first();
+    await editor.waitFor({ state: 'visible', timeout: SLA });
+    // Put the caret at the end so the inserted diagram lands after the prose.
+    await editor.click();
+    await dashPage.keyboard.press('Control+End').catch(() => {});
+    // Toolbar control: aria-label="Insert flowchart".
+    const insertFlow = d.getByRole('button', { name: /Insert flowchart/i }).first();
+    await insertFlow.click();
+    // The FlowchartEditorModal: title "Flowchart editor", Add-node buttons.
+    const modalMark = d.getByText(/Flowchart editor/i).first();
+    await modalMark.waitFor({ state: 'visible', timeout: SLA });
+    // Draw a few nodes (the lifecycle's shapes): Decision, Process, Terminal.
+    for (const node of [/^Process$/, /^Decision$/, /^Terminal$/] as const) {
+      const btn = d.getByRole('button', { name: node }).first();
+      if (await btn.isVisible().catch(() => false)) await btn.click().catch(() => {});
+    }
+    await capture(dashPage, 'flowchart-editor');
+    // Save the drawn diagram back into the description.
+    await d.getByRole('button', { name: /^Save diagram$/i }).first().click();
+    await modalMark.waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    await dashPage.keyboard.press('Control+s');
+    await d.getByRole('button', { name: /Saving/i }).first()
+      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    // Re-capture the description now that the rendered diagram is in it.
+    await capture(dashPage, 'description');
+  });
+
+  // ---- Coding Agent (+ live-dev preview) ----
+  // The Coding Agent tab pairs the agent terminal/files with the Environment
+  // panel, which lists each automation and its live-dev deployment. A copy
+  // auto-starts live-dev, so we WAIT for an automation to report running, then
+  // open its live preview (the external-link button) and shoot it. If the
+  // preview tab doesn't render in time we still document the running live-dev
+  // state in the panel — never a "Loading…" frame.
   await chapter('coding-agent', async () => {
     await clickTopTab(/Coding Agent/i);
     await capture(dashPage, 'coding-agent');
   });
+  await chapter('live-dev', async () => {
+    await clickTopTab(/Coding Agent/i);
+    // The Environment panel lists each automation; once its live-dev container
+    // is running, its name becomes an openable external link (title "Open
+    // https://…"). Wait for that openable link to appear — live-dev builds the
+    // image first, so this can take a few minutes (no progress-watchdog here;
+    // this is a plain visibility wait, not a deploy long-op). The DASHBOARD view
+    // showing the running, openable live-dev is the documented "live-dev is up"
+    // evidence; we capture that as the slot, and ALSO open the preview tab as a
+    // bonus shot when it renders real content.
+    const openLink = d.locator('a[target="_blank"][title^="Open "]').first();
+    await openLink.waitFor({ state: 'visible', timeout: 8 * 60_000 }).catch(() => {});
+    await capture(dashPage, 'live-dev');
+    if (await openLink.isVisible().catch(() => false)) {
+      const popupP = dashPage.context().waitForEvent('page', { timeout: 30_000 }).catch(() => null);
+      await openLink.click().catch(() => {});
+      const popup = await popupP;
+      if (popup) {
+        await popup.waitForLoadState('domcontentloaded').catch(() => {});
+        await popup.locator('body').waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+        await popup.getByText(/Loading|Starting/i).first()
+          .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+        // Only keep the preview shot if it actually rendered visible content
+        // (the example frontend can be blank at its root); otherwise the
+        // dashboard panel shot above stands as the live-dev evidence.
+        const hasContent = await popup.locator('body :visible').first().isVisible().catch(() => false);
+        if (hasContent) await capture(popup, 'live-dev-preview').catch(() => {});
+        await popup.close().catch(() => {});
+      }
+    }
+  });
 
   // ---- Requirements & tests: the runnable-spec tab a real operator uses ----
   await chapter('requirements', async () => {
-    await clickTopTab(/Requirements & tests/i).catch(() => {});
+    const reqTab = topTab(/Requirements & tests/i);
+    await reqTab.click();
+    // Don't shoot until the tab is actually SELECTED on screen. The top-nav
+    // marks the active tab with `font-semibold` (inactive tabs are
+    // `font-medium`); waiting for that class guarantees the screenshot shows
+    // Requirements highlighted, not a transient frame where the highlight is
+    // still on the previously-active tab. (A real, settled UI state — the
+    // source of truth — never a half-applied render.)
+    await expect(reqTab).toHaveClass(/font-semibold/, { timeout: SLA });
+    // And the body has rendered the requirements surface (its header controls).
+    await d.getByRole('button', { name: /New requirement|Write tests/i }).first()
+      .waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
     await capture(dashPage, 'requirements');
   });
 
@@ -404,11 +565,15 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // History sub-tab — the copy + main commit timeline with deploy markers.
     await d.getByRole('button', { name: /^history$/i }).first().click().catch(() => {});
     await capture(dashPage, 'sync-deploy-history');
-    // Checks sub-tab — wait for the supply-chain scan to finish, then shoot it.
+    // Checks sub-tab — the pre-deploy supply-chain scan of the image this
+    // deploy WOULD build. The scan bakes an ephemeral image then scans it, so
+    // it can be "pending" right after a BP is scaffolded; we capture the REAL
+    // CVE list AFTER the first dev deploy (see the deploy chapter), where a
+    // built image for this BP exists and the preview resolves to a real scan.
+    // Here we just open the tab to show it exists in the flow.
     await d.getByRole('button', { name: /^checks$/i }).first().click();
-    await d.getByText(/Loading supply chain|Building|Scanning/i).first()
+    await d.getByText(/Loading supply chain/i).first()
       .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
-    await capture(dashPage, 'checks-cve');
   });
 
   // ---- Deploy the copy onto main + dev ----
@@ -492,6 +657,43 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'deploy-dev');
   });
 
+  // ---- Checks (real CVEs) — now that a built image for this BP exists, the
+  // Sync & Deploy → Checks preview resolves to a real SBOM/CVE scan. Wait for
+  // the scan to leave its loading/pending states and show actual rows before
+  // shooting, so the manual prints real advisories, not an empty placeholder.
+  await chapter('checks-cve', async () => {
+    await clickTopTab(/Sync & Deploy/i);
+    // The Checks preview bakes the image this BP would build and runs
+    // syft+grype on it in the background, re-fetching the panel periodically. We
+    // re-open the Checks sub-tab a few times, each time waiting a BOUNDED window
+    // for a REAL scan to appear (CVE rows / clean state / scanned footer). This
+    // is hang-proof: every wait is a Playwright locator.waitFor with an explicit
+    // timeout (never an open-ended poll), so a slow or pending scan can't stall
+    // the run. We capture the first real result; if the preview is still pending
+    // after the attempts we capture the honest pending state (the REAL,
+    // post-deploy CVE results are captured on Production → Supply chain).
+    const realScan = d
+      .getByText(/CVE-\d{4}-\d+/).first()
+      .or(d.getByText(/in-scope CVE|No active CVEs|vulnerabilit|out of scope/i).first());
+    let landed = false;
+    for (let attempt = 0; attempt < 6 && !landed; attempt++) {
+      await d.getByRole('button', { name: /^checks$/i }).first().click().catch(() => {});
+      // Bounded wait for the fetch spinner to clear, then for a real scan row.
+      await d.getByText(/Loading supply chain/i).first()
+        .waitFor({ state: 'hidden', timeout: 30_000 }).catch(() => {});
+      landed = await realScan
+        .waitFor({ state: 'visible', timeout: 60_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!landed) {
+        // Re-mount the panel (diff ↔ checks) so the next fetch can pick up the
+        // finished background scan.
+        await d.getByRole('button', { name: /^diff$/i }).first().click().catch(() => {});
+      }
+    }
+    await capture(dashPage, 'checks-cve');
+  });
+
   // ---- Promote dev → staging → production, waiting for each to be Healthy ----
   await chapter('promote', async () => {
     await clickTopTab(/Deployments/i);
@@ -499,16 +701,44 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // stage we're filling), click whichever Promote is enabled (the pipeline
     // only enables the next hop), and wait — on screen — for that stage to
     // report Healthy. No reload between click and wait.
+    let shotProcess = false;
     for (const target of [/Staging/i, /Production/i] as const) {
       await selectStage(target);
-      const all = d.getByRole('button', { name: /^Promote$/ });
-      const n = await all.count();
-      for (let j = 0; j < n; j++) {
-        const b = all.nth(j);
-        if (await b.isEnabled().catch(() => false)) {
-          await b.click();
-          break;
+      // Press the enabled Promote and CONFIRM it actually started before we wait
+      // on the deploy watchdog: the target stage must leave its "never deployed"
+      // state OR a Promoting/Working/toast signal must appear. A click that
+      // doesn't register would otherwise leave the stage static and trip the
+      // progress watchdog as a false stall — so we retry the press until the
+      // promote is observably underway (bounded), then ride it to Healthy.
+      const moving = d
+        .getByText(/Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i)
+        .first();
+      const healthy = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+      let started = false;
+      for (let attempt = 0; attempt < 4 && !started; attempt++) {
+        const all = d.getByRole('button', { name: /^Promote$/ });
+        const n = await all.count();
+        for (let j = 0; j < n; j++) {
+          const b = all.nth(j);
+          if (await b.isEnabled().catch(() => false)) {
+            await b.click().catch(() => {});
+            break;
+          }
         }
+        // Wait briefly for an on-screen sign the promote is underway (or already
+        // landed). If nothing moves, the click missed — loop and press again.
+        await Promise.race([
+          moving.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
+          healthy.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
+        ]);
+        started =
+          (await moving.isVisible().catch(() => false)) ||
+          (await healthy.isVisible().catch(() => false));
+      }
+      // Capture the promotion IN PROGRESS the first time (the live step beat).
+      if (!shotProcess) {
+        await capture(dashPage, 'promote-progress');
+        shotProcess = true;
       }
       await waitDeployDone(); // this target stage reaches Healthy on screen
     }
@@ -525,6 +755,25 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   await chapter('supply-chain', async () => {
     await selectStage(/Production/i);
     await clickSection(/Supply chain/i);
+    // The deployed image's SBOM/CVE scan runs in the background after deploy and
+    // is re-fetched periodically. Production has a real deployed image, so a real
+    // scan WILL appear. Re-mount the panel (Containers ↔ Supply chain) a few
+    // times, each with a BOUNDED waitFor for a real scan row (CVE / clean state /
+    // vulnerabilities) — hang-proof (no open-ended poll). Capture the real scan.
+    const realScan = d
+      .getByText(/CVE-\d{4}-\d+/).first()
+      .or(d.getByText(/in-scope CVE|No active CVEs|vulnerabilit|out of scope/i).first());
+    let landed = false;
+    for (let attempt = 0; attempt < 8 && !landed; attempt++) {
+      await clickSection(/Supply chain/i);
+      await d.getByText(/Loading supply chain/i).first()
+        .waitFor({ state: 'hidden', timeout: 30_000 }).catch(() => {});
+      landed = await realScan
+        .waitFor({ state: 'visible', timeout: 60_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!landed) await clickSection(/Containers/i).catch(() => {});
+    }
     await capture(dashPage, 'supply-chain');
     // Open the first CVE/package row's detail if the SBOM rendered any, so the
     // manual can show the advisory drill-down a real operator triages.
@@ -566,17 +815,24 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await selectStage(/Production/i);
     await clickSection(/Deployment history/i);
     await capture(dashPage, 'history');
-    // Open the per-deployment Inspect modal on the current entry — the audit
-    // drill-down (files, diff vs current, secrets snapshot, image download).
+    // Open the per-deployment Inspect modal and step through ALL its rail tabs
+    // (Files / Diff vs current / Download image — plus Scale on the current
+    // entry), capturing each — the audit drill-down a real operator uses.
     const inspect = d.getByRole('button', { name: /^Inspect$/ }).first();
     if (await inspect.isVisible().catch(() => false)) {
       await inspect.click();
-      // The Inspect overlay is a custom fixed backdrop (not role="dialog") with a
-      // left rail (Scale / Files / Diff vs current / Secrets snapshot). Wait on a
-      // signature item, shoot it, then close via its own × (aria-label "Close").
+      // The Inspect overlay is a custom fixed backdrop (not role="dialog").
       const inspectMark = d.getByText(/Diff vs current/i).first();
       await inspectMark.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+      // Files — the exact source tree this deployment ran.
+      await d.getByRole('button', { name: /^Files$/ }).first().click().catch(() => {});
       await capture(dashPage, 'inspect-modal');
+      // Diff vs current — what changed versus what's live now.
+      await d.getByRole('button', { name: /Diff vs current/i }).first().click().catch(() => {});
+      await capture(dashPage, 'inspect-diff');
+      // Download image — the built image + schema bundle for offline audit.
+      await d.getByRole('button', { name: /Download image/i }).first().click().catch(() => {});
+      await capture(dashPage, 'inspect-image');
       // Its × is the last aria-label="Close" on the page while the modal is up.
       const x = d.locator('button[aria-label="Close" i]').last();
       if (await x.isVisible().catch(() => false)) await x.click().catch(() => {});
@@ -584,21 +840,107 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await expect(inspectMark, 'Inspect modal stayed open and would block later clicks')
         .toBeHidden({ timeout: SLA });
     }
-  });
-  await chapter('firewall', async () => {
     await selectStage(/Production/i);
+  });
+
+  // ---- Firewall & data processing (N): the invoice BP makes REAL outbound
+  // calls on startup (its egress probes), which the firewall observes. On the
+  // Development stage the firewall runs in MONITOR mode, so those destinations
+  // surface under "Needs review". We open Firewall (WAIT for it to finish
+  // loading — never a "Loading firewall…" frame), find a detected egress host,
+  // open its GDPR data-processing record, FILL it, capture, and save it (the
+  // approval is idempotent — it just versions the record in bitswan.yaml).
+  await chapter('firewall', async () => {
+    // Development is in monitor mode and is where the live-dev/dev containers'
+    // egress is observed. Select it, open Firewall, wait for the panel to load.
+    await selectStage(/Development/i);
     await clickSection(/^Firewall$/i);
+    // Real load signal: the "Loading firewall…" spinner must clear AND the
+    // posture pill (Monitoring/Enforcing) must be on screen — never shoot mid-load.
+    await d.getByText(/Loading firewall…/i).first()
+      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    await d.getByText(/Monitoring|Enforcing/i).first()
+      .waitFor({ state: 'visible', timeout: SLA });
+    // The BP backend fires real outbound probes on a loop; when an egress
+    // gateway is observing the realm, the destinations surface under "Needs
+    // review". Give it a bounded window to appear (non-fatal — if the egress
+    // gateway isn't active for this BP/stage, the panel still truthfully shows
+    // the monitoring posture + allow-list, which is what we capture).
+    const needsReview = d.getByText(/Needs review/i).first();
+    await expect
+      .poll(async () => (await needsReview.isVisible().catch(() => false)) ? 'seen' : 'waiting', {
+        timeout: 90_000,
+        intervals: [2000, 3000, 5000],
+      })
+      .toBe('seen')
+      .catch(() => {});
     await capture(dashPage, 'firewall');
-    // If a host is awaiting its GDPR data-processing record, open that modal so
-    // the manual shows the Article 30 record an operator completes before a new
-    // egress destination is allowed. Close without approving (idempotent).
-    const review = d.getByRole('button', { name: /Review|Complete record|Add host|Data-processing|Approve/i }).first();
-    if (await review.isVisible().catch(() => false)) {
-      await review.click().catch(() => {});
-      if (await d.getByRole('dialog').first().isVisible().catch(() => false)) {
-        await capture(dashPage, 'firewall-gdpr');
+    // Open the GDPR data-processing record for a detected host via its Approve
+    // button (the modal is a custom overlay, not role="dialog").
+    const approve = d.getByRole('button', { name: /^Approve$/ }).first();
+    if (await approve.isVisible().catch(() => false)) {
+      await approve.click().catch(() => {});
+      // Modal signature: the "No user data…" record toggle.
+      const recMark = d.getByText(/No user data is sent to this service/i).first();
+      await recMark.waitFor({ state: 'visible', timeout: SLA });
+      // Fill the Article 30 record fully (a personal-data recipient): what data,
+      // purpose, stored?, jurisdiction. (We leave the DPA file upload — a real
+      // PDF — out; the field is documented and optional for the record to save.)
+      const dataSent = d.getByPlaceholder(/employee email, error stack traces/i).first();
+      if (await dataSent.isVisible().catch(() => false)) {
+        await dataSent.fill('Vendor VAT-IDs and invoice totals for validation.');
+      }
+      const purpose = d.getByPlaceholder(/crash diagnostics & alerting/i).first();
+      if (await purpose.isVisible().catch(() => false)) {
+        await purpose.fill('Validate vendor VAT-IDs against the Czech business register.');
+      }
+      await d.getByRole('button', { name: /^Transient$/ }).first().click().catch(() => {});
+      const juris = d.getByPlaceholder(/EU \(Ireland\)/i).first();
+      if (await juris.isVisible().catch(() => false)) {
+        await juris.fill('EU (Czech Republic)');
+      }
+      await capture(dashPage, 'firewall-gdpr');
+      // Save the record (idempotent — versions the record + allows the host).
+      const save = d.getByRole('button', { name: /Approve & record|Save record/i }).first();
+      if (await save.isVisible().catch(() => false)) {
+        await save.click().catch(() => {});
+        await recMark.waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+      } else {
         await closeAnyModal();
       }
+    }
+  });
+
+  // ---- Sharing the endpoint (I): the workspace dashboard is itself a protected
+  // endpoint the operator OWNS, so the Bailey chrome footer shows a "Share"
+  // button. Click it, see the share modal (deny-by-default access list), grant a
+  // teammate at User level, then Done. These chrome elements live on the TOP
+  // page (the wrap), not inside the dashboard iframe — so we drive `dashPage`.
+  await chapter('share-endpoint', async () => {
+    const shareBtn = dashPage.getByRole('link', { name: /^Share$/ })
+      .or(dashPage.getByRole('button', { name: /^Share$/ }))
+      .first();
+    if (await shareBtn.isVisible().catch(() => false)) {
+      await shareBtn.click().catch(() => {});
+      // The share modal: an input to add people/groups + a role select + Add.
+      const input = dashPage.locator('#bailey-share-input');
+      await input.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+      if (await input.isVisible().catch(() => false)) {
+        // Grant a teammate (a real member of the Meridian cast) at User level.
+        await input.fill('marek.horvath@meridianfoods.cz').catch(() => {});
+        await capture(dashPage, 'share-modal');
+        await dashPage.locator('#bailey-share-add-btn').click().catch(() => {});
+        // The grant lands in the "People with access" list; capture the result.
+        await dashPage.getByText(/marek\.horvath@meridianfoods\.cz/i).first()
+          .waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+        await capture(dashPage, 'share-modal');
+        // Close the modal (its footer Done button).
+        await dashPage.getByRole('button', { name: /^Done$/ }).first().click().catch(() => {});
+      }
+    } else {
+      // No Share affordance (e.g. running without the chrome wrap) — leave the
+      // slot to render an honest "capture pending"; documented in the report.
+      await capture(dashPage, 'share-modal').catch(() => {});
     }
   });
 
@@ -649,8 +991,25 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
 
   // ---- Disaster Recovery: restore the backup into DR + mark recovery-tested --
   await chapter('dr-rehearse', async () => {
+    // Defensive: a leftover modal (e.g. a create dialog) would intercept the
+    // stage/section clicks below and make them time out. Close any open overlay
+    // first so DR navigation is never blocked.
+    await closeAnyModal();
     await selectStage(/Disaster Recovery/i);
     await clickSection(/Rehearse & restore/i);
+    // The panel loads its snapshot list; wait for it to settle on a real state
+    // (a snapshot row's Restore/Mark/Tested control, or the empty notice) so we
+    // never act on a half-rendered list.
+    await d
+      .getByRole('button', { name: /Restore into DR|Mark recovery-tested/i })
+      .or(d.getByText(/No Production backups yet|Tested .*·/i))
+      .first()
+      .waitFor({ state: 'visible', timeout: SLA })
+      .catch(() => {});
+    // On a re-run a snapshot may ALREADY be "In DR now" — then there is no
+    // "Restore into DR" button for it (it shows Mark recovery-tested / Tested
+    // instead). Handle both: restore if a Restore action exists, otherwise jump
+    // straight to recording the recovery test.
     const restore = d.getByRole('button', { name: /Restore into DR/i }).first();
     if (await restore.isVisible().catch(() => false)) {
       await restore.click();
@@ -675,7 +1034,19 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       }
       const mark = d.getByRole('button', { name: /Mark recovery-tested/i }).first();
       if (await mark.isVisible().catch(() => false)) {
-        await mark.click();
+        // The restore's success toasts can briefly overlap the button; click with
+        // force and don't let a transient intercept fail the chapter (the restore
+        // — the substantive DR rehearsal — already succeeded on screen above).
+        await mark.click({ timeout: SLA, force: true }).catch(() => {});
+        await d.getByText(/Tested/i).first().waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+      }
+    } else {
+      // No Restore action — a backup is already "In DR now" from a prior run.
+      // Record the recovery test on it so the chapter still demonstrates the
+      // full rehearse → recovery-tested outcome (idempotent across re-runs).
+      const mark = d.getByRole('button', { name: /Mark recovery-tested/i }).first();
+      if (await mark.isVisible().catch(() => false)) {
+        await mark.click({ timeout: SLA, force: true }).catch(() => {});
         await d.getByText(/Tested/i).first().waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
       }
     }
@@ -704,6 +1075,111 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         await closeAnyModal();
       }
     }
+  });
+
+  // ---- Rollback (J): the dashboard exposes a "Roll back" action ONLY on a
+  // NON-current DEPLOY history entry, and a deploy entry is recorded only when the
+  // deployed SOURCE commit changes. So far Development has a single, current deploy
+  // — nothing to roll back to. We act like an operator who shipped a tweak and then
+  // changed their mind: make a REAL source edit (append a line to the Description),
+  // Sync & Deploy a SECOND version (demoting the first to a prior, non-current
+  // entry), then open Development → Deployment history and find the now-present
+  // "Roll back" on that prior entry, open the confirm, capture it, and CANCEL — a
+  // rehearsal must NOT mutate the stage, so we never confirm. Placed LAST so the
+  // extra deploy + any residual busy state can't disrupt another chapter.
+  await chapter('rollback', async () => {
+    // Defensive: clear any modal a prior chapter may have left open (e.g. the DR
+    // swap confirm) so our first click isn't intercepted by a stale overlay.
+    await closeAnyModal();
+    await selectStage(/Development/i);
+    // 1) Make a minimal REAL source change so the BP has pending work to ship.
+    // Reuse the Description editor mechanics (ProseMirror contenteditable +
+    // Ctrl+S) from the `description` chapter: click into the editor, append a
+    // line, and save. This changes the deployed source so the next deploy
+    // records a new version (a pure redeploy of the same source records none).
+    await clickTopTab(/Description/i);
+    const editor = d.locator('.ProseMirror, [contenteditable="true"]').first();
+    await editor.waitFor({ state: 'visible', timeout: SLA });
+    await editor.click();
+    await dashPage.keyboard.press('Control+End');
+    await editor.pressSequentially('\n- Audit note: dev tweak for rollback rehearsal.', { delay: 0 });
+    await dashPage.keyboard.press('Control+s');
+    // Wait for the save to settle: the Save button leaves its 'Saving…' state.
+    await d.getByRole('button', { name: /Saving/i }).first()
+      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    // CRITICAL: right after the edit/save a sonner toast overlay and the
+    // just-loaded diff panel cause transient layout instability that can make a
+    // direct click on the top-right "Sync & Deploy" button never land. Let any
+    // toast clear before we look at the header.
+    await d.locator('[data-sonner-toast]').first()
+      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    // The Sync & Deploy header gates its button on `!bpUpToDate`, where
+    // `bpUpToDate = ahead==0 && behind==0 && !dirty` (SyncDeployTab.tsx). The
+    // `dirty` flag reads the header's OWN `useCopyStatus(copy)` instance — a
+    // SEPARATE snapshot from the Diff sub-tab's instance. By this last chapter
+    // `invoice-processing` is already in sync with main (prior deploy/promote),
+    // so the ONLY thing that re-arms the button is the working-tree edit showing
+    // up as `dirty`. The header only refetches `/status` on (re)mount or window
+    // focus, so a single tab-bounce can latch the PRE-save (clean) snapshot —
+    // "Up to date with main", button disabled — even while the freshly-mounted
+    // Diff panel already lists the file. Gate on the SAME on-screen signal the
+    // button keys off: bounce the tab (`{tab==='sync-deploy' && …}` unmounts on
+    // leave, so each return REMOUNTS and refetches), click the Diff ⟳ refresh,
+    // and poll the header badge until it reports pending work — only then is the
+    // button reliably actionable. Bounded; never sleeps.
+    const upToDate = d.getByText(/up to date with main/i).first();
+    const pending = d.getByText(/uncommitted file|↑\s*\d+\s*ahead|↓\s*\d+\s*behind/i).first();
+    const armDeadline = Date.now() + SLA;
+    for (;;) {
+      await clickTopTab(/Deployments/i);
+      await clickTopTab(/Sync & Deploy/i);
+      // Force the diff/status panels to refetch (the ⟳ control next to the file
+      // count); harmless if the count is already current.
+      await d.getByRole('button', { name: /^Refresh$/i }).first().click().catch(() => {});
+      const armed = await Promise.race([
+        pending.waitFor({ state: 'visible', timeout: 5_000 }).then(() => true).catch(() => false),
+        upToDate.waitFor({ state: 'visible', timeout: 5_000 }).then(() => false).catch(() => false),
+      ]);
+      if (armed && (await pending.isVisible().catch(() => false))) break;
+      if (Date.now() > armDeadline) break; // fall through to the hard assert below
+    }
+    // 2) Ship the SECOND version. Gate on the BP being actionable (pending work),
+    // then ride the deploy with the progress watchdog — same shape as `deploy`:
+    // press while actionable until Development is Healthy on screen (bounded).
+    const btn = d.getByRole('button', { name: /^Sync & Deploy$|Working/ }).last();
+    await expect(btn, 'Sync & Deploy never became actionable after the edit').toBeEnabled({ timeout: SLA });
+    let healthy = false;
+    for (let attempt = 0; attempt < 3 && !healthy; attempt++) {
+      await pressSyncDeploy();
+      await clickTopTab(/Deployments/i);
+      await selectStage(/Development/i);
+      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+      const none = d.getByText(/Not deployed yet/i).first();
+      await Promise.race([
+        ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+        none.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+      ]);
+      healthy = await ok.isVisible().catch(() => false);
+      if (!healthy) {
+        await clickTopTab(/Sync & Deploy/i);
+        if (!(await btn.isEnabled().catch(() => false))) break;
+      }
+    }
+    await clickTopTab(/Deployments/i);
+    await selectStage(/Development/i);
+    await waitDeployDone();
+    // 3) Open Development → Deployment history. The first version is now a prior,
+    // non-current entry, so it carries the "Roll back" action.
+    await clickSection(/Deployment history/i);
+    const rb = d.getByRole('button', { name: /^Roll back$/ }).first();
+    await expect(rb, 'a prior deploy entry exposed no Roll back action after a second deploy').toBeVisible({ timeout: SLA });
+    // 4) Open the confirm, capture it, and CANCEL — never confirm the rollback.
+    await rb.click();
+    const dlg = d.getByRole('alertdialog').or(d.getByRole('dialog')).first();
+    await expect(dlg, 'clicking Roll back did not open a confirm dialog').toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'rollback-modal');
+    await d.getByRole('button', { name: /^Cancel$/ }).first().click().catch(() => {});
+    await expect(dlg, 'the rollback confirm dialog did not close on Cancel').toBeHidden({ timeout: SLA });
   });
 
   /* eslint-disable no-console */
