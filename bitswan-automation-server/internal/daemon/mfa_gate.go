@@ -3,7 +3,6 @@ package daemon
 import (
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 )
 
@@ -96,7 +95,6 @@ func isTopLevelHTMLGet(r *http.Request) bool {
 //
 // Behaviour for an UNtrusted (but OAuth-authenticated) device:
 //
-//   - BAILEY_MFA_GATE_DISABLE=1 → pass through (escape hatch).
 //   - No identity → pass through (upstream OIDC failed; the gate never
 //     invents an identity, and the inner handler will reject).
 //   - Exempt path (gateExemptPath: oauth2, the legacy /2fa-gate pages, and
@@ -118,10 +116,6 @@ func isTopLevelHTMLGet(r *http.Request) bool {
 //     top-level HTML document gets a scene; an XHR/asset gets a clean 401
 //     so the app's own client code can react (and never a stray HTML body).
 func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
-	if os.Getenv("BAILEY_MFA_GATE_DISABLE") == "1" {
-		return true
-	}
-
 	if gateExemptPath(r.URL.Path) {
 		return true
 	}
