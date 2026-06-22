@@ -910,13 +910,26 @@ async def update_git(
                 "git", "add", os.path.join(bitswan_dir, rel), cwd=bitswan_dir
             )
 
-        author = (
-            f"{deployed_by} <{deployed_by}>"
-            if deployed_by
-            else "gitops <info@bitswan.space>"
-        )
+        # Attribute the commit to the operator who triggered the deploy/promote.
+        # `deployed_by` is their email; use it for BOTH the author and the
+        # committer so `git log --format='%an <%ae>|%cn <%ce>'` shows the
+        # operator, not the gitops service identity. We set the committer via
+        # `-c user.name/user.email` (which survive the nsenter/host path that
+        # GIT_COMMITTER_* env vars would not) and the author via --author.
+        if deployed_by:
+            author = f"{deployed_by} <{deployed_by}>"
+            ident_name = deployed_by
+            ident_email = deployed_by
+        else:
+            author = "gitops <info@bitswan.space>"
+            ident_name = "gitops"
+            ident_email = "gitops@gitops.com"
         await call_git_command(
             "git",
+            "-c",
+            f"user.name={ident_name}",
+            "-c",
+            f"user.email={ident_email}",
             "commit",
             "--author",
             author,

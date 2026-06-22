@@ -86,6 +86,40 @@ async def update_vuln_db() -> bool:
     return rc == 0
 
 
+# Ensure the grype vulnerability DB exists at least once before the first scan.
+# A freshly-built gitops image ships WITHOUT the DB (it's downloaded at runtime),
+# so the very first scan would otherwise find a missing DB and produce no CVE
+# matches (the panel sits in "Scan pending"/empty). We download it once, lazily,
+# guarded by a lock so concurrent scans don't race multiple downloads. Cached for
+# the process lifetime; the daily refresh job keeps it current after that.
+_db_ready = False
+_db_lock: asyncio.Lock | None = None
+
+
+async def ensure_vuln_db() -> bool:
+    """Make sure grype has a usable vulnerability DB; download it once if not.
+    Best-effort: returns True if the DB is (now) present, False otherwise. Never
+    raises — a scan with no DB simply yields no matches rather than crashing."""
+    global _db_ready, _db_lock
+    if _db_ready:
+        return True
+    if _db_lock is None:
+        _db_lock = asyncio.Lock()
+    async with _db_lock:
+        if _db_ready:
+            return True
+        # `grype db status` exits non-zero when the DB is missing/invalid.
+        rc, _, _ = await _run("grype", "db", "status", timeout=60)
+        if rc == 0:
+            _db_ready = True
+            return True
+        # Missing/invalid — download it (needs outbound internet).
+        ok = await update_vuln_db()
+        if ok:
+            _db_ready = True
+        return ok
+
+
 # ── parsing ──────────────────────────────────────────────────────────────────
 def parse_sbom(raw: dict) -> list[dict]:
     """syft-json `artifacts[]` → [{name, version, type}] (named packages only)."""
@@ -148,6 +182,9 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
         cve_doc = _read_json(cve_path)
         if not force_cve and cve_doc and cve_doc.get("status") == "ok":
             return  # already have a CVE scan; daily job passes force_cve=True
+        # A fresh gitops image has no vuln DB yet — make sure it's downloaded
+        # once before the first scan, or grype finds nothing to match against.
+        await ensure_vuln_db()
         rc, out, err = await _run("grype", f"sbom:{sbom_path}", "-o", "json")
         if rc != 0 or not out:
             _write_unavailable(

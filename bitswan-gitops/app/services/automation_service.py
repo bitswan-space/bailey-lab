@@ -1650,7 +1650,9 @@ class AutomationService:
             self.gitops_dir_host,
             bp,
             "dr",
-            deployed_by=deployed_by,
+            # Attribute to the operator: prefer an explicit deployer, else the
+            # `by` actor that triggered the restore (so the commit isn't gitops).
+            deployed_by=deployed_by or by,
             message=f"dr restore {bp} → {snapshot}",
         )
         return self.read_dr(bp)
@@ -2067,6 +2069,21 @@ class AutomationService:
             for d in deployments.values()
             if (d or {}).get("image_id")
         ]
+        # Lazily (re)trigger a scan for any deployed image that has no completed
+        # scan yet. The deploy path fires the scan, but a scan can be missing —
+        # e.g. the image was promoted verbatim (built before the vuln DB landed)
+        # or the cache was cleared — leaving the panel stuck on "pending". Viewing
+        # the panel then kicks the scan off (background, never blocks the read),
+        # so a subsequent poll resolves to a real result. We pass the docker image
+        # ref (`image`) so syft/grype can resolve it, keyed by `image_id`.
+        for d in deployments.values():
+            iid = (d or {}).get("image_id")
+            ref = (d or {}).get("image") or iid
+            if not iid:
+                continue
+            scan = supply_chain_service.read_image_scan(iid)
+            if scan.get("status") not in ("ok", "unavailable"):
+                supply_chain_service.spawn_scan(ref, iid)
         return self._supply_chain_report(
             bp, realm, image_ids, cve_waivers.waiver_list(bp, None)
         )
@@ -4907,9 +4924,14 @@ fi
         # Egress-firewall pre-pass: which (ctx, stage) groups route their worker
         # containers through a per-group egress gateway. Opt-in — only BPs that
         # have a `firewall` node for the realm are affected (zero change
-        # otherwise). live-dev is never gated (the edit loop). Workers with
-        # replicas>1 can't share one netns, so the gateway is disabled for that
-        # group (logged) rather than silently leaving a hole half-applied.
+        # otherwise), EXCEPT the dev realm which observes by default (see below).
+        # The Development stage is deployed as `live-dev` (the bind-mounted edit
+        # loop), which is intentionally NOT routed through a gateway (see the skip
+        # in the loop below) — so live dev egress observation is a known gap, not
+        # wired here. Regular `dev`/staging/production groups participate normally.
+        # Workers with replicas>1 can't share one netns, so the gateway is
+        # disabled for that group (logged) rather than silently leaving a hole
+        # half-applied.
         # Blue-green production: a production deployment is emitted once per
         # ACTIVE app slot (a/b/c), each wired to its own logical DB (1/2), per
         # the BP's `backups` wiring. Non-production deployments are a single
@@ -4963,12 +4985,27 @@ fi
             if not _conf:
                 continue
             _stage = _conf.get("stage", "production") or "production"
+            # live-dev (the Development bind-mount edit loop) does NOT route through
+            # an egress gateway. Sharing a gateway's netns destabilises the live-dev
+            # startup path (the worker can't start until the gateway's netns is up),
+            # so observing dev egress live through the gateway is a known gap tracked
+            # separately — NOT wired here to keep live-dev fast and reliable.
             if _stage == "live-dev":
                 continue
             _ctx = _conf.get("context", "")
             _realm = bp_secrets.realm_for_stage(_stage)
             fwnode = ((bs_yaml.get("firewall") or {}).get(_ctx) or {}).get(_realm)
-            if not fwnode:
+            # Dev OBSERVES egress by default. The dev realm's posture is monitor
+            # (observe + log, never block), so we stand up its gateway even with
+            # NO firewall node yet — otherwise egress could never be observed at
+            # all (you can't review a host the gateway never saw, and you can't
+            # get a gateway without first having a rule: a bootstrap deadlock).
+            # With a default monitor gateway, dev egress surfaces under "Needs
+            # review" and the operator approves it into a real allow-list + GDPR
+            # record. Monitor mode changes NO traffic, so this is zero-risk.
+            # Enforcing realms (staging/production) still require an explicit
+            # firewall node — they BLOCK, so they must be opted into deliberately.
+            if not fwnode and firewall_service.posture_for(_realm) != "monitor":
                 continue
             for _slot, _db in _slot_db_pairs(_conf):
                 key = (_ctx, _stage, _slot)
@@ -4980,7 +5017,7 @@ fi
                         "gw": make_hostname_label(
                             self.workspace_name, "fwgw", _ctx, _stage, _slot
                         ),
-                        "mode": fwnode.get("posture")
+                        "mode": (fwnode or {}).get("posture")
                         or firewall_service.posture_for(_realm),
                         "allow": firewall_service.allowed_hosts(bs_yaml, _ctx, _realm),
                         "realm": _realm,

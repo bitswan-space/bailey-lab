@@ -98,6 +98,15 @@ chown 1000 /gitops/snapshots
 mkdir -p /gitops/secrets
 chown -R 1000 /gitops/secrets
 
+# Supply-chain scan cache (SBOM + CVE json per image) lives at
+# $BITSWAN_GITOPS_DIR/supply-chain (= /gitops/supply-chain). /gitops itself is
+# root-owned, so the user1000 gitops process can't create this dir at scan time
+# (os.makedirs → EACCES) — which silently leaves EVERY supply-chain/Checks scan
+# stuck in "Scan pending" with no SBOM ever written. Pre-create it writable,
+# mirroring snapshots/secrets above.
+mkdir -p /gitops/supply-chain
+chown -R 1000 /gitops/supply-chain
+
 # Always set up Docker group permissions for user1000
 # This ensures user1000 can access Docker socket even when running as root
 setup_docker_group

@@ -836,6 +836,7 @@ async def _spawn_dev_deploy(bp: str, deployer: str | None) -> str | None:
             stage="dev",
             commit_subject=(f"{deployer} synced {bp}" if deployer else None),
             service=service,
+            deployed_by=deployer,
         )
         deploy = res.get("deploy")
         if res.get("error"):

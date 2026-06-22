@@ -62,11 +62,13 @@ class DeployBPRequest(BaseModel):
     bp: str
     stage: str  # "dev" or "live-dev"
     copy: str | None = None
+    deployed_by: str | None = None
 
 
 class PromoteBPRequest(BaseModel):
     bp: str
     stage: str  # "staging" or "production"
+    deployed_by: str | None = None
 
 
 class RollbackBPRequest(BaseModel):
@@ -615,6 +617,7 @@ async def deploy_bp(
             stage=body.stage,
             copy=body.copy,
             members=members,
+            deployed_by=body.deployed_by,
         )
     )
 
@@ -673,6 +676,7 @@ async def promote_bp(
             automation_service,
             stage=body.stage,
             members=members,
+            deployed_by=body.deployed_by,
         )
     )
 
@@ -902,6 +906,7 @@ async def _run_bp_deploy_with_progress(
     stage: str,
     copy: str | None,
     members: list[dict],
+    deployed_by: str | None = None,
 ):
     """Background coroutine running a BP deploy with progress broadcasting.
 
@@ -941,6 +946,7 @@ async def _run_bp_deploy_with_progress(
             stage=stage,
             copy=copy,
             members=members,
+            deployed_by=deployed_by,
             progress_callback=progress_callback,
         )
 
@@ -976,6 +982,7 @@ async def _run_bp_promote_with_progress(
     automation_service: AutomationService,
     stage: str,
     members: list[dict],
+    deployed_by: str | None = None,
 ):
     """Background coroutine running a BP promotion with progress broadcasting.
 
@@ -1014,6 +1021,7 @@ async def _run_bp_promote_with_progress(
             bp=bp,
             target_stage=stage,
             members=members,
+            deployed_by=deployed_by,
             progress_callback=progress_callback,
         )
 

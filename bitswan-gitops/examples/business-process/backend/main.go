@@ -1,16 +1,72 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/minio/minio-go/v7"
 	"gorm.io/gorm"
 )
+
+// startEgressProbes makes real outbound HTTPS connections to the external
+// services this invoice-processing automation legitimately talks to (vendor
+// portals, the Czech business register, the payment gateway). It runs on
+// startup and on a loop so the workspace's egress firewall observes each
+// destination and surfaces it for review — the connection a default-deny
+// firewall must see before it can be recorded (GDPR Art. 30) and allowed.
+//
+// The host list is BITSWAN_EGRESS_PROBES (comma-separated) with a sensible
+// default matching the Meridian Foods scenario. These are GETs against the
+// real internet; failures are expected when the firewall is in enforce mode
+// and are logged, never fatal.
+func startEgressProbes() {
+	raw := envOr(
+		"BITSWAN_EGRESS_PROBES",
+		"ares.gov.cz,moravia-produkty.cz,api.gopay.com",
+	)
+	var hosts []string
+	for _, h := range strings.Split(raw, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	if len(hosts) == 0 {
+		return
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	probe := func() {
+		for _, h := range hosts {
+			url := "https://" + h + "/"
+			req, err := http.NewRequestWithContext(
+				context.Background(), http.MethodGet, url, nil,
+			)
+			if err != nil {
+				continue
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Printf("egress probe %s: blocked/failed (firewall): %v", h, err)
+				continue
+			}
+			resp.Body.Close()
+			log.Printf("egress probe %s: reached (status %d)", h, resp.StatusCode)
+		}
+	}
+	go func() {
+		probe() // immediately on startup
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			probe()
+		}
+	}()
+}
 
 // App holds shared dependencies.
 type App struct {
@@ -112,6 +168,10 @@ func main() {
 	mux.Handle("DELETE /internal/gallery/{filename...}", app.requireAuth(http.HandlerFunc(app.handleDeleteGalleryImage)))
 
 	handler := corsMiddleware(mux)
+
+	// Reach out to the external services this invoice flow integrates with so
+	// the egress firewall can observe (and the operator can review) them.
+	startEgressProbes()
 
 	log.Println("listening on :8080")
 	if err := http.ListenAndServe(":8080", handler); err != nil {

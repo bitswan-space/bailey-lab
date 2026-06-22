@@ -43,6 +43,7 @@ async def _run_set_deploy_with_progress(
     stage: str,
     copy: str | None,
     commit_subject: str | None,
+    deployed_by: str | None = None,
 ):
     """Background coroutine driving `deploy_source_set` with progress
     broadcasting. Mirrors `_run_bp_deploy_with_progress`; on terminal status
@@ -82,6 +83,7 @@ async def _run_set_deploy_with_progress(
             stage=stage,
             copy=copy,
             commit_subject=commit_subject,
+            deployed_by=deployed_by,
             progress_callback=progress_callback,
         )
 
@@ -113,6 +115,7 @@ async def spawn_set_deploy(
     copy: str | None = None,
     commit_subject: str | None = None,
     service=None,
+    deployed_by: str | None = None,
 ) -> dict:
     """Reserve the deployable members under one task and spawn the background
     set deploy. Never raises.
@@ -181,6 +184,7 @@ async def spawn_set_deploy(
                 stage,
                 copy,
                 commit_subject,
+                deployed_by,
             )
         )
         return {
