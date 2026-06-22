@@ -1414,7 +1414,9 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // Development is in monitor mode and is where the live-dev/dev containers'
     // egress is observed. Select it, open Firewall, wait for the panel to load.
     await selectStage(/Development/i);
-    await clickSection(/^Firewall$/i);
+    // Loose match: the Firewall tab carries a count badge once egress is
+    // observed ("Firewall 2"), so an anchored /^Firewall$/ never matches.
+    await clickSection(/Firewall/i);
     // Real load signal: the "Loading firewall…" spinner must clear AND the
     // posture pill (Monitoring/Enforcing) must be on screen — never shoot mid-load.
     await d.getByText(/Loading firewall…/i).first()
@@ -1479,15 +1481,17 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // first dev deploy is up); a promoted Production stage may not expose the
     // same openable app — so we share off Development, the reliably-openable one.
     await selectStage(/Development/i);
-    // The "Open app" anchor: scope to the section by its heading, else fall back
-    // to the first openable https external link on the card (the section renders
-    // before any other external link, so the first one is a frontend's).
+    // The "Open app" anchor: scope to the section by its heading and take the
+    // first deployed frontend's external-link card. (A previous `.or(first
+    // https link on the page)` fallback matched a DIFFERENT element than the
+    // scoped one, so the combined locator resolved to 2 nodes → strict-mode
+    // violation. The scoped section reliably contains the link — see
+    // DeploymentsTab "Open app".)
     const openApp = d
       .getByText(/^Open app$/i)
       .locator('..')
       .locator('a[target="_blank"][href^="https://"]')
-      .first()
-      .or(d.locator('a[target="_blank"][href^="https://"]').first());
+      .first();
     await expect(openApp, 'no deployed frontend to open + share under Development → Open app')
       .toBeVisible({ timeout: SLA });
     const popupP = dashPage.context().waitForEvent('page', { timeout: 30_000 }).catch(() => null);
@@ -1830,7 +1834,12 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // into its underlying field. The "Trust this device" button enables once
     // six characters are entered.
     const codeInput = pendingBar.locator('..').locator('input').first()
-      .or(page.locator('input[inputmode="numeric"], input[maxlength="6"], input').filter({ hasNot: page.locator('[type="search"]') }).last());
+      .or(page.locator('input[inputmode="numeric"], input[maxlength="6"], input').filter({ hasNot: page.locator('[type="search"]') }).last())
+      // Collapse the .or() to a single node: a segmented [3,3] code input is TWO
+      // <input>s, so the two branches resolve to different boxes — without this
+      // the later pressSequentially() (an action) would hit a strict-mode
+      // violation. The first box is correct: segmented inputs auto-advance.
+      .first();
     await codeInput.waitFor({ state: 'visible', timeout: SLA });
     // Segmented inputs accept the digits typed in sequence; pressSequentially
     // drives each box like a human typing the code.
