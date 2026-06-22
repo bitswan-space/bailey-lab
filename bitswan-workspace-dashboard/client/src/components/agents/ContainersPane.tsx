@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Cog, Globe, Loader2, Play, RotateCcw, Square } from 'lucide-react';
+import { Cog, Globe, Hammer, Loader2, Play, RotateCcw, Square } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { deployBpWithToast } from '@/lib/deployBp';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import { LogsPane } from '@/components/automations/inspect/LogsPane';
+import { BuildLogsPane } from '@/components/automations/inspect/BuildLogsPane';
 import { cn } from '@/lib/utils';
 
 /**
@@ -30,7 +32,7 @@ interface Container {
   expose: boolean;
 }
 
-type Detail = 'overview' | 'logs';
+type Detail = 'overview' | 'logs' | 'build';
 
 export function ContainersPane({ bp, copy, active }: Props) {
   const { automations } = useAutomations();
@@ -64,6 +66,26 @@ export function ContainersPane({ bp, copy, active }: Props) {
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail>('overview');
   const [busy, setBusy] = useState(false);
+  const [deploying, setDeploying] = useState(false);
+
+  // Rebuild every image in this business process and redeploy the copy's
+  // live-dev stage (the working preview these containers belong to). Reuses
+  // the BP deploy task + progress toast; gitops rebuilds from the copy state.
+  const rebuildRedeploy = async () => {
+    setDeploying(true);
+    try {
+      await deployBpWithToast({
+        bp,
+        stage: 'live-dev',
+        copy,
+        loading: `Rebuilding & redeploying ${bp}…`,
+        success: `${bp} rebuilt & redeployed`,
+        failurePrefix: `Rebuild & redeploy of ${bp} failed`,
+      });
+    } finally {
+      setDeploying(false);
+    }
+  };
 
   // Keep a valid selection as the list changes.
   useEffect(() => {
@@ -76,6 +98,33 @@ export function ContainersPane({ bp, copy, active }: Props) {
   }, [containers, selectedName]);
 
   const selected = containers.find((c) => c.name === selectedName) ?? null;
+
+  // The image build checksum lives in the automation's `automation.toml` as
+  // image = "internal/<root>:sha<checksum>" (gitops writes the BUILT base image
+  // there). That checksum names the build-log dir; the running container's
+  // version_hash is the thin app layer and has no log. Resolve it lazily when
+  // the Build logs tab is open.
+  // eslint-disable-next-line no-restricted-syntax -- null = no built image / not resolved
+  const [buildChecksum, setBuildChecksum] = useState<string | null>(null);
+  useEffect(() => {
+    setBuildChecksum(null);
+    const name = selected?.name;
+    if (!name || detail !== 'build' || !active) return;
+    let cancelled = false;
+    api.copyFiles
+      .content(copy, `${bp}/${name}/automation.toml`)
+      .then((r) => {
+        if (cancelled || 'error' in r) return;
+        const m = r.content.match(/image\s*=\s*["'][^"']*:sha([0-9a-f]+)["']/i);
+        if (m?.[1]) setBuildChecksum(m[1]);
+      })
+      .catch(() => {
+        /* leave null → BuildLogsPane shows its empty state */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected?.name, bp, copy, detail, active]);
 
   const lifecycle = async (verb: 'restart' | 'stop' | 'start', c: Container) => {
     if (!c.deploymentId) return;
@@ -94,9 +143,33 @@ export function ContainersPane({ bp, copy, active }: Props) {
   };
 
   return (
-    <div className="flex min-h-0 flex-1 overflow-hidden">
-      {/* Left: container list */}
-      <aside className="flex w-[260px] shrink-0 flex-col border-r border-border bg-background">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      {/* BP-level toolbar: rebuild every image + redeploy this copy. */}
+      <div className="flex shrink-0 items-center gap-3 border-b border-border bg-background px-4 py-2">
+        <span className="truncate text-[11px] text-muted-foreground">
+          <span className="font-semibold uppercase tracking-wide">Business process</span>{' '}
+          <span className="font-mono text-foreground">{bp}</span>
+        </span>
+        <button
+          type="button"
+          onClick={rebuildRedeploy}
+          disabled={deploying}
+          title="Rebuild every image in this business process and redeploy the copy"
+          className="ml-auto flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-40"
+        >
+          {deploying ? (
+            <Loader2 className="size-3.5 animate-spin" aria-hidden />
+          ) : (
+            <Hammer className="size-3.5" aria-hidden />
+          )}
+          Rebuild &amp; redeploy
+        </button>
+      </div>
+
+      {/* Master-detail: container list + inspect. */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {/* Left: container list */}
+        <aside className="flex w-[260px] shrink-0 flex-col border-r border-border bg-background">
         <div className="flex items-center gap-1.5 border-b border-border px-3.5 py-3 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Containers
           <span className="ml-auto font-medium text-muted-foreground/60">
@@ -186,9 +259,16 @@ export function ContainersPane({ bp, copy, active }: Props) {
             <div className="flex shrink-0 items-center gap-4 border-b border-border px-5">
               <DetailTab active={detail === 'overview'} onClick={() => setDetail('overview')} label="Overview" />
               <DetailTab active={detail === 'logs'} onClick={() => setDetail('logs')} label="Logs" />
+              <DetailTab active={detail === 'build'} onClick={() => setDetail('build')} label="Build logs" />
             </div>
 
-            {!selected.deploymentId ? (
+            {detail === 'build' ? (
+              // Build logs key off the image checksum, not the running
+              // deployment — viewable even when the container isn't up.
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <BuildLogsPane checksum={buildChecksum} active={active && detail === 'build'} />
+              </div>
+            ) : !selected.deploymentId ? (
               <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                 This container isn’t deployed yet — deploy it to inspect.
               </div>
@@ -203,6 +283,7 @@ export function ContainersPane({ bp, copy, active }: Props) {
             )}
           </>
         )}
+        </div>
       </div>
     </div>
   );

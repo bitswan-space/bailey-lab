@@ -1127,6 +1127,32 @@ export class GitopsClient {
     return r.body;
   }
 
+  /**
+   * Stream an image's `docker build` log by checksum. Gitops serves this as a
+   * `text/plain` follow-stream (live during a build, then the final
+   * `.build.log`/`.failedbuild.log`, closing once a completed log is fully
+   * read). The route re-frames the bytes as SSE for the browser.
+   */
+  async streamBuildLogs(
+    checksum: string,
+    signal: AbortSignal,
+  ): Promise<ReadableStream<Uint8Array>> {
+    const r = await fetch(
+      `${this.baseUrl}/images/builds/${encodeURIComponent(checksum)}/stream`,
+      {
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          Accept: 'text/plain',
+        },
+        signal,
+      },
+    );
+    if (!r.ok || !r.body) {
+      throw new Error(`gitops build-log stream returned ${r.status}`);
+    }
+    return r.body;
+  }
+
   // ---------------------------------------------------------------------
   // Per-BP stage snapshots (`/snapshots/*`). Create/restore/clone return
   // 202 + task_id; progress is polled via `snapshotTaskStatus` (the

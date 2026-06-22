@@ -927,4 +927,45 @@ export function registerAutomationRoutes(
       ch.end();
     }
   });
+
+  // Image build-log stream by checksum. Gitops serves the `docker build` output
+  // as a plain-text follow-stream; we re-frame it line-by-line as SSE `log`
+  // events so the browser can consume it with the same EventSource machinery as
+  // container logs (then `end` once the build's final log is fully read).
+  app.get<{ Params: { checksum: string } }>(
+    '/api/images/builds/:checksum/logs',
+    async (req, reply) => {
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+
+      const ch = openSse(req, reply);
+      try {
+        const body = await gitops.streamBuildLogs(req.params.checksum, ch.signal);
+        const reader = body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (!ch.signal.aborted) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          // Emit complete lines; keep the trailing partial in the buffer.
+          const parts = buf.split('\n');
+          buf = parts.pop() ?? '';
+          for (const line of parts) {
+            ch.write(`event: log\ndata: ${JSON.stringify({ line })}\n\n`);
+          }
+        }
+        if (buf.length > 0) {
+          ch.write(`event: log\ndata: ${JSON.stringify({ line: buf })}\n\n`);
+        }
+        if (!ch.signal.aborted) ch.write(`event: end\ndata: {}\n\n`);
+      } catch (err) {
+        if (!ch.signal.aborted) {
+          app.log.warn({ err, checksum: req.params.checksum }, 'build-log stream error');
+          ch.write(`event: error\ndata: ${JSON.stringify(String(err))}\n\n`);
+        }
+      } finally {
+        ch.end();
+      }
+    },
+  );
 }
