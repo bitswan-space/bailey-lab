@@ -2820,6 +2820,16 @@ class AutomationService:
                 deployed_by=deployed_by,
             )
 
+        # Refresh the static automation cache so the just-deployed members (and,
+        # for a production promote, their blue-green slot containers) show up in
+        # the listing immediately. The Docker-events watcher that would otherwise
+        # invalidate the cache does NOT fire in some environments (notably
+        # Docker-in-Docker CI), so without this an Inspect/Containers view right
+        # after a set-deploy or promote sees "No container found" until an
+        # unrelated event refreshes it. deploy_automation() refreshes for the
+        # single-deployment path; this covers deploy_source_set + promote.
+        await self.refresh_all()
+
         return deployment_result
 
     async def deploy_source_set(
