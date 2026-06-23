@@ -12,12 +12,12 @@ import (
 //
 // These tests exercise the chrome wrap in isolation; the device-trust
 // gate (enforceMFAGate) now sits in front of it inside the same
-// middleware and would redirect every cookie-less request to
-// /2fa-gate/pending-pair before the wrap ran. Disable it via the
-// documented escape hatch so the tests see the wrap behaviour they
-// assert (gate behaviour is covered separately).
+// middleware and would redirect every untrusted request before the wrap
+// ran. The tests therefore present a TRUSTED device (see browserGet/trust)
+// so they reach the wrap; gate behaviour is covered separately in
+// mfa_gate_test.go.
 func wrappedHandler(t *testing.T) http.Handler {
-	t.Setenv("BAILEY_MFA_GATE_DISABLE", "1")
+	t.Helper()
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Test-Inner", "1")
 		w.WriteHeader(http.StatusOK)
@@ -26,12 +26,36 @@ func wrappedHandler(t *testing.T) http.Handler {
 	return chromeWrapMiddleware(inner)
 }
 
-func browserGet(host, path, email string) *http.Request {
+func browserGet(t *testing.T, host, path, email string) *http.Request {
 	r := httptest.NewRequest(http.MethodGet, "https://"+host+path, nil)
 	r.Host = host
 	r.Header.Set("Accept", "text/html,application/xhtml+xml")
 	if email != "" {
 		r.Header.Set("X-Forwarded-Email", email)
+	}
+	return trust(t, r, email)
+}
+
+// trust pairs a device for email and attaches its signed cookie so the request
+// clears the device-trust gate that now runs in front of the chrome wrap. The
+// wrap/ACL tests rely on this to reach the wrap; the gate itself is covered in
+// mfa_gate_test.go. No-op for the identity-less case (the gate passes those
+// through anyway).
+func trust(t *testing.T, r *http.Request, email string) *http.Request {
+	t.Helper()
+	if email == "" {
+		return r
+	}
+	rec, err := addDevice(email, "wrap-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cw := httptest.NewRecorder()
+	if err := setDeviceCookie(cw, r, email, rec.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cw.Result().Cookies() {
+		r.AddCookie(c)
 	}
 	return r
 }
@@ -39,7 +63,7 @@ func browserGet(host, path, email string) *http.Request {
 func TestChromeWrap_OuterHostGetsWrap(t *testing.T) {
 	host := "wrap-outer.example.com"
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, browserGet(host, "/some/page?x=1", "user@example.com"))
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, host,"/some/page?x=1", "user@example.com"))
 
 	if w.Header().Get("X-Test-Inner") == "1" {
 		t.Fatal("outer browser GET reached the inner handler instead of the wrap")
@@ -64,7 +88,7 @@ func TestChromeWrap_OuterHostGetsWrap(t *testing.T) {
 func TestChromeWrap_InnerHostPassesThrough(t *testing.T) {
 	host := "wrap-pass--inner.example.com"
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, browserGet(host, "/", "user@example.com"))
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, host,"/", "user@example.com"))
 	if w.Header().Get("X-Test-Inner") != "1" {
 		t.Error("inner-host request didn't reach the inner handler")
 	}
@@ -77,7 +101,7 @@ func TestChromeWrap_NonHTMLOnOuterIs404(t *testing.T) {
 	r.Header.Set("Accept", "application/json")
 	r.Header.Set("X-Forwarded-Email", "user@example.com")
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, r)
+	wrappedHandler(t).ServeHTTP(w, trust(t, r, "user@example.com"))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("non-HTML on outer host: status = %d, want 404 (the outer host has no app surface)", w.Code)
 	}
@@ -90,7 +114,7 @@ func TestChromeWrap_PostOnOuterIs404(t *testing.T) {
 	r.Header.Set("Accept", "text/html")
 	r.Header.Set("X-Forwarded-Email", "user@example.com")
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, r)
+	wrappedHandler(t).ServeHTTP(w, trust(t, r, "user@example.com"))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("POST on outer host: status = %d, want 404", w.Code)
 	}
@@ -105,7 +129,7 @@ func TestChromeWrap_GateAPIPassesThroughOnOuter(t *testing.T) {
 	r.Host = host
 	r.Header.Set("X-Forwarded-Email", "user@example.com")
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, r)
+	wrappedHandler(t).ServeHTTP(w, trust(t, r, "user@example.com"))
 	if w.Header().Get("X-Test-Inner") != "1" {
 		t.Error("gate API call on outer host didn't pass through")
 	}
@@ -114,7 +138,7 @@ func TestChromeWrap_GateAPIPassesThroughOnOuter(t *testing.T) {
 func TestChromeWrap_NoIdentityFallsThrough(t *testing.T) {
 	host := "wrap-noident.example.com"
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, browserGet(host, "/", ""))
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, host,"/", ""))
 	if w.Header().Get("X-Test-Inner") != "1" {
 		t.Error("identity-less request should fall through to the inner handler (upstream will reject)")
 	}
@@ -128,7 +152,7 @@ func TestChromeWrap_OwnerSeesShareButton(t *testing.T) {
 
 	// Owner gets the Share button + modal.
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, browserGet(host, "/", "owner@example.com"))
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, host,"/", "owner@example.com"))
 	if !strings.Contains(w.Body.String(), "__baileyShareOpen") {
 		t.Error("owner wrap missing the Share button")
 	}
@@ -139,7 +163,7 @@ func TestChromeWrap_OwnerSeesShareButton(t *testing.T) {
 		t.Fatal(err)
 	}
 	w2 := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w2, browserGet(host, "/", "viewer@example.com"))
+	wrappedHandler(t).ServeHTTP(w2, browserGet(t, host,"/", "viewer@example.com"))
 	if !strings.Contains(w2.Body.String(), "bailey-footer") {
 		t.Error("access-role member didn't get the wrap")
 	}
@@ -150,7 +174,7 @@ func TestChromeWrap_OwnerSeesShareButton(t *testing.T) {
 	// A user with no role at all is denied at the outer host — no wrap,
 	// and the generic denial page (no leak of host/owner).
 	w3 := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w3, browserGet(host, "/", "stranger@example.com"))
+	wrappedHandler(t).ServeHTTP(w3, browserGet(t, host,"/", "stranger@example.com"))
 	if w3.Code != http.StatusForbidden {
 		t.Errorf("stranger on outer host: status = %d, want 403", w3.Code)
 	}

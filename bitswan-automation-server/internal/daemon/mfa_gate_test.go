@@ -265,16 +265,6 @@ func TestMFAGate_GatePathsExempt(t *testing.T) {
 	}
 }
 
-// TestMFAGate_DisableEscapeHatch verifies BAILEY_MFA_GATE_DISABLE=1
-// short-circuits the gate.
-func TestMFAGate_DisableEscapeHatch(t *testing.T) {
-	t.Setenv("BAILEY_MFA_GATE_DISABLE", "1")
-	w := httptest.NewRecorder()
-	if !enforceMFAGate(w, gateReq("app.example.com", "/", "user@example.com", nil)) {
-		t.Error("BAILEY_MFA_GATE_DISABLE=1 should pass everything through")
-	}
-}
-
 // TestMFAGate_NoIdentityPassesThrough verifies a request with no
 // forwarded identity is let through (the upstream rejects it; the gate
 // never invents an identity).
