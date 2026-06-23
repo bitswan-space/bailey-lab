@@ -185,6 +185,16 @@ jobs:
           # published image that may lag the gitops/daemon API.
           docker build -t bitswan/coding-agent-local:latest -f "${{ github.workspace }}/bitswan-coding-agent/Dockerfile" "${{ github.workspace }}/bitswan-coding-agent"
 
+      - name: Build egress-gateway image from source
+        run: |
+          # Dev deployments now stand up a default monitor-mode egress firewall
+          # gateway (observe-only, zero blast radius), and the BP worker shares
+          # its netns + gates its start on the gateway becoming healthy. gitops
+          # references the gateway by BITSWAN_EGRESS_GATEWAY_IMAGE (default
+          # bitswan/egress-gateway:latest), so build that tag here or the deploy
+          # can't pull it and every BP deploy fails.
+          docker build -t bitswan/egress-gateway:latest -f "${{ github.workspace }}/bitswan-automation-server/cmd/egress-gateway/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
+
       - name: "E2E: create a business process and reach its frontend"
         timeout-minutes: 15
         run: |

@@ -4985,16 +4985,20 @@ fi
             if not _conf:
                 continue
             _stage = _conf.get("stage", "production") or "production"
-            # live-dev (the Development bind-mount edit loop) does NOT route through
-            # an egress gateway. Sharing a gateway's netns destabilises the live-dev
-            # startup path (the worker can't start until the gateway's netns is up),
-            # so observing dev egress live through the gateway is a known gap tracked
-            # separately — NOT wired here to keep live-dev fast and reliable.
-            if _stage == "live-dev":
-                continue
             _ctx = _conf.get("context", "")
             _realm = bp_secrets.realm_for_stage(_stage)
-            fwnode = ((bs_yaml.get("firewall") or {}).get(_ctx) or {}).get(_realm)
+            # Firewall RULES / attempts telemetry are keyed by the canonical BP
+            # slug (the same key the dashboard's Firewall tab and the audit log in
+            # bitswan.yaml use), NOT by the deployment `context`. They coincide for
+            # the regular dev/staging/production deployments (context == bp slug),
+            # but a COPY's context is `copy-<who>-<bp>` while its firewall scope is
+            # still the BP. live-dev (the Development bind-mount edit loop) is a
+            # copy deployment, so without this it would log to a `copy-…` attempts
+            # file the dashboard never reads and consult a `copy-…` allow-list the
+            # operator never edits — the egress would be observed but invisible.
+            _bp, _ = derive_bp_and_copy(_conf.get("relative_path"))
+            _fw_key = _bp or _ctx
+            fwnode = ((bs_yaml.get("firewall") or {}).get(_fw_key) or {}).get(_realm)
             # Dev OBSERVES egress by default. The dev realm's posture is monitor
             # (observe + log, never block), so we stand up its gateway even with
             # NO firewall node yet — otherwise egress could never be observed at
@@ -5005,6 +5009,9 @@ fi
             # record. Monitor mode changes NO traffic, so this is zero-risk.
             # Enforcing realms (staging/production) still require an explicit
             # firewall node — they BLOCK, so they must be opted into deliberately.
+            # The Development stage runs as `live-dev` (realm dev → monitor), so it
+            # observes here too; its worker depends_on the gateway being healthy so
+            # the bind-mount edit loop stays fast and reliable (see emission below).
             if not fwnode and firewall_service.posture_for(_realm) != "monitor":
                 continue
             for _slot, _db in _slot_db_pairs(_conf):
@@ -5013,14 +5020,20 @@ fi
                     key,
                     {
                         # Each slot gets its OWN egress gateway so two slots'
-                        # workers never collide in one netns.
+                        # workers never collide in one netns. The gateway hostname
+                        # stays context-scoped so distinct copies of the same BP
+                        # never share a netns.
                         "gw": make_hostname_label(
                             self.workspace_name, "fwgw", _ctx, _stage, _slot
                         ),
                         "mode": (fwnode or {}).get("posture")
                         or firewall_service.posture_for(_realm),
-                        "allow": firewall_service.allowed_hosts(bs_yaml, _ctx, _realm),
+                        "allow": firewall_service.allowed_hosts(
+                            bs_yaml, _fw_key, _realm
+                        ),
                         "realm": _realm,
+                        # BP-slug key for the attempts feed (dashboard-readable).
+                        "bp": _fw_key,
                         "ok": True,
                     },
                 )
@@ -5264,6 +5277,17 @@ fi
                 entry["cap_drop"] = sorted(
                     set(entry.get("cap_drop", [])) | {"NET_ADMIN", "NET_RAW"}
                 )
+                # The worker lives in the gateway's network namespace, so it can
+                # only start once that namespace exists AND the proxy inside it is
+                # listening — otherwise the worker's first outbound dial races a
+                # half-up gateway and the container wedges/restarts (the live-dev
+                # 480s failure mode). Gating on service_healthy also pulls the
+                # gateway into the explicit `docker compose up <worker>` set, so it
+                # is actually started (it carries no deployment-id label, so the
+                # member-service selector would otherwise never bring it up).
+                entry.setdefault("depends_on", {})[_fw["gw"]] = {
+                    "condition": "service_healthy"
+                }
 
             # Per-(BP, stage) secrets: decrypt this stage's blob from
             # bitswan.yaml and (re)materialise the plaintext env file the
@@ -5530,16 +5554,43 @@ fi
             gw_image = os.environ.get(
                 "BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest"
             )
-            fw_host_dir = os.path.join(
-                os.path.dirname(self.gitops_dir_host), "firewall"
-            )
+            # The attempts feed must be on storage SHARED with the gitops
+            # container (which reads firewall_service.firewall_dir() == the
+            # `firewall` subdir of BITSWAN_GITOPS_DIR). When workspace data lives
+            # in the named `bitswan` volume, mount the gateway's /firewall from the
+            # SAME `workspaces/<ws>/firewall` subpath the gitops container mounts —
+            # so a write by the gateway is visible to the dashboard reader. A host
+            # bind to a container-local path would diverge and the feed would stay
+            # empty. (The daemon pre-creates this subdir; see
+            # ensureWorkspaceVolumeDirs.) Fall back to the legacy host bind only
+            # when no volume is configured.
+            bitswan_volume_name = os.environ.get("BITSWAN_VOLUME_NAME")
+            bitswan_workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME")
+            if bitswan_volume_name:
+                fw_mount: dict | str = {
+                    "type": "volume",
+                    "source": bitswan_volume_name,
+                    "target": "/firewall",
+                    "volume": {
+                        "subpath": f"workspaces/{bitswan_workspace_name}/firewall"
+                    },
+                }
+            else:
+                fw_host_dir = os.path.join(
+                    os.path.dirname(self.gitops_dir_host), "firewall"
+                )
+                fw_mount = f"{fw_host_dir}:/firewall"
             os.makedirs(firewall_service.firewall_dir(), exist_ok=True)
             for (ctx, stage, slot), fw in fw_scope.items():
                 if not fw["ok"]:
                     continue
-                gw, realm = fw["gw"], fw["realm"]
+                gw, realm, fw_bp = fw["gw"], fw["realm"], fw["bp"]
                 # Per-slot attempts file so each blue-green slot's gateway logs
                 # to its own feed (the gateway name is already slot-suffixed).
+                # Keyed by the canonical BP slug (NOT the deployment context) so
+                # the dashboard's Firewall tab — which reads
+                # `<bp>__<realm>.attempts.jsonl` — sees what this group observed,
+                # including copies/live-dev whose context is `copy-…`.
                 slot_tag = f"__{slot}" if slot else ""
                 dc["services"][gw] = {
                     "image": gw_image,
@@ -5551,13 +5602,29 @@ fi
                         "BITSWAN_FW_MODE": fw["mode"],
                         "BITSWAN_FW_ALLOW": ",".join(fw["allow"]),
                         "BITSWAN_FW_ATTEMPTS": (
-                            f"/firewall/{ctx}__{realm}{slot_tag}.attempts.jsonl"
+                            f"/firewall/{fw_bp}__{realm}{slot_tag}.attempts.jsonl"
                         ),
                     },
-                    "volumes": [f"{fw_host_dir}:/firewall"],
+                    "volumes": [fw_mount],
+                    # Cheap liveness on the dedicated health port (:18077), which
+                    # the proxy binds in the same startup as the filter ports. The
+                    # workers that share this netns gate their start on it being
+                    # healthy (depends_on below) — without a healthcheck a worker
+                    # would race the gateway's netns and wedge on startup. We probe
+                    # :18077 rather than the filter ports so the healthcheck never
+                    # logs a bogus no-SNI attempt into the "Needs review" feed. The
+                    # ports are high/uncommon so they never collide with the app's
+                    # own listen port (e.g. :8080) in the shared netns.
+                    "healthcheck": {
+                        "test": ["CMD-SHELL", "nc -z 127.0.0.1 18077"],
+                        "interval": "3s",
+                        "timeout": "3s",
+                        "retries": 10,
+                        "start_period": "2s",
+                    },
                     "labels": {
                         "gitops.firewall_gateway": "true",
-                        "gitops.bp": ctx,
+                        "gitops.bp": fw_bp,
                         "gitops.stage": realm,
                         "gitops.slot": slot or "",
                     },

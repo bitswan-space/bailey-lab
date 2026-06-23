@@ -37,8 +37,52 @@ func main() {
 	}
 	log.Printf("egress-gateway: mode=%s allow=%q", mode, os.Getenv("BITSWAN_FW_ALLOW"))
 
-	go gw.serve(":8443", gw.handleTLS)
-	gw.serve(":8080", gw.handleHTTP)
+	// Bind the two FILTER ports FIRST and only then the health port, so the
+	// health signal can never be observable before the redirect targets are
+	// listening. A worker shares this netns and gates its start on the
+	// container becoming healthy; if :18077 answered before :18443/:18080 were
+	// bound, the worker could start and have its first HTTPS dial REDIRECTed by
+	// iptables to a not-yet-listening :18443 → connection refused (the exact
+	// startup race the healthcheck exists to prevent). net.Listen completing
+	// means the socket is accepting connections, so binding health last makes
+	// "healthy ⇒ filter ports up" a real invariant, not a scheduling accident.
+	// These ports are deliberately HIGH/uncommon: the worker SHARES this netns,
+	// so a filter port colliding with the app's own listen port (e.g. :8080)
+	// would make the app fail to bind ("address already in use") and crashloop.
+	tlsLn := listen(":18443")
+	httpLn := listen(":18080")
+	go acceptLoop(tlsLn, func(c net.Conn) { go gw.handleTLS(c) })
+	go acceptLoop(httpLn, func(c net.Conn) { go gw.handleHTTP(c) })
+
+	// Dedicated liveness port. Container healthchecks probe THIS, never the
+	// :18443/:18080 proxy ports — a bare TCP connect to the proxy ports (e.g.
+	// `nc -z`) would otherwise read no ClientHello/Host and get logged as a
+	// "(no-sni)" blocked attempt, polluting the "Needs review" feed every few
+	// seconds. Accept and immediately close; it filters nothing.
+	healthLn := listen(":18077")
+	acceptLoop(healthLn, func(c net.Conn) { c.Close() })
+}
+
+// listen binds a TCP listener, fatally exiting if the bind fails. Returning the
+// established listener (rather than spawning the accept loop internally) lets
+// main() order binds deterministically — see the filter-before-health ordering.
+func listen(addr string) net.Listener {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("listen %s: %v", addr, err)
+	}
+	log.Printf("listening on %s", addr)
+	return ln
+}
+
+func acceptLoop(ln net.Listener, handle func(net.Conn)) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			continue
+		}
+		handle(c)
+	}
 }
 
 func splitCSV(s string) []string {
@@ -56,21 +100,6 @@ type gateway struct {
 	allow    *AllowList
 	attempts string
 	mu       sync.Mutex
-}
-
-func (g *gateway) serve(addr string, handle func(net.Conn)) {
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatalf("listen %s: %v", addr, err)
-	}
-	log.Printf("listening on %s", addr)
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			continue
-		}
-		go handle(c)
-	}
 }
 
 // decide applies the allow-list + mode. Returns whether to proceed and logs the

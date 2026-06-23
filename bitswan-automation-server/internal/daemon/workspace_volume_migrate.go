@@ -24,6 +24,11 @@ var workspaceVolumeSubdirs = []string{
 	"copies/main", // the main copy (editor working tree / main live-dev source)
 	"secrets",
 	"snapshots",
+	// Egress-firewall attempt telemetry (per-BP JSONL the egress gateways
+	// append to and the gitops dashboard reads for "Needs review"). Shared
+	// between the gitops container and the gateway containers via this volume
+	// subpath, so it must exist before the gitops container mounts it.
+	"firewall",
 	"ssh",
 	"coder-home",
 	"coding-agent-home",

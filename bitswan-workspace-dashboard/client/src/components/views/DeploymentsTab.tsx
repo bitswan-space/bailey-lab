@@ -1296,16 +1296,25 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   >([]);
   useEffect(() => {
     let alive = true;
-    api
-      .firewall(bp.name, isDr ? 'production' : activeStage)
-      .then((r) => {
-        if (!alive) return;
-        const n = (r.attempts ?? []).length;
-        setFirewallBadge(n ? [{ n, cls: 'bg-red-600', title: `${n} unreviewed blocked attempts` }] : []);
-      })
-      .catch(() => alive && setFirewallBadge([]));
+    const stage = isDr ? 'production' : activeStage;
+    // Egress is observed asynchronously by the gateway, so the badge — like the
+    // FirewallPanel itself — must poll; a one-shot fetch would stay at 0 even
+    // after the BP's first outbound call gets logged, hiding the tab that needs
+    // attention. Errors are swallowed; the next tick retries.
+    const fetchBadge = () =>
+      api
+        .firewall(bp.name, stage)
+        .then((r) => {
+          if (!alive) return;
+          const n = (r.attempts ?? []).length;
+          setFirewallBadge(n ? [{ n, cls: 'bg-red-600', title: `${n} unreviewed blocked attempts` }] : []);
+        })
+        .catch(() => alive && setFirewallBadge([]));
+    fetchBadge();
+    const id = window.setInterval(fetchBadge, 4000);
     return () => {
       alive = false;
+      window.clearInterval(id);
     };
   }, [bp.name, activeStage, isDr, reloadKey]);
 

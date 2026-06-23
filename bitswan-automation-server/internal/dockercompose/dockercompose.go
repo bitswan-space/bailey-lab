@@ -99,6 +99,14 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 			// /gitops itself is the container's writable layer, so anything
 			// not bind-mounted there is lost on container recreation.
 			wsVolume("snapshots", "/gitops/snapshots"),
+			// Egress-firewall attempt telemetry. The per-BP egress gateways
+			// (a separate container per firewalled group) append observed/blocked
+			// hosts here; the gitops dashboard reads it for the "Needs review"
+			// feed. Both sides must point at the SAME volume subpath, so mount it
+			// into gitops at the path firewall_service.firewall_dir() resolves to
+			// (/gitops/firewall) — otherwise gitops would read its container-local
+			// layer while the gateways write the volume, and the feed stays empty.
+			wsVolume("firewall", "/gitops/firewall"),
 			wsVolume("ssh", "/home/user1000/.ssh"),
 			"/var/run/docker.sock:/var/run/docker.sock",
 			"/var/run/bitswan:/var/run/bitswan",

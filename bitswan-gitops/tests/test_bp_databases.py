@@ -576,7 +576,13 @@ def test_copy_override_wins_over_bp_injection(gitops_home, automation_service):
     }
     dc_yaml, _, _ = automation_service.generate_docker_compose(bs_yaml)
     dc = yaml.safe_load(dc_yaml)
-    (service_name,) = [s for s in dc["services"]]
+    # The deploy now also stands up a default monitor-mode egress firewall
+    # gateway (gitops.firewall_gateway) alongside the worker; pick the worker.
+    (service_name,) = [
+        s
+        for s, e in dc["services"].items()
+        if (e.get("labels") or {}).get("gitops.firewall_gateway") != "true"
+    ]
     env = dc["services"][service_name]["environment"]
     assert env["POSTGRES_DB"] == "postgres_copy_foo"
     # CouchDB/MinIO names aren't copy-cloned; they share the BP namespace.
@@ -602,6 +608,12 @@ def test_compose_live_dev_main_injects(gitops_home, automation_service):
     }
     dc_yaml, _, _ = automation_service.generate_docker_compose(bs_yaml)
     dc = yaml.safe_load(dc_yaml)
-    (service_name,) = [s for s in dc["services"]]
+    # The deploy now also stands up a default monitor-mode egress firewall
+    # gateway (gitops.firewall_gateway) alongside the worker; pick the worker.
+    (service_name,) = [
+        s
+        for s, e in dc["services"].items()
+        if (e.get("labels") or {}).get("gitops.firewall_gateway") != "true"
+    ]
     env = dc["services"][service_name]["environment"]
     assert env["POSTGRES_DB"] == "bp_my_bp"

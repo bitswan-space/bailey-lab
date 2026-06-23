@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowUpFromLine,
   Ban,
@@ -24,6 +24,11 @@ const REALM_LABEL: Record<string, string> = {
 };
 
 const EMPTY_RECORD: GdprRecord = { noUserData: false, stored: 'no' };
+
+// Re-poll the firewall feed this often so egress observed AFTER the panel
+// mounts (the gateway logs it asynchronously) appears under "Needs review"
+// without the operator having to take an action to force a refetch.
+const FIREWALL_POLL_MS = 4000;
 
 /**
  * Egress firewall panel (wireframe Firewall tab). Shows the outbound allow-list
@@ -69,28 +74,49 @@ export function FirewallPanel({
   } | null>(null);
   const [view, setView] = useState<{ host: string; record: GdprRecord } | null>(null);
 
-  const load = useCallback(() => {
-    let alive = true;
-    setLoading(true);
-    api
-      .firewall(bp, stage)
-      .then((r) => alive && setFw(r))
-      .catch(() => alive && setFw(null))
-      .finally(() => alive && setLoading(false));
-    if (prevStage) {
+  // Observed egress is logged asynchronously by the per-BP gateway AFTER the BP
+  // makes an outbound call — which can land seconds after this panel mounts (and
+  // long after the operator opened the Firewall tab). A one-shot on-mount fetch
+  // would therefore show an empty "Needs review" list forever, so the operator
+  // never sees the Approve button. Poll the read endpoint (and refetch on tab
+  // focus) so freshly observed hosts surface without a manual action — the same
+  // pattern the agent-sessions / copy-status feeds use. Refetches are SILENT
+  // (no loading spinner flash): only the very first fetch toggles `loading`.
+  const aliveRef = useRef(true);
+  const fetchNow = useCallback(
+    (initial: boolean) => {
+      if (initial) setLoading(true);
       api
-        .firewall(bp, prevStage)
-        .then((r) => alive && setPrevFw(r))
-        .catch(() => alive && setPrevFw(null));
-    } else {
-      setPrevFw(null);
-    }
-    api.getMe().then((m) => alive && setRole(m.role || 'member')).catch(() => {});
+        .firewall(bp, stage)
+        .then((r) => aliveRef.current && setFw(r))
+        .catch(() => aliveRef.current && initial && setFw(null))
+        .finally(() => initial && aliveRef.current && setLoading(false));
+      if (prevStage) {
+        api
+          .firewall(bp, prevStage)
+          .then((r) => aliveRef.current && setPrevFw(r))
+          .catch(() => aliveRef.current && initial && setPrevFw(null));
+      } else if (initial) {
+        setPrevFw(null);
+      }
+      if (initial) {
+        api.getMe().then((m) => aliveRef.current && setRole(m.role || 'member')).catch(() => {});
+      }
+    },
+    [bp, stage, prevStage],
+  );
+  useEffect(() => {
+    aliveRef.current = true;
+    fetchNow(true);
+    const id = window.setInterval(() => fetchNow(false), FIREWALL_POLL_MS);
+    const onFocus = () => fetchNow(false);
+    window.addEventListener('focus', onFocus);
     return () => {
-      alive = false;
+      aliveRef.current = false;
+      window.clearInterval(id);
+      window.removeEventListener('focus', onFocus);
     };
-  }, [bp, stage, prevStage]);
-  useEffect(() => load(), [load]);
+  }, [fetchNow]);
 
   // Production changes need admin/auditor; dev/staging are open. DR is read-only.
   const isProd = fw?.stage === 'production';
