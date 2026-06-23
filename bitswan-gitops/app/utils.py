@@ -994,6 +994,37 @@ def _compose_event_message(line: str) -> str | None:
     return f"Starting containers… ({name} {state.lower()})"
 
 
+async def ensure_docker_network(name: str) -> None:
+    """Create a Docker network if it doesn't already exist (idempotent).
+
+    The per-(workspace, stage) networks are declared `external: true` in the
+    generated compose, so `docker compose up` fails unless they already exist.
+    The daemon also creates them (and multi-homes the workspace sub-traefik
+    across them) — this guards the ordering so a deploy never races ahead of
+    the daemon. Safe to call concurrently: a create that loses the race to an
+    already-existing network is ignored.
+    """
+    inspect = await asyncio.create_subprocess_exec(
+        "docker",
+        "network",
+        "inspect",
+        name,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    if await inspect.wait() == 0:
+        return
+    create = await asyncio.create_subprocess_exec(
+        "docker",
+        "network",
+        "create",
+        name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await create.communicate()  # ignore "already exists" lost-race errors
+
+
 async def docker_compose_up(
     bitswan_dir: str,
     docker_compose: str,

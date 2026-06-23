@@ -20,6 +20,7 @@ from app.utils import (
     AutomationConfig,
     calculate_git_tree_hash,
     docker_compose_up,
+    ensure_docker_network,
     generate_workspace_url,
     read_bitswan_yaml,
     reconcile_ingress,
@@ -900,6 +901,26 @@ class AutomationService:
             "git", "rev-parse", "HEAD", cwd=source_dir
         )
         return out.strip() if rc == 0 else None
+
+    def _stage_network(self, realm: str) -> str:
+        """The per-(workspace, stage) Docker network an automation joins.
+
+        Automations and their stage infra (postgres/minio/…) and egress gateway
+        live ONLY on this network — never the shared `bitswan_network` — so a
+        `dev` automation can't reach gitops/dashboard/daemon, another stage, or
+        another workspace. The daemon creates these networks and multi-homes the
+        per-workspace sub-traefik across them as the sole ingress bridge.
+        `realm` is one of dev/staging/production (see bp_secrets.realm_for_stage).
+        """
+        return f"{self.workspace_name}-{realm}"
+
+    async def _ensure_stage_networks(self) -> None:
+        """Pre-create the per-(workspace, stage) Docker networks the generated
+        compose references as `external`, so `docker compose up` never races the
+        daemon (which also creates them + multi-homes the sub-traefik). Idempotent.
+        """
+        for realm in ("dev", "staging", "production"):
+            await ensure_docker_network(self._stage_network(realm))
 
     @staticmethod
     def deployment_id_for(source: dict, stage: str) -> str:
@@ -2755,6 +2776,7 @@ class AutomationService:
                 service_by_dep.setdefault(base, name)
 
         await _report("docker_compose_up", "Starting containers...")
+        await self._ensure_stage_networks()
         infra_to_up = await self._infra_services_to_bring_up(infra_service_names)
         deployment_result = await docker_compose_up(
             self.gitops_dir,
@@ -4048,6 +4070,7 @@ fi
 
         # deploy the automation and its infra services
         await _report("docker_compose_up", "Starting containers...")
+        await self._ensure_stage_networks()
         infra_to_up = await self._infra_services_to_bring_up(infra_service_names)
         deployment_result = await docker_compose_up(
             self.gitops_dir,
@@ -4168,6 +4191,7 @@ fi
 
         # deploy_automations starts all services (no filter), so infra services
         # are included automatically via --remove-orphans
+        await self._ensure_stage_networks()
         deployment_result = await docker_compose_up(self.gitops_dir, dc_yaml)
         await self._post_deploy_infra_services(filtered_bs_yaml)
         await self._provision_bp_databases(filtered_bs_yaml, list(deployments.keys()))
@@ -4266,6 +4290,7 @@ fi
             dep_conf.get("context", ""),
             dep_conf.get("stage", "production") or "production",
         )
+        await self._ensure_stage_networks()
         infra_to_up = await self._infra_services_to_bring_up(infra_service_names)
         deployment_result = await docker_compose_up(
             self.gitops_dir,
@@ -5373,7 +5398,14 @@ fi
                 elif "default-networks" in bs_yaml:
                     networks_list = bs_yaml["default-networks"].copy()
                 else:
-                    networks_list = ["bitswan_network"]
+                    # Per-(workspace, stage) isolation: an automation joins its
+                    # stage network ONLY — never the shared bitswan_network — so
+                    # it cannot reach gitops / the dashboard / the daemon or other
+                    # workspaces/stages. The multi-homed per-workspace sub-traefik
+                    # is the only bridge in from the ingress (see the daemon's
+                    # stage-network setup + network_security_model.md).
+                    realm = bp_secrets.realm_for_stage(dep_stage)
+                    networks_list = [self._stage_network(realm)]
 
             if not network_mode:
                 if replicas > 1:
@@ -5632,7 +5664,7 @@ fi
                     "container_name": gw,
                     "restart": "unless-stopped",
                     "cap_add": ["NET_ADMIN"],
-                    "networks": {"bitswan_network": {"aliases": [gw]}},
+                    "networks": {self._stage_network(realm): {"aliases": [gw]}},
                     "environment": {
                         "BITSWAN_FW_MODE": fw["mode"],
                         "BITSWAN_FW_ALLOW": ",".join(fw["allow"]),
@@ -5750,9 +5782,23 @@ fi
 
             svc_compose = svc._generate_compose_dict()
 
+            # Pin this stage's infra onto the stage network (not bitswan_network):
+            # reachable by that stage's automations, isolated from the control
+            # plane and other stages. Preserve any DNS aliases the template set.
+            stage_net = self._stage_network(bp_secrets.realm_for_stage(svc_stage))
+
             # Merge services
             for svc_name, svc_entry in svc_compose.get("services", {}).items():
                 if svc_name not in dc["services"]:
+                    nets = svc_entry.get("networks")
+                    aliases: list[str] = []
+                    if isinstance(nets, dict):
+                        for _conf in nets.values():
+                            if isinstance(_conf, dict):
+                                aliases.extend(_conf.get("aliases", []) or [])
+                    svc_entry["networks"] = (
+                        {stage_net: {"aliases": aliases}} if aliases else [stage_net]
+                    )
                     dc["services"][svc_name] = svc_entry
                     merged_service_names.append(svc_name)
 
@@ -5765,7 +5811,8 @@ fi
                     if vol_name not in dc["volumes"]:
                         dc["volumes"][vol_name] = vol_conf
 
-            # Collect networks
+            # Collect networks (the stage net is external — the daemon creates it)
+            external_networks.add(stage_net)
             for net_name, net_conf in svc_compose.get("networks", {}).items():
                 if net_conf and net_conf.get("external"):
                     external_networks.add(net_name)
