@@ -210,7 +210,11 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 	// with the stdlib flag package, which stops at the first non-flag argument.
 	// With the name first, --domain/--owner were silently dropped, so workspace
 	// routes registered against an empty domain (e.g. "<name>-dashboard.").
-	args := []string{"workspace", "init", "--domain", domain, "--owner", email, name}
+	// --no-oauth: Bailey-fronted workspaces are protected by the shared
+	// bitswan-protected-proxy, not a per-workspace Keycloak client, so init must
+	// not try to fetch a per-workspace OAuth config from the AOC (it 404s and
+	// fails the create). The Server Console create path is always Bailey-fronted.
+	args := []string{"workspace", "init", "--no-oauth", "--domain", domain, "--owner", email, name}
 	confirmCh := make(chan struct{}, 1)
 	confirmCh <- struct{}{}
 
