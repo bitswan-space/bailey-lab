@@ -372,17 +372,31 @@ async def clone_postgres_db(
         f"WHERE datname = '{source_db}' AND pid <> pg_backend_pid();"
     )
     await run_docker_command(
-        "docker", "exec", container, "psql", "-U", user, "-d", "postgres",
-        "-c", terminate_sql,
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        terminate_sql,
     )
     _, stderr, rc = await run_docker_command(
-        "docker", "exec", container, "psql", "-U", user, "-d", "postgres",
-        "-c", f'CREATE DATABASE "{new_db}" WITH TEMPLATE "{source_db}";',
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        f'CREATE DATABASE "{new_db}" WITH TEMPLATE "{source_db}";',
     )
     if rc != 0 and "already exists" not in (stderr or ""):
-        raise RuntimeError(
-            f"clone CREATE DATABASE {new_db} failed: {stderr.strip()}"
-        )
+        raise RuntimeError(f"clone CREATE DATABASE {new_db} failed: {stderr.strip()}")
     logger.info(
         "Cloned Postgres '%s' -> '%s' (copy '%s')", source_db, new_db, copy_name
     )
