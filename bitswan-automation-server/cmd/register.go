@@ -6,7 +6,6 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/cmd/automationserverdaemon"
 	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
@@ -51,44 +50,12 @@ func newRegisterCmd() *cobra.Command {
 				return fmt.Errorf("automation server ID is required. Use --server-id flag to provide the automation server ID from the web interface")
 			}
 
-			// Check if already registered to an AOC instance
-			cfg := config.NewAutomationServerConfig()
-			if settings, err := cfg.GetAutomationOperationsCenterSettings(); err == nil && settings.AccessToken != "" {
-				return fmt.Errorf(
-					"this automation server is already registered to an AOC instance at %s (server ID: %s).\n"+
-						"To register with a different AOC instance, first disconnect using:\n\n"+
-						"  bitswan disconnect-from-aoc",
-					settings.AOCUrl, settings.AutomationServerId,
-				)
-			}
-
-			// Create AOC client with OTP
-			aocClient, err := aoc.NewAOCClientWithOTP(aocUrl, otp, automationServerId)
-			if err != nil {
-				return fmt.Errorf("failed to create AOC client: %w", err)
-			}
-
-			// Get automation server info to verify connection
-			serverInfo, err := aocClient.GetAutomationServerInfo()
-			if err != nil {
-				return fmt.Errorf("failed to get automation server info: %w", err)
-			}
-
-			// Persist the AOC-assigned domain (e.g. acme-prod.bswn.io) so the
-			// daemon can configure wildcard certificates for it.
-			aocClient.SetDomain(serverInfo.Domain)
-
-			// Save the configuration
-			if err := aocClient.SaveConfig(); err != nil {
-				return fmt.Errorf("failed to save configuration: %w", err)
-			}
-
-			fmt.Printf("✅ Successfully registered automation server '%s' with ID: %s\n", serverInfo.Name, serverInfo.AutomationServerId)
-			fmt.Println("Access token, AOC URL, and Automation server ID have been saved to ~/.config/bitswan/automation_server_config.toml.")
-
-			// Make sure the daemon is up before we talk to it over the socket.
-			// This lets `register` bring up a fresh server from nothing.
-			fmt.Println("\n🚀 Ensuring the automation server daemon is running...")
+			// Bring the daemon up first: it is the single owner of
+			// ~/.config/bitswan (a named Docker volume), so register writes no
+			// config on the host — it hands the freshly obtained token to the
+			// daemon over the socket instead. This also lets `register` bring up
+			// a fresh server from nothing.
+			fmt.Println("🚀 Ensuring the automation server daemon is running...")
 			if err := automationserverdaemon.EnsureDaemonRunning(); err != nil {
 				return fmt.Errorf("failed to ensure daemon is running: %w", err)
 			}
@@ -97,6 +64,45 @@ func newRegisterCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to create daemon client (daemon may not be running): %w", err)
 			}
+
+			// Already-registered guard — asked of the daemon, since the config now
+			// lives in its volume rather than on the host.
+			if status, err := client.AOCStatus(); err == nil && status.Registered {
+				return fmt.Errorf(
+					"this automation server is already registered to an AOC instance at %s (server ID: %s).\n"+
+						"To register with a different AOC instance, first disconnect using:\n\n"+
+						"  bitswan disconnect-from-aoc",
+					status.AOCUrl, status.AutomationServerId,
+				)
+			}
+
+			// Exchange the OTP for an access token. NewAOCClientWithOTP keeps
+			// everything in memory — it talks to the AOC from the host but never
+			// writes a config file.
+			aocClient, err := aoc.NewAOCClientWithOTP(aocUrl, otp, automationServerId)
+			if err != nil {
+				return fmt.Errorf("failed to create AOC client: %w", err)
+			}
+
+			// Get automation server info to verify the connection and learn the
+			// AOC-assigned domain (e.g. acme-prod.bswn.io).
+			serverInfo, err := aocClient.GetAutomationServerInfo()
+			if err != nil {
+				return fmt.Errorf("failed to get automation server info: %w", err)
+			}
+
+			// Persist the AOC connection into the daemon's config volume. From
+			// here on the daemon holds a valid token to talk to the AOC (wildcard
+			// ingress, protected proxy, workspace connect).
+			if err := client.SetAOCConfig(
+				aocUrl, serverInfo.AutomationServerId, aocClient.GetAccessToken(),
+				aocClient.GetExpiresAt(), serverInfo.Domain,
+			); err != nil {
+				return fmt.Errorf("failed to save AOC configuration to the daemon: %w", err)
+			}
+
+			fmt.Printf("✅ Successfully registered automation server '%s' with ID: %s\n", serverInfo.Name, serverInfo.AutomationServerId)
+			fmt.Println("AOC URL, access token, and server ID have been saved to the daemon (no config is written on the host).")
 
 			// If the AOC assigned this server a domain, stand up the full
 			// protected-ingress stack BEFORE (re)deploying workspaces, so each

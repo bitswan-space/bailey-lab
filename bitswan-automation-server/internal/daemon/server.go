@@ -149,6 +149,11 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	mux.HandleFunc("/ingress", s.authMiddleware(s.handleIngress))
 	mux.HandleFunc("/ingress/", s.authMiddleware(s.handleIngress))
 
+	// AOC connection config (authenticated) — register persists the freshly
+	// obtained token here so the daemon (not the host) owns ~/.config/bitswan.
+	mux.HandleFunc("/aoc", s.authMiddleware(s.handleAOC))
+	mux.HandleFunc("/aoc/", s.authMiddleware(s.handleAOC))
+
 	// Service endpoints (authenticated)
 	mux.HandleFunc("/service", s.authMiddleware(s.handleService))
 	mux.HandleFunc("/service/", s.authMiddleware(s.handleService))

@@ -1295,6 +1295,78 @@ func (c *Client) DisconnectFromAOC() error {
 	return err
 }
 
+// SetAOCConfig persists the AOC connection (URL, server ID, access token,
+// optional expiry + domain) into the daemon's own config volume. The daemon is
+// the single owner of ~/.config/bitswan — register no longer writes it on the
+// host — so this is how a freshly obtained token reaches the daemon before it
+// talks to the AOC (wildcard ingress, protected proxy, workspace connect).
+func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string) error {
+	reqBody := AOCConfigRequest{
+		AOCUrl:             aocUrl,
+		AutomationServerId: automationServerId,
+		AccessToken:        accessToken,
+		ExpiresAt:          expiresAt,
+		Domain:             domain,
+	}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "http://unix/aoc/config", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// AOCStatus reports whether the daemon already holds an AOC registration. Used
+// by register's "already registered" guard now that the host no longer stores
+// the config.
+func (c *Client) AOCStatus() (*AOCStatusResponse, error) {
+	req, err := http.NewRequest("GET", "http://unix/aoc/status", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var status AOCStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &status, nil
+}
+
 // WorkspaceRemove runs `bitswan workspace remove ...` via the daemon with NDJSON streaming.
 func (c *Client) WorkspaceRemove(workspaceName string) error {
 	bodyBytes, err := json.Marshal(WorkspaceRemoveRequest{Workspace: workspaceName})

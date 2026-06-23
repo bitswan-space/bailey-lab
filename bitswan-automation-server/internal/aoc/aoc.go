@@ -616,3 +616,14 @@ func (c *AOCClient) sendRequestOnce(method, requestURL string, payload []byte) (
 func (c *AOCClient) GetAccessToken() string {
 	return c.settings.AccessToken
 }
+
+// GetExpiresAt returns the access token's expiry (as returned by the AOC at
+// OTP exchange), or "" if unknown.
+func (c *AOCClient) GetExpiresAt() string {
+	return c.settings.ExpiresAt
+}
+
+// GetDomain returns the AOC-assigned domain for this automation server.
+func (c *AOCClient) GetDomain() string {
+	return c.settings.Domain
+}
