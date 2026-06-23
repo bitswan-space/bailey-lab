@@ -687,7 +687,23 @@ providers:
 			return false, fmt.Errorf("failed to ensure stage network %s: %w", net, err)
 		}
 	}
-	traefikDockerCompose, err := dockercompose.CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikConfigForCompose, domain, wildcardResolver, stageNetworks)
+	// The platform-facing HostRegexp catch-all (emitted by
+	// CreateWorkspaceTraefikDockerComposeFile whenever a domain is given) makes
+	// the GLOBAL traefik route every {workspace}-*.{domain} host straight to
+	// this sub-traefik. That is correct only in the bare two-tier topology. In
+	// the protected/wrap topology the global traefik must route those hosts
+	// through bitswan-protected-proxy (oauth) → daemon gate, and the gate
+	// reaches this sub-traefik internally ({ws}__traefik:80, recorded by
+	// saveProtectedRoute). The catch-all router outranks the proxy routes
+	// (longer rule → higher priority) and would serve workspace hosts with NO
+	// authentication — so suppress it by withholding the domain. The
+	// sub-traefik stays internal-only (HTTP :80 over bitswan_network); its
+	// inner→container routes come from the REST provider, not docker labels.
+	catchAllDomain := domain
+	if containerRunning("bitswan-protected-proxy") {
+		catchAllDomain = ""
+	}
+	traefikDockerCompose, err := dockercompose.CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikConfigForCompose, catchAllDomain, wildcardResolver, stageNetworks)
 	if err != nil {
 		return false, fmt.Errorf("failed to create workspace traefik docker-compose file: %w", err)
 	}
@@ -995,6 +1011,35 @@ func isWorkspaceTraefikRunning(workspaceName string) bool {
 // running. In bare environments (CI without protected ingress, dev
 // hosts) the route falls back to single-tier: both hostnames resolve
 // to the upstream directly, with no auth wrap to layer on top.
+// repushWorkspaceRoutesToSubTraefik re-applies ALL of a workspace's recorded
+// routes (dashboard, gitops, every BP/stage) to its per-workspace sub-traefik.
+// The sub-traefik keeps its dynamic config in memory via the REST provider, so
+// a freshly-(re)created sub-traefik starts empty; without this re-push only the
+// routes touched by the current reconcile would resolve and every other host
+// would 404. Idempotent — AddRouteWithTraefik upserts. Cert install is skipped
+// (certs were already provisioned when the route was first added).
+func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
+	eps, err := listAllEndpoints()
+	if err != nil {
+		return
+	}
+	subURL := traefikapi.GetWorkspaceTraefikBaseURL(workspaceName)
+	for _, ep := range eps {
+		if isInnerHost(ep.Hostname) {
+			continue // the inner pair is derived from the outer host below
+		}
+		label, _, _ := strings.Cut(ep.Hostname, ".")
+		if workspaceFromLabel(label) != workspaceName {
+			continue
+		}
+		up, lookupErr := lookupProtectedRouteUpstream(ep.Hostname)
+		if lookupErr != nil || up == "" {
+			continue
+		}
+		_ = traefikapi.AddRouteWithTraefik(toInnerHost(ep.Hostname), up, subURL)
+	}
+}
+
 func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 	if isInnerHost(req.Hostname) {
 		return fmt.Errorf("addRouteTraefik: refusing to register inner hostname %q directly — pass the outer hostname; the inner pair is registered automatically", req.Hostname)
@@ -1511,6 +1556,11 @@ func (s *Server) handleIngressReconcile(w http.ResponseWriter, r *http.Request) 
 			if _, err := initWorkspaceTraefik(req.WorkspaceName, dom, false); err != nil {
 				resp.Warnings = append(resp.Warnings, "init workspace sub-traefik: "+err.Error())
 			}
+			// The sub-traefik holds its dynamic config in memory, so a freshly
+			// (re)created one has NO routes. Re-push ALL of this workspace's
+			// recorded routes — not just the ones in THIS reconcile — or the
+			// dashboard / gitops / other-stage hosts 404 through the gate.
+			repushWorkspaceRoutesToSubTraefik(req.WorkspaceName)
 		}
 	}
 
