@@ -1024,6 +1024,16 @@ func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
 		return
 	}
 	subURL := traefikapi.GetWorkspaceTraefikBaseURL(workspaceName)
+	// Mirror addRouteTraefik's sub-traefik routes for the active topology:
+	//   - protected wrap: the sub-traefik serves the INNER host only (the
+	//     platform serves the outer host's wrap and the gate forwards the
+	//     post-auth inner request here);
+	//   - bare two-tier (no wrap): the sub-traefik serves BOTH outer and inner,
+	//     because the platform's HostRegexp catch-all sends every
+	//     {workspace}-* host straight here. Restoring inner-only there would
+	//     404 every outer host (gitops, dashboard, frontends) until its next
+	//     deploy.
+	wrapAvailable := containerRunning("bitswan-protected-proxy")
 	for _, ep := range eps {
 		if isInnerHost(ep.Hostname) {
 			continue // the inner pair is derived from the outer host below
@@ -1037,6 +1047,9 @@ func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
 			continue
 		}
 		_ = traefikapi.AddRouteWithTraefik(toInnerHost(ep.Hostname), up, subURL)
+		if !wrapAvailable {
+			_ = traefikapi.AddRouteWithTraefik(ep.Hostname, up, subURL)
+		}
 	}
 }
 
