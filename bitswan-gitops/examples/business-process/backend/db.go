@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"backend/models"
 
@@ -10,7 +11,33 @@ import (
 	"gorm.io/gorm"
 )
 
+// dbInitDeadline bounds the startup wait for the per-BP database. The database
+// is provisioned around the same time the worker starts, and postgres can be
+// (re)started by a deploy reconcile, so the first connection legitimately fails
+// for a short window ("connection refused", "database ... does not exist", "the
+// database system is shutting down"). We retry until reachable instead of
+// crash-looping the container; only after the deadline do we fail loudly.
+const dbInitDeadline = 3 * time.Minute
+
 func mustInitDB() *gorm.DB {
+	deadline := time.Now().Add(dbInitDeadline)
+	for attempt := 1; ; attempt++ {
+		db, err := initDBOnce()
+		if err == nil {
+			return db
+		}
+		if time.Now().After(deadline) {
+			log.Fatalf("database not ready after retrying for %s: %v", dbInitDeadline, err)
+		}
+		log.Printf("database not ready (attempt %d): %v — retrying in 2s…", attempt, err)
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// initDBOnce makes ONE full attempt to connect, verify, and migrate. Any error
+// is returned (not fatal) so mustInitDB can retry it through the transient
+// startup window above.
+func initDBOnce() (*gorm.DB, error) {
 	host := envOr("POSTGRES_HOST", "localhost")
 	user := envOr("POSTGRES_USER", "admin")
 	password := envOr("POSTGRES_PASSWORD", "")
@@ -22,17 +49,22 @@ func mustInitDB() *gorm.DB {
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		return nil, fmt.Errorf("connect: %w", err)
 	}
 
 	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatalf("failed to get underlying sql.DB: %v", err)
+		return nil, fmt.Errorf("sql.DB: %w", err)
+	}
+	// Force a real round-trip: gorm.Open is lazy, so without this a dead/absent
+	// database wouldn't surface until the first query (mid-migrate).
+	if err := sqlDB.Ping(); err != nil {
+		return nil, fmt.Errorf("ping: %w", err)
 	}
 	sqlDB.SetMaxOpenConns(5)
 
 	if err := db.AutoMigrate(&models.UserCounter{}); err != nil {
-		log.Fatalf("failed to migrate database: %v", err)
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
 	// gallery_images is managed via raw idempotent DDL rather than
@@ -52,16 +84,16 @@ func mustInitDB() *gorm.DB {
 		created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
 	)`
 	if err := db.Exec(galleryImagesDDL).Error; err != nil {
-		log.Fatalf("failed to create gallery_images table: %v", err)
+		return nil, fmt.Errorf("create gallery_images table: %w", err)
 	}
 	// Drop any leftover constraint/index from prior half-migrated states so
 	// the table converges on a single uniqueness mechanism we control.
 	db.Exec(`ALTER TABLE gallery_images DROP CONSTRAINT IF EXISTS uni_gallery_images_key`)
 	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_gallery_images_key ON gallery_images (key)`).Error; err != nil {
-		log.Fatalf("failed to create gallery_images key index: %v", err)
+		return nil, fmt.Errorf("create gallery_images key index: %w", err)
 	}
 
-	return db
+	return db, nil
 }
 
 func listGalleryImages(db *gorm.DB) ([]models.GalleryImage, error) {
