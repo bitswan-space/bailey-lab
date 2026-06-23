@@ -1116,6 +1116,14 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 				return fmt.Errorf("failed to add route to platform traefik for %s: %w", h, err)
 			}
 		}
+		// Record the REAL upstream (not the sub-traefik) so repushWorkspace-
+		// RoutesToSubTraefik can rebuild this route after the sub-traefik is
+		// (re)created — otherwise the platform catch-all captures the host with
+		// nothing behind it in the sub-traefik (404). The gate is absent in this
+		// topology, so this record is consumed only by the re-push.
+		if err := saveProtectedRoute(outer, req.Upstream); err != nil {
+			fmt.Printf("Warning: failed to record protected route for %s: %v\n", outer, err)
+		}
 	} else if wrapAvailable {
 		// No workspace sub-traefik but the protected chain is up:
 		// route BOTH hostnames through it. The gate resolves the
@@ -1138,6 +1146,12 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 			if err := traefikapi.AddRouteWithTLSDomains(h, req.Upstream, "", certResolver, tlsDomains); err != nil {
 				return fmt.Errorf("failed to add route for %s: %w", h, err)
 			}
+		}
+		// Record the upstream so that if a workspace sub-traefik is created
+		// later (e.g. the first staged-network deploy), the re-push can rebuild
+		// this route through it instead of leaving the catch-all host dangling.
+		if err := saveProtectedRoute(outer, req.Upstream); err != nil {
+			fmt.Printf("Warning: failed to record protected route for %s: %v\n", outer, err)
 		}
 	}
 
