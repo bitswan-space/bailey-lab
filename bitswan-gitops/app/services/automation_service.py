@@ -2729,6 +2729,9 @@ class AutomationService:
         # from bitswan.yaml (adds/repoints/prunes only gitops routes; manual
         # routes preserved; in-sync routes skipped). This is the only place
         # ingress is touched — applying bitswan.yaml is what converges it.
+        # A promote to a new stage adds that stage's host(s) here (cert mint +
+        # route), which is real work — report it so the deploy never goes dark.
+        await _report("reconciling_ingress", "Configuring ingress routes...")
         reconcile_ingress(self.workspace_name, desired_routes)
         dc_config = yaml.safe_load(dc_yaml)
         services = dc_config.get("services", {})
@@ -2760,6 +2763,7 @@ class AutomationService:
             extra_services=member_services + infra_to_up,
             progress_callback=_report,
         )
+        await _report("provisioning_services", "Provisioning databases & services...")
         await self._post_deploy_infra_services(bs_yaml)
         await self._provision_bp_databases(bs_yaml, deployment_ids)
 
@@ -2773,11 +2777,21 @@ class AutomationService:
                     ),
                 )
 
-        await _report("installing_certs", "Installing certificates...")
-        for dep_id in deployment_ids:
+        # Per-member progress: a production promote brings up several members
+        # (each with two blue-green slots), so one static "Installing
+        # certificates…" for the whole set can exceed the deploy progress
+        # window. Report each member as it's handled.
+        for i, dep_id in enumerate(deployment_ids, 1):
+            await _report(
+                "installing_certs",
+                f"Installing certificates… ({i}/{len(deployment_ids)} {dep_id})",
+            )
             await self.install_certificates_in_container(dep_id)
-        await _report("starting_oauth2_proxy", "Starting OAuth2 proxy...")
-        for dep_id in deployment_ids:
+        for i, dep_id in enumerate(deployment_ids, 1):
+            await _report(
+                "starting_oauth2_proxy",
+                f"Starting OAuth2 proxy… ({i}/{len(deployment_ids)} {dep_id})",
+            )
             await self.start_oauth2_proxy_in_container(dep_id)
         await self.start_oauth2_proxy_in_infra_services(infra_service_names)
 
