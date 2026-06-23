@@ -34,6 +34,10 @@ mark() {
   local label="$*"
   local now start prev dp ds
   now=$(date +%s.%N)
+  # Be self-sufficient: callers (e.g. the dind CI bring-up) may source this and
+  # call mark WITHOUT tl_begin, so the build dir may not exist yet. Create it
+  # here so the writes below land instead of aborting the caller under `set -e`.
+  mkdir -p "$(dirname "$TL_FILE")" 2>/dev/null || true
   if [ -f "$TL_STATE" ]; then
     read -r start prev < "$TL_STATE"
   else
@@ -45,7 +49,7 @@ mark() {
   ds=$(awk "BEGIN{printf \"%.1f\", $now-$start}")
   printf '%s\t%s\t%s\t%s\n' "$(date -u +%H:%M:%S)" "$dp" "$ds" "$label" >> "$TL_FILE" 2>/dev/null || true
   printf '⏱  +%6ss  total %8ss  %s\n' "$dp" "$ds" "$label"
-  printf '%s %s\n' "$start" "$now" > "$TL_STATE"
+  printf '%s %s\n' "$start" "$now" > "$TL_STATE" 2>/dev/null || true
   chmod 0666 "$TL_FILE" "$TL_STATE" 2>/dev/null || true
 }
 
