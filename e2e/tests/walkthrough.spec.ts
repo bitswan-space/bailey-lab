@@ -307,8 +307,14 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // ALLOWED to take longer than the SLA, but NOT to go dark: if PROGRESS ms pass
   // with no change to progressSignature() AND no terminal state, the product
   // stopped telling the operator what it's doing — that is the bug, so we throw.
-  const waitDeployDone = async () => {
-    const healthy = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+  const waitDeployDone = async (stageName?: string) => {
+    // When a target stage is named (a promote hop), the deploy is DONE only when
+    // THAT stage is current ("Current on <Stage>"); a prior stage's lingering
+    // Healthy / "Current on …" must not end the wait early. Otherwise (a plain
+    // deploy) any Healthy / Current-on on screen is the terminal.
+    const healthy = stageName
+      ? d.getByText(new RegExp(`Current on ${stageName}`, 'i')).first()
+      : d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
     const failed = d
       .getByText(/services? not running/i)
       .or(d.getByText(/Last deploy to .* failed/i))
@@ -1174,67 +1180,77 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // ---- Promote dev → staging → production, waiting for each to be Healthy ----
   await chapter('promote', async () => {
     await clickTopTab(/Deployments/i);
-    // Two hops. For each, click the target stage (so waitDeployDone watches the
-    // stage we're filling), click whichever Promote is enabled (the pipeline
-    // only enables the next hop), and wait — on screen — for that stage to
-    // report Healthy. No reload between click and wait.
+    // Two hops. For each, press the promote pill that targets THIS stage and
+    // CONFIRM this stage actually starts before riding the deploy watchdog.
+    // Robustness the dind timing demands:
+    //  - The pill is selected by its stage-specific title ("Promote all
+    //    containers to <Stage>"), so the dev→staging pill is never confused with
+    //    the staging→production one (both render as "Promote").
+    //  - "started"/"done" are scoped to THIS stage ("Current on <Stage>"): a
+    //    prior stage's lingering Healthy / "Current on …" must NOT count, or the
+    //    hop looks done while the target sits at "never deployed".
+    //  - A click that doesn't land (a re-render detaches the pill) is re-pressed,
+    //    so the target never sits static long enough for waitDeployDone to read a
+    //    dead screen and trip the went-dark watchdog as a false stall.
     let shotStaging = false;
     let shotProd = false;
-    for (const target of [/Staging/i, /Production/i] as const) {
-      const isProd = target.source === /Production/i.source;
+    for (const stageName of ['Staging', 'Production'] as const) {
+      const isProd = stageName === 'Production';
+      const target = new RegExp(stageName, 'i');
       await selectStage(target);
-      // Press the enabled Promote and CONFIRM it actually started before we wait
-      // on the deploy watchdog: the target stage must leave its "never deployed"
-      // state OR a Promoting/Working/toast signal must appear. A click that
-      // doesn't register would otherwise leave the stage static and trip the
-      // progress watchdog as a false stall — so we retry the press until the
-      // promote is observably underway (bounded), then ride it to Healthy.
+      // Title is present only while the pill is actionable (canPromote); when
+      // there's nothing to promote it reads "Nothing new to promote to <Stage>".
+      const promotePill = d
+        .locator(`button[title="Promote all containers to ${stageName}"]`)
+        .first();
+      const targetCurrent = d
+        .getByText(new RegExp(`Current on ${stageName}`, 'i'))
+        .first();
       const moving = d
         .getByText(/Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i)
         .first();
-      const healthy = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
       let started = false;
-      for (let attempt = 0; attempt < 4 && !started; attempt++) {
-        const all = d.getByRole('button', { name: /^Promote$/ });
-        const n = await all.count();
-        for (let j = 0; j < n; j++) {
-          const b = all.nth(j);
-          if (await b.isEnabled().catch(() => false)) {
-            await b.click().catch(() => {});
-            break;
-          }
+      for (let attempt = 0; attempt < 6 && !started; attempt++) {
+        if (await targetCurrent.isVisible().catch(() => false)) {
+          started = true;
+          break;
         }
-        // Wait briefly for an on-screen sign the promote is underway (or already
-        // landed). If nothing moves, the click missed — loop and press again.
-        await Promise.race([
-          moving.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
-          healthy.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
+        if (await promotePill.isEnabled().catch(() => false)) {
+          await promotePill.click().catch(() => {});
+        }
+        // Bounded wait (well under the 30-min deploy backstop) for THIS stage to
+        // start moving or land. If nothing moves, the click missed — press again.
+        started = await Promise.race([
+          moving
+            .waitFor({ state: 'visible', timeout: 12_000 })
+            .then(() => true)
+            .catch(() => false),
+          targetCurrent
+            .waitFor({ state: 'visible', timeout: 12_000 })
+            .then(() => true)
+            .catch(() => false),
         ]);
-        started =
-          (await moving.isVisible().catch(() => false)) ||
-          (await healthy.isVisible().catch(() => false));
       }
       // Capture the promotion IN PROGRESS on BOTH hops (the live step beat):
       // dev→staging as `promote-progress`, staging→production as
-      // `promote-progress-prod`, so the manual documents both cutovers.
+      // `promote-progress-prod`, so the manual documents both cutovers. The
+      // staging hop's waitDeployDone('Staging') already gated staging current
+      // before the production iteration, so the prod shot reflects a pipeline
+      // where staging is deployed (the meaningful blue-green state).
       if (isProd && !shotProd) {
-        // #102 fix: the production blue-green shot must reflect a pipeline where
-        // STAGING IS ALREADY DEPLOYED — that's the meaningful state (staging done,
-        // production blue-green promotion underway). The staging hop's
-        // waitDeployDone() above already gated staging to Healthy before this
-        // production iteration began, but make the precondition EXPLICIT here:
-        // best-effort confirm the pipeline still shows a deployed/healthy stage
-        // (staging) on screen before we shoot, so the capture never lands before
-        // staging is deployed. Non-aborting (the gate above is the hard guard).
-        await d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first()
-          .waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+        await targetCurrent
+          .or(moving)
+          .first()
+          .waitFor({ state: 'visible', timeout: SLA })
+          .catch(() => {});
         await capture(dashPage, 'promote-progress-prod');
         shotProd = true;
       } else if (!isProd && !shotStaging) {
         await capture(dashPage, 'promote-progress');
         shotStaging = true;
       }
-      await waitDeployDone(); // this target stage reaches Healthy on screen
+      await selectStage(target);
+      await waitDeployDone(stageName); // THIS stage reaches "Current on <Stage>"
     }
   });
 
