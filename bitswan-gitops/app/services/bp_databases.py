@@ -109,6 +109,17 @@ def bp_resource_names(bp_slug: str, db: int | None = None) -> dict:
     }
 
 
+def copy_db_name(copy_name: str) -> str:
+    """Postgres database backing a non-main copy's live-dev backends.
+
+    Single source of truth shared by copy-create (the clone), the deploy-time
+    ensure guard, and the POSTGRES_DB env injection in generate_docker_compose —
+    they MUST agree, or a backend connects to a database nobody created.
+    """
+    safe = re.sub(r"[^a-z0-9_]", "_", copy_name.lower())
+    return f"postgres_copy_{safe}"
+
+
 def derive_bp_and_copy(relative_path: str | None) -> tuple[str, str]:
     """Derive (bp_slug, copy_name) from a deployment's relative_path.
 
@@ -326,6 +337,56 @@ async def _create_postgres_db(container: str, user: str, db_name: str) -> None:
     )
     if rc != 0 and "already exists" not in (stderr or ""):
         raise RuntimeError(f"CREATE DATABASE {db_name} failed: {stderr.strip()}")
+
+
+async def clone_postgres_db(
+    workspace: str, copy_name: str, source_realm: str = "dev"
+) -> str | None:
+    """Ensure a non-main copy's live-dev database (``postgres_copy_<copy>``)
+    exists, cloning it from the realm's default database
+    (``CREATE DATABASE ... WITH TEMPLATE``).
+
+    Returns the database name, or ``None`` when Postgres isn't enabled in this
+    workspace (nothing to clone — the caller decides whether that's fatal).
+    Idempotent: a no-op when the database already exists. Waits for the server
+    to accept connections first, so a cold-start deploy doesn't race initdb.
+    Shared by copy-create (``routes/copies.py``) and the deploy-time guard.
+    """
+    secrets = get_service_secrets("postgres", source_realm)
+    if not secrets or not secrets.get("POSTGRES_USER"):
+        return None
+    user = secrets["POSTGRES_USER"]
+    source_db = secrets.get("POSTGRES_DB", "postgres")
+    new_db = copy_db_name(copy_name)
+    container = _container_name(workspace, "postgres", source_realm)
+
+    await _wait_for_postgres(container, user)
+    if await _postgres_db_exists(container, user, new_db):
+        return new_db
+
+    # CREATE DATABASE ... WITH TEMPLATE requires no other sessions on the
+    # template DB — drop them first (best-effort; the CREATE below is the
+    # authoritative step).
+    terminate_sql = (
+        f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        f"WHERE datname = '{source_db}' AND pid <> pg_backend_pid();"
+    )
+    await run_docker_command(
+        "docker", "exec", container, "psql", "-U", user, "-d", "postgres",
+        "-c", terminate_sql,
+    )
+    _, stderr, rc = await run_docker_command(
+        "docker", "exec", container, "psql", "-U", user, "-d", "postgres",
+        "-c", f'CREATE DATABASE "{new_db}" WITH TEMPLATE "{source_db}";',
+    )
+    if rc != 0 and "already exists" not in (stderr or ""):
+        raise RuntimeError(
+            f"clone CREATE DATABASE {new_db} failed: {stderr.strip()}"
+        )
+    logger.info(
+        "Cloned Postgres '%s' -> '%s' (copy '%s')", source_db, new_db, copy_name
+    )
+    return new_db
 
 
 async def _create_minio_bucket(
@@ -602,3 +663,93 @@ async def provision_for_deployments(
                 )
     except Exception as e:
         logger.warning("Per-BP database provisioning failed (non-fatal): %s", e)
+
+
+def _production_db_numbers(bs_yaml: dict | None, bp_slug: str) -> list[int]:
+    """Blue-green db numbers a production BP's slots use (default [1, 2]).
+
+    Mirrors generate_docker_compose's `_slot_db_pairs`: each running slot wires
+    to one of the two persistent production databases.
+    """
+    rec = ((bs_yaml or {}).get("backups") or {}).get(bp_slug) or {}
+    slots = rec.get("slots") or {"a": {"db": 1}, "b": {"db": 2}}
+    nums = sorted(
+        {
+            int((slots[s] or {}).get("db"))
+            for s in slots
+            if (slots.get(s) or {}).get("db")
+        }
+    )
+    return nums or [1]
+
+
+async def ensure_live_postgres_dbs(
+    workspace: str, bs_yaml: dict | None, deployment_ids: list[str]
+) -> None:
+    """Fail-fast guard: ensure the Postgres database each deploying backend will
+    connect to actually exists, before relying on the backend's connect retry.
+
+    Mirrors the POSTGRES_DB resolution in generate_docker_compose:
+      - live-dev non-main copy -> ``postgres_copy_<copy>`` (cloned from dev default)
+      - registered BP          -> ``bp_<slug>`` (dev/staging), or ``bp_<slug>_<db>``
+                                  for each blue-green db a production BP's slots use
+      - otherwise (shared default DB) -> nothing to create
+
+    Unlike `provision_for_deployments` (best-effort; covers couch/minio + the
+    standby blue-green db), this owns ONLY the live Postgres DB and **raises**
+    when Postgres is enabled but the DB can't be created — so the deploy fails
+    with a clear error instead of leaving the backend crash-looping on a missing
+    database. When Postgres isn't enabled for a realm it skips (the guard can't
+    create a server).
+    """
+    deployments = (bs_yaml or {}).get("deployments") or {}
+    registry = load_registry()
+    seen: set[tuple[str, str]] = set()
+    for dep_id in deployment_ids:
+        conf = deployments.get(dep_id) or {}
+        bp_slug, copy = derive_bp_and_copy(conf.get("relative_path"))
+        stage = conf.get("stage") or "production"
+        realm = stage_for_deployment(stage)
+        if realm not in SERVICE_REALMS:
+            continue
+
+        # 1) A non-main copy's live-dev backends connect to the cloned per-copy
+        #    DB (the env injection overrides POSTGRES_DB to it unconditionally).
+        if stage == "live-dev" and copy:
+            if ("copy", copy) in seen:
+                continue
+            seen.add(("copy", copy))
+            if get_service_secrets("postgres", realm) is None:
+                logger.info(
+                    "Postgres not enabled (%s); skipping copy DB for '%s'",
+                    realm,
+                    copy,
+                )
+                continue
+            await clone_postgres_db(workspace, copy, source_realm=realm)
+            continue
+
+        # 2) A registered BP's per-stage database(s). Unregistered BPs use the
+        #    shared default DB, so there's nothing to create.
+        if not bp_slug or not is_registered(registry, bp_slug, realm):
+            continue
+        secrets = get_service_secrets("postgres", realm)
+        if not secrets or not secrets.get("POSTGRES_USER"):
+            logger.info(
+                "Postgres not enabled (%s); skipping DB for BP '%s'", realm, bp_slug
+            )
+            continue
+        user = secrets["POSTGRES_USER"]
+        container = _container_name(workspace, "postgres", realm)
+        dbs = (
+            _production_db_numbers(bs_yaml, bp_slug)
+            if realm == "production"
+            else [None]
+        )
+        for db in dbs:
+            db_name = bp_resource_names(bp_slug, db)["postgres_db"]
+            if ("bp", db_name) in seen:
+                continue
+            seen.add(("bp", db_name))
+            await _wait_for_postgres(container, user)
+            await _create_postgres_db(container, user, db_name)

@@ -4753,14 +4753,23 @@ fi
     async def _provision_bp_databases(
         self, bs_yaml: dict | None, deployment_ids: list[str]
     ) -> None:
-        """Create per-BP logical databases for registered BPs after compose-up.
+        """Ensure databases exist for the deploying backends, after compose-up.
 
         Runs after `_post_deploy_infra_services` so the stage's service
-        containers exist. Best-effort — the registry retries unprovisioned
-        services on the next deploy.
+        containers exist. Two layers:
+          1. `ensure_live_postgres_dbs` — FAIL-FAST guard for the live Postgres
+             DB each backend connects to (per-copy clone / per-BP / blue-green).
+             Raises so the deploy reports a clear error instead of leaving the
+             backend crash-looping on a missing database.
+          2. `provision_for_deployments` — best-effort snapshot namespaces
+             (couch/minio + the standby blue-green db); never fails a deploy.
         """
-        from app.services.bp_databases import provision_for_deployments
+        from app.services.bp_databases import (
+            ensure_live_postgres_dbs,
+            provision_for_deployments,
+        )
 
+        await ensure_live_postgres_dbs(self.workspace_name, bs_yaml, deployment_ids)
         await provision_for_deployments(self.workspace_name, bs_yaml, deployment_ids)
 
     def get_org_group_path(self):
@@ -4910,6 +4919,7 @@ fi
         """
         from app.services.bp_databases import (
             bp_resource_names,
+            copy_db_name,
             derive_bp_and_copy,
             is_registered,
             load_registry,
@@ -5254,8 +5264,7 @@ fi
             # cloned database. Ordering is load-bearing: this MUST come after
             # the per-BP injection above so the copy clone wins.
             if wt_name and stage == "live-dev":
-                wt_db = "postgres_copy_" + re.sub(r"[^a-z0-9_]", "_", wt_name.lower())
-                entry["environment"]["POSTGRES_DB"] = wt_db
+                entry["environment"]["POSTGRES_DB"] = copy_db_name(wt_name)
 
             if self.workspace_name and self.gitops_domain:
                 if dep_context:

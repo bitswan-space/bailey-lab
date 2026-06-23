@@ -65,86 +65,32 @@ def _get_postgres_secrets(stage: str = "dev") -> dict | None:
 
 
 def _copy_db_name(copy_name: str) -> str:
-    """Generate a Postgres database name for a copy."""
-    safe = re.sub(r"[^a-z0-9_]", "_", copy_name.lower())
-    return f"postgres_copy_{safe}"
+    """Generate a Postgres database name for a copy.
 
-
-async def _clone_postgres_db(copy_name: str) -> str:
-    """Clone the dev Postgres database for a copy. Returns the new DB name.
-
-    A copy's live-dev backends are wired to connect to ``postgres_copy_<copy>``,
-    so when this workspace runs Postgres the database MUST exist — a failure to
-    clone it then is fatal (the backend would boot against a nonexistent DB and
-    die with an opaque 502). But a workspace with no Postgres yet (e.g. a fresh
-    one where a user's personal copy is created before any business process)
-    simply has nothing to clone, so we skip — there is no dev DB to copy and the
-    per-copy DB is provisioned later when a Postgres-backed BP is deployed.
-    Returns the new DB name, or None when Postgres isn't enabled in this
-    workspace.
+    Thin wrapper over the canonical name helper so copy-create, the deploy-time
+    ensure guard, and the POSTGRES_DB env injection all agree.
     """
-    secrets = _get_postgres_secrets("dev")
-    if not secrets:
-        logger.info(
-            "Postgres not enabled in this workspace; skipping per-copy database "
-            "for '%s' (nothing to clone)",
-            copy_name,
-        )
-        return None
+    from app.services.bp_databases import copy_db_name
 
-    user = secrets["POSTGRES_USER"]
-    password = secrets["POSTGRES_PASSWORD"]
-    source_db = secrets.get("POSTGRES_DB", "postgres")
-    new_db = _copy_db_name(copy_name)
+    return copy_db_name(copy_name)
 
-    docker_client = get_async_docker_client()
+
+async def _clone_postgres_db(copy_name: str) -> str | None:
+    """Ensure a copy's live-dev Postgres database (``postgres_copy_<copy>``)
+    exists. Returns its name, or None when Postgres isn't enabled in this
+    workspace.
+
+    A workspace with no Postgres yet (a fresh one where a user's personal copy
+    is created before any business process) simply has nothing to clone, so this
+    returns None — the per-copy DB is then provisioned at deploy by the
+    ensure-Postgres guard (`bp_databases.ensure_live_postgres_dbs`). Delegates to
+    the shared, readiness-aware `bp_databases.clone_postgres_db`, so copy-create
+    and deploy create the database by the exact same code path.
+    """
+    from app.services.bp_databases import clone_postgres_db
+
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-    container_name = f"{workspace_name}__postgres-dev"
-
-    try:
-        terminate_sql = (
-            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            f"WHERE datname = '{source_db}' AND pid <> pg_backend_pid();"
-        )
-        clone_sql = f'CREATE DATABASE "{new_db}" WITH TEMPLATE "{source_db}";'
-
-        containers = await docker_client.list_containers(
-            all=False,
-            filters={"name": [f"^/{container_name}$"]},
-        )
-        if not containers:
-            raise RuntimeError(
-                f"Postgres dev container '{container_name}' not found; cannot "
-                f"create the copy database for '{copy_name}'"
-            )
-
-        cid = containers[0]["Id"]
-
-        for sql in [terminate_sql, clone_sql]:
-            exec_id = await docker_client.exec_create(
-                cid,
-                [
-                    "sh",
-                    "-c",
-                    f"PGPASSWORD='{password}' psql -U {user} -d postgres -c \"{sql}\"",
-                ],
-            )
-            output = await docker_client.exec_start(exec_id)
-            info = await docker_client.exec_inspect(exec_id)
-            if info.get("ExitCode", 1) != 0 and "already exists" not in (output or ""):
-                raise RuntimeError(
-                    f"Postgres command failed (exit {info.get('ExitCode')}) while "
-                    f"creating copy database '{new_db}': {output}"
-                )
-
-        logger.info(
-            f"Cloned Postgres DB '{source_db}' -> '{new_db}' for copy '{copy_name}'"
-        )
-        return new_db
-    except DockerError as e:
-        raise RuntimeError(
-            f"Failed to clone Postgres DB for copy '{copy_name}': {e}"
-        ) from e
+    return await clone_postgres_db(workspace_name, copy_name)
 
 
 async def _drop_postgres_db(copy_name: str) -> None:

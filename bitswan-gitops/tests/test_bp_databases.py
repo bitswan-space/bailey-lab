@@ -7,6 +7,7 @@ BITSWAN_GITOPS_DIR points at a tmp_path.
 """
 
 import os
+import re
 
 import pytest
 import yaml
@@ -617,3 +618,130 @@ def test_compose_live_dev_main_injects(gitops_home, automation_service):
     ]
     env = dc["services"][service_name]["environment"]
     assert env["POSTGRES_DB"] == "bp_my_bp"
+
+
+# ---------------------------------------------------------------------------
+# ensure_live_postgres_dbs — deploy-time fail-fast guard
+# ---------------------------------------------------------------------------
+
+
+def _write_pg_secrets(gitops_home, stage="dev"):
+    secrets_dir = gitops_home / "secrets"
+    secrets_dir.mkdir(exist_ok=True)
+    suffix = "" if stage == "production" else f"-{stage}"
+    (secrets_dir / f"postgres{suffix}").write_text(
+        "POSTGRES_USER=admin\nPOSTGRES_PASSWORD=pw\nPOSTGRES_HOST=h\nPOSTGRES_DB=postgres\n"
+    )
+
+
+def test_copy_db_name_matches_env_injection():
+    # Must equal the formula generate_docker_compose injects as POSTGRES_DB.
+    for raw in ("alice", "Tomas-Peroutka.Wingsdata-ai", "X_Y", "main2"):
+        expected = "postgres_copy_" + re.sub(r"[^a-z0-9_]", "_", raw.lower())
+        assert bp_databases.copy_db_name(raw) == expected
+
+
+async def test_guard_clones_copy_db_at_deploy(gitops_home, fake_docker):
+    """The copy live-dev DB skipped at copy-create gets cloned at deploy."""
+    _write_pg_secrets(gitops_home, "dev")
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
+        }
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    joined = [" ".join(c) for c in fake_docker]
+    assert any(
+        'CREATE DATABASE "postgres_copy_alice" WITH TEMPLATE "postgres"' in j
+        for j in joined
+    ), joined
+
+
+async def test_guard_skips_copy_when_postgres_not_enabled(gitops_home, fake_docker):
+    """No Postgres in the workspace → skip (no raise, nothing created)."""
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
+        }
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    assert not any("CREATE DATABASE" in " ".join(c) for c in fake_docker)
+
+
+async def test_guard_creates_bp_db_for_dev(gitops_home, fake_docker):
+    _write_pg_secrets(gitops_home, "dev")
+    reg = load_registry()
+    register_bp_stage(reg, "my-bp", "My BP", "dev")
+    save_registry(reg)
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/main/My BP/backend", "stage": "dev"}
+        }
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    assert any('CREATE DATABASE "bp_my_bp"' in " ".join(c) for c in fake_docker)
+
+
+async def test_guard_creates_both_blue_green_prod_dbs(gitops_home, fake_docker):
+    _write_pg_secrets(gitops_home, "production")
+    reg = load_registry()
+    register_bp_stage(reg, "my-bp", "My BP", "production")
+    save_registry(reg)
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/main/My BP/backend", "stage": "production"}
+        },
+        "backups": {"my-bp": {"slots": {"a": {"db": 1}, "b": {"db": 2}}}},
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    joined = [" ".join(c) for c in fake_docker]
+    assert any('CREATE DATABASE "bp_my_bp_1"' in j for j in joined), joined
+    assert any('CREATE DATABASE "bp_my_bp_2"' in j for j in joined), joined
+
+
+async def test_guard_fail_fast_raises_on_create_error(gitops_home, monkeypatch):
+    """Postgres enabled but CREATE fails → raise (deploy reports the error)."""
+    _write_pg_secrets(gitops_home, "dev")
+
+    async def fake_run(*args, cwd=None):
+        joined = " ".join(args)
+        if "pg_isready" in joined:
+            return "", "", 0
+        if "pg_database WHERE datname" in joined:
+            return "", "", 0  # not present yet
+        if "CREATE DATABASE" in joined:
+            return "", "permission denied", 1
+        return "", "", 0
+
+    monkeypatch.setattr(bp_databases, "run_docker_command", fake_run)
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
+        }
+    }
+    with pytest.raises(RuntimeError):
+        await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+
+
+async def test_guard_clone_idempotent_when_db_exists(gitops_home, monkeypatch):
+    """If the per-copy DB already exists, no CREATE is issued (idempotent)."""
+    _write_pg_secrets(gitops_home, "dev")
+    calls = []
+
+    async def fake_run(*args, cwd=None):
+        calls.append(list(args))
+        joined = " ".join(args)
+        if "pg_isready" in joined:
+            return "", "", 0
+        if "pg_database WHERE datname" in joined:
+            return "1", "", 0  # already exists
+        return "", "", 0
+
+    monkeypatch.setattr(bp_databases, "run_docker_command", fake_run)
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
+        }
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    assert not any("CREATE DATABASE" in " ".join(c) for c in calls)
