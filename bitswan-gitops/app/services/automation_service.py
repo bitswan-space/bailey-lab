@@ -2758,6 +2758,7 @@ class AutomationService:
             dc_yaml,
             container_name=None,
             extra_services=member_services + infra_to_up,
+            progress_callback=_report,
         )
         await self._post_deploy_infra_services(bs_yaml)
         await self._provision_bp_databases(bs_yaml, deployment_ids)
@@ -4029,6 +4030,7 @@ fi
             dc_yaml,
             compose_service_name,
             extra_services=infra_to_up,
+            progress_callback=_report,
         )
         await self._post_deploy_infra_services(bs_yaml)
         await self._provision_bp_databases(bs_yaml, [deployment_id])

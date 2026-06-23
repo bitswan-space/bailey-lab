@@ -959,31 +959,48 @@ async def update_git(
                 raise Exception("Error pushing to git")
 
 
+_COMPOSE_EVENT_STATES = (
+    "Creating",
+    "Created",
+    "Starting",
+    "Started",
+    "Waiting",
+    "Healthy",
+    "Running",
+    "Recreated",
+)
+
+
+def _compose_event_message(line: str) -> str | None:
+    """Turn a `docker compose up` stderr line into a human deploy-progress
+    message, or None if it carries no container state transition.
+
+    Lines look like ` Container <name>  <State>` (plain text in non-TTY mode).
+    We surface container lifecycle so a long container-start phase — e.g. the
+    worker waiting on the egress firewall gateway's health gate before it can
+    start — keeps the deploy UI moving instead of sitting on a static message.
+    """
+    s = line.strip()
+    idx = s.find("Container ")
+    if idx == -1:
+        return None
+    rest = s[idx + len("Container ") :].strip()
+    parts = rest.rsplit(None, 1)
+    if len(parts) != 2:
+        return None
+    name, state = parts[0].strip(), parts[1].strip()
+    if state not in _COMPOSE_EVENT_STATES:
+        return None
+    return f"Starting containers… ({name} {state.lower()})"
+
+
 async def docker_compose_up(
     bitswan_dir: str,
     docker_compose: str,
     container_name: str | None = None,
     extra_services: list[str] | None = None,
-) -> None:
-    async def setup_asyncio_process(cmd: list[Any]) -> dict[str, Any]:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=bitswan_dir,
-        )
-
-        stdout, stderr = await proc.communicate(input=docker_compose.encode())
-
-        res = {
-            "cmd": cmd,
-            "stdout": stdout.decode("utf-8"),
-            "stderr": stderr.decode("utf-8"),
-            "return_code": proc.returncode,
-        }
-        return res
-
+    progress_callback=None,
+) -> dict:
     docker_compose_cmd = [
         "docker",
         "compose",
@@ -998,8 +1015,48 @@ async def docker_compose_up(
     if extra_services:
         docker_compose_cmd.extend(extra_services)
 
-    up_result = await setup_asyncio_process(docker_compose_cmd)
+    proc = await asyncio.create_subprocess_exec(
+        *docker_compose_cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=bitswan_dir,
+    )
+    # The compose document is small (well under a pipe buffer), so writing it
+    # and closing stdin can't deadlock against the concurrent output pumps.
+    proc.stdin.write(docker_compose.encode())
+    await proc.stdin.drain()
+    proc.stdin.close()
 
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+
+    async def _pump_stdout():
+        stdout_chunks.append(await proc.stdout.read())
+
+    async def _pump_stderr():
+        last = None
+        while True:
+            raw = await proc.stderr.readline()
+            if not raw:
+                break
+            stderr_chunks.append(raw)
+            if progress_callback is None:
+                continue
+            msg = _compose_event_message(raw.decode("utf-8", "replace"))
+            if msg and msg != last:
+                last = msg
+                await progress_callback("docker_compose_up", msg)
+
+    await asyncio.gather(_pump_stdout(), _pump_stderr())
+    return_code = await proc.wait()
+
+    up_result = {
+        "cmd": docker_compose_cmd,
+        "stdout": b"".join(stdout_chunks).decode("utf-8"),
+        "stderr": b"".join(stderr_chunks).decode("utf-8"),
+        "return_code": return_code,
+    }
     return {
         "up_result": up_result,
     }
