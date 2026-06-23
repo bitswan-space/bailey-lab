@@ -344,6 +344,38 @@ func lookupProtectedRouteUpstream(hostname string) (string, error) {
 	return up, err
 }
 
+// protectedRoute is one recorded hostname→upstream pair.
+type protectedRoute struct {
+	Hostname string
+	Upstream string
+}
+
+// listProtectedRoutes returns every recorded route (outer hostname →
+// real upstream). Used to rebuild a freshly (re)created workspace
+// sub-traefik, which must serve ALL of a workspace's hosts — including
+// site services (gitops/dashboard/editor) that are routes but not owned
+// endpoints, so they don't appear in listAllEndpoints.
+func listProtectedRoutes() ([]protectedRoute, error) {
+	db, err := openBaileyDB()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT hostname, upstream FROM protected_routes`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []protectedRoute
+	for rows.Next() {
+		var r protectedRoute
+		if err := rows.Scan(&r.Hostname, &r.Upstream); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // deleteProtectedRoute drops the upstream record for a hostname.
 func deleteProtectedRoute(hostname string) error {
 	db, err := openBaileyDB()

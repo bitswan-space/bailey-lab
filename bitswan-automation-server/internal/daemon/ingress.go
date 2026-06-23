@@ -1019,7 +1019,11 @@ func isWorkspaceTraefikRunning(workspaceName string) bool {
 // would 404. Idempotent — AddRouteWithTraefik upserts. Cert install is skipped
 // (certs were already provisioned when the route was first added).
 func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
-	eps, err := listAllEndpoints()
+	// Iterate the protected_routes table — every recorded hostname→upstream —
+	// NOT listAllEndpoints: site services (gitops/dashboard/editor) are routes
+	// but not owned endpoints, so they're absent from the endpoints table and
+	// were the hosts that 404'd through a fresh sub-traefik.
+	routes, err := listProtectedRoutes()
 	if err != nil {
 		return
 	}
@@ -1034,21 +1038,17 @@ func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
 	//     404 every outer host (gitops, dashboard, frontends) until its next
 	//     deploy.
 	wrapAvailable := containerRunning("bitswan-protected-proxy")
-	for _, ep := range eps {
-		if isInnerHost(ep.Hostname) {
-			continue // the inner pair is derived from the outer host below
+	for _, r := range routes {
+		if r.Upstream == "" {
+			continue
 		}
-		label, _, _ := strings.Cut(ep.Hostname, ".")
+		label, _, _ := strings.Cut(toOuterHost(r.Hostname), ".")
 		if workspaceFromLabel(label) != workspaceName {
 			continue
 		}
-		up, lookupErr := lookupProtectedRouteUpstream(ep.Hostname)
-		if lookupErr != nil || up == "" {
-			continue
-		}
-		_ = traefikapi.AddRouteWithTraefik(toInnerHost(ep.Hostname), up, subURL)
+		_ = traefikapi.AddRouteWithTraefik(toInnerHost(r.Hostname), r.Upstream, subURL)
 		if !wrapAvailable {
-			_ = traefikapi.AddRouteWithTraefik(ep.Hostname, up, subURL)
+			_ = traefikapi.AddRouteWithTraefik(toOuterHost(r.Hostname), r.Upstream, subURL)
 		}
 	}
 }
@@ -1100,7 +1100,13 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 		if err := traefikapi.AddRouteWithTLSDomains(outer, "bitswan-protected-proxy:80", "", certResolver, tlsDomains); err != nil {
 			return fmt.Errorf("failed to add outer route to platform traefik: %w", err)
 		}
-		if err := saveProtectedRoute(outer, workspaceName+"__traefik:80"); err != nil {
+		// Record the REAL upstream (the container), not the sub-traefik. The
+		// gate forwards workspace hosts to the sub-traefik via workspaceFromLabel,
+		// not via this record, so protected_routes is consumed only by the
+		// sub-traefik re-push and the reconcile in-sync check — both of which
+		// want the real container upstream (recording the sub-traefik here would
+		// make the re-push push a self-referential route).
+		if err := saveProtectedRoute(outer, req.Upstream); err != nil {
 			fmt.Printf("Warning: failed to record protected route for %s: %v\n", outer, err)
 		}
 	} else if workspaceName != "" && isWorkspaceTraefikRunning(workspaceName) {
