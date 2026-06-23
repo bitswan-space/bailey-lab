@@ -1553,14 +1553,22 @@ func (s *Server) handleIngressReconcile(w http.ResponseWriter, r *http.Request) 
 	// also (re)creates the stage networks. Domain is taken from a desired route.
 	if len(req.Routes) > 0 {
 		if _, dom, ok := strings.Cut(toOuterHost(req.Routes[0].Hostname), "."); ok && dom != "" {
-			if _, err := initWorkspaceTraefik(req.WorkspaceName, dom, false); err != nil {
+			created, err := initWorkspaceTraefik(req.WorkspaceName, dom, false)
+			if err != nil {
 				resp.Warnings = append(resp.Warnings, "init workspace sub-traefik: "+err.Error())
 			}
-			// The sub-traefik holds its dynamic config in memory, so a freshly
-			// (re)created one has NO routes. Re-push ALL of this workspace's
-			// recorded routes — not just the ones in THIS reconcile — or the
-			// dashboard / gitops / other-stage hosts 404 through the gate.
-			repushWorkspaceRoutesToSubTraefik(req.WorkspaceName)
+			// A freshly (re)created sub-traefik starts with NO routes (its REST
+			// config is in-memory), so re-push ALL of this workspace's recorded
+			// routes — not just the ones in THIS reconcile — or the dashboard /
+			// gitops / other-stage hosts 404 through the gate until their next
+			// deploy. Do this ONLY on an actual (re)creation: the steady-state
+			// routes are kept current by addRouteTraefik on each deploy, so
+			// re-pushing on every reconcile is redundant — it churns the
+			// sub-traefik's router table and opens a window where a route can
+			// briefly resolve to the wrong upstream mid-reconcile.
+			if created {
+				repushWorkspaceRoutesToSubTraefik(req.WorkspaceName)
+			}
 		}
 	}
 
