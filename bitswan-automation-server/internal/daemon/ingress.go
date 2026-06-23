@@ -165,6 +165,8 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 		s.handleIngressMigrate(w, r)
 	case path == "update":
 		s.handleIngressUpdate(w, r)
+	case path == "provision-protected-proxy":
+		s.handleIngressProvisionProtectedProxy(w, r)
 	default:
 		writeJSONError(w, "not found", http.StatusNotFound)
 	}

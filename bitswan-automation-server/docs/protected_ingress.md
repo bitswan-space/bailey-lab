@@ -179,10 +179,17 @@ Everything described above:
 - Keycloak callback registration for both subdomains via AOC
   (`protected_redirect.go`, `aoc.GetOrCreateOAuthClient`)
 
-Out of scope for stage 1, deliberately: nothing here provisions the
-`bitswan-protected-proxy` container itself. When it is absent the ingress
-falls back to single-tier routes (outer → upstream directly) so bare
-dev/CI environments keep working without the wrap.
+Provisioning the `bitswan-protected-proxy` container itself was out of scope
+for the original stage 1. It is now automatic: `bitswan register` brings up the
+daemon (if it isn't already), configures the wildcard ingress, and then deploys
+`bitswan-protected-proxy` — a shared `quay.io/oauth2-proxy/oauth2-proxy`
+instance whose upstream is the gate (`bitswan-automation-server-daemon:9080`),
+configured from the AOC's `bitswan-protected` Keycloak client (see
+`internal/daemon/protected_proxy.go`). Because the proxy is provisioned before
+existing workspaces are reconnected/redeployed, their route registrations take
+the wrapped path automatically. When the proxy is still absent (bare dev/CI
+environments that never registered) the ingress falls back to single-tier
+routes (outer → upstream directly) so things keep working without the wrap.
 
 ### Stage 2 — second factor (MFA)
 
