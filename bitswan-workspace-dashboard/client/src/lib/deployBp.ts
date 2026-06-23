@@ -20,6 +20,12 @@ export interface DeployToastCopy {
    *  surface it PERSISTENTLY on the screen (the toast is transient — the
    *  deployments view must not silently fall back to "Not deployed yet"). */
   onError?: (message: string) => void;
+  /** Called with each live step message as the deploy progresses, so callers
+   *  can surface progress ON the stage card — not only in the transient toast.
+   *  A promote/deploy can run tens of seconds (image promote, ingress, blue-
+   *  green slots) during which the stage card would otherwise read a static
+   *  "never deployed". */
+  onProgress?: (message: string) => void;
 }
 
 /**
@@ -73,6 +79,7 @@ export async function watchDeployTask(
     }
     if (status.message) {
       toast.loading(status.message, { id: toastId, duration: Infinity });
+      copy.onProgress?.(status.message);
     }
   }
 
@@ -94,6 +101,7 @@ export async function deployBpWithToast(opts: {
   loading: string;
   success: string;
   failurePrefix: string;
+  onProgress?: (message: string) => void;
 }): Promise<BpDeployOutcome> {
   const toastId = `bp-deploy-${opts.copy ?? 'main'}-${opts.bp}`;
   toast.loading(opts.loading, { id: toastId, duration: Infinity });
@@ -129,6 +137,7 @@ export async function deployBpWithToast(opts: {
     loading: opts.loading,
     success: opts.success,
     failurePrefix: opts.failurePrefix,
+    onProgress: opts.onProgress,
   });
 }
 
@@ -145,6 +154,7 @@ export async function promoteBpWithToast(opts: {
   success: string;
   failurePrefix: string;
   onError?: (message: string) => void;
+  onProgress?: (message: string) => void;
 }): Promise<BpDeployOutcome> {
   const toastId = `bp-promote-${opts.stage}-${opts.bp}`;
   toast.loading(opts.loading, { id: toastId, duration: Infinity });
@@ -178,5 +188,6 @@ export async function promoteBpWithToast(opts: {
     success: opts.success,
     failurePrefix: opts.failurePrefix,
     onError: opts.onError,
+    onProgress: opts.onProgress,
   });
 }

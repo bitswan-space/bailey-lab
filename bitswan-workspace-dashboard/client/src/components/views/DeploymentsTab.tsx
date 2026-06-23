@@ -1064,6 +1064,14 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   // silently falling back to "Not deployed yet" (which forces you to go dig in
   // container logs). Cleared when the stage view changes or a new attempt starts.
   const [deployError, setDeployError] = useState<{ stage: string; msg: string } | null>(null);
+  // Live deploy/promote progress shown ON the stage card (not only in the
+  // transient toast). A promote runs tens of seconds — image promote, ingress
+  // reconcile, blue-green slots — during which the stage card would otherwise
+  // read a static "never deployed" until the final refresh. Surfacing the live
+  // step keeps the operator (and the e2e progress watchdog) informed.
+  const [deployProgress, setDeployProgress] = useState<{ stage: string; msg: string } | null>(
+    null,
+  );
   useEffect(() => {
     setDeployError(null);
   }, [activeStage]);
@@ -1199,6 +1207,10 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     async (target: 'staging' | 'production') => {
       setBusy(true);
       setDeployError(null);
+      // Show "Promoting…" on the target stage card immediately, then track the
+      // live step messages — so the card never sits on a static "never
+      // deployed" through the (multi-second) promote.
+      setDeployProgress({ stage: target, msg: `Promoting to ${target}…` });
       await promoteBpWithToast({
         bp: bp.name,
         stage: target,
@@ -1207,7 +1219,10 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         failurePrefix: `Failed to promote ${bp.name} to ${target}`,
         // Keep the failure on screen for the target stage, not just a toast.
         onError: (msg) => setDeployError({ stage: target, msg }),
+        // Mirror each live step onto the stage card.
+        onProgress: (msg) => setDeployProgress({ stage: target, msg }),
       });
+      setDeployProgress(null);
       setBusy(false);
       refresh();
     },
@@ -1437,12 +1452,19 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 <div className="text-[18px] font-bold tracking-tight text-foreground">
                   {STAGE_LABEL[activeStage]}
                 </div>
-                <div className={cn('mt-0.5 text-[13px] font-semibold', friendly.color)}>
-                  {friendly.label}
-                  <span className="font-normal text-muted-foreground">
-                    {currentEntry?.deployed_at ? ` · updated ${currentEntry.deployed_at}` : ' · never deployed'}
-                  </span>
-                </div>
+                {deployProgress && deployProgress.stage === activeStage ? (
+                  <div className="mt-0.5 inline-flex items-center gap-1.5 text-[13px] font-semibold text-primary">
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    {deployProgress.msg}
+                  </div>
+                ) : (
+                  <div className={cn('mt-0.5 text-[13px] font-semibold', friendly.color)}>
+                    {friendly.label}
+                    <span className="font-normal text-muted-foreground">
+                      {currentEntry?.deployed_at ? ` · updated ${currentEntry.deployed_at}` : ' · never deployed'}
+                    </span>
+                  </div>
+                )}
                 {deployError && deployError.stage === activeStage && (
                   <div className="mt-1.5 rounded-md bg-red-50 px-2.5 py-1.5 text-[12px] font-medium text-red-700 ring-1 ring-red-200">
                     Last deploy to {STAGE_LABEL[activeStage]} failed: {deployError.msg}

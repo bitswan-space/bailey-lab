@@ -296,7 +296,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const btn = await d.getByRole('button', { name: /Working|Sync & Deploy|Promote|Switching|Starting/i }).first().textContent().catch(() => '');
     if (btn && btn.trim()) parts.push('btn:' + btn.trim());
     // The stage card status line + version (changes when a deploy lands).
-    const status = await d.getByText(/Healthy|services? not running|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|updated|never deployed/i).first().textContent().catch(() => '');
+    const status = await d.getByText(/Healthy|services? not running|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|Generating|Configuring|Reconciling|Provisioning|Installing|Recording|Updating|updated|never deployed/i).first().textContent().catch(() => '');
     if (status && status.trim()) parts.push('status:' + status.trim());
     return parts.join(' | ');
   };
