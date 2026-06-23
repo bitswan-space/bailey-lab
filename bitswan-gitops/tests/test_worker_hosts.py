@@ -76,6 +76,11 @@ def test_worker_hosts_injected_into_all_containers(svc):
     # Both the frontend and the worker learn the worker hosts; only the
     # worker (backend) is listed, at its own host:port.
     for name, entry in services.items():
+        # The egress firewall gateway owns the worker's network namespace but is
+        # NOT itself a worker — it carries no app and no BITSWAN_WORKER_HOSTS
+        # (only its BITSWAN_FW_* config). Skip it.
+        if (entry.get("labels") or {}).get("gitops.firewall_gateway") == "true":
+            continue
         env = entry.get("environment", {})
         assert "BITSWAN_WORKER_HOSTS" in env, name
         hosts = env["BITSWAN_WORKER_HOSTS"]
