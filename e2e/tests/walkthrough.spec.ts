@@ -37,10 +37,18 @@ import { BP, WORKSPACE, COMPANY, SECRETS, TEAMMATE } from '../scenario';
 // (deploy/promote/snapshot/DR restore) are not bounded by a flat SLA — they are
 // bounded by the PROGRESS rule: the screen must change at least every PROGRESS
 // window, or the run fails. Every chapter is still timed and recorded to the run
-// timeline; a chapter "breaches" only if it suffered a >15s silent-progress gap
-// (recorded by the watchdog), never merely for taking longer than 60s.
+// timeline; a chapter "breaches" only if it suffered a silent-progress gap
+// longer than the PROGRESS window (recorded by the watchdog), never merely for
+// taking longer than the SLA.
 const SLA = 60_000; // short-interaction SLA: nothing quick should wait longer
-const PROGRESS = 15_000; // long-op rule: the screen must move within this window
+// long-op rule: the screen must move within this window or the product is
+// considered "gone dark". Promote shows a single coarse "Promoting to <stage>…"
+// status (not the deploy's granular steps), and a promote now stands up
+// per-(workspace,stage) infra (postgres/minio fresh per stage) — so that one
+// status can legitimately hold for tens of seconds on CI dind. Keep the window
+// well above a real promote's coarse-status span; the 30-min backstop in
+// waitDeployDone still catches a genuine hang.
+const PROGRESS = 60_000;
 const NAV = 15_000; // a tab/section/stage click targets an element already on
 // screen, so it should land fast. If it can't within NAV, something (usually a
 // stuck modal) is intercepting clicks — fail fast here instead of burning the
