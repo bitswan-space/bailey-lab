@@ -14,6 +14,7 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/caddyapi"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 	"github.com/bitswan-space/bitswan-workspaces/internal/util"
@@ -669,8 +670,24 @@ providers:
 		wildcardResolver = dnsCertResolverName
 	}
 
-	// No stage networks — just bitswan_network for backward compatibility
-	traefikDockerCompose, err := dockercompose.CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikConfigForCompose, domain, wildcardResolver, nil)
+	// Per-(workspace, stage) network isolation: create the stage networks and
+	// multi-home the workspace sub-traefik across them + bitswan_network. The
+	// sub-traefik is the SOLE bridge from the ingress to stage-isolated
+	// automations (which live ONLY on their {workspace}-{stage} network, never
+	// on bitswan_network — see gitops generate_docker_compose and
+	// network_security_model.md). Without this, automations could reach gitops /
+	// the dashboard / the daemon directly.
+	stageNetworks := []string{
+		workspaceName + "-dev",
+		workspaceName + "-staging",
+		workspaceName + "-production",
+	}
+	for _, net := range stageNetworks {
+		if _, err := docker.EnsureDockerNetwork(net, verbose); err != nil {
+			return false, fmt.Errorf("failed to ensure stage network %s: %w", net, err)
+		}
+	}
+	traefikDockerCompose, err := dockercompose.CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikConfigForCompose, domain, wildcardResolver, stageNetworks)
 	if err != nil {
 		return false, fmt.Errorf("failed to create workspace traefik docker-compose file: %w", err)
 	}
@@ -1483,6 +1500,19 @@ func (s *Server) handleIngressReconcile(w http.ResponseWriter, r *http.Request) 
 
 	jwtToken := r.Header.Get("BITSWAN_AUTOMATION_SERVER_DAEMON_TOKEN")
 	resp := IngressReconcileResponse{Success: true, Pruned: []string{}}
+
+	// Ensure the per-workspace sub-traefik exists before we push routes to it.
+	// It is the multi-homed bridge (bitswan_network + {workspace}-{stage}) that
+	// reaches stage-isolated automations the gate itself cannot. initWorkspaceTraefik
+	// is idempotent (returns immediately if the container already exists) and
+	// also (re)creates the stage networks. Domain is taken from a desired route.
+	if len(req.Routes) > 0 {
+		if _, dom, ok := strings.Cut(toOuterHost(req.Routes[0].Hostname), "."); ok && dom != "" {
+			if _, err := initWorkspaceTraefik(req.WorkspaceName, dom, false); err != nil {
+				resp.Warnings = append(resp.Warnings, "init workspace sub-traefik: "+err.Error())
+			}
+		}
+	}
 
 	// 1. Upsert every desired route and mark it gitops-managed. Skip the
 	//    (multi-write, ~1s) re-apply only when the route is ALREADY resolving to

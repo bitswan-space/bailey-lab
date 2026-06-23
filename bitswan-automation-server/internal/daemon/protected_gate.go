@@ -64,25 +64,30 @@ func upstreamForHost(host string) *url.URL {
 		u, _ := url.Parse("http://" + upstreamDaemonHost() + ":8080")
 		return u
 	}
+	// Workspace hostname: <workspace>-<service>.<domain> (outer form). Route it
+	// to the multi-homed per-workspace sub-traefik — the ONLY component that can
+	// reach both bitswan_network management services (gitops/dashboard) AND the
+	// stage-isolated automation containers on {workspace}-{stage}. Routing to the
+	// recorded protected-route upstream directly would 502 for any automation,
+	// because the gate (on bitswan_network) cannot reach a stage network. The
+	// sub-traefik holds the per-host route (pushed by addRouteTraefik) and
+	// resolves the upstream on whichever network the target sits on.
+	label, _, _ := strings.Cut(outer, ".")
+	if ws := workspaceFromLabel(label); ws != "" {
+		u, _ := url.Parse("http://" + ws + "__traefik:80")
+		return u
+	}
+	// Not a workspace host — a separately-registered protected endpoint. Use the
+	// recorded post-auth upstream directly.
 	if up, err := lookupProtectedRouteUpstream(outer); err == nil && up != "" {
 		if !strings.Contains(up, "://") {
 			up = "http://" + up
 		}
-		u, err := url.Parse(up)
-		if err == nil {
+		if u, err := url.Parse(up); err == nil {
 			return u
 		}
 	}
-	// Workspace hostname: <workspace>-<service>.<domain> (outer form).
-	// Drop the .<domain> tail to get the label, then trim back to a
-	// known workspace.
-	label, _, _ := strings.Cut(outer, ".")
-	ws := workspaceFromLabel(label)
-	if ws == "" {
-		return nil
-	}
-	u, _ := url.Parse("http://" + ws + "__traefik:80")
-	return u
+	return nil
 }
 
 // upstreamDaemonHost returns the address of the daemon's HTTP server.
