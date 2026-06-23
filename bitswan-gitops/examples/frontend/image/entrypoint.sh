@@ -20,6 +20,13 @@ VITE=/deps/node_modules/.bin/vite
 
 if [ "$BITSWAN_AUTOMATION_STAGE" = "live-dev" ]; then
   echo "Frontend: vite (hot reload) on :5173 + shim on :8080"
+  # The deployed /app is read-only and the committed `node_modules -> /deps`
+  # symlink isn't reliably materialized into the copy, so vite (root=/app) can't
+  # find node_modules and fails to resolve bare imports (react/jsx-dev-runtime).
+  # Provide node_modules at the container ROOT (writable): vite walks up from
+  # /app and resolves via /node_modules -> /deps/node_modules. (The build branch
+  # below does the equivalent under a writable /tmp copy.)
+  ln -sfn /deps/node_modules /node_modules
   "$VITE" --config /deps/vite.config.mjs --host 127.0.0.1 --port 5173 &
 else
   echo "Frontend: building production bundle, serving on :5173 + shim on :8080"

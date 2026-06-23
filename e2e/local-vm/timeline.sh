@@ -12,8 +12,13 @@
 # Override TL_FILE / TL_STATE before sourcing to use a different timeline (the
 # host runner does this so its phases don't collide with the guest's).
 
-TL_FILE="${TL_FILE:-/repo/e2e/manual/build/timeline.tsv}"
-TL_STATE="${TL_STATE:-/repo/e2e/manual/build/.timeline-state}"
+# Default the timeline under e2e/manual/build relative to THIS script, so it
+# works both in the VM (repo at /repo) and in CI / any checkout (repo at
+# $GITHUB_WORKSPACE) — a hardcoded /repo broke the dind e2e bring-up, whose
+# checkout isn't at /repo. Callers may still override TL_FILE/TL_STATE.
+_tl_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TL_FILE="${TL_FILE:-$_tl_self/../manual/build/timeline.tsv}"
+TL_STATE="${TL_STATE:-$_tl_self/../manual/build/.timeline-state}"
 
 # Begin a fresh timeline. Call ONCE at the very start of the run.
 tl_begin() {

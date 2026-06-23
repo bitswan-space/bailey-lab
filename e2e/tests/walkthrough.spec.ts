@@ -830,28 +830,37 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         // is up) and otherwise reload after a short on-screen settle — bounded by
         // a generous budget so a genuinely-broken frontend still ends (and we
         // capture whatever it shows) rather than hanging. Best-effort/non-aborting.
-        const looksLike404 = async (): Promise<boolean> =>
-          await popup.getByText(/404 page not found|404\b.*not found|page not found/i)
-            .first()
-            .isVisible()
+        // The frontend popup is the Bailey chrome WRAP (outer host) that IFRAMES
+        // the inner frontend host — so the React app's #root lives in the INNER
+        // FRAME, not the popup's top document. Resolve that frame, then wait for
+        // the app to render VISIBLE content into #root (main.tsx mounts there). A
+        // 404 (router not up) and Vite's cold-start (optimizing deps on the first
+        // request) both serve HTTP 200 while #root is empty, so WAIT for a visible
+        // descendant — not instant-check, which races the cold optimize + render.
+        const innerOf = () =>
+          popup.frames().find((f) => /--inner\./.test(f.url())) ?? popup.mainFrame();
+        const reloadDeadline = Date.now() + 6 * 60_000;
+        for (let attempt = 0; attempt < 8; attempt++) {
+          // Let the chrome wrap attach its inner <iframe> before we read it.
+          await popup.waitForSelector('iframe', { timeout: 30_000 }).catch(() => {});
+          const inner = innerOf();
+          await inner.getByText(/Loading|Starting/i).first()
+            .waitFor({ state: 'hidden', timeout: 30_000 }).catch(() => {});
+          const mounted = await inner.locator('#root :visible').first()
+            .waitFor({ state: 'visible', timeout: 45_000 })
+            .then(() => true)
             .catch(() => false);
-        const reloadDeadline = Date.now() + 5 * 60_000;
-        for (let attempt = 0; attempt < 20; attempt++) {
-          // Wait generously for the app to finish its own boot (Loading/Starting
-          // clears) so we don't mistake a spinner frame for the served app.
-          await popup.getByText(/Loading|Starting/i).first()
-            .waitFor({ state: 'hidden', timeout: 2 * 60_000 }).catch(() => {});
-          await popup.locator('body :visible').first()
-            .waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
-          if (!(await looksLike404())) break; // real app content is up
-          if (Date.now() > reloadDeadline) break; // budget spent — capture as-is
+          if (mounted) break; // the React app rendered visible content into #root
+          if (Date.now() > reloadDeadline) break; // budget spent — assert below
           await popup.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
         }
-        // Give a settle beat for the frontend to paint its content, then capture
-        // the running frontend AS 'live-dev'. The 404-poll above ensures this is
-        // the real app, not a "page not found"; on the rare exhausted budget we
-        // still capture whatever real content it shows (best-effort).
-        await popup.locator('body :visible').first().waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+        // Truly validate: the live-dev frontend must render its MOUNTED app (in the
+        // inner frame) — not a blank page, a Vite dev-error overlay, or a 404. A
+        // persistent failure to render visible content is a real defect and must
+        // FAIL the chapter, not be screenshotted as if the step passed.
+        await expect(innerOf().locator('#root :visible').first(),
+          'live-dev frontend never rendered visible content into #root (Vite build error or 404?) — check the frontend template')
+          .toBeVisible({ timeout: SLA });
         await capture(popup, 'live-dev').catch(() => {});
         captured = true;
         await popup.close().catch(() => {});
