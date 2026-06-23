@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 	"github.com/dchest/uniuri"
 )
 
@@ -325,6 +326,31 @@ func (s *Server) Run() error {
 				break
 			}
 			if i < maxRetries-1 {
+				time.Sleep(2 * time.Second)
+			}
+		}
+	}()
+
+	// Reconcile-drop self-heal: on EVERY startup re-push the saved Traefik
+	// dynamic config (rest-state.json) to Traefik. The daemon's
+	// protected_routes table + the REST state file are the source of truth,
+	// but Traefik's REST provider holds its config in memory — so a daemon
+	// recreate (or a Traefik restart) can leave Traefik missing every
+	// workspace route while the records still say "in sync" (the ingress
+	// reconcile compares the recorded upstream, not Traefik, so it skips
+	// re-applying). InitTraefik (a no-op modifyState) re-pushes the full
+	// saved state, so any restart/recreate self-heals instead of silently
+	// dropping all routes. Best-effort with retry — Traefik may not be
+	// reachable the instant the daemon boots.
+	go func() {
+		time.Sleep(2 * time.Second)
+		for i := 0; i < 6; i++ {
+			if err := traefikapi.InitTraefik(); err == nil {
+				fmt.Println("Re-pushed saved Traefik dynamic config on startup")
+				break
+			} else if i == 5 {
+				fmt.Printf("Warning: failed to re-push Traefik state on startup: %v\n", err)
+			} else {
 				time.Sleep(2 * time.Second)
 			}
 		}
