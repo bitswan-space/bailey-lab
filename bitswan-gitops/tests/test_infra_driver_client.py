@@ -8,6 +8,7 @@ Validates the two transports end-to-end without docker:
     JSON + SSE contract.
 """
 
+import base64
 import json
 import os
 import stat
@@ -20,6 +21,7 @@ from aiohttp.test_utils import TestServer
 from app.services.infra_driver_client import (
     BuildRequest,
     Container,
+    ExecSpec,
     ImageRef,
     InfraDriverClient,
     InfraDriverError,
@@ -166,11 +168,46 @@ async def driver_server():
         await resp.write_eof()
         return resp
 
+    def _frame(stream: int, payload: bytes) -> bytes:
+        return bytes([stream]) + len(payload).to_bytes(4, "big") + payload
+
+    async def exec_handler(request):
+        # Echo the exec metadata + streamed stdin back as framed stdout, then a
+        # stderr line and an exit frame — mirrors execframe.go on the Go side.
+        if not authed(request):
+            return web.Response(status=401)
+        meta = json.loads(base64.b64decode(request.headers["X-Bitswan-Exec"]))
+        stdin = await request.read()
+        resp = web.StreamResponse()
+        resp.headers["Content-Type"] = "application/octet-stream"
+        await resp.prepare(request)
+        # binary-safe stdout: echo stdin verbatim (could be a dump), plus a marker
+        await resp.write(_frame(1, b"\x00\x01" + stdin))
+        await resp.write(_frame(2, b"cmd: " + " ".join(meta["spec"]["cmd"]).encode()))
+        code = 7 if meta["spec"]["container"] == "boom" else 0
+        await resp.write(_frame(3, code.to_bytes(4, "big")))
+        await resp.write_eof()
+        return resp
+
+    async def exec_error_handler(request):
+        resp = web.StreamResponse()
+        resp.headers["Content-Type"] = "application/octet-stream"
+        await resp.prepare(request)
+        await resp.write(
+            bytes([4])
+            + len(b"no such container").to_bytes(4, "big")
+            + b"no such container"
+        )
+        await resp.write_eof()
+        return resp
+
     app = web.Application()
     app.router.add_post("/v1/containers/list", list_handler)
     app.router.add_post("/v1/containers/stop", stop_handler)
     app.router.add_post("/v1/build-image", build_handler)
     app.router.add_post("/v1/build-error", build_error_handler)
+    app.router.add_post("/v1/containers/exec", exec_handler)
+    app.router.add_post("/v1/exec-error", exec_error_handler)
     server = TestServer(app)
     await server.start_server()
     try:
@@ -242,6 +279,56 @@ async def test_sse_error_frame_raises(driver_server):
 
     with pytest.raises(InfraDriverError, match="boom"):
         await client._stream("/v1/build-error", {"ctx": WCTX.to_json()}, on_frame)
+
+
+async def test_exec_streams_stdin_stdout_and_exit(driver_server):
+    client = InfraDriverClient(
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+    )
+    out, err = bytearray(), bytearray()
+
+    async def on_out(chunk):
+        out.extend(chunk)
+
+    async def on_err(chunk):
+        err.extend(chunk)
+
+    code = await client.exec(
+        WCTX,
+        ExecSpec(container="acme-postgres", cmd=["pg_dump", "-Fc", "db"]),
+        stdin=b"\xff\x00binary-stdin",
+        on_stdout=on_out,
+        on_stderr=on_err,
+    )
+    assert code == 0
+    # stdout is the server marker + echoed (binary-safe) stdin.
+    assert bytes(out) == b"\x00\x01\xff\x00binary-stdin"
+    assert bytes(err) == b"cmd: pg_dump -Fc db"
+
+
+async def test_exec_propagates_nonzero_exit(driver_server):
+    client = InfraDriverClient(
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+    )
+    code = await client.exec(WCTX, ExecSpec(container="boom", cmd=["false"]))
+    assert code == 7
+
+
+async def test_exec_error_frame_raises(driver_server):
+    client = InfraDriverClient(
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+    )
+    with pytest.raises(InfraDriverError, match="no such container"):
+        # Hit the error endpoint directly via the frame reader path.
+        async with __import__("httpx").AsyncClient() as hc:
+            async with hc.stream(
+                "POST",
+                str(driver_server.make_url("/v1/exec-error")),
+                headers={"Authorization": "Bearer s3cret"},
+            ) as resp:
+                from app.services.infra_driver_client import _read_exec_frames
+
+                await _read_exec_frames(resp.aiter_bytes(), None, None)
 
 
 def test_require_env_fails_loudly(monkeypatch):

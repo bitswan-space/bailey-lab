@@ -25,10 +25,11 @@ return-None-on-error.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Optional
+from typing import AsyncIterator, Awaitable, Callable, Optional
 
 import httpx
 
@@ -38,11 +39,21 @@ PATH_CONTAINERS_LIST = "/v1/containers/list"
 PATH_CONTAINERS_LOGS = "/v1/containers/logs"
 PATH_CONTAINERS_STOP = "/v1/containers/stop"
 PATH_CONTAINERS_RESTART = "/v1/containers/restart"
+PATH_CONTAINERS_EXEC = "/v1/containers/exec"
 
 # SSE event names (api.go).
 EVENT_LOG = "log"
 EVENT_IMAGE = "image"
 EVENT_ERROR = "error"
+
+# exec wire (api.go / execframe.go): metadata rides this header (base64 of
+# {ctx, spec}); stdin is the raw request body; the response is a binary
+# multiplexed stream of [stream:1][len:4 big-endian][payload] frames.
+HEADER_EXEC = "X-Bitswan-Exec"
+_EXEC_STDOUT = 1
+_EXEC_STDERR = 2
+_EXEC_EXIT = 3
+_EXEC_ERROR = 4
 
 # Markers the driver's apply prints on the post-receive hook's stdout.
 _ROUTE_PREFIX = "[route] "
@@ -154,6 +165,18 @@ class BuildRequest:
             "mount_path": self.mount_path,
             "source_sha": self.source_sha,
         }
+
+
+@dataclass
+class ExecSpec:
+    """One container exec invocation (driver.go ExecSpec)."""
+
+    container: str
+    cmd: list[str]
+    tty: bool = False
+
+    def to_json(self) -> dict:
+        return {"container": self.container, "cmd": self.cmd, "tty": self.tty}
 
 
 class InfraDriverClient:
@@ -333,6 +356,54 @@ class InfraDriverClient:
 
         await self._stream(PATH_CONTAINERS_LOGS, body, on_frame)
 
+    # ---- exec (general escape hatch: backups/restores/maintenance) ----------
+
+    async def exec(
+        self,
+        ctx: WorkspaceContext,
+        spec: ExecSpec,
+        stdin: "bytes | AsyncIterator[bytes] | None" = None,
+        on_stdout: Optional[Callable[[bytes], Awaitable[None]]] = None,
+        on_stderr: Optional[Callable[[bytes], Awaitable[None]]] = None,
+    ) -> int:
+        """Run a command in a container and return its exit code.
+
+        ``stdin`` (bytes or an async byte iterator) is streamed to the process
+        stdin — used to feed restore dumps without buffering. ``on_stdout`` /
+        ``on_stderr`` receive raw byte chunks as they arrive (binary-safe: a
+        pg_dump is not text). The driver holds docker.sock; this is the only
+        path by which gitops runs in-container commands after the cut-over.
+        Fails loudly: a transport error or a driver error frame raises.
+        """
+        meta = base64.b64encode(
+            json.dumps({"ctx": ctx.to_json(), "spec": spec.to_json()}).encode()
+        ).decode()
+        headers = {
+            **self._headers,
+            HEADER_EXEC: meta,
+            "Content-Type": "application/octet-stream",
+        }
+        # httpx sends None as an empty body; bytes/async-iterators stream as-is.
+        content = b"" if stdin is None else stdin
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                async with client.stream(
+                    "POST",
+                    self.base_url + PATH_CONTAINERS_EXEC,
+                    content=content,
+                    headers=headers,
+                ) as resp:
+                    if resp.status_code != 200:
+                        text = (await resp.aread()).decode(errors="replace")
+                        raise InfraDriverError(
+                            f"{PATH_CONTAINERS_EXEC}: HTTP {resp.status_code}: {text}"
+                        )
+                    return await _read_exec_frames(
+                        resp.aiter_bytes(), on_stdout, on_stderr
+                    )
+            except httpx.HTTPError as e:
+                raise InfraDriverError(f"{PATH_CONTAINERS_EXEC}: {e}") from e
+
     # ---- transport helpers --------------------------------------------------
 
     async def _post_json(self, path: str, body: dict) -> dict:
@@ -396,6 +467,53 @@ class InfraDriverClient:
         async for raw in proc.stdout:
             await on_line(raw.decode(errors="replace").rstrip("\n"))
         return await proc.wait()
+
+
+async def _read_exec_frames(
+    chunks: AsyncIterator[bytes],
+    on_stdout: Optional[Callable[[bytes], Awaitable[None]]],
+    on_stderr: Optional[Callable[[bytes], Awaitable[None]]],
+) -> int:
+    """Demux the binary exec response (execframe.go) from a byte-chunk stream:
+    [stream:1][len:4 big-endian][payload]. Returns the exit-frame code; an
+    error frame (or a stream that ends with no exit frame) raises."""
+    buf = bytearray()
+    chunk_iter = chunks.__aiter__()
+
+    async def fill(n: int) -> bool:
+        # Pull chunks until buf has at least n bytes; False at clean EOF.
+        while len(buf) < n:
+            try:
+                buf.extend(await chunk_iter.__anext__())
+            except StopAsyncIteration:
+                return False
+        return True
+
+    while True:
+        if not await fill(5):
+            if buf:
+                raise InfraDriverError("exec stream truncated mid-frame header")
+            raise InfraDriverError("exec stream ended without an exit frame")
+        stream = buf[0]
+        length = int.from_bytes(bytes(buf[1:5]), "big")
+        if not await fill(5 + length):
+            raise InfraDriverError("exec stream truncated mid-frame payload")
+        payload = bytes(buf[5 : 5 + length])
+        del buf[: 5 + length]
+        if stream == _EXEC_STDOUT:
+            if on_stdout is not None:
+                await on_stdout(payload)
+        elif stream == _EXEC_STDERR:
+            if on_stderr is not None:
+                await on_stderr(payload)
+        elif stream == _EXEC_EXIT:
+            if len(payload) != 4:
+                raise InfraDriverError("malformed exec exit frame")
+            return int.from_bytes(payload, "big", signed=True)
+        elif stream == _EXEC_ERROR:
+            raise InfraDriverError(f"exec: {payload.decode(errors='replace')}")
+        else:
+            raise InfraDriverError(f"unknown exec frame stream {stream}")
 
 
 def _decode_sse_data(data: str) -> dict:
