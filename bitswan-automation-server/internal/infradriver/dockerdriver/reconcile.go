@@ -44,6 +44,15 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		return err
 	}
 
+	// 3b. Fail-fast: ensure the live Postgres DB each backend connects to exists
+	//     before it settles into a connect-retry loop (bp_databases.
+	//     ensure_live_postgres_dbs). Raises if Postgres is enabled but the DB
+	//     can't be created — a clear deploy error beats a silent crash-loop.
+	report("provision", "Ensuring live databases...")
+	if err := ensureLivePostgresDBs(ctx, wctx, bs, report); err != nil {
+		return fmt.Errorf("ensure live postgres dbs: %w", err)
+	}
+
 	// 4. Install CA certs + start oauth2 sidecars in the freshly-(re)started
 	//    containers selected by their gitops labels.
 	report("certs", "Installing CA certificates...")
@@ -54,6 +63,12 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	if err := startOAuth2ProxyInContainers(ctx, wctx, report); err != nil {
 		return err
 	}
+
+	// 4b. Best-effort per-BP namespaces: MinIO buckets + the standby blue-green
+	//     Postgres DB (bp_databases.provision_for_deployments). Never fails the
+	//     deploy — these back snapshots/restore, not the live path.
+	report("provision", "Provisioning per-BP namespaces...")
+	provisionForDeployments(ctx, wctx, bs, report)
 
 	// 5. Configure ingress: converge the daemon's gitops-managed routes to the
 	//    desired set. The applier owns the Ingress (k8s-style), so this is the
