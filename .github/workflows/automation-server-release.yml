@@ -53,6 +53,26 @@ jobs:
           git tag "v$VERSION"
           git push origin "v$VERSION"
 
+      # 4.5) Build the embedded Server Console SPA. Its build output is not
+      # committed (the daemon pulls it in via `go:embed serverconsole_dist`),
+      # so without this step the released binary embeds only the .gitkeep
+      # placeholder and bailey.<domain> / bailey-onboard.<domain> render an
+      # empty directory listing instead of the console. Mirrors the test and
+      # coverage workflows.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Server Console (embedded SPA)
+        working-directory: ${{ github.workspace }}
+        run: |
+          npm --prefix bitswan-server-console install --no-audit --no-fund
+          npm --prefix bitswan-server-console run build
+          rm -rf bitswan-automation-server/internal/daemon/serverconsole_dist
+          mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
+          cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
+
       # 5) Cross-compile for six target triples
       - name: Build binaries
         env:

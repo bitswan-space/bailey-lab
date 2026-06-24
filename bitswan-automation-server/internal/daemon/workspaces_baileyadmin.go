@@ -214,7 +214,10 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 	// bitswan-protected-proxy, not a per-workspace Keycloak client, so init must
 	// not try to fetch a per-workspace OAuth config from the AOC (it 404s and
 	// fails the create). The Server Console create path is always Bailey-fronted.
-	args := []string{"workspace", "init", "--no-oauth", "--domain", domain, "--owner", email, name}
+	// --staging: CI publishes only the -staging gitops/dashboard/coding-agent
+	// images on every push to main, so a server running a current binary must
+	// pull those (the prod repos aren't published by CI and would be stale).
+	args := []string{"workspace", "init", "--no-oauth", "--staging", "--domain", domain, "--owner", email, name}
 	confirmCh := make(chan struct{}, 1)
 	confirmCh <- struct{}{}
 
