@@ -3,41 +3,50 @@
 // small context) and a Driver compiles it to a concrete backend (Docker today,
 // Kubernetes later) and reconciles. See README.md for the architecture.
 //
-// This file is the in-process Go contract. The gRPC server
-// (proto/v1/infradriver.proto) is a thin adapter over it, and each backend
-// (dockerdriver, k8sdriver) is one implementation — so the wire protocol and
-// the backends share one source of truth and a backend swap touches no gitops
-// code.
+// The surface is deliberately minimal. There is ONE declarative entry point —
+// Apply, the bitswan.yaml compiler — plus four operational container
+// primitives (list/logs/stop/restart). Everything orchestration-shaped is a
+// bitswan.yaml mutation followed by Apply: deploy is a write+Apply, promote is
+// adding a stage's deployment+Apply, swap is flipping the live slot/db+Apply,
+// scale is changing replicas+Apply, rollback is pinning the version+Apply, and
+// backup/restore is the bitswan.yaml backup state the compiler realizes. If a
+// flow doesn't fit, the fix is to make bitswan.yaml more expressive — NOT to
+// add a driver command. Image building folds into Apply (the compiler builds
+// the images its declaration needs).
+//
+// This file is the in-process Go contract. The HTTP/SSE server (api.go) is a
+// thin adapter over it, and each backend (dockerdriver, k8sdriver) is one
+// implementation — so the wire protocol and the backends share one source of
+// truth and a backend swap touches no gitops code.
 package infradriver
 
 import "context"
 
-// Driver realizes declarative workspace intent against a backend. Every method
-// is idempotent where it can be; Apply in particular must be a no-op when the
-// running state already matches the declaration.
+// Driver realizes declarative workspace intent against a backend.
 type Driver interface {
 	// Apply compiles ctx+bitswanYAML into desired backend state and reconciles
-	// to it (networks, services, sidecars, routes). prog receives streamed
-	// progress steps; the returned routes let gitops keep its own view in sync.
-	// onlyDeploymentIDs (optional) narrows reconciliation to a single BP/stage.
+	// to it: build any source images, ensure networks, generate and bring up
+	// the compose project, install CA certs + oauth2 sidecars, and realize the
+	// data state the declaration implies (blue-green DB seeding, restores).
+	// Idempotent — a no-op when the running state already matches. prog receives
+	// streamed progress; the returned routes let gitops keep its own view in
+	// sync. onlyDeploymentIDs (optional) narrows reconciliation to a subset.
 	Apply(ctx context.Context, req ApplyRequest, prog func(Progress)) ([]Route, error)
 
-	// BuildImage bakes a source tree into an image, content-addressed by
-	// SourceSHA (a cache hit returns immediately with CacheHit=true).
-	BuildImage(ctx context.Context, req BuildRequest, prog func(string)) (ImageRef, error)
+	// ContainerList returns the workspace's containers (optionally filtered by
+	// label/stage). gitops derives deployment status from this — health, image,
+	// replica count, blue-green slot are all read off the containers + labels.
+	ContainerList(ctx context.Context, req WorkspaceContext, filter ContainerFilter) ([]Container, error)
 
-	// Snapshot / Restore dump and load a deployment's data services.
-	Snapshot(ctx context.Context, req SnapshotRequest, prog func(Progress)) error
-	Restore(ctx context.Context, req RestoreRequest, prog func(Progress)) error
+	// ContainerLogs streams a container's logs to sink until ctx is done
+	// (follow) or EOF.
+	ContainerLogs(ctx context.Context, req WorkspaceContext, container string, tail int, follow bool, sink func(LogLine)) error
 
-	// Status returns the realized state of the given deployments (all if empty).
-	Status(ctx context.Context, req WorkspaceContext, deploymentIDs []string) ([]DeploymentState, error)
-
-	// Logs streams a container's logs to sink until ctx is done (follow) or EOF.
-	Logs(ctx context.Context, req WorkspaceContext, container string, tail int, follow bool, sink func(LogLine)) error
-
-	// WatchEvents streams backend state-change events to sink until ctx is done.
-	WatchEvents(ctx context.Context, req WorkspaceContext, sink func(Event)) error
+	// ContainerStop / ContainerRestart are operational primitives — a transient
+	// action on one container, NOT a state change (state changes go through a
+	// bitswan.yaml mutation + Apply).
+	ContainerStop(ctx context.Context, req WorkspaceContext, container string) error
+	ContainerRestart(ctx context.Context, req WorkspaceContext, container string) error
 }
 
 // WorkspaceContext is everything the compiler needs that is not in bitswan.yaml.
@@ -57,31 +66,24 @@ type ApplyRequest struct {
 	OnlyDeploymentIDs []string         `json:"only_deployment_ids,omitempty"`
 }
 
-type BuildRequest struct {
-	Ctx        WorkspaceContext `json:"ctx"`
-	SourcePath string           `json:"source_path"`
-	BaseImage  string           `json:"base_image"`
-	MountPath  string           `json:"mount_path"`
-	SourceSHA  string           `json:"source_sha"`
+// ContainerFilter narrows ContainerList. Empty fields are ignored; Labels are
+// matched as exact key=value pairs (e.g. gitops.deployment.id, gitops.stage).
+type ContainerFilter struct {
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
-type SnapshotRequest struct {
-	Ctx        WorkspaceContext `json:"ctx"`
-	BP         string           `json:"bp"`
-	Stage      string           `json:"stage"`
-	SnapshotID string           `json:"snapshot_id"`
+// Container is one realized container.
+type Container struct {
+	ID     string            `json:"id"`
+	Name   string            `json:"name"`
+	State  string            `json:"state"`  // "running" | "exited" | "created" | ...
+	Health string            `json:"health"` // "healthy" | "starting" | "unhealthy" | "" (no healthcheck)
+	Image  string            `json:"image"`
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
-type RestoreRequest struct {
-	Ctx        WorkspaceContext `json:"ctx"`
-	BP         string           `json:"bp"`
-	FromStage  string           `json:"from_stage"`
-	ToStage    string           `json:"to_stage"`
-	SnapshotID string           `json:"snapshot_id"`
-}
-
-// Progress is one step of an Apply/Snapshot/Restore. Step is a stable machine
-// key; Message is the human line. Streamed as SSE `event: progress` frames.
+// Progress is one step of an Apply. Step is a stable machine key; Message is the
+// human line. Streamed as SSE `event: progress` frames.
 type Progress struct {
 	Step    string `json:"step"`
 	Message string `json:"message"`
@@ -93,27 +95,7 @@ type Route struct {
 	Stage    string `json:"stage"`
 }
 
-type ImageRef struct {
-	FullTag  string `json:"full_tag"`
-	ImageID  string `json:"image_id"`
-	CacheHit bool   `json:"cache_hit"`
-}
-
-type DeploymentState struct {
-	DeploymentID string `json:"deployment_id"`
-	Stage        string `json:"stage"`
-	Image        string `json:"image"`
-	Replicas     int    `json:"replicas"`
-	Health       string `json:"health"` // "healthy" | "starting" | "not_running" | "unknown"
-	Slot         string `json:"slot,omitempty"`
-}
-
 type LogLine struct {
 	Line   string `json:"line"`
 	Stderr bool   `json:"stderr"`
-}
-
-type Event struct {
-	Container string `json:"container"`
-	Action    string `json:"action"`
 }

@@ -11,12 +11,13 @@ import (
 	"strings"
 )
 
-// Client speaks the HTTP/SSE contract to a driver over a UNIX socket. gitops
-// has its own (Python) equivalent; this Go client is used by tests and by the
-// daemon when it drives infra itself.
+// Client calls the driver's container primitives over its UNIX socket. Apply is
+// NOT here — callers trigger it by pushing to the driver's git remote. gitops
+// has its own (Python) equivalent of this client; the Go one is used by tests
+// and by the daemon when it inspects containers itself.
 type Client struct {
 	http *http.Client
-	base string // dummy host; the UNIX socket dialer ignores it
+	base string
 }
 
 // NewUnixClient dials the driver on the given UNIX socket path.
@@ -33,76 +34,82 @@ func NewUnixClient(socketPath string) *Client {
 	}
 }
 
-// newClientFor builds a Client against an arbitrary base URL (used by tests with
-// httptest.Server).
+// newClientFor builds a Client against an arbitrary base URL (tests).
 func newClientFor(hc *http.Client, base string) *Client {
 	return &Client{http: hc, base: strings.TrimRight(base, "/")}
 }
 
-// Apply streams a compile+reconcile; prog receives each progress step; the
-// realized routes are returned on success.
-func (c *Client) Apply(ctx context.Context, req ApplyRequest, prog func(Progress)) ([]Route, error) {
-	var routes []Route
-	err := c.stream(ctx, PathApply, req, func(event string, data []byte) error {
+// ContainerList returns the workspace's containers (optionally filtered).
+func (c *Client) ContainerList(ctx context.Context, wctx WorkspaceContext, filter ContainerFilter) ([]Container, error) {
+	var out ContainerListResult
+	if err := c.postJSON(ctx, PathContainersList, ListBody{Ctx: wctx, Filter: filter}, &out); err != nil {
+		return nil, err
+	}
+	return out.Containers, nil
+}
+
+// ContainerStop stops a container.
+func (c *Client) ContainerStop(ctx context.Context, wctx WorkspaceContext, container string) error {
+	return c.postJSON(ctx, PathContainersStop, ContainerBody{Ctx: wctx, Container: container}, &OKResult{})
+}
+
+// ContainerRestart restarts a container.
+func (c *Client) ContainerRestart(ctx context.Context, wctx WorkspaceContext, container string) error {
+	return c.postJSON(ctx, PathContainersRestart, ContainerBody{Ctx: wctx, Container: container}, &OKResult{})
+}
+
+// ContainerLogs streams a container's logs to sink until the stream ends.
+func (c *Client) ContainerLogs(ctx context.Context, wctx WorkspaceContext, container string, tail int, follow bool, sink func(LogLine)) error {
+	body := LogsBody{Ctx: wctx, Container: container, Tail: tail, Follow: follow}
+	return c.stream(ctx, PathContainersLogs, body, func(event string, data []byte) error {
 		switch event {
-		case EventProgress:
-			var p Progress
-			if err := json.Unmarshal(data, &p); err != nil {
+		case EventLog:
+			var l LogLine
+			if err := json.Unmarshal(data, &l); err != nil {
 				return err
 			}
-			if prog != nil {
-				prog(p)
+			if sink != nil {
+				sink(l)
 			}
-		case EventDone:
-			var res ApplyResult
-			if err := json.Unmarshal(data, &res); err != nil {
-				return err
-			}
-			routes = res.Routes
 		case EventError:
 			return sseError(data)
 		}
 		return nil
 	})
-	return routes, err
 }
 
-// Status fetches deployment state (non-streamed).
-func (c *Client) Status(ctx context.Context, wctx WorkspaceContext, ids []string) ([]DeploymentState, error) {
-	body, _ := json.Marshal(StatusBody{Ctx: wctx, DeploymentIDs: ids})
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+PathStatus, bytes.NewReader(body))
+func (c *Client) postJSON(ctx context.Context, path string, reqBody, out any) error {
+	body, _ := json.Marshal(reqBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return err
 	}
-	resp, err := c.http.Do(httpReq)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status: HTTP %d", resp.StatusCode)
+		return fmt.Errorf("%s: HTTP %d", path, resp.StatusCode)
 	}
-	var out DeploymentStatus
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+	if out == nil {
+		return nil
 	}
-	return out.States, nil
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 // stream POSTs reqBody and dispatches each SSE frame to onFrame until the
 // stream ends or onFrame returns an error (e.g. a terminal error frame).
 func (c *Client) stream(ctx context.Context, path string, reqBody any, onFrame func(event string, data []byte) error) error {
-	body, err := json.Marshal(reqBody)
+	body, _ := json.Marshal(reqBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	resp, err := c.http.Do(httpReq)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
@@ -112,13 +119,13 @@ func (c *Client) stream(ctx context.Context, path string, reqBody any, onFrame f
 	}
 
 	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // tolerate large compose/log frames
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var event string
 	var data bytes.Buffer
 	for sc.Scan() {
 		line := sc.Text()
 		switch {
-		case line == "": // frame boundary
+		case line == "":
 			if event != "" {
 				if err := onFrame(event, data.Bytes()); err != nil {
 					return err
@@ -135,7 +142,6 @@ func (c *Client) stream(ctx context.Context, path string, reqBody any, onFrame f
 	if err := sc.Err(); err != nil {
 		return err
 	}
-	// flush a trailing frame with no terminating blank line
 	if event != "" {
 		return onFrame(event, data.Bytes())
 	}

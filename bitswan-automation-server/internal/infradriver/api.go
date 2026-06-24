@@ -1,60 +1,48 @@
 package infradriver
 
-// HTTP/SSE wire contract between gitops (client) and the driver (server).
+// Wire contract between gitops and the driver.
 //
-// Transport mirrors what gitops + the daemon already use elsewhere (plain HTTP
-// for request/response, Server-Sent Events for streamed progress/logs/events) —
-// no gRPC, no codegen. The driver listens on a private UNIX socket shared only
-// with its paired gitops (and the daemon); it is never network-reachable.
+// APPLY IS NOT AN RPC. The driver hosts a bare git remote for the workspace's
+// deployed state; gitops `git push`es the resolved bitswan.yaml (+ source) and
+// the driver's post-receive hook compiles + applies. The push output (the
+// hook's stdout, relayed over git's sideband) carries the apply progress, which
+// gitops forwards to the dashboard. Because every deploy/promote/swap/scale/
+// rollback/backup is a committed push, the git history IS the audit log. (A k8s
+// backend is then just ArgoCD/Flux watching the same repo — no custom driver.)
 //
-// Request bodies are the JSON-tagged structs in driver.go. Long operations
-// stream SSE frames and end with exactly one terminal frame:
+// The only RPCs are four operational container primitives, served as HTTP over
+// the private UNIX socket (never network-reachable). They are transient actions
+// / reads, NOT state changes — state changes go through a push:
 //
-//	POST /v1/apply         body ApplyRequest    → SSE: progress* then (done|error)
-//	POST /v1/build-image   body BuildRequest    → SSE: log*      then (image|error)
-//	POST /v1/snapshot      body SnapshotRequest → SSE: progress* then (done|error)
-//	POST /v1/restore       body RestoreRequest  → SSE: progress* then (done|error)
-//	POST /v1/status        body StatusBody      → JSON DeploymentStatus (not streamed)
-//	POST /v1/logs          body LogsBody        → SSE: log*      (until EOF/close)
-//	POST /v1/events        body WorkspaceContext→ SSE: event*    (until close)
+//	POST /v1/containers/list    body ListBody      → JSON ContainerListResult
+//	POST /v1/containers/logs    body LogsBody      → SSE: log* (until EOF/close)
+//	POST /v1/containers/stop    body ContainerBody → JSON OKResult (or error)
+//	POST /v1/containers/restart body ContainerBody → JSON OKResult (or error)
 //
-// SSE frame names (the `event:` field); `data:` is the JSON payload:
+// SSE frame names (the `event:` field) for /v1/containers/logs; `data:` is JSON:
 //
-//	progress → Progress
-//	log      → LogLine
-//	event    → Event
-//	image    → ImageRef   (terminal success of build-image)
-//	done     → ApplyResult (terminal success of apply/snapshot/restore)
-//	error    → ErrorResult (terminal failure of any streamed op)
-//
-// A terminal frame is always the last frame; the client stops on done|image|error.
+//	log   → LogLine
+//	error → ErrorResult   (terminal failure)
 const (
-	PathApply      = "/v1/apply"
-	PathBuildImage = "/v1/build-image"
-	PathSnapshot   = "/v1/snapshot"
-	PathRestore    = "/v1/restore"
-	PathStatus     = "/v1/status"
-	PathLogs       = "/v1/logs"
-	PathEvents     = "/v1/events"
+	PathContainersList    = "/v1/containers/list"
+	PathContainersLogs    = "/v1/containers/logs"
+	PathContainersStop    = "/v1/containers/stop"
+	PathContainersRestart = "/v1/containers/restart"
 )
 
-// SSE event names.
+// SSE event names (logs only — apply progress rides the git push, not SSE).
 const (
-	EventProgress = "progress"
-	EventLog      = "log"
-	EventEvent    = "event"
-	EventImage    = "image"
-	EventDone     = "done"
-	EventError    = "error"
+	EventLog   = "log"
+	EventError = "error"
 )
 
-// StatusBody is the POST body for /v1/status.
-type StatusBody struct {
-	Ctx           WorkspaceContext `json:"ctx"`
-	DeploymentIDs []string         `json:"deployment_ids,omitempty"`
+// ListBody is the POST body for /v1/containers/list.
+type ListBody struct {
+	Ctx    WorkspaceContext `json:"ctx"`
+	Filter ContainerFilter  `json:"filter"`
 }
 
-// LogsBody is the POST body for /v1/logs.
+// LogsBody is the POST body for /v1/containers/logs.
 type LogsBody struct {
 	Ctx       WorkspaceContext `json:"ctx"`
 	Container string           `json:"container"`
@@ -62,18 +50,23 @@ type LogsBody struct {
 	Follow    bool             `json:"follow"`
 }
 
-// ApplyResult is the terminal `done` frame of an apply/snapshot/restore: the
-// routes the driver realized, so gitops can keep its own view in sync.
-type ApplyResult struct {
-	Routes []Route `json:"routes,omitempty"`
+// ContainerBody is the POST body for /v1/containers/{stop,restart}.
+type ContainerBody struct {
+	Ctx       WorkspaceContext `json:"ctx"`
+	Container string           `json:"container"`
 }
 
-// ErrorResult is the terminal `error` frame of any streamed op.
+// ContainerListResult is the JSON response of /v1/containers/list.
+type ContainerListResult struct {
+	Containers []Container `json:"containers"`
+}
+
+// OKResult is the JSON response of a successful stop/restart.
+type OKResult struct {
+	OK bool `json:"ok"`
+}
+
+// ErrorResult is the terminal `error` SSE frame (logs) / JSON error envelope.
 type ErrorResult struct {
 	Error string `json:"error"`
-}
-
-// DeploymentStatus is the (non-streamed) JSON response of /v1/status.
-type DeploymentStatus struct {
-	States []DeploymentState `json:"states"`
 }
