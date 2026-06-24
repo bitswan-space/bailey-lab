@@ -41,6 +41,8 @@ PATH_CONTAINERS_LOGS = "/v1/containers/logs"
 PATH_CONTAINERS_STOP = "/v1/containers/stop"
 PATH_CONTAINERS_RESTART = "/v1/containers/restart"
 PATH_CONTAINERS_EXEC = "/v1/containers/exec"
+PATH_CONTAINERS_COPY_OUT = "/v1/containers/copy-out"
+PATH_CONTAINERS_COPY_IN = "/v1/containers/copy-in"
 PATH_IMAGES_LIST = "/v1/images/list"
 PATH_IMAGES_REMOVE = "/v1/images/remove"
 
@@ -53,6 +55,10 @@ EVENT_ERROR = "error"
 # {ctx, spec}); stdin is the raw request body; the response is a binary
 # multiplexed stream of [stream:1][len:4 big-endian][payload] frames.
 HEADER_EXEC = "X-Bitswan-Exec"
+
+# copy-in wire (api.go): metadata (base64 of {ctx, container, path}) rides this
+# header so the request body is a pure, streamed TAR — mirroring HEADER_EXEC.
+HEADER_COPY = "X-Bitswan-Copy"
 _EXEC_STDOUT = 1
 _EXEC_STDERR = 2
 _EXEC_EXIT = 3
@@ -462,6 +468,82 @@ class InfraDriverClient:
                     )
             except httpx.HTTPError as e:
                 raise InfraDriverError(f"{PATH_CONTAINERS_EXEC}: {e}") from e
+
+    # ---- archive (docker cp: tar streams for the tar-less infra images) ------
+
+    async def copy_out(
+        self,
+        ctx: WorkspaceContext,
+        container: str,
+        src_path: str,
+        on_chunk: Callable[[bytes], Awaitable[None]],
+    ) -> None:
+        """Archive ``src_path`` from ``container`` and stream the resulting TAR
+        to ``on_chunk`` (``docker cp <container>:<src_path> -``). The daemon does
+        the archiving, so this works on images that ship no ``tar`` (minio
+        UBI-micro). Chunks arrive as raw bytes — never buffered whole. Fails
+        loudly: a transport error or non-200 raises ``InfraDriverError``.
+        """
+        body = {
+            "ctx": ctx.to_json(),
+            "container": container,
+            "path": src_path,
+        }
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                async with client.stream(
+                    "POST",
+                    self.base_url + PATH_CONTAINERS_COPY_OUT,
+                    json=body,
+                    headers=self._headers,
+                ) as resp:
+                    if resp.status_code != 200:
+                        text = (await resp.aread()).decode(errors="replace")
+                        raise InfraDriverError(
+                            f"{PATH_CONTAINERS_COPY_OUT}: HTTP {resp.status_code}: {text}"
+                        )
+                    async for chunk in resp.aiter_bytes():
+                        if chunk:
+                            await on_chunk(chunk)
+            except httpx.HTTPError as e:
+                raise InfraDriverError(f"{PATH_CONTAINERS_COPY_OUT}: {e}") from e
+
+    async def copy_in(
+        self,
+        ctx: WorkspaceContext,
+        container: str,
+        dst_path: str,
+        chunks: "bytes | AsyncIterator[bytes]",
+    ) -> None:
+        """Stream a TAR (``chunks`` — bytes or an async byte iterator) into
+        ``dst_path`` in ``container`` (``docker cp - <container>:<dst_path>``).
+        The metadata rides ``X-Bitswan-Copy`` so the request body is the pure
+        TAR. The daemon extracts it, so this works on tar-less images. Fails
+        loudly: a transport error or non-200 raises ``InfraDriverError``.
+        """
+        meta = base64.b64encode(
+            json.dumps(
+                {"ctx": ctx.to_json(), "container": container, "path": dst_path}
+            ).encode()
+        ).decode()
+        headers = {
+            **self._headers,
+            HEADER_COPY: meta,
+            "Content-Type": "application/octet-stream",
+        }
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                resp = await client.post(
+                    self.base_url + PATH_CONTAINERS_COPY_IN,
+                    content=chunks,
+                    headers=headers,
+                )
+            except httpx.HTTPError as e:
+                raise InfraDriverError(f"{PATH_CONTAINERS_COPY_IN}: {e}") from e
+            if resp.status_code != 200:
+                raise InfraDriverError(
+                    f"{PATH_CONTAINERS_COPY_IN}: HTTP {resp.status_code}: {resp.text}"
+                )
 
     # ---- transport helpers --------------------------------------------------
 

@@ -6,10 +6,12 @@ Manages infrastructure services (CouchDB, Kafka) as Docker Compose deployments.
 """
 
 import asyncio
+import io
 import logging
 import os
 import secrets
 import string
+import tarfile
 from abc import ABC, abstractmethod
 
 import requests
@@ -55,7 +57,8 @@ async def run_docker_command(
 
     - `docker exec <container> <cmd...>`  -> driver exec
     - `docker stop <container>`           -> driver container_stop
-    - `docker cp ...`                     -> NOT yet supported (see below)
+    - `docker cp <c>:<src> <host>`        -> driver copy_out (+ extract)
+    - `docker cp <host> <c>:<dst>`        -> driver copy_in (+ tar build)
     """
     from app.services.infra_driver_client import (
         ExecSpec,
@@ -103,14 +106,91 @@ async def run_docker_command(
             return "", str(e), 1
         return "", "", 0
 
-    # `docker cp` cannot be proxied via exec: the infra images (minio UBI-micro,
-    # etc.) ship no tar/shell, which is exactly why these paths use daemon-side
-    # `docker cp` archiving. It needs a dedicated driver archive primitive
-    # (get/put-archive), tracked as a follow-up. Fail loudly rather than pretend.
+    if verb == "cp":
+        # `docker cp` is proxied through the driver's archive primitives (the
+        # infra images — minio UBI-micro — ship no tar/shell, so the daemon does
+        # the archiving). Exactly one operand is a `container:path` ref; the
+        # other is a host path. We translate Docker's host<->container semantics
+        # to the driver's pure-TAR copy_out/copy_in:
+        #   docker cp <c>:<src> <host>  -> copy_out a TAR, extract it to <host>
+        #   docker cp <host>  <c>:<dst> -> build a TAR of <host>, copy_in to <dst>
+        if len(args) != 4:
+            raise ValueError(f"docker cp expects two operands, got {args!r}")
+        src, dst = args[2], args[3]
+        src_is_ref, dst_is_ref = ":" in src, ":" in dst
+        if src_is_ref == dst_is_ref:
+            raise ValueError(
+                f"docker cp: exactly one operand must be container:path, got {args!r}"
+            )
+        try:
+            if src_is_ref:
+                container, path = _split_cp_ref(src)
+                await _cp_out_to_host(client, ctx, container, path, dst)
+            else:
+                container, path = _split_cp_ref(dst)
+                await _cp_in_from_host(client, ctx, container, path, src)
+        except InfraDriverError as e:
+            return "", str(e), 1
+        return "", "", 0
+
     raise NotImplementedError(
         f"docker '{verb}' is not yet proxied by the infra-driver "
-        "(supported: exec, stop). 'cp' needs a driver archive primitive."
+        "(supported: exec, stop, cp)."
     )
+
+
+def _split_cp_ref(operand: str) -> tuple[str, str]:
+    """Split a `docker cp` ``container:path`` operand into (container, path).
+    Fails loudly on a malformed ref (the other operand is a host path)."""
+    container, sep, path = operand.partition(":")
+    if not sep or not container or not path:
+        raise ValueError(f"docker cp: expected container:path, got {operand!r}")
+    return container, path
+
+
+async def _cp_out_to_host(client, ctx, container: str, src_path: str, host_path: str):
+    """`docker cp <container>:<src_path> <host_path>`: copy_out yields a TAR of
+    src_path; extract it to host_path with Docker's semantics — when host_path
+    is an existing directory the archive's members land under it, otherwise the
+    single archived file is written AS host_path."""
+    buf = io.BytesIO()
+
+    async def on_chunk(d: bytes):
+        buf.write(d)
+
+    await client.copy_out(ctx, container, src_path, on_chunk)
+    buf.seek(0)
+    with tarfile.open(fileobj=buf, mode="r:*") as tar:
+        members = [m for m in tar.getmembers() if m.isreg()]
+        if os.path.isdir(host_path):
+            tar.extractall(host_path, filter="data")
+            return
+        # host_path is a target file name: extract the single regular member to it.
+        if len(members) != 1:
+            raise ValueError(
+                f"docker cp {container}:{src_path}: archive has {len(members)} files, "
+                f"cannot copy to single path {host_path!r}"
+            )
+        extracted = tar.extractfile(members[0])
+        if extracted is None:
+            raise ValueError(f"docker cp {container}:{src_path}: empty archive member")
+        with open(host_path, "wb") as f:
+            while True:
+                chunk = extracted.read(1 << 16)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+
+async def _cp_in_from_host(client, ctx, container: str, dst_path: str, host_path: str):
+    """`docker cp <host_path> <container>:<dst_path>`: build a TAR of host_path
+    (rooted at its basename, matching `docker cp`) and copy_in to dst_path."""
+    if not os.path.exists(host_path):
+        raise ValueError(f"docker cp: source {host_path!r} does not exist")
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        tar.add(host_path, arcname=os.path.basename(host_path.rstrip("/")))
+    await client.copy_in(ctx, container, dst_path, buf.getvalue())
 
 
 class InfraService(ABC):

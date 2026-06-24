@@ -146,6 +146,50 @@ func (c *Client) ContainerExec(ctx context.Context, wctx WorkspaceContext, spec 
 	return readExecFrames(resp.Body, out)
 }
 
+// ContainerCopyOut archives a path from a container and returns the raw TAR
+// stream (docker cp <c>:<path> -). The returned reader is the HTTP response
+// body — the caller must Close it.
+func (c *Client) ContainerCopyOut(ctx context.Context, wctx WorkspaceContext, container, path string) (io.ReadCloser, error) {
+	body, _ := json.Marshal(CopyOutBody{Ctx: wctx, Container: container, Path: path})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+PathContainersCopyOut, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.auth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return nil, fmt.Errorf("%s: HTTP %d", PathContainersCopyOut, resp.StatusCode)
+	}
+	return resp.Body, nil
+}
+
+// ContainerCopyIn streams a TAR from r into a container path (docker cp -
+// <c>:<path>). Metadata rides X-Bitswan-Copy so the body is the pure TAR.
+func (c *Client) ContainerCopyIn(ctx context.Context, wctx WorkspaceContext, container, path string, r io.Reader) error {
+	meta, _ := json.Marshal(CopyInBody{Ctx: wctx, Container: container, Path: path})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+PathContainersCopyIn, r)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(HeaderCopy, base64.StdEncoding.EncodeToString(meta))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	c.auth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: HTTP %d", PathContainersCopyIn, resp.StatusCode)
+	}
+	return nil
+}
+
 // ContainerLogs streams a container's logs to sink until the stream ends.
 func (c *Client) ContainerLogs(ctx context.Context, wctx WorkspaceContext, container string, tail int, follow bool, sink func(LogLine)) error {
 	body := LogsBody{Ctx: wctx, Container: container, Tail: tail, Follow: follow}

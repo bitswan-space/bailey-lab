@@ -1,6 +1,7 @@
 package infradriver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -30,6 +31,16 @@ type fakeDriver struct {
 	execCode     int
 	images       []Image
 	removedImage string
+	// copy-out: the TAR the driver streams back, and the request it saw.
+	copyOutTar     []byte
+	copyOutErr     error
+	gotCopyOutCont string
+	gotCopyOutPath string
+	// copy-in: the TAR the driver received, and the request it saw.
+	copyInTar     []byte
+	copyInErr     error
+	gotCopyInCont string
+	gotCopyInPath string
 }
 
 func (f *fakeDriver) Apply(_ context.Context, _ ApplyRequest, _ func(Progress)) ([]Route, error) {
@@ -91,6 +102,23 @@ func (f *fakeDriver) ContainerExec(_ context.Context, _ WorkspaceContext, spec E
 		out(true, f.execStderr)
 	}
 	return f.execCode, nil
+}
+
+func (f *fakeDriver) ContainerCopyOut(_ context.Context, _ WorkspaceContext, container, path string) (io.ReadCloser, error) {
+	f.gotCopyOutCont, f.gotCopyOutPath = container, path
+	if f.copyOutErr != nil {
+		return nil, f.copyOutErr
+	}
+	return io.NopCloser(bytes.NewReader(f.copyOutTar)), nil
+}
+
+func (f *fakeDriver) ContainerCopyIn(_ context.Context, _ WorkspaceContext, container, path string, r io.Reader) error {
+	f.gotCopyInCont, f.gotCopyInPath = container, path
+	if f.copyInErr != nil {
+		return f.copyInErr
+	}
+	f.copyInTar, _ = io.ReadAll(r)
+	return nil
 }
 
 func newTestPair(d Driver) (*Client, func()) {
@@ -264,5 +292,68 @@ func TestContainerRestartError(t *testing.T) {
 	err := client.ContainerRestart(context.Background(), WorkspaceContext{}, "nope")
 	if err == nil {
 		t.Fatal("expected an error")
+	}
+}
+
+func TestContainerCopyOutRoundTrip(t *testing.T) {
+	// A TAR is opaque, binary bytes — they must round-trip verbatim.
+	fd := &fakeDriver{copyOutTar: []byte{0x00, 'u', 's', 't', 'a', 'r', 0xff, 0x00}}
+	client, closeFn := newTestPair(fd)
+	defer closeFn()
+
+	rc, err := client.ContainerCopyOut(context.Background(),
+		WorkspaceContext{WorkspaceName: "acme"}, "acme-minio", "/tmp/bpsnap-bkt")
+	if err != nil {
+		t.Fatalf("ContainerCopyOut: %v", err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read tar: %v", err)
+	}
+	if !reflect.DeepEqual(got, fd.copyOutTar) {
+		t.Errorf("tar = %v, want %v (binary must round-trip)", got, fd.copyOutTar)
+	}
+	if fd.gotCopyOutCont != "acme-minio" || fd.gotCopyOutPath != "/tmp/bpsnap-bkt" {
+		t.Errorf("copy-out target = %q:%q", fd.gotCopyOutCont, fd.gotCopyOutPath)
+	}
+}
+
+func TestContainerCopyInRoundTrip(t *testing.T) {
+	fd := &fakeDriver{}
+	client, closeFn := newTestPair(fd)
+	defer closeFn()
+
+	tar := []byte{0x00, 'u', 's', 't', 'a', 'r', 0xfe}
+	if err := client.ContainerCopyIn(context.Background(),
+		WorkspaceContext{WorkspaceName: "acme"}, "acme-minio", "/tmp", bytes.NewReader(tar)); err != nil {
+		t.Fatalf("ContainerCopyIn: %v", err)
+	}
+	if !reflect.DeepEqual(fd.copyInTar, tar) {
+		t.Errorf("streamed tar = %v, want %v", fd.copyInTar, tar)
+	}
+	if fd.gotCopyInCont != "acme-minio" || fd.gotCopyInPath != "/tmp" {
+		t.Errorf("copy-in target = %q:%q", fd.gotCopyInCont, fd.gotCopyInPath)
+	}
+}
+
+func TestContainerCopyOutError(t *testing.T) {
+	fd := &fakeDriver{copyOutErr: errors.New("no such container")}
+	client, closeFn := newTestPair(fd)
+	defer closeFn()
+
+	if _, err := client.ContainerCopyOut(context.Background(), WorkspaceContext{}, "nope", "/x"); err == nil {
+		t.Fatal("expected an error from copy-out")
+	}
+}
+
+func TestContainerCopyInError(t *testing.T) {
+	fd := &fakeDriver{copyInErr: errors.New("no such container")}
+	client, closeFn := newTestPair(fd)
+	defer closeFn()
+
+	err := client.ContainerCopyIn(context.Background(), WorkspaceContext{}, "nope", "/x", strings.NewReader(""))
+	if err == nil {
+		t.Fatal("expected an error from copy-in")
 	}
 }

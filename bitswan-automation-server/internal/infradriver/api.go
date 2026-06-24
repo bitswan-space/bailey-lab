@@ -21,12 +21,20 @@ package infradriver
 //	POST /v1/containers/stop    body ContainerBody → JSON OKResult (or error)
 //	POST /v1/containers/restart body ContainerBody → JSON OKResult (or error)
 //	POST /v1/containers/exec    hdr X-Bitswan-Exec, body=stdin → framed stdout/stderr/exit
+//	POST /v1/containers/copy-out body CopyOutBody → raw TAR stream (docker cp c:path -)
+//	POST /v1/containers/copy-in  hdr X-Bitswan-Copy, body=TAR → JSON OKResult (docker cp - c:path)
 //
 // exec is the general escape hatch for imperative container operations that
 // aren't a state change and don't fit the narrower primitives — backups
 // (pg_dump), restores (psql < dump), MinIO mirrors. gitops orchestrates them;
 // the driver executes. Its wire shape is a binary multiplexed stream rather
 // than SSE because the payloads are binary and large (DB dumps).
+//
+// copy-out/copy-in mirror Docker's archive API (raw TAR streams) for the
+// tar-less infra images (minio UBI-micro, etc.) where exec'ing `tar` is
+// impossible: the daemon does the archiving. copy-out's response body IS the
+// TAR; copy-in's request body IS the TAR (metadata rides X-Bitswan-Copy so the
+// body stays a pure stream, same as exec's stdin).
 //
 // build-image exists because, after the cut-over, gitops has no Docker socket:
 // it builds an image here, records the tag in bitswan.yaml, then pushes — so
@@ -45,6 +53,8 @@ const (
 	PathContainersStop    = "/v1/containers/stop"
 	PathContainersRestart = "/v1/containers/restart"
 	PathContainersExec    = "/v1/containers/exec"
+	PathContainersCopyOut = "/v1/containers/copy-out"
+	PathContainersCopyIn  = "/v1/containers/copy-in"
 	PathImagesList        = "/v1/images/list"
 	PathImagesRemove      = "/v1/images/remove"
 )
@@ -68,6 +78,27 @@ const HeaderExec = "X-Bitswan-Exec"
 type ExecBody struct {
 	Ctx  WorkspaceContext `json:"ctx"`
 	Spec ExecSpec         `json:"spec"`
+}
+
+// CopyOutBody is the POST body for /v1/containers/copy-out. The response body
+// is the raw TAR archive of Path inside Container (no envelope — it streams).
+type CopyOutBody struct {
+	Ctx       WorkspaceContext `json:"ctx"`
+	Container string           `json:"container"`
+	Path      string           `json:"path"`
+}
+
+// HeaderCopy carries the copy-in metadata (base64 of a CopyInBody JSON) so the
+// request body can be a pure, streamed TAR (a bucket mirror is large/binary),
+// mirroring HeaderExec.
+const HeaderCopy = "X-Bitswan-Copy"
+
+// CopyInBody is the (base64-encoded, header-borne) metadata of a copy-in
+// request; the request body is the raw TAR extracted into Path.
+type CopyInBody struct {
+	Ctx       WorkspaceContext `json:"ctx"`
+	Container string           `json:"container"`
+	Path      string           `json:"path"`
 }
 
 // Exec response framing — a binary multiplexed stream (not SSE: stdout is

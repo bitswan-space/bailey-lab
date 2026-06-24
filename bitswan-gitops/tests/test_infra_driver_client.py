@@ -115,6 +115,10 @@ async def driver_server():
     """A fake driver speaking the api.go HTTP/SSE contract, with token auth.
     Uses aiohttp's TestServer directly (no pytest-aiohttp plugin dependency)."""
 
+    # Captures cross-request state (e.g. the copy-in body) for assertions; kept
+    # in a closure rather than request.app to avoid aiohttp's app-key warnings.
+    captured: dict = {}
+
     def authed(request):
         return request.headers.get("Authorization") == "Bearer s3cret"
 
@@ -201,6 +205,32 @@ async def driver_server():
         await resp.write_eof()
         return resp
 
+    async def copy_out_handler(request):
+        # Stream a raw TAR back (the response body IS the archive) — mirrors the
+        # Go handleCopyOut. Echo the requested path into the archive so the test
+        # can assert it round-tripped.
+        if not authed(request):
+            return web.Response(status=401)
+        body = await request.json()
+        resp = web.StreamResponse()
+        resp.headers["Content-Type"] = "application/x-tar"
+        await resp.prepare(request)
+        # Two binary chunks (a TAR is opaque bytes) — must round-trip verbatim.
+        await resp.write(b"\x00ustar")
+        await resp.write(body["path"].encode())
+        await resp.write_eof()
+        return resp
+
+    async def copy_in_handler(request):
+        # Read the streamed TAR body + the X-Bitswan-Copy metadata, stash them so
+        # the test can assert both — mirrors the Go handleCopyIn.
+        if not authed(request):
+            return web.Response(status=401)
+        meta = json.loads(base64.b64decode(request.headers["X-Bitswan-Copy"]))
+        tar = await request.read()
+        captured["copy_in"] = {"meta": meta, "tar": tar}
+        return web.json_response({"ok": True})
+
     app = web.Application()
     app.router.add_post("/v1/containers/list", list_handler)
     app.router.add_post("/v1/containers/stop", stop_handler)
@@ -208,7 +238,10 @@ async def driver_server():
     app.router.add_post("/v1/build-error", build_error_handler)
     app.router.add_post("/v1/containers/exec", exec_handler)
     app.router.add_post("/v1/exec-error", exec_error_handler)
+    app.router.add_post("/v1/containers/copy-out", copy_out_handler)
+    app.router.add_post("/v1/containers/copy-in", copy_in_handler)
     server = TestServer(app)
+    server.captured = captured  # expose cross-request captures to the tests
     await server.start_server()
     try:
         yield server
@@ -326,6 +359,45 @@ async def test_exec_error_frame_raises(driver_server):
                 from app.services.infra_driver_client import _read_exec_frames
 
                 await _read_exec_frames(resp.aiter_bytes(), None, None)
+
+
+async def test_copy_out_streams_tar(driver_server):
+    client = InfraDriverClient(
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+    )
+    got = bytearray()
+
+    async def on_chunk(chunk):
+        got.extend(chunk)
+
+    await client.copy_out(WCTX, "acme-minio", "/tmp/bpsnap-bkt", on_chunk)
+    # The raw TAR bytes round-trip verbatim (binary-safe), incl. the echoed path.
+    assert bytes(got) == b"\x00ustar/tmp/bpsnap-bkt"
+
+
+async def test_copy_in_streams_tar_and_metadata(driver_server):
+    client = InfraDriverClient(
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+    )
+
+    async def chunks():
+        yield b"\x00ustar"
+        yield b"\xfe\xffpayload"
+
+    await client.copy_in(WCTX, "acme-minio", "/tmp", chunks())
+    received = driver_server.captured["copy_in"]
+    assert received["tar"] == b"\x00ustar\xfe\xffpayload"
+    assert received["meta"]["container"] == "acme-minio"
+    assert received["meta"]["path"] == "/tmp"
+    assert received["meta"]["ctx"]["workspace_name"] == "acme"
+
+
+async def test_copy_out_token_enforced(driver_server):
+    client = InfraDriverClient(
+        base_url=str(driver_server.make_url("")), token="wrong", deploy_remote="x"
+    )
+    with pytest.raises(InfraDriverError):
+        await client.copy_out(WCTX, "acme-minio", "/x", lambda _c: None)
 
 
 def test_require_env_fails_loudly(monkeypatch):

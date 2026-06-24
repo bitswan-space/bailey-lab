@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 )
@@ -39,6 +40,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(PathContainersStop, s.handleStop)
 	mux.HandleFunc(PathContainersRestart, s.handleRestart)
 	mux.HandleFunc(PathContainersExec, s.handleExec)
+	mux.HandleFunc(PathContainersCopyOut, s.handleCopyOut)
+	mux.HandleFunc(PathContainersCopyIn, s.handleCopyIn)
 	mux.HandleFunc(PathImagesList, s.handleImageList)
 	mux.HandleFunc(PathImagesRemove, s.handleImageRemove)
 	if s.GitProjectRoot != "" {
@@ -201,6 +204,55 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	var codeBuf [4]byte
 	binary.BigEndian.PutUint32(codeBuf[:], uint32(int32(code)))
 	emit(ExecStreamExit, codeBuf[:])
+}
+
+// handleCopyOut archives a path from a container and streams the raw TAR back
+// (docker cp <c>:<path> -). The response body IS the archive — chunk-by-chunk,
+// never buffered — so the tar-less infra images can still be snapshotted.
+func (s *Server) handleCopyOut(w http.ResponseWriter, r *http.Request) {
+	var body CopyOutBody
+	if !decode(w, r, &body) {
+		return
+	}
+	rc, err := s.driver.ContainerCopyOut(r.Context(), body.Ctx, body.Container, body.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rc.Close()
+	w.Header().Set("Content-Type", "application/x-tar")
+	// Copy emits the implicit 200 on the first write; a copy error after that
+	// can't change the status, but Close() (below) reports a failed archive — we
+	// surface it by failing the request body (the client sees a truncated read).
+	if _, err := io.Copy(w, rc); err != nil {
+		return
+	}
+}
+
+// handleCopyIn extracts an incoming TAR into a path in a container (docker cp -
+// <c>:<path>). Metadata rides X-Bitswan-Copy so the request body is a pure,
+// streamed TAR, mirroring handleExec's stdin.
+func (s *Server) handleCopyIn(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	hdr := r.Header.Get(HeaderCopy)
+	raw, err := base64.StdEncoding.DecodeString(hdr)
+	if err != nil {
+		http.Error(w, "invalid "+HeaderCopy+" header: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var body CopyInBody
+	if err := json.Unmarshal(raw, &body); err != nil {
+		http.Error(w, "invalid copy metadata: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.driver.ContainerCopyIn(r.Context(), body.Ctx, body.Container, body.Path, r.Body); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, OKResult{OK: true})
 }
 
 func (s *Server) containerAction(w http.ResponseWriter, r *http.Request, run func(WorkspaceContext, string) error) {

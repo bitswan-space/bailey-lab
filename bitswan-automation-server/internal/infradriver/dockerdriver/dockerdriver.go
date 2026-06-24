@@ -293,3 +293,59 @@ func (d *DockerDriver) ContainerExec(ctx context.Context, _ infradriver.Workspac
 	}
 	return -1, fmt.Errorf("docker exec %s: %w", spec.Container, err)
 }
+
+// ContainerCopyOut runs `docker cp <container>:<srcPath> -`, returning the TAR
+// stream the daemon archives on stdout. Used for the tar-less infra images: the
+// archiving runs in the daemon, not the container. The returned reader closing
+// waits for the cp process, so a late failure surfaces as a Close error.
+func (d *DockerDriver) ContainerCopyOut(ctx context.Context, _ infradriver.WorkspaceContext, container, srcPath string) (io.ReadCloser, error) {
+	if err := d.assertInWorkspace(ctx, container); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "docker", "cp", container+":"+srcPath, "-")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("docker cp %s:%s -: %w", container, srcPath, err)
+	}
+	return &cpReader{r: stdout, cmd: cmd, what: fmt.Sprintf("docker cp %s:%s -", container, srcPath), stderr: &stderr}, nil
+}
+
+// ContainerCopyIn runs `docker cp - <container>:<dstPath>`, streaming the TAR
+// from r into the cp process's stdin; the daemon extracts it into dstPath. The
+// counterpart of ContainerCopyOut, for the same tar-less images.
+func (d *DockerDriver) ContainerCopyIn(ctx context.Context, _ infradriver.WorkspaceContext, container, dstPath string, r io.Reader) error {
+	if err := d.assertInWorkspace(ctx, container); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "docker", "cp", "-", container+":"+dstPath)
+	cmd.Stdin = r
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("docker cp - %s:%s: %w: %s", container, dstPath, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// cpReader wraps the cp process's stdout so Close waits for the process and
+// turns a non-zero exit into an error (a truncated/failed archive must fail
+// loudly rather than look like a clean EOF).
+type cpReader struct {
+	r      io.ReadCloser
+	cmd    *exec.Cmd
+	what   string
+	stderr *strings.Builder
+}
+
+func (c *cpReader) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+func (c *cpReader) Close() error {
+	_ = c.r.Close()
+	if err := c.cmd.Wait(); err != nil {
+		return fmt.Errorf("%s: %w: %s", c.what, err, strings.TrimSpace(c.stderr.String()))
+	}
+	return nil
+}

@@ -89,6 +89,20 @@ type Driver interface {
 	// none); stdout/stderr chunks are delivered to out as raw bytes (binary-safe
 	// — DB dumps are not text). Returns the command's exit code.
 	ContainerExec(ctx context.Context, req WorkspaceContext, spec ExecSpec, in io.Reader, out func(stderr bool, chunk []byte)) (int, error)
+
+	// ContainerCopyOut archives srcPath from a container and streams the TAR
+	// back (the daemon-side archive — `docker cp <container>:<srcPath> -`). Used
+	// where exec'ing `tar` is impossible: the infra images (minio UBI-micro,
+	// etc.) ship no tar/shell, so the docker daemon does the archiving. The
+	// returned reader is a TAR stream the caller must Close; chunks flow as they
+	// arrive (constant memory — a bucket mirror is not buffered whole).
+	ContainerCopyOut(ctx context.Context, req WorkspaceContext, container, srcPath string) (io.ReadCloser, error)
+
+	// ContainerCopyIn extracts an incoming TAR into dstPath in a container (the
+	// daemon-side extraction — `docker cp - <container>:<dstPath>`). The TAR is
+	// streamed from r chunk by chunk (never buffered whole). The counterpart of
+	// ContainerCopyOut, for the same tar-less images.
+	ContainerCopyIn(ctx context.Context, req WorkspaceContext, container, dstPath string, r io.Reader) error
 }
 
 // ExecSpec is one container exec invocation.
