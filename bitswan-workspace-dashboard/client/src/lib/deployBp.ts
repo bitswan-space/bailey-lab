@@ -16,6 +16,16 @@ export interface DeployToastCopy {
   loading: string;
   success: string;
   failurePrefix: string;
+  /** Called with the failure detail when the deploy ends badly, so callers can
+   *  surface it PERSISTENTLY on the screen (the toast is transient — the
+   *  deployments view must not silently fall back to "Not deployed yet"). */
+  onError?: (message: string) => void;
+  /** Called with each live step message as the deploy progresses, so callers
+   *  can surface progress ON the stage card — not only in the transient toast.
+   *  A promote/deploy can run tens of seconds (image promote, ingress, blue-
+   *  green slots) during which the stage card would otherwise read a static
+   *  "never deployed". */
+  onProgress?: (message: string) => void;
 }
 
 /**
@@ -24,7 +34,7 @@ export interface DeployToastCopy {
  * Resolves with the terminal outcome.
  *
  * Used both by `deployBpWithToast` (explicit BP deploys) and by the
- * create-BP / create-worktree flows, whose responses carry a
+ * create-BP / create-copy flows, whose responses carry a
  * `deploy_task_id` for the server-side auto-deploy.
  *
  * Progress comes from polling gitops's `deploy-status/{task_id}` endpoint
@@ -50,10 +60,9 @@ export async function watchDeployTask(
     } catch {
       failures += 1;
       if (failures >= MAX_POLL_FAILURES) {
-        toast.error(
-          `${copy.failurePrefix}: lost track of the deploy task — check the cards for the real state`,
-          { id: toastId, duration: 8000 },
-        );
+        const msg = 'lost track of the deploy task — check the container logs';
+        toast.error(`${copy.failurePrefix}: ${msg}`, { id: toastId, duration: 8000 });
+        copy.onError?.(msg);
         return 'lost';
       }
       continue;
@@ -63,21 +72,20 @@ export async function watchDeployTask(
       return 'completed';
     }
     if (status.status === 'failed') {
-      toast.error(
-        `${copy.failurePrefix}: ${status.error || status.message || 'deployment failed'}`,
-        { id: toastId, duration: 10000 },
-      );
+      const msg = status.error || status.message || 'deployment failed';
+      toast.error(`${copy.failurePrefix}: ${msg}`, { id: toastId, duration: 10000 });
+      copy.onError?.(msg);
       return 'failed';
     }
     if (status.message) {
       toast.loading(status.message, { id: toastId, duration: Infinity });
+      copy.onProgress?.(status.message);
     }
   }
 
-  toast.error(`${copy.failurePrefix}: timed out waiting for deploy status`, {
-    id: toastId,
-    duration: 8000,
-  });
+  const timeoutMsg = 'timed out waiting for the deploy to finish';
+  toast.error(`${copy.failurePrefix}: ${timeoutMsg}`, { id: toastId, duration: 8000 });
+  copy.onError?.(timeoutMsg);
   return 'timeout';
 }
 
@@ -88,13 +96,14 @@ export async function watchDeployTask(
 export async function deployBpWithToast(opts: {
   bp: string;
   stage: 'dev' | 'live-dev';
-  worktree?: string;
+  copy?: string;
   /** Toast copy. */
   loading: string;
   success: string;
   failurePrefix: string;
+  onProgress?: (message: string) => void;
 }): Promise<BpDeployOutcome> {
-  const toastId = `bp-deploy-${opts.worktree ?? 'main'}-${opts.bp}`;
+  const toastId = `bp-deploy-${opts.copy ?? 'main'}-${opts.bp}`;
   toast.loading(opts.loading, { id: toastId, duration: Infinity });
 
   let taskId: string;
@@ -102,7 +111,7 @@ export async function deployBpWithToast(opts: {
     const res = await api.deployBusinessProcess({
       bp: opts.bp,
       stage: opts.stage,
-      ...(opts.worktree ? { worktree: opts.worktree } : {}),
+      ...(opts.copy ? { copy: opts.copy } : {}),
     });
     taskId = res.task_id;
     if (!taskId) throw new Error('gitops returned no task_id');
@@ -128,6 +137,7 @@ export async function deployBpWithToast(opts: {
     loading: opts.loading,
     success: opts.success,
     failurePrefix: opts.failurePrefix,
+    onProgress: opts.onProgress,
   });
 }
 
@@ -143,6 +153,8 @@ export async function promoteBpWithToast(opts: {
   loading: string;
   success: string;
   failurePrefix: string;
+  onError?: (message: string) => void;
+  onProgress?: (message: string) => void;
 }): Promise<BpDeployOutcome> {
   const toastId = `bp-promote-${opts.stage}-${opts.bp}`;
   toast.loading(opts.loading, { id: toastId, duration: Infinity });
@@ -167,6 +179,7 @@ export async function promoteBpWithToast(opts: {
       id: toastId,
       duration: 8000,
     });
+    opts.onError?.(String(err));
     return 'failed';
   }
 
@@ -174,5 +187,7 @@ export async function promoteBpWithToast(opts: {
     loading: opts.loading,
     success: opts.success,
     failurePrefix: opts.failurePrefix,
+    onError: opts.onError,
+    onProgress: opts.onProgress,
   });
 }

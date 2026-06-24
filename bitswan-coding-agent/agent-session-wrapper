@@ -5,13 +5,13 @@
 
 USER_EMAIL="${SSH_USER_EMAIL:-unknown}"
 LOGGED="${SSH_LOGGED:-true}"
-WORKTREE="${SSH_WORKTREE:-default}"
+COPY="${SSH_WORKTREE:-default}"
 BP="${SSH_BP:-}"
 # Claude session UUID — passed by the dashboard so it can resume later via
 # `claude --resume <uuid>`. Persisted into .meta.json below.
 CLAUDE_SESSION_ID="${SSH_CLAUDE_SESSION_ID:-}"
 # Session "kind" tag: "claude" for a regular BP-scoped chat, "sync" for the
-# worktree-level git-sync agent flow. Persisted so the dashboard can pick
+# copy-level git-sync agent flow. Persisted so the dashboard can pick
 # the right icon when listing past sessions. Empty for editor-launched
 # sessions.
 SESSION_KIND="${SSH_SESSION_KIND:-}"
@@ -40,25 +40,38 @@ fi
 export CLAUDE_CONFIG_DIR="/home/agent/.claude_${EMAIL_SLUG}"
 mkdir -p "$CLAUDE_CONFIG_DIR"
 
+# Attribute git commits made during this session to the actual user. Per-process
+# GIT_* env vars (not global git config) so concurrent sessions in this shared
+# container don't race. Set before every exec branch below so it covers the
+# interactive, auto-command, and non-interactive (SSH_ORIGINAL_COMMAND) paths.
+# Editor/anon sessions without an email fall back to the container-global
+# "BitSwan Coding Agent" identity from entrypoint-agent.sh.
+if [ -n "$SSH_USER_EMAIL" ] && [ "$SSH_USER_EMAIL" != "unknown" ]; then
+    export GIT_AUTHOR_NAME="$SSH_USER_EMAIL"
+    export GIT_AUTHOR_EMAIL="$SSH_USER_EMAIL"
+    export GIT_COMMITTER_NAME="$SSH_USER_EMAIL"
+    export GIT_COMMITTER_EMAIL="$SSH_USER_EMAIL"
+fi
+
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # Include the BP in the session id so concurrent dashboard sessions for the
-# same (user, worktree, BP) still get distinct files (the timestamp resolves
+# same (user, copy, BP) still get distinct files (the timestamp resolves
 # collisions even when BP is empty).
 if [ -n "$BP" ]; then
-    SESSION_ID="${TIMESTAMP}_${EMAIL_SLUG}_${WORKTREE}_${BP}"
+    SESSION_ID="${TIMESTAMP}_${EMAIL_SLUG}_${COPY}_${BP}"
 else
-    SESSION_ID="${TIMESTAMP}_${EMAIL_SLUG}_${WORKTREE}"
+    SESSION_ID="${TIMESTAMP}_${EMAIL_SLUG}_${COPY}"
 fi
 SESSION_DIR="/var/log/agent-sessions"
 
 # Determine working directory. When SSH_BP is set (dashboard) land in the BP
-# directory; otherwise fall back to the worktree root (editor behaviour).
-if [ -n "$BP" ] && [ -d "/workspace/worktrees/${WORKTREE}/${BP}" ]; then
-    cd "/workspace/worktrees/${WORKTREE}/${BP}"
-elif [ -d "/workspace/worktrees/${WORKTREE}" ]; then
-    cd "/workspace/worktrees/${WORKTREE}"
-elif [ "$WORKTREE" = "default" ]; then
-    cd /workspace/worktrees
+# directory; otherwise fall back to the copy root (editor behaviour).
+if [ -n "$BP" ] && [ -d "/workspace/copies/${COPY}/${BP}" ]; then
+    cd "/workspace/copies/${COPY}/${BP}"
+elif [ -d "/workspace/copies/${COPY}" ]; then
+    cd "/workspace/copies/${COPY}"
+elif [ "$COPY" = "default" ]; then
+    cd /workspace/copies
 fi
 
 # If SSH_ORIGINAL_COMMAND is set (non-interactive), just run it
@@ -68,7 +81,7 @@ if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
     fi
     # For logged sessions, record the command execution too
     asciinema rec "${SESSION_DIR}/${SESSION_ID}.cast" \
-        --title "${USER_EMAIL} - ${WORKTREE} (cmd)" \
+        --title "${USER_EMAIL} - ${COPY} (cmd)" \
         --command "bash -c '$SSH_ORIGINAL_COMMAND'" 2>/dev/null
     exit $?
 fi
@@ -95,7 +108,7 @@ cat > "${SESSION_DIR}/${SESSION_ID}.meta.json" << METAEOF
 {
   "id": "${SESSION_ID}",
   "user_email": "${USER_EMAIL}",
-  "worktree": "${WORKTREE}",
+  "worktree": "${COPY}",
   "bp": ${BP_JSON},
   "claude_session_id": ${CLAUDE_ID_JSON},
   "kind": ${KIND_JSON},
@@ -123,9 +136,14 @@ fi
 # case. Idle close on the dashboard server kills the underlying process,
 # at which point dtach removes the socket, so the *next* attach starts
 # fresh from claude's on-disk history via `--resume <uuid>`.
+#
+# `-r winch`: on (re)attach, send a SIGWINCH so Claude's full-screen TUI
+# repaints immediately. dtach's default redraw method is ctrl_l, which Claude
+# (an Ink/React app that only repaints on resize) ignores — without this the
+# reattached terminal stays blank until the user manually resizes the window.
 if [ -n "$CLAUDE_SESSION_ID" ]; then
     DTACH_SOCKET="/tmp/.claude-dtach-${CLAUDE_SESSION_ID}.sock"
-    SHELL_CMD="dtach -A ${DTACH_SOCKET} -z ${SHELL_CMD}"
+    SHELL_CMD="dtach -A ${DTACH_SOCKET} -z -r winch ${SHELL_CMD}"
 fi
 
 # Anon session - no recording, just shell
@@ -139,5 +157,5 @@ fi
 
 # Record session with asciinema
 exec asciinema rec "${SESSION_DIR}/${SESSION_ID}.cast" \
-    --title "${USER_EMAIL} - ${WORKTREE}" \
+    --title "${USER_EMAIL} - ${COPY}" \
     --command "$SHELL_CMD"

@@ -11,8 +11,8 @@ from fastapi.responses import StreamingResponse
 from app.dependencies import get_automation_service, get_image_service
 from app.deploy_manager import deploy_manager
 from app.event_broadcaster import event_broadcaster
-from app.mqtt_processes import process_service
-from app.routes.worktrees import get_cached_worktrees
+from app.services.process_service import process_service
+from app.routes.copies import get_cached_copies
 
 router = APIRouter(tags=["events"])
 
@@ -40,13 +40,13 @@ async def stream_events():
             processes = process_service.get_all_processes()
             yield f"event: processes\ndata: {json.dumps(processes)}\n\n"
 
-            # Current worktree list. Carried as data (not just a ping) so
+            # Current copy list. Carried as data (not just a ping) so
             # the dashboard doesn't need a follow-up REST round-trip.
             try:
-                worktrees = await get_cached_worktrees()
+                copies = await get_cached_copies()
             except Exception:
-                worktrees = []
-            yield f"event: worktrees\ndata: {json.dumps(worktrees)}\n\n"
+                copies = []
+            yield f"event: copies\ndata: {json.dumps(copies)}\n\n"
 
             # Send active deploy tasks so reconnecting clients pick up current state
             for task in deploy_manager.get_all_active_tasks():

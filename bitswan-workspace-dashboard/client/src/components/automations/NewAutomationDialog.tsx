@@ -23,7 +23,7 @@ interface NewAutomationDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   bpId: string;
-  worktree?: string;
+  copy?: string;
   /** Existing automation directory names to validate against. */
   existingNames: string[];
 }
@@ -51,7 +51,7 @@ export function NewAutomationDialog({
   open,
   onOpenChange,
   bpId,
-  worktree,
+  copy,
   existingNames,
 }: NewAutomationDialogProps) {
   const [data, setData] = useState<TemplatesResponse | null>(null);
@@ -137,7 +137,7 @@ export function NewAutomationDialog({
         ? { template_id: selection.entry.id, name: sanitizedName }
         : { group_id: selection.entry.id }),
       bp: bpId,
-      ...(worktree ? { worktree } : {}),
+      ...(copy ? { copy } : {}),
     });
     toast.promise(work, {
       loading: label,
@@ -155,7 +155,7 @@ export function NewAutomationDialog({
     } finally {
       setSubmitting(false);
     }
-  }, [selection, canSubmit, sanitizedName, bpId, worktree, handleOpenChange]);
+  }, [selection, canSubmit, sanitizedName, bpId, copy, handleOpenChange]);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>

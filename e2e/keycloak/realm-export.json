@@ -1,0 +1,54 @@
+{
+  "realm": "bitswan",
+  "enabled": true,
+  "sslRequired": "none",
+  "loginTheme": "keycloak",
+  "clients": [
+    {
+      "clientId": "bailey",
+      "name": "Bailey Server Console",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "bailey-e2e-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": [
+        "https://bailey.bs-e2e.localhost/oauth2/callback",
+        "https://bailey-onboard.bs-e2e.localhost/oauth2/callback",
+        "https://*.bs-e2e.localhost/oauth2/callback"
+      ],
+      "webOrigins": ["https://bailey.bs-e2e.localhost", "https://bailey-onboard.bs-e2e.localhost"],
+      "attributes": { "post.logout.redirect.uris": "https://*.bs-e2e.localhost/*" }
+    }
+  ],
+  "users": [
+    {
+      "username": "tomas.novak@meridianfoods.cz",
+      "email": "tomas.novak@meridianfoods.cz",
+      "firstName": "Tomáš",
+      "lastName": "Novák",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "meridian-operator", "temporary": false }]
+    },
+    {
+      "username": "eva.mueller@meridianfoods.cz",
+      "email": "eva.mueller@meridianfoods.cz",
+      "firstName": "Eva",
+      "lastName": "Müller",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "meridian-auditor", "temporary": false }]
+    },
+    {
+      "username": "marek.horvath@meridianfoods.cz",
+      "email": "marek.horvath@meridianfoods.cz",
+      "firstName": "Marek",
+      "lastName": "Horváth",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "meridian-member", "temporary": false }]
+    }
+  ]
+}

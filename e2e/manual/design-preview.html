@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bitswan — The Operator's Handbook</title>
+<style>
+  :root{
+    --ink:#0a1622; --ink2:#0f2233; --steel:#16344b; --steel2:#1e4661;
+    --paper:#faf8f3; --paper2:#f1ece1; --line:#e3dccd;
+    --amber:#ff7a18; --amber2:#ffb43d; --teal:#36c5b0; --muted:#6f7b88;
+    --maxw:920px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:#0c1722; background:#33414f; line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  .page{
+    width:100%; max-width:var(--maxw); margin:26px auto; background:var(--paper);
+    box-shadow:0 24px 60px rgba(0,0,0,.35); border-radius:6px; overflow:hidden;
+    position:relative;
+  }
+  .pad{padding:64px 68px}
+  @media (max-width:680px){ .pad{padding:40px 28px} }
+
+  /* ---------- COVER ---------- */
+  .cover{
+    background:
+      radial-gradient(1200px 500px at 80% -10%, rgba(255,122,24,.30), transparent 60%),
+      radial-gradient(900px 600px at -10% 110%, rgba(54,197,176,.18), transparent 55%),
+      linear-gradient(160deg,#08111c 0%, #0c1f30 60%, #0a1622 100%);
+    color:#eaf1f7;
+  }
+  .kicker{
+    display:inline-flex; align-items:center; gap:9px; font-size:12px; font-weight:700;
+    letter-spacing:.18em; text-transform:uppercase; color:var(--amber2);
+    border:1px solid rgba(255,180,61,.35); padding:7px 13px; border-radius:999px;
+    background:rgba(255,180,61,.06);
+  }
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--teal);box-shadow:0 0 12px var(--teal)}
+  .cover h1{
+    font-size:84px; line-height:.92; margin:26px 0 0; letter-spacing:-.03em; font-weight:800;
+    background:linear-gradient(180deg,#ffffff,#bcd0df); -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  .cover .sub{ font-size:25px; font-weight:600; color:#cfe0ee; margin:14px 0 0; letter-spacing:-.01em }
+  .cover .tag{ font-size:16px; color:#9fb4c6; max-width:520px; margin:22px 0 0 }
+  .hero-shot{
+    margin:40px 0 0; border-radius:10px; aspect-ratio:16/9; position:relative;
+    background:linear-gradient(135deg,#0e2435,#0a1826);
+    border:1px solid rgba(255,255,255,.10);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.06), 0 30px 60px rgba(0,0,0,.45);
+    display:flex; align-items:center; justify-content:center; overflow:hidden;
+  }
+  .hero-shot::before{
+    content:""; position:absolute; inset:0;
+    background:repeating-linear-gradient(135deg,rgba(255,255,255,.018) 0 12px,transparent 12px 24px);
+  }
+  .shot-label{
+    z-index:1; text-align:center; color:#7fa0ba; font-size:13px; font-weight:600; letter-spacing:.04em;
+  }
+  .shot-label .cam{font-size:30px; display:block; margin-bottom:8px; opacity:.7}
+  .cover-foot{
+    display:flex; justify-content:space-between; align-items:center; gap:16px;
+    margin-top:40px; padding-top:22px; border-top:1px solid rgba(255,255,255,.10);
+    font-size:13px; color:#8ba3b6;
+  }
+  .live-badge{ color:#bfe9e0; display:inline-flex; gap:8px; align-items:center; font-weight:600 }
+
+  /* ---------- MANIFESTO ---------- */
+  .manifesto{ background:linear-gradient(165deg,#0c1f30,#0a1622); color:#e8eff5 }
+  .manifesto h2{ font-size:15px; letter-spacing:.2em; text-transform:uppercase; color:var(--amber2); margin:0 0 30px; font-weight:700 }
+  .promises{ display:grid; gap:30px }
+  .promise{ display:grid; grid-template-columns:64px 1fr; gap:22px; align-items:start }
+  .promise .num{ font-size:40px; font-weight:800; color:transparent; -webkit-text-stroke:1.4px rgba(255,180,61,.55); line-height:1 }
+  .promise h3{ font-size:26px; margin:0 0 6px; letter-spacing:-.01em; color:#fff }
+  .promise p{ margin:0; color:#a9bccd; font-size:16px }
+
+  /* ---------- FEATURE CHAPTER ---------- */
+  .chapter-head{ display:flex; align-items:baseline; gap:18px; margin-bottom:8px }
+  .chapter-num{
+    font-size:14px; font-weight:800; letter-spacing:.16em; color:#fff; background:var(--ink);
+    padding:6px 12px; border-radius:6px;
+  }
+  .chapter-eyebrow{ font-size:13px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--amber) }
+  .chapter h2{ font-size:46px; line-height:1.02; letter-spacing:-.025em; margin:8px 0 0; color:var(--ink) }
+  .lede{ font-size:20px; color:#33404d; margin:20px 0 0; max-width:640px; font-weight:500 }
+
+  .shot{
+    margin:34px 0; border-radius:12px; aspect-ratio:16/10; position:relative; overflow:hidden;
+    background:linear-gradient(135deg,#eef1f4,#dfe5ea); border:1px solid var(--line);
+    box-shadow:0 18px 40px rgba(12,30,48,.12);
+    display:flex; align-items:center; justify-content:center;
+  }
+  .shot.dark{ background:linear-gradient(135deg,#0e2435,#0a1826); border-color:rgba(255,255,255,.08) }
+  .shot .frame-label{
+    position:absolute; top:14px; left:14px; font-size:11px; font-weight:700; letter-spacing:.05em;
+    text-transform:uppercase; color:#fff; background:var(--amber); padding:5px 10px; border-radius:5px;
+    box-shadow:0 4px 12px rgba(255,122,24,.4);
+  }
+  .shot .ph{ text-align:center; color:#9aa7b3; font-size:14px; font-weight:600 }
+  .shot.dark .ph{ color:#6f8ba2 }
+  .shot .ph .cam{ font-size:34px; display:block; margin-bottom:10px; opacity:.6 }
+
+  .two{ display:grid; grid-template-columns:1.1fr .9fr; gap:40px; margin-top:8px }
+  @media (max-width:680px){ .two{ grid-template-columns:1fr; gap:26px } .cover h1{font-size:54px} .chapter h2{font-size:34px} }
+  .selltext p{ font-size:16.5px; color:#39454f; margin:0 0 16px }
+  .selltext strong{ color:var(--ink) }
+
+  .howto{ background:var(--paper2); border:1px solid var(--line); border-radius:12px; padding:26px 28px }
+  .howto h4{ margin:0 0 18px; font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:var(--steel) }
+  .step{ display:grid; grid-template-columns:30px 1fr; gap:14px; margin-bottom:16px }
+  .step:last-child{margin-bottom:0}
+  .step .s{
+    width:26px;height:26px;border-radius:50%; background:var(--ink); color:#fff; font-weight:700; font-size:13px;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .step .t{ font-size:15px; color:#2c3a45 }
+  .step .t b{color:var(--ink)}
+
+  .callout{
+    margin-top:34px; border-left:4px solid var(--amber); background:linear-gradient(90deg,rgba(255,122,24,.07),transparent);
+    padding:18px 22px; border-radius:0 10px 10px 0;
+  }
+  .callout .c-k{ font-size:12px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; color:var(--amber) }
+  .callout p{ margin:6px 0 0; font-size:16px; color:#33404d }
+
+  .specs{ display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:12px; overflow:hidden; margin-top:30px }
+  .spec{ background:var(--paper); padding:22px }
+  .spec .v{ font-size:30px; font-weight:800; color:var(--ink); letter-spacing:-.02em }
+  .spec .l{ font-size:13px; color:var(--muted); margin-top:4px }
+
+  .runfoot{ margin-top:46px; padding-top:20px; border-top:1px solid var(--line); display:flex; justify-content:space-between; font-size:12.5px; color:var(--muted) }
+  .note{ max-width:var(--maxw); margin:0 auto 40px; color:#cdd8e2; font-size:13px; text-align:center; padding:0 20px }
+
+  /* ---------- BRAND / LOGO ---------- */
+  .logo{ display:inline-block; line-height:0 }
+  .logo svg{ height:30px; width:auto; display:block }
+  .cover .logo svg{ height:34px }
+  .glyph{ display:inline-block; line-height:0; vertical-align:middle }
+  .glyph svg{ height:16px; width:auto; display:block }
+  .cover-watermark{ position:absolute; right:-60px; top:60px; opacity:.05; pointer-events:none }
+  .cover-watermark svg{ height:560px; width:auto; color:#9fd9ce }
+  .runfoot .brand{ display:inline-flex; align-items:center; gap:8px; color:var(--ink); font-weight:600 }
+
+  /* ---------- "BAILEY IS BEST PRACTICE" MARK ---------- */
+  .bpmark{ margin:30px 0 0; font-size:34px; font-weight:800; letter-spacing:-.02em; color:#dfeaf2 }
+  .bpmark span{ color:var(--amber2); position:relative }
+  .bpmark span::after{ content:""; position:absolute; left:0; right:0; bottom:2px; height:8px; background:rgba(255,122,24,.22); z-index:-1 }
+
+  /* ---------- STANDARDS / COMPLIANCE CALLOUT ---------- */
+  .std{ margin-top:32px; border:1px solid var(--line); border-radius:14px; overflow:hidden; background:#fff }
+  .std-h{
+    display:flex; align-items:center; gap:10px; padding:16px 22px; background:var(--ink); color:#fff;
+    font-size:13.5px; font-weight:700; letter-spacing:.04em;
+  }
+  .std-h .glyph{ color:var(--amber2) } .std-h .glyph svg{ height:18px }
+  .std-h b{ color:var(--amber2) }
+  .std ul{ list-style:none; margin:0; padding:8px 0 }
+  .std li{ display:grid; grid-template-columns:170px 1fr; gap:18px; padding:14px 22px; border-top:1px solid var(--paper2); align-items:start }
+  .std li:first-child{ border-top:none }
+  .std .code{ font-weight:800; color:var(--ink); font-size:13.5px; line-height:1.35 }
+  .std .code em{ display:block; font-weight:600; font-style:normal; color:var(--amber); font-size:11.5px; letter-spacing:.06em; text-transform:uppercase; margin-top:3px }
+  .std .demand{ font-size:14.5px; color:#39454f }
+  .std .demand b{ color:var(--ink) }
+</style>
+</head>
+<body>
+
+<!-- ============ COVER ============ -->
+<section class="page cover">
+  <div class="cover-watermark"><span class="glyph"><svg viewBox="0 0 123 154.8" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M0,104.5V5l59.9,50L10.3,92.8C6,96,2.5,100,0,104.5z M90.7,80.6l-21.3,18c-7.1,6.2-10.9,14.5-10.9,24c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5s16.7-3.4,22.8-9.5c6.1-6.1,9.4-14.2,9.4-22.8s-3.3-16.7-9.4-22.7L90.7,80.6z M118.5,15.8l-25,19.5l0,0L13.1,96.6C4.9,102.6,0,112.3,0,122.5c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5h40.4c-2.9-1.6-5.6-3.7-8.1-6.1c-7-7-10.8-16.3-10.8-26.1c0-10.7,4.4-20.5,12.5-27.6l46-38.7c6.8-5.8,10.8-14.9,10.8-24C123,26.4,121.5,20.8,118.5,15.8z M57.5,0l36.1,29.3L115.7,12c-0.5-0.6-1.3-1.5-2.3-2.7C107,1.6,97.5,0,90.8,0H57.5z"/></svg></span></div>
+  <div class="pad">
+    <span class="logo" style="color:#ffffff"><svg viewBox="0 0 663.4 154.8" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M612.6,77.7c5.8-5.8,12.4-8.7,19.8-8.7c6.1,0,10.8,1,14,3s4.3,3.7,4.3,7.3v38h12.6V78.6c0-5.6-1.8-9.8-5.4-12.9c-5.6-4.7-13.2-7.1-22.7-7.1c-8.6,0-16.2,3.3-22.7,9.9v-8.6H600v57.5h12.6V77.7z M583.2,117.3V59.8h-12.6V68c-7-6-15.8-9.4-25-9.5c-9,0-16.7,2.6-23,7.9c-3.5,3.1-5.4,7.3-5.4,12.9v18.5c0,5.6,1.8,9.8,5.4,12.9c6.1,5.2,13.8,7.8,23,7.8c9.2,0.2,18.2-3.2,25-9.4v8.1L583.2,117.3z M570.6,98.4c-2.7,3.2-6.2,5.6-10.1,7c-3.8,1.8-8,2.8-12.2,2.9c-4.8,0-9.6-1.3-13.8-3.7c-3.5-2-4.7-3.8-4.7-7.4V80.1c0-3.8,1.1-5.5,4.7-7.4c4.2-2.4,8.9-3.6,13.8-3.6c4.2,0.1,8.4,1,12.2,2.7c4.5,1.8,7.8,4.1,10.1,7V98.4z M491.7,117.3l18.1-57.5h-13.1l-14.2,47.3h-3l-15-47.3h-13.4l-16.3,47.3H432l-13.9-47.3h-13.6l18.2,57.5H443l14.5-42.9l14,42.9H491.7z M360.5,118.4c12.2,0,21.1-1.2,26.5-3.6c6.4-3,9.6-7.6,9.6-13.6v-6.1c0.2-3.8-1.4-7.5-4.2-10c-2.6-2.4-7.2-4.6-14-6.3l-20.1-5.4c-5.6-1.4-9.2-2.8-10.6-4s-2.4-3.3-2.4-6c0-2.9,1-4.9,3-6.2c2.6-1.7,8.4-2.6,17.1-2.6c9.1-0.1,18.1,0.8,27,2.7V46.8c-8.5-1.6-17-2.4-25.6-2.3c-12.7,0-21.8,1.7-27.1,5.3c-4.7,3.1-7,7.1-7,12v5.3c-0.1,3.6,1.3,7,3.9,9.5c3.1,2.9,8.4,5.4,16,7.3l19.2,5.2c9.3,2.3,12.1,4.5,12.1,9.5c0,3.6-1.1,6-3.3,7.2c-3.3,1.7-9.8,2.6-19.4,2.6c-9.5,0.1-18.9-0.9-28.2-2.7v10.7C341.9,117.8,351.1,118.5,360.5,118.4 M323.3,106.7c-4.6,1.3-9.3,1.9-14.1,1.8c-4.7,0-8.4-0.9-11-2.9c-2.4-1.8-3.1-4-3.1-8.6V69.6h28.2v-9.9h-28.1V45.1h-12.6v52.8c0,7.8,1.4,12,5.8,15.7c4.2,3.3,10.6,4.9,19.4,4.9c6.8,0,11.9-0.7,15.6-2.2L323.3,106.7z M266,59.7h-12.6v57.5H266V59.7z M266,36.5h-12.6v13.1H266V36.5z M213,117.3c11.8,0,18-1.3,22.7-5.3c4.5-3.8,6.1-6.5,6.1-12.4v-5c0-6-2.9-10.3-8.7-12.9c-0.9-0.5-1.6-0.8-1.9-0.9l0.4-0.2c5.4-2.2,8-6.3,8-12.4V63c0-5.5-1.4-8.5-5.1-11.8c-4.4-3.7-11.8-5.5-22.4-5.5h-36.3v71.6H213z M215.2,85.9c5,0,8.6,0.8,10.8,2.5s3.3,4.5,3.3,8.4s-1.3,6.5-3.7,8.2c-2.2,1.6-6.3,2.4-12.3,2.4h-25.1V85.9H215.2z M211.2,55.7c6.8,0,11.1,0.9,13.3,2.9c1.7,1.7,2.6,4.2,2.6,7.7c0,3.7-0.9,6.2-2.8,7.7c-2.1,1.5-5,2.3-8.9,2.3h-27.2V55.7H211.2z" fill="currentColor"/><path d="M0,104.5V5l59.9,50L10.3,92.8C6,96,2.5,100,0,104.5z M90.7,80.6l-21.3,18c-7.1,6.2-10.9,14.5-10.9,24c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5s16.7-3.4,22.8-9.5c6.1-6.1,9.4-14.2,9.4-22.8s-3.3-16.7-9.4-22.7L90.7,80.6z M118.5,15.8l-25,19.5l0,0L13.1,96.6C4.9,102.6,0,112.3,0,122.5c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5h40.4c-2.9-1.6-5.6-3.7-8.1-6.1c-7-7-10.8-16.3-10.8-26.1c0-10.7,4.4-20.5,12.5-27.6l46-38.7c6.8-5.8,10.8-14.9,10.8-24C123,26.4,121.5,20.8,118.5,15.8z M57.5,0l36.1,29.3L115.7,12c-0.5-0.6-1.3-1.5-2.3-2.7C107,1.6,97.5,0,90.8,0H57.5z" fill="currentColor"/></svg></span>
+    <span class="kicker" style="margin-top:24px"><span class="dot"></span> The Operator's Handbook · 2026 Edition</span>
+    <h1>Run it like it<br>matters.</h1>
+    <div class="sub">Business processes on infrastructure that defends itself.</div>
+    <p class="tag">Blue-green production. One-click disaster-recovery rehearsals. Supply-chain scanning before anything ships. Access control that an auditor will actually like. This is the platform — and this manual.</p>
+    <div class="bpmark">Bailey is <span>best practice</span>.</div>
+
+    <div class="hero-shot">
+      <div class="shot-label"><span class="cam">▣</span>Cover capture · the Bitswan workspace, live</div>
+    </div>
+
+    <div class="cover-foot">
+      <span class="live-badge"><span class="dot"></span> Every screenshot in this manual was captured live, walking the real product.</span>
+      <span>No. BSW‑OH‑01</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ WHY / MANIFESTO ============ -->
+<section class="page manifesto">
+  <div class="pad">
+    <h2>Why teams put Bitswan in front of what matters</h2>
+    <div class="promises">
+      <div class="promise"><div class="num">01</div><div><h3>Ship without holding your breath</h3><p>Promote dev → staging → production across three blue-green slots over two persistent databases. The live slot never blinks; the standby is always one cutover away.</p></div></div>
+      <div class="promise"><div class="num">02</div><div><h3>Rehearse the disaster before it happens</h3><p>Restore any production backup into an isolated DR slot, verify it by hand, mark it recovery-tested, then swap it live with a single ingress cutover. No data move. No downtime.</p></div></div>
+      <div class="promise"><div class="num">03</div><div><h3>Know what's inside before it runs</h3><p>Every image is scanned for CVEs before deploy. Waivers live in your source tree, not buried in config. Auditors get a clean, signed story.</p></div></div>
+      <div class="promise"><div class="num">04</div><div><h3>Trust the device, not just the password</h3><p>The first operator claims the server; every device after is approved. Identity is enforced at the gate — your processes run safely behind it.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CHAPTER 01 — SYNC & DEPLOY ============ -->
+<section class="page chapter">
+  <div class="pad">
+    <div class="chapter-head">
+      <span class="chapter-num">CH 01</span>
+      <span class="chapter-eyebrow">Ship changes</span>
+    </div>
+    <h2>Sync &amp; Deploy</h2>
+    <p class="lede">From a working copy to a healthy deployment — with a security check standing between you and production.</p>
+
+    <div class="shot">
+      <span class="frame-label">Live capture</span>
+      <div class="ph"><span class="cam">▣</span>Sync &amp; Deploy → Checks tab, CVEs of the image this deploy would build</div>
+    </div>
+
+    <div class="two">
+      <div class="selltext">
+        <p>One button does the careful thing: it commits your work-in-progress, rebases onto main, fast-forwards, and rolls out to development — <strong>tracking the single deploy it started</strong> instead of racing a second one.</p>
+        <p>Before you promote, the <strong>Checks</strong> tab shows the exact CVEs of the image this deploy <em>would</em> build. Click any CVE to open the advisory. Mark what's out of scope — into your source tree, where review can see it.</p>
+      </div>
+      <div class="howto">
+        <h4>How to ship a change</h4>
+        <div class="step"><div class="s">1</div><div class="t">Open <b>Sync &amp; Deploy</b> on your business process.</div></div>
+        <div class="step"><div class="s">2</div><div class="t">Review the <b>diff</b> and the <b>Checks</b> tab.</div></div>
+        <div class="step"><div class="s">3</div><div class="t">Press <b>Sync &amp; Deploy</b> — development goes <b>Healthy</b>.</div></div>
+        <div class="step"><div class="s">4</div><div class="t"><b>Promote</b> dev → staging → production when you're ready.</div></div>
+      </div>
+    </div>
+
+    <div class="callout">
+      <span class="c-k">Why it matters</span>
+      <p>The check happens on the image that will actually run — not last week's scan. Security is a step in the flow, not a gate someone forgets.</p>
+    </div>
+
+    <div class="std">
+      <div class="std-h"><span class="glyph"><svg viewBox="0 0 123 154.8" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M0,104.5V5l59.9,50L10.3,92.8C6,96,2.5,100,0,104.5z M90.7,80.6l-21.3,18c-7.1,6.2-10.9,14.5-10.9,24c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5s16.7-3.4,22.8-9.5c6.1-6.1,9.4-14.2,9.4-22.8s-3.3-16.7-9.4-22.7L90.7,80.6z M118.5,15.8l-25,19.5l0,0L13.1,96.6C4.9,102.6,0,112.3,0,122.5c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5h40.4c-2.9-1.6-5.6-3.7-8.1-6.1c-7-7-10.8-16.3-10.8-26.1c0-10.7,4.4-20.5,12.5-27.6l46-38.7c6.8-5.8,10.8-14.9,10.8-24C123,26.4,121.5,20.8,118.5,15.8z M57.5,0l36.1,29.3L115.7,12c-0.5-0.6-1.3-1.5-2.3-2.7C107,1.6,97.5,0,90.8,0H57.5z"/></svg></span> Bailey is best practice — what the standards ask of you, and how this does it</div>
+      <ul>
+        <li><div class="code">ISO/IEC 27001<em>A.8.8</em></div><div class="demand"><b>Management of technical vulnerabilities.</b> You must obtain timely information about vulnerabilities in the software you run and evaluate your exposure. The Checks tab scans the exact image before it ships and links each CVE to its advisory.</div></li>
+        <li><div class="code">NIS2<em>Art. 21(2)(d) & (e)</em></div><div class="demand"><b>Supply-chain security & secure acquisition.</b> Vulnerability handling and the security of your software supply chain are explicit duties. Bitswan records waivers in your source tree, so every accepted risk is versioned and reviewable.</div></li>
+        <li><div class="code">DORA<em>Art. 8–9</em></div><div class="demand"><b>ICT risk identification & protection.</b> Continuously identify ICT-supported risks before deployment. Pre-deploy scanning makes that identification automatic and auditable.</div></li>
+      </ul>
+    </div>
+
+    <div class="runfoot"><span class="brand"><span class="glyph" style="color:var(--ink)"><svg viewBox="0 0 123 154.8" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M0,104.5V5l59.9,50L10.3,92.8C6,96,2.5,100,0,104.5z M90.7,80.6l-21.3,18c-7.1,6.2-10.9,14.5-10.9,24c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5s16.7-3.4,22.8-9.5c6.1-6.1,9.4-14.2,9.4-22.8s-3.3-16.7-9.4-22.7L90.7,80.6z M118.5,15.8l-25,19.5l0,0L13.1,96.6C4.9,102.6,0,112.3,0,122.5c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5h40.4c-2.9-1.6-5.6-3.7-8.1-6.1c-7-7-10.8-16.3-10.8-26.1c0-10.7,4.4-20.5,12.5-27.6l46-38.7c6.8-5.8,10.8-14.9,10.8-24C123,26.4,121.5,20.8,118.5,15.8z M57.5,0l36.1,29.3L115.7,12c-0.5-0.6-1.3-1.5-2.3-2.7C107,1.6,97.5,0,90.8,0H57.5z"/></svg></span>Bitswan · The Operator's Handbook</span><span>Sync &amp; Deploy — 01</span></div>
+  </div>
+</section>
+
+<!-- ============ CHAPTER 02 — DISASTER RECOVERY ============ -->
+<section class="page chapter">
+  <div class="pad">
+    <div class="chapter-head">
+      <span class="chapter-num">CH 02</span>
+      <span class="chapter-eyebrow">Sleep at night</span>
+    </div>
+    <h2>Rehearse &amp; Restore</h2>
+    <p class="lede">A backup you've never restored is a rumor. Bitswan makes the rehearsal a routine — and the real thing a single swap.</p>
+
+    <div class="shot dark">
+      <span class="frame-label">Live capture</span>
+      <div class="ph"><span class="cam">▣</span>Disaster Recovery · the three-slot state diagram with Production / DR / Idle tags</div>
+    </div>
+
+    <div class="two">
+      <div class="selltext">
+        <p>Restore a production backup <strong>into the DR slot</strong> — never onto live production. Open it, click around, confirm it's whole. Only the backup actually loaded into DR can be <strong>marked recovery-tested</strong> — because you can only vouch for what you've seen.</p>
+        <p>When you need to go live, the <strong>Restore</strong> pill performs an ingress cutover: the <code>-production</code> host repoints to the verified slot. No data migration, no redeploy, no downtime.</p>
+      </div>
+      <div class="howto">
+        <h4>How to run a recovery drill</h4>
+        <div class="step"><div class="s">1</div><div class="t">In <b>Production → Backups</b>, take a snapshot.</div></div>
+        <div class="step"><div class="s">2</div><div class="t">Go to <b>Disaster Recovery → Rehearse &amp; restore</b>.</div></div>
+        <div class="step"><div class="s">3</div><div class="t"><b>Restore into DR</b>, then verify and <b>Mark recovery-tested</b>.</div></div>
+        <div class="step"><div class="s">4</div><div class="t">Use the <b>Restore</b> pill to swap DR live when needed.</div></div>
+      </div>
+    </div>
+
+    <div class="specs">
+      <div class="spec"><div class="v">3 slots</div><div class="l">over 2 persistent databases</div></div>
+      <div class="spec"><div class="v">0&nbsp;s</div><div class="l">downtime on a swap (ingress cutover)</div></div>
+      <div class="spec"><div class="v">Quarterly</div><div class="l">default recovery-test cadence</div></div>
+    </div>
+
+    <div class="std">
+      <div class="std-h"><span class="glyph"><svg viewBox="0 0 123 154.8" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M0,104.5V5l59.9,50L10.3,92.8C6,96,2.5,100,0,104.5z M90.7,80.6l-21.3,18c-7.1,6.2-10.9,14.5-10.9,24c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5s16.7-3.4,22.8-9.5c6.1-6.1,9.4-14.2,9.4-22.8s-3.3-16.7-9.4-22.7L90.7,80.6z M118.5,15.8l-25,19.5l0,0L13.1,96.6C4.9,102.6,0,112.3,0,122.5c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5h40.4c-2.9-1.6-5.6-3.7-8.1-6.1c-7-7-10.8-16.3-10.8-26.1c0-10.7,4.4-20.5,12.5-27.6l46-38.7c6.8-5.8,10.8-14.9,10.8-24C123,26.4,121.5,20.8,118.5,15.8z M57.5,0l36.1,29.3L115.7,12c-0.5-0.6-1.3-1.5-2.3-2.7C107,1.6,97.5,0,90.8,0H57.5z"/></svg></span> Bailey is best practice — what the standards ask of you, and how this does it</div>
+      <ul>
+        <li><div class="code">DORA<em>Art. 11 & 12</em></div><div class="demand"><b>Response, recovery & backup, restoration and testing.</b> You must maintain backup procedures and <b>regularly test</b> your ability to restore. Rehearse &amp; Restore turns that test into a routine and records when it last passed.</div></li>
+        <li><div class="code">ISO/IEC 27001<em>A.8.13 / A.5.30</em></div><div class="demand"><b>Information backup & ICT readiness for continuity.</b> Backups must be maintained and verified by restoration. A recovery test is only valid against the backup actually loaded into DR.</div></li>
+        <li><div class="code">NIS2<em>Art. 21(2)(c)</em></div><div class="demand"><b>Business continuity & crisis management.</b> Backup management and disaster recovery are required measures. A zero-downtime swap means recovery doesn't cost you an outage.</div></li>
+      </ul>
+    </div>
+
+    <div class="runfoot"><span class="brand"><span class="glyph" style="color:var(--ink)"><svg viewBox="0 0 123 154.8" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M0,104.5V5l59.9,50L10.3,92.8C6,96,2.5,100,0,104.5z M90.7,80.6l-21.3,18c-7.1,6.2-10.9,14.5-10.9,24c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5s16.7-3.4,22.8-9.5c6.1-6.1,9.4-14.2,9.4-22.8s-3.3-16.7-9.4-22.7L90.7,80.6z M118.5,15.8l-25,19.5l0,0L13.1,96.6C4.9,102.6,0,112.3,0,122.5c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5h40.4c-2.9-1.6-5.6-3.7-8.1-6.1c-7-7-10.8-16.3-10.8-26.1c0-10.7,4.4-20.5,12.5-27.6l46-38.7c6.8-5.8,10.8-14.9,10.8-24C123,26.4,121.5,20.8,118.5,15.8z M57.5,0l36.1,29.3L115.7,12c-0.5-0.6-1.3-1.5-2.3-2.7C107,1.6,97.5,0,90.8,0H57.5z"/></svg></span>Bitswan · The Operator's Handbook</span><span>Rehearse &amp; Restore — 02</span></div>
+  </div>
+</section>
+
+<p class="note">Design preview · cover + “why” spread + two of ~12 feature chapters. Every <span style="color:var(--amber2)">Live capture</span> slot is filled by a real screenshot taken during the automated product walkthrough. The same HTML renders to a downloadable PDF and is served inside the product.</p>
+
+</body>
+</html>

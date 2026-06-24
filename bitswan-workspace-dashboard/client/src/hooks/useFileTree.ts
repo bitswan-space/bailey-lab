@@ -7,22 +7,22 @@ interface Result {
   refresh: () => Promise<void>;
 }
 
-/** Per-worktree filesystem tree (sans hidden dirs). Refetches on focus. */
-export function useFileTree(worktree: string): Result {
+/** Per-copy filesystem tree (sans hidden dirs). Refetches on focus. */
+export function useFileTree(copy: string): Result {
   const [tree, setTree] = useState<FileTreeNode[]>([]);
   const [loading, setLoading] = useState(true);
   const aliveRef = useRef(true);
 
   const refresh = useCallback(async () => {
     try {
-      const data = await api.worktreeFiles.tree(worktree);
+      const data = await api.copyFiles.tree(copy);
       if (aliveRef.current) setTree(data);
     } catch {
       // see useRequirements / useAgentSessions — non-fatal
     } finally {
       if (aliveRef.current) setLoading(false);
     }
-  }, [worktree]);
+  }, [copy]);
 
   useEffect(() => {
     aliveRef.current = true;

@@ -156,9 +156,8 @@ def server(tmp_path_factory):
     env = os.environ.copy()
     env["BITSWAN_GITOPS_DIR"] = str(tmp_path)
     env["BITSWAN_GITOPS_SECRET"] = secret
-    # Ensure local git (no nsenter) and no MQTT side-effects
+    # Ensure local git (no nsenter)
     env.pop("HOST_PATH", None)
-    env.pop("MQTT_BROKER", None)
 
     proc = subprocess.Popen(
         [

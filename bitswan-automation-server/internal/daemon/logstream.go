@@ -100,4 +100,3 @@ func WriteLogEntry(w io.Writer, level, message string) error {
 
 	return nil
 }
-

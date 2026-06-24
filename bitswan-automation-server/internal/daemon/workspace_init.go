@@ -36,23 +36,24 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	certsDir := fs.String("certs-dir", "", "")
 	verbose := fs.Bool("verbose", false, "")
 	mkCerts := fs.Bool("mkcerts", false, "")
-	noIde := fs.Bool("no-ide", false, "")
 	noDashboard := fs.Bool("no-dashboard", false, "")
 	noCodingAgent := fs.Bool("no-coding-agent", false, "")
 	setHosts := fs.Bool("set-hosts", false, "")
 	local := fs.Bool("local", false, "")
 	gitopsImage := fs.String("gitops-image", "", "")
-	editorImage := fs.String("editor-image", "", "")
 	dashboardImage := fs.String("dashboard-image", "", "")
 	codingAgentImage := fs.String("coding-agent-image", "", "")
 	gitopsDevSourceDir := fs.String("gitops-dev-source-dir", "", "")
-	editorDevSourceDir := fs.String("editor-dev-source-dir", "", "")
 	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
 	codingAgentDevSourceDir := fs.String("coding-agent-dev-source-dir", "", "")
 	oauthConfigFile := fs.String("oauth-config", "", "")
 	noOauth := fs.Bool("no-oauth", false, "")
 	sshPort := fs.String("ssh-port", "", "")
 	staging := fs.Bool("staging", false, "")
+	// Email of the user creating the workspace. Passed through to
+	// route registration so the workspace's endpoints (gitops,
+	// dashboard) are recorded under this owner in the Bailey ACL.
+	owner := fs.String("owner", "", "")
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("failed to parse flags: %w", err)
@@ -141,6 +142,14 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	if err := os.MkdirAll(gitopsConfig, 0755); err != nil {
 		return fmt.Errorf("failed to create GitOps directory: %w", err)
 	}
+
+	// Pre-create the workspace's standard data subdirectories. The compose
+	// mounts them as named-volume subpaths, which Docker requires to exist
+	// before the container starts (unlike bind mounts, which auto-create the
+	// source). Created before the recursive chown below so they inherit
+	// user1000 ownership. (e.g. secrets, snapshots — missing these makes the
+	// gitops container fail to start with "cannot access path .../snapshots".)
+	ensureWorkspaceVolumeDirs(workspaceName)
 
 	// Ensure user1000 exists (create if it doesn't)
 	checkUserCmd := exec.Command("id", "-u", "1000")
@@ -377,13 +386,31 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	gitConfigGlobalCmd = exec.Command("su", "-s", "/bin/sh", "user1000", "-c", "git config --global user.email 'workspace@bitswan.local'") //nolint:gosec
 	gitConfigGlobalCmd.Run()                                                                                                               // Ignore errors, might already be set
 
-	// Add GitOps worktree as user1000
+	// GitOps deploy STATE lives on its own disjoint branch (bitswan.yaml only),
+	// separate from the source on `main`. It used to be a git WORKTREE of the
+	// workspace repo, relying on that repo's `.git` being bind-mounted into the
+	// gitops container. Commit 490ff63 ("Replace shared-.git worktrees with a
+	// ff-only git server + per-copy clones") stopped mounting that `.git` (and
+	// dropped the orphan-worktree gitdir rewrite) when it moved `main` to
+	// repo.git/copies — but it never migrated THIS state branch, so the worktree's
+	// gitdir pointed at an unmounted path and every in-container git op failed
+	// (deploy history never rendered → "Not deployed yet"; BP creation 400s).
+	//
+	// Make it a SELF-CONTAINED repo on the same disjoint branch so its git works
+	// regardless of what's mounted (only /gitops/gitops itself is). Mirror the
+	// workspace repo's origin, if any, so the remote-repo push path below still
+	// works; the empty state branch is fine — the first deploy writes bitswan.yaml.
 	gitopsWorktree := gitopsConfig + "/gitops"
-	worktreeAddCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("git -C %s worktree add --orphan -b %s %s", gitopsWorkspace, workspaceName, gitopsWorktree)) //nolint:gosec
+	initStateRepo := fmt.Sprintf(
+		"mkdir -p %[1]s && git -C %[1]s init -q -b %[2]s && "+
+			"O=$(git -C %[3]s remote get-url origin 2>/dev/null || true); "+
+			"[ -n \"$O\" ] && git -C %[1]s remote add origin \"$O\" || true",
+		gitopsWorktree, workspaceName, gitopsWorkspace)
+	worktreeAddCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", initStateRepo) //nolint:gosec
 
-	fmt.Println("Setting up GitOps worktree...")
+	fmt.Println("Setting up GitOps state repo...")
 	if err := util.RunCommandVerbose(worktreeAddCom, *verbose); err != nil {
-		return fmt.Errorf("failed to create GitOps worktree: %w", err)
+		return fmt.Errorf("failed to create GitOps state repo: %w", err)
 	}
 
 	if *remoteRepo != "" {
@@ -470,6 +497,14 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 	fmt.Println("Ownership fixed successfully!")
 
+	// Set up the canonical bare repo (served fast-forward-only over smart-HTTP)
+	// and the `main` copy — the editor's working tree and main-branch live-dev
+	// source. This is the new working-tree model; the gitops worktree above
+	// remains the promoted-deployment state repo.
+	if err := setupCanonicalRepoAndMainCopy(workspaceName, gitopsConfig, gitopsWorkspace, *verbose); err != nil {
+		return fmt.Errorf("failed to set up canonical git repo: %w", err)
+	}
+
 	// Create secrets directory
 	secretsDir := gitopsConfig + "/secrets"
 	if err := os.MkdirAll(secretsDir, 0700); err != nil {
@@ -499,7 +534,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 
 	// Set hosts to /etc/hosts file
 	if *setHosts {
-		err := setHostsFile(workspaceName, *domain, *noIde)
+		err := setHostsFile(workspaceName, *domain)
 		if err != nil {
 			fmt.Printf("\033[33m%s\033[0m\n", err)
 		}
@@ -515,20 +550,8 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	// Resolve service images lazily — only hit Docker Hub for services we'll
-	// actually deploy. Otherwise `bitswan workspace init --no-ide --no-dashboard`
-	// fails if the editor or dashboard image repo isn't reachable.
-	var bitswanEditorImage string
-	if !*noIde {
-		bitswanEditorImage = *editorImage
-		if bitswanEditorImage == "" {
-			var err error
-			bitswanEditorImage, err = dockerhub.ResolveEditorImage(*staging)
-			if err != nil {
-				return fmt.Errorf("failed to get latest BitSwan Editor image: %w", err)
-			}
-		}
-	}
-
+	// actually deploy. Otherwise `bitswan workspace init --no-dashboard`
+	// fails if the dashboard image repo isn't reachable.
 	var bitswanDashboardImage string
 	if !*noDashboard {
 		bitswanDashboardImage = *dashboardImage
@@ -567,16 +590,28 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		return fmt.Errorf("failed to create deployment directory: %w", err)
 	}
 
+	// The workspace dashboard endpoint is the workspace's membership
+	// surface: the other workspace endpoints (gitops, editor, and later
+	// every automation gitops deploys) register it as their ACL parent,
+	// so workspace members can share what the workspace spawns.
+	workspaceParent := ""
+	if !*noDashboard {
+		workspaceParent = fmt.Sprintf("%s-dashboard.%s", workspaceName, *domain)
+	}
+
 	// Register GitOps service route via the daemon's ingress abstraction.
 	// addRouteToIngress detects the ingress type and handles certs + routing.
 	gitopsHostname := fmt.Sprintf("%s-gitops.%s", workspaceName, *domain)
 	gitopsUpstream := fmt.Sprintf("%s-gitops:8079", workspaceName)
 	if err := addRouteToIngress(IngressAddRouteRequest{
-		Hostname:      gitopsHostname,
-		Upstream:      gitopsUpstream,
-		Mkcert:        *mkCerts,
-		CertsDir:      *certsDir,
-		WorkspaceName: workspaceName,
+		Hostname:       gitopsHostname,
+		Upstream:       gitopsUpstream,
+		Mkcert:         *mkCerts,
+		CertsDir:       *certsDir,
+		WorkspaceName:  workspaceName,
+		OwnerEmail:     *owner,
+		DisplayName:    workspaceName + " (gitops)",
+		ParentEndpoint: workspaceParent,
 	}, ""); err != nil {
 		return fmt.Errorf("failed to register GitOps service: %w", err)
 	}
@@ -590,13 +625,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		}
 	}
 
-	err = ensureExamples(bitswanConfig, *verbose)
-	if err != nil {
-		return fmt.Errorf("failed to download examples: %w", err)
-	}
-
 	var aocEnvVars []string
-	var mqttEnvVars []string
 	workspaceId := ""
 	fmt.Println("Registering workspace...")
 
@@ -612,13 +641,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		} else {
 			fmt.Println("Automation server token received successfully!")
 
-			var editorURL *string
-			if !*noIde {
-				url := fmt.Sprintf("https://%s-editor.%s", workspaceName, *domain)
-				editorURL = &url
-			}
-
-			workspaceId, err = aocClient.RegisterWorkspace(workspaceName, editorURL, *domain)
+			workspaceId, err = aocClient.RegisterWorkspace(workspaceName, *domain)
 			if err != nil {
 				return fmt.Errorf("failed to register workspace: %w", err)
 			}
@@ -642,15 +665,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			}
 
 			aocEnvVars = aocClient.GetAOCEnvironmentVariables(workspaceId, automationServerToken)
-
-			fmt.Println("Getting EMQX JWT for workspace...")
-			mqttCreds, err := aocClient.GetMQTTCredentials(workspaceId)
-			if err != nil {
-				return fmt.Errorf("failed to get MQTT credentials: %w", err)
-			}
-			fmt.Println("EMQX JWT received successfully!")
-
-			mqttEnvVars = aoc.GetMQTTEnvironmentVariables(mqttCreds)
 		}
 	}
 
@@ -671,7 +685,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		WorkspaceName:      workspaceName,
 		GitopsImage:        imgopsImage,
 		Domain:             *domain,
-		MqttEnvVars:        mqttEnvVars,
 		AocEnvVars:         aocEnvVars,
 		OAuthEnvVars:       oauthEnvVars,
 		GitopsDevSourceDir: *gitopsDevSourceDir,
@@ -700,7 +713,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	fmt.Println("GitOps deployment set up successfully!")
 
 	// Save metadata to file
-	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noIde, *noDashboard, *noCodingAgent, &workspaceId, mqttEnvVars, *gitopsDevSourceDir, *editorDevSourceDir, *dashboardDevSourceDir, *codingAgentDevSourceDir, codingAgentSecret); err != nil {
+	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noDashboard, *noCodingAgent, &workspaceId, *gitopsDevSourceDir, *dashboardDevSourceDir, *codingAgentDevSourceDir, codingAgentSecret); err != nil {
 		fmt.Printf("Warning: Failed to save metadata: %v\n", err)
 	}
 
@@ -721,52 +734,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		fmt.Printf("Warning: Failed to sync workspace list to AOC: %v\n", err)
 	}
 
-	// Setup editor service if not disabled
-	if !*noIde {
-		fmt.Println("Setting up editor service...")
-
-		editorService, err := services.NewEditorService(workspaceName)
-		if err != nil {
-			return fmt.Errorf("failed to create editor service: %w", err)
-		}
-
-		if err := editorService.Enable(token, bitswanEditorImage, *domain, oauthConfig, true); err != nil {
-			return fmt.Errorf("failed to enable editor service: %w", err)
-		}
-
-		editorHostname := fmt.Sprintf("%s-editor.%s", workspaceName, *domain)
-		editorUpstream := fmt.Sprintf("%s-editor:9999", workspaceName)
-		if err := addRouteToIngress(IngressAddRouteRequest{
-			Hostname:      editorHostname,
-			Upstream:      editorUpstream,
-			Mkcert:        *mkCerts,
-			CertsDir:      *certsDir,
-			WorkspaceName: workspaceName,
-		}, ""); err != nil {
-			return fmt.Errorf("failed to register Editor service: %w", err)
-		}
-
-		if err := editorService.StartContainer(); err != nil {
-			return fmt.Errorf("failed to start editor container: %w", err)
-		}
-
-		fmt.Println("Downloading and installing editor...")
-		if err := editorService.WaitForEditorReady(); err != nil {
-			return fmt.Errorf("failed to wait for editor to be ready: %w", err)
-		}
-
-		fmt.Println("------------BITSWAN EDITOR INFO------------")
-		fmt.Printf("Bitswan Editor URL: https://%s-editor.%s\n", workspaceName, *domain)
-		if oauthConfig == nil {
-			editorPassword, err := editorService.GetEditorPassword()
-			if err != nil {
-				return fmt.Errorf("failed to get Bitswan Editor password: %w", err)
-			}
-			fmt.Printf("Bitswan Editor Password: %s\n", editorPassword)
-		}
-	}
-
-	// Setup dashboard service if not disabled — fully independent from the editor.
+	// Setup dashboard service if not disabled.
 	if !*noDashboard {
 		fmt.Println("Setting up workspace-dashboard service...")
 
@@ -775,7 +743,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			return fmt.Errorf("failed to create dashboard service: %w", err)
 		}
 
-		if err := dashboardService.Enable(token, bitswanDashboardImage, *domain, oauthConfig, true); err != nil {
+		if err := dashboardService.Enable(token, bitswanDashboardImage, true); err != nil {
 			return fmt.Errorf("failed to enable dashboard service: %w", err)
 		}
 
@@ -787,6 +755,8 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			Mkcert:        *mkCerts,
 			CertsDir:      *certsDir,
 			WorkspaceName: workspaceName,
+			OwnerEmail:    *owner,
+			DisplayName:   workspaceName + " (dashboard)",
 		}, ""); err != nil {
 			return fmt.Errorf("failed to register Dashboard service: %w", err)
 		}
@@ -849,56 +819,7 @@ type RepositoryInfo struct {
 	IsSSH    bool
 }
 
-func ensureExamples(bitswanConfig string, verbose bool) error {
-	repoURL := "https://github.com/bitswan-space/BitSwan.git"
-	targetDir := filepath.Join(bitswanConfig, "bitswan-src")
-
-	if _, err := os.Stat(filepath.Join(targetDir, ".git")); os.IsNotExist(err) {
-		if verbose {
-			fmt.Printf("Cloning BitSwan repository to %s\n", targetDir)
-		}
-
-		if err := os.MkdirAll(filepath.Dir(targetDir), 0755); err != nil {
-			return fmt.Errorf("failed to create parent directory: %w", err)
-		}
-
-		cmd := exec.Command("git", "clone", repoURL, targetDir)
-		if err := util.RunCommandVerbose(cmd, verbose); err != nil {
-			return fmt.Errorf("failed to clone repository: %w", err)
-		}
-
-		if verbose {
-			fmt.Println("Repository cloned successfully")
-		}
-	} else {
-		if err := updateExamples(bitswanConfig, verbose); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func updateExamples(bitswanConfig string, verbose bool) error {
-	repoPath := filepath.Join(bitswanConfig, "bitswan-src")
-	if verbose {
-		fmt.Printf("Updating BitSwan repository at %s\n", repoPath)
-	}
-
-	cmd := exec.Command("git", "-c", fmt.Sprintf("safe.directory=%s", repoPath), "pull")
-	cmd.Dir = repoPath
-
-	if err := util.RunCommandVerbose(cmd, verbose); err != nil {
-		return fmt.Errorf("failed to update repository: %w", err)
-	}
-
-	if verbose {
-		fmt.Println("Repository updated successfully")
-	}
-	return nil
-}
-
-func setHostsFile(workspaceName, domain string, noIde bool) error {
+func setHostsFile(workspaceName, domain string) error {
 	fmt.Println("Checking if the user has permission to write to /etc/hosts...")
 	fileInfo, err := os.Stat("/etc/hosts")
 	if err != nil {
@@ -912,10 +833,6 @@ func setHostsFile(workspaceName, domain string, noIde bool) error {
 
 	hostsEntries := []string{
 		"127.0.0.1 " + workspaceName + "-gitops." + domain,
-	}
-
-	if !noIde {
-		hostsEntries = append(hostsEntries, "127.0.0.1 "+workspaceName+"-editor."+domain)
 	}
 
 	for _, entry := range hostsEntries {
@@ -937,7 +854,7 @@ func setHostsFile(workspaceName, domain string, noIde bool) error {
 	return nil
 }
 
-func saveMetadata(gitopsConfig, workspaceName, token, domain string, noIde, noDashboard, noCodingAgent bool, workspaceId *string, mqttEnvVars []string, gitopsDevSourceDir, editorDevSourceDir, dashboardDevSourceDir, codingAgentDevSourceDir, codingAgentSecret string) error {
+func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentDevSourceDir, codingAgentSecret string) error {
 	metadata := config.WorkspaceMetadata{
 		Domain:       domain,
 		GitopsURL:    fmt.Sprintf("https://%s-gitops.%s", workspaceName, domain),
@@ -946,33 +863,6 @@ func saveMetadata(gitopsConfig, workspaceName, token, domain string, noIde, noDa
 
 	if workspaceId != nil {
 		metadata.WorkspaceId = workspaceId
-	}
-
-	if len(mqttEnvVars) > 0 {
-		for _, envVar := range mqttEnvVars {
-			key, value, _ := strings.Cut(envVar, "=")
-			switch key {
-			case "MQTT_USERNAME":
-				metadata.MqttUsername = &value
-			case "MQTT_PASSWORD":
-				metadata.MqttPassword = &value
-			case "MQTT_BROKER":
-				metadata.MqttBroker = &value
-			case "MQTT_PORT":
-				port, err := strconv.Atoi(value)
-				if err != nil {
-					return fmt.Errorf("failed to convert MQTT_PORT: %w", err)
-				}
-				metadata.MqttPort = &port
-			case "MQTT_TOPIC":
-				metadata.MqttTopic = &value
-			}
-		}
-	}
-
-	if !noIde {
-		editorURL := fmt.Sprintf("https://%s-editor.%s", workspaceName, domain)
-		metadata.EditorURL = &editorURL
 	}
 
 	if !noDashboard {
@@ -984,14 +874,9 @@ func saveMetadata(gitopsConfig, workspaceName, token, domain string, noIde, noDa
 		metadata.GitopsDevSourceDir = &gitopsDevSourceDir
 	}
 
-	// Dev mode for editor / dashboard is implied by their source dirs being set.
+	// Dev mode for the dashboard is implied by its source dir being set.
 	// The DevMode bool is still written for backward-compat consumers but no
 	// longer gates the per-service dev-mode behavior.
-	if editorDevSourceDir != "" {
-		metadata.EditorDevSourceDir = &editorDevSourceDir
-		metadata.DevMode = true
-	}
-
 	if dashboardDevSourceDir != "" {
 		metadata.DashboardDevSourceDir = &dashboardDevSourceDir
 		metadata.DevMode = true
@@ -1189,4 +1074,58 @@ func createSSHConfig(workspacePath, workspaceName string, repoInfo *RepositoryIn
 	}
 
 	return configPath, nil
+}
+
+// setupCanonicalRepoAndMainCopy creates the workspace's canonical bare repo
+// (repo.git) and the `main` copy. The bare repo is what the embedded smart-HTTP
+// git server serves (fast-forward-only); each agent and the editor work in an
+// independent clone ("copy") whose origin points back at it. The `main` copy is
+// the editor's working tree and the default-branch live-dev source. `seedTree`
+// is the freshly initialised/cloned workspace tree used to seed `main`.
+func setupCanonicalRepoAndMainCopy(workspaceName, gitopsConfig, seedTree string, verbose bool) error {
+	runU := func(cmd string) error {
+		c := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", cmd) //nolint:gosec
+		return util.RunCommandVerbose(c, verbose)
+	}
+	bareRepo := filepath.Join(gitopsConfig, "repo.git")
+	copiesDir := filepath.Join(gitopsConfig, "copies")
+	mainCopy := filepath.Join(copiesDir, "main")
+
+	// Put the seed tree on `main` with at least one commit.
+	_ = runU(fmt.Sprintf("git -C %q checkout -B main", seedTree))
+	check := exec.Command("su", "-s", "/bin/sh", "user1000", "-c",
+		fmt.Sprintf("git -C %q rev-parse --verify HEAD", seedTree)) //nolint:gosec
+	if check.Run() != nil {
+		if err := runU(fmt.Sprintf("git -C %q commit --allow-empty -m 'Initial commit'", seedTree)); err != nil {
+			return fmt.Errorf("initial commit: %w", err)
+		}
+	}
+
+	// Canonical bare repo, seeded with `main` via a local push (the gitops
+	// service installs the fast-forward-only pre-receive hook on startup).
+	if err := runU(fmt.Sprintf("git init --bare --initial-branch=main %q", bareRepo)); err != nil {
+		return fmt.Errorf("init bare repo: %w", err)
+	}
+	if err := runU(fmt.Sprintf("git -C %q push %q main:main", seedTree, bareRepo)); err != nil {
+		return fmt.Errorf("seed canonical repo: %w", err)
+	}
+
+	// The `main` copy — an independent clone; origin points at the smart-HTTP
+	// git server for runtime use by the editor.
+	if err := runU(fmt.Sprintf("mkdir -p %q", copiesDir)); err != nil {
+		return fmt.Errorf("create copies dir: %w", err)
+	}
+	if err := runU(fmt.Sprintf("git clone %q %q", bareRepo, mainCopy)); err != nil {
+		return fmt.Errorf("clone main copy: %w", err)
+	}
+	remoteURL := fmt.Sprintf("http://%s-gitops:8079/git/repo.git", workspaceName)
+	_ = runU(fmt.Sprintf("git -C %q remote set-url origin %q", mainCopy, remoteURL))
+
+	// gitops/editor containers run as user1000.
+	for _, d := range []string{bareRepo, copiesDir} {
+		if err := exec.Command("chown", "-R", "1000:1000", d).Run(); err != nil {
+			return fmt.Errorf("chown %s: %w", d, err)
+		}
+	}
+	return nil
 }

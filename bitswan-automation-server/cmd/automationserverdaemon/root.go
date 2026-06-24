@@ -19,6 +19,7 @@ func NewAutomationServerDaemonCmd() *cobra.Command {
 	cmd.AddCommand(newApiDocsCmd())
 	cmd.AddCommand(newUpdateCmd())
 	cmd.AddCommand(newSyncWorkspacesCmd())
+	cmd.AddCommand(newRegionCmd())
 
 	return cmd
 }

@@ -17,7 +17,6 @@ dependencies = [
  "dockerfile-parse",
  "docker",
  "apscheduler",
- "paho-mqtt",
  "humanize",
  "toml",
  "watchdog",
@@ -25,6 +24,7 @@ dependencies = [
  "aiohttp",
  "httpx",
  "yappi",
+ "cryptography",
 ]
 
 [project.optional-dependencies]

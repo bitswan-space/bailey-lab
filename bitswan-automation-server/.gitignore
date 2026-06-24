@@ -12,3 +12,11 @@ completions/
 
 # for Intellij PyCharm IDE
 /.idea/
+
+# Server Console build output — the Vite build of bitswan-server-console,
+# embedded via go:embed at build time. The compiled bundles are never
+# committed; CI (and local builds) generate them before `go build`/`go test`.
+# Only the .gitkeep marker is tracked, so go:embed still compiles on a bare
+# checkout.
+/internal/daemon/serverconsole_dist/*
+!/internal/daemon/serverconsole_dist/.gitkeep

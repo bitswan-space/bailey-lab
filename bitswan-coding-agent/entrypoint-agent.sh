@@ -17,9 +17,24 @@ su - agent -c 'git config --global user.name "BitSwan Coding Agent"'
 su - agent -c 'git config --global user.email "agent@bitswan.local"'
 su - agent -c 'git config --global --add safe.directory "*"'
 
-# Copy CLAUDE.md to worktrees that don't have it yet
+# Configure git credentials so plain `git push/pull` to the workspace git
+# server authenticates with the agent secret. git's "store" helper matches by
+# host, so a single host-only line in ~/.git-credentials covers every repo path
+# served from that host.
+if [ -n "$BITSWAN_GIT_REMOTE" ] && [ -n "$BITSWAN_GITOPS_AGENT_SECRET" ]; then
+    su - agent -c 'git config --global credential.helper store'
+    # Strip scheme (http:// or https://) and any path, leaving just HOST[:port].
+    GIT_REMOTE_NOSCHEME="${BITSWAN_GIT_REMOTE#*://}"
+    GIT_REMOTE_HOST="${GIT_REMOTE_NOSCHEME%%/*}"
+    printf 'http://agent:%s@%s\n' "$BITSWAN_GITOPS_AGENT_SECRET" "$GIT_REMOTE_HOST" \
+        > /home/agent/.git-credentials
+    chown agent:agent /home/agent/.git-credentials
+    chmod 600 /home/agent/.git-credentials
+fi
+
+# Copy CLAUDE.md to copies that don't have it yet
 if [ -f /etc/bitswan/CLAUDE.md ]; then
-    for wt in /workspace/worktrees/*/; do
+    for wt in /workspace/copies/*/; do
         if [ -d "$wt" ] && [ ! -f "$wt/CLAUDE.md" ]; then
             cp /etc/bitswan/CLAUDE.md "$wt/CLAUDE.md"
             chown agent:agent "$wt/CLAUDE.md"
@@ -39,6 +54,7 @@ export BITSWAN_AGENT_MODE=true
 {
     echo "export BITSWAN_GITOPS_URL=\"$BITSWAN_GITOPS_URL\""
     echo "export BITSWAN_GITOPS_AGENT_SECRET=\"$BITSWAN_GITOPS_AGENT_SECRET\""
+    echo "export BITSWAN_GIT_REMOTE=\"$BITSWAN_GIT_REMOTE\""
     echo "export BITSWAN_WORKSPACE_NAME=\"$BITSWAN_WORKSPACE_NAME\""
     echo "export BITSWAN_AGENT_MODE=true"
 } > /etc/profile.d/bitswan-agent.sh

@@ -6,11 +6,14 @@ import os
 from fastapi import (
     APIRouter,
     Depends,
+    File,
     Form,
     HTTPException,
     Query,
+    UploadFile,
 )
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from pydantic import BaseModel
 
@@ -46,24 +49,469 @@ async def get_automations(
 
 class StartLiveDevRequest(BaseModel):
     relative_path: str
-    worktree: str | None = None
+    copy: str | None = None
 
 
 class StartDeployRequest(BaseModel):
     relative_path: str
     stage: str  # "dev" or "live-dev"
-    worktree: str | None = None
+    copy: str | None = None
 
 
 class DeployBPRequest(BaseModel):
     bp: str
     stage: str  # "dev" or "live-dev"
-    worktree: str | None = None
+    copy: str | None = None
+    deployed_by: str | None = None
 
 
 class PromoteBPRequest(BaseModel):
     bp: str
     stage: str  # "staging" or "production"
+    deployed_by: str | None = None
+
+
+class RollbackBPRequest(BaseModel):
+    stage: str  # "dev" | "staging" | "production"
+    git_commit: str
+    deployed_by: str | None = None
+    kind: str = "deploy"  # "deploy" | "firewall"
+    role: str | None = None  # caller's Bailey role (for production firewall gating)
+
+
+@router.get("/business-processes/{bp}/history")
+async def get_bp_history(
+    bp: str,
+    stage: str = Query("dev"),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Deployment history for one BP stage (newest-first; `current` = live).
+    Derived from the git log of bitswan.yaml."""
+    return await automation_service.bp_history(bp, stage)
+
+
+@router.get("/business-processes/{bp}/diff")
+async def get_bp_diff(
+    bp: str,
+    from_sha: str = Query(..., alias="from"),
+    to: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Unified diff of a BP's source between two commits (history "diff vs current")."""
+    return await automation_service.bp_diff(bp, from_sha, to)
+
+
+class ScaleBPRequest(BaseModel):
+    stage: str
+    replicas: int
+
+
+@router.post("/business-processes/{bp}/scale")
+async def scale_bp(
+    bp: str,
+    body: ScaleBPRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Scale every member container of a BP stage (Inspect → Scale)."""
+    if body.replicas < 1:
+        raise HTTPException(status_code=400, detail="replicas must be at least 1")
+    return await automation_service.scale_business_process(
+        bp, body.stage, body.replicas
+    )
+
+
+class BpSecretsRequest(BaseModel):
+    # Secret NAMES are shared across stages; VALUES are per stage. The editor
+    # sends every realm's {KEY: value} map: {dev, staging, production}.
+    values: dict[str, dict[str, str]]
+    deployed_by: str | None = None
+
+
+@router.get("/business-processes/{bp}/secrets")
+async def get_bp_secrets_route(
+    bp: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """A BP's decrypted per-stage secrets: {dev, staging, production} each a
+    {KEY: value} map (Deployments → Secrets)."""
+    return automation_service.read_bp_secrets(bp)
+
+
+@router.put("/business-processes/{bp}/secrets")
+async def put_bp_secrets_route(
+    bp: str,
+    body: BpSecretsRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Apply a BP's secrets: encrypt + version them in bitswan.yaml as one commit
+    (so they roll back together) and re-derive each stage's env file. Names are
+    shared across stages; values are per stage. Take effect on the next deploy."""
+    return await automation_service.write_bp_secrets(bp, body.values, body.deployed_by)
+
+
+class DrPolicyRequest(BaseModel):
+    policy: str
+    deployed_by: str | None = None
+
+
+class DrTestRequest(BaseModel):
+    by: str | None = None
+    note: str | None = None
+    snapshot: str | None = None
+    deployed_by: str | None = None
+
+
+@router.get("/user-role")
+async def get_user_role_route(email: str):
+    """The authoritative Bailey role for an email, resolved from the
+    automation-server daemon (the same store the People & roles view uses,
+    never SSO groups). The dashboard shim calls this with the identity it has
+    already verified from the user's access token; gitops bridges to the daemon
+    over its trusted local socket. Fails closed (500) if the daemon can't be
+    reached, so the caller treats the user as unprivileged."""
+    from app.utils import daemon_user_role
+
+    return {"email": email, "role": daemon_user_role(email)}
+
+
+@router.get("/business-processes/{bp}/dr")
+async def get_bp_dr_route(
+    bp: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """A BP's disaster-recovery status: test cadence policy, the manual
+    recovery-test log (newest-first), and the derived overdue flag."""
+    return automation_service.read_dr(bp)
+
+
+@router.put("/business-processes/{bp}/dr/policy")
+async def put_bp_dr_policy_route(
+    bp: str,
+    body: DrPolicyRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Set a BP's recovery-test cadence policy (versioned in bitswan.yaml)."""
+    try:
+        return await automation_service.write_dr_policy(
+            bp, body.policy, body.deployed_by
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/business-processes/{bp}/dr/tests")
+async def post_bp_dr_test_route(
+    bp: str,
+    body: DrTestRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Record a hand-performed recovery test for a BP (versioned in bitswan.yaml,
+    prepended so the log stays newest-first). Only the backup currently restored
+    into DR may be tested — otherwise 400."""
+    try:
+        return await automation_service.record_dr_test(
+            bp, body.by, body.note, body.snapshot, body.deployed_by
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class BackupRetentionRequest(BaseModel):
+    daily: int = 7
+    weekly: int = 0
+    monthly: int = 3
+    by: str | None = None
+
+
+class BackupSwapRequest(BaseModel):
+    by: str | None = None
+    role: str | None = None
+
+
+@router.get("/business-processes/{bp}/backups")
+async def get_bp_backups_route(
+    bp: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """A BP's backup state: which production slot is live (Production) vs standby
+    (DR), the retention policy, and the recent audit log (newest-first)."""
+    return automation_service.read_backups(bp)
+
+
+@router.put("/business-processes/{bp}/backups/retention")
+async def put_bp_backup_retention_route(
+    bp: str,
+    body: BackupRetentionRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Set the production backup retention policy (versioned + audited)."""
+    return await automation_service.set_backup_retention(
+        bp,
+        {"daily": body.daily, "weekly": body.weekly, "monthly": body.monthly},
+        body.by,
+    )
+
+
+@router.post("/business-processes/{bp}/backups/swap")
+async def post_bp_backup_swap_route(
+    bp: str,
+    body: BackupSwapRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """DR go-live swap: flip which production slot is live and repoint the
+    production ingress to it (zero downtime, no data moved)."""
+    try:
+        return await automation_service.swap_production_dr(bp, body.by, body.role)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/business-processes/{bp}/backups/promote")
+async def post_bp_zero_downtime_promote_route(
+    bp: str,
+    body: BackupSwapRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Zero-downtime production promote: stage the new version on the idle app
+    slot (wired to the current live db), bring it up, repoint the ingress to
+    it, and retire the old slot. The database never moves."""
+    try:
+        return await automation_service.zero_downtime_promote(bp, body.by)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+class SupplyChainWaiverRequest(BaseModel):
+    # Out-of-scope markings live in the source tree, so they're authored against
+    # a COPY (from the Checks tab) — never a deployment stage.
+    copy: str | None = None
+    package: str
+    cve: str
+    comment: str | None = None
+    by: str | None = None
+
+
+@router.get("/business-processes/{bp}/supply-chain")
+async def get_bp_supply_chain(
+    bp: str,
+    stage: str = Query("dev"),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """SBOM packages + CVEs (syft/grype) for the image(s) deployed to a BP stage,
+    plus the out-of-scope waiver log."""
+    return automation_service.read_supply_chain(bp, stage)
+
+
+@router.get("/business-processes/{bp}/supply-chain/preview")
+async def get_bp_supply_chain_preview(
+    bp: str,
+    copy: str | None = Query(None),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Pre-deploy SBOM + CVEs for the image(s) a deploy of this BP WOULD build
+    from the current source (Sync & Deploy → Checks). Builds the content-
+    addressed image (cache hit when unchanged) and scans it; same response
+    shape as the deployed supply-chain rollup."""
+    return await automation_service.preview_supply_chain(bp, copy)
+
+
+@router.post("/business-processes/{bp}/supply-chain/waivers")
+async def post_bp_supply_chain_waiver(
+    bp: str,
+    body: SupplyChainWaiverRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Mark a CVE out of scope — stored in the copy's source tree (cve-waivers.yaml,
+    committed) so it rides Sync & Deploy to main with the code."""
+    return await automation_service.set_cve_waiver(
+        bp, body.copy, body.package, body.cve, body.comment or "", body.by
+    )
+
+
+@router.delete("/business-processes/{bp}/supply-chain/waivers")
+async def delete_bp_supply_chain_waiver(
+    bp: str,
+    body: SupplyChainWaiverRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Restore a previously out-of-scope CVE to in-scope (commit in the copy)."""
+    return await automation_service.unset_cve_waiver(
+        bp, body.copy, body.package, body.cve, body.by
+    )
+
+
+class FirewallRuleRequest(BaseModel):
+    stage: str
+    host: str
+    status: str = "allowed"  # allowed | denied
+    purpose: str | None = None
+    gdpr: dict | None = None
+    by: str | None = None
+    role: str | None = None  # caller's Bailey role (admin/auditor) for prod gating
+
+
+class FirewallDeleteRequest(BaseModel):
+    stage: str
+    host: str
+    by: str | None = None
+    role: str | None = None
+
+
+class FirewallPromoteRequest(BaseModel):
+    from_stage: str
+    to_stage: str
+    by: str | None = None
+    role: str | None = None
+
+
+@router.get("/business-processes/{bp}/firewall")
+async def get_bp_firewall(
+    bp: str,
+    stage: str = Query("dev"),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Egress allow-list rules + blocked/observed attempts for a BP stage."""
+    return automation_service.read_firewall(bp, stage)
+
+
+@router.put("/business-processes/{bp}/firewall/rules")
+async def put_bp_firewall_rule(
+    bp: str,
+    body: FirewallRuleRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Allow/deny an outbound host (versioned in bitswan.yaml). Production
+    changes require an admin/auditor role."""
+    return await automation_service.set_firewall_rule(
+        bp,
+        body.stage,
+        body.host,
+        body.status,
+        body.purpose or "",
+        body.gdpr,
+        body.by,
+        body.role,
+    )
+
+
+@router.delete("/business-processes/{bp}/firewall/rules")
+async def delete_bp_firewall_rule(
+    bp: str,
+    body: FirewallDeleteRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Remove a firewall rule (revoke/clear)."""
+    return await automation_service.delete_firewall_rule(
+        bp, body.stage, body.host, body.by, body.role
+    )
+
+
+@router.post("/business-processes/{bp}/firewall/promote")
+async def promote_bp_firewall(
+    bp: str,
+    body: FirewallPromoteRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Pull firewall rules forward (dev→staging→production)."""
+    return await automation_service.promote_firewall(
+        bp, body.from_stage, body.to_stage, body.by, body.role
+    )
+
+
+@router.post("/business-processes/{bp}/firewall/dpa")
+async def upload_bp_firewall_dpa(
+    bp: str,
+    stage: str = Form(...),
+    host: str = Form(...),
+    by: str | None = Form(None),
+    role: str | None = Form(None),
+    file: UploadFile = File(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Upload a host's GDPR data-processing-agreement PDF; stored + versioned in
+    the gitops repo under firewall-dpa/<bp>/. Production needs admin/auditor."""
+    content = await file.read()
+    return await automation_service.store_firewall_dpa(
+        bp, stage, host, content, filename=file.filename, by=by, role=role
+    )
+
+
+@router.get("/business-processes/{bp}/firewall/dpa")
+async def get_bp_firewall_dpa(
+    bp: str,
+    host: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Download a host's stored DPA PDF (shared across stages for the host)."""
+    path = automation_service.firewall_dpa_path(bp, host)
+    if not path:
+        raise HTTPException(status_code=404, detail="No DPA on file for that host")
+    return FileResponse(path, media_type="application/pdf")
+
+
+@router.get("/business-processes/{bp}/files")
+async def get_bp_files(
+    bp: str,
+    commit: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """The full source tree of a BP at a commit (Inspect → Files)."""
+    return await automation_service.bp_file_tree(bp, commit)
+
+
+@router.get("/business-processes/{bp}/file-content")
+async def get_bp_file_content(
+    bp: str,
+    commit: str = Query(...),
+    path: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """A single file's content from a BP's source at a commit (Inspect → Files)."""
+    return await automation_service.bp_file_content(bp, commit, path)
+
+
+@router.get("/business-processes/{bp}/bundle")
+async def get_bp_bundle(
+    bp: str,
+    stage: str = Query(...),
+    commit: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Download a deployment bundle (source + docker images + DB schema)."""
+    path = await automation_service.bundle_deployment(bp, stage, commit)
+    filename = f"{bp}-{stage}-{commit[:8]}.tar.gz"
+    return FileResponse(
+        path,
+        media_type="application/gzip",
+        filename=filename,
+        background=BackgroundTask(lambda: os.path.exists(path) and os.remove(path)),
+    )
+
+
+@router.post("/business-processes/{bp}/rollback")
+async def rollback_bp(
+    bp: str,
+    body: RollbackBPRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Roll a BP stage back to a prior state. `kind=deploy` (default) re-points
+    the member deployments to a prior version; `kind=firewall` restores the
+    stage's egress allow-list to a prior commit (production needs admin/auditor).
+    Both come from the same git-derived history timeline."""
+    if body.kind == "firewall":
+        return await automation_service.rollback_firewall(
+            bp=bp,
+            stage=body.stage,
+            git_commit=body.git_commit,
+            by=body.deployed_by,
+            role=body.role,
+        )
+    return await automation_service.rollback_business_process(
+        bp=bp,
+        stage=body.stage,
+        git_commit=body.git_commit,
+        deployed_by=body.deployed_by,
+    )
 
 
 @router.post("/start-deploy")
@@ -75,7 +523,7 @@ async def start_deploy(
 
     Replaces the editor's upload+deploy flow for environments where the
     workspace is co-located with gitops. The body is intentionally minimal
-    (relative_path, stage, worktree?) — gitops reads the automation source
+    (relative_path, stage, copy?) — gitops reads the automation source
     directly from `/workspace-repo`, merges `bitswan_lib` if present,
     computes the merged-tree checksum, materialises `<checksum>/` if needed,
     and kicks off the existing deploy pipeline.
@@ -83,7 +531,7 @@ async def start_deploy(
     prep = await automation_service.start_deploy_from_workspace(
         relative_path=body.relative_path,
         stage=body.stage,
-        worktree=body.worktree,
+        copy=body.copy,
     )
 
     _spawn_bg(
@@ -140,10 +588,10 @@ async def deploy_bp(
         )
 
     members = automation_service.members_for_bp(
-        body.bp, worktree=body.worktree, stage=body.stage
+        body.bp, copy=body.copy, stage=body.stage
     )
     if not members:
-        ctx = f" in worktree '{body.worktree}'" if body.worktree else ""
+        ctx = f" in copy '{body.copy}'" if body.copy else ""
         raise HTTPException(
             status_code=404,
             detail=f"No deployable automations under BP '{body.bp}'{ctx}",
@@ -167,8 +615,9 @@ async def deploy_bp(
             deployment_ids,
             automation_service,
             stage=body.stage,
-            worktree=body.worktree,
+            copy=body.copy,
             members=members,
+            deployed_by=body.deployed_by,
         )
     )
 
@@ -227,6 +676,7 @@ async def promote_bp(
             automation_service,
             stage=body.stage,
             members=members,
+            deployed_by=body.deployed_by,
         )
     )
 
@@ -247,7 +697,7 @@ async def deploy_changed(
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """Deploy every main automation whose source differs from (or has no)
-    deployed dev checksum — the same changed+new set the worktree-sync hook
+    deployed dev checksum — the same changed+new set the copy-sync hook
     deploys automatically. Members already being deployed are skipped.
     """
     members = await automation_service.changed_dev_members()
@@ -294,12 +744,12 @@ async def start_live_dev(
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """Start a live-dev deployment. Server constructs the deployment ID."""
-    sources = _scan_automations(body.worktree)
+    sources = _scan_automations(body.copy)
     source = next(
         (s for s in sources if s["relative_path"] == body.relative_path), None
     )
     if not source:
-        ctx = f" in worktree '{body.worktree}'" if body.worktree else ""
+        ctx = f" in copy '{body.copy}'" if body.copy else ""
         raise HTTPException(
             status_code=404,
             detail=f"No automation source at '{body.relative_path}'{ctx}",
@@ -362,6 +812,18 @@ async def start_live_dev(
 async def deploy_automations(
     automation_service: AutomationService = Depends(get_automation_service),
 ):
+    return await automation_service.deploy_automations()
+
+
+@router.post("/apply")
+async def apply_workspace(
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Re-apply bitswan.yaml to the live system (kubectl apply / nixos-rebuild
+    switch): regenerate compose for every active deployment, bring it up, and
+    reconcile ingress to the routes derived from the file. Idempotent — safe to
+    re-run any time to repair drift (a broken or stale ingress route, a missing
+    container). The whole system state is a function of bitswan.yaml."""
     return await automation_service.deploy_automations()
 
 
@@ -429,6 +891,11 @@ async def _run_deploy_with_progress(
             message="Deployment failed",
         )
         await _broadcast_task()
+    finally:
+        # Safety net: free the deployment lock however this ends — including
+        # cancellation, which `except Exception` cannot catch and which would
+        # otherwise leak the lock and 409 every future deploy.
+        deploy_manager.release(task_id)
 
 
 async def _run_bp_deploy_with_progress(
@@ -437,8 +904,9 @@ async def _run_bp_deploy_with_progress(
     deployment_ids: list[str],
     automation_service: AutomationService,
     stage: str,
-    worktree: str | None,
+    copy: str | None,
     members: list[dict],
+    deployed_by: str | None = None,
 ):
     """Background coroutine running a BP deploy with progress broadcasting.
 
@@ -476,8 +944,9 @@ async def _run_bp_deploy_with_progress(
         await automation_service.deploy_business_process(
             bp=bp,
             stage=stage,
-            worktree=worktree,
+            copy=copy,
             members=members,
+            deployed_by=deployed_by,
             progress_callback=progress_callback,
         )
 
@@ -500,6 +969,11 @@ async def _run_bp_deploy_with_progress(
             message="Business process deployment failed",
         )
         await _broadcast_task()
+    finally:
+        # Safety net: free every member lock however this ends — including
+        # cancellation, which `except Exception` cannot catch and which would
+        # otherwise leak the locks and 409 every future deploy of this BP.
+        deploy_manager.release(task_id)
 
 
 async def _run_bp_promote_with_progress(
@@ -508,6 +982,7 @@ async def _run_bp_promote_with_progress(
     automation_service: AutomationService,
     stage: str,
     members: list[dict],
+    deployed_by: str | None = None,
 ):
     """Background coroutine running a BP promotion with progress broadcasting.
 
@@ -546,6 +1021,7 @@ async def _run_bp_promote_with_progress(
             bp=bp,
             target_stage=stage,
             members=members,
+            deployed_by=deployed_by,
             progress_callback=progress_callback,
         )
 
@@ -568,6 +1044,11 @@ async def _run_bp_promote_with_progress(
             message="Business process promotion failed",
         )
         await _broadcast_task()
+    finally:
+        # Safety net: free every member lock however this ends — including
+        # cancellation, which `except Exception` cannot catch and which would
+        # otherwise leak the locks and 409 every future promote of this BP.
+        deploy_manager.release(task_id)
 
 
 @router.get("/deploy-status/{task_id}")

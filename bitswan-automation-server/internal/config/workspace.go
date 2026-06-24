@@ -10,18 +10,11 @@ import (
 // WorkspaceMetadata represents the unified workspace metadata structure
 type WorkspaceMetadata struct {
 	Domain             string  `yaml:"domain"`
-	EditorURL          *string `yaml:"editor-url,omitempty"`
 	DashboardURL       *string `yaml:"dashboard-url,omitempty"`
 	GitopsURL          string  `yaml:"gitops-url"`
 	GitopsSecret       string  `yaml:"gitops-secret"`
 	WorkspaceId        *string `yaml:"workspace_id,omitempty"`
-	MqttUsername       *string `yaml:"mqtt_username,omitempty"`
-	MqttPassword       *string `yaml:"mqtt_password,omitempty"`
-	MqttBroker         *string `yaml:"mqtt_broker,omitempty"`
-	MqttPort           *int    `yaml:"mqtt_port,omitempty"`
-	MqttTopic          *string `yaml:"mqtt_topic,omitempty"`
 	GitopsDevSourceDir    *string `yaml:"gitops-dev-source-dir,omitempty"`
-	EditorDevSourceDir    *string `yaml:"editor-dev-source-dir,omitempty"`
 	DashboardDevSourceDir *string `yaml:"dashboard-dev-source-dir,omitempty"`
 	DevMode            bool    `yaml:"dev-mode,omitempty"`
 	CodingAgentEnabled bool    `yaml:"coding-agent-enabled,omitempty"`

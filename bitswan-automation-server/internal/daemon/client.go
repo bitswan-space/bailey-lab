@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -42,10 +43,11 @@ func NewClient() (*Client, error) {
 
 // NewClientWithSocket creates a new daemon client with a custom socket path and verifies the daemon is running
 func NewClientWithSocket(socketPath string) (*Client, error) {
-	token, err := LoadToken()
-	if err != nil {
-		return nil, fmt.Errorf("automation server daemon is not initialized: %w", err)
-	}
+	// The token authenticates HTTP requests, but requests over the trusted Unix
+	// socket skip token verification (see server.authMiddleware). The daemon's
+	// config now lives in a Docker volume the host CLI can't read, so a missing
+	// token is no longer fatal — fall back to empty and rely on socket trust.
+	token, _ := LoadToken()
 
 	client := &Client{
 		socketPath: socketPath,
@@ -452,6 +454,177 @@ func (c *Client) SelectWorkspace(workspace string) error {
 	return nil
 }
 
+// ApproveDevice approves a pending "trust this device" request by its 6-digit
+// code, optionally restricted to a specific user's request. Returns the email
+// whose device was approved.
+func (c *Client) ApproveDevice(code, email string) (string, error) {
+	bodyBytes, err := json.Marshal(map[string]string{"code": code, "email": email})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "http://unix/bailey/devices/approve", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return "", fmt.Errorf("%s", errResp.Error)
+		}
+		return "", fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+	return result.Email, nil
+}
+
+// PendingDeviceInfo mirrors the daemon's PendingDevice for the CLI list.
+type PendingDeviceInfo struct {
+	Email     string `json:"email"`
+	Code      string `json:"code"`
+	UserAgent string `json:"user_agent"`
+	AgeSec    int    `json:"age_sec"`
+	Approved  bool   `json:"approved"`
+}
+
+// ListPendingDevices returns the live pending device-trust requests.
+func (c *Client) ListPendingDevices() ([]PendingDeviceInfo, error) {
+	req, err := http.NewRequest("GET", "http://unix/bailey/devices/pending", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("%s", errResp.Error)
+		}
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Pending []PendingDeviceInfo `json:"pending"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return result.Pending, nil
+}
+
+// AccessGrant describes one ACL grant on an endpoint.
+type AccessGrant struct {
+	Hostname       string `json:"hostname"`
+	PrincipalType  string `json:"principal_type"`
+	PrincipalValue string `json:"principal_value"`
+	Role           string `json:"role"`
+	GrantedAt      string `json:"granted_at"`
+	GrantedBy      string `json:"granted_by"`
+}
+
+// AccessListResult is the response of ListAccess.
+type AccessListResult struct {
+	Host       string        `json:"host"`
+	OwnerEmail string        `json:"owner_email"`
+	Grants     []AccessGrant `json:"grants"`
+}
+
+// postAccess is the shared POST helper for grant/revoke.
+func (c *Client) postAccess(path, host, principal, principalType, role string) error {
+	bodyBytes, err := json.Marshal(map[string]string{
+		"host": host, "principal": principal,
+		"principal_type": principalType, "role": role,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", "http://unix"+path, strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// GrantAccess grants a principal access (or owner) on an endpoint host.
+func (c *Client) GrantAccess(host, principal, principalType, role string) error {
+	return c.postAccess("/bailey/access/grant", host, principal, principalType, role)
+}
+
+// RevokeAccess removes a principal's grant on an endpoint host.
+func (c *Client) RevokeAccess(host, principal, principalType, role string) error {
+	return c.postAccess("/bailey/access/revoke", host, principal, principalType, role)
+}
+
+// ListAccess lists the grants on an endpoint host.
+func (c *Client) ListAccess(host string) (*AccessListResult, error) {
+	req, err := http.NewRequest("GET", "http://unix/bailey/access/list?host="+url.QueryEscape(host), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("%s", errResp.Error)
+		}
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	var result AccessListResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &result, nil
+}
+
 // ListWorkspaces returns the list of workspaces and the active workspace
 func (c *Client) ListWorkspaces(long, showPasswords bool) (*WorkspaceListResponse, error) {
 	url := "http://unix/workspace/list"
@@ -660,13 +833,47 @@ func (c *Client) InitIngress(verbose bool, ingressType ...string) (*IngressInitR
 	return &result, nil
 }
 
-// AddIngressRoute adds a route to the ingress proxy
-func (c *Client) AddIngressRoute(hostname, upstream string, mkcert bool, certsDir string) (*IngressAddRouteResponse, error) {
+// ProvisionProtectedProxy asks the daemon to bring up the shared
+// bitswan-protected-proxy (oauth2-proxy) container that fronts every protected
+// endpoint. Requires a configured domain + reachable AOC; safe to call again
+// (idempotent `docker compose up -d`).
+func (c *Client) ProvisionProtectedProxy() error {
+	req, err := http.NewRequest("POST", "http://unix/ingress/provision-protected-proxy", nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.doLongRunningRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("authentication failed: invalid or missing token")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// AddIngressRoute adds a route to the ingress proxy. ownerEmail (may
+// be empty) records the endpoint's owner in the Bailey ACL.
+func (c *Client) AddIngressRoute(hostname, upstream string, mkcert bool, certsDir, ownerEmail string) (*IngressAddRouteResponse, error) {
 	reqBody := IngressAddRouteRequest{
-		Hostname: hostname,
-		Upstream: upstream,
-		Mkcert:   mkcert,
-		CertsDir: certsDir,
+		Hostname:   hostname,
+		Upstream:   upstream,
+		Mkcert:     mkcert,
+		CertsDir:   certsDir,
+		OwnerEmail: ownerEmail,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -863,7 +1070,7 @@ func (c *Client) GetIngressType() (string, error) {
 	return result["type"], nil
 }
 
-// EnableService enables a service (editor, kafka, or couchdb) with streaming logs
+// EnableService enables a service (dashboard, kafka, or couchdb) with streaming logs
 func (c *Client) EnableService(serviceType, workspace string, options map[string]interface{}) (*ServiceResponse, error) {
 	reqBody := ServiceEnableRequest{
 		ServiceType: serviceType,
@@ -873,9 +1080,6 @@ func (c *Client) EnableService(serviceType, workspace string, options map[string
 	// Set service-specific options
 	if stage, ok := options["stage"].(string); ok {
 		reqBody.Stage = stage
-	}
-	if editorImage, ok := options["editor_image"].(string); ok {
-		reqBody.EditorImage = editorImage
 	}
 	if dashboardImage, ok := options["dashboard_image"].(string); ok {
 		reqBody.DashboardImage = dashboardImage
@@ -1062,28 +1266,7 @@ func (c *Client) WorkspaceConnectToAOC(aocUrl, automationServerId, accessToken s
 	return err
 }
 
-// ReconnectMQTT tells the daemon to reinitialize its MQTT connection using the current config.
-func (c *Client) ReconnectMQTT() error {
-	req, err := http.NewRequest("POST", "http://unix/mqtt/reinitialize", nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := c.doRequest(req)
-	if err != nil {
-		return fmt.Errorf("failed to connect to daemon: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("MQTT reinitialization failed: %s", string(body))
-	}
-
-	return nil
-}
-
-// DisconnectFromAOC tells the daemon to disconnect from AOC, cleaning up MQTT, OAuth, and workspace metadata.
+// DisconnectFromAOC tells the daemon to disconnect from AOC, cleaning up OAuth and workspace metadata.
 func (c *Client) DisconnectFromAOC() error {
 	req, err := http.NewRequest("POST", "http://unix/workspace/disconnect-from-aoc", nil)
 	if err != nil {
@@ -1110,6 +1293,78 @@ func (c *Client) DisconnectFromAOC() error {
 
 	_, err = c.streamLogs(resp.Body, os.Stdout)
 	return err
+}
+
+// SetAOCConfig persists the AOC connection (URL, server ID, access token,
+// optional expiry + domain) into the daemon's own config volume. The daemon is
+// the single owner of ~/.config/bitswan — register no longer writes it on the
+// host — so this is how a freshly obtained token reaches the daemon before it
+// talks to the AOC (wildcard ingress, protected proxy, workspace connect).
+func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string) error {
+	reqBody := AOCConfigRequest{
+		AOCUrl:             aocUrl,
+		AutomationServerId: automationServerId,
+		AccessToken:        accessToken,
+		ExpiresAt:          expiresAt,
+		Domain:             domain,
+	}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "http://unix/aoc/config", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// AOCStatus reports whether the daemon already holds an AOC registration. Used
+// by register's "already registered" guard now that the host no longer stores
+// the config.
+func (c *Client) AOCStatus() (*AOCStatusResponse, error) {
+	req, err := http.NewRequest("GET", "http://unix/aoc/status", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var status AOCStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &status, nil
 }
 
 // WorkspaceRemove runs `bitswan workspace remove ...` via the daemon with NDJSON streaming.
@@ -1572,9 +1827,6 @@ func (c *Client) UpdateService(serviceType, workspace string, options map[string
 	// Set service-specific options
 	if stage, ok := options["stage"].(string); ok {
 		reqBody.Stage = stage
-	}
-	if editorImage, ok := options["editor_image"].(string); ok {
-		reqBody.EditorImage = editorImage
 	}
 	if dashboardImage, ok := options["dashboard_image"].(string); ok {
 		reqBody.DashboardImage = dashboardImage

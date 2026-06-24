@@ -55,6 +55,24 @@ def _validate_stage(stage: str) -> None:
         )
 
 
+async def _audit_backup(
+    slug: str, action: str, detail: str, by: str | None, stage: str | None = None
+) -> None:
+    """Append a backup/restore event to bitswan.yaml (versioned audit log).
+    `stage` selects which deployment-history timeline it surfaces on.
+    Best-effort: an audit failure must never fail the snapshot operation."""
+    try:
+        from app.dependencies import get_automation_service
+
+        await get_automation_service().record_backup_event(
+            slug, action, detail, by, stage
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+
+        logging.warning("backup audit (%s %s) failed: %s", action, slug, e)
+
+
 # NOTE: route order matters — the concrete /tasks/{task_id} route must be
 # declared before the parameterised /{bp} routes would shadow it.
 @router.get("/tasks/{task_id}")
@@ -136,10 +154,40 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
     """
     slug = _bp_slug(bp)
     _validate_stage(body.source_stage)
-    _validate_stage(body.target_stage)
+
+    # 'dr' is the safe recovery sink: restore into the production STANDBY
+    # database (never the live db), then hand-verify and swap. It maps to the
+    # production instance + the standby db — the live db is never touched.
+    service_target = body.target_stage
+    restore_db: int | None = None
+    if body.target_stage == "dr":
+        from app.dependencies import get_automation_service
+
+        restore_db = get_automation_service().standby_db(slug)
+        service_target = "production"
+    else:
+        _validate_stage(body.target_stage)
+        # Safety: never overwrite LIVE Production data with a restore. Recovery
+        # goes into the isolated Disaster-Recovery standby (restored, hand-
+        # verified) and only then goes live via the DR swap (an ingress
+        # repoint, no data move).
+        if body.target_stage == "production":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Restoring directly into live Production is not allowed. "
+                    "Restore into Disaster Recovery, verify the data, then swap "
+                    "DR with Production (ingress cutover)."
+                ),
+            )
     try:
         res = await spawn_restore_snapshot(
-            slug, body.snapshot_id, body.source_stage, body.target_stage
+            slug,
+            body.snapshot_id,
+            body.source_stage,
+            service_target,
+            db=restore_db,
+            by=body.by,
         )
     except BusyError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -147,6 +195,24 @@ async def restore_snapshot(bp: str, body: SnapshotRestoreRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    audit_dest = (
+        f"Disaster Recovery (standby db{restore_db})"
+        if restore_db
+        else body.target_stage
+    )
+    # A DR restore lands in the production standby db, so it surfaces on the
+    # production timeline; dev/staging restores surface on their own stage.
+    # (The DR "currently restored" pointer that gates recovery-testing is set
+    # by the background task only once the restore actually succeeds — see
+    # spawn_restore_snapshot — so a failed restore never marks DR as loaded.)
+    audit_stage = "production" if restore_db else body.target_stage
+    await _audit_backup(
+        slug,
+        "restored",
+        f"{body.source_stage} snapshot → {audit_dest}",
+        body.by,
+        stage=audit_stage,
+    )
     return JSONResponse(
         status_code=202,
         content={
@@ -167,6 +233,14 @@ async def clone_stage(bp: str, body: SnapshotCloneRequest):
     slug = _bp_slug(bp)
     _validate_stage(body.source_stage)
     _validate_stage(body.target_stage)
+    if body.target_stage == "production":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cloning directly into live Production is not allowed — restore "
+                "into Disaster Recovery and swap to go live."
+            ),
+        )
     try:
         res = await spawn_clone_stage(slug, body.source_stage, body.target_stage)
     except BusyError as e:
@@ -198,6 +272,9 @@ async def create_snapshot(bp: str, stage: str, body: SnapshotCreateRequest):
         raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await _audit_backup(
+        slug, "created", f"{body.label or 'snapshot'} ({stage})", body.by, stage=stage
+    )
     return JSONResponse(
         status_code=202,
         content={

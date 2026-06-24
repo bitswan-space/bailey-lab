@@ -6,8 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 )
+
+// imageOverride returns a pinned image set via environment, or "". Operators
+// running a private/air-gapped registry (or CI testing locally-built images)
+// set e.g. BITSWAN_DASHBOARD_IMAGE to bypass the Docker Hub "latest" lookup.
+func imageOverride(envVar string) string {
+	return os.Getenv(envVar)
+}
 
 func GetLatestDockerHubVersion(url string) (string, error) {
 	// Get the latest version of the bitswan-gitops image by looking it up on dockerhub
@@ -57,11 +65,6 @@ func GetLatestDockerHubVersion(url string) (string, error) {
 	return "latest", errors.New("No valid version found")
 }
 
-// GetLatestEditorVersion gets the latest version of the bitswan-editor image
-func GetLatestEditorVersion() (string, error) {
-	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/bitswan-editor/tags/")
-}
-
 // GetLatestKafkaVersion gets the latest version of the bitswan-kafka image
 func GetLatestKafkaVersion() (string, error) {
 	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/bitswan-kafka/tags/")
@@ -77,11 +80,6 @@ func GetLatestCouchDBVersion() (string, error) {
 	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/bitswan-couchdb/tags/")
 }
 
-// GetLatestEditorStagingVersion gets the latest version of the bitswan-editor-staging image
-func GetLatestEditorStagingVersion() (string, error) {
-	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/bitswan-editor-staging/tags/")
-}
-
 // GetLatestGitopsStagingVersion gets the latest version of the gitops-staging image
 func GetLatestGitopsStagingVersion() (string, error) {
 	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/gitops-staging/tags/")
@@ -89,6 +87,9 @@ func GetLatestGitopsStagingVersion() (string, error) {
 
 // ResolveGitopsImage returns the full gitops image string based on the staging flag.
 func ResolveGitopsImage(staging bool) (string, error) {
+	if img := imageOverride("BITSWAN_GITOPS_IMAGE"); img != "" {
+		return img, nil
+	}
 	if staging {
 		version, err := GetLatestGitopsStagingVersion()
 		if err != nil {
@@ -115,6 +116,9 @@ func GetLatestDashboardStagingVersion() (string, error) {
 
 // ResolveDashboardImage returns the full workspace-dashboard image string based on the staging flag.
 func ResolveDashboardImage(staging bool) (string, error) {
+	if img := imageOverride("BITSWAN_DASHBOARD_IMAGE"); img != "" {
+		return img, nil
+	}
 	if staging {
 		version, err := GetLatestDashboardStagingVersion()
 		if err != nil {
@@ -129,22 +133,6 @@ func ResolveDashboardImage(staging bool) (string, error) {
 	return "bitswan/workspace-dashboard:" + version, nil
 }
 
-// ResolveEditorImage returns the full editor image string based on the staging flag.
-func ResolveEditorImage(staging bool) (string, error) {
-	if staging {
-		version, err := GetLatestEditorStagingVersion()
-		if err != nil {
-			return "", err
-		}
-		return "bitswan/bitswan-editor-staging:" + version, nil
-	}
-	version, err := GetLatestEditorVersion()
-	if err != nil {
-		return "", err
-	}
-	return "bitswan/bitswan-editor:" + version, nil
-}
-
 // GetLatestCodingAgentVersion gets the latest version of the coding-agent image
 func GetLatestCodingAgentVersion() (string, error) {
 	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/coding-agent/tags/")
@@ -157,6 +145,9 @@ func GetLatestCodingAgentStagingVersion() (string, error) {
 
 // ResolveCodingAgentImage returns the full coding-agent image string based on the staging flag.
 func ResolveCodingAgentImage(staging bool) (string, error) {
+	if img := imageOverride("BITSWAN_CODING_AGENT_IMAGE"); img != "" {
+		return img, nil
+	}
 	if staging {
 		version, err := GetLatestCodingAgentStagingVersion()
 		if err != nil {

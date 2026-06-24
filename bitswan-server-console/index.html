@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bailey — Server Console</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff;
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+    color: #09090b; -webkit-font-smoothing: antialiased; }
+  #root { width: 100%; height: 100%; }
+  * { box-sizing: border-box; }
+  button { font-family: inherit; }
+  input, textarea, select { font-family: inherit; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  [data-lucide="loader"], [data-lucide="loader-circle"] { animation: spin 1.2s linear infinite; transform-origin: center; }
+
+  @keyframes sc-fade { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes sc-pop  { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
+  @keyframes sc-slide { from { transform: translateX(24px); opacity: 0.6; } to { transform: none; opacity: 1; } }
+  @keyframes sc-toast { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+  @keyframes sc-scan { 0% { top: 14px; } 50% { top: calc(100% - 16px); } 100% { top: 14px; } }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: rgba(0,0,0,.16); border-radius: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body data-screen-label="Bailey Server Console">
+<div id="root"></div>
+<script type="module" src="/src/main.jsx"></script>
+</body>
+</html>

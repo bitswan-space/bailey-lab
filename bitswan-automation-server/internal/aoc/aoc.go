@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	httplocalhost "github.com/bitswan-space/bitswan-workspaces/internal/http"
@@ -59,23 +58,6 @@ type WorkspaceListResponse struct {
 	Next     *string                `json:"next"`
 	Previous *string                `json:"previous"`
 	Results  []WorkspacePostResponse `json:"results"`
-}
-
-// EmqxGetResponse represents the EMQX JWT response
-type EmqxGetResponse struct {
-	Url   string `json:"url"`
-	Token string `json:"token"`
-}
-
-// MQTTCredentials contains MQTT connection information
-type MQTTCredentials struct {
-	Username string
-	Password string
-	Broker   string
-	Port     int
-	Topic    string
-	Protocol string // Protocol: tcp, ssl, ws, wss
-	URL      string // Full URL with protocol (e.g., wss://host:port)
 }
 
 // BackupBucketResponse contains S3 credentials and bucket name for workspace backups
@@ -207,14 +189,10 @@ func (c *AOCClient) GetAutomationServerToken() (string, error) {
 }
 
 // RegisterWorkspace registers a workspace with AOC
-func (c *AOCClient) RegisterWorkspace(workspaceName string, editorURL *string, domain string) (string, error) {
+func (c *AOCClient) RegisterWorkspace(workspaceName string, domain string) (string, error) {
 	payload := map[string]interface{}{
 		"name":                 workspaceName,
 		"automation_server_id": c.settings.AutomationServerId,
-	}
-
-	if editorURL != nil {
-		payload["editor_url"] = *editorURL
 	}
 
 	if domain != "" {
@@ -362,240 +340,6 @@ func (c *AOCClient) DeleteWorkspace(workspaceId string) error {
 	return nil
 }
 
-// GetMQTTCredentials gets MQTT credentials for a workspace
-func (c *AOCClient) GetMQTTCredentials(workspaceId string) (*MQTTCredentials, error) {
-	url := fmt.Sprintf("%s/api/automation_server/workspaces/%s/emqx/jwt", c.settings.AOCUrl, workspaceId)
-	resp, err := c.sendRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error sending request to %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to get EMQX JWT from %s: %s - %s", url, resp.Status, string(body))
-	}
-
-	var emqxResponse EmqxGetResponse
-	body, _ := io.ReadAll(resp.Body)
-	err = json.Unmarshal([]byte(body), &emqxResponse)
-	if err != nil {
-		return nil, fmt.Errorf("error decoding JSON: %w", err)
-	}
-
-	// Parse MQTT URL - use the same logic as GetAutomationServerMQTTCredentials
-	mqttURL := emqxResponse.Url
-	
-	// Determine protocol and extract host:port
-	var protocol string
-	var hostPort string
-	
-	if strings.HasPrefix(mqttURL, "wss://") {
-		protocol = "wss"
-		hostPort = strings.TrimPrefix(mqttURL, "wss://")
-	} else if strings.HasPrefix(mqttURL, "ws://") {
-		protocol = "ws"
-		hostPort = strings.TrimPrefix(mqttURL, "ws://")
-	} else if strings.HasPrefix(mqttURL, "ssl://") {
-		protocol = "ssl"
-		hostPort = strings.TrimPrefix(mqttURL, "ssl://")
-	} else if strings.HasPrefix(mqttURL, "tls://") {
-		protocol = "tls"
-		hostPort = strings.TrimPrefix(mqttURL, "tls://")
-	} else if strings.HasPrefix(mqttURL, "tcp://") {
-		protocol = "tcp"
-		hostPort = strings.TrimPrefix(mqttURL, "tcp://")
-	} else if strings.HasPrefix(mqttURL, "mqtt://") {
-		protocol = "tcp" // mqtt:// is equivalent to tcp://
-		hostPort = strings.TrimPrefix(mqttURL, "mqtt://")
-	} else {
-		// No protocol specified, default to tcp
-		protocol = "tcp"
-		hostPort = mqttURL
-	}
-	
-	// Parse host and port
-	// hostPort might be "host:port" or "host:port/path"
-	// Extract port before any path separator
-	var emqxUrl string
-	var emqxPortInt int
-	
-	// Check if there's a port specified (contains ":")
-	if strings.Contains(hostPort, ":") {
-		// Split on ":" to get host and port+path
-		parts := strings.SplitN(hostPort, ":", 2)
-		emqxUrl = parts[0]
-		portAndPath := parts[1]
-		
-		// Extract port (before "/" if path is present)
-		if strings.Contains(portAndPath, "/") {
-			portStr := strings.Split(portAndPath, "/")[0]
-			emqxPortInt, err = strconv.Atoi(portStr)
-		} else {
-			emqxPortInt, err = strconv.Atoi(portAndPath)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse MQTT port: %w", err)
-		}
-	} else {
-		// No port specified, use default based on protocol
-		emqxUrl = hostPort
-		if strings.Contains(emqxUrl, "/") {
-			emqxUrl = strings.Split(emqxUrl, "/")[0]
-		}
-		switch protocol {
-		case "wss", "ssl", "tls":
-			emqxPortInt = 443
-		case "ws":
-			emqxPortInt = 80
-		default:
-			emqxPortInt = 1883
-		}
-	}
-
-	return &MQTTCredentials{
-		Username: workspaceId, // Use workspace ID as username for workspace-specific credentials
-		Password: emqxResponse.Token,
-		Broker:   emqxUrl,
-		Port:     emqxPortInt,
-		Protocol: protocol,
-		URL:      mqttURL, // Preserve full URL with protocol
-		Topic:    "/topology",
-	}, nil
-}
-
-// GetAutomationServerMQTTCredentials gets MQTT credentials for the automation server itself
-func (c *AOCClient) GetAutomationServerMQTTCredentials() (*MQTTCredentials, error) {
-	url := fmt.Sprintf("%s/api/automation_server/emqx/jwt", c.settings.AOCUrl)
-	resp, err := c.sendRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error sending request to %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("failed to get EMQX JWT from %s: %s - %s", url, resp.Status, string(body))
-	}
-
-	var emqxResponse EmqxGetResponse
-	body, _ := io.ReadAll(resp.Body)
-	err = json.Unmarshal([]byte(body), &emqxResponse)
-	if err != nil {
-		return nil, fmt.Errorf("error decoding JSON: %w", err)
-	}
-
-	// Parse MQTT URL - preserve the protocol from the API response
-	// The URL might be in format: wss://host:port, ws://host:port, ssl://host:port, tcp://host:port, or host:port
-	mqttURL := emqxResponse.Url
-	
-	// Determine protocol and extract host:port
-	var protocol string
-	var hostPort string
-	
-	if strings.HasPrefix(mqttURL, "wss://") {
-		protocol = "wss"
-		hostPort = strings.TrimPrefix(mqttURL, "wss://")
-	} else if strings.HasPrefix(mqttURL, "ws://") {
-		protocol = "ws"
-		hostPort = strings.TrimPrefix(mqttURL, "ws://")
-	} else if strings.HasPrefix(mqttURL, "ssl://") {
-		protocol = "ssl"
-		hostPort = strings.TrimPrefix(mqttURL, "ssl://")
-	} else if strings.HasPrefix(mqttURL, "tls://") {
-		protocol = "tls"
-		hostPort = strings.TrimPrefix(mqttURL, "tls://")
-	} else if strings.HasPrefix(mqttURL, "tcp://") {
-		protocol = "tcp"
-		hostPort = strings.TrimPrefix(mqttURL, "tcp://")
-	} else if strings.HasPrefix(mqttURL, "mqtt://") {
-		protocol = "tcp" // mqtt:// is equivalent to tcp://
-		hostPort = strings.TrimPrefix(mqttURL, "mqtt://")
-	} else {
-		// No protocol specified, default to tcp
-		protocol = "tcp"
-		hostPort = mqttURL
-	}
-	
-	// Parse host and port
-	// hostPort might be "host:port" or "host:port/path"
-	// Extract port before any path separator
-	var emqxUrl string
-	var emqxPortInt int
-	
-	// Check if there's a port specified (contains ":")
-	if strings.Contains(hostPort, ":") {
-		// Split on ":" to get host and port+path
-		urlParts := strings.SplitN(hostPort, ":", 2)
-		emqxUrl = urlParts[0]
-		
-		// Extract port (before "/" if path is present)
-		portPart := urlParts[1]
-		if strings.Contains(portPart, "/") {
-			portPart = strings.Split(portPart, "/")[0]
-		}
-		
-		var err error
-		emqxPortInt, err = strconv.Atoi(portPart)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse MQTT port: %w", err)
-		}
-	} else {
-		// No port specified, use default port based on protocol
-		// Remove any path from hostname
-		if strings.Contains(hostPort, "/") {
-			emqxUrl = strings.Split(hostPort, "/")[0]
-		} else {
-			emqxUrl = hostPort
-		}
-		switch protocol {
-		case "wss":
-			emqxPortInt = 443 // Default HTTPS/WSS port
-		case "ws":
-			emqxPortInt = 80 // Default HTTP/WS port
-		case "ssl", "tls":
-			emqxPortInt = 8883 // Default MQTT SSL port
-		case "tcp":
-			emqxPortInt = 1883 // Default MQTT TCP port
-		default:
-			return nil, fmt.Errorf("unknown protocol %s and no port specified in URL: %s", protocol, emqxResponse.Url)
-		}
-	}
-	
-	// Store the full URL with protocol for the daemon to use
-	// For WSS connections, preserve the path from the original URL if present
-	fullURL := fmt.Sprintf("%s://%s:%d", protocol, emqxUrl, emqxPortInt)
-	if strings.HasPrefix(protocol, "wss") || strings.HasPrefix(protocol, "ws") {
-		// Check if original URL had a path (e.g., /mqtt)
-		if strings.Contains(emqxResponse.Url, "/") {
-			// Extract path from original URL
-			urlParts := strings.SplitN(emqxResponse.Url, "/", 4)
-			if len(urlParts) >= 4 {
-				// Reconstruct with path: protocol://host:port/path
-				path := "/" + strings.Join(urlParts[3:], "/")
-				fullURL = fmt.Sprintf("%s://%s:%d%s", protocol, emqxUrl, emqxPortInt, path)
-			}
-		}
-	}
-	
-	// For Docker internal communication, use the hostname directly
-	// Replace .localhost hostname with Docker service name if needed
-	internalHost := emqxUrl
-	if emqxUrl == "aoc-emqx" || strings.Contains(emqxUrl, "localhost") {
-		internalHost = "aoc-emqx"
-	}
-
-	return &MQTTCredentials{
-		Username: c.settings.AutomationServerId, // Use automation server ID as username
-		Password: emqxResponse.Token,
-		Broker:   internalHost,
-		Port:     emqxPortInt,
-		Protocol: protocol,
-		URL:      fullURL,
-		Topic:    "/workspaces", // Topic for publishing workspace lists
-	}, nil
-}
-
 // KeycloakClientSecretResponse represents the Keycloak client secret response
 type KeycloakClientSecretResponse struct {
 	ClientID     string `json:"client_id"`
@@ -624,6 +368,45 @@ func (c *AOCClient) GetKeycloakClientSecret(workspaceId string) (*KeycloakClient
 	}
 
 	return &response, nil
+}
+
+// OAuthClientResponse represents the response from the server-level
+// Keycloak OAuth client endpoint.
+type OAuthClientResponse struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	IssuerURL    string `json:"issuer_url"`
+}
+
+// GetOrCreateOAuthClient provisions a Keycloak OIDC client for a named
+// service (e.g. "bitswan-protected") scoped to this automation server.
+// The client_id is deterministic:
+// automation-server-{server_id}-{service_name}-client. If the client
+// already exists, the redirect_uri is added to its allowlist and the
+// existing credentials are returned — safe to call once per hostname.
+func (c *AOCClient) GetOrCreateOAuthClient(serviceName, redirectURI string) (*OAuthClientResponse, error) {
+	payload := map[string]string{
+		"service_name": serviceName,
+		"redirect_uri": redirectURI,
+	}
+	jsonBytes, _ := json.Marshal(payload)
+	url := fmt.Sprintf("%s/api/automation_server/keycloak/oauth-client", c.settings.AOCUrl)
+	resp, err := c.sendRequest("POST", url, jsonBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get/create OAuth client: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("OAuth client request failed (%s): %s", resp.Status, string(body))
+	}
+
+	var result OAuthClientResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse OAuth client response: %w", err)
+	}
+	return &result, nil
 }
 
 func generateCookieSecret() (string, error) {
@@ -682,23 +465,6 @@ func (c *AOCClient) GetAOCEnvironmentVariables(workspaceId, automationServerToke
 		"BITSWAN_WORKSPACE_ID=" + workspaceId,
 		"BITSWAN_AOC_URL=" + aocUrl,
 		"BITSWAN_AOC_TOKEN=" + automationServerToken,
-	}
-}
-
-// GetMQTTEnvironmentVariables creates MQTT environment variables from credentials
-func GetMQTTEnvironmentVariables(creds *MQTTCredentials) []string {
-	broker := creds.Broker
-	// Replace .localhost hostname with Docker service name for internal communication
-	if strings.Contains(broker, ".localhost") {
-		broker = "aoc-emqx"
-	}
-
-	return []string{
-		"MQTT_USERNAME=" + creds.Username,
-		"MQTT_PASSWORD=" + creds.Password,
-		"MQTT_BROKER=" + broker,
-		"MQTT_PORT=" + fmt.Sprint(creds.Port),
-		"MQTT_TOPIC=" + creds.Topic,
 	}
 }
 
@@ -849,4 +615,15 @@ func (c *AOCClient) sendRequestOnce(method, requestURL string, payload []byte) (
 // GetAccessToken returns the current access token
 func (c *AOCClient) GetAccessToken() string {
 	return c.settings.AccessToken
+}
+
+// GetExpiresAt returns the access token's expiry (as returned by the AOC at
+// OTP exchange), or "" if unknown.
+func (c *AOCClient) GetExpiresAt() string {
+	return c.settings.ExpiresAt
+}
+
+// GetDomain returns the AOC-assigned domain for this automation server.
+func (c *AOCClient) GetDomain() string {
+	return c.settings.Domain
 }

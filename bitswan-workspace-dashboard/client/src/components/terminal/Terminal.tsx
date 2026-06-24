@@ -116,6 +116,8 @@ export function Terminal({ wsUrl, onExit }: TerminalProps) {
     // the cleanup would fire `onExit` on a session that never actually started,
     // and the parent would mark it ended before the re-mounted WS has a chance.
     let wasOpened = false;
+    // eslint-disable-next-line no-restricted-syntax -- null = no nudge scheduled
+    let redrawNudge: ReturnType<typeof setTimeout> | null = null;
 
     const sendResize = () => {
       if (ws.readyState !== WebSocket.OPEN) return;
@@ -126,6 +128,27 @@ export function Terminal({ wsUrl, onExit }: TerminalProps) {
       wasOpened = true;
       term.focus();
       sendResize();
+      // Redraw nudge: when reconnecting to a still-running session (the agent
+      // persists server-side in dtach across browser close / refresh), the
+      // remote full-screen TUI — Claude is an Ink/React app — only repaints on
+      // an actual dimension *change*; a plain reattach at the same size (even
+      // with a same-size SIGWINCH) leaves the screen blank until the user
+      // manually resizes. Once the attach has settled, briefly shrink the
+      // terminal by one row then restore it — a genuine resize delta that
+      // forces the remote to repaint. Harmless for fresh sessions.
+      const nudge = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN || term.rows < 2) return;
+        const rows = term.rows;
+        const cols = term.cols;
+        term.resize(cols, rows - 1);
+        sendResize();
+        redrawNudge = setTimeout(() => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          term.resize(cols, rows);
+          sendResize();
+        }, 150);
+      }, 600);
+      redrawNudge = nudge;
     });
 
     ws.addEventListener('message', (ev) => {
@@ -181,6 +204,7 @@ export function Terminal({ wsUrl, onExit }: TerminalProps) {
     observer.observe(host);
 
       return () => {
+        if (redrawNudge) clearTimeout(redrawNudge);
         observer.disconnect();
         dataDisposable.dispose();
         ws.close();

@@ -19,6 +19,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Named Docker volumes that back the daemon's storage (replacing the old host
+// bind mounts under the user's home directory).
+const (
+	configVolume = "bitswan"        // mounted at /root/.config/bitswan (config, bailey.db, workspaces)
+	mkcertVolume = "bitswan-mkcert" // mounted at /root/.local/share/mkcert (local CA)
+)
+
 func newInitCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
@@ -68,6 +75,38 @@ func runInitCmd(cmd *cobra.Command, args []string) error {
 		ensureInotifyLimits()
 	}
 
+	alreadyRunning, err := ensureDaemonRunning()
+	if err != nil {
+		return err
+	}
+	if alreadyRunning {
+		fmt.Println("Automation server daemon is already running")
+	}
+
+	installCompletions()
+	return nil
+}
+
+// EnsureDaemonRunning makes sure the automation-server daemon container is up,
+// creating and starting it if needed. It is idempotent — a no-op when the
+// container is already running with a live config bind-mount. This lets a
+// single command (e.g. `bitswan register`) bring the daemon up from nothing
+// rather than requiring a separate `automation-server-daemon init` first.
+//
+// Requires Docker to be available; it does not prompt to install Docker (that
+// interactive path lives in `init`).
+func EnsureDaemonRunning() error {
+	if !docker.IsDockerAvailable() {
+		return fmt.Errorf("Docker is required but not available; install Docker and retry: https://docs.docker.com/engine/install/")
+	}
+	_, err := ensureDaemonRunning()
+	return err
+}
+
+// ensureDaemonRunning does the work behind EnsureDaemonRunning and runInitCmd.
+// It returns (alreadyRunning, err): alreadyRunning is true when the container
+// was already up (and healthy) so callers can tailor their messaging.
+func ensureDaemonRunning() (bool, error) {
 	// Generate and save the authentication token to the config file
 	cfg := config.NewAutomationServerConfig()
 	existingToken, err := cfg.GetLocalServerToken()
@@ -75,14 +114,14 @@ func runInitCmd(cmd *cobra.Command, args []string) error {
 		// Generate a new random token (64 characters)
 		token := uniuri.NewLen(64)
 		if err := cfg.SetLocalServerToken(token); err != nil {
-			return fmt.Errorf("failed to save token to config: %w", err)
+			return false, fmt.Errorf("failed to save token to config: %w", err)
 		}
 		fmt.Println("Generated new authentication token")
 
 		// Set restrictive permissions on the config file (owner read/write only)
 		configPath := cfg.GetConfigPath()
 		if err := os.Chmod(configPath, 0600); err != nil {
-			return fmt.Errorf("failed to set config file permissions: %w", err)
+			return false, fmt.Errorf("failed to set config file permissions: %w", err)
 		}
 	}
 
@@ -94,45 +133,25 @@ func runInitCmd(cmd *cobra.Command, args []string) error {
 		checkRunningCmd := exec.Command("docker", "ps", "--filter", "name=bitswan-automation-server-daemon", "--format", "{{.Names}}")
 		runningOutput, err := checkRunningCmd.Output()
 		if err == nil && len(runningOutput) > 0 {
-			// Container is running — but if ~/.config/bitswan was deleted the bind
-			// mount inside the container will be stale (inode with 0 links) and any
-			// directory creation inside it will fail with ENOENT.  Detect this by
-			// checking whether the host directory still exists; if not, stop and
-			// remove the container so it is re-created with a fresh bind mount below.
-			homeDir, hdErr := config.GetRealUserHomeDir()
-			if hdErr == nil {
-				bitswanConfig := filepath.Join(homeDir, ".config", "bitswan")
-				if _, statErr := os.Stat(bitswanConfig); os.IsNotExist(statErr) {
-					fmt.Println("Detected missing ~/.config/bitswan — recreating daemon container to refresh bind mounts...")
-					exec.Command("docker", "stop", "bitswan-automation-server-daemon").Run()
-					exec.Command("docker", "rm", "bitswan-automation-server-daemon").Run()
-					// Fall through to startDaemonContainer below.
-				} else {
-					fmt.Println("Automation server daemon is already running")
-					installCompletions()
-					return nil
-				}
-			} else {
-				fmt.Println("Automation server daemon is already running")
-				installCompletions()
-				return nil
-			}
+			// Container is running. Storage now lives in named Docker volumes,
+			// so there's no host bind mount that can go stale — just report it.
+			// (Caller prints the "already running" message + installs completions.)
+			return true, nil
 		} else {
 			// Container exists but is not running, remove it first
 			fmt.Println("Removing existing stopped container...")
 			removeCmd := exec.Command("docker", "rm", "bitswan-automation-server-daemon")
 			if err := removeCmd.Run(); err != nil {
-				return fmt.Errorf("failed to remove existing container: %w", err)
+				return false, fmt.Errorf("failed to remove existing container: %w", err)
 			}
 		}
 	}
 
 	if err := startDaemonContainer("Starting automation server daemon container...", "Automation server daemon started successfully"); err != nil {
-		return err
+		return false, err
 	}
 
-	installCompletions()
-	return nil
+	return false, nil
 }
 
 // startDaemonContainer sets up and starts the daemon container with the current binary
@@ -179,21 +198,18 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		return fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	bitswanConfig := filepath.Join(homeDir, ".config", "bitswan")
-	mkcertDir := filepath.Join(homeDir, ".local", "share", "mkcert")
-
-	// Ensure the config directory exists
-	if err := os.MkdirAll(bitswanConfig, 0755); err != nil {
-		return fmt.Errorf("failed to create bitswan config directory: %w", err)
-	}
-
-	// Ensure mkcert directory exists (create if it doesn't, but it's okay if it doesn't exist)
-	// We'll mount it anyway so mkcert can use it if it exists
-	_ = os.MkdirAll(mkcertDir, 0755)
+	// The daemon's config + data and the mkcert CA now live in named Docker
+	// volumes instead of host bind mounts under the user's home directory. This
+	// makes storage independent of which host user runs the commands (the
+	// root-then-ubuntu mismatch that used to leave files in the wrong place).
+	// The legacy* paths are the old bind-mount locations, used ONLY as the
+	// one-time migration source.
+	legacyConfig := filepath.Join(homeDir, ".config", "bitswan")
+	legacyMkcert := filepath.Join(homeDir, ".local", "share", "mkcert")
 
 	// Launch the daemon container
 	// Mount the binary, config directory, docker socket, and mkcert directory
-	// Use bitswan_network to allow resolving Docker service names like aoc-emqx
+	// Use bitswan_network to allow resolving Docker service names
 	// Use pre-built image with all tools (git, ssh-keygen, docker-cli, mkcert) pre-installed
 	// Set BITSWAN_CADDY_HOST to use 'caddy' hostname instead of 'localhost' when on bitswan_network
 	// Mount the bitswan automation server socket directory for IPC
@@ -257,9 +273,26 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		return fmt.Errorf("network %s does not exist and could not be created", networkName)
 	}
 
-	// Set HOST_HOME so the daemon knows the host home directory
-	// This is needed when fixing permissions and creating docker-compose files with correct paths
-	dockerCmd := exec.Command("docker", "run",
+	// Ensure the named volumes exist, and migrate any legacy bind-mount data
+	// into them (one-time, idempotent — skipped when the volume already has
+	// content). The legacy host directories are left untouched as a backup.
+	if err := ensureDockerVolume(configVolume); err != nil {
+		return err
+	}
+	if err := ensureDockerVolume(mkcertVolume); err != nil {
+		return err
+	}
+	if err := migrateBindMountToVolume(configVolume, legacyConfig, daemonImage); err != nil {
+		return fmt.Errorf("failed to migrate config into %s volume: %w", configVolume, err)
+	}
+	if err := migrateBindMountToVolume(mkcertVolume, legacyMkcert, daemonImage); err != nil {
+		return fmt.Errorf("failed to migrate mkcert into %s volume: %w", mkcertVolume, err)
+	}
+
+	// HOST_HOME still tells the daemon the host home directory (used for the few
+	// remaining host-path operations, e.g. local-repo remotes via /host).
+	runArgs := []string{
+		"run",
 		"-d",
 		"--name", "bitswan-automation-server-daemon",
 		"--restart", "unless-stopped",
@@ -267,9 +300,20 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		"-e", "BITSWAN_CADDY_HOST=caddy:2019",
 		"-e", "BITSWAN_TRAEFIK_HOST=traefik:8080",
 		"-e", fmt.Sprintf("HOST_HOME=%s", homeDir),
+	}
+	// Forward any pinned component-image overrides into the daemon so workspaces
+	// it creates (incl. via the Server Console UI) use them instead of the Docker
+	// Hub "latest". Lets operators run a private registry — and CI test images
+	// built from this checkout.
+	for _, key := range []string{"BITSWAN_GITOPS_IMAGE", "BITSWAN_DASHBOARD_IMAGE", "BITSWAN_CODING_AGENT_IMAGE"} {
+		if v := os.Getenv(key); v != "" {
+			runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%s", key, v))
+		}
+	}
+	runArgs = append(runArgs,
 		"-v", fmt.Sprintf("%s:/usr/local/bin/bitswan:ro", binaryPath),
-		"-v", fmt.Sprintf("%s:/root/.config/bitswan", bitswanConfig),
-		"-v", fmt.Sprintf("%s:/root/.local/share/mkcert", mkcertDir),
+		"-v", fmt.Sprintf("%s:/root/.config/bitswan", configVolume),
+		"-v", fmt.Sprintf("%s:/root/.local/share/mkcert", mkcertVolume),
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
 		"-v", fmt.Sprintf("%s:%s", socketDir, socketDir),
 		"-v", "/:/host:rw",
@@ -277,6 +321,7 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		daemonImage,
 		"/usr/local/bin/bitswan", "automation-server-daemon", "__run",
 	)
+	dockerCmd := exec.Command("docker", runArgs...)
 
 	dockerCmd.Stdout = os.Stdout
 	dockerCmd.Stderr = os.Stderr
@@ -489,3 +534,55 @@ func ensureInotifyLimits() {
 	}
 }
 
+// ensureDockerVolume creates a named Docker volume if it does not already exist.
+func ensureDockerVolume(name string) error {
+	if exec.Command("docker", "volume", "inspect", name).Run() == nil {
+		return nil
+	}
+	out, err := exec.Command("docker", "volume", "create", name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to create docker volume %s: %s: %w", name, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// dockerVolumeEmpty reports whether the named volume contains no files. It runs
+// a throwaway container that lists the volume root.
+func dockerVolumeEmpty(name, image string) (bool, error) {
+	out, err := exec.Command("docker", "run", "--rm",
+		"-v", name+":/v:ro", image,
+		"sh", "-c", "ls -A /v 2>/dev/null | head -1").CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect docker volume %s: %s: %w", name, strings.TrimSpace(string(out)), err)
+	}
+	return strings.TrimSpace(string(out)) == "", nil
+}
+
+// migrateBindMountToVolume copies a legacy bind-mount directory into a named
+// volume exactly once. It is a no-op when the volume already has content (so
+// it's safe to call on every daemon start/upgrade) or when the legacy directory
+// is absent/empty (fresh installs). The legacy directory is left in place as a
+// backup — nothing is deleted.
+func migrateBindMountToVolume(volume, legacyDir, image string) error {
+	empty, err := dockerVolumeEmpty(volume, image)
+	if err != nil {
+		return err
+	}
+	if !empty {
+		return nil // already migrated, or the daemon has started populating it
+	}
+	entries, err := os.ReadDir(legacyDir)
+	if err != nil || len(entries) == 0 {
+		return nil // nothing to migrate (fresh install)
+	}
+	fmt.Printf("Migrating existing data from %s into docker volume %q ...\n", legacyDir, volume)
+	out, err := exec.Command("docker", "run", "--rm",
+		"-v", legacyDir+":/src:ro",
+		"-v", volume+":/dst",
+		image, "sh", "-c", "cp -a /src/. /dst/").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copy %s -> volume %s failed: %s: %w", legacyDir, volume, strings.TrimSpace(string(out)), err)
+	}
+	fmt.Printf("Migrated %s into volume %q (original left in place as a backup).\n", legacyDir, volume)
+	return nil
+}

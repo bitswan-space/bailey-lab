@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
@@ -104,7 +103,7 @@ func (s *Server) connectWorkspaceToAOC(workspaceName, aocUrl, automationServerId
 	var workspaceId string
 	if metadata.WorkspaceId == nil || *metadata.WorkspaceId == "" {
 		fmt.Printf("  🆕 Registering workspace '%s' with AOC...\n", workspaceName)
-		workspaceId, err = aocClient.RegisterWorkspace(workspaceName, metadata.EditorURL, metadata.Domain)
+		workspaceId, err = aocClient.RegisterWorkspace(workspaceName, metadata.Domain)
 		if err != nil {
 			return fmt.Errorf("failed to register workspace with AOC: %w", err)
 		}
@@ -114,46 +113,9 @@ func (s *Server) connectWorkspaceToAOC(workspaceName, aocUrl, automationServerId
 		fmt.Printf("  ℹ️  Workspace already registered with ID: %s\n", workspaceId)
 	}
 
-	// Get MQTT credentials for the workspace
-	fmt.Printf("  📡 Getting MQTT credentials for workspace...\n")
-	mqttCreds, err := aocClient.GetMQTTCredentials(workspaceId)
-	if err != nil {
-		// Check if this is a 404 error, which means the workspace was deleted from AOC
-		if strings.Contains(err.Error(), "404 Not Found") {
-			fmt.Printf("  ⚠️  Workspace ID %s not found in AOC (404), clearing and re-registering...\n", workspaceId)
-
-			// Clear the workspace ID from metadata
-			metadata.WorkspaceId = nil
-
-			// Re-register the workspace with AOC
-			fmt.Printf("  🆕 Re-registering workspace '%s' with AOC...\n", workspaceName)
-			newWorkspaceId, err := aocClient.RegisterWorkspace(workspaceName, metadata.EditorURL, metadata.Domain)
-			if err != nil {
-				return fmt.Errorf("failed to re-register workspace with AOC: %w", err)
-			}
-			workspaceId = newWorkspaceId
-			fmt.Printf("  ✅ Workspace re-registered with ID: %s\n", workspaceId)
-
-			// Try to get MQTT credentials again with the new workspace ID
-			fmt.Printf("  📡 Getting MQTT credentials for re-registered workspace...\n")
-			mqttCreds, err = aocClient.GetMQTTCredentials(workspaceId)
-			if err != nil {
-				return fmt.Errorf("failed to get MQTT credentials for re-registered workspace: %w", err)
-			}
-		} else {
-			return fmt.Errorf("failed to get MQTT credentials: %w", err)
-		}
-	}
-	fmt.Printf("  ✅ MQTT credentials received successfully!\n")
-
-	// Update metadata with new MQTT credentials and workspace ID
-	fmt.Printf("  💾 Updating metadata with MQTT credentials...\n")
+	// Update metadata with new workspace ID
+	fmt.Printf("  💾 Updating metadata with workspace ID...\n")
 	metadata.WorkspaceId = &workspaceId
-	metadata.MqttUsername = &mqttCreds.Username
-	metadata.MqttPassword = &mqttCreds.Password
-	metadata.MqttBroker = &mqttCreds.Broker
-	metadata.MqttPort = &mqttCreds.Port
-	metadata.MqttTopic = &mqttCreds.Topic
 
 	// Save updated metadata (daemon runs as root, so no permission issues)
 	if err := metadata.SaveToFile(metadataPath); err != nil {
@@ -163,9 +125,9 @@ func (s *Server) connectWorkspaceToAOC(workspaceName, aocUrl, automationServerId
 	fmt.Printf("  ✅ Metadata updated successfully!\n")
 
 	// Actually update the workspace deployment via daemon
-	fmt.Printf("  🔄 Updating workspace deployment with new AOC and MQTT configuration...\n")
-	
-	// Use workspace update command to refresh the deployment with new AOC/MQTT config
+	fmt.Printf("  🔄 Updating workspace deployment with new AOC configuration...\n")
+
+	// Use workspace update command to refresh the deployment with new AOC config
 	// runWorkspaceUpdate expects just the workspace name (it parses flags internally)
 	updateArgs := []string{workspaceName}
 	if err := s.runWorkspaceUpdate(updateArgs); err != nil {

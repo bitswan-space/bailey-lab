@@ -10,7 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"net/url"
+
 	"github.com/bitswan-space/bitswan-workspaces/internal/caddyapi"
+	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 	"github.com/bitswan-space/bitswan-workspaces/internal/util"
@@ -44,12 +47,58 @@ type IngressAddRouteRequest struct {
 	CertsDir      string `json:"certs_dir,omitempty"`
 	Secret        string `json:"secret,omitempty"`
 	WorkspaceName string `json:"workspace_name,omitempty"`
+	// OwnerEmail is the deployer's email — the user whose action caused
+	// this route to be registered. When set, the daemon records the
+	// hostname in the Bailey ACL with this user as the original owner,
+	// so the endpoint is access-controlled and shareable from the
+	// moment it exists. Empty means the caller doesn't know who the
+	// deployer is (e.g. server-internal routes registered at boot); the
+	// endpoint then stays open until something registers an owner.
+	OwnerEmail string `json:"owner_email,omitempty"`
+	// DisplayName is a friendly label for the endpoint shown in Bailey
+	// UIs. If empty, the hostname is used.
+	DisplayName string `json:"display_name,omitempty"`
+	// ParentEndpoint is the hostname of the endpoint this route's
+	// Bailey ACL delegates membership to — for workspace-spawned routes
+	// that's the workspace dashboard. When empty, the daemon resolves
+	// it from the workspace's recorded metadata (dashboard-url).
+	ParentEndpoint string `json:"parent_endpoint,omitempty"`
+	// Kind classifies the endpoint for the Bailey launcher: "frontend"
+	// (an exposed business-process app), "service" (gitops/editor and other
+	// infrastructure), or "workspace". Callers pass it as explicit data —
+	// e.g. gitops marks exposed automations "frontend" and everything else
+	// "service". The daemon overrides it to "workspace" for a route that
+	// resolves to a top-level (parentless) dashboard. Empty is treated as
+	// "service" for parented routes.
+	Kind string `json:"kind,omitempty"`
+	// Stage is the deployment stage of the backing automation ("production",
+	// "staging", "dev", "live-dev"). Explicit data — stored on the endpoint so
+	// launcher/admin views can filter (e.g. only production frontends).
+	Stage string `json:"stage,omitempty"`
 }
 
 // IngressAddRouteResponse represents the response from adding a route
 type IngressAddRouteResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+}
+
+// IngressReconcileRequest is the declarative ingress apply: the COMPLETE set of
+// gitops-managed routes a workspace should have. The daemon converges to it —
+// upserts each route (marking it source='gitops'), then prunes any gitops route
+// for the workspace that is NOT in the set. Manual routes are never touched.
+// This is the "kubectl apply" of ingress: re-sending the same set is a no-op.
+type IngressReconcileRequest struct {
+	WorkspaceName string                   `json:"workspace_name"`
+	Routes        []IngressAddRouteRequest `json:"routes"`
+}
+
+// IngressReconcileResponse reports what converging did.
+type IngressReconcileResponse struct {
+	Success  bool     `json:"success"`
+	Applied  int      `json:"applied"`
+	Pruned   []string `json:"pruned"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // IngressListRoutesResponse represents the response from listing routes
@@ -101,6 +150,10 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 		s.handleIngressInit(w, r)
 	case path == "add-route":
 		s.handleIngressAddRoute(w, r)
+	case path == "repoint-route":
+		s.handleIngressRepointRoute(w, r)
+	case path == "reconcile":
+		s.handleIngressReconcile(w, r)
 	case path == "list-routes":
 		s.handleIngressListRoutes(w, r)
 	case strings.HasPrefix(path, "remove-route/"):
@@ -112,6 +165,8 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 		s.handleIngressMigrate(w, r)
 	case path == "update":
 		s.handleIngressUpdate(w, r)
+	case path == "provision-protected-proxy":
+		s.handleIngressProvisionProtectedProxy(w, r)
 	default:
 		writeJSONError(w, "not found", http.StatusNotFound)
 	}
@@ -339,6 +394,22 @@ func initCaddyIngress(verbose bool) (bool, error) {
 // provider (pointed at the daemon's AOC bridge through HTTPREQ_* env vars in
 // the Traefik container) — used for wildcard certificates, which HTTP-01
 // cannot issue.
+// traefikDynamicConfig is loaded by the file provider (see
+// renderTraefikStaticConfig). It forces the TLS edge to negotiate HTTP/1.1
+// only. The protected-ingress upstream chain (oauth2-proxy -> bailey gate ->
+// app) is HTTP/1.1 and cannot carry RFC 8441 WebSocket-over-HTTP/2, so if the
+// edge offered h2 the browser would open h2 websockets whose upgrade Traefik
+// can't bridge to the h1 chain — breaking the dashboard's coding-agent
+// terminal and the vite HMR sockets. Offering only http/1.1 in ALPN makes
+// browsers use HTTP/1.1 websocket upgrades, which the chain carries. The h2
+// multiplexing given up is irrelevant for these internal dev surfaces.
+const traefikDynamicConfig = `tls:
+  options:
+    default:
+      alpnProtocols:
+        - http/1.1
+`
+
 func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
 	cfg := fmt.Sprintf(`entryPoints:
   web:
@@ -348,6 +419,8 @@ func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
 api:
   insecure: true
 providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
   rest:
     insecure: true
   docker:
@@ -477,10 +550,17 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	if err := os.WriteFile(traefikConfigFilePath, []byte(traefikStaticConfig), 0755); err != nil {
 		return false, fmt.Errorf("failed to write traefik.yml: %w", err)
 	}
+	// Dynamic config (TLS ALPN = http/1.1) loaded by the file provider.
+	if err := os.WriteFile(traefikConfig+"/dynamic.yml", []byte(traefikDynamicConfig), 0644); err != nil {
+		return false, fmt.Errorf("failed to write traefik dynamic.yml: %w", err)
+	}
 	if traefikConfigForCompose != traefikConfig {
 		traefikConfigFilePathHost := traefikConfigForCompose + "/traefik.yml"
 		if err := os.WriteFile(traefikConfigFilePathHost, []byte(traefikStaticConfig), 0755); err != nil {
 			return false, fmt.Errorf("failed to write traefik.yml on host: %w", err)
+		}
+		if err := os.WriteFile(traefikConfigForCompose+"/dynamic.yml", []byte(traefikDynamicConfig), 0644); err != nil {
+			return false, fmt.Errorf("failed to write traefik dynamic.yml on host: %w", err)
 		}
 	}
 
@@ -729,41 +809,143 @@ func addRouteToIngress(req IngressAddRouteRequest, jwtToken string) error {
 	}
 
 	ingressType := DetectIngressType()
+	workspaceName := resolveWorkspaceName(req, jwtToken)
 
 	switch ingressType {
 	case IngressCaddy:
-		return addRouteCaddy(req)
+		if err := addRouteCaddy(req); err != nil {
+			return err
+		}
 	case IngressTraefik:
-		workspaceName := resolveWorkspaceName(req, jwtToken)
-		return addRouteTraefik(req, workspaceName)
+		if err := addRouteTraefik(req, workspaceName); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("no ingress proxy detected")
 	}
 
-	return fmt.Errorf("no ingress proxy detected")
+	// Every hostname routed through the protected chain needs its OAuth
+	// callback URIs (outer + inner) on the shared Keycloak client —
+	// otherwise the first session-less request to it dead-ends on a
+	// Keycloak "Invalid parameter: redirect_uri" page. This must NOT be
+	// owner-gated: gitops registers automation/live-dev routes without
+	// knowing the deployer. Best-effort — a failure here doesn't unwind
+	// the route registration above.
+	outer := toOuterHost(req.Hostname)
+	if err := registerProtectedRedirectURI(outer); err != nil {
+		fmt.Printf("Warning: AOC didn't accept protected-client redirect URI for %s: %v\n", outer, err)
+	}
+
+	// Record the hostname in the Bailey ACL so it is access-controlled
+	// and shows up on the owner's share index.
+	//
+	// Parent linkage: workspace-spawned routes (gitops deploying
+	// automations / business processes / live-dev services) delegate
+	// membership to the workspace's dashboard endpoint, so everyone in
+	// the workspace can share what they deploy there (see roleFor). The
+	// association is explicit data: the caller states it via
+	// req.ParentEndpoint, or the daemon reads the dashboard hostname
+	// recorded in the workspace's own metadata.
+	//
+	// Owner: the caller-supplied email (workspace init, the add-route
+	// CLI), falling back to the parent endpoint's owner for workspace-
+	// spawned routes. Routes that are neither owned nor part of a
+	// workspace stay open until something claims them.
+	parent := req.ParentEndpoint
+	if parent == "" && workspaceName != "" {
+		parent = workspaceDashboardEndpoint(workspaceName)
+	}
+	if strings.EqualFold(parent, outer) {
+		parent = "" // the dashboard itself has no parent
+	}
+	ownerEmail := req.OwnerEmail
+	if ownerEmail == "" && parent != "" {
+		if parentEp, err := getEndpoint(parent); err == nil && parentEp != nil {
+			ownerEmail = parentEp.OwnerEmail
+		}
+	}
+	if ownerEmail != "" {
+		display := req.DisplayName
+		if display == "" {
+			display = outer
+		}
+		// A parentless route is a workspace dashboard (a top-level launcher
+		// entry); otherwise honour the caller's explicit kind, defaulting a
+		// parented route to "service" when unspecified.
+		kind := req.Kind
+		if parent == "" {
+			kind = endpointKindWorkspace
+		} else if kind == "" {
+			kind = endpointKindService
+		}
+		if _, err := registerEndpoint(outer, ownerEmail, display, parent, kind, req.Stage); err != nil {
+			fmt.Printf("Warning: failed to register Bailey endpoint for %s: %v\n", outer, err)
+		}
+	}
+	return nil
 }
 
-// addRouteCaddy adds a route to Caddy
-func addRouteCaddy(req IngressAddRouteRequest) error {
-	if req.Mkcert {
-		parts := strings.Split(req.Hostname, ".")
-		if len(parts) < 2 {
-			return fmt.Errorf("invalid hostname format: must contain at least one dot")
-		}
-		domain := strings.Join(parts[1:], ".")
+// workspaceDashboardEndpoint returns the hostname of a workspace's
+// dashboard endpoint as recorded in the workspace's metadata (the
+// dashboard-url written at workspace init), or "" when the workspace
+// has no dashboard or no metadata.
+func workspaceDashboardEndpoint(workspaceName string) string {
+	metadata, err := config.GetWorkspaceMetadata(workspaceName)
+	if err != nil || metadata.DashboardURL == nil {
+		return ""
+	}
+	u, err := url.Parse(*metadata.DashboardURL)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
 
-		if err := caddyapi.GenerateAndInstallCertsForHostname(req.Hostname, domain); err != nil {
-			return fmt.Errorf("failed to generate and install certificates: %w", err)
-		}
-		if err := caddyapi.InstallTLSCertsForHostname(req.Hostname, domain, "default"); err != nil {
-			return fmt.Errorf("failed to install TLS policies: %w", err)
+// addRouteCaddy adds a route to Caddy.
+//
+// Caddy deployments don't run the protected-ingress chain (no
+// bitswan-protected-proxy container in the Caddy path), so there is no
+// outer→wrap / inner→upstream split here. To keep the two-subdomain
+// contract stable for clients that hit either hostname form, the inner
+// sibling is registered pointing at the *same* upstream. Anything that
+// wants the wrap should use Traefik.
+func addRouteCaddy(req IngressAddRouteRequest) error {
+	if isInnerHost(req.Hostname) {
+		return fmt.Errorf("addRouteCaddy: refusing to register inner hostname %q directly — pass the outer hostname; the inner pair is registered automatically", req.Hostname)
+	}
+	outer := req.Hostname
+	inner := toInnerHost(outer)
+
+	if req.Mkcert {
+		for _, h := range []string{outer, inner} {
+			parts := strings.Split(h, ".")
+			if len(parts) < 2 {
+				return fmt.Errorf("invalid hostname format: must contain at least one dot")
+			}
+			domain := strings.Join(parts[1:], ".")
+			if err := caddyapi.GenerateAndInstallCertsForHostname(h, domain); err != nil {
+				return fmt.Errorf("failed to generate and install certificates for %s: %w", h, err)
+			}
+			if err := caddyapi.InstallTLSCertsForHostname(h, domain, "default"); err != nil {
+				return fmt.Errorf("failed to install TLS policies for %s: %w", h, err)
+			}
 		}
 	} else if req.CertsDir != "" {
 		caddyConfig := os.Getenv("HOME") + "/.config/bitswan/caddy"
-		if err := caddyapi.InstallCertsFromDir(req.CertsDir, req.Hostname, caddyConfig); err != nil {
-			return fmt.Errorf("failed to install certificates from directory: %w", err)
+		for _, h := range []string{outer, inner} {
+			if err := caddyapi.InstallCertsFromDir(req.CertsDir, h, caddyConfig); err != nil {
+				return fmt.Errorf("failed to install certificates from directory for %s: %w", h, err)
+			}
 		}
 	}
 
-	return caddyapi.AddRoute(req.Hostname, req.Upstream)
+	if err := caddyapi.AddRoute(outer, req.Upstream); err != nil {
+		return fmt.Errorf("add outer route: %w", err)
+	}
+	if err := caddyapi.AddRoute(inner, req.Upstream); err != nil {
+		return fmt.Errorf("add inner route: %w", err)
+	}
+	return nil
 }
 
 // isWorkspaceTraefikRunning checks if a workspace sub-traefik container is running.
@@ -774,62 +956,154 @@ func isWorkspaceTraefikRunning(workspaceName string) bool {
 }
 
 // addRouteTraefik adds a route to Traefik.
-// If a workspace sub-traefik is running, uses two-tier routing (platform → sub-traefik → container).
-// Otherwise, adds the route directly to the platform traefik (single-tier).
+//
+// Two-subdomain protected-ingress topology — for hostname "foo.<domain>"
+// we register BOTH:
+//
+//   - foo.<domain> (OUTER): platform-traefik → bitswan-protected-proxy
+//     → protected gate (chrome-wrap HTML). The gate serves only the
+//     wrap on this hostname; no app content ever reaches it.
+//
+//   - foo--inner.<domain> (INNER): platform-traefik →
+//     bitswan-protected-proxy → protected gate (ACL + CSP injection) →
+//     workspace traefik → service. The wrap iframe loads this URL.
+//     Direct visits work too; they show the bare app behind the same
+//     oauth.
+//
+// req.Hostname must be the OUTER hostname; the inner pair is derived.
+// Both subdomains are covered by the *.<domain> wildcard certificate
+// when DNS-01 is configured (certResolverForHostname).
+//
+// The split only works when the bitswan-protected-proxy container is
+// running. In bare environments (CI without protected ingress, dev
+// hosts) the route falls back to single-tier: both hostnames resolve
+// to the upstream directly, with no auth wrap to layer on top.
 func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
+	if isInnerHost(req.Hostname) {
+		return fmt.Errorf("addRouteTraefik: refusing to register inner hostname %q directly — pass the outer hostname; the inner pair is registered automatically", req.Hostname)
+	}
+	outer := req.Hostname
+	inner := toInnerHost(outer)
+
 	certResolver := ""
 	var tlsDomains []traefikapi.TLSDomain
-	if !req.Mkcert && req.CertsDir == "" && !strings.HasSuffix(req.Hostname, ".localhost") {
-		certResolver, tlsDomains = certResolverForHostname(req.Hostname)
+	if !req.Mkcert && req.CertsDir == "" && !strings.HasSuffix(outer, ".localhost") {
+		certResolver, tlsDomains = certResolverForHostname(outer)
 	}
 
-	// Handle certificates
+	// TLS — both subdomains need certificates. (With the DNS-01
+	// wildcard resolver this is a single shared *.<domain> cert.)
 	if req.Mkcert {
-		if err := traefikapi.InstallTLSCerts(req.Hostname, true, ""); err != nil {
-			return fmt.Errorf("failed to generate and install certificates: %w", err)
+		for _, h := range []string{outer, inner} {
+			if err := traefikapi.InstallTLSCerts(h, true, ""); err != nil {
+				return fmt.Errorf("failed to generate and install certificates for %s: %w", h, err)
+			}
 		}
 	} else if req.CertsDir != "" {
-		if err := traefikapi.InstallTLSCerts(req.Hostname, false, req.CertsDir); err != nil {
-			return fmt.Errorf("failed to install certificates from directory: %w", err)
+		for _, h := range []string{outer, inner} {
+			if err := traefikapi.InstallTLSCerts(h, false, req.CertsDir); err != nil {
+				return fmt.Errorf("failed to install certificates from directory for %s: %w", h, err)
+			}
 		}
 	}
 
-	// If workspace has a sub-traefik running, use two-tier routing
-	if workspaceName != "" && isWorkspaceTraefikRunning(workspaceName) {
+	wrapAvailable := containerRunning("bitswan-protected-proxy")
+	if wrapAvailable && workspaceName != "" && isWorkspaceTraefikRunning(workspaceName) {
+		// INNER hostname carries the actual app content: route it in
+		// the workspace's own traefik and through the auth chain in
+		// platform-traefik. The gate forwards post-auth inner traffic
+		// to the sub-traefik (recorded below), which can reach
+		// containers on the workspace's own networks.
 		workspaceTraefikURL := traefikapi.GetWorkspaceTraefikBaseURL(workspaceName)
-
-		// Add plain HTTP reverse proxy route at workspace sub-traefik
-		if err := traefikapi.AddRouteWithTraefik(req.Hostname, req.Upstream, workspaceTraefikURL); err != nil {
-			return fmt.Errorf("failed to add route to workspace sub-traefik: %w", err)
+		if err := traefikapi.AddRouteWithTraefik(inner, req.Upstream, workspaceTraefikURL); err != nil {
+			return fmt.Errorf("failed to add inner route to workspace sub-traefik: %w", err)
 		}
-
-		// Add route at platform traefik: hostname → workspace sub-traefik
+		if err := traefikapi.AddRouteWithTLSDomains(inner, "bitswan-protected-proxy:80", "", certResolver, tlsDomains); err != nil {
+			return fmt.Errorf("failed to add inner route to platform traefik: %w", err)
+		}
+		// OUTER hostname serves only the wrap.
+		if err := traefikapi.AddRouteWithTLSDomains(outer, "bitswan-protected-proxy:80", "", certResolver, tlsDomains); err != nil {
+			return fmt.Errorf("failed to add outer route to platform traefik: %w", err)
+		}
+		if err := saveProtectedRoute(outer, workspaceName+"__traefik:80"); err != nil {
+			fmt.Printf("Warning: failed to record protected route for %s: %v\n", outer, err)
+		}
+	} else if workspaceName != "" && isWorkspaceTraefikRunning(workspaceName) {
+		// Two-tier routing without the wrap: platform-traefik →
+		// workspace sub-traefik → container, for both hostnames.
+		workspaceTraefikURL := traefikapi.GetWorkspaceTraefikBaseURL(workspaceName)
 		workspaceTraefikUpstream := fmt.Sprintf("%s__traefik:80", workspaceName)
-		if err := traefikapi.AddRouteWithTLSDomains(req.Hostname, workspaceTraefikUpstream, "", certResolver, tlsDomains); err != nil {
-			return fmt.Errorf("failed to add route to platform traefik: %w", err)
+		for _, h := range []string{outer, inner} {
+			if err := traefikapi.AddRouteWithTraefik(h, req.Upstream, workspaceTraefikURL); err != nil {
+				return fmt.Errorf("failed to add route to workspace sub-traefik for %s: %w", h, err)
+			}
+			if err := traefikapi.AddRouteWithTLSDomains(h, workspaceTraefikUpstream, "", certResolver, tlsDomains); err != nil {
+				return fmt.Errorf("failed to add route to platform traefik for %s: %w", h, err)
+			}
+		}
+	} else if wrapAvailable {
+		// No workspace sub-traefik but the protected chain is up:
+		// route BOTH hostnames through it. The gate resolves the
+		// post-auth upstream from the protected_routes record, so the
+		// service must be reachable from the daemon (bitswan_network —
+		// true for all workspace services today).
+		for _, h := range []string{outer, inner} {
+			if err := traefikapi.AddRouteWithTLSDomains(h, "bitswan-protected-proxy:80", "", certResolver, tlsDomains); err != nil {
+				return fmt.Errorf("failed to add route for %s: %w", h, err)
+			}
+		}
+		if err := saveProtectedRoute(outer, req.Upstream); err != nil {
+			fmt.Printf("Warning: failed to record protected route for %s: %v\n", outer, err)
 		}
 	} else {
-		// No workspace sub-traefik — single-tier routing at platform traefik
-		if err := traefikapi.AddRouteWithTLSDomains(req.Hostname, req.Upstream, "", certResolver, tlsDomains); err != nil {
-			return fmt.Errorf("failed to add route: %w", err)
+		// Bare environment (no protected proxy): single-tier direct
+		// routes for both hostnames so the service stays reachable at
+		// its canonical name (matches what addRouteCaddy does).
+		for _, h := range []string{outer, inner} {
+			if err := traefikapi.AddRouteWithTLSDomains(h, req.Upstream, "", certResolver, tlsDomains); err != nil {
+				return fmt.Errorf("failed to add route for %s: %w", h, err)
+			}
 		}
 	}
 
 	return nil
 }
 
-// removeRouteFromIngress removes a route from whichever ingress is running.
+// containerRunning reports whether a docker container with the given
+// name is currently running.
+func containerRunning(name string) bool {
+	out, err := exec.Command("docker", "ps", "-q", "-f", fmt.Sprintf("name=^%s$", name)).Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
+// removeRouteFromIngress removes a route from whichever ingress is
+// running. The inner sibling registered by addRouteToIngress and the
+// Bailey ACL row are cleaned up alongside (both keyed by the outer
+// hostname).
 func removeRouteFromIngress(hostname string) error {
-	ingressType := DetectIngressType()
+	outer := toOuterHost(hostname)
+	inner := toInnerHost(outer)
 
-	switch ingressType {
+	var err error
+	switch DetectIngressType() {
 	case IngressCaddy:
-		return caddyapi.RemoveRoute(hostname)
+		_ = caddyapi.RemoveRoute(inner)
+		err = caddyapi.RemoveRoute(outer)
 	case IngressTraefik:
-		return traefikapi.RemoveRoute(hostname)
+		_ = traefikapi.RemoveRoute(inner)
+		err = traefikapi.RemoveRoute(outer)
+	default:
+		return fmt.Errorf("no ingress proxy detected")
 	}
-
-	return fmt.Errorf("no ingress proxy detected")
+	if err == nil {
+		if derr := deleteEndpoint(outer); derr != nil {
+			fmt.Printf("Warning: failed to remove Bailey endpoint for %s: %v\n", outer, derr)
+		}
+		if derr := deleteProtectedRoute(outer); derr != nil {
+			fmt.Printf("Warning: failed to remove protected route record for %s: %v\n", outer, derr)
+		}
+	}
+	return err
 }
 
 // MigrateCaddyToTraefik migrates from Caddy to Traefik.
@@ -1116,6 +1390,154 @@ func (s *Server) handleIngressAddRoute(w http.ResponseWriter, r *http.Request) {
 		Success: true,
 		Message: fmt.Sprintf("Successfully added route: %s -> %s", req.Hostname, req.Upstream),
 	})
+}
+
+// handleIngressRepointRoute handles POST /ingress/repoint-route — atomically
+// repoints an EXISTING production route's upstream to a different container.
+// This is the single primitive behind both zero-downtime promotion (point the
+// production hostname at the freshly-deployed app version, same DB) and the DR
+// go-live swap (point it at the other slot's containers, other DB). Unlike
+// add-route it deliberately does NOT touch TLS certs, the Bailey ACL, or
+// OAuth redirect URIs — the route already exists with all of that; only the
+// upstream the route resolves to changes. The rewrite reuses addRouteTraefik /
+// addRouteCaddy, so it is correct across every routing topology (protected
+// wrap, workspace sub-traefik, or direct) and replaces the upstream in place.
+func (s *Server) handleIngressRepointRoute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req IngressAddRouteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Hostname == "" || req.Upstream == "" {
+		writeJSONError(w, "hostname and upstream are required", http.StatusBadRequest)
+		return
+	}
+
+	jwtToken := r.Header.Get("BITSWAN_AUTOMATION_SERVER_DAEMON_TOKEN")
+	workspaceName := resolveWorkspaceName(req, jwtToken)
+
+	switch DetectIngressType() {
+	case IngressTraefik:
+		if err := addRouteTraefik(req, workspaceName); err != nil {
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case IngressCaddy:
+		if err := addRouteCaddy(req); err != nil {
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	default:
+		writeJSONError(w, "no ingress proxy detected", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(IngressAddRouteResponse{
+		Success: true,
+		Message: fmt.Sprintf("Repointed route: %s -> %s", req.Hostname, req.Upstream),
+	})
+}
+
+// upstreamsEqual compares the daemon's recorded upstream for a route with a
+// desired upstream, ignoring any scheme. Used by reconcile to skip a route that
+// is already resolving to the right place (so re-applying an in-sync workspace
+// is a fast no-op) while re-applying one that drifted or is missing.
+func upstreamsEqual(recorded, desired string) bool {
+	if recorded == "" || desired == "" {
+		return false
+	}
+	strip := func(s string) string {
+		s = strings.TrimPrefix(s, "http://")
+		s = strings.TrimPrefix(s, "https://")
+		return strings.TrimSuffix(s, "/")
+	}
+	return strip(recorded) == strip(desired)
+}
+
+// handleIngressReconcile handles POST /ingress/reconcile — the declarative
+// ingress apply. It converges the workspace's gitops-managed routes to exactly
+// the desired set: upsert each (addRouteToIngress + mark source='gitops'), then
+// prune any gitops route for the workspace not in the set. Manual routes (added
+// by a human via add-route, or workspace-init infra) are never pruned. Idempotent.
+func (s *Server) handleIngressReconcile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req IngressReconcileRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.WorkspaceName) == "" {
+		writeJSONError(w, "workspace_name is required", http.StatusBadRequest)
+		return
+	}
+
+	jwtToken := r.Header.Get("BITSWAN_AUTOMATION_SERVER_DAEMON_TOKEN")
+	resp := IngressReconcileResponse{Success: true, Pruned: []string{}}
+
+	// 1. Upsert every desired route and mark it gitops-managed. Skip the
+	//    (multi-write, ~1s) re-apply only when the route is ALREADY resolving to
+	//    the right upstream — checked against the daemon's recorded
+	//    protected_routes upstream, not a cache. So re-applying an in-sync
+	//    workspace is a fast no-op, but a route that drifted (manual repoint) or
+	//    went missing (lost on a restart) is re-applied — "re-apply to fix it".
+	desired := make(map[string]bool) // outer hostnames in the desired set
+	for _, route := range req.Routes {
+		if route.WorkspaceName == "" {
+			route.WorkspaceName = req.WorkspaceName
+		}
+		outer := toOuterHost(route.Hostname)
+		desired[strings.ToLower(outer)] = true
+
+		live, _ := lookupProtectedRouteUpstream(outer)
+		ep, _ := getEndpoint(outer)
+		inSync := ep != nil && ep.Source == "gitops" &&
+			upstreamsEqual(live, route.Upstream)
+		if inSync {
+			continue // already resolving to the right upstream — nothing to do
+		}
+		if err := addRouteToIngress(route, jwtToken); err != nil {
+			resp.Warnings = append(resp.Warnings,
+				fmt.Sprintf("apply %s: %v", route.Hostname, err))
+			continue
+		}
+		if err := setEndpointSource(outer, "gitops"); err != nil {
+			resp.Warnings = append(resp.Warnings,
+				fmt.Sprintf("mark %s gitops: %v", outer, err))
+		}
+		resp.Applied++
+	}
+
+	// 2. Prune gitops-managed routes for this workspace that are no longer
+	//    desired. Manual routes are not in this list, so they're never pruned.
+	managed, err := listGitopsManagedHosts(req.WorkspaceName)
+	if err != nil {
+		resp.Warnings = append(resp.Warnings, "list managed: "+err.Error())
+	}
+	for _, host := range managed {
+		if desired[strings.ToLower(host)] {
+			continue
+		}
+		if err := removeRouteFromIngress(host); err != nil {
+			resp.Warnings = append(resp.Warnings,
+				fmt.Sprintf("prune %s: %v", host, err))
+			continue
+		}
+		resp.Pruned = append(resp.Pruned, host)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handleIngressListRoutes handles GET /ingress/list-routes

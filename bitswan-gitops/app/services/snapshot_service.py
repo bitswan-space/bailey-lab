@@ -274,12 +274,18 @@ class SnapshotService:
         kind: str = "manual",
         source: dict | None = None,
         progress=None,
+        db: int | None = None,
     ) -> dict:
         """Snapshot the BP's data at `stage`. Returns the manifest.
 
         Includes every data service that is currently available; raises
         ValueError when none is. Files are written into a temp dir first and
         renamed into place, so a crashed snapshot never lists.
+
+        `db` (1|2) snapshots a specific blue-green PRODUCTION database — the
+        manual production-backup path passes the LIVE db so a backup captures
+        what Production is actually serving (not the unused slot-free name).
+        `db=None` is the single-backend scheme dev/staging use.
         """
         if kind not in ("manual", "auto"):
             raise ValueError(f"Invalid snapshot kind: {kind!r}")
@@ -298,7 +304,7 @@ class SnapshotService:
 
         registry = load_registry()
         entry = get_bp_entry(registry, bp_slug) or {}
-        names = bp_resource_names(bp_slug)
+        names = bp_resource_names(bp_slug, db)
         snapshot_id = new_snapshot_id()
 
         stage_dir = self._stage_dir(bp_slug, stage)
@@ -376,6 +382,7 @@ class SnapshotService:
         target_stage: str,
         progress=None,
         pre_restore_snapshot: bool = True,
+        db: int | None = None,
     ) -> dict:
         """Replace the BP's data at `target_stage` with the snapshot's content.
 
@@ -413,10 +420,14 @@ class SnapshotService:
             manifest.get("bp_name") or bp_slug,
             target_stage,
             services=included,
+            db=db,
         )
 
+        # A db-targeted restore writes the production STANDBY db — DR scratch
+        # data whose whole purpose is to be overwritten, so there is nothing
+        # worth auto-snapshotting first (and create_snapshot is db-free anyway).
         pre_id = None
-        if pre_restore_snapshot:
+        if pre_restore_snapshot and db is None:
             await _report(
                 "pre_restore_snapshot",
                 f"Auto-snapshotting current {target_stage} data...",
@@ -436,7 +447,7 @@ class SnapshotService:
             await _report("pruning", "Pruning old auto-snapshots...")
             self.prune_auto_snapshots(bp_slug, target_stage, keep_ids={pre_id})
 
-        names = bp_resource_names(bp_slug)
+        names = bp_resource_names(bp_slug, db)
         snap_dir = self._snapshot_dir(bp_slug, source_stage, snapshot_id)
         try:
             for svc_type in SNAPSHOT_DATA_SERVICES:
@@ -452,7 +463,14 @@ class SnapshotService:
                 elif svc_type == "couchdb":
                     await self._restore_couchdb(target_stage, names, in_file)
                 else:
-                    await self._restore_minio(target_stage, names, in_file)
+                    # The minio archive is rooted at the bucket it was taken
+                    # FROM; for a blue-green DR restore that source bucket (live
+                    # db) differs from the target bucket (standby db), so pass
+                    # it through rather than assuming it matches the target.
+                    src_bucket = (manifest["services"].get("minio") or {}).get(
+                        "bucket"
+                    ) or names["minio_bucket"]
+                    await self._restore_minio(target_stage, names, in_file, src_bucket)
         except Exception as e:
             hint = (
                 f" The target's pre-restore state was saved as snapshot "
@@ -857,13 +875,18 @@ class SnapshotService:
         finally:
             await run_docker_command("docker", "exec", container, "rm", "-rf", scratch)
 
-    async def _restore_minio(self, stage: str, names: dict, in_file: str) -> None:
+    async def _restore_minio(
+        self, stage: str, names: dict, in_file: str, src_bucket: str
+    ) -> None:
         container = self._container("minio", stage)
         bucket = names["minio_bucket"]
         await self._mc_alias(container, stage)
-        # The dump archive is rooted at `bpsnap-{bucket}`; `docker cp - :/tmp`
-        # recreates that dir under /tmp.
-        scratch = f"/tmp/bpsnap-{bucket}"
+        # The dump archive is rooted at `bpsnap-{src_bucket}` (the bucket it was
+        # taken from), which `docker cp - :/tmp` recreates under /tmp. That
+        # source bucket may differ from the target `bucket` (blue-green DR
+        # restores load the live db's snapshot into the standby db's bucket), so
+        # mirror FROM the archive's own root dir INTO the target bucket.
+        scratch = f"/tmp/bpsnap-{src_bucket}"
         try:
             await run_docker_command("docker", "exec", container, "rm", "-rf", scratch)
             # Stream the tar in via `docker cp` (gunzipped on our end; extraction

@@ -182,4 +182,3 @@ func deployAutomations(gitopsURL, gitopsSecret, workspaceName string, writer io.
 
 	return nil
 }
-

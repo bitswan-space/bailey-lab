@@ -57,8 +57,8 @@ import type { BusinessProcess } from '@/types';
 
 interface SpecificationTabProps {
   bp: BusinessProcess;
-  /** Worktree whose copy of the README is edited. */
-  worktree: string;
+  /** Copy whose copy of the README is edited. */
+  copy: string;
   /** Flips the workspace to the Coding Agent tab (Build automation). */
   onShowAgents: () => void;
 }
@@ -222,12 +222,12 @@ function serializeDoc(state: EditorState): string {
 
 /**
  * WYSIWYG markdown editor for a BP's specification (its `README.md`),
- * shown on the Description tab when a worktree is selected. Reads and
- * writes the worktree's copy through the worktree-files API; attachments
- * and embedded mermaid flowcharts live in the same worktree files, so
+ * shown on the Description tab when a copy is selected. Reads and
+ * writes the copy's copy through the copy-files API; attachments
+ * and embedded mermaid flowcharts live in the same copy files, so
  * the coding agent sees everything the user authored.
  */
-export function SpecificationTab({ bp, worktree, onShowAgents }: SpecificationTabProps) {
+export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabProps) {
   const { startSession, agentStatus, ensureAgent } = useSessions();
   const [editorState, setEditorState] = useState<EditorState>();
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' });
@@ -276,12 +276,12 @@ export function SpecificationTab({ bp, worktree, onShowAgents }: SpecificationTa
   // itself must stay a stable module-level reference).
   const specContext = useMemo<SpecEditorContextValue>(
     () => ({
-      worktree,
+      copy,
       bpId: bp.id,
       onEditMermaid: handleEditMermaid,
       onDeleteMermaid: handleDeleteMermaid,
     }),
-    [worktree, bp.id, handleEditMermaid, handleDeleteMermaid],
+    [copy, bp.id, handleEditMermaid, handleDeleteMermaid],
   );
 
   useEffect(() => {
@@ -290,8 +290,8 @@ export function SpecificationTab({ bp, worktree, onShowAgents }: SpecificationTa
     setEditorState(undefined);
     setSave({ kind: 'clean' });
     etagRef.current = undefined;
-    api.worktreeFiles
-      .content(worktree, readmePath)
+    api.copyFiles
+      .content(copy, readmePath)
       .then((r) => {
         if (cancelled) return;
         if ('error' in r) {
@@ -324,7 +324,7 @@ export function SpecificationTab({ bp, worktree, onShowAgents }: SpecificationTa
     return () => {
       cancelled = true;
     };
-  }, [worktree, readmePath, onSaveKey, onLinkKey, onImageKey, openNewDiagram]);
+  }, [copy, readmePath, onSaveKey, onLinkKey, onImageKey, openNewDiagram]);
 
   const dispatchTransaction = useCallback((tr: Transaction) => {
     setEditorState((s) => s?.apply(tr));
@@ -349,7 +349,7 @@ export function SpecificationTab({ bp, worktree, onShowAgents }: SpecificationTa
       setSave({ kind: 'saving' });
       try {
         const etag = etagRef.current;
-        const r = await api.worktreeFiles.save(worktree, readmePath, {
+        const r = await api.copyFiles.save(copy, readmePath, {
           content: serializeDoc(state),
           // A forced save out of conflict omits the etag: the user has
           // chosen to overwrite the on-disk version with theirs.
@@ -360,7 +360,7 @@ export function SpecificationTab({ bp, worktree, onShowAgents }: SpecificationTa
           // If the user kept typing while the request was in flight, the
           // state is already 'dirty' again — let autosave re-fire.
           setSave((s) => (s.kind === 'dirty' ? s : { kind: 'saved' }));
-          invalidateReadme(bp.id, worktree);
+          invalidateReadme(bp.id, copy);
         } else if (r.error === 'conflict') {
           setSave({ kind: 'conflict' });
           toast.error('README.md changed on disk', {
@@ -377,7 +377,7 @@ export function SpecificationTab({ bp, worktree, onShowAgents }: SpecificationTa
         toast.error('Save failed', { description: message });
       }
     },
-    [worktree, readmePath, bp.id],
+    [copy, readmePath, bp.id],
   );
   forceSaveRef.current = () => void doSave(true);
 
@@ -464,7 +464,7 @@ export function SpecificationTab({ bp, worktree, onShowAgents }: SpecificationTa
         // surfaces via agentStatus; the session will still attempt to spawn
       }
     }
-    startSession(worktree, bp.name, 'automation');
+    startSession(copy, bp.name, 'automation');
     onShowAgents();
   };
 
@@ -530,7 +530,7 @@ export function SpecificationTab({ bp, worktree, onShowAgents }: SpecificationTa
             handleClick={handleEditorClick}
           >
             <SpecEditorToolbar
-              worktree={worktree}
+              copy={copy}
               bpId={bp.id}
               linkShortcutRef={openLinkRef}
               imageShortcutRef={openImageRef}
@@ -550,7 +550,7 @@ export function SpecificationTab({ bp, worktree, onShowAgents }: SpecificationTa
         </SpecEditorContext.Provider>
       )}
 
-      <SpecAttachments bpId={bp.id} worktree={worktree} />
+      <SpecAttachments bpId={bp.id} copy={copy} />
 
       <FlowchartEditorModal
         open={flowchartOpen}

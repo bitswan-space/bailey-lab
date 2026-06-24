@@ -22,14 +22,17 @@ interface BpSwitcherProps {
   // eslint-disable-next-line no-restricted-syntax -- null = no BP selected yet
   activeBpId: string | null;
   onSelect: (id: string) => void;
-  /** New BPs are created in the selected worktree; the footer button is
-   *  hidden when no worktree is selected. */
-  // eslint-disable-next-line no-restricted-syntax -- null = no worktree selected
-  worktree: string | null;
+  /** Fired after a new BP is created — selects it and focuses its
+   *  Description tab. Falls back to onSelect when not provided. */
+  onCreated?: (name: string) => void;
+  /** New BPs are created in the selected copy; the footer button is
+   *  hidden when no copy is selected. */
+  // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
+  copy: string | null;
 }
 
 /** Top-bar business-process switcher: searchable popover + "+ New BP". */
-export function BpSwitcher({ bps, activeBpId, onSelect, worktree }: BpSwitcherProps) {
+export function BpSwitcher({ bps, activeBpId, onSelect, onCreated, copy }: BpSwitcherProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -129,7 +132,7 @@ export function BpSwitcher({ bps, activeBpId, onSelect, worktree }: BpSwitcherPr
               })
             )}
           </div>
-          {worktree && (
+          {copy && (
             <div className="border-t border-border p-1.5">
               <button
                 type="button"
@@ -137,7 +140,7 @@ export function BpSwitcher({ bps, activeBpId, onSelect, worktree }: BpSwitcherPr
                   setOpen(false);
                   setDialogOpen(true);
                 }}
-                title={`New business process in worktree "${worktree}"`}
+                title={`New business process in copy "${copy}"`}
                 className="flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-border text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
               >
                 <Plus className="size-3.5" aria-hidden />
@@ -151,9 +154,9 @@ export function BpSwitcher({ bps, activeBpId, onSelect, worktree }: BpSwitcherPr
       <NewBusinessProcessDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
-        worktree={worktree ?? undefined}
+        copy={copy ?? undefined}
         existingNames={bps.map((b) => b.name)}
-        onCreated={(name) => onSelect(name)}
+        onCreated={(name) => (onCreated ?? onSelect)(name)}
       />
     </>
   );

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { isValidBpId, isValidWorktreeName } from '../services/workspace.js';
+import { isValidBpId, isValidCopyName } from '../services/workspace.js';
 import type { GitopsClient } from '../services/gitops.js';
 
 export interface TemplateRoutesOptions {
@@ -41,19 +41,19 @@ export function registerTemplateRoutes(
       group_id?: string;
       name?: string;
       bp?: string;
-      worktree?: string;
+      copy?: string;
     };
   }>('/api/automations/from-template', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) {
       return reply.code(503).send({ error: 'gitops not configured' });
     }
-    const { template_id, group_id, name, bp, worktree } = req.body ?? {};
+    const { template_id, group_id, name, bp, copy } = req.body ?? {};
     if (!bp || !isValidBpId(bp)) {
       return reply.code(400).send({ error: 'invalid bp' });
     }
-    if (worktree !== undefined && !isValidWorktreeName(worktree)) {
-      return reply.code(400).send({ error: 'invalid worktree' });
+    if (copy !== undefined && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
     }
     if (!template_id && !group_id) {
       return reply.code(400).send({ error: 'template_id or group_id required' });
@@ -69,7 +69,7 @@ export function registerTemplateRoutes(
         ...(group_id ? { group_id } : {}),
         ...(name !== undefined ? { name } : {}),
         bp,
-        ...(worktree ? { worktree } : {}),
+        ...(copy ? { copy } : {}),
       });
       if (!r.ok) {
         return reply
@@ -81,5 +81,81 @@ export function registerTemplateRoutes(
       app.log.warn({ err, body: req.body }, 'create-from-template failed');
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
+  });
+
+  // Stage 1.5 scaffolding: add a frontend / worker / rename within a BP. Each
+  // proxies straight to the matching gitops endpoint; the dashboard's job here
+  // is the auth boundary + request validation (gitops owns the write path).
+  const relay = async (
+    reply: import('fastify').FastifyReply,
+    label: string,
+    call: () => Promise<{ ok: boolean; status: number; body: unknown }>,
+  ) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
+    try {
+      const r = await call();
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err }, `${label} failed`);
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  };
+
+  app.post<{
+    Body: { bp?: string; name?: string; copy?: string };
+  }>('/api/automations/frontend', async (req, reply) => {
+    const { bp, name, copy } = req.body ?? {};
+    if (!bp || !isValidBpId(bp)) return reply.code(400).send({ error: 'invalid bp' });
+    if (!name) return reply.code(400).send({ error: 'name required' });
+    if (copy !== undefined && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
+    }
+    return relay(reply, 'add-frontend', () =>
+      gitops!.addFrontend({ bp, name, ...(copy ? { copy } : {}) }),
+    );
+  });
+
+  app.post<{
+    Body: { bp?: string; name?: string; type?: string; copy?: string };
+  }>('/api/automations/worker', async (req, reply) => {
+    const { bp, name, type, copy } = req.body ?? {};
+    if (!bp || !isValidBpId(bp)) return reply.code(400).send({ error: 'invalid bp' });
+    if (!name) return reply.code(400).send({ error: 'name required' });
+    if (!type) return reply.code(400).send({ error: 'type required' });
+    if (copy !== undefined && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
+    }
+    return relay(reply, 'add-worker', () =>
+      gitops!.addWorker({ bp, name, type, ...(copy ? { copy } : {}) }),
+    );
+  });
+
+  app.post<{
+    Body: { bp?: string; old_name?: string; new_name?: string; copy?: string };
+  }>('/api/automations/rename', async (req, reply) => {
+    const { bp, old_name, new_name, copy } = req.body ?? {};
+    if (!bp || !isValidBpId(bp)) return reply.code(400).send({ error: 'invalid bp' });
+    if (!old_name || !new_name) {
+      return reply.code(400).send({ error: 'old_name and new_name required' });
+    }
+    if (copy !== undefined && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
+    }
+    return relay(reply, 'rename-automation', () =>
+      gitops!.renameAutomation({
+        bp,
+        old_name,
+        new_name,
+        ...(copy ? { copy } : {}),
+      }),
+    );
   });
 }

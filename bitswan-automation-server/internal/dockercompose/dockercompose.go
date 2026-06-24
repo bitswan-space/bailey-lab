@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -27,7 +26,6 @@ type DockerComposeConfig struct {
 	WorkspaceName      string
 	GitopsImage        string
 	Domain             string
-	MqttEnvVars        []string
 	AocEnvVars         []string
 	OAuthEnvVars       []string
 	GitopsDevSourceDir string
@@ -45,17 +43,28 @@ func (config *DockerComposeConfig) CreateDockerComposeFile() (string, string, er
 
 // CreateDockerComposeFileWithSecret creates a docker-compose YAML content with an optional existing secret
 func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSecret string) (string, string, error) {
-	// Convert container path to host path for volume mounts (docker-compose runs on host)
-	// But use container path for file operations
-	gitopsPathForVolumes := config.GitopsPath
+	// Workspace data lives inside the named `bitswan` Docker volume at
+	// workspaces/<name>/... — mounted via compose long-form volume + subpath.
+	// The host docker daemon resolves the named volume directly, so there's no
+	// container→host path translation to apply here anymore.
 	homeDir := os.Getenv("HOME")
-	hostHomeDir := os.Getenv("HOST_HOME")
-	if hostHomeDir != "" && homeDir != hostHomeDir && strings.HasPrefix(config.GitopsPath, homeDir) {
-		// Replace container home with host home for docker-compose volume paths
-		gitopsPathForVolumes = strings.Replace(config.GitopsPath, homeDir, hostHomeDir, 1)
+
+	// wsVolume builds a long-form named-volume subpath mount entry for this
+	// workspace's data subtree inside the external `bitswan` volume.
+	wsSubpath := func(subdir string) string {
+		return "workspaces/" + config.WorkspaceName + "/" + subdir
 	}
-	
-	sshDir := gitopsPathForVolumes + "/ssh"
+	wsVolume := func(subdir, target string) map[string]interface{} {
+		return map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": target,
+			"volume": map[string]interface{}{
+				"subpath": wsSubpath(subdir),
+			},
+		}
+	}
+
 	gitConfig := os.Getenv("HOME") + "/.gitconfig"
 
 	hostOsTmp := runtime.GOOS
@@ -78,35 +87,52 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		gitopsSecretToken = uniuri.NewLen(64)
 	}
 
-	// Mount built-in automation templates so the gitops `template_service`
-	// can scaffold new automations from the same `examples/` tree the editor
-	// reads. The path mirrors the computation in editor.go.
-	bitswanSrcPath := filepath.Dir(filepath.Dir(gitopsPathForVolumes)) + "/bitswan-src"
-
 	gitopsService := map[string]interface{}{
 		"image":    config.GitopsImage,
 		"restart":  "always",
 		"hostname": config.WorkspaceName + "-gitops",
 		"networks": []string{"bitswan_network"},
-		"volumes": []string{
-			gitopsPathForVolumes + "/gitops:/gitops/gitops:z",
-			gitopsPathForVolumes + "/secrets:/gitops/secrets:z",
+		"volumes": []interface{}{
+			wsVolume("gitops", "/gitops/gitops"),
+			wsVolume("secrets", "/gitops/secrets"),
 			// Per-BP stage snapshots (app/services/snapshot_service.py).
 			// /gitops itself is the container's writable layer, so anything
 			// not bind-mounted there is lost on container recreation.
-			gitopsPathForVolumes + "/snapshots:/gitops/snapshots:z",
-			sshDir + ":/home/user1000/.ssh:z",
+			wsVolume("snapshots", "/gitops/snapshots"),
+			// Egress-firewall attempt telemetry. The per-BP egress gateways
+			// (a separate container per firewalled group) append observed/blocked
+			// hosts here; the gitops dashboard reads it for the "Needs review"
+			// feed. Both sides must point at the SAME volume subpath, so mount it
+			// into gitops at the path firewall_service.firewall_dir() resolves to
+			// (/gitops/firewall) — otherwise gitops would read its container-local
+			// layer while the gateways write the volume, and the feed stays empty.
+			wsVolume("firewall", "/gitops/firewall"),
+			wsVolume("ssh", "/home/user1000/.ssh"),
 			"/var/run/docker.sock:/var/run/docker.sock",
 			"/var/run/bitswan:/var/run/bitswan",
-			bitswanSrcPath + "/examples:/workspace/examples:ro",
 		},
 		"environment": []string{
 			"BITSWAN_GITOPS_DIR=/gitops",
-			"BITSWAN_GITOPS_DIR_HOST=" + gitopsPathForVolumes,
+			"BITSWAN_GITOPS_DIR_HOST=" + config.GitopsPath,
 			"BITSWAN_GITOPS_SECRET=" + gitopsSecretToken,
 			"BITSWAN_GITOPS_DOMAIN=" + config.Domain,
 			"BITSWAN_WORKSPACE_NAME=" + config.WorkspaceName,
 			"BITSWAN_CERTS_DIR=" + homeDir + "/.config/bitswan/certauthorities",
+			// The named Docker volume that backs all workspace data. gitops uses
+			// this (+ BITSWAN_WORKSPACE_NAME) to mount business-process containers
+			// off the volume via subpaths instead of host bind paths.
+			"BITSWAN_VOLUME_NAME=bitswan",
+			// Canonical bare repo (served over smart-HTTP, fast-forward only)
+			// and the per-copy checkouts under the workspace-repo dir. Keeping
+			// copies at <workspace-repo>/copies makes a deployment's
+			// workspace-root-relative path ("copies/<copy>/<rel>") resolve
+			// correctly both as a container-local path (join with
+			// BITSWAN_WORKSPACE_REPO_DIR) and as a volume subpath
+			// (workspaces/<ws>/<rel-path>). The `main` copy is the default scope.
+			"BITSWAN_GIT_REPOS_DIR=/git",
+			"BITSWAN_WORKSPACE_REPO_DIR=/workspace-repo",
+			"BITSWAN_COPIES_DIR=/workspace-repo/copies",
+			"BITSWAN_GIT_REMOTE=http://" + config.WorkspaceName + "-gitops:8079/git/repo.git",
 		},
 	}
 
@@ -131,11 +157,6 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), config.AocEnvVars...)
 	}
 
-	// Append MQTT env variables when workspace is registered as an automation server
-	if len(config.MqttEnvVars) > 0 {
-		gitopsService["environment"] = append(gitopsService["environment"].([]string), config.MqttEnvVars...)
-	}
-
 	// Append OAuth env variables when OAuth is configured
 	if len(config.OAuthEnvVars) > 0 {
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), config.OAuthEnvVars...)
@@ -143,45 +164,30 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 
 	// Add dev source directory volume mount and DEBUG env var if provided
 	if config.GitopsDevSourceDir != "" {
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), config.GitopsDevSourceDir+":/src:z")
+		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}), config.GitopsDevSourceDir+":/src:z")
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), "DEBUG=true")
 	}
 
 	// Mount certificate authorities if specified
 	caVolumes, caEnvVars := certauthority.GetCACertMountConfig(config.TrustCA)
 	if len(caVolumes) > 0 {
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), caVolumes...)
+		for _, v := range caVolumes {
+			gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}), v)
+		}
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), caEnvVars...)
 	}
 
-	// Add workspace directory mount and rewrite git path for all OS
-	workspaceDir := gitopsPathForVolumes + "/workspace/:/workspace-repo/:z"
+	// Mount the canonical bare repo (served over smart-HTTP) and the per-copy
+	// checkouts (the deploy unit). These replace the old shared workspace
+	// working-tree mount + gitops orphan-worktree gitdir rewrite.
+	gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
+		wsVolume("repo.git", "/git/repo.git"),
+		wsVolume("copies", "/workspace-repo/copies"),
+	)
 	if hostOs == WindowsMac {
-		gitopsVolumes := []string{
-			gitConfig + ":/root/.gitconfig:z",
-			workspaceDir,
-		}
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), gitopsVolumes...)
-	} else if hostOs == Linux {
-		// For Linux, also mount workspace directory
-		gitopsVolumes := []string{
-			workspaceDir,
-		}
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), gitopsVolumes...)
-	}
-	
-	// If this workspace has a local remote repository, mount it so GitOps can access it
-	if config.LocalRemotePath != "" && config.LocalRemoteName != "" {
-		// Mount local repository to /remote-repos/<name> for GitOps to access
-		// The mount name is used to construct the mount point path
-		localRemoteMount := config.LocalRemotePath + ":/remote-repos/" + config.LocalRemoteName + ":ro"
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]string), localRemoteMount)
-	}
-
-	// Rewrite .git in worktree for all OS to use container path
-	gitdir := "gitdir: /workspace-repo/.git/worktrees/gitops"
-	if err := os.WriteFile(config.GitopsPath+"/gitops/.git", []byte(gitdir), 0644); err != nil {
-		return "", "", fmt.Errorf("failed to rewrite gitops worktree .git file: %w", err)
+		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
+			gitConfig+":/root/.gitconfig:z",
+		)
 	}
 
 	// Construct the docker-compose data structure
@@ -192,6 +198,11 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
+				"external": true,
+			},
+		},
+		"volumes": map[string]interface{}{
+			"bitswan": map[string]interface{}{
 				"external": true,
 			},
 		},
@@ -255,10 +266,28 @@ func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
 // configure lego's httpreq DNS-01 provider for wildcard certificates).
 // networks parameter is optional - if provided, adds those networks along with bitswan_network.
 func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, networks ...string) (string, error) {
-	traefikVolumes := []string{
-		traefikPath + "/traefik.yml:/etc/traefik/traefik.yml:z",
-		traefikPath + "/certs:/tls:z",
-		traefikPath + "/acme:/acme:z",
+	// Traefik's config lives in the daemon's config volume at
+	// <volume>/traefik/... (the daemon mounts the `bitswan` volume at
+	// /root/.config/bitswan). Mount those files into Traefik as named-volume
+	// subpaths rather than host bind paths — with the config in the volume there
+	// is no host file to bind, and Docker would otherwise auto-create the missing
+	// source as an empty directory (Traefik then fails: "traefik.yml is a
+	// directory"). The docker socket stays a bind.
+	tVolume := func(subpath, target string) map[string]interface{} {
+		return map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": target,
+			"volume": map[string]interface{}{
+				"subpath": "traefik/" + subpath,
+			},
+		}
+	}
+	traefikVolumes := []interface{}{
+		tVolume("traefik.yml", "/etc/traefik/traefik.yml"),
+		tVolume("dynamic.yml", "/etc/traefik/dynamic.yml"),
+		tVolume("certs", "/tls"),
+		tVolume("acme", "/acme"),
 		"/var/run/docker.sock:/var/run/docker.sock:ro",
 	}
 
@@ -305,6 +334,63 @@ func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, n
 			"traefik": traefikService,
 		},
 		"networks": networksMap,
+		"volumes": map[string]interface{}{
+			"bitswan": map[string]interface{}{
+				"external": true,
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	encoder := yaml.NewEncoder(&buf)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(dockerCompose); err != nil {
+		return "", fmt.Errorf("failed to encode docker-compose data structure: %w", err)
+	}
+
+	return buf.String(), nil
+}
+
+// CreateProtectedProxyDockerComposeFile creates a docker-compose file for the
+// shared bitswan-protected-proxy (an oauth2-proxy instance). It sits between
+// platform-traefik and the daemon's protected gate: Traefik routes every
+// protected hostname to bitswan-protected-proxy:80, the proxy authenticates the
+// request against Keycloak and forwards the identity headers to the gate
+// (upstream). All oauth2-proxy settings come from env (the upstream image's
+// entrypoint is /bin/oauth2-proxy with no args), so the service needs no
+// volumes or published ports — Traefik reaches it over bitswan_network.
+//
+// env is the full OAUTH2_PROXY_* map; it's rendered sorted for deterministic
+// output so the daemon can compare against the on-disk file to detect drift.
+func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error) {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	envList := make([]string, 0, len(env))
+	for _, key := range keys {
+		envList = append(envList, fmt.Sprintf("%s=%s", key, env[key]))
+	}
+
+	proxyService := map[string]interface{}{
+		"image":          "quay.io/oauth2-proxy/oauth2-proxy:v7.7.1",
+		"restart":        "always",
+		"container_name": "bitswan-protected-proxy",
+		"networks":       []string{"bitswan_network"},
+		"environment":    envList,
+	}
+
+	dockerCompose := map[string]interface{}{
+		"version": "3.8",
+		"services": map[string]interface{}{
+			"bitswan-protected-proxy": proxyService,
+		},
+		"networks": map[string]interface{}{
+			"bitswan_network": map[string]interface{}{
+				"external": true,
+			},
+		},
 	}
 
 	var buf bytes.Buffer
@@ -326,8 +412,18 @@ func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, n
 // per-hostname HTTP-01 certificates.
 // networks: list of additional networks (bitswan_network is always included)
 func CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikPath, domain, wildcardResolver string, networks []string) (string, error) {
-	traefikVolumes := []string{
-		traefikPath + "/traefik.yml:/etc/traefik/traefik.yml:z",
+	// The sub-traefik config lives in the `bitswan` volume at
+	// workspaces/<ws>/traefik/traefik.yml — mount it as a volume subpath, not a
+	// host bind (see CreateTraefikDockerComposeFile for why).
+	traefikVolumes := []interface{}{
+		map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": "/etc/traefik/traefik.yml",
+			"volume": map[string]interface{}{
+				"subpath": "workspaces/" + workspaceName + "/traefik/traefik.yml",
+			},
+		},
 	}
 
 	traefikNetworks := []string{"bitswan_network"}
@@ -391,6 +487,11 @@ func CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikPath, domain,
 			"traefik": serviceMap,
 		},
 		"networks": networksMap,
+		"volumes": map[string]interface{}{
+			"bitswan": map[string]interface{}{
+				"external": true,
+			},
+		},
 	}
 
 	var buf bytes.Buffer

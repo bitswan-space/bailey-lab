@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Camera, TriangleAlert } from 'lucide-react';
+import { ArrowRight, Camera, LifeBuoy, TriangleAlert, type LucideIcon } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -33,34 +34,6 @@ function ReplaceWarning({ target }: { target: SnapshotStage }) {
   );
 }
 
-function TypedConfirmation({
-  slug,
-  value,
-  onChange,
-}: {
-  slug: string;
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-[13px] text-muted-foreground">
-        Restoring into <strong className="text-red-600">production</strong>.
-        Type <span className="font-mono font-semibold text-foreground">{slug}</span>{' '}
-        to confirm:
-      </label>
-      <Input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={slug}
-        autoComplete="off"
-        spellCheck={false}
-        className="font-mono"
-      />
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Create
 // ---------------------------------------------------------------------------
@@ -68,11 +41,15 @@ function TypedConfirmation({
 export function CreateSnapshotDialog({
   open,
   enabledStages,
+  fixedStage,
   onCancel,
   onConfirm,
 }: {
   open: boolean;
   enabledStages: SnapshotStage[];
+  /** When set (per-stage Backups tab), the snapshot is of THIS stage — no
+   *  stage picker is shown; you're already scoped to it. */
+  fixedStage?: SnapshotStage;
   onCancel: () => void;
   onConfirm: (stage: SnapshotStage, label: string) => void;
 }) {
@@ -82,10 +59,10 @@ export function CreateSnapshotDialog({
 
   useEffect(() => {
     if (open) {
-      setStage(enabledStages[0] ?? null);
+      setStage(fixedStage ?? enabledStages[0] ?? null);
       setLabel('');
     }
-  }, [open, enabledStages]);
+  }, [open, enabledStages, fixedStage]);
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onCancel()}>
@@ -93,12 +70,15 @@ export function CreateSnapshotDialog({
         <DialogHeader>
           <DialogTitle>Create snapshot</DialogTitle>
           <DialogDescription>
-            Capture this business process&apos;s data (Postgres, CouchDB, MinIO)
-            at one stage. Manual snapshots are kept until you delete them.
+            {fixedStage
+              ? `Capture ${STAGE_META[fixedStage].label}'s data (Postgres, CouchDB, MinIO). Manual snapshots are kept until you delete them.`
+              : "Capture this business process's data (Postgres, CouchDB, MinIO) at one stage. Manual snapshots are kept until you delete them."}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
-          <StagePicker value={stage} onChange={setStage} enabled={enabledStages} />
+          {!fixedStage && (
+            <StagePicker value={stage} onChange={setStage} enabled={enabledStages} />
+          )}
           <Input
             value={label}
             onChange={(e) => setLabel(e.target.value)}
@@ -126,34 +106,48 @@ export function CreateSnapshotDialog({
 // Restore
 // ---------------------------------------------------------------------------
 
+/** Where a restore may land. NEVER live Production — recovery goes into the
+ *  isolated Disaster-Recovery slot (then a swap goes live). dev/staging are
+ *  in-place. */
+export type RestoreTarget = 'dev' | 'staging' | 'dr';
+
+const RESTORE_TARGET_META: Record<
+  RestoreTarget,
+  { label: string; Icon: LucideIcon; badge: string }
+> = {
+  dev: STAGE_META.dev,
+  staging: STAGE_META.staging,
+  dr: {
+    label: 'Disaster Recovery',
+    Icon: LifeBuoy,
+    badge: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  },
+};
+
 export function RestoreDialog({
   snapshot,
-  bpSlug,
   enabledStages,
   onCancel,
   onConfirm,
 }: {
   // eslint-disable-next-line no-restricted-syntax -- null = dialog closed
   snapshot: Snapshot | null;
-  bpSlug: string;
+  /** Snapshot-enabled stages (dev/staging) — controls which in-place targets
+   *  are pickable. DR is always offered (it's the safe recovery sink). */
   enabledStages: SnapshotStage[];
   onCancel: () => void;
-  onConfirm: (snapshot: Snapshot, target: SnapshotStage) => void;
+  onConfirm: (snapshot: Snapshot, target: RestoreTarget) => void;
 }) {
   // eslint-disable-next-line no-restricted-syntax -- null = nothing picked yet
-  const [target, setTarget] = useState<SnapshotStage | null>(null);
-  const [typed, setTyped] = useState('');
+  const [target, setTarget] = useState<RestoreTarget | null>(null);
 
   useEffect(() => {
-    if (snapshot) {
-      setTarget(snapshot.stage);
-      setTyped('');
-    }
+    // Default to DR — the safe recovery path; live Production is never a target.
+    if (snapshot) setTarget('dr');
   }, [snapshot]);
 
-  const needsTyped = target === 'production';
-  const confirmEnabled =
-    !!snapshot && !!target && (!needsTyped || typed.trim() === bpSlug);
+  const choices: RestoreTarget[] = ['dev', 'staging', 'dr'];
+  const pickable = (t: RestoreTarget) => t === 'dr' || enabledStages.includes(t as SnapshotStage);
 
   return (
     <Dialog open={snapshot !== null} onOpenChange={(o) => !o && onCancel()}>
@@ -162,25 +156,48 @@ export function RestoreDialog({
           <DialogTitle>Restore snapshot</DialogTitle>
           <DialogDescription>
             {snapshot
-              ? `Restore “${snapshot.label || snapshot.id}” (taken on ${STAGE_META[snapshot.stage].label}) into any stage.`
+              ? `Restore “${snapshot.label || snapshot.id}” (taken on ${STAGE_META[snapshot.stage].label}). Restoring directly onto live Production is not allowed — recover into Disaster Recovery, verify, then swap to go live.`
               : ''}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
-          <div className="text-[13px] font-medium text-muted-foreground">
-            Restore into
+          <div className="text-[13px] font-medium text-muted-foreground">Restore into</div>
+          <div className="flex gap-1.5">
+            {choices.map((t) => {
+              const meta = RESTORE_TARGET_META[t];
+              const disabled = !pickable(t);
+              const active = target === t;
+              return (
+                <button
+                  key={t}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => setTarget(t)}
+                  title={disabled ? 'Snapshots not enabled for this stage' : meta.label}
+                  className={cn(
+                    'inline-flex h-9 flex-1 items-center justify-center gap-1.5 rounded-md border text-[13px] font-medium transition-colors',
+                    active
+                      ? 'border-primary bg-primary/10 text-foreground'
+                      : 'border-border text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+                    disabled && 'cursor-not-allowed opacity-40 hover:bg-transparent',
+                  )}
+                >
+                  <meta.Icon className="size-3.5" aria-hidden />
+                  {meta.label}
+                </button>
+              );
+            })}
           </div>
-          <StagePicker
-            value={target}
-            onChange={(s) => {
-              setTarget(s);
-              setTyped('');
-            }}
-            enabled={enabledStages}
-          />
-          {target && <ReplaceWarning target={target} />}
-          {needsTyped && (
-            <TypedConfirmation slug={bpSlug} value={typed} onChange={setTyped} />
+          {target === 'dr' ? (
+            <div className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-[13px] leading-snug text-emerald-800">
+              <LifeBuoy className="mt-0.5 size-4 shrink-0" aria-hidden />
+              <span>
+                Restored into the isolated <strong>Disaster Recovery</strong> slot — live Production
+                is untouched. Verify the data there, then swap DR with Production to go live.
+              </span>
+            </div>
+          ) : (
+            target && <ReplaceWarning target={target as SnapshotStage} />
           )}
         </div>
         <DialogFooter>
@@ -188,8 +205,7 @@ export function RestoreDialog({
             Cancel
           </Button>
           <Button
-            variant={needsTyped ? 'destructive' : 'default'}
-            disabled={!confirmEnabled}
+            disabled={!snapshot || !target}
             onClick={() => snapshot && target && onConfirm(snapshot, target)}
           >
             Restore
@@ -206,14 +222,16 @@ export function RestoreDialog({
 
 export function CloneDialog({
   open,
-  bpSlug,
   enabledStages,
+  fixedSource,
   onCancel,
   onConfirm,
 }: {
   open: boolean;
-  bpSlug: string;
   enabledStages: SnapshotStage[];
+  /** When set, the source stage is implied (per-stage view) — no "From"
+   *  picker is shown and only the target is chosen. */
+  fixedSource?: SnapshotStage;
   onCancel: () => void;
   onConfirm: (source: SnapshotStage, target: SnapshotStage) => void;
 }) {
@@ -221,26 +239,20 @@ export function CloneDialog({
   const [source, setSource] = useState<SnapshotStage | null>(null);
   // eslint-disable-next-line no-restricted-syntax -- null = nothing picked yet
   const [target, setTarget] = useState<SnapshotStage | null>(null);
-  const [typed, setTyped] = useState('');
 
   useEffect(() => {
     if (open) {
-      setSource(enabledStages[0] ?? null);
+      setSource(fixedSource ?? enabledStages[0] ?? null);
       setTarget(null);
-      setTyped('');
     }
-  }, [open, enabledStages]);
+  }, [open, enabledStages, fixedSource]);
 
+  // Never clone onto live Production (same rule as restore — go via DR + swap).
   const targetChoices = useMemo(
-    () => enabledStages.filter((s) => s !== source),
+    () => enabledStages.filter((s) => s !== source && s !== 'production'),
     [enabledStages, source],
   );
-  const needsTyped = target === 'production';
-  const confirmEnabled =
-    !!source &&
-    !!target &&
-    source !== target &&
-    (!needsTyped || typed.trim() === bpSlug);
+  const confirmEnabled = !!source && !!target && source !== target;
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onCancel()}>
@@ -248,45 +260,51 @@ export function CloneDialog({
         <DialogHeader>
           <DialogTitle>Clone stage data</DialogTitle>
           <DialogDescription>
-            One-click copy of this business process&apos;s data from one stage
-            into another — e.g. seed Staging from Production.
+            {fixedSource
+              ? `One-click copy of ${STAGE_META[fixedSource].label}’s data into another stage — e.g. seed Staging from Production.`
+              : 'One-click copy of this business process’s data from one stage into another — e.g. seed Staging from Production.'}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
-          <div className="text-[13px] font-medium text-muted-foreground">From</div>
-          <StagePicker
-            value={source}
-            onChange={(s) => {
-              setSource(s);
-              if (target === s) setTarget(null);
-              setTyped('');
-            }}
-            enabled={enabledStages}
-          />
-          <div className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
-            <ArrowRight className="size-3.5" aria-hidden />
-            Into
-          </div>
+          {fixedSource ? (
+            <div className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
+              Copy{' '}
+              <strong className="text-foreground">
+                {STAGE_META[fixedSource].label}
+              </strong>
+              <ArrowRight className="size-3.5" aria-hidden />
+              into
+            </div>
+          ) : (
+            <>
+              <div className="text-[13px] font-medium text-muted-foreground">From</div>
+              <StagePicker
+                value={source}
+                onChange={(s) => {
+                  setSource(s);
+                  if (target === s) setTarget(null);
+                }}
+                enabled={enabledStages}
+              />
+              <div className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
+                <ArrowRight className="size-3.5" aria-hidden />
+                Into
+              </div>
+            </>
+          )}
           <StagePicker
             value={target}
-            onChange={(s) => {
-              setTarget(s);
-              setTyped('');
-            }}
+            onChange={(s) => setTarget(s)}
             enabled={targetChoices}
             exclude={source ?? undefined}
           />
           {target && <ReplaceWarning target={target} />}
-          {needsTyped && (
-            <TypedConfirmation slug={bpSlug} value={typed} onChange={setTyped} />
-          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onCancel}>
             Cancel
           </Button>
           <Button
-            variant={needsTyped ? 'destructive' : 'default'}
             disabled={!confirmEnabled}
             onClick={() => source && target && onConfirm(source, target)}
           >

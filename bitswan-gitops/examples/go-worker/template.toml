@@ -1,0 +1,5 @@
+name = "Go backend worker"
+short_description = """A private high-performance Go backend worker. Not exposed
+to the internet; reached by frontends via /api over the Docker network. Ships
+with Postgres + MinIO."""
+icon = """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5c0 .94 0 1.41.2 1.76a2 2 0 0 0 .74.74c.35.2.82.2 1.76.2h8.6c.94 0 1.41 0 1.76-.2a2 2 0 0 0 .74-.74c.2-.35.2-.82.2-1.76"/><rect width="18" height="6" x="3" y="4" rx="2"/><rect width="18" height="6" x="3" y="14" rx="2"/></svg>"""

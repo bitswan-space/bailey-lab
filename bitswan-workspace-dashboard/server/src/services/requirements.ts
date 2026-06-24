@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import TOML from '@iarna/toml';
-import { isValidBpId, isValidWorktreeName } from './workspace.js';
+import { isValidBpId, isValidCopyName } from './workspace.js';
 
 /**
  * Per-BP "testable requirements" stored in the BP directory as
@@ -40,22 +40,22 @@ export interface Requirement {
 const REQUIREMENTS_FILENAME = 'testable-requirements.toml';
 
 /**
- * Worktree-scoped path resolution. We deliberately don't read main-repo
+ * Copy-scoped path resolution. We deliberately don't read main-repo
  * requirements from this surface — the dashboard places this UI inside
  * `WorktreeView` only, mirroring the editor's flow.
  */
 function resolveFilePath(opts: {
   workspaceRoot: string;
-  worktree: string;
+  copy: string;
   bp: string;
 }): string {
-  if (!isValidWorktreeName(opts.worktree)) {
-    throw new Error('invalid worktree name');
+  if (!isValidCopyName(opts.copy)) {
+    throw new Error('invalid copy name');
   }
   if (!isValidBpId(opts.bp)) {
     throw new Error('invalid bp id');
   }
-  return path.join(opts.workspaceRoot, 'worktrees', opts.worktree, opts.bp, REQUIREMENTS_FILENAME);
+  return path.join(opts.workspaceRoot, 'copies', opts.copy, opts.bp, REQUIREMENTS_FILENAME);
 }
 
 interface RawRequirement {
@@ -79,7 +79,7 @@ function normaliseRequirement(raw: RawRequirement): Requirement | null {
  */
 export async function listRequirements(opts: {
   workspaceRoot: string;
-  worktree: string;
+  copy: string;
   bp: string;
 }): Promise<Requirement[]> {
   const filePath = resolveFilePath(opts);
@@ -113,7 +113,7 @@ export async function listRequirements(opts: {
  * rename). Avoids leaving a half-written file if the process dies mid-write.
  */
 async function writeRequirements(
-  opts: { workspaceRoot: string; worktree: string; bp: string },
+  opts: { workspaceRoot: string; copy: string; bp: string },
   reqs: Requirement[],
 ): Promise<void> {
   const filePath = resolveFilePath(opts);
@@ -156,7 +156,7 @@ function nextId(reqs: readonly Requirement[], prefix: 'REQ-' | 'AI-'): string {
 
 export async function addRequirement(opts: {
   workspaceRoot: string;
-  worktree: string;
+  copy: string;
   bp: string;
   /** May be empty — the dashboard creates a blank row and edits inline. */
   text: string;
@@ -183,7 +183,7 @@ export async function addRequirement(opts: {
 
 export async function updateRequirement(opts: {
   workspaceRoot: string;
-  worktree: string;
+  copy: string;
   bp: string;
   id: string;
   patch: { description?: string; status?: ReqStatus };
@@ -214,7 +214,7 @@ export async function updateRequirement(opts: {
  */
 export async function removeRequirement(opts: {
   workspaceRoot: string;
-  worktree: string;
+  copy: string;
   bp: string;
   id: string;
 }): Promise<void> {

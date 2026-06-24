@@ -23,7 +23,7 @@ interface RemoveConfirmDialogProps {
 
 /**
  * Confirm prompt for the destructive Remove action. Shared between the
- * Deployments and Worktree views because the wording / wiring is identical;
+ * Deployments and Copy views because the wording / wiring is identical;
  * the parent owns the `target` state and the actual remove call.
  */
 export function RemoveConfirmDialog({

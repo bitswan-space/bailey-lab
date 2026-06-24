@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,38 +15,56 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/automations"
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/bitswan-space/bitswan-workspaces/internal/httpReq"
 	"github.com/spf13/cobra"
 )
 
+// workspaceDaemonInfo returns a workspace's gitops URL and secret from the
+// daemon. Workspace data lives in the daemon's Docker volume, which the host
+// CLI can't read directly, so metadata must come from the daemon rather than
+// config.GetWorkspaceMetadata (which reads the host filesystem). Requests the
+// long form (for GitopsURL) and password fields (for GitopsSecret).
+func workspaceDaemonInfo(client *daemon.Client, name string) (*daemon.WorkspaceInfo, error) {
+	resp, err := client.ListWorkspaces(true, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list workspaces: %w", err)
+	}
+	for i := range resp.Workspaces {
+		if resp.Workspaces[i].Name == name {
+			return &resp.Workspaces[i], nil
+		}
+	}
+	return nil, fmt.Errorf("workspace %q not found", name)
+}
+
 func newInitCmd() *cobra.Command {
 	var noRemove bool
 	var gitopsImage string
-	var editorImage string
+	var codingAgentImage string
 
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Test workspace initialization and FastAPI deployment",
+		Short: "Test workspace initialization and business-process deployment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTestInit(noRemove, gitopsImage, editorImage)
+			return runTestInit(noRemove, gitopsImage, codingAgentImage)
 		},
 	}
 
 	cmd.Flags().BoolVar(&noRemove, "no-remove", false, "Leave workspace and deployment running (skip cleanup)")
 	cmd.Flags().StringVar(&gitopsImage, "gitops-image", "", "Custom GitOps image to use (default: production image)")
-	cmd.Flags().StringVar(&editorImage, "editor-image", "", "Custom editor image to use (default: production image)")
+	cmd.Flags().StringVar(&codingAgentImage, "coding-agent-image", "", "Custom coding-agent image to use (default: production image)")
 
 	return cmd
 }
 
-func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
+func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
 	fmt.Println("=== BitSwan Test Suite: Init ===")
 	fmt.Println()
 
@@ -88,25 +107,24 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	}
 
 	// Step 1: Initialize workspace
-	fmt.Println("\n[1/6] Initializing workspace...")
+	fmt.Println("\n[1/7] Initializing workspace...")
 	client, err := daemon.NewClient()
 	if err != nil {
 		return fmt.Errorf("failed to create daemon client: %w", err)
 	}
 
-	// Use local flags for workspace init (no editor, no oauth for faster initialization)
+	// Use local flags for workspace init (no dashboard, no oauth for faster initialization)
 	initArgs := []string{
 		"workspace", "init",
 		"--local",
-		"--no-ide",
 		"--no-dashboard",
 		"--no-oauth",
 	}
 	if gitopsImage != "" {
 		initArgs = append(initArgs, "--gitops-image", gitopsImage)
 	}
-	if editorImage != "" {
-		initArgs = append(initArgs, "--editor-image", editorImage)
+	if codingAgentImage != "" {
+		initArgs = append(initArgs, "--coding-agent-image", codingAgentImage)
 	}
 	initArgs = append(initArgs, workspaceName)
 
@@ -115,93 +133,100 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 	}
 	fmt.Println("✓ Workspace initialized")
 
-	// Get workspace metadata
-	metadata, err := config.GetWorkspaceMetadata(workspaceName)
+	// Get workspace metadata from the daemon. Workspace data lives in the
+	// daemon's Docker volume, which the host CLI can't read directly, so we
+	// can't use config.GetWorkspaceMetadata (it reads the host filesystem).
+	metadata, err := workspaceDaemonInfo(client, workspaceName)
 	if err != nil {
 		return fmt.Errorf("failed to get workspace metadata: %w", err)
 	}
 
 	// Step 2: Wait for gitops service to be ready
-	fmt.Println("\n[2/6] Waiting for gitops service to be ready...")
+	fmt.Println("\n[2/7] Waiting for gitops service to be ready...")
 	if err := waitForGitopsReady(metadata.GitopsURL, metadata.GitopsSecret, workspaceName); err != nil {
 		cleanupOnFailure()
 		return fmt.Errorf("gitops service did not become ready: %w", err)
 	}
 	fmt.Println("✓ Gitops service ready")
 
-	// Step 3: Scaffold the FastAPI automation from the built-in template gallery.
-	// The examples tree is bind-mounted read-only into the gitops container at
-	// /workspace/examples; gitops copies the chosen template into the workspace
-	// repo (/workspace-repo) under <bp>/<name> and commits it. This replaces the
-	// old upload-asset flow — gitops is now the sole writer to the workspace repo.
-	fmt.Println("\n[3/6] Creating FastAPI automation from template...")
-	const (
-		templateID = "FastAPIApp"
-		bp         = "test"
-		automation = "fastapi"
-	)
-	relativePath, err := createAutomationFromTemplate(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, templateID, bp, automation)
+	// Step 2.5: Verify the embedded fast-forward-only git server: clone the
+	// canonical repo, push a fast-forward (succeeds), and attempt a history
+	// rewrite / force-push (must be rejected by the pre-receive hook).
+	fmt.Println("\nVerifying fast-forward-only git server...")
+	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret); err != nil {
+		cleanupOnFailure()
+		return fmt.Errorf("git server verification failed: %w", err)
+	}
+	fmt.Println("✓ Git server: clone + fast-forward push OK; force-push rejected")
+
+	// Step 3: Create a business process. Gitops scaffolds the default template
+	// group (BITSWAN_DEFAULT_TEMPLATE_GROUP, "business-process": one frontend
+	// exposed through Bailey + one private backend worker) into <bp>/ and kicks
+	// off its deploy in the background. This is the real user flow — there is no
+	// standalone template-scaffolding step to test anymore.
+	fmt.Println("\n[3/7] Creating business process...")
+	const bp = "test"
+	automationsCreated, deployTaskID, err := createBusinessProcess(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, bp)
 	if err != nil {
 		cleanupOnFailure()
-		return fmt.Errorf("failed to create automation from template: %w", err)
+		return fmt.Errorf("failed to create business process: %w", err)
 	}
-	fmt.Printf("✓ Automation created at: %s\n", relativePath)
+	if deployTaskID == "" {
+		cleanupOnFailure()
+		return fmt.Errorf("business process %q created but its auto-deploy did not start", bp)
+	}
+	fmt.Printf("✓ Business process %q created (automations: %s)\n", bp, strings.Join(automationsCreated, ", "))
 
-	// Step 4: Deploy the automation directly from the workspace. gitops reads the
-	// source from /workspace-repo, builds the per-automation image from its image/
-	// Dockerfile, materializes the merged tree, and runs the deploy pipeline. No
-	// client-side ZIP/image build/upload is required anymore.
-	fmt.Println("\n[4/6] Deploying automation...")
-	taskID, deploymentID, _, err := startDeploy(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, relativePath, "dev")
+	// Step 4: Wait for the BP deploy pipeline to finish. This builds the
+	// frontend + backend images from their image/Dockerfiles, provisions the
+	// backend's Postgres + MinIO, and runs compose up.
+	fmt.Println("\n[4/7] Waiting for business-process deploy to complete...")
+	if err := waitForDeployTask(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, deployTaskID); err != nil {
+		cleanupOnFailure()
+		return fmt.Errorf("business-process deploy did not complete: %w", err)
+	}
+	fmt.Println("✓ Business process deployed")
+
+	// Step 5: The frontend is the only part exposed through Bailey. Wait for it
+	// to be running and confirm it serves its app shell — that's "the frontend
+	// is accessible" end to end.
+	fmt.Println("\n[5/7] Waiting for the frontend to be accessible...")
+	frontendURL, err := waitForFrontendRunning(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, bp)
 	if err != nil {
 		cleanupOnFailure()
-		return fmt.Errorf("failed to start deploy: %w", err)
+		return fmt.Errorf("frontend did not become ready: %w", err)
 	}
-	fmt.Printf("  Deploy started: task=%s deployment=%s\n", taskID, deploymentID)
-	if err := waitForDeployTask(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, taskID); err != nil {
-		cleanupOnFailure()
-		return fmt.Errorf("deploy did not complete: %w", err)
-	}
-	fmt.Println("✓ Automation deployed")
+	fmt.Printf("✓ Frontend running at: %s\n", frontendURL)
 
-	// Step 5: Wait for the deployment to be running and test the endpoint
-	fmt.Println("\n[5/6] Waiting for deployment to be ready...")
-	endpointURL, err := waitForDeployment(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, deploymentID)
-	if err != nil {
+	fmt.Println("\nTesting frontend...")
+	if err := testFrontendEndpoint(frontendURL, workspaceName); err != nil {
 		cleanupOnFailure()
-		return fmt.Errorf("failed to wait for deployment: %w", err)
+		return fmt.Errorf("frontend accessibility test failed: %w", err)
 	}
-	if endpointURL == "" {
-		cleanupOnFailure()
-		return fmt.Errorf("deployment ready but no endpoint URL found")
-	}
-	fmt.Printf("✓ Deployment ready at: %s\n", endpointURL)
+	fmt.Println("✓ Frontend is accessible")
 
-	fmt.Println("\nTesting endpoint...")
-	if err := testEndpoint(endpointURL, workspaceName); err != nil {
-		if !noRemove {
-			cleanupWorkspace(workspaceName)
-		}
-		return fmt.Errorf("endpoint test failed: %w", err)
+	// Step 6: The coding-agent CLI must authenticate to gitops from inside the
+	// coding-agent container. This guards the agent-token path end to end:
+	// gitops has to resolve the same BITSWAN_GITOPS_AGENT_SECRET the agent
+	// container was given, or every `bitswan-coding-agent` call 401s.
+	fmt.Println("\n[6/7] Verifying coding-agent CLI authentication...")
+	if err := testCodingAgentCLI(workspaceName); err != nil {
+		cleanupOnFailure()
+		return fmt.Errorf("coding-agent CLI authentication check failed: %w", err)
 	}
-	fmt.Println("✓ Endpoint test passed")
+	fmt.Println("✓ Coding-agent CLI authenticated to gitops")
 
 	if noRemove {
-		fmt.Println("\n[6/6] Skipping cleanup (--no-remove flag set)...")
+		fmt.Println("\n[7/7] Skipping cleanup (--no-remove flag set)...")
 		fmt.Printf("Workspace '%s' is still running\n", workspaceName)
-		fmt.Printf("Endpoint: %s\n", endpointURL)
+		fmt.Printf("Frontend: %s\n", frontendURL)
 		fmt.Println("\n=== Test Suite: SUCCESS (workspace left running) ===")
 		return nil
 	}
 
-	// Step 6: Remove deployment and workspace
-	fmt.Println("\n[6/6] Cleaning up...")
-	if err := removeAutomation(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, deploymentID); err != nil {
-		fmt.Printf("Warning: Failed to remove automation: %v\n", err)
-	} else {
-		fmt.Println("✓ Automation removed")
-	}
-
+	// Step 7: Tear down the whole workspace (removes the BP's containers,
+	// services, and routes along with it).
+	fmt.Println("\n[7/7] Cleaning up...")
 	if err := cleanupWorkspace(workspaceName); err != nil {
 		return fmt.Errorf("failed to cleanup workspace: %w", err)
 	}
@@ -209,6 +234,403 @@ func runTestInit(noRemove bool, gitopsImage, editorImage string) error {
 
 	fmt.Println("\n=== Test Suite: SUCCESS ===")
 	return nil
+}
+
+// createBusinessProcess creates a business process via gitops' POST /processes/.
+// Gitops scaffolds the default template group (one frontend + one backend
+// worker) into <name>/ and kicks off its deploy in the background. Returns the
+// scaffolded automation names and the deploy task id (poll it with
+// waitForDeployTask). A non-empty setup_error in the response is surfaced as an
+// error — auto-setup failing is exactly what this test must catch.
+func createBusinessProcess(gitopsURL, secret, workspaceName, name string) ([]string, string, error) {
+	payload := map[string]string{"name": name}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, "", err
+	}
+
+	reqURL := fmt.Sprintf("%s/processes/", gitopsURL)
+	reqURL = automations.TransformURLForDaemon(reqURL, workspaceName)
+	req, err := httpReq.NewRequest("POST", reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+secret)
+
+	resp, err := httpReq.ExecuteRequestWithLocalhostResolution(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	respBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("create-process failed with status %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var result struct {
+		AutomationsCreated []string `json:"automations_created"`
+		DeployTaskID       string   `json:"deploy_task_id"`
+		SetupError         string   `json:"setup_error"`
+	}
+	if err := json.Unmarshal(respBytes, &result); err != nil {
+		return nil, "", fmt.Errorf("failed to parse create-process response: %w (body: %s)", err, string(respBytes))
+	}
+	if result.SetupError != "" {
+		return nil, "", fmt.Errorf("business-process auto-setup failed: %s", result.SetupError)
+	}
+	return result.AutomationsCreated, result.DeployTaskID, nil
+}
+
+// maxHostnameLabelLen mirrors gitops' MAX_NAME_LEN (app/services/automation_service.py):
+// workspace_name and automation_name are each capped at 24 chars so the final
+// DNS label fits within the 63-char limit.
+const maxHostnameLabelLen = 24
+
+// sanitizeAutomationNameRE mirrors gitops' sanitize_automation_name
+// (app/utils.py): lowercase, replace every char outside [a-z0-9-] with '-'.
+var sanitizeAutomationNameRE = regexp.MustCompile(`[^a-z0-9-]`)
+
+// sanitizeAutomationName replicates gitops' sanitize_automation_name exactly:
+// lowercase the input, replace each char outside [a-z0-9-] with '-', then trim
+// leading/trailing hyphens. Deploy-id derivation and template scaffolding both
+// depend on this, so the e2e must produce the identical output.
+func sanitizeAutomationName(name string) string {
+	lowered := strings.ToLower(name)
+	replaced := sanitizeAutomationNameRE.ReplaceAllString(lowered, "-")
+	return strings.Trim(replaced, "-")
+}
+
+// shortContextHash replicates gitops' _short_hash
+// (app/services/automation_service.py): the first 4 hex chars of the SHA-256 of
+// the context string. e.g. _short_hash("test") == "9f86".
+func shortContextHash(context string) string {
+	sum := sha256.Sum256([]byte(context))
+	return hex.EncodeToString(sum[:])[:4]
+}
+
+// makeHostnameLabel replicates gitops' make_hostname_label
+// (app/services/automation_service.py). It builds the DNS label from structured
+// components — no string parsing — capping workspace_name and automation_name at
+// 24 chars each:
+//
+//	context && stage -> "<ws>-<an>-<ctxhash>-<stage>"
+//	context only     -> "<ws>-<an>-<ctxhash>"
+//	stage only       -> "<ws>-<an>-<stage>"
+//	neither          -> "<ws>-<an>"
+func makeHostnameLabel(workspaceName, automationName, context, stage string) string {
+	ws := workspaceName
+	if len(ws) > maxHostnameLabelLen {
+		ws = ws[:maxHostnameLabelLen]
+	}
+	an := automationName
+	if len(an) > maxHostnameLabelLen {
+		an = an[:maxHostnameLabelLen]
+	}
+	if context != "" {
+		h := shortContextHash(context)
+		if stage != "" {
+			return fmt.Sprintf("%s-%s-%s-%s", ws, an, h, stage)
+		}
+		return fmt.Sprintf("%s-%s-%s", ws, an, h)
+	}
+	if stage != "" {
+		return fmt.Sprintf("%s-%s-%s", ws, an, stage)
+	}
+	return fmt.Sprintf("%s-%s", ws, an)
+}
+
+// constructFrontendURL reproduces, from structured inputs only, the exact
+// https URL gitops registers for the business process's frontend route — without
+// reading it back from get_automations (whose state/automation_url overlay can
+// lag in CI). It mirrors gitops' generate_workspace_url
+// (app/utils.py) + add_workspace_route_to_ingress, which build the host as
+// "<make_hostname_label(...)>.<BITSWAN_GITOPS_DOMAIN>".
+//
+// The inputs for a main (non-copy) BP deploy are fixed by gitops itself:
+//   - workspace   = the test workspace name (capped/sanitized below)
+//   - automation  = "frontend" (the exposed automation in the default
+//     business-process template group)
+//   - context     = the sanitized BP name (scan_workspace_sources sets
+//     context = bp_name for non-copy scans), i.e. sanitize("test")
+//   - stage       = "dev" (routes/processes.py: stage = "dev" when there is no
+//     copy; "live-dev" only for copy deploys)
+//
+// The gitops domain is BITSWAN_GITOPS_DOMAIN, which the daemon sets to the
+// workspace's domain (dockercompose.go) and which equals the host of the gitops
+// URL with the leading "<workspace>-gitops." label stripped (workspace_init.go
+// builds GitopsURL as "https://<ws>-gitops.<domain>"). Deriving the domain from
+// gitopsURL this way handles every regime identically — e.g. the --local CI
+// regime where domain == "bs-<workspace>.localhost" (so the constructed host
+// ends in .localhost and resolves through dnsmasq/mkcert just like the gitops
+// URL itself).
+func constructFrontendURL(gitopsURL, workspaceName, bp string) (string, error) {
+	parsed, err := url.Parse(gitopsURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse gitops URL %q: %w", gitopsURL, err)
+	}
+	host := parsed.Host
+	// Strip the "<workspace>-gitops." label to recover BITSWAN_GITOPS_DOMAIN.
+	gitopsLabelPrefix := workspaceName + "-gitops."
+	if !strings.HasPrefix(host, gitopsLabelPrefix) {
+		return "", fmt.Errorf("gitops URL host %q does not start with expected prefix %q", host, gitopsLabelPrefix)
+	}
+	gitopsDomain := strings.TrimPrefix(host, gitopsLabelPrefix)
+	if gitopsDomain == "" {
+		return "", fmt.Errorf("could not derive gitops domain from host %q", host)
+	}
+
+	// Match gitops' deploy-time inputs for the main-BP frontend route.
+	sanitizedWorkspace := sanitizeAutomationName(workspaceName)
+	context := sanitizeAutomationName(bp)
+	const automationName = "frontend"
+	const stage = "dev"
+
+	label := makeHostnameLabel(sanitizedWorkspace, automationName, context, stage)
+	scheme := parsed.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s.%s", scheme, label, gitopsDomain), nil
+}
+
+// waitForFrontendRunning polls gitops' GET /automations/ for the business
+// process's frontend and returns its URL once it's actually serving. The
+// frontend is the automation exposed through Bailey (expose=true) whose
+// relative_path ends in "/frontend" — identified by explicit data, not a
+// guessed hostname. The per-automation images were already built by the deploy
+// task, so 3 minutes is a generous margin for the container to come up.
+//
+// Readiness is established by EITHER signal:
+//
+//	(1) get_automations reports state=="running", OR
+//	(2) the frontend's own URL is reachable (HTTP 200 + app shell) through the
+//	    gate, even if the get_automations 'state' field still lags.
+//
+// In the dev stage the overlay/label-matching that populates 'state' can lag
+// behind the container actually serving (observed only in CI), so relying on
+// 'state' alone makes this flaky. Probing the real URL keeps the check a true
+// end-to-end assertion — the frontend must genuinely return its HTML — without
+// depending on the lagging state field. Once the frontend's endpoint URL is
+// known we probe it directly; the first signal to fire wins.
+func waitForFrontendRunning(gitopsURL, secret, workspaceName, bp string) (string, error) {
+	maxAttempts := 90 // 3 minutes (90 * 2 seconds)
+
+	// Construct the frontend's URL the same way gitops registers its route, so
+	// the e2e never depends on the get_automations overlay populating
+	// automation_url (it can lag in CI — observed as "Frontend present but no
+	// URL yet"). This is the fallback probe target when the entry has no URL.
+	constructedURL, constructErr := constructFrontendURL(gitopsURL, workspaceName, bp)
+	if constructErr != nil {
+		fmt.Printf("  Warning: could not construct frontend URL (will rely on get_automations): %v\n", constructErr)
+	} else {
+		fmt.Printf("  Constructed frontend URL: %s\n", constructedURL)
+	}
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		reqURL := fmt.Sprintf("%s/automations/", gitopsURL)
+		reqURL = automations.TransformURLForDaemon(reqURL, workspaceName)
+		req, err := httpReq.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+secret)
+
+		resp, err := httpReq.ExecuteRequestWithLocalhostResolution(req)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		var autos []struct {
+			State         string `json:"state"`
+			Expose        bool   `json:"expose"`
+			RelativePath  string `json:"relative_path"`
+			EndpointName  string `json:"endpoint_name"`
+			AutomationURL string `json:"automation_url"`
+		}
+		if err := json.Unmarshal(bodyBytes, &autos); err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		for _, a := range autos {
+			if !a.Expose {
+				continue
+			}
+			rel := strings.TrimRight(a.RelativePath, "/")
+			if !strings.HasSuffix(rel, bp+"/frontend") {
+				continue
+			}
+
+			// Resolve the frontend's URL. Prefer the entry's own
+			// automation_url / endpoint_name (populated from route metadata
+			// independently of 'state'), but fall back to the URL we
+			// constructed ourselves when the entry carries no URL — in CI the
+			// overlay that fills automation_url can lag, leaving the entry with
+			// empty state AND empty url even though the container is serving.
+			endpointURL := a.AutomationURL
+			if endpointURL == "" && a.EndpointName != "" {
+				if parsed, err := url.Parse(gitopsURL); err == nil {
+					endpointURL = fmt.Sprintf("%s://%s/%s", parsed.Scheme, parsed.Host, a.EndpointName)
+				}
+			}
+			if endpointURL == "" {
+				endpointURL = constructedURL
+			}
+
+			// Signal (1): get_automations explicitly reports running (only a
+			// fast-path when the entry also gave us a URL).
+			if a.State == "running" && a.AutomationURL != "" {
+				fmt.Printf("  Frontend ready (state=running)! URL: %s\n", a.AutomationURL)
+				// Give the shim/vite a moment to fully start serving.
+				time.Sleep(3 * time.Second)
+				return a.AutomationURL, nil
+			}
+
+			// Signal (2): probe the URL directly (entry URL if present, else the
+			// constructed URL). If the gate serves the app shell, the frontend
+			// is genuinely up regardless of the lagging 'state'/overlay fields.
+			if endpointURL != "" && frontendServesAppShell(endpointURL, workspaceName) {
+				fmt.Printf("  Frontend reachable (state=%s, URL serves the app shell)! URL: %s\n", a.State, endpointURL)
+				return endpointURL, nil
+			}
+
+			if attempt%5 == 0 {
+				if endpointURL == "" {
+					fmt.Printf("  Frontend present but no URL yet (state=%s, attempt %d/%d)\n", a.State, attempt+1, maxAttempts)
+				} else {
+					fmt.Printf("  Waiting for frontend... (state=%s, URL=%s not yet serving, attempt %d/%d)\n", a.State, endpointURL, attempt+1, maxAttempts)
+				}
+			}
+			break
+		}
+
+		time.Sleep(2 * time.Second)
+	}
+
+	return "", fmt.Errorf("frontend did not become ready within timeout")
+}
+
+// frontendServesAppShell probes the frontend URL through the gate (localhost
+// resolution) and reports whether it returns HTTP 200 with the React app shell.
+// This is the same liveness criterion as testFrontendEndpoint, used as the
+// reachability signal in waitForFrontendRunning so the e2e doesn't depend on
+// the (CI-flaky) get_automations 'state' field. Any transport error or non-200
+// is treated as "not ready yet" — the caller retries.
+func frontendServesAppShell(endpointURL, workspaceName string) bool {
+	reqURL := automations.TransformURLForDaemon(endpointURL, workspaceName)
+	req, err := httpReq.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := httpReq.ExecuteRequestWithLocalhostResolution(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	body := string(bodyBytes)
+	lower := strings.ToLower(body)
+	return strings.Contains(body, `id="root"`) || strings.Contains(lower, "<html")
+}
+
+// testFrontendEndpoint fetches the frontend URL and verifies it serves the app
+// shell. A frontend returns its HTML document (not a JSON health body), so
+// success is HTTP 200 plus the React app's root mount point in the markup.
+func testFrontendEndpoint(endpointURL, workspaceName string) error {
+	reqURL := automations.TransformURLForDaemon(endpointURL, workspaceName)
+	req, err := httpReq.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := httpReq.ExecuteRequestWithLocalhostResolution(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("frontend returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	body := string(bodyBytes)
+	lower := strings.ToLower(body)
+	if !strings.Contains(body, `id="root"`) && !strings.Contains(lower, "<html") {
+		return fmt.Errorf("frontend response does not look like the app shell: %s", body)
+	}
+
+	return nil
+}
+
+// testCodingAgentCLI verifies the bitswan-coding-agent CLI can authenticate to
+// gitops from inside the coding-agent container. `deployments list` hits gitops
+// GET /agent/deployments with the agent token — the same agent-token auth path
+// the git credential helper uses to push. This guards the agent-token wiring:
+// gitops must resolve the same BITSWAN_GITOPS_AGENT_SECRET the coding-agent
+// container was given, or every agent call 401s.
+//
+// We pass --copy explicitly. Without it the CLI tries to auto-detect the
+// copy from $PWD and fails client-side ("cannot detect copy") before
+// ever contacting gitops — so it can't test auth for this e2e, which deploys a
+// main (non-copy) BP and therefore has no copy on disk. With the flag
+// the request reaches the handler: gitops runs verify_agent_token first, so a
+// good token yields HTTP 200 (an empty list for a copy that doesn't exist —
+// scan_workspace_sources returns [] for a missing dir) while a bad token yields
+// 401. Either way the listed contents are irrelevant; the not-401 round-trip is
+// the signal we want.
+func testCodingAgentCLI(workspaceName string) error {
+	container, err := codingAgentContainer(workspaceName)
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command("docker", "exec", container,
+		"bitswan-coding-agent", "deployments", "list", "--copy", workspaceName)
+	out, runErr := cmd.CombinedOutput()
+	output := strings.TrimSpace(string(out))
+
+	// The specific failure we're guarding against: gitops couldn't resolve the
+	// agent secret, so it rejects the bearer token.
+	if strings.Contains(output, "Invalid agent token") || strings.Contains(output, "HTTP 401") {
+		return fmt.Errorf("gitops rejected the coding-agent token (agent secret not resolved): %s", output)
+	}
+	if runErr != nil {
+		return fmt.Errorf("`bitswan-coding-agent deployments list` failed: %v: %s", runErr, output)
+	}
+	return nil
+}
+
+// codingAgentContainer resolves the coding-agent container name for a workspace.
+// The coding-agent service pins container_name to {workspace}-coding-agent, but
+// resolve by name filter so the check tolerates a compose-default name too.
+func codingAgentContainer(workspaceName string) (string, error) {
+	cmd := exec.Command("docker", "ps",
+		"--filter", "name="+workspaceName+"-coding-agent",
+		"--format", "{{.Names}}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to list coding-agent containers: %w", err)
+	}
+	names := strings.Fields(string(out))
+	if len(names) == 0 {
+		return "", fmt.Errorf("no coding-agent container found for workspace %q", workspaceName)
+	}
+	return names[0], nil
 }
 
 // createAutomationFromTemplate scaffolds an automation from a built-in template
@@ -668,137 +1090,43 @@ func calculateGitBlobHash(filePath string) (string, error) {
 }
 
 func waitForGitopsReady(gitopsURL, secret, workspaceName string) error {
-	// gitops boots quickly (its image is already built locally), so 3 minutes is
-	// a generous margin for CI.
-	maxAttempts := 90 // 3 minutes total (90 * 2 seconds)
-	attempt := 0
-
-	// First, wait for container to be running
-	// Container name format: {workspaceName}-site-bitswan-gitops-1
+	// Probe the gitops service directly inside its container instead of through
+	// the public URL. The public path crosses Traefik, the protected gate (which
+	// redirects unauthenticated requests to OAuth), and host-side localhost
+	// resolution that can't follow cross-host redirects — none of which this
+	// readiness check cares about. A direct `curl localhost:8079` is
+	// deterministic across CI and AOC-connected hosts alike.
 	containerName := fmt.Sprintf("%s-site-bitswan-gitops-1", workspaceName)
-	fmt.Printf("Waiting for gitops container '%s' to be running...\n", containerName)
-	for i := 0; i < 30; i++ { // Wait up to 1 minute for container to start
-		cmd := exec.Command("docker", "ps", "--filter", fmt.Sprintf("name=%s", containerName), "--format", "{{.Status}}")
-		output, err := cmd.Output()
-		if err == nil && len(output) > 0 && strings.Contains(string(output), "Up") {
-			fmt.Printf("Container '%s' is running\n", containerName)
-			break
-		}
-		if i == 29 {
-			fmt.Printf("Warning: Container '%s' did not start within 1 minute, continuing anyway...\n", containerName)
-		}
-		time.Sleep(2 * time.Second)
-	}
+	const maxAttempts = 90 // ~3 minutes (90 * 2s)
 
-	for attempt < maxAttempts {
-		// Try to get automations list as a health check
-		url := fmt.Sprintf("%s/automations", gitopsURL)
-		url = automations.TransformURLForDaemon(url, workspaceName)
-		req, err := httpReq.NewRequest("GET", url, nil)
-		if err != nil {
-			time.Sleep(2 * time.Second)
-			attempt++
-			continue
-		}
-
-		req.Header.Set("Authorization", "Bearer "+secret)
-
-		resp, err := httpReq.ExecuteRequestWithLocalhostResolution(req)
-		if err != nil {
-			// In CI, localhost resolution might fail, so also check container health
-			// After container has been running for a while, try to connect via Docker network
-			if attempt > 15 { // After 30 seconds, start checking container health and try direct connection
-				// Check if container is still running
-				checkCmd := exec.Command("docker", "ps", "--filter", fmt.Sprintf("name=%s", containerName), "--format", "{{.Status}}")
-				statusOutput, statusErr := checkCmd.Output()
-				if statusErr == nil && len(statusOutput) > 0 && strings.Contains(string(statusOutput), "Up") {
-					// Container is running, try connecting directly via Docker network
-					// Use docker exec to curl from within the network
-					if attempt > 30 { // After 60 seconds, try direct connection
-						// Try to curl from within the container's network
-						curlCmd := exec.Command("docker", "exec", containerName, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-							"-H", fmt.Sprintf("Authorization: Bearer %s", secret),
-							"http://localhost:8079/automations")
-						if curlOutput, curlErr := curlCmd.Output(); curlErr == nil {
-							statusCodeStr := strings.TrimSpace(string(curlOutput))
-							if statusCodeStr == "200" || statusCodeStr == "404" {
-								fmt.Printf("Service is responding directly on port 8079 (status: %s), but Caddy is returning 502\n", statusCodeStr)
-								fmt.Printf("This suggests a Caddy routing issue. Checking Caddy logs...\n")
-								// Check Caddy logs
-								caddyLogsCmd := exec.Command("docker", "logs", "caddy", "--tail", "20")
-								if caddyLogs, caddyErr := caddyLogsCmd.Output(); caddyErr == nil {
-									fmt.Printf("Recent Caddy logs:\n%s\n", string(caddyLogs))
-								}
-								// If service is responding directly, assume it's ready despite Caddy issue
-								if attempt > 60 {
-									fmt.Printf("Service is responding directly after 2+ minutes, assuming ready despite Caddy 502\n")
-									return nil
-								}
-							}
-						}
-					}
-				} else {
-					// Container not running - check logs
-					if attempt%20 == 0 {
-						fmt.Printf("Container may not be running. Checking container status and logs...\n")
-						logsCmd := exec.Command("docker", "logs", containerName, "--tail", "30")
-						if logsOutput, logsErr := logsCmd.Output(); logsErr == nil {
-							fmt.Printf("Container logs (last 30 lines):\n%s\n", string(logsOutput))
-						}
-					}
-				}
+	fmt.Printf("Waiting for gitops container '%s' to be ready...\n", containerName)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Trailing slash avoids gitops' 307 redirect on /automations.
+		curlCmd := exec.Command("docker", "exec", containerName, "curl", "-s", "-o", "/dev/null",
+			"-w", "%{http_code}",
+			"-H", fmt.Sprintf("Authorization: Bearer %s", secret),
+			"http://localhost:8079/automations/")
+		out, err := curlCmd.Output()
+		if err == nil {
+			// Any real HTTP status (2xx/3xx/4xx) means the server is up and
+			// serving; only "000" (no connection) or 5xx mean not-ready-yet.
+			code := strings.TrimSpace(string(out))
+			if code != "" && code != "000" && !strings.HasPrefix(code, "5") {
+				fmt.Printf("Gitops service is ready (HTTP %s)\n", code)
+				return nil
 			}
-			time.Sleep(2 * time.Second)
-			attempt++
-			continue
-		}
-		resp.Body.Close()
-
-		// If we get any response (even 200 or 404), the service is up
-		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
-			return nil
-		}
-
-		// 502 Bad Gateway means the service is NOT ready - don't treat it as ready
-		// Only treat 200/404 as ready, or 401 (auth issue, but service is up)
-		if resp.StatusCode == http.StatusBadGateway {
 			if attempt%10 == 0 {
-				fmt.Printf("Service returned 502 Bad Gateway (attempt %d/%d) - service not ready yet\n", attempt+1, maxAttempts)
-				// After many attempts, check if service is actually running but Caddy can't reach it
-				if attempt > 60 {
-					// Try direct connection to container
-					curlCmd := exec.Command("docker", "exec", containerName, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-						"-H", fmt.Sprintf("Authorization: Bearer %s", secret),
-						"http://localhost:8079/automations")
-					if curlOutput, curlErr := curlCmd.Output(); curlErr == nil {
-						statusCodeStr := strings.TrimSpace(string(curlOutput))
-						fmt.Printf("Direct container check returned status: %s\n", statusCodeStr)
-						if statusCodeStr == "200" || statusCodeStr == "404" {
-							fmt.Printf("Service is responding directly but Caddy returns 502 - likely Caddy routing issue\n")
-							// Check Caddy configuration
-							caddyConfigCmd := exec.Command("curl", "-s", "http://localhost:2019/config/apps/http/servers/srv0/routes")
-							if caddyConfig, caddyErr := caddyConfigCmd.Output(); caddyErr == nil {
-								fmt.Printf("Caddy routes config:\n%s\n", string(caddyConfig))
-							}
-						}
-					}
-				}
+				fmt.Printf("Gitops not serving yet (HTTP %s, attempt %d/%d)\n", code, attempt+1, maxAttempts)
 			}
-			time.Sleep(2 * time.Second)
-			attempt++
-			continue
+		} else if attempt%10 == 0 {
+			fmt.Printf("Gitops container not reachable yet (attempt %d/%d)\n", attempt+1, maxAttempts)
 		}
-
-		// For other status codes (like 401), log but continue waiting
-		// Don't assume service is ready just because we got a response
-		if attempt%10 == 0 {
-			fmt.Printf("Service returned status %d (attempt %d/%d) - waiting for 200/404\n", resp.StatusCode, attempt+1, maxAttempts)
-		}
-
 		time.Sleep(2 * time.Second)
-		attempt++
 	}
 
+	if logs, err := exec.Command("docker", "logs", containerName, "--tail", "30").CombinedOutput(); err == nil {
+		fmt.Printf("Gitops container logs (last 30 lines):\n%s\n", string(logs))
+	}
 	return fmt.Errorf("gitops service did not become ready within timeout")
 }
 
@@ -1360,4 +1688,79 @@ func cleanupWorkspace(workspaceName string) error {
 	}
 
 	return client.WorkspaceRemove(workspaceName)
+}
+
+// verifyGitServer exercises the workspace's embedded fast-forward-only git
+// server: it clones the canonical repo over smart-HTTP, fast-forward-pushes a
+// commit (must succeed), then rewrites history and force-pushes (must be
+// rejected by the pre-receive hook). Credentials are the gitops secret, which
+// the git server accepts via HTTP Basic.
+func verifyGitServer(gitopsURL, secret string) error {
+	u, err := url.Parse(gitopsURL)
+	if err != nil {
+		return fmt.Errorf("parse gitops url: %w", err)
+	}
+	u.User = url.UserPassword("x", secret)
+	u.Path = "/git/repo.git"
+	gitURL := u.String()
+
+	tmp, err := os.MkdirTemp("", "gitsrv-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	work := filepath.Join(tmp, "work")
+
+	runGit := func(args ...string) (string, error) {
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(),
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@bitswan.local",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@bitswan.local",
+		)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+
+	if out, err := runGit("clone", gitURL, work); err != nil {
+		return fmt.Errorf("clone failed: %w: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(work, "git-server-test.txt"), []byte("ok\n"), 0644); err != nil {
+		return err
+	}
+	if out, err := runGit("-C", work, "add", "-A"); err != nil {
+		return fmt.Errorf("git add: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "commit", "-m", "git server ff test"); err != nil {
+		return fmt.Errorf("git commit: %w: %s", err, out)
+	}
+	// main is deploy-only: a direct push to it must be rejected — it only
+	// advances server-side via the user-gated deploy, never by a client push.
+	if out, err := runGit("-C", work, "push", "origin", "HEAD:refs/heads/main"); err == nil {
+		return fmt.Errorf("push to protected main was accepted but must be rejected: %s", out)
+	}
+	// Work goes on a copy branch: creating it and fast-forwarding it are allowed.
+	if out, err := runGit("-C", work, "push", "origin", "HEAD:refs/heads/git-server-test"); err != nil {
+		return fmt.Errorf("copy-branch creation push was rejected unexpectedly: %w: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(work, "git-server-test2.txt"), []byte("ok2\n"), 0644); err != nil {
+		return err
+	}
+	if out, err := runGit("-C", work, "add", "-A"); err != nil {
+		return fmt.Errorf("git add: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "commit", "-m", "git server ff test 2"); err != nil {
+		return fmt.Errorf("git commit: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "push", "origin", "HEAD:refs/heads/git-server-test"); err != nil {
+		return fmt.Errorf("fast-forward push to a copy branch was rejected unexpectedly: %w: %s", err, out)
+	}
+	// Rewrite the just-pushed commit and force-push — the server must reject it.
+	if out, err := runGit("-C", work, "commit", "--amend", "-m", "rewritten"); err != nil {
+		return fmt.Errorf("git amend: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "push", "-f", "origin", "HEAD:refs/heads/git-server-test"); err == nil {
+		return fmt.Errorf("force-push was accepted but must be rejected (fast-forward-only): %s", out)
+	}
+	return nil
 }

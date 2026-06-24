@@ -1,0 +1,39 @@
+# Local KVM VM to run the real-stack BP-lifecycle E2E fast and isolated.
+#
+# Why a VM: the E2E does system-level things (root daemon init, dnsmasq taking
+# over :53, mkcert CA, real docker churn). A disposable KVM guest keeps that off
+# your dev box and — on a powerful local machine — runs the whole suite far
+# faster than CI.
+#
+# Uses the libvirt provider (KVM). Install once:
+#   sudo apt-get install -y vagrant qemu-kvm libvirt-daemon-system
+#   vagrant plugin install vagrant-libvirt
+#
+# Run (from e2e/local-vm/):
+#   vagrant up                 # boots + provisions + RUNS the full E2E
+#   vagrant ssh                # poke around the live stack
+#   vagrant ssh -c 'cd /repo/e2e && npm test'   # re-run just the tests
+#   vagrant destroy -f         # tear down
+#
+# The Playwright HTML report is synced back to e2e/playwright-report/.
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "generic/ubuntu2404"
+  config.vm.hostname = "bitswan-e2e"
+
+  config.vm.provider :libvirt do |kvm|
+    kvm.driver = "kvm"          # hardware acceleration
+    kvm.cpus = ENV.fetch("E2E_VM_CPUS", "8").to_i
+    kvm.memory = ENV.fetch("E2E_VM_MEMORY_MB", "8192").to_i
+    kvm.nested = true
+  end
+
+  # The repo (the directory two levels up) is mounted read/write at /repo so the
+  # guest builds THIS checkout and writes the Playwright report straight back.
+  config.vm.synced_folder "../..", "/repo", type: "rsync",
+    rsync__exclude: ["node_modules/", ".git/", "**/dist/", "e2e/playwright-report/"]
+
+  config.vm.provision "shell", path: "provision.sh", privileged: true
+  config.vm.provision "shell", path: "run-e2e.sh", privileged: false,
+    env: { "E2E_VM" => "1" }
+end

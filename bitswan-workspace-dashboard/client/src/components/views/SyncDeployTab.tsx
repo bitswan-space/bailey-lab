@@ -1,230 +1,171 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Plus, Rocket } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Rocket } from 'lucide-react';
 import { toast } from 'sonner';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
-import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { useSessions } from '@/components/agents/SessionProvider';
-import type { AutomationStage, BusinessProcess, DeployedAutomation, Worktree } from '@/types';
-import { AutomationCard } from '@/components/automations/AutomationCard';
-import { InspectModal, type InspectStage } from '@/components/automations/InspectModal';
-import {
-  RemoveConfirmDialog,
-  type RemoveTarget,
-} from '@/components/automations/RemoveConfirmDialog';
-import { NewAutomationDialog } from '@/components/automations/NewAutomationDialog';
-import { EmptyState } from '@/components/shared/EmptyState';
-import { Button } from '@/components/ui/button';
-import { api, isTransientNetworkError } from '@/lib/api';
-import { deployBpWithToast } from '@/lib/deployBp';
+import { useCopyStatus } from '@/hooks/useCopyStatus';
+import { DiffTab } from '@/components/diff/DiffTab';
+import { CopyHistoryView } from '@/components/views/CopyHistoryView';
+import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
 import { cn } from '@/lib/utils';
-
-// See the old DeploymentsView for the rationale on the busy-state lifecycle.
-const BUSY_TIMEOUT_MS = 15_000;
-
-interface BusyEntry {
-  stage: AutomationStage;
-  expect: 'deployed' | 'undeployed';
-  startedAt: number;
-}
-
-interface CardEntry {
-  automation: DeployedAutomation | undefined;
-  relativePath: string;
-}
+import type { BusinessProcess, Copy } from '@/types';
+import { Button } from '@/components/ui/button';
+import { api } from '@/lib/api';
+import { watchDeployTask } from '@/lib/deployBp';
+import { useUrlEnum } from '@/lib/urlState';
 
 interface SyncDeployTabProps {
   bp: BusinessProcess;
-  wt: Worktree;
-  /** Flips the shell to the Coding Agent tab (the sync session runs there). */
+  wt: Copy;
+  /** Flips the shell to the Coding Agent tab (the rebase session runs there). */
   onShowAgents: () => void;
+  /** Called once the dev deploy finishes successfully — used to jump to the
+   *  Deployments tab (Development stage) so the user sees the result. */
+  onDeployed: () => void;
 }
 
 /**
- * The Sync & Deploy tab — the old worktree Overview, reshaped per the design:
- * an explainer header with ONE primary "Sync & Deploy" action (today's sync
- * flow: rebases the worktree onto main; gitops then auto-deploys changed
- * automations to dev), plus the worktree's live-dev automation cards.
- * The Specification/README moved to the Description tab; Delete worktree
- * moved to the worktree switcher.
+ * Sync & Deploy tab (design: worktree.jsx). An explainer header with the
+ * ahead/behind + diff summary and a single primary action, over the copy's
+ * line-by-line diff.
+ *
+ * The button does the cheap thing when it can: `POST /copies/{name}/sync`
+ * commits work in progress and, when the copy is a pure fast-forward of main
+ * (no rebase needed), fast-forwards main to it server-side and deploys to dev —
+ * no coding agent. When main has diverged it returns `needs_rebase`, and we
+ * open a coding-agent session to rebase the copy; the user returns and presses
+ * Sync & Deploy again, which now fast-forwards. main is never advanced by a
+ * direct push — only by this user-gated deploy.
  */
-export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
-  const { automations: raw, status } = useAutomations();
-  // Whole-BP live-dev deploy in flight — blocks the Deploy button until the
-  // polled deploy task reaches a terminal state.
-  const [bpDeploying, setBpDeploying] = useState(false);
-  const prefix = `worktrees/${wt.name}/${bp.name}`;
-  // eslint-disable-next-line no-restricted-syntax -- null = modal closed
-  const [inspectName, setInspectName] = useState<string | null>(null);
-  // Busy stays set from request fire until the SSE feed confirms the
-  // expected state, or the safety timeout fires.
-  // eslint-disable-next-line no-restricted-syntax -- null = not busy
-  const [busy, setBusy] = useState<Record<string, BusyEntry | null>>({});
-  const [newAutomationOpen, setNewAutomationOpen] = useState(false);
-  const [syncOpen, setSyncOpen] = useState(false);
-  const { startSyncSession, setSelectedFor, agentStatus, ensureAgent } = useSessions();
-  const [removeTarget, setRemoveTarget] = useState<
-    (RemoveTarget & { automationName: string }) | null
-  >(null);
+export function SyncDeployTab({
+  bp,
+  wt,
+  onShowAgents,
+  onDeployed,
+}: SyncDeployTabProps) {
+  const { changed } = useCopyStatus(wt.name);
+  const { startSyncSession, setSelectedFor, agentStatus, ensureAgent } =
+    useSessions();
+  const [busy, setBusy] = useState(false);
+  const [view, setView] = useUrlEnum('view', ['diff', 'history', 'checks'] as const, 'diff');
 
-  // Group worktree automations by name. Both deployed (stage='live-dev') and
-  // discoverable (stage=null) entries contribute so the card grid shows
-  // automations that exist on disk but haven't been started yet.
-  const byName = useMemo(() => {
-    const out = new Map<string, CardEntry>();
-    for (const a of raw) {
-      const rel = a.relative_path ?? '';
-      if (rel !== prefix && !rel.startsWith(`${prefix}/`)) continue;
-      const key = a.automation_name ?? a.name;
-      const existing = out.get(key);
-      const isDeployed = a.stage === 'live-dev' && a.deployment_id;
-      if (existing) {
-        if (isDeployed && !existing.automation) existing.automation = a;
-        if (!existing.relativePath && rel) existing.relativePath = rel;
-      } else {
-        out.set(key, {
-          automation: isDeployed ? a : undefined,
-          relativePath: rel,
-        });
-      }
-    }
-    return out;
-  }, [raw, prefix]);
-
-  const sorted = useMemo(
-    () => Array.from(byName.entries()).sort(([a], [b]) => a.localeCompare(b)),
-    [byName],
+  // Checks: scan the image a deploy of this BP WOULD build from this copy's
+  // source (built + scanned on demand). Memoised so the panel doesn't refetch
+  // on every render.
+  const checksFetcher = useCallback(
+    () => api.supplyChainPreview(bp.name, wt.name),
+    [bp.name, wt.name],
   );
 
-  const inspectStages: InspectStage[] = useMemo(() => {
-    if (!inspectName) return [];
-    const entry = byName.get(inspectName);
-    return [
-      {
-        id: 'live-dev',
-        label: 'Live dev',
-        automation: entry?.automation,
-        relativePath: entry?.relativePath,
-      },
-    ];
-  }, [byName, inspectName]);
+  // Scope the change summary to this BP — only its changes get synced/deployed,
+  // so the counts here match the BP-scoped diff below.
+  const bpChanged = changed.filter(
+    (c) => c.path === bp.name || c.path.startsWith(`${bp.name}/`),
+  );
+  const adds = bpChanged.reduce((a, c) => a + c.adds, 0);
+  const dels = bpChanged.reduce((a, c) => a + c.dels, 0);
+  const dirty = bpChanged.length > 0;
 
-  const handleClose = useCallback(() => setInspectName(null), []);
-
-  // Clear busy entries once the live snapshot reflects the expected state, or
-  // after the safety timeout.
+  // The copy as a whole can be far ahead/behind main purely from work on OTHER
+  // business processes, while THIS one is identical to main. Split the
+  // divergence so the screen reflects the BP you're actually on. Re-fetched
+  // whenever the change list updates (i.e. after a sync).
+  // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
+  const [divergence, setDivergence] = useState<import('@/lib/api').BpDivergence | null>(
+    null,
+  );
   useEffect(() => {
-    setBusy((cur) => {
-      let changed = false;
-      const next = { ...cur };
-      const now = Date.now();
-      for (const [name, entry] of Object.entries(cur)) {
-        if (!entry) continue;
-        const aut = byName.get(name)?.automation;
-        const isDeployed = !!aut?.deployment_id;
-        const satisfied =
-          entry.expect === 'deployed' ? isDeployed : !isDeployed;
-        if (satisfied || now - entry.startedAt > BUSY_TIMEOUT_MS) {
-          next[name] = null;
-          changed = true;
-        }
-      }
-      return changed ? next : cur;
-    });
-  }, [byName]);
+    let alive = true;
+    api.copyFiles
+      .divergence(wt.name, bp.name)
+      .then((d) => alive && setDivergence(d))
+      .catch(() => alive && setDivergence(null));
+    return () => {
+      alive = false;
+    };
+  }, [wt.name, bp.name, changed]);
 
-  useEffect(() => {
-    const anyBusy = Object.values(busy).some(Boolean);
-    if (!anyBusy) return;
-    const t = setTimeout(() => {
-      setBusy((cur) => {
-        let changed = false;
-        const next = { ...cur };
-        const now = Date.now();
-        for (const [name, entry] of Object.entries(cur)) {
-          if (entry && now - entry.startedAt > BUSY_TIMEOUT_MS) {
-            next[name] = null;
-            changed = true;
-          }
-        }
-        return changed ? next : cur;
-      });
-    }, BUSY_TIMEOUT_MS + 200);
-    return () => clearTimeout(t);
-  }, [busy]);
+  const aheadBp = divergence?.ahead_bp ?? 0;
+  const behindBp = divergence?.behind_bp ?? 0;
+  const aheadOther = divergence?.ahead_other ?? 0;
+  const behindOther = divergence?.behind_other ?? 0;
+  // This BP is up to date with main when it has no un-merged commits, isn't
+  // behind main, and has no uncommitted edits. Other BPs' divergence does NOT
+  // count — they sync from their own Sync & Deploy. Uncommitted work is still
+  // actionable (Sync & Deploy auto-commits it).
+  const bpUpToDate = aheadBp === 0 && behindBp === 0 && !dirty;
+  const actionable = !bpUpToDate;
 
-  // Start the whole business process in live-dev with one click.
-  const runDeployBP = useCallback(async () => {
-    const members = Array.from(byName.keys());
-    setBpDeploying(true);
-    setBusy((m) => {
-      const next = { ...m };
-      for (const name of members) {
-        next[name] = {
-          stage: 'live-dev',
-          expect: 'deployed',
-          startedAt: Date.now(),
-        };
+  const handoffToAgent = useCallback(async () => {
+    if (agentStatus === 'idle' || agentStatus === 'failed') {
+      try {
+        await ensureAgent();
+      } catch {
+        // surfaces via agentStatus; the session will still attempt to spawn
       }
-      return next;
-    });
+    }
+    const id = startSyncSession(wt.name);
+    // Pre-select for this BP scope so flipping to the Coding Agent tab lands on
+    // the rebase terminal without an extra click.
+    setSelectedFor({ copy: wt.name, bp: bp.name }, id);
+    onShowAgents();
+  }, [
+    agentStatus,
+    ensureAgent,
+    startSyncSession,
+    setSelectedFor,
+    wt.name,
+    bp.name,
+    onShowAgents,
+  ]);
+
+  const runSyncDeploy = useCallback(async () => {
+    setBusy(true);
     try {
-      const outcome = await deployBpWithToast({
-        bp: bp.name,
-        stage: 'live-dev',
-        worktree: wt.name,
-        loading: `Starting ${bp.name} in ${wt.name}…`,
-        success: `${bp.name} started in ${wt.name}`,
-        failurePrefix: `Failed to start ${bp.name}`,
-      });
-      if (outcome !== 'completed') {
-        setBusy((m) => {
-          const next = { ...m };
-          for (const name of members) next[name] = null;
-          return next;
+      let result;
+      try {
+        // Scope the sync to this BP: only its commits go to main, the copy's
+        // other commits are auto-rebased (or handed to the agent on conflict).
+        result = await api.copyFiles.sync(wt.name, bp.name);
+      } catch (err) {
+        toast.error(`Sync failed: ${String(err)}`);
+        return;
+      }
+      if (result.status === 'needs_rebase') {
+        toast.info(
+          'main has moved on — opening a coding-agent session to rebase this copy. ' +
+            'When it finishes, come back and press Sync & Deploy again.',
+        );
+        await handoffToAgent();
+        return;
+      }
+      // Fast-forwarded into main. The sync endpoint ALREADY spawned the
+      // dev-stage redeploy (so the deployed dev stage tracks main) and returned
+      // its task id — TRACK that task. Do NOT fire a second deploy: it would
+      // collide with the one the sync just started and 409 ("already in
+      // progress") every time.
+      const toastId = `bp-deploy-main-${bp.name}`;
+      if (result.deploy_task_id) {
+        const outcome = await watchDeployTask(result.deploy_task_id, toastId, {
+          loading: `Synced — deploying ${bp.name} to dev…`,
+          success: `${bp.name} synced and deployed to dev`,
+          failurePrefix: `Synced into main, but deploy to dev failed for ${bp.name}`,
         });
+        // Once it's fully deployed, jump to the Deployments tab's Development
+        // stage so the user lands on the result of what they just shipped.
+        if (outcome === 'completed') onDeployed();
+      } else {
+        // Synced, but the sync deployed nothing (no deployable containers in
+        // this BP, or no net change to deploy).
+        toast.success(`${bp.name} synced to main`);
       }
     } finally {
-      setBpDeploying(false);
+      setBusy(false);
     }
-  }, [bp.name, byName, wt.name]);
-
-  const runRemove = useCallback(async (name: string, deploymentId: string) => {
-    setBusy((m) => ({
-      ...m,
-      [name]: { stage: 'live-dev', expect: 'undeployed', startedAt: Date.now() },
-    }));
-    const work = api.removeAutomation(deploymentId);
-    toast.promise(work, {
-      loading: `Removing ${name} live-dev…`,
-      success: `${name} live-dev removed`,
-      error: (err: unknown) =>
-        isTransientNetworkError(err)
-          ? `${name} live-dev removed`
-          : `Failed to remove ${name}: ${String(err)}`,
-    });
-    try {
-      await work;
-    } catch (err) {
-      if (!isTransientNetworkError(err)) {
-        setBusy((m) => ({ ...m, [name]: null }));
-      }
-    }
-  }, []);
-
-  const bpBusy = bpDeploying || Object.values(busy).some(Boolean);
+  }, [wt.name, bp.name, handoffToAgent, onDeployed]);
 
   return (
-    <div className="flex-1 overflow-auto bg-background">
-      {/* Explainer header (design: worktree.jsx Sync & Deploy) */}
+    <div className="flex flex-1 flex-col overflow-hidden bg-background">
+      {/* Explainer header + the one primary action. */}
       <div className="flex items-start gap-4 border-b border-border bg-background px-7 py-6">
         <div className="flex size-11 shrink-0 items-center justify-center rounded-[10px] bg-primary/10">
           <Rocket className="size-5 text-primary" aria-hidden />
@@ -239,184 +180,118 @@ export function SyncDeployTab({ bp, wt, onShowAgents }: SyncDeployTabProps) {
               {wt.name}
             </strong>{' '}
             onto the <strong className="text-foreground">main code area</strong>,
-            then builds and deploys every changed container in this business
-            process to <strong className="text-foreground">dev</strong>.
+            then builds and deploys every container in this business process to{' '}
+            <strong className="text-foreground">dev</strong>. Your changes below
+            become the new main once the deploy succeeds.
           </p>
-          <div className="mt-3 flex items-center gap-3">
-            <span
-              className={cn(
-                'rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide',
-                wt.synced
-                  ? 'bg-emerald-100 text-emerald-700'
-                  : 'bg-amber-100 text-amber-700',
+          <div className="mt-3 flex flex-col gap-2">
+            {/* THIS business process — the only thing this button syncs/deploys. */}
+            <div className="flex flex-wrap items-center gap-2.5 text-xs">
+              <span className="w-44 shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                This business process
+              </span>
+              {bpUpToDate ? (
+                <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                  Up to date with main
+                </span>
+              ) : (
+                <span className="inline-flex flex-wrap items-center gap-2.5">
+                  {behindBp > 0 && (
+                    <span className="font-semibold text-amber-600">↓ {behindBp} behind</span>
+                  )}
+                  {aheadBp > 0 && (
+                    <span className="font-semibold text-emerald-600">↑ {aheadBp} ahead</span>
+                  )}
+                  {dirty && (
+                    <span className="font-mono text-muted-foreground">
+                      {bpChanged.length} uncommitted file{bpChanged.length === 1 ? '' : 's'} ·{' '}
+                      <span className="text-emerald-600">+{adds}</span> ·{' '}
+                      <span className="text-red-600">−{dels}</span>
+                    </span>
+                  )}
+                </span>
               )}
-            >
-              {wt.synced ? 'Up to date with main' : 'Unsynced'}
-            </span>
-            <span className="text-xs text-muted-foreground">{wt.branch}</span>
+            </div>
+            {/* OTHER business processes — informational; each syncs from its own
+                Sync & Deploy screen and is NOT touched by this button. */}
+            {(aheadOther > 0 || behindOther > 0) && (
+              <div className="flex flex-wrap items-center gap-2.5 text-xs">
+                <span className="w-44 shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Other business processes
+                </span>
+                <span className="inline-flex flex-wrap items-center gap-2.5 text-muted-foreground">
+                  {behindOther > 0 && <span>↓ {behindOther} behind</span>}
+                  {aheadOther > 0 && <span>↑ {aheadOther} ahead</span>}
+                  <span className="text-[11px] italic">
+                    not synced by this button — each deploys from its own screen
+                  </span>
+                </span>
+              </div>
+            )}
           </div>
         </div>
-        <Button size="lg" className="shrink-0" onClick={() => setSyncOpen(true)}>
+        <Button
+          size="lg"
+          className="shrink-0"
+          disabled={!actionable || busy}
+          title={
+            !actionable
+              ? 'Already up to date with main'
+              : 'Commit, fast-forward into main, and deploy to dev'
+          }
+          onClick={() => void runSyncDeploy()}
+        >
           <Rocket className="size-4" aria-hidden />
-          Sync &amp; Deploy
+          {busy ? 'Working…' : 'Sync & Deploy'}
         </Button>
       </div>
 
-      <div className="flex flex-col gap-5 px-7 py-6">
-        <div className="flex items-end justify-between gap-4">
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Automations · live-dev
-            </div>
-            <div className="mt-0.5 text-sm text-muted-foreground">
-              Each automation runs locally with hot-reload. Sync the worktree to
-              deploy.
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {sorted.length > 0 && (
-              <Button
-                size="sm"
-                onClick={() => void runDeployBP()}
-                disabled={bpBusy}
-              >
-                <Rocket className="size-3.5" aria-hidden />
-                {bpDeploying ? 'Deploying…' : 'Deploy'}
-              </Button>
+      {/* Diff (what becomes main) / History (copy + main commits, deploy tags). */}
+      <div className="flex shrink-0 items-center gap-4 border-b border-border bg-background px-7">
+        {(['diff', 'history', 'checks'] as const).map((id) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setView(id)}
+            className={cn(
+              '-mb-px border-b-2 py-2.5 text-[13px] font-medium capitalize transition-colors',
+              view === id
+                ? 'border-foreground text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground',
             )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setNewAutomationOpen(true)}
-            >
-              <Plus className="size-3.5" aria-hidden />
-              New automation
-            </Button>
-          </div>
-        </div>
-
-        {status === 'connecting' && sorted.length === 0 ? (
-          <EmptyState message="Loading automations…" />
-        ) : sorted.length === 0 ? (
-          <EmptyState message="No live-dev automations for this worktree." />
+          >
+            {id}
+          </button>
+        ))}
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {view === 'diff' ? (
+          <DiffTab copy={wt.name} pathPrefix={bp.name} />
+        ) : view === 'history' ? (
+          <CopyHistoryView copy={wt.name} />
         ) : (
-          <div className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(320px,1fr))]">
-            {sorted.map(([name, entry]) => (
-              <AutomationCard
-                key={name}
-                name={name}
-                stages={[
-                  {
-                    id: 'live-dev',
-                    label: 'Live dev',
-                    short: 'Live dev',
-                    automation: entry.automation,
-                  },
-                ]}
-                deployableStages={[]}
-                promotableStages={[]}
-                busyStage={busy[name]?.stage ?? null}
-                onInspect={() => setInspectName(name)}
-                onDeploy={() => {
-                  // Per-automation deploy is disabled (deployableStages is
-                  // empty); deploys happen at the BP level via "Deploy".
-                }}
-                onPromote={() => {
-                  // Single live-dev stage — promotion is not applicable here.
-                }}
-                onRemove={(deploymentId) => {
-                  setRemoveTarget({
-                    deploymentId,
-                    name,
-                    automationName: name,
-                    stageLabel: 'Live dev',
-                  });
-                }}
-              />
-            ))}
+          <div className="min-h-0 flex-1 overflow-auto px-7 py-5">
+            <SupplyChainPanel
+              bp={bp.name}
+              stage="dev"
+              stageLabel="this build"
+              copy={wt.name}
+              fetcher={checksFetcher}
+              emptyHint={`No buildable automation source found for ${bp.name} in ${wt.name}.`}
+              intro={
+                <>
+                  Vulnerabilities in the image this business process would build from{' '}
+                  <strong className="font-mono font-semibold text-foreground">{wt.name}</strong>’s
+                  current source — the same artifact{' '}
+                  <strong className="text-foreground">Sync &amp; Deploy</strong> ships. Built and
+                  scanned on demand. Click a CVE to view it or mark it out of scope — that decision
+                  is saved with the code and ships on Sync &amp; Deploy.
+                </>
+              }
+            />
           </div>
         )}
       </div>
-
-      <InspectModal
-        open={inspectName !== null}
-        onClose={handleClose}
-        name={inspectName ?? ''}
-        stages={inspectStages}
-        mode="liveDev"
-        worktree={wt.name}
-        actionBusy={inspectName ? !!busy[inspectName] : false}
-        onRemove={(deploymentId) => {
-          if (!inspectName) return;
-          setRemoveTarget({
-            deploymentId,
-            name: inspectName,
-            automationName: inspectName,
-            stageLabel: 'Live dev',
-          });
-        }}
-      />
-
-      <RemoveConfirmDialog
-        target={removeTarget}
-        onCancel={() => setRemoveTarget(null)}
-        onConfirm={() => {
-          if (!removeTarget) return;
-          const { automationName, deploymentId } = removeTarget;
-          setRemoveTarget(null);
-          void runRemove(automationName, deploymentId);
-        }}
-      />
-
-      <NewAutomationDialog
-        open={newAutomationOpen}
-        onOpenChange={setNewAutomationOpen}
-        bpId={bp.id}
-        worktree={wt.name}
-        existingNames={sorted.map(([n]) => n)}
-      />
-
-      <AlertDialog open={syncOpen} onOpenChange={setSyncOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Sync worktree &quot;{wt.name}&quot; with main?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Opens a coding-agent session at the worktree root that runs the{' '}
-              <code>bitswan-coding-agent vcs sync</code> flow. Uncommitted
-              changes are committed as <code>pre-sync-commit</code> first; if
-              merge conflicts occur the agent will walk you through resolving
-              them via <code>vcs sync-continue</code>. After a successful sync,
-              changed automations are deployed to dev automatically.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={async (e) => {
-                e.preventDefault();
-                setSyncOpen(false);
-                if (agentStatus === 'idle' || agentStatus === 'failed') {
-                  try {
-                    await ensureAgent();
-                  } catch {
-                    // surfaces via agentStatus; the session will still attempt to spawn
-                  }
-                }
-                const id = startSyncSession(wt.name);
-                // Pre-select for the current BP scope so flipping to the
-                // Coding Agent tab lands on the new sync terminal without an
-                // extra click.
-                setSelectedFor({ worktree: wt.name, bp: bp.name }, id);
-                onShowAgents();
-              }}
-            >
-              Sync &amp; Deploy
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 }

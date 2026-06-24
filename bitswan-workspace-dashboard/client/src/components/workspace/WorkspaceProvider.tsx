@@ -5,19 +5,19 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { BusinessProcess, DeployedAutomation, Worktree } from '@/types';
+import type { BusinessProcess, DeployedAutomation, Copy } from '@/types';
 
 export type StreamStatus = 'connecting' | 'live' | 'error';
 
 interface WorkspaceContextValue {
   /** Latest automations snapshot from the upstream SSE feed. */
   automations: DeployedAutomation[];
-  /** Latest business-process listing (main repo + all worktrees, deduped). */
+  /** Latest business-process listing (main repo + all copies, deduped). */
   // eslint-disable-next-line no-restricted-syntax -- nullable until first delivery
   processes: BusinessProcess[] | null;
-  /** Latest worktree listing — same payload as the old `/api/worktrees` REST. */
+  /** Latest copy listing — same payload as the old `/api/copies` REST. */
   // eslint-disable-next-line no-restricted-syntax -- nullable until first delivery
-  worktrees: Worktree[] | null;
+  copies: Copy[] | null;
   /** Live status of the SSE subscription. */
   status: StreamStatus;
 }
@@ -29,8 +29,8 @@ interface GitopsProcessEntry {
   id: string;
   name: string;
   in_main: boolean;
-  worktrees: string[];
-  has_worktrees: boolean;
+  copies: string[];
+  has_copies: boolean;
 }
 
 function toBusinessProcess(p: GitopsProcessEntry): BusinessProcess {
@@ -39,14 +39,14 @@ function toBusinessProcess(p: GitopsProcessEntry): BusinessProcess {
     name: p.name,
     path: p.name,
     inMain: p.in_main,
-    worktrees: p.worktrees,
-    hasWorktrees: p.has_worktrees,
+    copies: p.copies,
+    hasCopies: p.has_copies,
   };
 }
 
 /**
  * Holds the single `/api/events` SSE subscription for the whole app. Views
- * mount and unmount as the user switches scopes (Deployments / Worktree /
+ * mount and unmount as the user switches scopes (Deployments / Copy /
  * Agents), but the EventSource — and the cached snapshots — survive,
  * eliminating the "Loading…" flash on every tab switch.
  *
@@ -62,7 +62,7 @@ function toBusinessProcess(p: GitopsProcessEntry): BusinessProcess {
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [automations, setAutomations] = useState<DeployedAutomation[]>([]);
   const [processes, setProcesses] = useState<BusinessProcess[] | null>(null);
-  const [worktrees, setWorktrees] = useState<Worktree[] | null>(null);
+  const [copies, setCopies] = useState<Copy[] | null>(null);
   const [status, setStatus] = useState<StreamStatus>('connecting');
 
   useEffect(() => {
@@ -87,13 +87,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
     };
 
-    const handleWorktreesPayload = (raw: string) => {
+    const handleCopiesPayload = (raw: string) => {
       try {
         const payload = JSON.parse(raw);
         // Older gitops emitted an empty object `{}` as a ping; treat that
         // and any non-array payload as "no data, keep current state".
         if (!Array.isArray(payload)) return;
-        setWorktrees(payload as Worktree[]);
+        setCopies(payload as Copy[]);
       } catch {
         // ignore
       }
@@ -107,8 +107,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       handleProcessesPayload((ev as MessageEvent).data);
       setStatus('live');
     });
-    es.addEventListener('worktrees', (ev) => {
-      handleWorktreesPayload((ev as MessageEvent).data);
+    es.addEventListener('copies', (ev) => {
+      handleCopiesPayload((ev as MessageEvent).data);
       setStatus('live');
     });
     es.addEventListener('open', () => setStatus('live'));
@@ -118,7 +118,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <WorkspaceContext.Provider value={{ automations, processes, worktrees, status }}>
+    <WorkspaceContext.Provider value={{ automations, processes, copies, status }}>
       {children}
     </WorkspaceContext.Provider>
   );
@@ -150,15 +150,15 @@ export function useProcesses(): {
 }
 
 /**
- * Read the shared worktree list. Returns `null` until the first SSE delivery
+ * Read the shared copy list. Returns `null` until the first SSE delivery
  * lands so callers can show a loading state if needed.
  */
-export function useWorktrees(): {
+export function useCopies(): {
   // eslint-disable-next-line no-restricted-syntax -- null = first SSE not yet received
-  worktrees: Worktree[] | null;
+  copies: Copy[] | null;
   status: StreamStatus;
 } {
   const v = useContext(WorkspaceContext);
-  if (!v) throw new Error('useWorktrees must be used inside <WorkspaceProvider>');
-  return { worktrees: v.worktrees, status: v.status };
+  if (!v) throw new Error('useCopies must be used inside <WorkspaceProvider>');
+  return { copies: v.copies, status: v.status };
 }

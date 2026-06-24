@@ -10,8 +10,8 @@ Bailey is part of [BitSwan](https://www.bitswan.ai/), the platform for building 
 
 This repository — **Bailey Lab** — is the unstable upstream of **Bailey4Enterprise**:
 
-- **Bailey Lab** (this repo) is on a **rolling release**. Development happens here first; expect rapid changes and occasional breakage.
-- **Bailey4Enterprise** has **stable releases** that are hardened and tested by our QA team, with an **SLA available**.
+- **Bailey Lab** (this repo) is on a **rolling release**. Development happens here first; expect rapid changes and occasional breakage. It is **shared source** — see [License](#license) below.
+- **Bailey4Enterprise** has **stable releases** that are hardened and tested by our QA team, with an **SLA available**. It is a separate, **proprietary** edition under a commercial license.
 
 To get Bailey4Enterprise, visit [bitswan.ai](https://www.bitswan.ai/).
 
@@ -25,3 +25,21 @@ To get Bailey4Enterprise, visit [bitswan.ai](https://www.bitswan.ai/).
 | [`bitswan-workspace-dashboard`](bitswan-workspace-dashboard/) | Web dashboard for working with your workspace, including an in-browser terminal |
 
 Each component has its own README with development and usage instructions. CI for all components runs from the root [`.github/workflows/`](.github/workflows/) directory, with each workflow scoped to its component via paths filters.
+
+## License
+
+**Bitswan Lab is shared source.** Every component in this repository is licensed
+under your choice of **either**:
+
+- the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0), or
+- the [PolyForm Perimeter License 1.0.0](https://polyformproject.org/licenses/perimeter/1.0.0),
+
+at your option — see [`LICENSE`](LICENSE). In short: free for any noncommercial
+use, and free for commercial use that does not compete with Bitswan.
+
+This is **not** an OSI open-source license: the source is published and freely
+usable within those bounds, but the licenses reserve commercial-competition
+rights.
+
+**Bailey4Enterprise** is a separate, **proprietary** edition under a commercial
+license; the terms above do not apply to it. See [bitswan.ai](https://www.bitswan.ai/).

@@ -6,19 +6,13 @@ import (
 	"path/filepath"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
-	"github.com/bitswan-space/bitswan-workspaces/internal/services"
 	"github.com/bitswan-space/bitswan-workspaces/internal/workspace"
 	"gopkg.in/yaml.v3"
 )
 
 // runDisconnectFromAOC disconnects from AOC by cleaning up all AOC-related config
 func (s *Server) runDisconnectFromAOC() error {
-	// 1. Stop MQTT monitor and disconnect
-	stopMQTTMonitor()
-	publisher := GetMQTTPublisher()
-	publisher.Disconnect()
-
-	// 2. Clean up workspace metadata and OAuth configs, collect deployable workspace names
+	// 1. Clean up workspace metadata and OAuth configs, collect deployable workspace names
 	workspaceNames, err := cleanupWorkspaceAOCConfig()
 	if err != nil {
 		fmt.Printf("Warning: Failed to clean up some workspace configs: %v\n", err)
@@ -53,41 +47,18 @@ func (s *Server) runDisconnectFromAOC() error {
 	return nil
 }
 
-// restartWorkspace regenerates docker-compose files and restarts gitops + editor
-// for a single workspace. Unlike runWorkspaceUpdate this skips example updates
-// and does not wait for the editor health check.
+// restartWorkspace regenerates docker-compose files and restarts gitops
+// for a single workspace. Unlike runWorkspaceUpdate this skips example updates.
 func restartWorkspace(workspaceName string) error {
 	// Regenerate and restart gitops
 	if err := workspace.UpdateWorkspaceDeployment(workspaceName, "", false, false); err != nil {
 		return fmt.Errorf("gitops: %w", err)
 	}
 
-	// Regenerate and restart editor if enabled
-	editorService, err := services.NewEditorService(workspaceName)
-	if err != nil {
-		return nil // workspace doesn't exist or isn't set up, skip
-	}
-	if !editorService.IsEnabled() {
-		return nil
-	}
-
-	if err := editorService.StopContainer(); err != nil {
-		return fmt.Errorf("editor stop: %w", err)
-	}
-	if err := fixEditorPermissions(workspaceName); err != nil {
-		return fmt.Errorf("editor permissions: %w", err)
-	}
-	if err := editorService.RegenerateDockerCompose("", false, false); err != nil {
-		return fmt.Errorf("editor regenerate: %w", err)
-	}
-	if err := editorService.StartContainer(); err != nil {
-		return fmt.Errorf("editor start: %w", err)
-	}
-
 	return nil
 }
 
-// cleanupWorkspaceAOCConfig removes OAuth config files and clears MQTT metadata from all workspaces.
+// cleanupWorkspaceAOCConfig removes OAuth config files and clears AOC metadata from all workspaces.
 // Returns the list of workspace names that have a full deployment (metadata.yaml + deployment dir)
 // and should be restarted.
 func cleanupWorkspaceAOCConfig() ([]string, error) {
@@ -121,7 +92,7 @@ func cleanupWorkspaceAOCConfig() ([]string, error) {
 			}
 		}
 
-		// Clear MQTT and workspace_id fields from metadata.yaml
+		// Clear workspace_id and other AOC fields from metadata.yaml
 		if err := clearWorkspaceAOCMetadata(metadataPath); err != nil {
 			continue
 		}
@@ -151,11 +122,6 @@ func clearWorkspaceAOCMetadata(metadataPath string) error {
 	}
 
 	metadata.WorkspaceId = nil
-	metadata.MqttUsername = nil
-	metadata.MqttPassword = nil
-	metadata.MqttBroker = nil
-	metadata.MqttPort = nil
-	metadata.MqttTopic = nil
 
 	return metadata.SaveToFile(metadataPath)
 }

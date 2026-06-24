@@ -2,7 +2,6 @@ import asyncio
 from contextlib import asynccontextmanager
 import logging
 import os
-import functools
 import threading
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -16,16 +15,14 @@ from .dependencies import get_automation_service
 from .deploy_manager import deploy_manager
 from .snapshot_manager import snapshot_manager
 from .event_broadcaster import event_broadcaster
-from .mqtt import mqtt_resource
-from .mqtt_publish_automations import publish_automations
-from .mqtt_processes import (
-    process_service,
-    publish_processes,
-    setup_mqtt_subscriptions,
-)
-from .routes.worktrees import refresh_worktrees
+from .services.process_service import process_service
+from .routes.copies import refresh_copies
 
 logger = logging.getLogger(__name__)
+
+
+def _copies_dir() -> str:
+    return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
 
 
 async def _broadcast_processes() -> None:
@@ -33,7 +30,7 @@ async def _broadcast_processes() -> None:
 
     Consumed by the workspace dashboard so it never has to walk the
     filesystem itself. Driven from both `WorkspaceChangeHandler` (main repo)
-    and `WorktreeChangeHandler` (per-worktree).
+    and `CopyChangeHandler` (per-copy).
     """
     try:
         await event_broadcaster.broadcast(
@@ -43,17 +40,17 @@ async def _broadcast_processes() -> None:
         logger.warning("Failed to broadcast processes: %s", e)
 
 
-async def _broadcast_worktrees() -> None:
-    """Push the current `worktrees` snapshot over the SSE feed.
+async def _broadcast_copies() -> None:
+    """Push the current `copies` snapshot over the SSE feed.
 
-    Carries the same payload as `GET /worktrees/`. Driven by
-    `WorktreeChangeHandler` so the dashboard never has to poll.
+    Carries the same payload as `GET /copies/`. Driven by
+    `CopyChangeHandler` so the dashboard never has to poll.
     """
     try:
-        worktrees = await refresh_worktrees()
-        await event_broadcaster.broadcast("worktrees", worktrees)
+        copies = await refresh_copies()
+        await event_broadcaster.broadcast("copies", copies)
     except Exception as e:
-        logger.warning("Failed to broadcast worktrees: %s", e)
+        logger.warning("Failed to broadcast copies: %s", e)
 
 
 async def _broadcast_automations() -> None:
@@ -89,9 +86,8 @@ class WorkspaceChangeHandler(FileSystemEventHandler):
     a python file inside an automation doesn't fire either refresh.
     """
 
-    def __init__(self, client, event_loop):
+    def __init__(self, event_loop):
         super().__init__()
-        self.client = client
         self.event_loop = event_loop
         self.update_scheduled = False
         self.update_lock = threading.Lock()
@@ -108,10 +104,9 @@ class WorkspaceChangeHandler(FileSystemEventHandler):
         async def delayed_update():
             await asyncio.sleep(0.5)  # debounce 500ms for bursts
             try:
-                # Refresh the main-repo BP cache before downstream publishers
+                # Refresh the main-repo BP cache before downstream consumers
                 # read from it.
                 process_service.refresh(None)
-                await publish_processes(self.client)
                 await _broadcast_processes()
             except Exception as e:
                 logger.warning("Error publishing processes: %s", e)
@@ -166,21 +161,21 @@ class WorkspaceChangeHandler(FileSystemEventHandler):
             self.schedule_automations_update()
 
 
-class WorktreeChangeHandler(FileSystemEventHandler):
-    """Watch worktree directories for file changes and broadcast via SSE.
+class CopyChangeHandler(FileSystemEventHandler):
+    """Watch copy directories for file changes and broadcast via SSE.
 
     Narrowly filtered so editing code inside an automation doesn't fire any
     refresh — only events that meaningfully change the state we publish:
-      - worktrees-list ping: events at the worktrees root (worktree added /
-        removed), or events under a worktree's `.git/` (commit detection,
+      - copies-list ping: events at the copies root (copy added /
+        removed), or events under a copy's `.git/` (commit detection,
         which flips `synced` / `commit_hash`).
-      - per-worktree process refresh: `process.toml` events.
-      - per-worktree automation refresh: `automation.toml` events.
-      - per-worktree automation refresh-all on `bitswan.yaml` events
+      - per-copy process refresh: `process.toml` events.
+      - per-copy automation refresh: `automation.toml` events.
+      - per-copy automation refresh-all on `bitswan.yaml` events
         (defensive — bitswan.yaml normally lives at the gitops root, not
-        inside a worktree).
+        inside a copy).
 
-    The worktree name is derived from the event path so we only re-scan the
+    The copy name is derived from the event path so we only re-scan the
     affected scope.
     """
 
@@ -190,22 +185,24 @@ class WorktreeChangeHandler(FileSystemEventHandler):
     _GIT_STATE_SUFFIXES = ("/.git/HEAD", "/.git/index", "/.git/ORIG_HEAD")
     _GIT_REFS_SEGMENT = "/.git/refs/heads/"
 
-    def __init__(self, event_loop, worktrees_root: str):
+    def __init__(self, event_loop, copies_root: str):
         super().__init__()
         self.event_loop = event_loop
-        self.worktrees_root = os.path.realpath(worktrees_root)
-        # Per-worktree debounce timers, one set per refresh pipeline.
+        # Root of the per-copy clones (${BITSWAN_COPIES_DIR}, default /copies).
+        # The `main` copy is the default-branch / main scope (keyed None).
+        self.copies_root = os.path.realpath(copies_root)
+        # Per-copy debounce timers, one set per refresh pipeline.
         self._process_tasks: dict[str | None, asyncio.Task] = {}
         self._automation_tasks: dict[str | None, asyncio.Task] = {}
-        # Single timer for the "ping" worktrees-list broadcast.
-        self._wt_ping_task: asyncio.Task | None = None
+        # Single timer for the "ping" copies-list broadcast.
+        self._copy_ping_task: asyncio.Task | None = None
 
-    def _worktree_from_path(self, path: str) -> str | None:
-        """Return the name of the worktree containing `path`, or None when
-        the event is at the worktrees root (e.g. a worktree being added /
-        removed)."""
+    def _copy_from_path(self, path: str) -> str | None:
+        """Return the name of the copy containing `path`, or None when the
+        event is at the copies root (e.g. a copy being added / removed) or
+        within the `main` copy (the main scope is keyed None everywhere)."""
         try:
-            rel = os.path.relpath(os.path.realpath(path), self.worktrees_root)
+            rel = os.path.relpath(os.path.realpath(path), self.copies_root)
         except ValueError:
             return None
         if rel == "." or rel.startswith(".."):
@@ -214,6 +211,9 @@ class WorktreeChangeHandler(FileSystemEventHandler):
         if len(parts) <= 1:
             return None
         first = parts[0]
+        # The `main` copy is the unprefixed/None scope.
+        if first == "main":
+            return None
         return first or None
 
     def _is_git_state_change(self, path: str) -> bool:
@@ -225,99 +225,99 @@ class WorktreeChangeHandler(FileSystemEventHandler):
             return True
         return self._GIT_REFS_SEGMENT in norm
 
-    def _schedule_worktrees_ping(self):
-        """Refresh the cached worktree list and broadcast it over SSE."""
+    def _schedule_copies_ping(self):
+        """Refresh the cached copy list and broadcast it over SSE."""
 
         async def _broadcast():
             await asyncio.sleep(1)
-            await _broadcast_worktrees()
+            await _broadcast_copies()
 
         def _run():
-            if self._wt_ping_task and not self._wt_ping_task.done():
-                self._wt_ping_task.cancel()
-            self._wt_ping_task = asyncio.ensure_future(_broadcast())
+            if self._copy_ping_task and not self._copy_ping_task.done():
+                self._copy_ping_task.cancel()
+            self._copy_ping_task = asyncio.ensure_future(_broadcast())
 
         self.event_loop.call_soon_threadsafe(_run)
 
-    def _schedule_process_refresh(self, worktree: str | None):
-        """Debounced refresh + SSE broadcast for one worktree's BP cache.
+    def _schedule_process_refresh(self, copy: str | None):
+        """Debounced refresh + SSE broadcast for one copy's BP cache.
 
-        `worktree=None` means the event hit the worktrees root itself — a
-        worktree was probably added or removed. Refresh the full set so the
+        `copy=None` means the event hit the copies root itself — a
+        copy was probably added or removed. Refresh the full set so the
         cache reflects the new shape, then broadcast.
         """
 
         async def _refresh():
             await asyncio.sleep(0.5)
             try:
-                if worktree is None:
+                if copy is None:
                     process_service.refresh_all()
                 else:
-                    if os.path.isdir(os.path.join(self.worktrees_root, worktree)):
-                        process_service.refresh(worktree)
+                    if os.path.isdir(os.path.join(self.copies_root, copy)):
+                        process_service.refresh(copy)
                     else:
-                        process_service.forget_worktree(worktree)
+                        process_service.forget_copy(copy)
                 await _broadcast_processes()
             except Exception as e:
                 logger.warning(
-                    "Failed to refresh worktree processes (%s): %s",
-                    worktree or "<root>",
+                    "Failed to refresh copy processes (%s): %s",
+                    copy or "<root>",
                     e,
                 )
 
         def _run():
-            existing = self._process_tasks.get(worktree)
+            existing = self._process_tasks.get(copy)
             if existing and not existing.done():
                 existing.cancel()
-            self._process_tasks[worktree] = asyncio.ensure_future(_refresh())
+            self._process_tasks[copy] = asyncio.ensure_future(_refresh())
 
         self.event_loop.call_soon_threadsafe(_run)
 
-    def _schedule_automations_refresh(self, worktree: str | None):
-        """Debounced refresh + SSE broadcast for one worktree's automation cache."""
+    def _schedule_automations_refresh(self, copy: str | None):
+        """Debounced refresh + SSE broadcast for one copy's automation cache."""
 
         async def _refresh():
             await asyncio.sleep(0.5)
             try:
                 svc = get_automation_service()
-                if worktree is None:
+                if copy is None:
                     await svc.refresh_all()
                 else:
-                    if os.path.isdir(os.path.join(self.worktrees_root, worktree)):
-                        await svc.refresh(worktree)
+                    if os.path.isdir(os.path.join(self.copies_root, copy)):
+                        await svc.refresh(copy)
                     else:
-                        svc.forget_worktree(worktree)
+                        svc.forget_copy(copy)
                 await _broadcast_automations()
             except Exception as e:
                 logger.warning(
-                    "Failed to refresh worktree automations (%s): %s",
-                    worktree or "<root>",
+                    "Failed to refresh copy automations (%s): %s",
+                    copy or "<root>",
                     e,
                 )
 
         def _run():
-            existing = self._automation_tasks.get(worktree)
+            existing = self._automation_tasks.get(copy)
             if existing and not existing.done():
                 existing.cancel()
-            self._automation_tasks[worktree] = asyncio.ensure_future(_refresh())
+            self._automation_tasks[copy] = asyncio.ensure_future(_refresh())
 
         self.event_loop.call_soon_threadsafe(_run)
 
     def _handle(self, event):
         src = getattr(event, "src_path", "") or ""
-        wt = self._worktree_from_path(src) if src else None
+        copy = self._copy_from_path(src) if src else None
         basename = os.path.basename(src)
 
-        # 1. Worktree-list ping: only on root events (add/remove) or git
+        # 1. Copy-list ping: only on root events (add/remove) or git
         #    state changes (commit, index write, ref update) — NOT on every
-        #    code edit inside a worktree.
-        if wt is None or self._is_git_state_change(src):
-            self._schedule_worktrees_ping()
+        #    code edit inside a copy.
+        if copy is None or self._is_git_state_change(src):
+            self._schedule_copies_ping()
 
-        # 2. Worktree directory itself appearing / disappearing → full
+        # 2. Copy directory itself appearing / disappearing → full
         #    refresh of both pipelines so the new scope is picked up (or
         #    stale scope dropped).
-        if wt is None:
+        if copy is None:
             self._schedule_process_refresh(None)
             self._schedule_automations_refresh(None)
             return
@@ -325,12 +325,12 @@ class WorktreeChangeHandler(FileSystemEventHandler):
         # 3. Targeted refresh by file basename. Skip everything else (code
         #    edits, asset writes, etc.) to keep noise off the SSE feed.
         if basename == "process.toml":
-            self._schedule_process_refresh(wt)
+            self._schedule_process_refresh(copy)
         if basename == "automation.toml":
-            self._schedule_automations_refresh(wt)
+            self._schedule_automations_refresh(copy)
         if basename == "bitswan.yaml":
             # bitswan.yaml normally lives at the gitops root, not under a
-            # worktree, but treat any in-worktree occurrence as a global
+            # copy, but treat any in-copy occurrence as a global
             # automation-state change.
             self._schedule_automations_refresh(None)
 
@@ -435,120 +435,131 @@ def _start_profiling():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     observer = None
-    worktree_observer = None
+    copy_observer = None
     watcher_task: asyncio.Task | None = None
     dump_profile = _start_profiling()
 
     scheduler = AsyncIOScheduler(timezone="UTC")
-    result = await mqtt_resource.connect()
 
-    if result:
-        client = mqtt_resource.get_client()
+    # Ensure the canonical bare repo exists and is fast-forward-only before the
+    # smart-HTTP git server starts serving clones/pushes. Idempotent.
+    try:
+        from app.services.git_server import ensure_bare_repo
 
-        # Set up MQTT subscriptions for process operations
-        await setup_mqtt_subscriptions(client)
+        await ensure_bare_repo()
+    except Exception as e:
+        logger.warning("Failed to ensure canonical bare repo: %s", e)
 
-        # Warm the ProcessService cache before publishing anything — both
-        # `publish_processes` (MQTT) and `_broadcast_processes` (SSE) read
-        # from it.
-        process_service.refresh_all()
+    # Warm the ProcessService cache so the first `_broadcast_processes`
+    # (SSE) read finds it populated.
+    process_service.refresh_all()
 
-        # Warm the AutomationService scope-keyed cache. Cheap (filesystem
-        # scan + bitswan.yaml read) and means the first GET /automations/
-        # or SSE consumer doesn't pay for an inline `refresh_all()`.
-        try:
-            await get_automation_service().refresh_all()
-        except Exception as e:
-            logger.warning("Initial automations cache warm failed: %s", e)
+    # Warm the AutomationService scope-keyed cache. Cheap (filesystem
+    # scan + bitswan.yaml read) and means the first GET /automations/
+    # or SSE consumer doesn't pay for an inline `refresh_all()`.
+    try:
+        await get_automation_service().refresh_all()
+    except Exception as e:
+        logger.warning("Initial automations cache warm failed: %s", e)
 
-        # Warm the worktree-list cache so the first SSE consumer doesn't
-        # pay the git-cost of an initial scan.
-        try:
-            await refresh_worktrees()
-        except Exception as e:
-            logger.warning("Initial worktrees cache warm failed: %s", e)
+    # Warm the copy-list cache so the first SSE consumer doesn't
+    # pay the git-cost of an initial scan.
+    try:
+        await refresh_copies()
+    except Exception as e:
+        logger.warning("Initial copies cache warm failed: %s", e)
 
-        # Publish processes and automations
-        await publish_processes(client)
-        await publish_automations(client)
+    # Set up file system watcher for workspace directory
+    workspace_dir = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
+    if os.path.exists(workspace_dir):
+        event_handler = WorkspaceChangeHandler(asyncio.get_event_loop())
+        observer = Observer()
+        observer.schedule(event_handler, workspace_dir, recursive=True)
+        observer.start()
+        print(f"Started watching workspace directory: {workspace_dir}")
 
-        # Schedule periodic updates
-        scheduler.add_job(
-            functools.partial(publish_automations, client),
-            trigger="interval",
-            seconds=10,
-            name="publish_automations",
-        )
-
-        # Set up file system watcher for workspace directory
-        workspace_dir = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
-        if os.path.exists(workspace_dir):
-            event_handler = WorkspaceChangeHandler(client, asyncio.get_event_loop())
-            observer = Observer()
-            observer.schedule(event_handler, workspace_dir, recursive=True)
-            observer.start()
-            print(f"Started watching workspace directory: {workspace_dir}")
-        else:
-            print(f"Workspace directory does not exist: {workspace_dir}")
-
-        # Watch worktree directories for file changes → SSE push.
-        # Create the directory first so a fresh workspace (where worktrees/
-        # doesn't exist yet) still gets a watcher attached. Without this the
-        # first `POST /worktrees/create` has no listener, the cache stays
-        # empty, and `GET /worktrees/` keeps returning [] until gitops
-        # restarts. The recursive watcher on `workspace_dir` doesn't help —
+        # Watch the per-copy clones for file changes → SSE push.
+        # Create the directory first so a fresh deployment (where the copies
+        # dir doesn't exist yet) still gets a watcher attached. Without this
+        # the first copy created has no listener, the cache stays empty, and
+        # `GET /copies/` keeps returning [] until gitops restarts. The
+        # recursive watcher on `workspace_dir` doesn't help —
         # `WorkspaceChangeHandler` only refreshes automations/processes, not
-        # the worktrees list cache.
-        worktrees_dir = os.path.join(workspace_dir, "worktrees")
-        os.makedirs(worktrees_dir, exist_ok=True)
-        wt_handler = WorktreeChangeHandler(asyncio.get_event_loop(), worktrees_dir)
-        worktree_observer = Observer()
-        worktree_observer.schedule(wt_handler, worktrees_dir, recursive=True)
-        worktree_observer.start()
-        print(f"Started watching worktrees directory: {worktrees_dir}")
+        # the copies list cache.
+        # Guarded by the workspace-dir check: this used to live behind the
+        # MQTT-connected branch, so it was skipped where there's no workspace
+        # repo (e.g. tests); keep that behaviour now that MQTT is gone.
+        copies_dir = _copies_dir()
+        os.makedirs(copies_dir, exist_ok=True)
+        copy_handler = CopyChangeHandler(asyncio.get_event_loop(), copies_dir)
+        copy_observer = Observer()
+        copy_observer.schedule(copy_handler, copies_dir, recursive=True)
+        copy_observer.start()
+        print(f"Started watching copies directory: {copies_dir}")
+    else:
+        print(f"Workspace directory does not exist: {workspace_dir}")
 
-        # Clean up completed/failed deploy tasks every 10 minutes
-        scheduler.add_job(
-            deploy_manager.cleanup_old_tasks,
-            trigger="interval",
-            minutes=10,
-            name="cleanup_deploy_tasks",
+    # Clean up completed/failed deploy tasks every 10 minutes
+    scheduler.add_job(
+        deploy_manager.cleanup_old_tasks,
+        trigger="interval",
+        minutes=10,
+        name="cleanup_deploy_tasks",
+    )
+
+    # Same for snapshot tasks
+    scheduler.add_job(
+        snapshot_manager.cleanup_old_tasks,
+        trigger="interval",
+        minutes=10,
+        name="cleanup_snapshot_tasks",
+    )
+
+    # Daily backup at 2 AM UTC (if configured)
+    async def _scheduled_backup():
+        from app.services.backup_service import (
+            get_backup_config,
+            get_restic_key,
+            run_backup,
         )
 
-        # Same for snapshot tasks
-        scheduler.add_job(
-            snapshot_manager.cleanup_old_tasks,
-            trigger="interval",
-            minutes=10,
-            name="cleanup_snapshot_tasks",
-        )
+        config = get_backup_config()
+        if not config or not get_restic_key():
+            return  # Not configured, skip
+        try:
+            await run_backup(config)
+            print("Scheduled backup completed successfully")
+        except Exception as e:
+            print(f"Scheduled backup failed: {e}")
 
-        # Daily backup at 2 AM UTC (if configured)
-        async def _scheduled_backup():
-            from app.services.backup_service import (
-                get_backup_config,
-                get_restic_key,
-                run_backup,
-            )
+    scheduler.add_job(
+        _scheduled_backup,
+        trigger="cron",
+        hour=2,
+        minute=0,
+        name="daily_backup",
+    )
 
-            config = get_backup_config()
-            if not config or not get_restic_key():
-                return  # Not configured, skip
-            try:
-                await run_backup(config)
-                print("Scheduled backup completed successfully")
-            except Exception as e:
-                print(f"Scheduled backup failed: {e}")
+    # Daily supply-chain re-scan at 3 AM UTC: refresh grype's vuln DB and re-run
+    # it against every deployed image's cached SBOM so newly-disclosed CVEs against
+    # unchanged images surface without a rebuild.
+    async def _scheduled_supply_chain_scan():
+        from app.dependencies import get_automation_service
 
-        scheduler.add_job(
-            _scheduled_backup,
-            trigger="cron",
-            hour=2,
-            minute=0,
-            name="daily_backup",
-        )
+        try:
+            await get_automation_service().rescan_deployed_images()
+        except Exception as e:
+            print(f"Scheduled supply-chain scan failed: {e}")
 
-        scheduler.start()
+    scheduler.add_job(
+        _scheduled_supply_chain_scan,
+        trigger="cron",
+        hour=3,
+        minute=0,
+        name="daily_supply_chain_scan",
+    )
+
+    scheduler.start()
 
     # Warm the history cache in the background so first requests are fast
     _cache_task = asyncio.create_task(get_automation_service().warm_history_cache())
@@ -584,9 +595,9 @@ async def lifespan(app: FastAPI):
             observer.stop()
             # Run blocking join in executor to avoid blocking event loop
             await asyncio.to_thread(observer.join)
-        if worktree_observer:
-            worktree_observer.stop()
-            await asyncio.to_thread(worktree_observer.join)
+        if copy_observer:
+            copy_observer.stop()
+            await asyncio.to_thread(copy_observer.join)
 
         if dump_profile is not None:
             dump_profile()

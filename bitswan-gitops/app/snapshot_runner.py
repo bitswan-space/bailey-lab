@@ -68,13 +68,13 @@ def _bp_deploy_in_flight(service, bp: str, stages: list[str]) -> str | None:
     """Return a deployment_id of `bp` currently deploying at any of `stages`,
     or None. Restoring under a mid-deploy container swap would race."""
     from app.services.infra_service import stage_for_deployment
-    from app.services.bp_databases import derive_bp_and_worktree
+    from app.services.bp_databases import derive_bp_and_copy
     from app.utils import read_bitswan_yaml
 
     bs_yaml = read_bitswan_yaml(service.gitops_dir) or {}
     for dep_id, conf in (bs_yaml.get("deployments") or {}).items():
         conf = conf or {}
-        dep_slug, wt = derive_bp_and_worktree(conf.get("relative_path"))
+        dep_slug, wt = derive_bp_and_copy(conf.get("relative_path"))
         if wt or dep_slug != bp:
             continue
         realm = stage_for_deployment(conf.get("stage") or "production")
@@ -122,6 +122,7 @@ async def spawn_create_snapshot(bp: str, stage: str, label: str = "") -> dict:
     Returns {"task_id": ...} or raises ValueError (busy → caller maps to 409).
     """
     from app.services.snapshot_service import get_snapshot_service
+    from app.dependencies import get_automation_service
 
     task, conflict = await snapshot_manager.create_task(
         "create", bp, [stage], source_stage=stage
@@ -132,10 +133,14 @@ async def spawn_create_snapshot(bp: str, stage: str, label: str = "") -> dict:
         )
 
     service = get_snapshot_service()
+    # Production data lives in the blue-green LIVE db (db1/db2), not the
+    # slot-free name dev/staging use. Snapshot whichever db Production is
+    # currently serving so a backup captures the real live data.
+    db = get_automation_service().live_db(bp) if stage == "production" else None
 
     async def run(progress):
         return await service.create_snapshot(
-            bp, stage, label=label, kind="manual", progress=progress
+            bp, stage, label=label, kind="manual", progress=progress, db=db
         )
 
     _spawn_bg(_run_task(task.task_id, f"Snapshot of {bp} ({stage})", run))
@@ -143,9 +148,21 @@ async def spawn_create_snapshot(bp: str, stage: str, label: str = "") -> dict:
 
 
 async def spawn_restore_snapshot(
-    bp: str, snapshot_id: str, source_stage: str, target_stage: str
+    bp: str,
+    snapshot_id: str,
+    source_stage: str,
+    target_stage: str,
+    db: int | None = None,
+    by: str | None = None,
 ) -> dict:
-    """Reserve source+target stages and restore in the background."""
+    """Reserve source+target stages and restore in the background.
+
+    `db` (1/2) restores into that production database instead of the
+    single-backend one — the DR-restore path (target_stage is 'production',
+    db is the standby) that never touches the live db. For that path the DR
+    "currently restored" pointer is recorded only after the restore succeeds,
+    so a failed restore never marks DR as loaded with this backup.
+    """
     from app.services.snapshot_service import get_snapshot_service
     from app.dependencies import get_automation_service
 
@@ -174,14 +191,21 @@ async def spawn_restore_snapshot(
         )
 
     async def run(progress):
-        return await service.restore_snapshot(
-            bp, snapshot_id, source_stage, target_stage, progress=progress
+        result = await service.restore_snapshot(
+            bp, snapshot_id, source_stage, target_stage, progress=progress, db=db
         )
+        # DR restore succeeded → record which backup is now loaded into the
+        # standby db (the only one eligible to be recovery-tested). Done here,
+        # not at request time, so a failed restore leaves DR honestly empty.
+        if db:
+            await get_automation_service().record_dr_restore(bp, snapshot_id, by)
+        return result
 
+    dest = f"{target_stage} db{db}" if db else target_stage
     _spawn_bg(
         _run_task(
             task.task_id,
-            f"Restore of {bp} ({source_stage} → {target_stage})",
+            f"Restore of {bp} ({source_stage} → {dest})",
             run,
         )
     )

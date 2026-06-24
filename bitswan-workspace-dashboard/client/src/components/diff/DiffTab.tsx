@@ -1,19 +1,32 @@
 import { useEffect, useMemo, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { useFileDiff } from '@/hooks/useFileDiff';
-import { useWorktreeStatus } from '@/hooks/useWorktreeStatus';
+import { useCopyStatus } from '@/hooks/useCopyStatus';
 import { DiffFileList } from './DiffFileList';
 import { DiffView } from './DiffView';
 
 interface Props {
-  worktree: string;
+  copy: string;
+  /** When set, only show changes under this directory (e.g. the BP being
+   *  synced) — the diff that will actually become main on Sync & Deploy. */
+  pathPrefix?: string;
 }
 
-export function DiffTab({ worktree }: Props) {
-  const { changed, loading, refresh: refreshStatus } = useWorktreeStatus(worktree);
+export function DiffTab({ copy, pathPrefix }: Props) {
+  const { changed: allChanged, loading, refresh: refreshStatus } =
+    useCopyStatus(copy);
+  const changed = useMemo(
+    () =>
+      pathPrefix
+        ? allChanged.filter(
+            (c) => c.path === pathPrefix || c.path.startsWith(`${pathPrefix}/`),
+          )
+        : allChanged,
+    [allChanged, pathPrefix],
+  );
   const [selected, setSelected] = useState<string | null>(null);
   const { diff, loading: diffLoading, refresh: refreshDiff } = useFileDiff(
-    worktree,
+    copy,
     selected,
   );
 
@@ -71,7 +84,7 @@ export function DiffTab({ worktree }: Props) {
             </div>
           ) : changed.length === 0 ? (
             <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-              No changes in this worktree.
+              No changes in this copy.
             </div>
           ) : (
             <DiffFileList

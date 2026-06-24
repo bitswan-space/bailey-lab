@@ -2,14 +2,28 @@ package cmd
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/bitswan-space/bitswan-workspaces/cmd/automationserverdaemon"
 	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
 
-
+// newDaemonClientWithRetry connects to the daemon, retrying briefly so a
+// freshly-started daemon container has time to create its Unix socket.
+func newDaemonClientWithRetry() (*daemon.Client, error) {
+	var lastErr error
+	for i := 0; i < 30; i++ {
+		client, err := daemon.NewClient()
+		if err == nil {
+			return client, nil
+		}
+		lastErr = err
+		time.Sleep(time.Second)
+	}
+	return nil, lastErr
+}
 
 func newRegisterCmd() *cobra.Command {
 	var serverName string
@@ -36,66 +50,68 @@ func newRegisterCmd() *cobra.Command {
 				return fmt.Errorf("automation server ID is required. Use --server-id flag to provide the automation server ID from the web interface")
 			}
 
-			// Check if already registered to an AOC instance
-			cfg := config.NewAutomationServerConfig()
-			if settings, err := cfg.GetAutomationOperationsCenterSettings(); err == nil && settings.AccessToken != "" {
+			// Bring the daemon up first: it is the single owner of
+			// ~/.config/bitswan (a named Docker volume), so register writes no
+			// config on the host — it hands the freshly obtained token to the
+			// daemon over the socket instead. This also lets `register` bring up
+			// a fresh server from nothing.
+			fmt.Println("🚀 Ensuring the automation server daemon is running...")
+			if err := automationserverdaemon.EnsureDaemonRunning(); err != nil {
+				return fmt.Errorf("failed to ensure daemon is running: %w", err)
+			}
+
+			client, err := newDaemonClientWithRetry()
+			if err != nil {
+				return fmt.Errorf("failed to create daemon client (daemon may not be running): %w", err)
+			}
+
+			// Already-registered guard — asked of the daemon, since the config now
+			// lives in its volume rather than on the host.
+			if status, err := client.AOCStatus(); err == nil && status.Registered {
 				return fmt.Errorf(
 					"this automation server is already registered to an AOC instance at %s (server ID: %s).\n"+
 						"To register with a different AOC instance, first disconnect using:\n\n"+
 						"  bitswan disconnect-from-aoc",
-					settings.AOCUrl, settings.AutomationServerId,
+					status.AOCUrl, status.AutomationServerId,
 				)
 			}
 
-			// Create AOC client with OTP
+			// Exchange the OTP for an access token. NewAOCClientWithOTP keeps
+			// everything in memory — it talks to the AOC from the host but never
+			// writes a config file.
 			aocClient, err := aoc.NewAOCClientWithOTP(aocUrl, otp, automationServerId)
 			if err != nil {
 				return fmt.Errorf("failed to create AOC client: %w", err)
 			}
 
-			// Get automation server info to verify connection
+			// Get automation server info to verify the connection and learn the
+			// AOC-assigned domain (e.g. acme-prod.bswn.io).
 			serverInfo, err := aocClient.GetAutomationServerInfo()
 			if err != nil {
 				return fmt.Errorf("failed to get automation server info: %w", err)
 			}
 
-			// Persist the AOC-assigned domain (e.g. acme-prod.bswn.io) so the
-			// daemon can configure wildcard certificates for it.
-			aocClient.SetDomain(serverInfo.Domain)
-
-			// Save the configuration
-			if err := aocClient.SaveConfig(); err != nil {
-				return fmt.Errorf("failed to save configuration: %w", err)
+			// Persist the AOC connection into the daemon's config volume. From
+			// here on the daemon holds a valid token to talk to the AOC (wildcard
+			// ingress, protected proxy, workspace connect).
+			if err := client.SetAOCConfig(
+				aocUrl, serverInfo.AutomationServerId, aocClient.GetAccessToken(),
+				aocClient.GetExpiresAt(), serverInfo.Domain,
+			); err != nil {
+				return fmt.Errorf("failed to save AOC configuration to the daemon: %w", err)
 			}
 
 			fmt.Printf("✅ Successfully registered automation server '%s' with ID: %s\n", serverInfo.Name, serverInfo.AutomationServerId)
-			fmt.Println("Access token, AOC URL, and Automation server ID have been saved to ~/.config/bitswan/automation_server_config.toml.")
+			fmt.Println("AOC URL, access token, and server ID have been saved to the daemon (no config is written on the host).")
 
-			// Now connect existing workspaces to AOC via daemon
-			fmt.Println("\n🔗 Connecting existing workspaces to AOC...")
-			client, err := daemon.NewClient()
-			if err != nil {
-				return fmt.Errorf("failed to create daemon client (daemon may not be running): %w", err)
-			}
-
-			if err := client.WorkspaceConnectToAOC(aocUrl, serverInfo.AutomationServerId, aocClient.GetAccessToken()); err != nil {
-				return err
-			}
-
-			// Reinitialize MQTT connection so the daemon picks up the new AOC credentials
-			fmt.Println("\n📡 Initializing MQTT connection...")
-			if err := client.ReconnectMQTT(); err != nil {
-				fmt.Printf("Warning: Failed to initialize MQTT connection: %v\n", err)
-				fmt.Println("You may need to restart the daemon to connect to MQTT.")
-			} else {
-				fmt.Println("MQTT connection established successfully.")
-			}
-
-			// If the AOC assigned this server a domain, reconfigure the
-			// ingress so Traefik obtains a *.<domain> wildcard certificate
-			// via the DNS-01 challenge (through the AOC) instead of issuing
-			// a separate HTTP-01 certificate per endpoint.
+			// If the AOC assigned this server a domain, stand up the full
+			// protected-ingress stack BEFORE (re)deploying workspaces, so each
+			// workspace's routes register through the auth wrap rather than as
+			// bare single-tier routes (see addRouteTraefik).
 			if serverInfo.Domain != "" {
+				// Reconfigure the ingress so Traefik obtains a *.<domain>
+				// wildcard certificate via the DNS-01 challenge (through the
+				// AOC) instead of a separate HTTP-01 certificate per endpoint.
 				fmt.Printf("\n🔐 Configuring ingress for a *.%s wildcard certificate...\n", serverInfo.Domain)
 				if _, err := client.InitIngress(false); err != nil {
 					fmt.Printf("Warning: Failed to reconfigure ingress for wildcard certificates: %v\n", err)
@@ -103,6 +119,25 @@ func newRegisterCmd() *cobra.Command {
 				} else {
 					fmt.Println("Ingress configured to use a DNS-01 wildcard certificate.")
 				}
+
+				// Bring up the shared bitswan-protected-proxy (oauth2-proxy)
+				// that authenticates every protected endpoint upstream of the
+				// daemon's access gate.
+				fmt.Println("\n🛡️  Deploying the Bitswan protected proxy...")
+				if err := client.ProvisionProtectedProxy(); err != nil {
+					fmt.Printf("Warning: Failed to deploy the protected proxy: %v\n", err)
+					fmt.Println("Endpoints will route without the Bailey auth wrap until it is provisioned.")
+				} else {
+					fmt.Println("Protected proxy deployed; endpoints are now authenticated through Bailey.")
+				}
+			}
+
+			// Now connect existing workspaces to AOC via daemon. With the
+			// protected proxy already running, their route registrations take
+			// the wrapped path automatically.
+			fmt.Println("\n🔗 Connecting existing workspaces to AOC...")
+			if err := client.WorkspaceConnectToAOC(aocUrl, serverInfo.AutomationServerId, aocClient.GetAccessToken()); err != nil {
+				return err
 			}
 
 			return nil
@@ -120,5 +155,3 @@ func newRegisterCmd() *cobra.Command {
 
 	return cmd
 }
-
-

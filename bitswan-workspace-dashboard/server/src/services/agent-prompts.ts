@@ -11,12 +11,21 @@ export const DEFAULT_PROMPT =
   'Read the BP\'s README.md, process.toml, and bitswan.yaml to orient yourself before ' +
   'making changes. Ask for clarification when the user\'s request is ambiguous.';
 
-/** Worktree-level sync flow. Mirrors bitswan-editor's syncWorktree prompt. */
+/**
+ * Copy-level sync flow. The copy is a normal git clone whose `origin` points at
+ * the workspace git server (credentials are already configured), so the agent
+ * uses plain git. The server accepts fast-forward pushes only. This prompt is
+ * the conflict-resolution path: the dashboard does a plain commit + ff-push
+ * itself when no rebase is needed, and only hands off to the agent here when
+ * the copy actually has to be rebased onto a moved main.
+ */
 export const SYNC_PROMPT =
-  'IMPORTANT: git is not installed. Use ONLY bitswan-coding-agent commands. ' +
-  'Sync this worktree with main: 1) bitswan-coding-agent vcs commit -m pre-sync-commit ' +
-  '2) bitswan-coding-agent vcs sync 3) If conflicts, resolve and run bitswan-coding-agent vcs sync-continue. ' +
-  'Tell me when sync is complete.';
+  'Sync this copy with main using git. ' +
+  '1) Commit your work in progress: `git add -A && git commit -m "wip"` (skip if there is nothing to commit). ' +
+  '2) Rebase onto the latest main: `git pull --rebase origin main`. ' +
+  '3) If there are conflicts, resolve them, then `git add` the resolved files and `git rebase --continue`. ' +
+  '4) Publish your branch: `git push origin HEAD` (the server accepts fast-forward pushes only). ' +
+  'Tell me when the sync is complete.';
 
 /**
  * "Write tests" button in the Requirements tab. The agent turns the BP's

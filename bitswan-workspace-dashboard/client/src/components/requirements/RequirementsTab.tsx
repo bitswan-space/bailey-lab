@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { FlaskConical, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -17,10 +17,11 @@ import { useRequirements } from '@/hooks/useRequirements';
 import { useSessions, type BpSessionKind } from '@/components/agents/SessionProvider';
 import { nextStatus } from './StatusBadge';
 import { RequirementsTable } from './RequirementsTable';
+import { useUrlEnum, useUrlParam } from '@/lib/urlState';
 import type { Requirement, ReqStatus } from '@/lib/api';
 
 interface Props {
-  worktree: string;
+  copy: string;
   bp: string;
   /** Caller-controlled handler to flip the workspace to the Coding Agent tab. */
   onShowAgents: () => void;
@@ -31,19 +32,19 @@ type Filter = 'all' | ReqStatus;
 const FILTERS: Filter[] = ['all', 'pending', 'pass', 'fail', 'retest', 'proposed'];
 
 /**
- * Per-(worktree, bp) testable requirements view. Reads/writes the same
+ * Per-(copy, bp) testable requirements view. Reads/writes the same
  * `testable-requirements.toml` the agent CLI uses, so flipping a status
  * here is visible from `bitswan-coding-agent requirements list` and
  * vice-versa.
  */
-export function RequirementsTab({ worktree, bp, onShowAgents }: Props) {
+export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   const {
     requirements,
     loading,
     add,
     update,
     remove,
-  } = useRequirements(worktree, bp);
+  } = useRequirements(copy, bp);
   const {
     startSession,
     startRequirementSession,
@@ -52,8 +53,15 @@ export function RequirementsTab({ worktree, bp, onShowAgents }: Props) {
     ensureAgent,
   } = useSessions();
 
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<Filter>('all');
+  // Search term and status filter live in the URL so a filtered view is
+  // deep-linkable (?filter=fail&q=auth).
+  const [searchRaw, setSearchRaw] = useUrlParam('q');
+  const search = searchRaw ?? '';
+  const setSearch = useCallback(
+    (v: string) => setSearchRaw(v || null),
+    [setSearchRaw],
+  );
+  const [filter, setFilter] = useUrlEnum('filter', FILTERS, 'all');
   const [pendingEditId, setPendingEditId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Requirement | null>(null);
 
@@ -126,8 +134,8 @@ export function RequirementsTab({ worktree, bp, onShowAgents }: Props) {
         // surfaces via agentStatus; the session will still attempt to spawn
       }
     }
-    const id = startRequirementSession(worktree, bp, r.id);
-    setSelectedFor({ worktree, bp }, id);
+    const id = startRequirementSession(copy, bp, r.id);
+    setSelectedFor({ copy, bp }, id);
     onShowAgents();
   };
 
@@ -142,7 +150,7 @@ export function RequirementsTab({ worktree, bp, onShowAgents }: Props) {
         // surfaces via agentStatus; the session will still attempt to spawn
       }
     }
-    startSession(worktree, bp, kind);
+    startSession(copy, bp, kind);
     onShowAgents();
   };
 

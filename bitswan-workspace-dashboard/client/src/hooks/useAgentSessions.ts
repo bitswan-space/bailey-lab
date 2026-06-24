@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { authHeader, clearAccessToken } from '@/lib/auth-token';
 
 export interface AgentSession {
   id: string;
   timestamp: string;
   userEmail: string;
-  worktree: string;
+  copy: string;
   bp: string | null;
   castFile: string;
   logged: boolean;
@@ -25,22 +26,26 @@ interface Result {
 const POLL_MS = 5000;
 
 /**
- * Poll `/api/coding-agent/sessions?worktree=…&bp=…` every 5s, and on window
+ * Poll `/api/coding-agent/sessions?copy=…&bp=…` every 5s, and on window
  * focus. Returns the merged list and a `refresh()` for forced fetches —
  * SessionTerminal uses that when its WebSocket closes so the just-ended
  * session shows up immediately without waiting for the next tick.
  */
-export function useAgentSessions(worktree: string, bp: string): Result {
+export function useAgentSessions(copy: string, bp: string): Result {
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [loading, setLoading] = useState(true);
   const aliveRef = useRef(true);
 
   const fetchNow = useCallback(async () => {
     try {
-      const r = await fetch(
-        `/api/coding-agent/sessions?worktree=${encodeURIComponent(worktree)}&bp=${encodeURIComponent(bp)}`,
-        { credentials: 'include', cache: 'no-store' },
-      );
+      const url = `/api/coding-agent/sessions?copy=${encodeURIComponent(copy)}&bp=${encodeURIComponent(bp)}`;
+      const r = await fetch(url, {
+        credentials: 'include',
+        cache: 'no-store',
+        headers: await authHeader(),
+      });
+      // Token may have expired — drop the cache so the next poll re-fetches it.
+      if (r.status === 401) clearAccessToken();
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = (await r.json()) as AgentSession[];
       if (aliveRef.current) setSessions(data);
@@ -49,7 +54,7 @@ export function useAgentSessions(worktree: string, bp: string): Result {
     } finally {
       if (aliveRef.current) setLoading(false);
     }
-  }, [worktree, bp]);
+  }, [copy, bp]);
 
   useEffect(() => {
     aliveRef.current = true;

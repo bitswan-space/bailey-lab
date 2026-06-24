@@ -8,25 +8,22 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
 
 func newPullAndDeployCmd() *cobra.Command {
 	var gitopsImage string
-	var editorImage string
 
 	cmd := &cobra.Command{
 		Use:   "pull-and-deploy",
 		Short: "Test pull-and-deploy functionality across two workspaces",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTestPullAndDeploy(gitopsImage, editorImage)
+			return runTestPullAndDeploy(gitopsImage)
 		},
 	}
 
 	cmd.Flags().StringVar(&gitopsImage, "gitops-image", "", "Custom GitOps image to use (default: production image)")
-	cmd.Flags().StringVar(&editorImage, "editor-image", "", "Custom editor image to use (default: production image)")
 
 	return cmd
 }
@@ -41,7 +38,7 @@ func newPullAndDeployCmd() *cobra.Command {
 // Re-implement the initial deploy with createAutomationFromTemplate + startDeploy
 // + waitForDeployTask (see init.go), then exercise client.PullAndDeploy on
 // workspace 2. Not wired into CI (see .github/workflows/test.yml).
-func runTestPullAndDeploy(gitopsImage, editorImage string) error {
+func runTestPullAndDeploy(gitopsImage string) error {
 	fmt.Println("=== BitSwan Test Suite: Pull and Deploy ===")
 	fmt.Println()
 
@@ -83,14 +80,10 @@ func runTestPullAndDeploy(gitopsImage, editorImage string) error {
 	initArgs1 := []string{
 		"workspace", "init",
 		"--local",
-		"--no-ide",
 		"--no-oauth",
 	}
 	if gitopsImage != "" {
 		initArgs1 = append(initArgs1, "--gitops-image", gitopsImage)
-	}
-	if editorImage != "" {
-		initArgs1 = append(initArgs1, "--editor-image", editorImage)
 	}
 	initArgs1 = append(initArgs1, workspace1Name)
 
@@ -99,8 +92,9 @@ func runTestPullAndDeploy(gitopsImage, editorImage string) error {
 	}
 	fmt.Println("✓ Workspace 1 initialized")
 
-	// Get workspace 1 metadata
-	metadata1, err := config.GetWorkspaceMetadata(workspace1Name)
+	// Get workspace 1 metadata from the daemon (data lives in its Docker
+	// volume, not on the host filesystem).
+	metadata1, err := workspaceDaemonInfo(client, workspace1Name)
 	if err != nil {
 		cleanupWorkspace(workspace1Name)
 		return fmt.Errorf("failed to get workspace 1 metadata: %w", err)
@@ -118,7 +112,7 @@ func runTestPullAndDeploy(gitopsImage, editorImage string) error {
 	fmt.Println("\n[2/9] Deploying FastAPI to workspace 1...")
 	imageHash, err := computeImageDirHash()
 	if err != nil {
-		fmt.Printf("Warning: could not compute image dir hash: %v (pipelines.conf will not be patched)\n", err)
+		fmt.Printf("Warning: could not compute image dir hash: %v\n", err)
 		imageHash = ""
 	}
 	zipPath, checksum, err := createFastAPIZip(imageHash)
@@ -242,16 +236,12 @@ func runTestPullAndDeploy(gitopsImage, editorImage string) error {
 	initArgs2 := []string{
 		"workspace", "init",
 		"--local",
-		"--no-ide",
 		"--no-oauth",
 		"--remote", containerRepoPath,
 		"--branch", branchName,
 	}
 	if gitopsImage != "" {
 		initArgs2 = append(initArgs2, "--gitops-image", gitopsImage)
-	}
-	if editorImage != "" {
-		initArgs2 = append(initArgs2, "--editor-image", editorImage)
 	}
 	initArgs2 = append(initArgs2, workspace2Name)
 
@@ -261,8 +251,9 @@ func runTestPullAndDeploy(gitopsImage, editorImage string) error {
 	}
 	fmt.Println("✓ Workspace 2 initialized with remote configured")
 
-	// Get workspace 2 metadata
-	metadata2, err := config.GetWorkspaceMetadata(workspace2Name)
+	// Get workspace 2 metadata from the daemon (data lives in its Docker
+	// volume, not on the host filesystem).
+	metadata2, err := workspaceDaemonInfo(client, workspace2Name)
 	if err != nil {
 		cleanupWorkspace(workspace1Name)
 		cleanupWorkspace(workspace2Name)

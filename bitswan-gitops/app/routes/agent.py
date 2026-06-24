@@ -10,17 +10,13 @@ from pydantic import BaseModel
 
 from app.async_docker import get_async_docker_client, DockerError
 from app.dependencies import get_automation_service
-from app.deploy_runner import spawn_set_deploy
 from app.services.automation_service import (
     AutomationService,
     make_hostname_label,
     scan_workspace_sources,
 )
-from app.utils import (
-    call_git_command,
-    call_git_command_with_output,
-    GitLockContext,
-)
+# (git operations now run in each copy via normal git against the embedded
+# git server — the agent no longer proxies commit/sync through this service.)
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +35,9 @@ def _spawn_bg(coro) -> asyncio.Task:
 
 security = HTTPBearer()
 
-# Pattern for valid worktree live-dev deployment IDs
-# Format: {name}-wt-{worktree}-{bp}-live-dev
-LIVE_DEV_PATTERN = re.compile(r"^.+-wt-.+-live-dev$")
+# Pattern for valid per-copy live-dev deployment IDs
+# Format: {name}-copy-{copy}-{bp}-live-dev
+LIVE_DEV_PATTERN = re.compile(r"^.+-copy-.+-live-dev$")
 
 # Cached agent secret — resolved lazily from the coding agent container
 _cached_agent_secret: str | None = None
@@ -105,11 +101,11 @@ def verify_agent_token(
 
 
 def _validate_deployment_id(deployment_id: str):
-    """Validate that deployment_id matches the *-wt-*-live-dev pattern."""
+    """Validate that deployment_id matches the *-copy-*-live-dev pattern."""
     if not LIVE_DEV_PATTERN.match(deployment_id):
         raise HTTPException(
             status_code=403,
-            detail=f"Deployment '{deployment_id}' is not a valid live-dev worktree deployment",
+            detail=f"Deployment '{deployment_id}' is not a valid live-dev copy deployment",
         )
 
 
@@ -118,67 +114,29 @@ def _get_workspace_dir() -> str:
     return os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
 
 
-def _get_worktrees_base() -> str:
-    return os.path.join(_get_workspace_dir(), "worktrees")
-
-
-# Worktree name validation. The route param can never contain a path
-# separator (FastAPI splits on `/`), but values like `..` or `..foo` would
-# still escape the worktrees base when joined. The regex matches the one
-# in app/routes/worktrees.py — keep them in sync.
-_WORKTREE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
-
-
-def _validate_worktree_name(name: str) -> None:
-    if not name or not _WORKTREE_NAME_RE.match(name):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Invalid worktree name: must be alphanumeric with hyphens "
-                "only and must not start with a hyphen."
-            ),
-        )
-
-
-def _resolve_worktree_path(name: str) -> str:
-    """Validate `name` and return the realpath to the worktree directory.
-
-    Belt-and-suspenders: even though the regex blocks `..` and `/`,
-    realpath containment ensures a malicious symlink inside the worktrees
-    base can't redirect git operations elsewhere. Mirrors the helper of
-    the same name in app/routes/worktrees.py.
-    """
-    _validate_worktree_name(name)
-    base = os.path.realpath(_get_worktrees_base())
-    candidate = os.path.realpath(os.path.join(base, name))
-    if candidate != base and not candidate.startswith(base + os.sep):
-        raise HTTPException(status_code=400, detail="Invalid worktree name")
-    return candidate
-
-
 # --- Deployment endpoints ---
 
 
-def _scan_automations(worktree: str | None = None) -> list[dict]:
+def _scan_automations(copy: str | None = None) -> list[dict]:
     """Scan the filesystem for automation sources (automation.toml).
 
     Thin wrapper over `scan_workspace_sources` that keeps the existing
     `_get_workspace_dir()` resolution behaviour.
     """
-    return scan_workspace_sources(_get_workspace_dir(), worktree)
+    return scan_workspace_sources(_get_workspace_dir(), copy)
 
 
 @router.get("/deployments")
 async def list_agent_deployments(
-    worktree: str = Query(None),
+    copy: str = Query(None),
     _token=Depends(verify_agent_token),
 ):
-    """List deployments for a worktree, including those not yet started."""
-    if not worktree:
-        raise HTTPException(status_code=400, detail="worktree parameter is required")
+    """List deployments for a copy, including those not yet started."""
+    if not copy:
+        raise HTTPException(status_code=400, detail="copy parameter is required")
 
-    # Scan filesystem for all automation sources in this worktree
-    sources = _scan_automations(worktree)
+    # Scan filesystem for all automation sources in this copy
+    sources = _scan_automations(copy)
 
     # Query running containers to get their state
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
@@ -194,7 +152,7 @@ async def list_agent_deployments(
         for container in containers:
             labels = container.get("Labels", {})
             dep_id = labels.get("gitops.deployment_id", "")
-            if f"-wt-{worktree}" in dep_id and dep_id.endswith("-live-dev"):
+            if f"-copy-{copy}" in dep_id and dep_id.endswith("-live-dev"):
                 running_states[dep_id] = container.get("State", "unknown")
     except DockerError:
         pass  # If Docker query fails, we still show sources as "not deployed"
@@ -220,7 +178,7 @@ async def list_agent_deployments(
                 "context": src["context"],
                 "stage": src["stage"],
                 "relative_path": src["relative_path"],
-                "worktree": src["worktree"],
+                "copy": src["copy"],
                 "url": _make_url(src),
             }
         )
@@ -236,7 +194,7 @@ async def list_agent_deployments(
                 "context": "",
                 "stage": "live-dev",
                 "relative_path": None,
-                "worktree": worktree,
+                "copy": copy,
                 "url": _make_url(orphan),
             }
         )
@@ -246,7 +204,7 @@ async def list_agent_deployments(
 
 class StartDeploymentRequest(BaseModel):
     relative_path: str
-    worktree: str | None = None
+    copy: str | None = None
 
 
 @router.post("/deployments/start")
@@ -256,12 +214,12 @@ async def start_agent_deployment(
     _token=Depends(verify_agent_token),
 ):
     """Start a live-dev deployment for an automation."""
-    sources = _scan_automations(body.worktree)
+    sources = _scan_automations(body.copy)
     source = next(
         (s for s in sources if s["relative_path"] == body.relative_path), None
     )
     if not source:
-        ctx = f" in worktree '{body.worktree}'" if body.worktree else ""
+        ctx = f" in copy '{body.copy}'" if body.copy else ""
         raise HTTPException(
             status_code=404,
             detail=f"No automation source at '{body.relative_path}'{ctx}",
@@ -553,10 +511,10 @@ async def build_and_restart_deployment(
                 auto_name = os.path.basename(source_dir)
                 ws_name = automation_service.workspace_name or "workspace"
                 # Extract BP name from relative_path
-                # e.g. "worktrees/test2/foobar/backend" → bp = "foobar"
-                # e.g. "foobar/backend" → bp = "foobar"
+                # e.g. "copies/test2/foobar/backend" → bp = "foobar"
+                # e.g. "copies/main/foobar/backend" → bp = "foobar"
                 rel_parts = relative_path.replace("\\", "/").split("/")
-                if len(rel_parts) >= 2 and rel_parts[0] == "worktrees":
+                if len(rel_parts) >= 2 and rel_parts[0] == "copies":
                     bp_name = rel_parts[2] if len(rel_parts) >= 4 else ""
                 else:
                     bp_name = rel_parts[0] if len(rel_parts) >= 2 else ""
@@ -655,425 +613,6 @@ async def get_deployment_status(
     if not task:
         return {"deploying": False}
     return {"deploying": True, **task.to_dict()}
-
-
-# --- Worktree commit endpoint ---
-
-
-class CommitRequest(BaseModel):
-    message: str
-    author_email: str = "agent@bitswan.local"
-
-
-@router.post("/worktrees/{worktree_name}/commit")
-async def commit_worktree(
-    worktree_name: str,
-    body: CommitRequest,
-    _token=Depends(verify_agent_token),
-):
-    worktree_path = _resolve_worktree_path(worktree_name)
-
-    if not os.path.exists(worktree_path):
-        raise HTTPException(
-            status_code=404, detail=f"Worktree '{worktree_name}' not found"
-        )
-
-    async with GitLockContext(timeout=15.0):
-        # Stage all changes
-        success = await call_git_command("git", "add", "-A", cwd=worktree_path)
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to stage changes")
-
-        # Commit with the provided message and author
-        author = f"{body.author_email} <{body.author_email}>"
-        stdout, stderr, rc = await call_git_command_with_output(
-            "git",
-            "commit",
-            "-m",
-            body.message,
-            "--author",
-            author,
-            cwd=worktree_path,
-        )
-        if rc != 0:
-            # Check if it's just "nothing to commit"
-            if "nothing to commit" in stdout or "nothing to commit" in stderr:
-                raise HTTPException(status_code=400, detail="Nothing to commit")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to commit: {stderr.strip()}",
-            )
-
-    # Get the commit hash
-    hash_stdout, _, hash_rc = await call_git_command_with_output(
-        "git", "rev-parse", "HEAD", cwd=worktree_path
-    )
-    commit_hash = hash_stdout.strip() if hash_rc == 0 else "unknown"
-
-    return {"status": "success", "commit_hash": commit_hash}
-
-
-# --- VCS query endpoints ---
-
-
-@router.get("/worktrees/{worktree_name}/status")
-async def worktree_status(
-    worktree_name: str,
-    _token=Depends(verify_agent_token),
-):
-    worktree_path = _resolve_worktree_path(worktree_name)
-    if not os.path.exists(worktree_path):
-        raise HTTPException(
-            status_code=404, detail=f"Worktree '{worktree_name}' not found"
-        )
-
-    stdout, stderr, rc = await call_git_command_with_output(
-        "git", "status", cwd=worktree_path
-    )
-    if rc != 0:
-        raise HTTPException(
-            status_code=500, detail=f"git status failed: {stderr.strip()}"
-        )
-    return {"output": stdout}
-
-
-@router.get("/worktrees/{worktree_name}/log")
-async def worktree_log(
-    worktree_name: str,
-    n: int = Query(20, ge=1, le=200),
-    _token=Depends(verify_agent_token),
-):
-    worktree_path = _resolve_worktree_path(worktree_name)
-    if not os.path.exists(worktree_path):
-        raise HTTPException(
-            status_code=404, detail=f"Worktree '{worktree_name}' not found"
-        )
-
-    stdout, stderr, rc = await call_git_command_with_output(
-        "git", "log", "--oneline", f"-{n}", cwd=worktree_path
-    )
-    if rc != 0:
-        raise HTTPException(status_code=500, detail=f"git log failed: {stderr.strip()}")
-    return {"output": stdout}
-
-
-@router.get("/worktrees/{worktree_name}/diff")
-async def worktree_diff(
-    worktree_name: str,
-    path: str = Query(None),
-    _token=Depends(verify_agent_token),
-):
-    worktree_path = _resolve_worktree_path(worktree_name)
-    if not os.path.exists(worktree_path):
-        raise HTTPException(
-            status_code=404, detail=f"Worktree '{worktree_name}' not found"
-        )
-
-    git_args = ["git", "diff", "HEAD"]
-    if path:
-        git_args += ["--", path]
-    stdout, stderr, rc = await call_git_command_with_output(
-        *git_args, cwd=worktree_path
-    )
-    if rc != 0:
-        raise HTTPException(
-            status_code=500, detail=f"git diff failed: {stderr.strip()}"
-        )
-    return {"output": stdout}
-
-
-# --- Rebase and merge endpoint ---
-
-
-async def _stash_workspace(workspace_dir: str) -> bool:
-    """Stash all changes including untracked files. Returns True if a stash was created."""
-    before, _, _ = await call_git_command_with_output(
-        "git", "stash", "list", cwd=workspace_dir
-    )
-    count_before = len(before.strip().splitlines()) if before.strip() else 0
-    await call_git_command_with_output(
-        "git",
-        "stash",
-        "push",
-        "--include-untracked",
-        "-m",
-        "rebase-merge-stash",
-        cwd=workspace_dir,
-    )
-    after, _, _ = await call_git_command_with_output(
-        "git", "stash", "list", cwd=workspace_dir
-    )
-    count_after = len(after.strip().splitlines()) if after.strip() else 0
-    return count_after > count_before
-
-
-async def _clean_workspace_conflicts(workspace_dir: str):
-    """Clean up any leftover unmerged/conflict state in the workspace directory.
-
-    This handles the case where a previous stash pop or merge left unmerged
-    files. Without cleanup, every subsequent merge attempt fails permanently
-    with 'Merging is not possible because you have unmerged files'.
-    """
-    stdout, _, _ = await call_git_command_with_output(
-        "git", "diff", "--name-only", "--diff-filter=U", cwd=workspace_dir
-    )
-    unmerged = [f for f in stdout.strip().splitlines() if f]
-    if not unmerged:
-        return
-
-    logger.warning(
-        "Workspace has %d unmerged files from previous operation, "
-        "resolving by resetting to HEAD: %s",
-        len(unmerged),
-        unmerged,
-    )
-    # Reset the index and working tree to HEAD, clearing the merge state
-    await call_git_command_with_output(
-        "git", "reset", "--hard", "HEAD", cwd=workspace_dir
-    )
-
-
-async def _complete_merge(workspace_dir: str, worktree_path: str, **_kwargs) -> dict:
-    """After a successful rebase, fast-forward the default branch.
-
-    Any stashed workspace changes are left stashed — the "dirt" in main
-    (e.g. live-dev config changes written by deploys) doesn't need to be
-    restored and popping it is what caused the permanent-stuck-conflict bug.
-    """
-    # Clean up any leftover conflict state from a previous failed operation
-    await _clean_workspace_conflicts(workspace_dir)
-
-    # Get default branch
-    stdout, stderr, rc = await call_git_command_with_output(
-        "git", "rev-parse", "--abbrev-ref", "HEAD", cwd=workspace_dir
-    )
-    if rc != 0:
-        return {
-            "status": "error",
-            "detail": f"Failed to detect default branch: {stderr.strip()}",
-        }
-    default_branch = stdout.strip()
-
-    # Get worktree tip
-    tip_stdout, _, rc = await call_git_command_with_output(
-        "git", "rev-parse", "HEAD", cwd=worktree_path
-    )
-    if rc != 0:
-        return {"status": "error", "detail": "Failed to get worktree HEAD after rebase"}
-    tip_sha = tip_stdout.strip()
-
-    # Fast-forward
-    stdout, stderr, rc = await call_git_command_with_output(
-        "git", "merge", "--ff-only", tip_sha, cwd=workspace_dir
-    )
-    if rc != 0:
-        return {"status": "error", "detail": f"Fast-forward failed: {stderr.strip()}"}
-
-    return {
-        "status": "success",
-        "merged_into": default_branch,
-        "tip": tip_sha[:12],
-    }
-
-
-async def _attach_sync_auto_deploy(result: dict, worktree_name: str) -> None:
-    """After a successful sync merge, deploy changed+new main automations to
-    dev in the background and attach `result["deploy"]`.
-
-    Best-effort — never raises (sync already succeeded). MUST be called AFTER
-    the sync handler's GitLockContext is released: the spawned deploy takes
-    its own git locks and the lock is non-reentrant. Zero changed members →
-    no task, no `deploy` field.
-    """
-    try:
-        service = get_automation_service()
-        members = await service.changed_dev_members()
-        if not members:
-            return
-        res = await spawn_set_deploy(
-            label=f"sync:{worktree_name}",
-            members=members,
-            stage="dev",
-            service=service,
-        )
-        if res.get("deploy"):
-            result["deploy"] = res["deploy"]
-        elif res.get("error"):
-            result["deploy"] = {"error": res["error"]}
-    except Exception as e:
-        logger.warning("Sync auto-deploy spawn failed for '%s': %s", worktree_name, e)
-        result["deploy"] = {"error": str(e)}
-
-
-@router.post("/worktrees/{worktree_name}/sync")
-async def sync_worktree(
-    worktree_name: str,
-    _token=Depends(verify_agent_token),
-):
-    """Sync the worktree with the default branch: rebase the worktree onto the
-    default branch, then fast-forward the default branch to the worktree tip.
-    If conflicts occur, returns status='conflicts' with conflict details —
-    resolve the files and call sync-continue."""
-    workspace_dir = _get_workspace_dir()
-    worktree_path = _resolve_worktree_path(worktree_name)
-
-    if not os.path.exists(worktree_path):
-        raise HTTPException(
-            status_code=404, detail=f"Worktree '{worktree_name}' not found"
-        )
-
-    async with GitLockContext(timeout=30.0):
-        # Clean up any leftover conflict state from a previous failed operation.
-        # Without this, a single stash-pop conflict permanently breaks all
-        # subsequent merge attempts.
-        await _clean_workspace_conflicts(workspace_dir)
-
-        # Detect default branch
-        stdout, stderr, rc = await call_git_command_with_output(
-            "git", "rev-parse", "--abbrev-ref", "HEAD", cwd=workspace_dir
-        )
-        if rc != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to detect default branch: {stderr.strip()}",
-            )
-        default_branch = stdout.strip()
-
-        # Stash workspace changes so ff-only merge can proceed on a clean index.
-        # The stash is left intentionally — main branch dirt (live-dev deploy
-        # artifacts) doesn't need restoring and popping it risks conflicts.
-        await _stash_workspace(workspace_dir)
-
-        # Start rebase
-        stdout, stderr, rc = await call_git_command_with_output(
-            "git", "rebase", default_branch, cwd=worktree_path
-        )
-
-        if rc != 0:
-            # Check whether this is actually a conflict or some other failure
-            conflict_stdout, _, _ = await call_git_command_with_output(
-                "git", "diff", "--name-only", "--diff-filter=U", cwd=worktree_path
-            )
-            conflicted_files = [f for f in conflict_stdout.strip().splitlines() if f]
-
-            if not conflicted_files:
-                # Not a conflict — abort the rebase
-                await call_git_command_with_output(
-                    "git", "rebase", "--abort", cwd=worktree_path
-                )
-                rebase_output = f"{stdout.strip()}\n{stderr.strip()}".strip()
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Rebase failed: {rebase_output}",
-                )
-
-            return {
-                "status": "conflicts",
-                "message": "Sync paused due to conflicts. Resolve the files and run sync-continue.",
-                "conflicted_files": conflicted_files,
-                "rebase_output": f"{stdout.strip()}\n{stderr.strip()}".strip(),
-                "default_branch": default_branch,
-            }
-
-        # No conflicts — complete the merge (stash left intentionally)
-        result = await _complete_merge(workspace_dir, worktree_path)
-        if result["status"] == "error":
-            raise HTTPException(status_code=500, detail=result["detail"])
-
-    # Lock released — auto-deploy changed automations to dev (best-effort).
-    await _attach_sync_auto_deploy(result, worktree_name)
-    return result
-
-
-@router.post("/worktrees/{worktree_name}/sync-continue")
-async def sync_continue(
-    worktree_name: str,
-    _token=Depends(verify_agent_token),
-):
-    """After resolving conflicts, stage resolved files and continue the sync rebase.
-    If more conflicts arise, returns status='conflicts' again.
-    When the rebase completes, fast-forwards the default branch."""
-    workspace_dir = _get_workspace_dir()
-    worktree_path = _resolve_worktree_path(worktree_name)
-
-    if not os.path.exists(worktree_path):
-        raise HTTPException(
-            status_code=404, detail=f"Worktree '{worktree_name}' not found"
-        )
-
-    async with GitLockContext(timeout=30.0):
-        # Stage all resolved files
-        _, add_stderr, add_rc = await call_git_command_with_output(
-            "git", "add", "-A", cwd=worktree_path
-        )
-        if add_rc != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to stage resolved files: {add_stderr.strip()}",
-            )
-
-        # Continue rebase
-        stdout, stderr, rc = await call_git_command_with_output(
-            "git", "-c", "core.editor=true", "rebase", "--continue", cwd=worktree_path
-        )
-
-        if rc != 0:
-            # More conflicts
-            conflict_stdout, _, _ = await call_git_command_with_output(
-                "git", "diff", "--name-only", "--diff-filter=U", cwd=worktree_path
-            )
-            conflicted_files = [f for f in conflict_stdout.strip().splitlines() if f]
-
-            if conflicted_files:
-                return {
-                    "status": "conflicts",
-                    "message": "More conflicts encountered. Resolve and run sync-continue again.",
-                    "conflicted_files": conflicted_files,
-                    "rebase_output": f"{stdout.strip()}\n{stderr.strip()}".strip(),
-                }
-
-            # rebase --continue failed but no conflict markers — something else went wrong
-            raise HTTPException(
-                status_code=500,
-                detail=f"Sync continue failed: {stderr.strip()}\n{stdout.strip()}",
-            )
-
-        # Rebase complete — stash (if any) is left stashed intentionally
-        result = await _complete_merge(workspace_dir, worktree_path)
-        if result["status"] == "error":
-            raise HTTPException(status_code=500, detail=result["detail"])
-
-    # Lock released — auto-deploy changed automations to dev (best-effort).
-    await _attach_sync_auto_deploy(result, worktree_name)
-    return result
-
-
-@router.post("/worktrees/{worktree_name}/sync-abort")
-async def sync_abort(
-    worktree_name: str,
-    _token=Depends(verify_agent_token),
-):
-    """Abort an in-progress sync (rebase) and clean up any leftover conflict state."""
-    workspace_dir = _get_workspace_dir()
-    worktree_path = _resolve_worktree_path(worktree_name)
-
-    if not os.path.exists(worktree_path):
-        raise HTTPException(
-            status_code=404, detail=f"Worktree '{worktree_name}' not found"
-        )
-
-    async with GitLockContext(timeout=15.0):
-        # Abort the worktree rebase (if one is in progress)
-        await call_git_command_with_output(
-            "git", "rebase", "--abort", cwd=worktree_path
-        )
-
-        # Clean up any leftover conflict state in the workspace dir
-        await _clean_workspace_conflicts(workspace_dir)
-
-        # Stash is left intentionally — the "dirt" in main doesn't need restoring
-
-    return {"status": "aborted", "message": "Sync aborted."}
 
 
 # --- Docker exec endpoint ---

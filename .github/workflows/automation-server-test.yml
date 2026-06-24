@@ -20,8 +20,12 @@ jobs:
   test:
     strategy:
       matrix:
-        go-version: [1.24.x]
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        go-version: [1.25.x]
+        # The automation-server daemon only ever runs on Linux (it reads
+        # /proc + statfs and ships as a Linux container). macOS stays for
+        # general cross-Unix portability; Windows is dropped — it can't build
+        # the Unix-only syscalls and is not a supported runtime.
+        os: [ubuntu-latest, macos-latest]
 
     runs-on: ${{ matrix.os }}
 
@@ -33,6 +37,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The daemon embeds the Server Console via go:embed; its build output is
+      # not committed. Build the SPA so `go test` exercises the real assets.
+      - name: Build Server Console (embedded SPA)
+        working-directory: ${{ github.workspace }}
+        run: |
+          npm --prefix bitswan-server-console install --no-audit --no-fund
+          npm --prefix bitswan-server-console run build
+          rm -rf bitswan-automation-server/internal/daemon/serverconsole_dist
+          mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
+          cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
 
       - name: go get
         run: go get ./...
@@ -58,7 +77,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24.x'
+          go-version: '1.25.x'
 
       - name: Install Docker Compose
         run: |
@@ -126,14 +145,6 @@ jobs:
       - name: Build bitswan binary
         run: go build -o bitswan ./main.go
 
-      - name: Build gitops image from source
-        run: |
-          # Build a fresh image from the in-repo gitops source so integration
-          # tests exercise this monorepo's code (and talk to the daemon socket,
-          # not Caddy directly). Path is absolute because this job inherits the
-          # bitswan-automation-server working-directory default.
-          docker build -t bitswan/gitops-local:latest "${{ github.workspace }}/bitswan-gitops"
-
       - name: Initialize daemon
         run: |
           sudo ./bitswan automation-server-daemon init
@@ -144,89 +155,68 @@ jobs:
           # Verify daemon is running
           ./bitswan automation-server-daemon status || exit 1
 
-      - name: "Test 1: Init with Traefik (default)"
+      # Bring up Traefik ingress (Caddy is deprecated and no longer tested).
+      # The business-process deploy e2e below then exercises this branch's
+      # templates on top of Traefik.
+      - name: "Ingress: Traefik init"
+        timeout-minutes: 10
+        run: |
+          echo "=== Traefik ingress init ==="
+          docker rm -f traefik 2>/dev/null || true
+          docker compose -p bitswan-traefik down 2>/dev/null || true
+          sudo rm -rf ~/.config/bitswan/traefik
+          ./bitswan ingress init --type traefik -v || exit 1
+          docker ps | grep traefik || { echo "ERROR: Traefik not running"; exit 1; }
+          echo "Routes:"
+          ./bitswan ingress list-routes || true
+
+      - name: Build gitops image from source
+        run: |
+          # Build a fresh gitops image from this monorepo's source so the e2e
+          # exercises the in-repo gitops (and its baked example templates), not
+          # a published image. Absolute path: this job's default working dir is
+          # bitswan-automation-server.
+          docker build -t bitswan/gitops-local:latest -f "${{ github.workspace }}/bitswan-gitops/Dockerfile" "${{ github.workspace }}"
+
+      - name: Build coding-agent image from source
+        run: |
+          # Build the in-repo coding-agent so the e2e exercises this branch's
+          # CLI (e.g. the `--copy` flag / `?copy=` gitops calls), not a
+          # published image that may lag the gitops/daemon API.
+          docker build -t bitswan/coding-agent-local:latest -f "${{ github.workspace }}/bitswan-coding-agent/Dockerfile" "${{ github.workspace }}/bitswan-coding-agent"
+
+      - name: Build egress-gateway image from source
+        run: |
+          # Dev deployments now stand up a default monitor-mode egress firewall
+          # gateway (observe-only, zero blast radius), and the BP worker shares
+          # its netns + gates its start on the gateway becoming healthy. gitops
+          # references the gateway by BITSWAN_EGRESS_GATEWAY_IMAGE (default
+          # bitswan/egress-gateway:latest), so build that tag here or the deploy
+          # can't pull it and every BP deploy fails.
+          docker build -t bitswan/egress-gateway:latest -f "${{ github.workspace }}/bitswan-automation-server/cmd/egress-gateway/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
+
+      - name: "E2E: create a business process and reach its frontend"
         timeout-minutes: 15
         run: |
-          echo "=== Testing with Traefik (default ingress) ==="
-          ./bitswan _test init --gitops-image bitswan/gitops-local:latest --no-remove || exit 1
+          echo "=== Creating a business process and verifying the frontend ==="
+          ./bitswan _test init --gitops-image bitswan/gitops-local:latest --coding-agent-image bitswan/coding-agent-local:latest --no-remove || exit 1
           ./bitswan _test cleanup || true
 
-      - name: "Diagnostics on Test 1 failure"
+      - name: "Diagnostics on E2E failure"
         if: failure()
         run: |
           echo "::group::docker ps -a"
           docker ps -a || true
           echo "::endgroup::"
-          echo "::group::docker images"
-          docker images || true
-          echo "::endgroup::"
-          # --no-remove leaves the workspace up on failure, so dump every
-          # container's recent logs — the gitops container's deploy pipeline
-          # output and any deployed-automation container are what we need.
+          # --no-remove leaves the workspace up on failure; dump every
+          # container's recent logs (gitops deploy pipeline + the BP's
+          # frontend/backend containers are what we need).
           for c in $(docker ps -aq); do
             name=$(docker inspect --format '{{.Name}} ({{.State.Status}}, exit={{.State.ExitCode}})' "$c" 2>/dev/null || echo "$c")
             echo "::group::logs $name"
             docker logs --tail 200 "$c" 2>&1 || true
             echo "::endgroup::"
           done
-
-      - name: "Test 2: Init with Caddy (backward compat)"
-        timeout-minutes: 15
-        run: |
-          echo "=== Testing with Caddy (backward compatibility) ==="
-          # Rebuild gitops image (previous test cleanup deletes it)
-          docker build -t bitswan/gitops-local:latest "${{ github.workspace }}/bitswan-gitops"
-          # Stop Traefik so a fresh Caddy can be started
-          docker rm -f traefik 2>/dev/null || true
-          docker compose -p bitswan-traefik down 2>/dev/null || true
-          sudo rm -rf ~/.config/bitswan/traefik
-          # Force Caddy via --type flag
-          ./bitswan ingress init --type caddy -v || exit 1
-          # Verify Caddy is running
-          docker ps | grep caddy || { echo "ERROR: Caddy not running"; exit 1; }
-          echo "Caddy is running, running init test..."
-          ./bitswan _test init --gitops-image bitswan/gitops-local:latest --no-remove || exit 1
-          ./bitswan _test cleanup || true
-
-      - name: "Test 3: Migrate Caddy to Traefik and re-test"
-        timeout-minutes: 15
-        run: |
-          echo "=== Testing migration from Caddy to Traefik ==="
-          # Rebuild gitops image (previous test cleanup deletes it)
-          docker build -t bitswan/gitops-local:latest "${{ github.workspace }}/bitswan-gitops"
-          # Ensure Caddy is running with some routes
-          docker rm -f traefik 2>/dev/null || true
-          docker compose -p bitswan-traefik down 2>/dev/null || true
-          sudo rm -rf ~/.config/bitswan/traefik
-          # Start Caddy if not already running
-          if ! docker ps | grep -q caddy; then
-            sudo ./bitswan ingress init || true
-          fi
-          # Add a test route to Caddy to verify it survives migration
-          ./bitswan ingress add-route migration-test.bitswan.localhost localhost:9999 || true
-          # Verify route exists before migration
-          echo "Routes before migration:"
-          ./bitswan ingress list-routes || true
-          # Run migration
-          ./bitswan ingress migrate -v || exit 1
-          # Verify Traefik is now running
-          if ! docker ps | grep -q traefik; then
-            echo "ERROR: Traefik should be running after migration"
-            exit 1
-          fi
-          # Verify route survived migration
-          echo "Routes after migration:"
-          ./bitswan ingress list-routes || true
-          # Run full init test with Traefik after migration
-          ./bitswan _test init --gitops-image bitswan/gitops-local:latest --no-remove || exit 1
-          ./bitswan _test cleanup || true
-
-      - name: Run update test
-        timeout-minutes: 20
-        run: |
-          ./bitswan _test update --no-remove || exit 1
-          # Cleanup after test
-          ./bitswan _test cleanup || true
 
       - name: Final cleanup
         if: always()

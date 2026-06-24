@@ -29,7 +29,7 @@ const REPLAYABLE_EVENTS = new Set([
   'automations',
   'images',
   'processes',
-  'worktrees',
+  'copies',
 ]);
 
 export class GitopsClient {
@@ -60,6 +60,48 @@ export class GitopsClient {
   }
 
   /**
+   * Whether a copy with this name is present in the latest cached
+   * `copies` snapshot. Lets `/api/me` skip a redundant create when the
+   * user's copy already exists. Returns false when no snapshot has arrived yet
+   * — the caller then attempts an idempotent create (gitops 409s if present).
+   */
+  hasCopy(name: string): boolean {
+    const wts = this.lastByEvent.get('copies');
+    return (
+      Array.isArray(wts) &&
+      wts.some(
+        (w) =>
+          !!w &&
+          typeof w === 'object' &&
+          (w as { name?: unknown }).name === name,
+      )
+    );
+  }
+
+  /**
+   * `GET /automations/user-role?email=` — the authoritative Bailey role for an
+   * email, resolved by gitops from the automation-server daemon (the same store
+   * People & roles uses, NOT SSO groups). Pass an email already verified from
+   * the user's access token. Returns 'member' when the daemon can't resolve a
+   * role or the lookup fails — fail CLOSED (least privilege) for gating.
+   */
+  async userRole(email: string): Promise<'admin' | 'auditor' | 'member'> {
+    try {
+      const r = await fetch(
+        `${this.baseUrl}/automations/user-role?email=${encodeURIComponent(email)}`,
+        { headers: { Authorization: `Bearer ${this.secret}` } },
+      );
+      if (!r.ok) return 'member';
+      const body = (await r.json()) as { role?: string };
+      const role = body?.role;
+      if (role === 'admin' || role === 'auditor') return role;
+      return 'member';
+    } catch {
+      return 'member';
+    }
+  }
+
+  /**
    * `POST /automations/{id}/(start|stop|restart)`. gitops accepts an empty
    * JSON body; the status code is forwarded so the route handler can surface
    * 502s on upstream failure.
@@ -84,14 +126,14 @@ export class GitopsClient {
 
   /**
    * `POST /processes/` — create a new business-process directory in the
-   * main repo or a specific worktree. Gitops scaffolds `process.toml` +
+   * main repo or a specific copy. Gitops scaffolds `process.toml` +
    * `README.md`, refreshes its in-memory cache, and broadcasts the new
    * `processes` snapshot over SSE so the dashboard sidebar updates
    * automatically.
    */
   async createProcess(input: {
     name: string;
-    worktree?: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/processes/`, {
       method: 'POST',
@@ -138,7 +180,7 @@ export class GitopsClient {
     group_id?: string;
     name?: string;
     bp: string;
-    worktree?: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/automations/from-template`, {
       method: 'POST',
@@ -158,84 +200,48 @@ export class GitopsClient {
   }
 
   /**
-   * `DELETE /worktrees/{name}` — remove a worktree and its branch. Gitops
-   * handles the full teardown (git worktree remove, branch -D, postgres
-   * cleanup, privileged rm fallback for files owned by container uids).
+   * `POST /automations/frontend` — scaffold a frontend (the only kind, always
+   * exposed through Bailey) into a business process from the baked template.
    */
-  async deleteWorktree(
-    name: string,
-  ): Promise<{ ok: boolean; status: number; body: unknown }> {
-    const r = await fetch(
-      `${this.baseUrl}/worktrees/${encodeURIComponent(name)}`,
-      {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.secret}` },
-      },
-    );
-    let body: unknown = null;
-    try {
-      body = await r.json();
-    } catch {
-      // ignore
-    }
-    return { ok: r.ok, status: r.status, body };
-  }
-
-  /**
-   * `GET /worktrees/{name}/status` — per-file change list for a worktree
-   * (path + A/M/D kind + +adds/-dels). Drives the dashboard's Diff +
-   * Files tabs.
-   */
-  async worktreeStatus(
-    name: string,
-  ): Promise<{ ok: boolean; status: number; body: unknown }> {
-    const r = await fetch(
-      `${this.baseUrl}/worktrees/${encodeURIComponent(name)}/status`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
-    );
-    let body: unknown = null;
-    try {
-      body = await r.json();
-    } catch {
-      // ignore
-    }
-    return { ok: r.ok, status: r.status, body };
-  }
-
-  /**
-   * `GET /worktrees/{name}/diff[?path=<rel>]` — unified diff of the
-   * worktree's working tree vs. its own HEAD. Optional path filter
-   * narrows the diff to one file. Drives the dashboard's Diff tab.
-   */
-  async worktreeDiff(
-    name: string,
-    path?: string,
-  ): Promise<{ ok: boolean; status: number; body: unknown }> {
-    const qs = path ? `?path=${encodeURIComponent(path)}` : '';
-    const r = await fetch(
-      `${this.baseUrl}/worktrees/${encodeURIComponent(name)}/diff${qs}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
-    );
-    let body: unknown = null;
-    try {
-      body = await r.json();
-    } catch {
-      // ignore
-    }
-    return { ok: r.ok, status: r.status, body };
-  }
-
-  /**
-   * `POST /worktrees/create` — create a new git worktree under the
-   * workspace's `worktrees/` directory and check out a branch into it.
-   * The new worktree is picked up by gitops's filesystem watcher and
-   * surfaces in the `worktrees` SSE event without a follow-up REST call.
-   */
-  async createWorktree(input: {
-    branch_name: string;
-    base_branch?: string;
+  async addFrontend(input: {
+    bp: string;
+    name: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
-    const r = await fetch(`${this.baseUrl}/worktrees/create`, {
+    return this.postJson('/automations/frontend', input);
+  }
+
+  /**
+   * `POST /automations/worker` — scaffold a private worker container of the
+   * given `type` (e.g. "go", "fastapi") into a business process.
+   */
+  async addWorker(input: {
+    bp: string;
+    name: string;
+    type: string;
+    copy?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson('/automations/worker', input);
+  }
+
+  /**
+   * `POST /automations/rename` — rename a frontend or worker within a BP.
+   */
+  async renameAutomation(input: {
+    bp: string;
+    old_name: string;
+    new_name: string;
+    copy?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson('/automations/rename', input);
+  }
+
+  /** Shared POST-JSON helper for the simple scaffolding endpoints above. */
+  private async postJson(
+    path: string,
+    input: unknown,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.secret}`,
@@ -253,15 +259,158 @@ export class GitopsClient {
   }
 
   /**
+   * `GET /copies/{name}/status` — per-file change list for a copy
+   * (path + A/M/D kind + +adds/-dels). Drives the dashboard's Diff +
+   * Files tabs.
+   */
+  async copyStatus(
+    name: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/status`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `GET /copies/{name}/diff[?path=<rel>]` — unified diff of the
+   * copy's working tree vs. its own HEAD. Optional path filter
+   * narrows the diff to one file. Drives the dashboard's Diff tab.
+   */
+  async copyDiff(
+    name: string,
+    path?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const qs = path ? `?path=${encodeURIComponent(path)}` : '';
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/diff${qs}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `GET /copies/{name}/commit/{sha}/diff` — unified diff introduced by a
+   * single commit (`git show`). Drives the clickable rows in the Sync &
+   * Deploy History view; resolves commits on either side of the graph.
+   */
+  async copyCommitDiff(
+    name: string,
+    sha: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `POST /copies/create` — create a new git clone under the
+   * workspace's `copies/` directory and check out a branch into it.
+   * The new copy is picked up by gitops's filesystem watcher and
+   * surfaces in the `copies` SSE event without a follow-up REST call.
+   */
+  async createCopy(input: {
+    branch_name: string;
+    base_branch?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}/copies/create`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(input),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `POST /copies/{name}/sync` — commit WIP and, when the copy is a pure
+   * fast-forward of main, fast-forward main to it server-side. Returns
+   * `needs_rebase` in the body when a rebase is required instead.
+   */
+  async syncCopy(
+    name: string,
+    deployer?: string,
+    bp?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(`/copies/${encodeURIComponent(name)}/sync`, {
+      deployer: deployer ?? null,
+      bp: bp ?? null,
+    });
+  }
+
+  /** `GET /copies/{name}/history` — copy + main commit logs with deploy tags. */
+  async copyHistory(
+    name: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/history`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async copyDivergence(
+    name: string,
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/divergence?bp=${encodeURIComponent(bp)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `POST /automations/start-deploy` — workspace-bind-mount deploy. Body is
-   * `{ relative_path, stage, worktree? }`. Gitops resolves the source under
+   * `{ relative_path, stage, copy? }`. Gitops resolves the source under
    * `/workspace-repo`, merges `bitswan_lib`, computes the checksum, and
    * spawns the deploy in the background.
    */
   async startDeploy(input: {
     relative_path: string;
     stage: 'dev' | 'live-dev';
-    worktree?: string;
+    copy?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/automations/start-deploy`, {
       method: 'POST',
@@ -282,14 +431,15 @@ export class GitopsClient {
 
   /**
    * `POST /automations/deploy-bp` — deploy every automation under one business
-   * process as a single unit. Body is `{ bp, stage, worktree? }`. Gitops
+   * process as a single unit. Body is `{ bp, stage, copy? }`. Gitops
    * enumerates the BP's members, reserves them atomically, and runs one
    * batched deploy in the background under a single BP-level deploy task.
    */
   async deployBusinessProcess(input: {
     bp: string;
     stage: 'dev' | 'live-dev';
-    worktree?: string;
+    copy?: string;
+    deployed_by?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/automations/deploy-bp`, {
       method: 'POST',
@@ -317,6 +467,7 @@ export class GitopsClient {
   async promoteBusinessProcess(input: {
     bp: string;
     stage: 'staging' | 'production';
+    deployed_by?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/automations/promote-bp`, {
       method: 'POST',
@@ -347,6 +498,517 @@ export class GitopsClient {
     const r = await fetch(
       `${this.baseUrl}/automations/deploy-status/${encodeURIComponent(taskId)}`,
       { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpHistory(
+    bp: string,
+    stage: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/history?stage=${encodeURIComponent(stage)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpDiff(
+    bp: string,
+    from: string,
+    to: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpSecrets(
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpSetSecrets(
+    bp: string,
+    values: Record<string, Record<string, string>>,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ values }),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET .../business-processes/{bp}/dr` — a BP's disaster-recovery status
+   *  (cadence policy, manual recovery-test log, overdue flag). */
+  async dr(bp: string): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/dr`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET .../business-processes/{bp}/backups` — blue-green slot state (live vs
+   *  standby/DR), retention policy, and the recent audit log. */
+  async backups(bp: string): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/backups`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Backup writes: `path` is "/retention" (PUT) or "/swap" (POST). gitops
+   *  versions + audits the change in bitswan.yaml. */
+  async backupWrite(
+    bp: string,
+    path: string,
+    method: 'PUT' | 'POST',
+    payload: Record<string, unknown>,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/backups${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET .../business-processes/{bp}/firewall?stage=` — allow-list + attempts. */
+  async firewall(
+    bp: string,
+    stage: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall?stage=${encodeURIComponent(stage)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Firewall rule set/delete/promote. `path` selects /rules or /promote;
+   *  `method` is PUT/DELETE/POST. gitops versions the change + enforces prod RBAC
+   *  from the `role` in the payload. */
+  async firewallWrite(
+    bp: string,
+    path: string,
+    method: 'PUT' | 'DELETE' | 'POST',
+    payload: Record<string, unknown>,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Upload a host's GDPR data-processing-agreement PDF (stored + versioned in
+   *  the gitops repo). Forwards as multipart to gitops. */
+  async firewallDpaUpload(
+    bp: string,
+    input: {
+      stage: string;
+      host: string;
+      by?: string;
+      role?: string;
+      filename: string;
+      content: Buffer;
+      contentType?: string;
+    },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const form = new FormData();
+    form.set('stage', input.stage);
+    form.set('host', input.host);
+    if (input.by) form.set('by', input.by);
+    if (input.role) form.set('role', input.role);
+    const blob = new Blob([new Uint8Array(input.content)], {
+      type: input.contentType || 'application/pdf',
+    });
+    form.set('file', blob, input.filename);
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall/dpa`,
+      { method: 'POST', headers: { Authorization: `Bearer ${this.secret}` }, body: form },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Download a host's stored DPA PDF (raw bytes for the dashboard to stream). */
+  async firewallDpaDownload(
+    bp: string,
+    host: string,
+  ): Promise<{ ok: boolean; status: number; body: Buffer; contentType: string }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall/dpa?host=${encodeURIComponent(host)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    const buf = Buffer.from(await r.arrayBuffer());
+    return {
+      ok: r.ok,
+      status: r.status,
+      body: buf,
+      contentType: r.headers.get('content-type') || 'application/pdf',
+    };
+  }
+
+  /** `GET .../business-processes/{bp}/supply-chain?stage=` — SBOM + CVEs + waivers. */
+  async supplyChain(
+    bp: string,
+    stage: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET .../supply-chain/preview?copy=` — SBOM + CVEs for the image a deploy
+   *  of this BP WOULD build from the current source (Checks tab). */
+  async supplyChainPreview(
+    bp: string,
+    copy: string | null,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const q = copy ? `?copy=${encodeURIComponent(copy)}` : '';
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/preview${q}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Mark a CVE out of scope (POST) or restore it (DELETE) — body carries
+   *  {stage, package, cve, comment?, by?}; gitops versions it in bitswan.yaml. */
+  async supplyChainWaiver(
+    bp: string,
+    method: 'POST' | 'DELETE',
+    payload: {
+      copy: string | null;
+      package: string;
+      cve: string;
+      comment?: string;
+      by?: string;
+    },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/waivers`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `PUT .../business-processes/{bp}/dr/policy` — set the recovery-test cadence. */
+  async setDrPolicy(
+    bp: string,
+    policy: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/dr/policy`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ policy }),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `POST .../business-processes/{bp}/dr/tests` — record a hand-performed
+   *  recovery test (prepended; the log stays newest-first). */
+  async recordDrTest(
+    bp: string,
+    payload: { by?: string; note?: string; snapshot?: string },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/dr/tests`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET /snapshots/{bp}` — the BP's snapshot list (+ eligibility/usage/tasks).
+   *  Exposed for the DR panel's "tested against" snapshot picker. */
+  async bpSnapshots(
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/snapshots/${encodeURIComponent(bp)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Infra-service status for a stage (Containers tab "Stage services" row).
+   *  gitops only includes `connection_info.admin_ui` when show_passwords=true,
+   *  so we request it but then strip everything except the admin URL — the DB
+   *  credentials must never reach the browser. */
+  async serviceStatus(
+    type: string,
+    stage: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/services/${encodeURIComponent(type)}/status?stage=${encodeURIComponent(stage)}&show_passwords=true`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let raw: unknown = null;
+    try {
+      raw = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    let body: unknown = raw;
+    if (r.ok && raw && typeof raw === 'object') {
+      const s = raw as {
+        service?: unknown;
+        enabled?: unknown;
+        running?: unknown;
+        connection_info?: { admin_ui?: unknown } | null;
+      };
+      // Sanitize: only the non-secret fields the Containers tab needs.
+      body = {
+        service: s.service,
+        enabled: s.enabled,
+        running: s.running,
+        connection_info: { admin_ui: s.connection_info?.admin_ui ?? null },
+      };
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpScale(
+    bp: string,
+    stage: string,
+    replicas: number,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/scale`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ stage, replicas }),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpFileTree(
+    bp: string,
+    commit: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/files?commit=${encodeURIComponent(commit)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpFileContent(
+    bp: string,
+    commit: string,
+    path: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/file-content?commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** Returns the raw upstream Response so the route can stream the (large)
+   *  bundle body straight through with its Content-Disposition. */
+  async bpBundle(bp: string, stage: string, commit: string): Promise<Response> {
+    return fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/bundle?stage=${encodeURIComponent(stage)}&commit=${encodeURIComponent(commit)}`,
+      { headers: { Authorization: `Bearer ${this.secret}` } },
+    );
+  }
+
+  async bpRollback(input: {
+    bp: string;
+    stage: string;
+    git_commit: string;
+    deployed_by?: string;
+    kind?: 'deploy' | 'firewall';
+    role?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const { bp, ...rest } = input;
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/rollback`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(rest),
+      },
     );
     let body: unknown = null;
     try {
@@ -465,6 +1127,32 @@ export class GitopsClient {
     return r.body;
   }
 
+  /**
+   * Stream an image's `docker build` log by checksum. Gitops serves this as a
+   * `text/plain` follow-stream (live during a build, then the final
+   * `.build.log`/`.failedbuild.log`, closing once a completed log is fully
+   * read). The route re-frames the bytes as SSE for the browser.
+   */
+  async streamBuildLogs(
+    checksum: string,
+    signal: AbortSignal,
+  ): Promise<ReadableStream<Uint8Array>> {
+    const r = await fetch(
+      `${this.baseUrl}/images/builds/${encodeURIComponent(checksum)}/stream`,
+      {
+        headers: {
+          Authorization: `Bearer ${this.secret}`,
+          Accept: 'text/plain',
+        },
+        signal,
+      },
+    );
+    if (!r.ok || !r.body) {
+      throw new Error(`gitops build-log stream returned ${r.status}`);
+    }
+    return r.body;
+  }
+
   // ---------------------------------------------------------------------
   // Per-BP stage snapshots (`/snapshots/*`). Create/restore/clone return
   // 202 + task_id; progress is polled via `snapshotTaskStatus` (the
@@ -517,7 +1205,7 @@ export class GitopsClient {
   }
 
   /** `POST /snapshots/{bp}/{stage}` — start a background snapshot (202 + task_id). */
-  createSnapshot(bp: string, stage: string, input: { label?: string }) {
+  createSnapshot(bp: string, stage: string, input: { label?: string; by?: string }) {
     return this.requestJson(
       'POST',
       `/snapshots/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}`,
@@ -528,7 +1216,12 @@ export class GitopsClient {
   /** `POST /snapshots/{bp}/restore` — restore a snapshot into a target stage. */
   restoreSnapshot(
     bp: string,
-    input: { snapshot_id: string; source_stage: string; target_stage: string },
+    input: {
+      snapshot_id: string;
+      source_stage: string;
+      target_stage: string;
+      by?: string;
+    },
   ) {
     return this.requestJson(
       'POST',

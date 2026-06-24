@@ -75,39 +75,74 @@ def validate_bp_slug(slug: str) -> None:
         raise ValueError(f"Invalid BP slug: {slug!r}")
 
 
-def bp_resource_names(bp_slug: str) -> dict:
+def bp_resource_names(bp_slug: str, db: int | None = None) -> dict:
     """Stage-independent per-BP resource names.
 
     Postgres identifiers are capped at 63 bytes; MinIO bucket names at 63
     chars. Slugs come from directory names so they're rarely near the limit,
     but truncate defensively (collisions after truncation surface as a
     registry slug conflict, not silent data sharing).
+
+    `db` (1 or 2) selects one of a BP's two persistent blue-green PRODUCTION
+    databases: each is a fully separate logical DB/bucket/couch namespace, so
+    the live db (Production) and the standby db (DR) never share data. The
+    app slots a/b/c connect to one of these two DBs; restores only ever write
+    the standby db. `db=None` is the single-backend scheme used everywhere
+    else (dev/staging) — names are byte-identical to the original scheme.
     """
     validate_bp_slug(bp_slug)
-    pg = ("bp_" + bp_slug.replace("-", "_"))[:63]
-    bucket = ("bp-" + bp_slug)[:63].rstrip("-")
+    if db is not None:
+        if db not in (1, 2):
+            raise ValueError(f"Invalid blue-green db: {db!r} (want 1 or 2)")
+        # Reserve room for the "_<db>"/"-<db>" suffix within the 63-byte cap.
+        pg = (("bp_" + bp_slug.replace("-", "_"))[:61]) + f"_{db}"
+        bucket = (("bp-" + bp_slug)[:61].rstrip("-")) + f"-{db}"
+        couch = f"bp-{bp_slug}-{db}-"
+    else:
+        pg = ("bp_" + bp_slug.replace("-", "_"))[:63]
+        bucket = ("bp-" + bp_slug)[:63].rstrip("-")
+        couch = f"bp-{bp_slug}-"
     return {
         "postgres_db": pg,
-        "couchdb_prefix": f"bp-{bp_slug}-",
+        "couchdb_prefix": couch,
         "minio_bucket": bucket,
     }
 
 
-def derive_bp_and_worktree(relative_path: str | None) -> tuple[str, str]:
-    """Derive (bp_slug, worktree_name) from a deployment's relative_path.
+def copy_db_name(copy_name: str) -> str:
+    """Postgres database backing a non-main copy's live-dev backends.
 
-    relative_path looks like "Test/backend" or "worktrees/bar/Test/backend".
-    Returns ("", "") when the path has no BP segment (top-level automation).
+    Single source of truth shared by copy-create (the clone), the deploy-time
+    ensure guard, and the POSTGRES_DB env injection in generate_docker_compose —
+    they MUST agree, or a backend connects to a database nobody created.
+    """
+    safe = re.sub(r"[^a-z0-9_]", "_", copy_name.lower())
+    return f"postgres_copy_{safe}"
+
+
+def derive_bp_and_copy(relative_path: str | None) -> tuple[str, str]:
+    """Derive (bp_slug, copy_name) from a deployment's relative_path.
+
+    relative_path looks like "copies/main/Test/backend" (the main copy) or
+    "copies/bar/Test/backend" (a non-main copy). The second return value is the
+    *copy context*: empty for the main copy (so its deployments stay unprefixed,
+    matching legacy `main`), or the copy name for any other copy. Returns
+    ("", "") when the path has no BP segment (top-level automation).
+
     Single source of truth shared by `generate_docker_compose`'s deployment-
     context derivation and the provisioning hooks — both must agree on what
-    "the BP of a deployment" means.
+    "the BP of a deployment" means. (The variable is still called wt_name for
+    historical reasons; it now carries the copy context.)
     """
     bp_name = ""
     wt_name = ""
     if relative_path:
         parts = relative_path.replace("\\", "/").split("/")
-        if len(parts) >= 2 and parts[0] == "worktrees":
-            wt_name = parts[1]
+        if len(parts) >= 2 and parts[0] == "copies":
+            copy_name = parts[1]
+            # The main copy is the unprefixed scope (like the old shared repo);
+            # only non-main copies carry a copy context.
+            wt_name = "" if copy_name == "main" else copy_name
             parts = parts[2:]
         if len(parts) >= 2:
             bp_name = parts[0]
@@ -119,7 +154,7 @@ def get_service_secrets(service_type: str, stage: str) -> dict | None:
     """Read a service's connection info from its secrets env-file.
 
     Generalisation of the Postgres-only helper that used to live in
-    `app/routes/worktrees.py`. Returns the parsed KEY=VALUE dict, or None
+    `app/routes/copies.py`. Returns the parsed KEY=VALUE dict, or None
     when the file is missing (service not enabled at that stage).
     """
     bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
@@ -304,6 +339,70 @@ async def _create_postgres_db(container: str, user: str, db_name: str) -> None:
         raise RuntimeError(f"CREATE DATABASE {db_name} failed: {stderr.strip()}")
 
 
+async def clone_postgres_db(
+    workspace: str, copy_name: str, source_realm: str = "dev"
+) -> str | None:
+    """Ensure a non-main copy's live-dev database (``postgres_copy_<copy>``)
+    exists, cloning it from the realm's default database
+    (``CREATE DATABASE ... WITH TEMPLATE``).
+
+    Returns the database name, or ``None`` when Postgres isn't enabled in this
+    workspace (nothing to clone — the caller decides whether that's fatal).
+    Idempotent: a no-op when the database already exists. Waits for the server
+    to accept connections first, so a cold-start deploy doesn't race initdb.
+    Shared by copy-create (``routes/copies.py``) and the deploy-time guard.
+    """
+    secrets = get_service_secrets("postgres", source_realm)
+    if not secrets or not secrets.get("POSTGRES_USER"):
+        return None
+    user = secrets["POSTGRES_USER"]
+    source_db = secrets.get("POSTGRES_DB", "postgres")
+    new_db = copy_db_name(copy_name)
+    container = _container_name(workspace, "postgres", source_realm)
+
+    await _wait_for_postgres(container, user)
+    if await _postgres_db_exists(container, user, new_db):
+        return new_db
+
+    # CREATE DATABASE ... WITH TEMPLATE requires no other sessions on the
+    # template DB — drop them first (best-effort; the CREATE below is the
+    # authoritative step).
+    terminate_sql = (
+        f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        f"WHERE datname = '{source_db}' AND pid <> pg_backend_pid();"
+    )
+    await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        terminate_sql,
+    )
+    _, stderr, rc = await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        f'CREATE DATABASE "{new_db}" WITH TEMPLATE "{source_db}";',
+    )
+    if rc != 0 and "already exists" not in (stderr or ""):
+        raise RuntimeError(f"clone CREATE DATABASE {new_db} failed: {stderr.strip()}")
+    logger.info(
+        "Cloned Postgres '%s' -> '%s' (copy '%s')", source_db, new_db, copy_name
+    )
+    return new_db
+
+
 async def _create_minio_bucket(
     container: str, access_key: str, secret_key: str, bucket: str
 ) -> None:
@@ -350,6 +449,7 @@ async def ensure_bp_databases(
     bp_name: str,
     realm: str,
     services: list[str] | None = None,
+    db: int | None = None,
 ) -> dict:
     """Create the per-BP objects for every requested service at one realm.
 
@@ -357,6 +457,11 @@ async def ensure_bp_databases(
     and whose container is running; the rest are reported as skipped and
     retried on the next deploy. Marks each successfully created service as
     provisioned in the registry. Returns a per-service result dict.
+
+    `db` (1/2) provisions one of a production BP's two blue-green databases
+    (`bp_<slug>_<db>` etc.) instead of the single-backend names, tracked under
+    a separate registry key. Both DBs are provisioned for a production BP; the
+    standby db is where restore-to-DR lands without touching the live db.
     """
     from app.services.infra_service import get_service
 
@@ -366,13 +471,16 @@ async def ensure_bp_databases(
             f"Invalid realm '{realm}': must be one of {sorted(SERVICE_REALMS)}"
         )
 
-    names = bp_resource_names(bp_slug)
+    names = bp_resource_names(bp_slug, db)
     requested = [s for s in (services or BP_DATA_SERVICES) if s in BP_DATA_SERVICES]
 
     registry = load_registry()
     register_bp_stage(registry, bp_slug, bp_name, realm)
     stage_entry = registry["bps"][bp_slug]["stages"][realm]
-    svc_state = stage_entry.setdefault("services", {})
+    if db is not None:
+        svc_state = stage_entry.setdefault("dbs", {}).setdefault(str(db), {})
+    else:
+        svc_state = stage_entry.setdefault("services", {})
 
     results: dict[str, str] = {}
     changed = True  # register_bp_stage may have added the stage entry
@@ -444,7 +552,7 @@ def _bp_has_existing_deployment_at_realm(
     have live data on the shared default DB and must NOT be auto-migrated."""
     for conf in ((bs_yaml or {}).get("deployments") or {}).values():
         conf = conf or {}
-        dep_slug, wt = derive_bp_and_worktree(conf.get("relative_path"))
+        dep_slug, wt = derive_bp_and_copy(conf.get("relative_path"))
         if wt or dep_slug != bp_slug:
             continue
         dep_stage = conf.get("stage") or "production"
@@ -473,7 +581,7 @@ def register_new_bps_for_members(
         for m in members:
             relative_path = m.get("relative_path")
             stage = m.get("stage") or "production"
-            bp_slug, wt = derive_bp_and_worktree(relative_path)
+            bp_slug, wt = derive_bp_and_copy(relative_path)
             if not bp_slug or wt:
                 continue
             realm = stage_for_deployment(stage if stage != "" else "production")
@@ -504,7 +612,9 @@ def _bp_display_name(relative_path: str | None) -> str:
     if not relative_path:
         return ""
     parts = relative_path.replace("\\", "/").split("/")
-    if len(parts) >= 2 and parts[0] == "worktrees":
+    if len(parts) >= 2 and parts[0] == "copies":
+        # Drop the "copies/<copy>" prefix; the main copy and any other copy
+        # are treated the same for the purpose of the BP folder name.
         parts = parts[2:]
     return parts[0] if len(parts) >= 2 else ""
 
@@ -524,7 +634,7 @@ async def provision_for_deployments(
         seen: set[tuple[str, str]] = set()
         for dep_id in deployment_ids:
             conf = deployments.get(dep_id) or {}
-            bp_slug, wt = derive_bp_and_worktree(conf.get("relative_path"))
+            bp_slug, wt = derive_bp_and_copy(conf.get("relative_path"))
             if not bp_slug or wt:
                 continue
             dep_stage = conf.get("stage") or "production"
@@ -535,12 +645,125 @@ async def provision_for_deployments(
             entry = get_bp_entry(registry, bp_slug)
             if not entry or realm not in entry.get("stages", {}):
                 continue
-            svc_state = entry["stages"][realm].get("services", {})
-            if all(svc_state.get(s, {}).get("provisioned") for s in BP_DATA_SERVICES):
-                continue
-            results = await ensure_bp_databases(
-                workspace, bp_slug, entry.get("bp_name", bp_slug), realm
-            )
-            logger.info("Per-BP databases for '%s' at %s: %s", bp_slug, realm, results)
+            name = entry.get("bp_name", bp_slug)
+            stage_entry = entry["stages"][realm]
+            if realm == "production":
+                # Blue-green: provision BOTH databases (1 and 2). The app slots
+                # a/b/c wire to one of these; the standby is where restore-to-DR
+                # lands. Tracked under the per-db "dbs" registry key.
+                dbs_state = stage_entry.get("dbs", {})
+                for db in (1, 2):
+                    db_svc = dbs_state.get(str(db), {})
+                    if all(
+                        (db_svc.get(s, {}) or {}).get("provisioned")
+                        for s in BP_DATA_SERVICES
+                    ):
+                        continue
+                    results = await ensure_bp_databases(
+                        workspace, bp_slug, name, realm, db=db
+                    )
+                    logger.info(
+                        "Per-BP db%s for '%s' at %s: %s", db, bp_slug, realm, results
+                    )
+            else:
+                svc_state = stage_entry.get("services", {})
+                if all(
+                    svc_state.get(s, {}).get("provisioned") for s in BP_DATA_SERVICES
+                ):
+                    continue
+                results = await ensure_bp_databases(workspace, bp_slug, name, realm)
+                logger.info(
+                    "Per-BP databases for '%s' at %s: %s", bp_slug, realm, results
+                )
     except Exception as e:
         logger.warning("Per-BP database provisioning failed (non-fatal): %s", e)
+
+
+def _production_db_numbers(bs_yaml: dict | None, bp_slug: str) -> list[int]:
+    """Blue-green db numbers a production BP's slots use (default [1, 2]).
+
+    Mirrors generate_docker_compose's `_slot_db_pairs`: each running slot wires
+    to one of the two persistent production databases.
+    """
+    rec = ((bs_yaml or {}).get("backups") or {}).get(bp_slug) or {}
+    slots = rec.get("slots") or {"a": {"db": 1}, "b": {"db": 2}}
+    nums = sorted(
+        {
+            int((slots[s] or {}).get("db"))
+            for s in slots
+            if (slots.get(s) or {}).get("db")
+        }
+    )
+    return nums or [1]
+
+
+async def ensure_live_postgres_dbs(
+    workspace: str, bs_yaml: dict | None, deployment_ids: list[str]
+) -> None:
+    """Fail-fast guard: ensure the Postgres database each deploying backend will
+    connect to actually exists, before relying on the backend's connect retry.
+
+    Mirrors the POSTGRES_DB resolution in generate_docker_compose:
+      - live-dev non-main copy -> ``postgres_copy_<copy>`` (cloned from dev default)
+      - registered BP          -> ``bp_<slug>`` (dev/staging), or ``bp_<slug>_<db>``
+                                  for each blue-green db a production BP's slots use
+      - otherwise (shared default DB) -> nothing to create
+
+    Unlike `provision_for_deployments` (best-effort; covers couch/minio + the
+    standby blue-green db), this owns ONLY the live Postgres DB and **raises**
+    when Postgres is enabled but the DB can't be created — so the deploy fails
+    with a clear error instead of leaving the backend crash-looping on a missing
+    database. When Postgres isn't enabled for a realm it skips (the guard can't
+    create a server).
+    """
+    deployments = (bs_yaml or {}).get("deployments") or {}
+    registry = load_registry()
+    seen: set[tuple[str, str]] = set()
+    for dep_id in deployment_ids:
+        conf = deployments.get(dep_id) or {}
+        bp_slug, copy = derive_bp_and_copy(conf.get("relative_path"))
+        stage = conf.get("stage") or "production"
+        realm = stage_for_deployment(stage)
+        if realm not in SERVICE_REALMS:
+            continue
+
+        # 1) A non-main copy's live-dev backends connect to the cloned per-copy
+        #    DB (the env injection overrides POSTGRES_DB to it unconditionally).
+        if stage == "live-dev" and copy:
+            if ("copy", copy) in seen:
+                continue
+            seen.add(("copy", copy))
+            if get_service_secrets("postgres", realm) is None:
+                logger.info(
+                    "Postgres not enabled (%s); skipping copy DB for '%s'",
+                    realm,
+                    copy,
+                )
+                continue
+            await clone_postgres_db(workspace, copy, source_realm=realm)
+            continue
+
+        # 2) A registered BP's per-stage database(s). Unregistered BPs use the
+        #    shared default DB, so there's nothing to create.
+        if not bp_slug or not is_registered(registry, bp_slug, realm):
+            continue
+        secrets = get_service_secrets("postgres", realm)
+        if not secrets or not secrets.get("POSTGRES_USER"):
+            logger.info(
+                "Postgres not enabled (%s); skipping DB for BP '%s'", realm, bp_slug
+            )
+            continue
+        user = secrets["POSTGRES_USER"]
+        container = _container_name(workspace, "postgres", realm)
+        dbs = (
+            _production_db_numbers(bs_yaml, bp_slug)
+            if realm == "production"
+            else [None]
+        )
+        for db in dbs:
+            db_name = bp_resource_names(bp_slug, db)["postgres_db"]
+            if ("bp", db_name) in seen:
+                continue
+            seen.add(("bp", db_name))
+            await _wait_for_postgres(container, user)
+            await _create_postgres_db(container, user, db_name)

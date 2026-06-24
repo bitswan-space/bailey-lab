@@ -1,11 +1,16 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { GitopsClient } from '../services/gitops.js';
+import { emailFromRequest } from '../lib/user.js';
 
 export interface SnapshotRoutesOptions {
   gitops: GitopsClient | null;
 }
 
 const STAGES = new Set(['dev', 'staging', 'production']);
+// Where a restore/clone may LAND: never live Production. 'dr' is the safe
+// recovery sink (gitops maps it to the production standby slot); dev/staging
+// are in-place. The server mirrors the gitops-side guard.
+const RESTORE_TARGETS = new Set(['dev', 'staging', 'dr']);
 
 /**
  * `/api/snapshots/*` — per-BP stage-snapshot proxy. Thin pass-through to
@@ -111,11 +116,20 @@ export function registerSnapshotRoutes(
     if (!snapshot_id || typeof snapshot_id !== 'string') {
       return reply.code(400).send({ error: 'snapshot_id is required' });
     }
-    if (!source_stage || !STAGES.has(source_stage) || !target_stage || !STAGES.has(target_stage)) {
+    if (!source_stage || !STAGES.has(source_stage)) {
       return reply
         .code(400)
-        .send({ error: "source_stage and target_stage must be 'dev', 'staging' or 'production'" });
+        .send({ error: "source_stage must be 'dev', 'staging' or 'production'" });
     }
+    if (!target_stage || !RESTORE_TARGETS.has(target_stage)) {
+      return reply.code(400).send({
+        error:
+          "target_stage must be 'dev', 'staging' or 'dr' — restoring onto live Production is not allowed",
+      });
+    }
+    // Attribute a DR restore to the signed-in user so the "in DR now" pointer
+    // records who loaded it (the client doesn't send `by`).
+    const by = (await emailFromRequest(req, app.log)) || undefined;
     try {
       return await forward(
         reply,
@@ -123,6 +137,7 @@ export function registerSnapshotRoutes(
           snapshot_id,
           source_stage,
           target_stage,
+          ...(by ? { by } : {}),
         }),
       );
     } catch (err) {
@@ -138,10 +153,16 @@ export function registerSnapshotRoutes(
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
     const { source_stage, target_stage } = req.body ?? {};
-    if (!source_stage || !STAGES.has(source_stage) || !target_stage || !STAGES.has(target_stage)) {
+    if (!source_stage || !STAGES.has(source_stage)) {
       return reply
         .code(400)
-        .send({ error: "source_stage and target_stage must be 'dev', 'staging' or 'production'" });
+        .send({ error: "source_stage must be 'dev', 'staging' or 'production'" });
+    }
+    // Clone may seed dev/staging but never overwrite live Production.
+    if (!target_stage || target_stage === 'production' || !STAGES.has(target_stage)) {
+      return reply
+        .code(400)
+        .send({ error: "target_stage must be 'dev' or 'staging' — not live Production" });
     }
     try {
       return await forward(
@@ -168,11 +189,13 @@ export function registerSnapshotRoutes(
           .code(400)
           .send({ error: "stage must be 'dev', 'staging' or 'production'" });
       }
+      const by = (await emailFromRequest(req, app.log)) || undefined;
       try {
         return await forward(
           reply,
           gitops.createSnapshot(req.params.bp, stage, {
             label: req.body?.label ?? '',
+            ...(by ? { by } : {}),
           }),
         );
       } catch (err) {

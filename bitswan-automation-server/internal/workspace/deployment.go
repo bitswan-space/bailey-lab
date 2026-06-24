@@ -14,7 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// UpdateWorkspaceDeployment updates the workspace deployment with new AOC and MQTT configuration
+// UpdateWorkspaceDeployment updates the workspace deployment with new AOC configuration
 func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, staging bool, trustCA bool) error {
 	// Use HOME for file operations (works inside container and outside)
 	// The workspace files are accessible via the container path
@@ -31,16 +31,6 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, s
 	var metadata config.WorkspaceMetadata
 	if err := yaml.Unmarshal(data, &metadata); err != nil {
 		return fmt.Errorf("failed to unmarshal metadata.yaml: %w", err)
-	}
-
-	// Prepare MQTT environment variables from metadata
-	var mqttEnvVars []string
-	if metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PASSWORD="+*metadata.MqttPassword)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "MQTT_TOPIC="+*metadata.MqttTopic)
 	}
 
 	// Prepare AOC environment variables
@@ -97,7 +87,6 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, s
 		WorkspaceName:      workspaceName,
 		GitopsImage:        gitopsImage,
 		Domain:             metadata.Domain,
-		MqttEnvVars:        mqttEnvVars,
 		AocEnvVars:         aocEnvVars,
 		OAuthEnvVars:       oauthEnvVars,
 		GitopsDevSourceDir: gitopsDevSourceDir,

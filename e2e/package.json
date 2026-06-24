@@ -1,0 +1,16 @@
+{
+  "name": "bitswan-e2e",
+  "private": true,
+  "description": "Real-stack browser E2E for the BitSwan business-process lifecycle.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  },
+  "dependencies": {
+    "pagedjs": "^0.4.3"
+  }
+}

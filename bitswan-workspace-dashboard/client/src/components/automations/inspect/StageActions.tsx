@@ -11,8 +11,8 @@ interface StageActionsProps {
   /** The currently-active stage in the modal. */
   stage: InspectStage | undefined;
   mode: 'deployments' | 'liveDev';
-  /** Required for live-dev deploys (the worktree the source lives in). */
-  worktree?: string;
+  /** Required for live-dev deploys (the copy the source lives in). */
+  copy?: string;
   /** Parent-tracked in-flight state (e.g. a confirmed Remove waiting for the
    *  SSE snapshot) — disables the actions to close the re-issue race. */
   busy?: boolean;
@@ -30,7 +30,7 @@ export function StageActions({
   name,
   stage,
   mode,
-  worktree,
+  copy,
   busy,
   onRemove,
 }: StageActionsProps) {
@@ -52,7 +52,7 @@ export function StageActions({
     const work = api.deployAutomation({
       relative_path: stage.relativePath,
       stage: isLiveDev ? 'live-dev' : 'dev',
-      ...(isLiveDev && worktree ? { worktree } : {}),
+      ...(isLiveDev && copy ? { copy } : {}),
     });
     toast.promise(work, {
       loading: isLiveDev ? `Starting ${name} live-dev…` : `Deploying ${name} to dev…`,

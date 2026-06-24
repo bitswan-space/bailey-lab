@@ -13,7 +13,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/automations"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
-	"github.com/bitswan-space/bitswan-workspaces/internal/oauth"
 	"github.com/bitswan-space/bitswan-workspaces/internal/services"
 	"github.com/google/uuid"
 )
@@ -21,21 +20,25 @@ import (
 // stdoutMutex protects stdout redirection from concurrent requests
 var stdoutMutex sync.Mutex
 
+// stderrMutex protects stderr redirection from concurrent requests
+// (the bailey-admin workspace-create handler captures os.Stderr the
+// same way it captures os.Stdout, on a separate pipe).
+var stderrMutex sync.Mutex
+
 // ServiceEnableRequest represents the request to enable a service
 type ServiceEnableRequest struct {
-	ServiceType    string                 `json:"service_type"` // "editor", "kafka", "couchdb", "postgres", "minio"
-	Workspace      string                 `json:"workspace"`
-	Stage          string                 `json:"stage,omitempty"`
-	EditorImage    string                 `json:"editor_image,omitempty"`
-	DashboardImage string                 `json:"dashboard_image,omitempty"`
-	OAuthConfig    map[string]interface{} `json:"oauth_config,omitempty"` // OAuth config as JSON object
-	TrustCA        bool                   `json:"trust_ca,omitempty"`
-	KafkaImage     string                 `json:"kafka_image,omitempty"`
-	UIImage        string                 `json:"ui_image,omitempty"`
-	ZookeeperImage string                 `json:"zookeeper_image,omitempty"`
-	CouchDBImage   string                 `json:"couchdb_image,omitempty"`
-	PostgresImage  string                 `json:"postgres_image,omitempty"`
-	PgAdminImage   string                 `json:"pgadmin_image,omitempty"`
+	ServiceType      string                 `json:"service_type"` // "kafka", "couchdb", "postgres", "minio"
+	Workspace        string                 `json:"workspace"`
+	Stage            string                 `json:"stage,omitempty"`
+	DashboardImage   string                 `json:"dashboard_image,omitempty"`
+	OAuthConfig      map[string]interface{} `json:"oauth_config,omitempty"` // OAuth config as JSON object
+	TrustCA          bool                   `json:"trust_ca,omitempty"`
+	KafkaImage       string                 `json:"kafka_image,omitempty"`
+	UIImage          string                 `json:"ui_image,omitempty"`
+	ZookeeperImage   string                 `json:"zookeeper_image,omitempty"`
+	CouchDBImage     string                 `json:"couchdb_image,omitempty"`
+	PostgresImage    string                 `json:"postgres_image,omitempty"`
+	PgAdminImage     string                 `json:"pgadmin_image,omitempty"`
 	MinioImage       string                 `json:"minio_image,omitempty"`
 	CodingAgentImage string                 `json:"coding_agent_image,omitempty"`
 	Staging          bool                   `json:"staging,omitempty"`
@@ -45,9 +48,9 @@ type ServiceEnableRequest struct {
 
 // ServiceDisableRequest represents the request to disable a service
 type ServiceDisableRequest struct {
-	ServiceType  string `json:"service_type"`
-	Workspace    string `json:"workspace"`
-	Stage string `json:"stage,omitempty"`
+	ServiceType string `json:"service_type"`
+	Workspace   string `json:"workspace"`
+	Stage       string `json:"stage,omitempty"`
 }
 
 // ServiceStatusRequest represents the request to get service status
@@ -60,16 +63,16 @@ type ServiceStatusRequest struct {
 
 // ServiceStartRequest represents the request to start a service
 type ServiceStartRequest struct {
-	ServiceType  string `json:"service_type"`
-	Workspace    string `json:"workspace"`
-	Stage string `json:"stage,omitempty"`
+	ServiceType string `json:"service_type"`
+	Workspace   string `json:"workspace"`
+	Stage       string `json:"stage,omitempty"`
 }
 
 // ServiceStopRequest represents the request to stop a service
 type ServiceStopRequest struct {
-	ServiceType  string `json:"service_type"`
-	Workspace    string `json:"workspace"`
-	Stage string `json:"stage,omitempty"`
+	ServiceType string `json:"service_type"`
+	Workspace   string `json:"workspace"`
+	Stage       string `json:"stage,omitempty"`
 }
 
 // ServiceUpdateRequest represents the request to update a service
@@ -77,7 +80,6 @@ type ServiceUpdateRequest struct {
 	ServiceType      string `json:"service_type"`
 	Workspace        string `json:"workspace"`
 	Stage            string `json:"stage,omitempty"`
-	EditorImage      string `json:"editor_image,omitempty"`
 	DashboardImage   string `json:"dashboard_image,omitempty"`
 	TrustCA          bool   `json:"trust_ca,omitempty"`
 	KafkaImage       string `json:"kafka_image,omitempty"`
@@ -92,17 +94,17 @@ type ServiceUpdateRequest struct {
 
 // ServiceBackupRequest represents the request to backup CouchDB
 type ServiceBackupRequest struct {
-	Workspace    string `json:"workspace"`
-	BackupPath   string `json:"backup_path"`
-	Stage string `json:"stage,omitempty"`
+	Workspace  string `json:"workspace"`
+	BackupPath string `json:"backup_path"`
+	Stage      string `json:"stage,omitempty"`
 }
 
 // ServiceRestoreRequest represents the request to restore CouchDB
 type ServiceRestoreRequest struct {
-	Workspace    string `json:"workspace"`
-	BackupPath   string `json:"backup_path"`
-	Force        bool   `json:"force"`
-	Stage string `json:"stage,omitempty"`
+	Workspace  string `json:"workspace"`
+	BackupPath string `json:"backup_path"`
+	Force      bool   `json:"force"`
+	Stage      string `json:"stage,omitempty"`
 }
 
 // ServiceClearRequest represents the request to clear all data from a service
@@ -290,11 +292,8 @@ func (s *Server) handleServiceEnable(w http.ResponseWriter, r *http.Request, ser
 	}
 
 	switch serviceType {
-	case "editor":
-		// Editor stays managed locally by the automation server
-		s.handleEditorEnableLocal(w, req)
 	case "dashboard":
-		// Workspace-dashboard is also managed locally
+		// Workspace-dashboard is managed locally
 		s.handleDashboardEnableLocal(w, req)
 	case "coding-agent":
 		s.handleCodingAgentEnableLocal(w, req)
@@ -334,18 +333,6 @@ func (s *Server) handleServiceDisable(w http.ResponseWriter, r *http.Request, se
 	}
 
 	switch serviceType {
-	case "editor":
-		err := s.disableEditorService(req.Workspace)
-		if err != nil {
-			writeJSONError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(ServiceResponse{
-			Success: true,
-			Message: "editor service disabled successfully",
-		})
 	case "dashboard":
 		err := s.disableDashboardService(req.Workspace)
 		if err != nil {
@@ -395,18 +382,6 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request, ser
 	}
 
 	switch serviceType {
-	case "editor":
-		statusData, err := s.getEditorStatus(workspace, showPasswords)
-		if err != nil {
-			writeJSONError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(ServiceResponse{
-			Success: true,
-			Data:    statusData,
-		})
 	case "dashboard":
 		statusData, err := s.getDashboardStatus(workspace)
 		if err != nil {
@@ -459,18 +434,6 @@ func (s *Server) handleServiceStart(w http.ResponseWriter, r *http.Request, serv
 	}
 
 	switch serviceType {
-	case "editor":
-		err := s.startEditorService(req.Workspace)
-		if err != nil {
-			writeJSONError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(ServiceResponse{
-			Success: true,
-			Message: "editor service started successfully",
-		})
 	case "dashboard":
 		err := s.startDashboardService(req.Workspace)
 		if err != nil {
@@ -522,18 +485,6 @@ func (s *Server) handleServiceStop(w http.ResponseWriter, r *http.Request, servi
 	}
 
 	switch serviceType {
-	case "editor":
-		err := s.stopEditorService(req.Workspace)
-		if err != nil {
-			writeJSONError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(ServiceResponse{
-			Success: true,
-			Message: "editor service stopped successfully",
-		})
 	case "dashboard":
 		err := s.stopDashboardService(req.Workspace)
 		if err != nil {
@@ -585,18 +536,6 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request, ser
 	}
 
 	switch serviceType {
-	case "editor":
-		err := s.updateEditorService(req)
-		if err != nil {
-			writeJSONError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(ServiceResponse{
-			Success: true,
-			Message: "editor service updated successfully",
-		})
 	case "dashboard":
 		err := s.updateDashboardService(req)
 		if err != nil {
@@ -767,232 +706,6 @@ func (s *Server) proxyServiceRestore(workspace, serviceType, stage, backupPath s
 	}
 
 	return nil
-}
-
-// =============================================================================
-// Editor service — handled locally by the automation server (not proxied)
-// =============================================================================
-
-// handleEditorEnableLocal runs the editor enable flow locally with stdout streaming
-func (s *Server) handleEditorEnableLocal(w http.ResponseWriter, req ServiceEnableRequest) {
-	// Set up streaming response
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	// Create a pipe to capture stdout
-	stdoutMutex.Lock()
-	oldStdout := os.Stdout
-	rPipe, wPipe, err := os.Pipe()
-	if err != nil {
-		stdoutMutex.Unlock()
-		WriteLogEntry(w, "error", fmt.Sprintf("Failed to create pipe: %v", err))
-		return
-	}
-
-	// Redirect stdout to the pipe
-	os.Stdout = wPipe
-	stdoutMutex.Unlock()
-
-	defer func() {
-		stdoutMutex.Lock()
-		os.Stdout = oldStdout
-		stdoutMutex.Unlock()
-		rPipe.Close()
-		wPipe.Close()
-	}()
-
-	logWriter := NewLogStreamWriter(w, "info")
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 4096)
-		for {
-			n, readErr := rPipe.Read(buf)
-			if n > 0 {
-				logWriter.Write(buf[:n])
-			}
-			if readErr == io.EOF {
-				break
-			}
-			if readErr != nil {
-				WriteLogEntry(w, "error", fmt.Sprintf("Error reading from pipe: %v", readErr))
-				break
-			}
-		}
-	}()
-
-	operationErr := s.enableEditorService(req)
-
-	wPipe.Close()
-	wg.Wait()
-
-	if operationErr != nil {
-		WriteLogEntry(w, "error", fmt.Sprintf("Operation failed: %v", operationErr))
-	}
-}
-
-func (s *Server) enableEditorService(req ServiceEnableRequest) error {
-	editorService, err := services.NewEditorService(req.Workspace)
-	if err != nil {
-		return fmt.Errorf("failed to create Editor service: %w", err)
-	}
-
-	if editorService.IsEnabled() {
-		return fmt.Errorf("Editor service is already enabled for workspace '%s'", req.Workspace)
-	}
-
-	metadata, err := editorService.GetMetadata()
-	if err != nil {
-		return fmt.Errorf("failed to read workspace metadata: %w", err)
-	}
-
-	gitopsSecretToken := metadata.GitopsSecret
-	domain := metadata.Domain
-
-	bitswanEditorImage := req.EditorImage
-	if bitswanEditorImage == "" {
-		bitswanEditorImage = "bitswan/bitswan-editor:latest"
-	}
-
-	var oauthConfig *oauth.Config
-	if req.OAuthConfig != nil {
-		oauthJSON, err := json.Marshal(req.OAuthConfig)
-		if err != nil {
-			return fmt.Errorf("failed to marshal OAuth config: %w", err)
-		}
-		if err := json.Unmarshal(oauthJSON, &oauthConfig); err != nil {
-			return fmt.Errorf("failed to parse OAuth config: %w", err)
-		}
-	}
-
-	if err := editorService.Enable(gitopsSecretToken, bitswanEditorImage, domain, oauthConfig, req.TrustCA); err != nil {
-		return err
-	}
-
-	if err := editorService.StartContainer(); err != nil {
-		return fmt.Errorf("failed to start editor container: %w", err)
-	}
-
-	if err := editorService.WaitForEditorReady(); err != nil {
-		return fmt.Errorf("editor failed to start properly: %w", err)
-	}
-
-	return nil
-}
-
-func (s *Server) disableEditorService(workspace string) error {
-	editorService, err := services.NewEditorService(workspace)
-	if err != nil {
-		return fmt.Errorf("failed to create Editor service: %w", err)
-	}
-
-	if !editorService.IsEnabled() {
-		return fmt.Errorf("Editor service is not enabled for workspace '%s'", workspace)
-	}
-
-	return editorService.Disable()
-}
-
-func (s *Server) getEditorStatus(workspace string, showPasswords bool) (map[string]interface{}, error) {
-	editorService, err := services.NewEditorService(workspace)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Editor service: %w", err)
-	}
-
-	status := map[string]interface{}{
-		"enabled": editorService.IsEnabled(),
-		"running": editorService.IsContainerRunning(),
-	}
-
-	if editorService.IsEnabled() {
-		status["workspace_path"] = editorService.WorkspacePath
-		if showPasswords {
-			if password, err := editorService.GetEditorPassword(); err == nil {
-				status["password"] = password
-			}
-		}
-	}
-
-	return status, nil
-}
-
-func (s *Server) startEditorService(workspace string) error {
-	editorService, err := services.NewEditorService(workspace)
-	if err != nil {
-		return fmt.Errorf("failed to create Editor service: %w", err)
-	}
-
-	if !editorService.IsEnabled() {
-		return fmt.Errorf("Editor service is not enabled for workspace '%s'", workspace)
-	}
-
-	if editorService.IsContainerRunning() {
-		return nil // Already running
-	}
-
-	if err := editorService.StartContainer(); err != nil {
-		return err
-	}
-
-	return editorService.WaitForEditorReady()
-}
-
-func (s *Server) stopEditorService(workspace string) error {
-	editorService, err := services.NewEditorService(workspace)
-	if err != nil {
-		return fmt.Errorf("failed to create Editor service: %w", err)
-	}
-
-	if !editorService.IsEnabled() {
-		return fmt.Errorf("Editor service is not enabled for workspace '%s'", workspace)
-	}
-
-	if !editorService.IsContainerRunning() {
-		return nil // Already stopped
-	}
-
-	return editorService.StopContainer()
-}
-
-func (s *Server) updateEditorService(req ServiceUpdateRequest) error {
-	editorService, err := services.NewEditorService(req.Workspace)
-	if err != nil {
-		return fmt.Errorf("failed to create Editor service: %w", err)
-	}
-
-	if !editorService.IsEnabled() {
-		return fmt.Errorf("Editor service is not enabled for workspace '%s'", req.Workspace)
-	}
-
-	if err := editorService.StopContainer(); err != nil {
-		return fmt.Errorf("failed to stop editor container: %w", err)
-	}
-
-	if req.TrustCA {
-		if err := editorService.UpdateCertificates(req.TrustCA); err != nil {
-			return fmt.Errorf("failed to update certificates: %w", err)
-		}
-	}
-
-	if req.EditorImage != "" {
-		if err := editorService.UpdateImage(req.EditorImage); err != nil {
-			return fmt.Errorf("failed to update docker-compose file: %w", err)
-		}
-	} else {
-		if err := editorService.UpdateToLatest(); err != nil {
-			return fmt.Errorf("failed to update to latest version: %w", err)
-		}
-	}
-
-	if err := editorService.StartContainer(); err != nil {
-		return fmt.Errorf("failed to start editor container: %w", err)
-	}
-
-	return editorService.WaitForEditorReady()
 }
 
 // =============================================================================
@@ -1195,7 +908,6 @@ func (s *Server) updateCodingAgentService(req ServiceUpdateRequest) error {
 
 // =============================================================================
 // Dashboard service — handled locally by the automation server (not proxied)
-// Mirrors the editor's handler set: each method maps 1:1 to its editor sibling.
 // =============================================================================
 
 func (s *Server) handleDashboardEnableLocal(w http.ResponseWriter, req ServiceEnableRequest) {
@@ -1271,25 +983,16 @@ func (s *Server) enableDashboardService(req ServiceEnableRequest) error {
 	}
 
 	gitopsSecretToken := metadata.GitopsSecret
-	domain := metadata.Domain
 
 	bitswanDashboardImage := req.DashboardImage
 	if bitswanDashboardImage == "" {
 		bitswanDashboardImage = "bitswan/workspace-dashboard:latest"
 	}
 
-	var oauthConfig *oauth.Config
-	if req.OAuthConfig != nil {
-		oauthJSON, err := json.Marshal(req.OAuthConfig)
-		if err != nil {
-			return fmt.Errorf("failed to marshal OAuth config: %w", err)
-		}
-		if err := json.Unmarshal(oauthJSON, &oauthConfig); err != nil {
-			return fmt.Errorf("failed to parse OAuth config: %w", err)
-		}
-	}
-
-	if err := dashboardService.Enable(gitopsSecretToken, bitswanDashboardImage, domain, oauthConfig, req.TrustCA); err != nil {
+	// The dashboard runs no oauth2-proxy of its own — it's authenticated by the
+	// platform protected-proxy inside the Bailey iframe — so req.OAuthConfig is
+	// intentionally not consumed here.
+	if err := dashboardService.Enable(gitopsSecretToken, bitswanDashboardImage, req.TrustCA); err != nil {
 		return err
 	}
 	if err := dashboardService.StartContainer(); err != nil {

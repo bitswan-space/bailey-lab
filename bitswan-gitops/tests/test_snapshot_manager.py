@@ -129,7 +129,7 @@ class FakeSnapshotService:
         self.fail_restore = False
 
     async def create_snapshot(
-        self, bp, stage, label="", kind="manual", source=None, progress=None
+        self, bp, stage, label="", kind="manual", source=None, progress=None, db=None
     ):
         if self.fail_create:
             raise ValueError("postgres not running")

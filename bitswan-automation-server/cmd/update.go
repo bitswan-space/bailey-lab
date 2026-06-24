@@ -10,7 +10,6 @@ import (
 
 type updateOptions struct {
 	gitopsImage        string
-	editorImage        string
 	dashboardImage     string
 	kafkaImage         string
 	zookeeperImage     string
@@ -20,7 +19,6 @@ type updateOptions struct {
 	devMode            bool
 	disableDevMode     bool
 	gitopsDevSourceDir    string
-	editorDevSourceDir    string
 	dashboardDevSourceDir string
 }
 
@@ -49,17 +47,15 @@ func newUpdateCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&o.gitopsImage, "gitops-image", "", "Custom image for the gitops")
-	cmd.Flags().StringVar(&o.editorImage, "editor-image", "", "Custom image for the editor")
 	cmd.Flags().StringVar(&o.dashboardImage, "dashboard-image", "", "Custom image for the workspace-dashboard")
 	cmd.Flags().StringVar(&o.kafkaImage, "kafka-image", "", "Custom image for Kafka")
 	cmd.Flags().StringVar(&o.zookeeperImage, "zookeeper-image", "", "Custom image for Zookeeper")
 	cmd.Flags().StringVar(&o.couchdbImage, "couchdb-image", "", "Custom image for CouchDB")
-	cmd.Flags().BoolVar(&o.staging, "staging", false, "Use staging images for editor and gitops")
+	cmd.Flags().BoolVar(&o.staging, "staging", false, "Use staging images for gitops")
 	cmd.Flags().BoolVar(&o.trustCA, "trust-ca", false, "Install custom certificates from the default CA certificates directory.")
-	cmd.Flags().BoolVar(&o.devMode, "dev-mode", false, "Enable development mode with live-reloading for gitops and editor extension")
+	cmd.Flags().BoolVar(&o.devMode, "dev-mode", false, "Enable development mode with live-reloading for gitops")
 	cmd.Flags().BoolVar(&o.disableDevMode, "disable-dev-mode", false, "Disable development mode")
 	cmd.Flags().StringVar(&o.gitopsDevSourceDir, "gitops-dev-source-dir", "", "Directory to mount as /src/app in gitops container for development")
-	cmd.Flags().StringVar(&o.editorDevSourceDir, "editor-dev-source-dir", "", "Directory to mount as /opt/bitswan-extension-dev in editor container for development")
 	cmd.Flags().StringVar(&o.dashboardDevSourceDir, "dashboard-dev-source-dir", "", "Directory to mount as /workspace/dashboard-src in the workspace-dashboard container for hot-reload development")
 
 	cmd.ValidArgsFunction = validWorkspaceArgs

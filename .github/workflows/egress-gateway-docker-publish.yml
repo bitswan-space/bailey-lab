@@ -1,0 +1,48 @@
+name: egress-gateway Build and Push Docker Image
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      # The image is `COPY . .` over the whole automation-server module and
+      # compiles ./cmd/egress-gateway, so any Go change can affect the binary.
+      # Build broadly rather than risk shipping a stale gateway.
+      - 'bitswan-automation-server/**'
+      - '.github/workflows/egress-gateway-docker-publish.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out the repo
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+    - name: Build and Push
+      run: |
+        # gitops references this image by BITSWAN_EGRESS_GATEWAY_IMAGE, which
+        # defaults to bitswan/egress-gateway:latest — publish exactly that tag
+        # (plus an immutable build-stamped tag) or every BP deploy can't pull it.
+        # Build context = the bitswan-automation-server module root.
+        YEAR=$(date +%Y)
+        COMMIT_HASH=$(git rev-parse --short HEAD)
+        IMAGE_TAG="bitswan/egress-gateway"
+
+        docker build \
+          -t $IMAGE_TAG:latest \
+          -t $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH \
+          -f bitswan-automation-server/cmd/egress-gateway/Dockerfile \
+          bitswan-automation-server
+
+        docker push $IMAGE_TAG:latest
+        docker push $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH

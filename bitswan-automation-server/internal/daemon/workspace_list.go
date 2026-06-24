@@ -9,7 +9,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
-	"github.com/bitswan-space/bitswan-workspaces/internal/services"
 	"github.com/bitswan-space/bitswan-workspaces/internal/ssh"
 )
 
@@ -38,9 +37,8 @@ func GetWorkspaceList(long, showPasswords bool) (*WorkspaceListResponse, error) 
 
 				if long {
 					// Get metadata
-					domain, editorURL, gitopsURL := getMetaData(workspaceName, workspacesDir)
+					domain, gitopsURL := getMetaData(workspaceName, workspacesDir)
 					workspaceInfo.Domain = domain
-					workspaceInfo.EditorURL = editorURL
 					workspaceInfo.GitopsURL = gitopsURL
 
 					// Get SSH public key
@@ -54,13 +52,6 @@ func GetWorkspaceList(long, showPasswords bool) (*WorkspaceListResponse, error) 
 				}
 
 				if showPasswords {
-					// Get VSCode server password
-					editorService, err := services.NewEditorService(workspaceName)
-					if err == nil {
-						vscodePassword, _ := editorService.GetEditorPassword()
-						workspaceInfo.VSCodePassword = vscodePassword
-					}
-
 					// Get GitOps secret
 					gitopsSecret, _ := getGitOpsSecret(workspaceName, workspacesDir)
 					workspaceInfo.GitopsSecret = gitopsSecret
@@ -81,33 +72,32 @@ func GetWorkspaceList(long, showPasswords bool) (*WorkspaceListResponse, error) 
 	}, nil
 }
 
-func getMetaData(workspaceName string, workspacesDir string) (string, string, string) {
+func getMetaData(workspaceName string, workspacesDir string) (string, string) {
 	// Path to metadata.yaml file
 	metadataPath := filepath.Join(workspacesDir, workspaceName, "metadata.yaml")
 
 	// Check if metadata file exists
 	if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
-		return "", "", ""
+		return "", ""
 	}
 
 	// Read metadata file
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {
-		return "", "", ""
+		return "", ""
 	}
 
 	// Parse YAML
 	var metadata struct {
 		Domain    string `yaml:"domain"`
-		EditorURL string `yaml:"editor-url"`
 		GitopsURL string `yaml:"gitops-url"`
 	}
 
 	if err := yaml.Unmarshal(data, &metadata); err != nil {
-		return "", "", ""
+		return "", ""
 	}
 
-	return metadata.Domain, metadata.EditorURL, metadata.GitopsURL
+	return metadata.Domain, metadata.GitopsURL
 }
 
 func getGitOpsSecret(workspace string, workspacesDir string) (string, error) {
@@ -158,4 +148,3 @@ func getGitOpsSecret(workspace string, workspacesDir string) (string, error) {
 
 	return "", fmt.Errorf("GitOps secret not found")
 }
-

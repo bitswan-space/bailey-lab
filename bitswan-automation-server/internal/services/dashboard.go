@@ -10,17 +10,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
 	"github.com/bitswan-space/bitswan-workspaces/internal/certauthority"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
-	"github.com/bitswan-space/bitswan-workspaces/internal/oauth"
 	"gopkg.in/yaml.v3"
 )
 
 // DashboardService manages the workspace-dashboard sidecar deployment for a workspace.
-// It owns its own docker-compose-dashboard.yml file and lifecycle, fully independent
-// from EditorService
+// It owns its own docker-compose-dashboard.yml file and lifecycle.
 type DashboardService struct {
 	WorkspaceName string
 	WorkspacePath string
@@ -47,25 +44,28 @@ type DashboardDevConfig struct {
 	SourceDir string
 }
 
-// CreateDockerCompose generates docker-compose-dashboard.yml content.
-func (d *DashboardService) CreateDockerCompose(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, mqttEnvVars []string, trustCA bool) (string, error) {
-	return d.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain, oauthConfig, mqttEnvVars, trustCA, nil)
-}
-
 // CreateDockerComposeWithDevMode generates the dashboard's docker-compose file with optional dev-mode mount.
-func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, mqttEnvVars []string, trustCA bool, devConfig *DashboardDevConfig) (string, error) {
-	homeDir := os.Getenv("HOME")
-	hostHomeDir := os.Getenv("HOST_HOME")
-	if hostHomeDir == "" {
-		hostHomeDir = homeDir
-	}
-
-	gitopsPath := d.WorkspacePath
-	if homeDir != hostHomeDir && strings.HasPrefix(gitopsPath, homeDir) {
-		gitopsPath = strings.Replace(gitopsPath, homeDir, hostHomeDir, 1)
-	}
-
+func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage string, trustCA bool, devConfig *DashboardDevConfig) (string, error) {
 	workspaceName := d.WorkspaceName
+
+	// Workspace data lives inside the named `bitswan` Docker volume at
+	// workspaces/<name>/... — mounted via compose long-form volume + subpath.
+	// The host docker daemon resolves the named volume directly, so there's no
+	// container→host path translation to apply here anymore.
+	wsVolume := func(subdir, target string, readOnly bool) map[string]interface{} {
+		entry := map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": target,
+			"volume": map[string]interface{}{
+				"subpath": "workspaces/" + workspaceName + "/" + subdir,
+			},
+		}
+		if readOnly {
+			entry["read_only"] = true
+		}
+		return entry
+	}
 
 	bitswanDashboard := map[string]interface{}{
 		"image":    bitswanDashboardImage,
@@ -79,41 +79,45 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			"PORT=8080",
 			"INTERNAL_PORT=8081",
 		},
-		"volumes": []string{
-			gitopsPath + "/workspace:/workspace/workspace:z",
-			// SSH key for connecting to the coding-agent container. Shared
-			// with bitswan-editor — the dashboard authenticates as the same
-			// principal that's already in the agent's authorized_keys.
-			gitopsPath + "/ssh:/workspace/.ssh:ro",
+		"volumes": []interface{}{
+			// The dashboard reads and writes business-process files in the
+			// per-user copies (copies/<copy>/<bp>/…). The file routes resolve
+			// them under WORKSPACE_ROOT as `<root>/copies/<copy>/…`, so mount
+			// the workspace's copies tree at /workspace/workspace/copies. (The
+			// old shared `workspace/` working tree is gone in the copy model.)
+			wsVolume("copies", "/workspace/workspace/copies", false),
+			// SSH key for connecting to the coding-agent container. The
+			// dashboard authenticates as the same principal that's already
+			// in the agent's authorized_keys.
+			wsVolume("ssh", "/workspace/.ssh", true),
 			// Read-only view of session transcripts (.meta.json + .cast)
 			// written by the coding-agent wrapper, for the dashboard's
 			// session list + asciinema playback.
-			gitopsPath + "/coding-agent-sessions:/workspace/agent-sessions:ro",
+			wsVolume("coding-agent-sessions", "/workspace/agent-sessions", true),
 			// Read-only view of the coding-agent's $HOME so the dashboard can
 			// resolve per-user Claude transcripts (`.claude_<slug>/projects/...`)
 			// as well as the legacy shared `.claude/projects/...` for session
 			// titles. Mounting the whole home rather than just `.claude` lets
 			// the dashboard see every user's config dir without us hard-coding
 			// the slug set.
-			gitopsPath + "/coding-agent-home:/workspace/agent-home:ro",
+			wsVolume("coding-agent-home", "/workspace/agent-home", true),
 		},
 	}
 
-	if oauthConfig != nil {
-		dashboardOAuthEnvVars := oauth.CreateOAuthEnvVars(oauthConfig, "dashboard", workspaceName, domain)
-		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string), dashboardOAuthEnvVars...)
-		if extraHosts := oauth.BuildExtraHosts(oauthConfig); len(extraHosts) > 0 {
-			bitswanDashboard["extra_hosts"] = extraHosts
-		}
-	}
-
-	if len(mqttEnvVars) > 0 {
-		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string), mqttEnvVars...)
-	}
+	// The dashboard runs NO auth of its own — no oauth2-proxy and no OIDC token
+	// validation. It is a first-party app reached only inside the Bailey
+	// chrome-wrap iframe on the workspace's protected (inner) host. The gate
+	// (bitswan-protected-proxy → the daemon's :9080 gate) authenticates every
+	// request and forwards the verified identity to the dashboard as a trusted
+	// X-Forwarded-Email; the dashboard server simply reads that header. So
+	// OAUTH_ENABLED stays unset (the app listens directly on PORT) and there is
+	// no BITSWAN_OIDC_ISSUER_URL to inject — all protection comes from the gate.
 
 	caVolumes, caEnvVars := certauthority.GetCACertMountConfig(trustCA)
 	if len(caVolumes) > 0 {
-		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]string), caVolumes...)
+		for _, v := range caVolumes {
+			bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}), v)
+		}
 		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string), caEnvVars...)
 	}
 
@@ -121,7 +125,7 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 	// entrypoint run `npm install` + `npm run dev` instead of the pre-built bundle.
 	if devConfig != nil && devConfig.SourceDir != "" {
 		dashboardDevContainerPath := "/workspace/dashboard-src"
-		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]string),
+		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
 			devConfig.SourceDir+":"+dashboardDevContainerPath+":z")
 		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string),
 			"BITSWAN_DEV_MODE=true",
@@ -136,6 +140,11 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
+				"external": true,
+			},
+		},
+		"volumes": map[string]interface{}{
+			"bitswan": map[string]interface{}{
 				"external": true,
 			},
 		},
@@ -164,30 +173,13 @@ func (d *DashboardService) SaveDockerCompose(content string) error {
 	return nil
 }
 
-// Enable generates docker-compose-dashboard.yml from metadata + the supplied image and OAuth config.
-func (d *DashboardService) Enable(gitopsSecretToken, bitswanDashboardImage, domain string, oauthConfig *oauth.Config, trustCA bool) error {
+// Enable generates docker-compose-dashboard.yml from metadata + the supplied image.
+func (d *DashboardService) Enable(gitopsSecretToken, bitswanDashboardImage string, trustCA bool) error {
 	if d.IsEnabled() {
 		return fmt.Errorf("Dashboard service is already enabled for workspace '%s'", d.WorkspaceName)
 	}
 
 	metadata, _ := d.GetMetadata()
-
-	var mqttEnvVars []string
-	if metadata != nil && metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PASSWORD="+*metadata.MqttPassword)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "MQTT_TOPIC="+*metadata.MqttTopic)
-	}
-
-	if oauthConfig != nil && metadata != nil && metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_ALLOWED_GROUPS_TOPIC=/groups")
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PASSWORD="+*metadata.MqttPassword)
-	}
 
 	// Dev-mode is purely a function of whether a source dir is set in metadata.
 	var devConfig *DashboardDevConfig
@@ -196,7 +188,7 @@ func (d *DashboardService) Enable(gitopsSecretToken, bitswanDashboardImage, doma
 		fmt.Printf("Dashboard dev mode enabled (source: %q)\n", devConfig.SourceDir)
 	}
 
-	content, err := d.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, domain, oauthConfig, mqttEnvVars, trustCA, devConfig)
+	content, err := d.CreateDockerComposeWithDevMode(gitopsSecretToken, bitswanDashboardImage, trustCA, devConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create docker-compose content: %w", err)
 	}
@@ -332,44 +324,6 @@ func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, stagin
 		}
 	}
 
-	var mqttEnvVars []string
-	if metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PASSWORD="+*metadata.MqttPassword)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "MQTT_TOPIC="+*metadata.MqttTopic)
-	}
-
-	oauthConfig, oauthErr := oauth.GetOauthConfig(d.WorkspaceName)
-	if oauthErr != nil {
-		if metadata.WorkspaceId != nil && *metadata.WorkspaceId != "" {
-			fmt.Printf("OAuth config not found locally for dashboard, attempting AOC fetch for workspace '%s'...\n", d.WorkspaceName)
-			if aocClient, aocErr := aoc.NewAOCClient(); aocErr == nil {
-				if fetched, fErr := aocClient.GetOAuthConfig(*metadata.WorkspaceId); fErr == nil {
-					oauthConfig = fetched
-					if saveErr := oauth.SaveOauthConfig(d.WorkspaceName, oauthConfig); saveErr != nil {
-						fmt.Printf("Warning: failed to save OAuth config to disk: %v\n", saveErr)
-					}
-				} else {
-					oauthConfig = nil
-				}
-			} else {
-				oauthConfig = nil
-			}
-		} else {
-			oauthConfig = nil
-		}
-	}
-
-	if oauthConfig != nil && metadata.MqttUsername != nil {
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_BROKER="+*metadata.MqttBroker)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PORT="+fmt.Sprint(*metadata.MqttPort))
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_ALLOWED_GROUPS_TOPIC=/groups")
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_USERNAME="+*metadata.MqttUsername)
-		mqttEnvVars = append(mqttEnvVars, "OAUTH2_PROXY_MQTT_PASSWORD="+*metadata.MqttPassword)
-	}
-
 	var devConfig *DashboardDevConfig
 	if metadata.DashboardDevSourceDir != nil && *metadata.DashboardDevSourceDir != "" {
 		devConfig = &DashboardDevConfig{SourceDir: *metadata.DashboardDevSourceDir}
@@ -379,9 +333,6 @@ func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, stagin
 	content, err := d.CreateDockerComposeWithDevMode(
 		metadata.GitopsSecret,
 		bitswanDashboardImage,
-		metadata.Domain,
-		oauthConfig,
-		mqttEnvVars,
 		trustCA,
 		devConfig,
 	)

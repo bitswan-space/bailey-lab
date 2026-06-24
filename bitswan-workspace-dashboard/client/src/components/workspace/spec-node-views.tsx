@@ -29,7 +29,7 @@ import { CODE_LANGUAGES, detectLanguage } from './spec-code-highlight';
  * instance data flows through context instead of props.
  */
 export interface SpecEditorContextValue {
-  worktree: string;
+  copy: string;
   bpId: string;
   onEditMermaid: (pos: number, source: string) => void;
   onDeleteMermaid: (pos: number) => void;
@@ -221,18 +221,18 @@ function isAbsoluteSrc(src: string): boolean {
 }
 
 /**
- * `image` view: the markdown stores worktree-relative paths (e.g.
+ * `image` view: the markdown stores copy-relative paths (e.g.
  * `attachments/diagram.png`, what the coding agent sees on disk); this
- * rewrites them to the worktree-files raw endpoint for display. Absolute
+ * rewrites them to the copy-files raw endpoint for display. Absolute
  * URLs render untouched.
  */
 export const ImageView = forwardRef<HTMLImageElement, NodeViewComponentProps>(
   function ImageView({ children: _children, nodeProps, ...props }, ref) {
-    const { worktree, bpId } = useSpecEditorContext();
+    const { copy, bpId } = useSpecEditorContext();
     const { node } = nodeProps;
     const src = typeof node.attrs.src === 'string' ? node.attrs.src : '';
     const resolved =
-      !src || isAbsoluteSrc(src) ? src : api.worktreeFiles.rawUrl(worktree, `${bpId}/${src}`);
+      !src || isAbsoluteSrc(src) ? src : api.copyFiles.rawUrl(copy, `${bpId}/${src}`);
     const alt = typeof node.attrs.alt === 'string' && node.attrs.alt ? node.attrs.alt : src;
     const title = typeof node.attrs.title === 'string' ? node.attrs.title : undefined;
     return (

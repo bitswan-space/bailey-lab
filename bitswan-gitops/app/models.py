@@ -46,17 +46,11 @@ class DeployedAutomation(BaseModel):
     context: str | None = None
     version_hash: str | None = None
     replicas: int = 1
-
-
-class JupyterServer(BaseModel):
-    automation_name: str
-    session_id: str
-    pre_image: str
-    token: str
-
-
-class JupyterServerHeartbeatRequest(BaseModel):
-    servers: list[JupyterServer]
+    # True for frontends (exposed through Bailey), False for worker
+    # containers (private backends). Read from the automation's
+    # [deployment] expose; drives the dashboard's Frontends vs Worker
+    # containers split.
+    expose: bool = False
 
 
 class ProcessInfo(BaseModel):
@@ -142,12 +136,14 @@ class SnapshotProvisionRequest(BaseModel):
 
 class SnapshotCreateRequest(BaseModel):
     label: str = ""
+    by: str | None = None
 
 
 class SnapshotRestoreRequest(BaseModel):
     snapshot_id: str
     source_stage: str
     target_stage: str
+    by: str | None = None
 
 
 class SnapshotCloneRequest(BaseModel):

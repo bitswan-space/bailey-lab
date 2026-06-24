@@ -1,7 +1,5 @@
 import asyncio
-from configparser import ConfigParser
 from dataclasses import dataclass
-from io import StringIO
 from datetime import datetime, timezone
 import hashlib
 import logging
@@ -22,6 +20,16 @@ import humanize
 import toml
 import yaml
 from fastapi import HTTPException
+
+# Parse bitswan.yaml with libyaml's C loader when available — it is ~6x faster
+# than the pure-Python SafeLoader and produces identical output. Falls back to
+# the pure-Python loader if libyaml isn't installed.
+_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def load_yaml(text: str):
+    """Safe-load YAML text using the fast C loader when available."""
+    return yaml.load(text, Loader=_SAFE_LOADER)
 
 
 # Thread-safe git lock that works across both async and sync contexts
@@ -90,7 +98,7 @@ SERVICE_REALMS = {"dev", "staging", "production"}
 
 @dataclass
 class AutomationConfig:
-    """Unified automation configuration from either automation.toml or pipelines.conf."""
+    """Automation configuration from automation.toml."""
 
     id: str | None = (
         None  # Unique automation ID (used as Keycloak client_id when auth=True)
@@ -99,47 +107,14 @@ class AutomationConfig:
     image: str = "bitswan/pipeline-runtime-environment:latest"
     expose: bool = False
     port: int = 8080
-    # Per-stage expose_to groups (from [expose_to] section in automation.toml)
-    dev_expose_to: list[str] | None = None
-    staging_expose_to: list[str] | None = None
-    production_expose_to: list[str] | None = None
-    config_format: str = "ini"  # "toml" or "ini"
-    mount_path: str = "/opt/pipelines"  # "/app/" for TOML, "/opt/pipelines" for INI
-    # Stage-specific secret groups (only for automation.toml - no general fallback)
-    live_dev_groups: list[str] | None = None
-    dev_groups: list[str] | None = None
-    staging_groups: list[str] | None = None
-    production_groups: list[str] | None = None
+    # Where the source tree is mounted/baked inside the container.
+    mount_path: str = "/app/"
     # CORS allowed domains for Keycloak client (optional)
     allowed_domains: list[str] | None = None
     # Infrastructure service dependencies
     services: dict[str, ServiceDependency] | None = None
     # Use host network for external access (Selenium testing)
     external_testing_network: bool = False
-
-
-def get_expose_to_for_stage(config: AutomationConfig, stage: str) -> list[str]:
-    """Resolve expose_to groups for a given stage."""
-    if stage == "live-dev" or stage == "dev":
-        groups = config.dev_expose_to
-    elif stage == "staging":
-        groups = config.staging_expose_to
-    elif stage == "production":
-        groups = config.production_expose_to
-    else:
-        groups = None
-    return groups or []
-
-
-def _parse_string_or_list(value) -> list[str] | None:
-    """Parse a value that can be either a string or list into a list."""
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return [str(g).strip() for g in value if str(g).strip()]
-    if isinstance(value, str):
-        return [g.strip() for g in value.split() if g.strip()]
-    return None
 
 
 def parse_automation_toml(content: str) -> AutomationConfig | None:
@@ -152,8 +127,6 @@ def parse_automation_toml(content: str) -> AutomationConfig | None:
         raise ValueError(f"Syntax error in automation.toml: {e}") from e
 
     deployment = data.get("deployment", {})
-    secrets = data.get("secrets", {})
-    expose_to_section = data.get("expose_to", {})
 
     # Parse allowed_domains as a list (for CORS in Keycloak client)
     allowed_domains = deployment.get("allowed_domains")
@@ -180,16 +153,7 @@ def parse_automation_toml(content: str) -> AutomationConfig | None:
         image=deployment.get("image", "bitswan/pipeline-runtime-environment:latest"),
         expose=deployment.get("expose", False),
         port=deployment.get("port", 8080),
-        config_format="toml",
         mount_path="/app/",
-        live_dev_groups=_parse_string_or_list(secrets.get("live-dev")),
-        dev_groups=_parse_string_or_list(secrets.get("dev")),
-        staging_groups=_parse_string_or_list(secrets.get("staging")),
-        production_groups=_parse_string_or_list(secrets.get("production")),
-        # Per-stage expose_to from [expose_to] section
-        dev_expose_to=_parse_string_or_list(expose_to_section.get("dev")),
-        staging_expose_to=_parse_string_or_list(expose_to_section.get("staging")),
-        production_expose_to=_parse_string_or_list(expose_to_section.get("production")),
         allowed_domains=allowed_domains,
         services=services,
         external_testing_network=deployment.get("external-testing-network", False),
@@ -218,40 +182,9 @@ def read_automation_toml(source_dir: str) -> AutomationConfig | None:
 
 
 def read_automation_config(source_dir: str) -> AutomationConfig:
-    """
-    Read automation configuration with priority: automation.toml > pipelines.conf.
-    Returns AutomationConfig with deployment settings.
-    """
-    # Try automation.toml first (highest priority)
-    toml_config = read_automation_toml(source_dir)
-    if toml_config:
-        return toml_config
-
-    # Fall back to pipelines.conf
-    pipeline_conf = read_pipeline_conf(source_dir)
-    if pipeline_conf:
-        # Parse id and auth for Keycloak
-        automation_id = None
-        if pipeline_conf.has_option("deployment", "id"):
-            automation_id = pipeline_conf.get("deployment", "id")
-        auth = pipeline_conf.getboolean("deployment", "auth", fallback=False)
-
-        return AutomationConfig(
-            id=automation_id,
-            auth=auth,
-            image=pipeline_conf.get(
-                "deployment",
-                "pre",
-                fallback="bitswan/pipeline-runtime-environment:latest",
-            ),
-            expose=pipeline_conf.getboolean("deployment", "expose", fallback=False),
-            port=int(pipeline_conf.get("deployment", "port", fallback="8080")),
-            config_format="ini",
-            mount_path="/opt/pipelines",
-        )
-
-    # Return default config if no config file found
-    return AutomationConfig()
+    """Read an automation's configuration from automation.toml, or defaults
+    when none is present."""
+    return read_automation_toml(source_dir) or AutomationConfig()
 
 
 async def wait_coroutine(*args, **kwargs) -> int:
@@ -321,13 +254,80 @@ async def call_git_command_with_output(*command, **kwargs) -> tuple[str, str, in
     return stdout.decode(), stderr.decode(), proc.returncode
 
 
+# ── bitswan.yaml deployment storage ────────────────────────────────────────
+# On disk, deployments are grouped in a tree: business_processes[<bp>][<stage>]
+# = { git_commit, deployed_at, deployed_by, history[], deployments{<id>: conf} }.
+# In memory we ALSO expose the legacy FLAT `deployments` map (hydrated on read)
+# so the many readers stay unchanged; `dump_bitswan_yaml` re-groups flat → tree
+# on write and persists only the tree. (production stage key is "production";
+# the flat conf keeps the canonical "" stage.)
+
+
+def _tree_to_flat(bs_yaml: dict) -> dict:
+    """Hydrate a flat {deployment_id: conf} map from the business_processes tree."""
+    flat: dict = {}
+    for bp, stages in (bs_yaml.get("business_processes") or {}).items():
+        for stage, node in (stages or {}).items():
+            for dep_id, conf in ((node or {}).get("deployments") or {}).items():
+                c = dict(conf or {})
+                c.setdefault("context", bp)
+                c.setdefault("stage", "" if stage == "production" else stage)
+                flat[dep_id] = c
+    return flat
+
+
+def _flat_to_tree(bs_yaml: dict) -> dict:
+    """Group the flat `deployments` map into business_processes[bp][stage],
+    preserving per-stage metadata (git_commit/deployed_*/history) already in the
+    in-memory tree."""
+    existing = bs_yaml.get("business_processes") or {}
+    tree: dict = {}
+    for dep_id, conf in (bs_yaml.get("deployments") or {}).items():
+        conf = conf or {}
+        bp = conf.get("context") or "ungrouped"
+        stage = conf.get("stage") or "production"
+        if stage == "":
+            stage = "production"
+        node = tree.setdefault(bp, {}).setdefault(stage, {})
+        ex = (existing.get(bp, {}) or {}).get(stage, {}) or {}
+        # The node's git_commit is the deployed source version — the key
+        # bp_history uses to surface a deploy (see bp_history). Prefer the
+        # source_commit recorded on the deployment itself: EVERY deploy path
+        # stamps it (write_deployment_entries), whereas the node-level git_commit
+        # is only set by write_bp_deploy. Without this, deploys made via the
+        # set-deploy path (Sync & Deploy's auto-deploy) carried a
+        # source_commit on the deployment but left the node's git_commit empty,
+        # so they never appeared in the Deployments history ("not deployed yet").
+        # Fall back to an existing tree value when a deployment has no
+        # source_commit (e.g. live-dev).
+        if conf.get("source_commit"):
+            node["git_commit"] = conf["source_commit"]
+        elif "git_commit" in ex and "git_commit" not in node:
+            node["git_commit"] = ex["git_commit"]
+        node.setdefault("deployments", {})[dep_id] = conf
+    return tree
+
+
+def dump_bitswan_yaml(bs_yaml: dict, f) -> None:
+    """Persist bitswan.yaml with deployments grouped into the business_processes
+    tree (the flat in-memory `deployments` map is dropped from disk)."""
+    out = dict(bs_yaml)
+    out["business_processes"] = _flat_to_tree(bs_yaml)
+    out.pop("deployments", None)
+    yaml.dump(out, f)
+
+
 def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
     bitswan_yaml_path = os.path.join(bitswan_dir, "bitswan.yaml")
     try:
         if os.path.exists(bitswan_yaml_path):
             with open(bitswan_yaml_path, "r") as f:
-                bs_yaml: dict = yaml.safe_load(f)
-                return bs_yaml
+                bs_yaml: dict = yaml.load(f, Loader=_SAFE_LOADER)
+            # Hydrate the flat `deployments` view from the tree so all readers
+            # work unchanged. (Legacy flat-only files are returned as-is.)
+            if isinstance(bs_yaml, dict) and bs_yaml.get("business_processes"):
+                bs_yaml["deployments"] = _tree_to_flat(bs_yaml)
+            return bs_yaml
     except Exception:
         return None
 
@@ -338,42 +338,6 @@ def calculate_uptime(created_at: str) -> str:
     return humanize.naturaldelta(uptime)
 
 
-def parse_pipeline_conf(content: str) -> ConfigParser | None:
-    """Parse pipelines.conf content from a string."""
-    if not content or not content.strip():
-        return None
-    try:
-        config = ConfigParser()
-        config.read_file(StringIO(content))
-        return config
-    except Exception:
-        return None
-
-
-def read_pipeline_conf(source_dir: str) -> ConfigParser | None:
-    """Read pipelines.conf from a directory (legacy method, uses parse_pipeline_conf internally)."""
-    conf_file_path = os.path.join(source_dir, "pipelines.conf")
-    if os.path.exists(conf_file_path):
-        with open(conf_file_path, "r") as f:
-            content = f.read()
-        return parse_pipeline_conf(content)
-    return None
-
-
-def test_read_pipeline_conf():
-    import tempfile
-
-    # create a tempdir with a pipelines.conf file
-    with tempfile.TemporaryDirectory() as tmpdirname:
-        with open(os.path.join(tmpdirname, "pipelines.conf"), "w") as f:
-            f.write("[pipeline1]\n")
-            f.write("key1=value1\n")
-            f.write("key2=value2\n")
-
-        config = read_pipeline_conf(tmpdirname)
-        assert config.get("pipeline1", "key1") == "value1"
-
-
 def generate_workspace_url(
     workspace_name: str,
     automation_name: str,
@@ -381,27 +345,117 @@ def generate_workspace_url(
     stage: str,
     gitops_domain: str,
     full: bool = False,
+    slot: str | None = None,
 ) -> str:
     from app.services.automation_service import make_hostname_label
 
-    label = make_hostname_label(workspace_name, automation_name, context, stage)
+    label = make_hostname_label(workspace_name, automation_name, context, stage, slot)
     url = f"{label}.{gitops_domain}"
     return f"https://{url}" if full else url
 
 
+def workspace_route(
+    automation_name: str,
+    context: str,
+    stage: str,
+    port: str,
+    slot: str | None = None,
+    upstream_slot: str | None = None,
+    host_stage: str | None = None,
+) -> dict:
+    """PURE: the daemon ingress route an exposed automation should have — no
+    I/O. This is the single derivation of (hostname, upstream) for an exposed
+    automation; `desired_ingress_routes` collects these into the declarative set
+    the reconcile converges to, and `add_workspace_route_to_ingress` POSTs one.
+
+    The HOSTNAME and the CONTAINER it resolves to are decoupled so a stable
+    user-facing host can point at a blue-green slot's container:
+      • host_stage overrides the hostname's stage — the DR host is `…-dr` while
+        its container lives in the `production` realm.
+      • slot adds a `-<slot>` suffix to the hostname (per-slot hosts only; the
+        stable production/DR hosts pass slot=None).
+      • upstream_slot picks the container's slot (defaults to slot) — the
+        production host → the live slot, the DR host → the standby slot.
+    """
+    from app.services.automation_service import make_hostname_label
+
+    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
+    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+    container_slot = upstream_slot if upstream_slot is not None else slot
+    hostname = generate_workspace_url(
+        workspace_name,
+        automation_name,
+        context,
+        host_stage or stage,
+        gitops_domain,
+        False,
+        slot,
+    )
+    svc_name = make_hostname_label(
+        workspace_name, automation_name, context, stage, container_slot
+    )
+    return {
+        "hostname": hostname,
+        "upstream": f"{svc_name}:{port}",
+        "workspace_name": workspace_name,
+        # Frontends inherit the workspace's Bailey ACL from the dashboard
+        # endpoint, so every workspace member can share what they deploy.
+        "parent_endpoint": f"{workspace_name}-dashboard.{gitops_domain}",
+        "kind": "frontend",
+        "stage": stage,
+    }
+
+
 def add_workspace_route_to_ingress(
-    automation_name: str, context: str, stage: str, port: str
+    automation_name: str,
+    context: str,
+    stage: str,
+    port: str,
+    slot: str | None = None,
+    upstream_slot: str | None = None,
+    host_stage: str | None = None,
 ) -> bool:
     from app.services.automation_service import make_hostname_label
 
     gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+    # The HOSTNAME and the CONTAINER it resolves to are decoupled, so a stable
+    # user-facing host can point at a blue-green slot's container:
+    #   • host_stage overrides the hostname's stage — the DR host is `…-dr` while
+    #     its container lives in the `production` realm.
+    #   • slot adds a `-<slot>` suffix to the hostname (used only for per-slot
+    #     hosts; the stable production/DR hosts pass slot=None).
+    #   • upstream_slot picks the container's slot (defaults to slot) — the
+    #     production host → the live slot, the DR host → the standby slot.
+    container_slot = upstream_slot if upstream_slot is not None else slot
     hostname = generate_workspace_url(
-        workspace_name, automation_name, context, stage, gitops_domain, False
+        workspace_name,
+        automation_name,
+        context,
+        host_stage or stage,
+        gitops_domain,
+        False,
+        slot,
     )
-    svc_name = make_hostname_label(workspace_name, automation_name, context, stage)
+    svc_name = make_hostname_label(
+        workspace_name, automation_name, context, stage, container_slot
+    )
     upstream = f"{svc_name}:{port}"
-    return add_route_to_ingress(hostname, upstream, workspace_name)
+    # Frontends inherit the workspace's Bailey ACL from the dashboard
+    # endpoint, so every workspace member can share what they deploy (see
+    # the daemon's parent-delegation in acl.go). State the parent explicitly
+    # rather than relying on the daemon's metadata fallback.
+    parent_endpoint = f"{workspace_name}-dashboard.{gitops_domain}"
+    # Only exposed automations (frontends) reach this path, so mark the
+    # endpoint as a frontend for the Bailey launcher.
+    return add_route_to_ingress(
+        hostname,
+        upstream,
+        workspace_name,
+        parent_endpoint=parent_endpoint,
+        kind="frontend",
+        stage=stage,
+    )
 
 
 def _ingress_client_and_base() -> tuple:
@@ -425,14 +479,53 @@ def _ingress_client_and_base() -> tuple:
     return httpx.Client(timeout=10), base_url
 
 
+def daemon_user_role(email: str) -> str:
+    """The authoritative Bailey role (admin|auditor|member|user) for an email,
+    read from the automation-server daemon over the trusted local socket.
+
+    The daemon's user_roles store is the single source of truth — the same
+    `effectiveRole` the People & roles admin view shows — and is deliberately
+    NOT derived from SSO groups. Callers pass an identity that an upstream shim
+    has already verified (the dashboard validates the user's access token →
+    email before asking). Raises on transport failure so callers fail CLOSED
+    (treat as unprivileged) rather than guess a role.
+    """
+    email = (email or "").strip()
+    if not email:
+        return ""
+    client, base = _ingress_client_and_base()
+    try:
+        resp = client.get(f"{base}/bailey/role", params={"email": email})
+        resp.raise_for_status()
+        return (resp.json() or {}).get("role") or ""
+    finally:
+        client.close()
+
+
 def add_route_to_ingress(
-    hostname: str, upstream: str, workspace_name: str = ""
+    hostname: str,
+    upstream: str,
+    workspace_name: str = "",
+    parent_endpoint: str = "",
+    kind: str = "",
+    stage: str = "",
 ) -> bool:
     body = {
         "hostname": hostname,
         "upstream": upstream,
         "workspace_name": workspace_name,
     }
+    if parent_endpoint:
+        body["parent_endpoint"] = parent_endpoint
+    # kind classifies the endpoint for the Bailey launcher ("frontend" for
+    # exposed automations, "service" otherwise). Explicit data — the daemon
+    # never infers it from the hostname.
+    if kind:
+        body["kind"] = kind
+    # stage is the automation's deployment stage; launcher/admin views filter
+    # on it (e.g. only production frontends).
+    if stage:
+        body["stage"] = stage
     try:
         client, base = _ingress_client_and_base()
         with client:
@@ -445,6 +538,69 @@ def add_route_to_ingress(
         return True
     except Exception as e:
         logger.warning(f"Ingress add-route request failed for {hostname}: {e}")
+        return False
+
+
+def reconcile_ingress(workspace_name: str, routes: list[dict]) -> bool:
+    """Declaratively converge the workspace's gitops-managed ingress routes to
+    `routes` (the COMPLETE desired set, from `desired_ingress_routes`). The
+    daemon adds/repoints each and prunes any gitops route not in the set; manual
+    routes are preserved. Idempotent — a re-apply with no change is a fast no-op
+    (the daemon skips routes already pointing at the right upstream). This is the
+    single ingress side effect of `apply`; nothing else touches the daemon."""
+    body = {"workspace_name": workspace_name, "routes": routes}
+    try:
+        client, base = _ingress_client_and_base()
+        with client:
+            # Generous timeout: the first reconcile of a workspace applies every
+            # route (each a ~1s Traefik write); later reconciles skip in-sync
+            # routes and finish near-instantly.
+            response = client.post(f"{base}/ingress/reconcile", json=body, timeout=180)
+        if response.status_code != 200:
+            logger.warning(
+                f"Ingress reconcile failed: HTTP {response.status_code} — {response.text}"
+            )
+            return False
+        result = response.json() if response.content else {}
+        pruned = result.get("pruned") or []
+        if result.get("applied") or pruned or result.get("warnings"):
+            logger.info(
+                "Ingress reconcile: applied=%s pruned=%s warnings=%s",
+                result.get("applied", 0),
+                pruned,
+                result.get("warnings") or [],
+            )
+        return True
+    except Exception as e:
+        logger.warning(f"Ingress reconcile request failed: {e}")
+        return False
+
+
+def repoint_route_in_ingress(
+    hostname: str, upstream: str, workspace_name: str = ""
+) -> bool:
+    """Atomically repoint an EXISTING route's upstream (the blue-green swap /
+    zero-downtime-promote primitive). Unlike add-route this does not touch TLS
+    certs, the Bailey ACL, or OAuth redirect URIs — the route already exists;
+    only the container it resolves to changes."""
+    body = {
+        "hostname": hostname,
+        "upstream": upstream,
+        "workspace_name": workspace_name,
+    }
+    try:
+        client, base = _ingress_client_and_base()
+        with client:
+            response = client.post(f"{base}/ingress/repoint-route", json=body)
+        if response.status_code != 200:
+            logger.warning(
+                f"Ingress repoint-route failed for {hostname}: "
+                f"HTTP {response.status_code} — {response.text}"
+            )
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f"Ingress repoint-route request failed for {hostname}: {e}")
         return False
 
 
@@ -609,7 +765,7 @@ def _calculate_git_tree_hash_recursive(
         else:
             blob_hash = _calculate_git_blob_hash(item_path)
             # Match git's executable detection: any of u/g/o +x flips the
-            # mode to 100755. Mirrors the editor-side checksum so the
+            # mode to 100755. Keeps the checksum stable so the
             # deploy cache reacts to chmod +x/-x on files whose bits
             # round-trip through the tarball intact.
             file_mode = os.stat(item_path).st_mode
@@ -638,8 +794,8 @@ def _calculate_git_tree_hash_recursive(
 async def calculate_git_tree_hash(dir_paths: list[str]) -> str:
     """
     Calculate git tree hash for one or more directories using git's tree object
-    format. Multiple directories are overlaid later-wins-on-collision (mirrors
-    the editor's pre-merged-tar checksum). Implementation calculates the hash
+    format. Multiple directories are overlaid later-wins-on-collision
+    (pre-merged-tar checksum). Implementation calculates the hash
     directly without spawning git processes, making it much more efficient.
     """
     import logging
@@ -666,9 +822,14 @@ async def update_git(
     action: str,
     deployed_by: str | None = None,
     message: str | None = None,
+    extra_paths: list[str] | None = None,
 ):
     """
     Update git repository with changes to bitswan.yaml.
+
+    `extra_paths` are additional repo-relative paths to stage in the same commit
+    (e.g. firewall DPA PDFs stored under firewall-dpa/<bp>/), so adjacent
+    artifacts are versioned and pushed atomically with bitswan.yaml.
 
     Uses async lock with minimal hold time - only during the actual git operations
     that need to be atomic (add, commit). Pull and push are done with retries
@@ -689,7 +850,7 @@ async def update_git(
     )
 
     # Resolve the current branch so we can push/pull explicitly even when no
-    # upstream is configured (e.g. on freshly-created worktree branches).
+    # upstream is configured (e.g. on freshly-created copy branches).
     current_branch = None
     if has_remote:
         stdout, _, rc = await call_git_command_with_output(
@@ -702,7 +863,7 @@ async def update_git(
     async with GitLockContext(timeout=10.0):
         # Pull latest changes if we have a remote and the remote tracking
         # branch exists. Skip the pull for branches that only live locally
-        # (e.g. new worktree branches that have never been pushed).
+        # (e.g. new copy branches that have never been pushed).
         if has_remote and current_branch:
             await call_git_command(
                 "git", "fetch", "origin", current_branch, cwd=bitswan_dir
@@ -743,13 +904,32 @@ async def update_git(
             dc_git_path = os.path.join(bitswan_dir, "docker-compose.yaml")
             await call_git_command("git", "add", dc_git_path, cwd=bitswan_dir)
 
-        author = (
-            f"{deployed_by} <{deployed_by}>"
-            if deployed_by
-            else "gitops <info@bitswan.space>"
-        )
+        # Stage any extra repo-relative artifacts (e.g. firewall DPA PDFs).
+        for rel in extra_paths or []:
+            await call_git_command(
+                "git", "add", os.path.join(bitswan_dir, rel), cwd=bitswan_dir
+            )
+
+        # Attribute the commit to the operator who triggered the deploy/promote.
+        # `deployed_by` is their email; use it for BOTH the author and the
+        # committer so `git log --format='%an <%ae>|%cn <%ce>'` shows the
+        # operator, not the gitops service identity. We set the committer via
+        # `-c user.name/user.email` (which survive the nsenter/host path that
+        # GIT_COMMITTER_* env vars would not) and the author via --author.
+        if deployed_by:
+            author = f"{deployed_by} <{deployed_by}>"
+            ident_name = deployed_by
+            ident_email = deployed_by
+        else:
+            author = "gitops <info@bitswan.space>"
+            ident_name = "gitops"
+            ident_email = "gitops@gitops.com"
         await call_git_command(
             "git",
+            "-c",
+            f"user.name={ident_name}",
+            "-c",
+            f"user.email={ident_email}",
             "commit",
             "--author",
             author,
@@ -779,31 +959,48 @@ async def update_git(
                 raise Exception("Error pushing to git")
 
 
+_COMPOSE_EVENT_STATES = (
+    "Creating",
+    "Created",
+    "Starting",
+    "Started",
+    "Waiting",
+    "Healthy",
+    "Running",
+    "Recreated",
+)
+
+
+def _compose_event_message(line: str) -> str | None:
+    """Turn a `docker compose up` stderr line into a human deploy-progress
+    message, or None if it carries no container state transition.
+
+    Lines look like ` Container <name>  <State>` (plain text in non-TTY mode).
+    We surface container lifecycle so a long container-start phase — e.g. the
+    worker waiting on the egress firewall gateway's health gate before it can
+    start — keeps the deploy UI moving instead of sitting on a static message.
+    """
+    s = line.strip()
+    idx = s.find("Container ")
+    if idx == -1:
+        return None
+    rest = s[idx + len("Container ") :].strip()
+    parts = rest.rsplit(None, 1)
+    if len(parts) != 2:
+        return None
+    name, state = parts[0].strip(), parts[1].strip()
+    if state not in _COMPOSE_EVENT_STATES:
+        return None
+    return f"Starting containers… ({name} {state.lower()})"
+
+
 async def docker_compose_up(
     bitswan_dir: str,
     docker_compose: str,
     container_name: str | None = None,
     extra_services: list[str] | None = None,
-) -> None:
-    async def setup_asyncio_process(cmd: list[Any]) -> dict[str, Any]:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=bitswan_dir,
-        )
-
-        stdout, stderr = await proc.communicate(input=docker_compose.encode())
-
-        res = {
-            "cmd": cmd,
-            "stdout": stdout.decode("utf-8"),
-            "stderr": stderr.decode("utf-8"),
-            "return_code": proc.returncode,
-        }
-        return res
-
+    progress_callback=None,
+) -> dict:
     docker_compose_cmd = [
         "docker",
         "compose",
@@ -818,8 +1015,48 @@ async def docker_compose_up(
     if extra_services:
         docker_compose_cmd.extend(extra_services)
 
-    up_result = await setup_asyncio_process(docker_compose_cmd)
+    proc = await asyncio.create_subprocess_exec(
+        *docker_compose_cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=bitswan_dir,
+    )
+    # The compose document is small (well under a pipe buffer), so writing it
+    # and closing stdin can't deadlock against the concurrent output pumps.
+    proc.stdin.write(docker_compose.encode())
+    await proc.stdin.drain()
+    proc.stdin.close()
 
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+
+    async def _pump_stdout():
+        stdout_chunks.append(await proc.stdout.read())
+
+    async def _pump_stderr():
+        last = None
+        while True:
+            raw = await proc.stderr.readline()
+            if not raw:
+                break
+            stderr_chunks.append(raw)
+            if progress_callback is None:
+                continue
+            msg = _compose_event_message(raw.decode("utf-8", "replace"))
+            if msg and msg != last:
+                last = msg
+                await progress_callback("docker_compose_up", msg)
+
+    await asyncio.gather(_pump_stdout(), _pump_stderr())
+    return_code = await proc.wait()
+
+    up_result = {
+        "cmd": docker_compose_cmd,
+        "stdout": b"".join(stdout_chunks).decode("utf-8"),
+        "stderr": b"".join(stderr_chunks).decode("utf-8"),
+        "return_code": return_code,
+    }
     return {
         "up_result": up_result,
     }

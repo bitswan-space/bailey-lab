@@ -11,7 +11,7 @@ interface Props {
   onOpen: (path: string) => void;
   /**
    * The folder path the user is currently dragging files over — used to
-   * highlight the row. Empty string means "the panel root" (the worktree
+   * highlight the row. Empty string means "the panel root" (the copy
    * root, or the BP folder when the parent has cd'd into it); `null`
    * means no drag in progress.
    */
@@ -90,7 +90,7 @@ function FileTreeRow({
           onClick={() => setOpen((v) => !v)}
           // Folder rows claim themselves as drop targets on dragenter; we
           // stopPropagation so the panel-level handler doesn't overwrite
-          // with `null` (which would fall back to the worktree root).
+          // with `null` (which would fall back to the copy root).
           onDragEnter={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -140,7 +140,7 @@ function FileTreeRow({
       type="button"
       onClick={() => onOpen(node.path)}
       // File rows aren't valid folder targets — clear any previous claim
-      // so the upload falls back to the worktree root.
+      // so the upload falls back to the copy root.
       onDragEnter={(e) => {
         e.preventDefault();
         e.stopPropagation();

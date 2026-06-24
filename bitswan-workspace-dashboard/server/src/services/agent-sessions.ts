@@ -46,8 +46,8 @@ export interface AgentSession {
   id: string;
   timestamp: string;
   userEmail: string;
-  worktree: string;
-  /** null when the session was created by the editor (no SSH_BP env var) or is a worktree-level sync session. */
+  copy: string;
+  /** null when the session was created by the editor (no SSH_BP env var) or is a copy-level sync session. */
   bp: string | null;
   /** Empty string when no `.cast` file exists alongside the metadata. */
   castFile: string;
@@ -60,7 +60,7 @@ export interface AgentSession {
   claudeSessionId: string | null;
   /**
    * "claude" for a regular BP-scoped chat (the default), "sync" for the
-   * worktree-level git-sync flow, "requirement" for a per-requirement
+   * copy-level git-sync flow, "requirement" for a per-requirement
    * focused session, "write-tests" / "automation" for the Requirements
    * tab's canned-prompt sessions, or null for legacy / editor-launched
    * sessions where the wrapper didn't record a kind.
@@ -77,6 +77,7 @@ interface RawMeta {
   id?: string;
   user_email?: string;
   userEmail?: string;
+  /** Wire field written by the coding-agent's session wrapper (`"worktree": …`); read as the copy name. */
   worktree?: string;
   bp?: string | null;
   claude_session_id?: string | null;
@@ -90,14 +91,14 @@ interface RawMeta {
 /**
  * Scan `SESSIONS_DIR` and return parsed session metadata. When `bp` is
  * supplied the result is filtered to sessions started under that exact
- * (worktree, bp) pair — editor sessions (which have `bp = null`) are
+ * (copy, bp) pair — editor sessions (which have `bp = null`) are
  * dropped from the per-BP view. When `userEmail` is supplied, only
  * sessions started by that user are returned (legacy sessions whose
  * meta has no recorded email are kept under the assumption they predate
  * per-user isolation).
  */
 export async function listSessions(filter: {
-  worktree?: string;
+  copy?: string;
   bp?: string;
   limit?: number;
   userEmail?: string;
@@ -122,7 +123,7 @@ export async function listSessions(filter: {
       continue; // skip corrupt entries silently
     }
 
-    const worktree = raw.worktree ?? '';
+    const copy = raw.worktree ?? '';
     const bp = raw.bp ?? null;
     const kindRaw = raw.kind ?? null;
     const kind: AgentSession['kind'] =
@@ -141,15 +142,15 @@ export async function listSessions(filter: {
       // email courtesy of the wrapper's hard-fail.
       if (userEmail && userEmail !== 'unknown' && userEmail !== filter.userEmail) continue;
     }
-    if (filter.worktree !== undefined && worktree !== filter.worktree) continue;
+    if (filter.copy !== undefined && copy !== filter.copy) continue;
     if (filter.bp !== undefined) {
-      // Worktree-level sync sessions (bp=null, kind='sync') surface in any
-      // BP's Agents tab inside the worktree — there's nowhere else for the
+      // Copy-level sync sessions (bp=null, kind='sync') surface in any
+      // BP's Agents tab inside the copy — there's nowhere else for the
       // user to see them. Other null-bp sessions (legacy / editor) stay
       // filtered out so the dashboard view doesn't accidentally pick them up.
       const matchesBp = bp === filter.bp;
-      const isSyncForWorktree = kind === 'sync' && bp === null;
-      if (!matchesBp && !isSyncForWorktree) continue;
+      const isSyncForCopy = kind === 'sync' && bp === null;
+      if (!matchesBp && !isSyncForCopy) continue;
     }
 
     const baseName = entry.slice(0, -'.meta.json'.length);
@@ -163,7 +164,7 @@ export async function listSessions(filter: {
       id: raw.id ?? baseName,
       timestamp: raw.started_at ?? raw.timestamp ?? '',
       userEmail,
-      worktree,
+      copy,
       bp,
       castFile,
       logged: raw.logged !== false,
@@ -198,12 +199,12 @@ export async function listSessions(filter: {
   // Resolve titles in parallel. Each lookup is a single open+read+close on
   // the JSONL; bounded by `capped` (≤50) so concurrent fan-out is fine.
   // Each session's title path depends on its own scope — sync sessions
-  // (bp=null) live at the worktree root, BP-scoped sessions inside the BP.
+  // (bp=null) live at the copy root, BP-scoped sessions inside the BP.
   await Promise.all(
     capped.map(async (s) => {
-      if (!s.claudeSessionId || !s.worktree) return;
+      if (!s.claudeSessionId || !s.copy) return;
       s.title = await readFirstPromptTitle({
-        worktree: s.worktree,
+        copy: s.copy,
         bp: s.bp ?? undefined,
         claudeSessionId: s.claudeSessionId,
         userEmail: s.userEmail,
@@ -276,18 +277,18 @@ function encodeClaudeProjectDir(absoluteCwd: string): string {
  * match. A single streaming pass collects all three.
  */
 async function readFirstPromptTitle(opts: {
-  worktree: string;
+  copy: string;
   bp?: string;
   claudeSessionId: string;
   userEmail?: string;
 }): Promise<string> {
-  // The agent runs claude with cwd = `/workspace/worktrees/<wt>/<bp>` for
-  // a regular BP-scoped session, or `/workspace/worktrees/<wt>` for a
-  // worktree-level sync session (see routes/coding-agent.ts → buildAutoCmd).
+  // The agent runs claude with cwd = `/workspace/copies/<c>/<bp>` for
+  // a regular BP-scoped session, or `/workspace/copies/<c>` for a
+  // copy-level sync session (see routes/coding-agent.ts → buildAutoCmd).
   // Claude encodes that path into its own projects/ subdirectory name.
   const cwd = opts.bp
-    ? `/workspace/worktrees/${opts.worktree}/${opts.bp}`
-    : `/workspace/worktrees/${opts.worktree}`;
+    ? `/workspace/copies/${opts.copy}/${opts.bp}`
+    : `/workspace/copies/${opts.copy}`;
   const projDir = encodeClaudeProjectDir(cwd);
   // Per-user sessions write transcripts under `.claude_<slug>/projects/...`;
   // legacy / unattributed sessions land in the shared `.claude/projects/...`.

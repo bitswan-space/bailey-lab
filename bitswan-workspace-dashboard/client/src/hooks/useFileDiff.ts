@@ -8,10 +8,10 @@ interface Result {
 }
 
 /**
- * Fetches the unified diff for one file in a worktree. `path` being
+ * Fetches the unified diff for one file in a copy. `path` being
  * null clears the buffer — the parent can render "nothing selected".
  */
-export function useFileDiff(worktree: string, path: string | null): Result {
+export function useFileDiff(copy: string, path: string | null): Result {
   const [diff, setDiff] = useState('');
   const [loading, setLoading] = useState(false);
   const aliveRef = useRef(true);
@@ -23,14 +23,14 @@ export function useFileDiff(worktree: string, path: string | null): Result {
     }
     setLoading(true);
     try {
-      const r = await api.worktreeFiles.diff(worktree, path);
+      const r = await api.copyFiles.diff(copy, path);
       if (aliveRef.current) setDiff(r.diff);
     } catch {
       if (aliveRef.current) setDiff('');
     } finally {
       if (aliveRef.current) setLoading(false);
     }
-  }, [worktree, path]);
+  }, [copy, path]);
 
   useEffect(() => {
     aliveRef.current = true;

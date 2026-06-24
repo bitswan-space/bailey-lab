@@ -1,0 +1,169 @@
+name: BP lifecycle E2E (real stack)
+
+# Real-stack, full-browser E2E of the whole business-process lifecycle:
+# create -> describe -> Sync & Deploy -> promote to prod -> snapshot ->
+# restore into DR -> record recovery test -> swap -> rollback -> re-apply.
+#
+# Everything is real docker (daemon, gitops, traefik, the dashboard, postgres,
+# minio, real deploys/snapshots/blue-green slots/ingress reconcile). The ONLY
+# thing swapped out is the identity provider: a disposable Keycloak with a
+# seeded realm (e2e/keycloak/realm-export.json).
+#
+# Heavy (real image builds + real deploys -> ~10-20 min), so it is scoped to PRs
+# touching the relevant components plus manual dispatch — NOT every push.
+
+on:
+  pull_request:
+    paths:
+      - 'bitswan-automation-server/**'
+      - 'bitswan-gitops/**'
+      - 'bitswan-workspace-dashboard/**'
+      - 'bitswan-coding-agent/**'
+      - 'e2e/**'
+      - '.github/workflows/bp-lifecycle-e2e.yml'
+  workflow_dispatch:
+
+jobs:
+  bp-lifecycle-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    services:
+      docker:
+        image: docker:dind
+        options: --privileged
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Docker Compose
+        run: |
+          sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+
+      - name: Configure Docker
+        run: |
+          sudo mkdir -p /etc/docker
+          echo '{"hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"]}' | sudo tee /etc/docker/daemon.json
+          sudo service docker start || true
+
+      - name: Install and configure dnsmasq for .localhost resolution
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dnsmasq
+          sudo systemctl stop systemd-resolved || true
+          sudo systemctl disable systemd-resolved || true
+          sudo mkdir -p /etc/dnsmasq.d
+          echo "address=/.localhost/127.0.0.1" | sudo tee /etc/dnsmasq.d/localhost.conf
+          echo "listen-address=127.0.0.1" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          echo "port=53" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          echo "no-resolv" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          echo "server=8.8.8.8" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          echo "server=8.8.4.4" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          sudo systemctl start dnsmasq || sudo dnsmasq --no-daemon --log-queries &
+          echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf
+          sudo chattr +i /etc/resolv.conf || true
+          sleep 3
+          dig @127.0.0.1 test.bs-e2e.localhost +short || echo "DNS resolution check skipped"
+
+      - name: Install and configure mkcert for TLS certificates
+        run: |
+          sudo apt-get install -y libnss3-tools sqlite3
+          curl -JLO "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+          chmod +x mkcert-v*-linux-amd64
+          sudo mv mkcert-v*-linux-amd64 /usr/local/bin/mkcert
+          mkcert -install
+          mkcert -CAROOT
+
+      # Stand up the ENTIRE real stack + seeded Keycloak and create the workspace.
+      # bringup.sh builds the CLI + gitops/dashboard/coding-agent images from this
+      # checkout, inits the daemon + traefik, runs Keycloak, `workspace init` with
+      # the dashboard wired to it, seeds the e2e root admin, and writes e2e/.env.
+      - name: Bring up the real stack
+        timeout-minutes: 30
+        run: bash e2e/bringup.sh
+
+      - name: Install Playwright
+        working-directory: e2e
+        run: |
+          npm ci || npm install
+          npx playwright install --with-deps chromium
+
+      # The mkcert CA is already trusted on the runner; pass it to Chromium too so
+      # the browser trusts traefik's *.bs-e2e.localhost certs (config also sets
+      # ignoreHTTPSErrors as a belt-and-braces fallback).
+      - name: Walk the product (gather screenshots)
+        working-directory: e2e
+        run: |
+          export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"
+          npm test
+
+      # Assemble the Operator's Handbook from the editorial content + the
+      # screenshots just captured. Chromium (installed above) prints the PDF.
+      - name: Generate the Operator's Handbook (HTML + PDF)
+        if: always()
+        working-directory: e2e
+        run: node manual/generate.mjs
+
+      - name: Upload the Operator's Handbook
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operators-handbook
+          path: |
+            e2e/manual/build/handbook.html
+            e2e/manual/build/handbook.pdf
+            e2e/manual/build/shots/
+          retention-days: 30
+          if-no-files-found: warn
+
+      # Always dump routing + container state — the walkthrough is best-effort, so
+      # it can "pass" while a workspace app (the dashboard host) 404s. This shows
+      # the real ingress routes and which containers are up.
+      - name: Routing + container diagnostics
+        if: always()
+        run: |
+          echo "::group::docker ps"
+          docker ps --format '{{.Names}}\t{{.Status}}\t{{.Image}}' || true
+          echo "::endgroup::"
+          echo "::group::ingress routes"
+          ./bitswan-automation-server/bitswan ingress list-routes || true
+          echo "::endgroup::"
+          echo "::group::dashboard container logs (if any)"
+          for c in $(docker ps -a --format '{{.Names}}' | grep -iE 'dashboard|meridian|gitops' || true); do
+            echo "--- $c ---"; docker logs --tail 60 "$c" 2>&1 || true
+          done
+          echo "::endgroup::"
+
+      - name: Upload Playwright report + traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Diagnostics on failure (container logs)
+        if: failure()
+        run: |
+          echo "::group::docker ps -a"
+          docker ps -a || true
+          echo "::endgroup::"
+          for c in $(docker ps -aq); do
+            name=$(docker inspect --format '{{.Name}} ({{.State.Status}}, exit={{.State.ExitCode}})' "$c" 2>/dev/null || echo "$c")
+            echo "::group::logs $name"
+            docker logs --tail 200 "$c" 2>&1 || true
+            echo "::endgroup::"
+          done

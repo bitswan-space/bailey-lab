@@ -7,6 +7,7 @@ BITSWAN_GITOPS_DIR points at a tmp_path.
 """
 
 import os
+import re
 
 import pytest
 import yaml
@@ -14,7 +15,7 @@ import yaml
 from app.services import bp_databases
 from app.services.bp_databases import (
     bp_resource_names,
-    derive_bp_and_worktree,
+    derive_bp_and_copy,
     ensure_bp_databases,
     get_service_secrets,
     is_registered,
@@ -64,18 +65,20 @@ def test_validate_bp_slug_rejects(bad):
         validate_bp_slug(bad)
 
 
-def test_derive_bp_and_worktree():
-    assert derive_bp_and_worktree("Test BP/backend") == ("test-bp", "")
-    assert derive_bp_and_worktree("worktrees/bar/Test BP/backend") == (
+def test_derive_bp_and_copy():
+    # main copy: unprefixed scope (no copy context).
+    assert derive_bp_and_copy("copies/main/Test BP/backend") == ("test-bp", "")
+    # non-main copy: carries the copy name as context.
+    assert derive_bp_and_copy("copies/bar/Test BP/backend") == (
         "test-bp",
         "bar",
     )
     # Top-level automation: no BP segment.
-    assert derive_bp_and_worktree("standalone") == ("", "")
-    # Worktree root automation: worktree but no BP.
-    assert derive_bp_and_worktree("worktrees/bar/standalone") == ("", "bar")
-    assert derive_bp_and_worktree(None) == ("", "")
-    assert derive_bp_and_worktree("") == ("", "")
+    assert derive_bp_and_copy("standalone") == ("", "")
+    # Copy-root automation: copy but no BP.
+    assert derive_bp_and_copy("copies/bar/standalone") == ("", "bar")
+    assert derive_bp_and_copy(None) == ("", "")
+    assert derive_bp_and_copy("") == ("", "")
 
 
 # ---------------------------------------------------------------------------
@@ -355,12 +358,12 @@ def test_live_dev_maps_to_dev_realm(gitops_home):
     assert out == []
 
 
-def test_worktree_members_never_register(gitops_home):
+def test_copy_members_never_register(gitops_home):
     out = register_new_bps_for_members(
         {"deployments": {}},
         [
             {
-                "relative_path": "worktrees/foo/New BP/backend",
+                "relative_path": "copies/foo/New BP/backend",
                 "stage": "live-dev",
             }
         ],
@@ -369,13 +372,13 @@ def test_worktree_members_never_register(gitops_home):
     assert load_registry()["bps"] == {}
 
 
-def test_worktree_deployments_do_not_block_registration(gitops_home):
-    # Only non-worktree deployments count as "the BP already exists here".
+def test_copy_deployments_do_not_block_registration(gitops_home):
+    # Only non-copy deployments count as "the BP already exists here".
     bs_yaml = {
         "deployments": {
             "backend-wt-foo-new-bp-live-dev": {
                 "stage": "live-dev",
-                "relative_path": "worktrees/foo/New BP/backend",
+                "relative_path": "copies/foo/New BP/backend",
             }
         }
     }
@@ -416,12 +419,33 @@ def automation_service(gitops_home, monkeypatch):
     return svc
 
 
-def _compose_env(svc, bs_yaml):
-    """Environment dict of the single automation service in the compose."""
-    dc_yaml, _ = svc.generate_docker_compose(bs_yaml)
+def _automation_services(dc):
+    """The automation (non-gateway/infra) services in a generated compose."""
+    return {
+        n: s
+        for n, s in dc["services"].items()
+        if (s.get("labels", {}) or {}).get("gitops.firewall_gateway") != "true"
+        and "BITSWAN_AUTOMATION_STAGE" in (s.get("environment") or {})
+    }
+
+
+def _compose_env(svc, bs_yaml, slot=None):
+    """Environment dict of one automation service. A production deployment now
+    emits two app slots (a/b); `slot` picks one, else the live slot (the one
+    whose deployment_id is canonical — no '@slot' suffix) is returned."""
+    dc_yaml, _, _ = svc.generate_docker_compose(bs_yaml)
     dc = yaml.safe_load(dc_yaml)
-    (service_name,) = list(dc["services"])
-    return dc["services"][service_name].get("environment", {})
+    svcs = _automation_services(dc)
+    if slot is not None:
+        for s in svcs.values():
+            if (s.get("labels", {}) or {}).get("gitops.slot") == slot:
+                return s.get("environment", {})
+        raise AssertionError(f"no service for slot {slot!r}")
+    for s in svcs.values():
+        lbl = s.get("labels", {}) or {}
+        if "@" not in (lbl.get("gitops.deployment_id") or ""):
+            return s.get("environment", {})
+    return next(iter(svcs.values())).get("environment", {})
 
 
 def test_compose_injects_env_for_registered_bp(gitops_home, automation_service):
@@ -489,8 +513,53 @@ def test_compose_injection_gated_per_realm(gitops_home, automation_service):
     assert "POSTGRES_DB" not in env
 
 
-def test_worktree_override_wins_over_bp_injection(gitops_home, automation_service):
-    """Ordering is load-bearing: worktree live-dev keeps its cloned DB even
+def test_production_emits_two_slots_wired_to_two_dbs(gitops_home, automation_service):
+    """A registered production BP emits two app slots (a/b), each a distinct
+    container wired to its own logical DB (bp_<slug>_1 / bp_<slug>_2). The live
+    slot keeps the canonical deployment_id + owns the canonical hostname."""
+    reg = load_registry()
+    register_bp_stage(reg, "my-bp", "My BP", "production")
+    save_registry(reg)
+
+    os.makedirs(os.path.join(automation_service.gitops_dir, "abc123"), exist_ok=True)
+    bs_yaml = {
+        "deployments": {
+            "backend-my-bp": {
+                "stage": "production",
+                "checksum": "abc123",
+                "relative_path": "My BP/backend",
+                "automation_name": "backend",
+                "context": "my-bp",
+            }
+        }
+    }
+    dc_yaml, _, _ = automation_service.generate_docker_compose(bs_yaml)
+    dc = yaml.safe_load(dc_yaml)
+    svcs = _automation_services(dc)
+    # Two distinct container sets, one per active slot.
+    slots = {(s.get("labels", {}) or {}).get("gitops.slot") for s in svcs.values()}
+    assert slots == {"a", "b"}, slots
+    # Slot a → db1, slot b → db2 — never the same DB.
+    env_a = _compose_env(automation_service, bs_yaml, slot="a")
+    env_b = _compose_env(automation_service, bs_yaml, slot="b")
+    assert env_a["POSTGRES_DB"] == "bp_my_bp_1"
+    assert env_b["POSTGRES_DB"] == "bp_my_bp_2"
+    assert env_a["MINIO_BUCKET"] == "bp-my-bp-1"
+    assert env_b["MINIO_BUCKET"] == "bp-my-bp-2"
+    # Live slot (a, by default) keeps the canonical deployment_id; the DR slot
+    # (b) is slot-suffixed.
+    by_slot = {(s["labels"] or {}).get("gitops.slot"): s for s in svcs.values()}
+    assert by_slot["a"]["labels"]["gitops.deployment_id"] == "backend-my-bp"
+    assert by_slot["b"]["labels"]["gitops.deployment_id"] == "backend-my-bp@b"
+    # Same-slot peer discovery: each slot's URL template is slot-scoped, so a
+    # slot's containers resolve their own slot's peers (never the other slot).
+    if env_a.get("BITSWAN_URL_TEMPLATE"):
+        assert "-a." in env_a["BITSWAN_URL_TEMPLATE"]
+        assert "-b." in env_b["BITSWAN_URL_TEMPLATE"]
+
+
+def test_copy_override_wins_over_bp_injection(gitops_home, automation_service):
+    """Ordering is load-bearing: copy live-dev keeps its cloned DB even
     when the BP is registered (live-dev maps to the dev realm)."""
     reg = load_registry()
     register_bp_stage(reg, "my-bp", "My BP", "dev")
@@ -498,26 +567,32 @@ def test_worktree_override_wins_over_bp_injection(gitops_home, automation_servic
 
     bs_yaml = {
         "deployments": {
-            "backend-wt-foo-my-bp-live-dev": {
+            "backend-copy-foo-my-bp-live-dev": {
                 "stage": "live-dev",
-                "relative_path": "worktrees/foo/My BP/backend",
+                "relative_path": "copies/foo/My BP/backend",
                 "automation_name": "backend",
-                "context": "wt-foo-my-bp",
+                "context": "copy-foo-my-bp",
             }
         }
     }
-    dc_yaml, _ = automation_service.generate_docker_compose(bs_yaml)
+    dc_yaml, _, _ = automation_service.generate_docker_compose(bs_yaml)
     dc = yaml.safe_load(dc_yaml)
-    (service_name,) = [s for s in dc["services"]]
+    # The deploy now also stands up a default monitor-mode egress firewall
+    # gateway (gitops.firewall_gateway) alongside the worker; pick the worker.
+    (service_name,) = [
+        s
+        for s, e in dc["services"].items()
+        if (e.get("labels") or {}).get("gitops.firewall_gateway") != "true"
+    ]
     env = dc["services"][service_name]["environment"]
-    assert env["POSTGRES_DB"] == "postgres_wt_foo"
-    # CouchDB/MinIO names aren't worktree-cloned; they share the BP namespace.
+    assert env["POSTGRES_DB"] == "postgres_copy_foo"
+    # CouchDB/MinIO names aren't copy-cloned; they share the BP namespace.
     assert env["COUCHDB_DB_PREFIX"] == "bp-my-bp-"
     assert env["MINIO_BUCKET"] == "bp-my-bp"
 
 
 def test_compose_live_dev_main_injects(gitops_home, automation_service):
-    # Main (non-worktree) live-dev shares the dev realm → injected.
+    # Main (non-copy) live-dev shares the dev realm → injected.
     reg = load_registry()
     register_bp_stage(reg, "my-bp", "My BP", "dev")
     save_registry(reg)
@@ -532,8 +607,141 @@ def test_compose_live_dev_main_injects(gitops_home, automation_service):
             }
         }
     }
-    dc_yaml, _ = automation_service.generate_docker_compose(bs_yaml)
+    dc_yaml, _, _ = automation_service.generate_docker_compose(bs_yaml)
     dc = yaml.safe_load(dc_yaml)
-    (service_name,) = [s for s in dc["services"]]
+    # The deploy now also stands up a default monitor-mode egress firewall
+    # gateway (gitops.firewall_gateway) alongside the worker; pick the worker.
+    (service_name,) = [
+        s
+        for s, e in dc["services"].items()
+        if (e.get("labels") or {}).get("gitops.firewall_gateway") != "true"
+    ]
     env = dc["services"][service_name]["environment"]
     assert env["POSTGRES_DB"] == "bp_my_bp"
+
+
+# ---------------------------------------------------------------------------
+# ensure_live_postgres_dbs — deploy-time fail-fast guard
+# ---------------------------------------------------------------------------
+
+
+def _write_pg_secrets(gitops_home, stage="dev"):
+    secrets_dir = gitops_home / "secrets"
+    secrets_dir.mkdir(exist_ok=True)
+    suffix = "" if stage == "production" else f"-{stage}"
+    (secrets_dir / f"postgres{suffix}").write_text(
+        "POSTGRES_USER=admin\nPOSTGRES_PASSWORD=pw\nPOSTGRES_HOST=h\nPOSTGRES_DB=postgres\n"
+    )
+
+
+def test_copy_db_name_matches_env_injection():
+    # Must equal the formula generate_docker_compose injects as POSTGRES_DB.
+    for raw in ("alice", "Tomas-Peroutka.Wingsdata-ai", "X_Y", "main2"):
+        expected = "postgres_copy_" + re.sub(r"[^a-z0-9_]", "_", raw.lower())
+        assert bp_databases.copy_db_name(raw) == expected
+
+
+async def test_guard_clones_copy_db_at_deploy(gitops_home, fake_docker):
+    """The copy live-dev DB skipped at copy-create gets cloned at deploy."""
+    _write_pg_secrets(gitops_home, "dev")
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
+        }
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    joined = [" ".join(c) for c in fake_docker]
+    assert any(
+        'CREATE DATABASE "postgres_copy_alice" WITH TEMPLATE "postgres"' in j
+        for j in joined
+    ), joined
+
+
+async def test_guard_skips_copy_when_postgres_not_enabled(gitops_home, fake_docker):
+    """No Postgres in the workspace → skip (no raise, nothing created)."""
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
+        }
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    assert not any("CREATE DATABASE" in " ".join(c) for c in fake_docker)
+
+
+async def test_guard_creates_bp_db_for_dev(gitops_home, fake_docker):
+    _write_pg_secrets(gitops_home, "dev")
+    reg = load_registry()
+    register_bp_stage(reg, "my-bp", "My BP", "dev")
+    save_registry(reg)
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/main/My BP/backend", "stage": "dev"}
+        }
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    assert any('CREATE DATABASE "bp_my_bp"' in " ".join(c) for c in fake_docker)
+
+
+async def test_guard_creates_both_blue_green_prod_dbs(gitops_home, fake_docker):
+    _write_pg_secrets(gitops_home, "production")
+    reg = load_registry()
+    register_bp_stage(reg, "my-bp", "My BP", "production")
+    save_registry(reg)
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/main/My BP/backend", "stage": "production"}
+        },
+        "backups": {"my-bp": {"slots": {"a": {"db": 1}, "b": {"db": 2}}}},
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    joined = [" ".join(c) for c in fake_docker]
+    assert any('CREATE DATABASE "bp_my_bp_1"' in j for j in joined), joined
+    assert any('CREATE DATABASE "bp_my_bp_2"' in j for j in joined), joined
+
+
+async def test_guard_fail_fast_raises_on_create_error(gitops_home, monkeypatch):
+    """Postgres enabled but CREATE fails → raise (deploy reports the error)."""
+    _write_pg_secrets(gitops_home, "dev")
+
+    async def fake_run(*args, cwd=None):
+        joined = " ".join(args)
+        if "pg_isready" in joined:
+            return "", "", 0
+        if "pg_database WHERE datname" in joined:
+            return "", "", 0  # not present yet
+        if "CREATE DATABASE" in joined:
+            return "", "permission denied", 1
+        return "", "", 0
+
+    monkeypatch.setattr(bp_databases, "run_docker_command", fake_run)
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
+        }
+    }
+    with pytest.raises(RuntimeError):
+        await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+
+
+async def test_guard_clone_idempotent_when_db_exists(gitops_home, monkeypatch):
+    """If the per-copy DB already exists, no CREATE is issued (idempotent)."""
+    _write_pg_secrets(gitops_home, "dev")
+    calls = []
+
+    async def fake_run(*args, cwd=None):
+        calls.append(list(args))
+        joined = " ".join(args)
+        if "pg_isready" in joined:
+            return "", "", 0
+        if "pg_database WHERE datname" in joined:
+            return "1", "", 0  # already exists
+        return "", "", 0
+
+    monkeypatch.setattr(bp_databases, "run_docker_command", fake_run)
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
+        }
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    assert not any("CREATE DATABASE" in " ".join(c) for c in calls)

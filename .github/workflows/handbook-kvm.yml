@@ -1,0 +1,72 @@
+name: Operator's Handbook (KVM build on sandbox)
+
+# The full product walkthrough does real multi-stage deploys (blue-green / DR),
+# which need a real VM with CPU + RAM — docker:dind in GitHub-hosted runners is
+# too slow for the deploy lifecycle. So this workflow triggers the clean-KVM-VM
+# build (e2e/local-vm/run-qemu.sh) on a capable host (sandbox.bitswan.ai) and
+# pulls the generated Operator's Handbook back as an artifact.
+#
+# Requires two repo secrets:
+#   SANDBOX_SSH_KEY  — private key authorized for root@<host>
+#   SANDBOX_HOST     — e.g. sandbox.bitswan.ai
+#
+# Manual trigger (or call it from another workflow). It does NOT run on every
+# push — the KVM build is heavy and the host is shared.
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_cpus:
+        description: 'vCPUs for the KVM guest'
+        default: '8'
+      vm_memory_mb:
+        description: 'RAM (MB) for the KVM guest'
+        default: '16384'
+
+jobs:
+  handbook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH to the KVM host
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SANDBOX_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.SANDBOX_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Sync this checkout to the KVM host
+        run: |
+          rsync -az --delete \
+            --exclude '.git/' --exclude 'node_modules/' --exclude '**/node_modules/' \
+            --exclude 'e2e/manual/build/' --exclude '**/dist/' \
+            -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" \
+            ./ "root@${{ secrets.SANDBOX_HOST }}:/root/bailey-lab-ci/"
+
+      - name: Run the full suite in a fresh, isolated KVM VM
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no "root@${{ secrets.SANDBOX_HOST }}" \
+            "cd /root/bailey-lab-ci/e2e/local-vm && chmod +x *.sh && \
+             E2E_VM_CPUS=${{ github.event.inputs.vm_cpus }} E2E_VM_MEMORY_MB=${{ github.event.inputs.vm_memory_mb }} \
+             ./run-qemu.sh"
+
+      - name: Fetch the generated handbook
+        if: always()
+        run: |
+          mkdir -p e2e/manual/build
+          rsync -az -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no" \
+            "root@${{ secrets.SANDBOX_HOST }}:/root/bailey-lab-ci/e2e/manual/build/" e2e/manual/build/ || true
+
+      - name: Upload the Operator's Handbook
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operators-handbook
+          path: |
+            e2e/manual/build/handbook.html
+            e2e/manual/build/handbook.pdf
+            e2e/manual/build/shots/
+          if-no-files-found: warn
+          retention-days: 30

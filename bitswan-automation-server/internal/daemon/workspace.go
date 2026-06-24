@@ -33,13 +33,11 @@ type WorkspaceListResponse struct {
 
 // WorkspaceInfo contains detailed information about a workspace
 type WorkspaceInfo struct {
-	Name         string `json:"name"`
-	Domain       string `json:"domain,omitempty"`
-	EditorURL    string `json:"editor_url,omitempty"`
-	GitopsURL    string `json:"gitops_url,omitempty"`
-	SSHPublicKey string `json:"ssh_public_key,omitempty"`
-	VSCodePassword string `json:"vscode_password,omitempty"`
-	GitopsSecret string `json:"gitops_secret,omitempty"`
+	Name           string `json:"name"`
+	Domain         string `json:"domain,omitempty"`
+	GitopsURL      string `json:"gitops_url,omitempty"`
+	SSHPublicKey   string `json:"ssh_public_key,omitempty"`
+	GitopsSecret   string `json:"gitops_secret,omitempty"`
 }
 
 // handleWorkspace routes workspace-related requests
@@ -589,4 +587,3 @@ func (s *Server) handleWorkspaceDisconnectFromAOC(w http.ResponseWriter, r *http
 		WriteLogEntry(w, "error", fmt.Sprintf("Operation failed: %v", disconnectErr))
 	}
 }
-

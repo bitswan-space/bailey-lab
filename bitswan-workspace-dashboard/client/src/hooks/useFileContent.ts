@@ -18,7 +18,7 @@ interface Result {
  * Fetches a file's content once the user picks one in FileTree. `path`
  * being null means "no file open" — we return early and clear stale data.
  */
-export function useFileContent(worktree: string, path: string | null): Result {
+export function useFileContent(copy: string, path: string | null): Result {
   const [data, setData] = useState<FileContentResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const aliveRef = useRef(true);
@@ -31,7 +31,7 @@ export function useFileContent(worktree: string, path: string | null): Result {
     }
     setLoading(true);
     try {
-      const d = await api.worktreeFiles.content(worktree, path);
+      const d = await api.copyFiles.content(copy, path);
       if (aliveRef.current) setData(d);
     } catch (err) {
       if (aliveRef.current) {
@@ -42,7 +42,7 @@ export function useFileContent(worktree: string, path: string | null): Result {
     } finally {
       if (aliveRef.current) setLoading(false);
     }
-  }, [worktree, path]);
+  }, [copy, path]);
 
   useEffect(() => {
     aliveRef.current = true;

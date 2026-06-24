@@ -12,7 +12,7 @@ import {
 const CodeEditor = lazy(() => import('./CodeEditor'));
 
 interface Props {
-  worktree: string;
+  copy: string;
   path: string | null;
   data: FileContentResponse | null;
   loading: boolean;
@@ -41,7 +41,7 @@ type SaveState =
   | { kind: 'conflict' };
 
 export function FileViewer({
-  worktree,
+  copy,
   path,
   data,
   loading,
@@ -88,7 +88,7 @@ export function FileViewer({
     const currentEtag = etagRef.current;
     setSave({ kind: 'saving' });
     try {
-      const r = await api.worktreeFiles.save(worktree, path, {
+      const r = await api.copyFiles.save(copy, path, {
         content,
         ...(currentEtag ? { etag: currentEtag } : {}),
       });
@@ -118,7 +118,7 @@ export function FileViewer({
       setSave({ kind: 'error', message });
       toast.error(`Save failed: ${message}`);
     }
-  }, [worktree, path, onAfterSave]);
+  }, [copy, path, onAfterSave]);
 
   // Idle debounce: arm a save timer when `dirty` flips on, reset it on
   // every keystroke. Cleared on unmount or successful save.

@@ -6,7 +6,7 @@ COMMIT_HASH=$(git rev-parse --short HEAD)
 IMAGE_TAG="bitswan/gitops-staging"
 
 # Build and push Docker images
-docker build -t $IMAGE_TAG:latest -t $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH -f ./Dockerfile .
+docker build -t $IMAGE_TAG:latest -t $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH -f ./Dockerfile ..
 
 docker push $IMAGE_TAG:latest
 docker push $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH

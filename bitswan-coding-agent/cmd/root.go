@@ -12,13 +12,13 @@ var rootCmd = &cobra.Command{
 	Short: "BitSwan Coding Agent CLI",
 	Long: `CLI tool for BitSwan coding agents to interact with the workspace environment.
 
-You are working inside a BitSwan workspace worktree. Your working directory
-contains a checkout of a specific feature branch, isolated from the main
-development branch. git is NOT installed — use only bitswan-coding-agent commands.
+You are working inside a BitSwan workspace COPY — your own independent clone of
+the project repo, checked out on a feature branch and isolated from other
+copies. git is installed and ` + "`origin`" + ` is already configured to the workspace
+git server.
 
 COMMANDS
   requirements  — Manage testable requirements for a business process
-  vcs           — Version control (commit, sync, merge, diff, log)
   deployments   — Manage live-dev deployments (list, start, exec, logs)
 
 Run any subcommand with --help for full usage details.
@@ -58,7 +58,7 @@ TYPICAL WORKFLOW
        proposed  — AI-suggested requirement awaiting human review
 
   8. Commit when ready:
-       bitswan-coding-agent vcs commit -m "implement feature X"
+       git add -A && git commit -m "implement feature X"
 
 DIRECTORY STRUCTURE
 
@@ -67,14 +67,22 @@ DIRECTORY STRUCTURE
     image/           — Custom Dockerfile for the automation
   Live-dev deployments auto-reload when source files change.
 
-MERGING (only when the user explicitly asks)
+VERSION CONTROL (use normal git)
 
-  1. bitswan-coding-agent vcs commit -m "final changes"
-  2. bitswan-coding-agent vcs rebase-and-merge
-  3. If conflicts: resolve the files, then: bitswan-coding-agent vcs rebase-continue
-     To abort: bitswan-coding-agent vcs rebase-abort
+  Commit your work:
+    git add -A && git commit -m "implement feature X"
 
-  Exit codes: 0 = success, 1 = conflicts (resolve and continue), 2 = stash error
+  Integrate the latest main:
+    git pull --rebase origin main
+    (resolve any conflicts, then: git rebase --continue)
+
+  Publish your branch:
+    git push origin <your-branch>
+
+  IMPORTANT: history on the server is fast-forward-only. NEVER use
+  ` + "`git push --force`" + ` / ` + "`-f`" + ` and never rewrite commits you have already
+  pushed. If a push is rejected as non-fast-forward, run
+  ` + "`git pull --rebase`" + ` and push again.
 
 SECRETS
 
@@ -90,7 +98,7 @@ CODING GUIDELINES
 
   - Do not use fallbacks. If tests fail, improve the design or error out.
   - Write DRY code. Refactor duplicate logic into shared functions.
-  - Do NOT use git directly — it is not installed.`,
+  - Use normal git, but NEVER force-push or rewrite already-published history.`,
 }
 
 func Execute() {
@@ -102,6 +110,5 @@ func Execute() {
 
 func init() {
 	rootCmd.AddCommand(requirementsCmd)
-	rootCmd.AddCommand(vcsCmd)
 	rootCmd.AddCommand(deploymentsCmd)
 }

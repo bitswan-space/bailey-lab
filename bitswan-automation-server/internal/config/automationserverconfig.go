@@ -16,9 +16,29 @@ type AutomationServerConfig struct {
 
 // Config represents the combined TOML configuration
 type Config struct {
-	ActiveWorkspace            string                             `toml:"active_workspace"`
+	ActiveWorkspace string `toml:"active_workspace"`
+
+	// ProtectedDomain overrides the hostname suffix used for protected
+	// (Bailey-gated) endpoints. Operators running protected ingress on
+	// a dedicated zone (e.g. apps.acme.com) set this so endpoint
+	// hostnames render against that suffix instead of the AOC-assigned
+	// domain. Empty falls back to the AOC domain.
+	ProtectedDomain string `toml:"protected_domain,omitempty"`
+
 	AutomationOperationsCenter AutomationOperationsCenterSettings `toml:"aoc"`
 	LocalServer                LocalServerSettings                `toml:"local_server"`
+}
+
+// ProtectedHostnameDomain returns the suffix used for protected
+// (Bailey-gated) hostnames. Resolution order: ProtectedDomain (the
+// explicit operator override) first, then the AOC-assigned domain —
+// the common case: a single public domain with a *.<domain> wildcard
+// certificate. Empty means protected ingress isn't configured yet.
+func (c *Config) ProtectedHostnameDomain() string {
+	if c.ProtectedDomain != "" {
+		return c.ProtectedDomain
+	}
+	return c.AutomationOperationsCenter.Domain
 }
 
 // LocalServerSettings represents the local automation server daemon settings

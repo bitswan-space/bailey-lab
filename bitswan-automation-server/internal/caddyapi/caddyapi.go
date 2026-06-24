@@ -244,11 +244,11 @@ func DeleteCaddyRecordsWithWriter(workspaceName string, writer io.Writer) error 
 	// We need to import the config package for this to work
 	// For now, we'll handle this differently by checking if we can delete by service routes first
 	
-	// Try to delete service routes (gitops, editor) by constructing likely hostnames
+	// Try to delete service routes (gitops, dashboard) by constructing likely hostnames
 	// We'll use a more robust approach by deleting directly by the old ID format for TLS items
-	
+
 	// Delete service routes that follow hostname pattern
-	serviceRoutes := []string{"gitops", "editor", "dashboard"}
+	serviceRoutes := []string{"gitops", "dashboard"}
 	
 	// For service routes, we need the domain. Let's try to get it from metadata
 	metadataPath := os.Getenv("HOME") + "/.config/bitswan/workspaces/" + workspaceName + "/metadata.yaml"

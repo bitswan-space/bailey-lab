@@ -102,6 +102,32 @@ class ImageService:
             return "ready"
         return "ready"
 
+    def build_log_tail(self, checksum: str) -> str | None:
+        """Return the last meaningful line of the in-progress build log.
+
+        The image build streams docker's `{"stream": ...}` output line-by-line
+        into `<checksum>.building.log` (see `build_callback`). Surfacing the
+        latest line lets a long-running build report granular progress (pulling
+        a base image, a build step, a layer) instead of going dark — the deploy
+        task polls this on each tick. Returns None when no readable progress
+        line is available yet."""
+        building, _, _ = self._log_paths(checksum)
+        try:
+            if not os.path.exists(building):
+                return None
+            # Builds rarely exceed a few hundred KB of log; reading the tail is
+            # cheap and avoids holding the whole file. Take the last non-blank
+            # line, trimmed — docker's build stream is one step/layer per line.
+            with open(building, "r", errors="replace") as f:
+                lines = f.read().splitlines()
+            for line in reversed(lines):
+                s = line.strip()
+                if s:
+                    return s[:140]
+            return None
+        except OSError:
+            return None
+
     def _extract_checksum_from_tag(self, tag: str) -> Optional[str]:
         if ":sha" not in tag:
             return None

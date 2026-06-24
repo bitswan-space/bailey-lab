@@ -5,7 +5,7 @@ Ported from the dashboard server's `services/templates.ts` so gitops owns the
 single write path into `/workspace-repo` and can broadcast `automations`
 events inline (no filesystem-watcher round-trip).
 
-The `examples/` directory the editor uses is bind-mounted at
+The shared `examples/` directory is bind-mounted at
 `/workspace/examples`; workspace-local overrides live at
 `<workspace_repo>/templates/`. Workspace overrides win on id collision.
 """
@@ -27,14 +27,45 @@ from app.utils import (
 
 logger = logging.getLogger(__name__)
 
-# Same root the editor uses. Mounted read-only into the gitops container by
-# bitswan-automation-server's compose generation.
-TEMPLATES_ROOT = "/workspace/examples"
 
-# Editor-compatible automation directory naming.
+def _copies_dir() -> str:
+    return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
+
+
+# Built-in templates are baked into the gitops image at /opt/bitswan/examples
+# (Dockerfile `COPY examples/`), so they are version-locked to the gitops
+# build. BITSWAN_TEMPLATES_DIR overrides the baked path (used in dev when the
+# source tree is mounted). The legacy /workspace/examples mount is still
+# consulted so older deployments that mount an examples repo keep working.
+# Workspace-local overrides at <workspace_repo>/templates/ win over both.
+BUILTIN_TEMPLATE_ROOTS = [
+    os.environ.get("BITSWAN_TEMPLATES_DIR", "/opt/bitswan/examples"),
+    # Dev mode mounts the gitops source at /src, so the templates ship at
+    # /src/examples — discover them there without needing an env override.
+    "/src/examples",
+    # Legacy: an examples repo bind-mounted by older automation-server builds.
+    "/workspace/examples",
+]
+
+
+def _discover_builtins() -> tuple[list["TemplateInfo"], list["TemplateGroupInfo"]]:
+    """Merge built-in templates/groups across every built-in root, earlier
+    roots winning on id collision (the baked path beats the legacy mount)."""
+    by_id_t: dict[str, "TemplateInfo"] = {}
+    by_id_g: dict[str, "TemplateGroupInfo"] = {}
+    for root in BUILTIN_TEMPLATE_ROOTS:
+        t_list, g_list = _discover_in_root(root)
+        for t in t_list:
+            by_id_t.setdefault(t.id, t)
+        for g in g_list:
+            by_id_g.setdefault(g.id, g)
+    return list(by_id_t.values()), list(by_id_g.values())
+
+
+# Automation directory naming.
 _AUTOMATION_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
-# Same regex extraction strategy as the editor and the dashboard server. A real
+# Same regex extraction strategy as the dashboard server. A real
 # TOML parser would be overkill for three fields and would lose the option of
 # preserving authoring conventions when we rewrite `automation.toml`.
 _NAME_RE = re.compile(r'\bname\s*=\s*"([^"]+)"')
@@ -125,9 +156,7 @@ def _read_group(dir_path: str) -> Optional[TemplateGroupInfo]:
             sub = os.path.join(dir_path, name)
             if not os.path.isdir(sub):
                 continue
-            if os.path.exists(os.path.join(sub, "automation.toml")) or os.path.exists(
-                os.path.join(sub, "pipelines.conf")
-            ):
+            if os.path.exists(os.path.join(sub, "automation.toml")):
                 automations.append(name)
     except OSError:
         pass
@@ -172,9 +201,9 @@ def discover_templates(workspace_root: str) -> dict:
     """Return the merged `{templates, groups}` listing.
 
     Workspace overrides at `<workspace_root>/templates/` win against built-ins
-    of the same id, matching the editor's behaviour.
+    of the same id, matching the dashboard's behaviour.
     """
-    builtin_t, builtin_g = _discover_in_root(TEMPLATES_ROOT)
+    builtin_t, builtin_g = _discover_builtins()
     override_t, override_g = _discover_in_root(
         os.path.join(workspace_root, "templates")
     )
@@ -221,7 +250,7 @@ def _ensure_automation_id(target_dir: str) -> None:
     """Add `[deployment] id = "<uuid>"` to `automation.toml` if missing.
 
     Targeted string edit (not a TOML round-trip) so authoring conventions
-    (comments, blank lines) survive. Mirrors the editor + dashboard logic.
+    (comments, blank lines) survive. Mirrors the dashboard logic.
     """
     toml_path = os.path.join(target_dir, "automation.toml")
     new_id = str(uuid.uuid4())
@@ -256,11 +285,17 @@ def _ensure_automation_id(target_dir: str) -> None:
 
 
 def _bp_destination(
-    workspace_root: str, bp: str, worktree: Optional[str]
+    workspace_root: str, bp: str, copy: Optional[str]
 ) -> tuple[str, str]:
-    """Returns `(bp_full_path, bp_relative_path)`."""
-    rel = os.path.join("worktrees", worktree, bp) if worktree else bp
-    return os.path.join(workspace_root, rel), rel
+    """Returns `(bp_full_path, bp_relative_path)`.
+
+    A copy (copy name) scaffolds into `${BITSWAN_COPIES_DIR}/<copy>/<bp>`;
+    the main scope (copy None) into `${BITSWAN_COPIES_DIR}/main/<bp>`. The
+    relative path uses the deployment `copies/<copy>/<bp>` form.
+    """
+    scope = copy or "main"
+    rel = os.path.join("copies", scope, bp)
+    return os.path.join(_copies_dir(), scope, bp), rel
 
 
 async def _commit(
@@ -288,6 +323,47 @@ async def _commit(
     return hash_stdout.strip() if hash_rc == 0 else None
 
 
+async def rename_automation(
+    *,
+    workspace_root: str,
+    bp: str,
+    old_name: str,
+    new_name: str,
+    copy: Optional[str] = None,
+) -> dict:
+    """Rename an automation directory within a BP and commit. Returns
+    `{ "name", "relative_path" }` for the new location.
+
+    The directory name is the automation's identity on disk; deployed
+    containers keep their existing deployment_id until the next deploy.
+    Validation of `bp`/`copy` shape happens at the route layer.
+    """
+    bp_full, bp_rel = _bp_destination(workspace_root, bp, copy)
+    old_san = sanitize_automation_name(old_name or "")
+    new_san = sanitize_automation_name(new_name or "")
+    if not new_san or not _AUTOMATION_NAME_RE.match(new_san):
+        raise ValueError("Invalid automation name")
+    src = os.path.join(bp_full, old_san)
+    if not os.path.isdir(src):
+        raise FileNotFoundError(f'No automation "{old_san}" in this business process.')
+    if old_san == new_san:
+        return {"name": new_san, "relative_path": os.path.join(bp_rel, new_san)}
+    dest = os.path.join(bp_full, new_san)
+    if os.path.exists(dest):
+        raise FileExistsError(
+            f'A folder named "{new_san}" already exists in this business process.'
+        )
+    os.rename(src, dest)
+
+    commit_cwd = os.path.join(_copies_dir(), copy or "main")
+    try:
+        await _commit(commit_cwd, f"Rename automation {old_san} → {new_san}")
+    except Exception as e:  # noqa: BLE001 — surface but don't undo the rename
+        logger.warning("rename commit failed: %s", e)
+
+    return {"name": new_san, "relative_path": os.path.join(bp_rel, new_san)}
+
+
 async def create_automation_from_template(
     *,
     workspace_root: str,
@@ -295,12 +371,12 @@ async def create_automation_from_template(
     template_id: Optional[str] = None,
     group_id: Optional[str] = None,
     name: Optional[str] = None,
-    worktree: Optional[str] = None,
+    copy: Optional[str] = None,
 ) -> dict:
     """Copy a template (or every automation in a group) into the BP directory
     and commit. Returns `{ "created": [ { "name", "relative_path" } ] }`.
 
-    Validation of `bp`/`worktree` shape is expected to happen at the route layer.
+    Validation of `bp`/`copy` shape is expected to happen at the route layer.
     """
     if not bp:
         raise ValueError("bp is required")
@@ -309,7 +385,7 @@ async def create_automation_from_template(
     if template_id and group_id:
         raise ValueError("template_id and group_id are mutually exclusive")
 
-    bp_full, bp_rel = _bp_destination(workspace_root, bp, worktree)
+    bp_full, bp_rel = _bp_destination(workspace_root, bp, copy)
     os.makedirs(bp_full, exist_ok=True)
 
     created: list[dict] = []
@@ -372,13 +448,10 @@ async def create_automation_from_template(
         names = ", ".join(c["name"] for c in created)
         message = f"Add automations: {names}"
 
-    # Commit in the workspace root (or worktree). `git` finds the right worktree
-    # from the cwd, so commits land on the right branch automatically.
-    commit_cwd = (
-        os.path.join(workspace_root, "worktrees", worktree)
-        if worktree
-        else workspace_root
-    )
+    # Commit in the copy's checkout (main copy when copy is None). `git` finds
+    # the right repo from the cwd, so commits land on the right branch
+    # automatically.
+    commit_cwd = os.path.join(_copies_dir(), copy or "main")
     try:
         await _commit(commit_cwd, message)
     except Exception as e:  # noqa: BLE001 — surface commit failures but don't undo the copy
@@ -390,7 +463,7 @@ async def create_automation_from_template(
 def _all_templates(workspace_root: str) -> list[TemplateInfo]:
     """Helper to re-fetch the full TemplateInfo (incl. source_dir) — `discover_templates`
     returns dicts trimmed for HTTP response."""
-    builtin_t, _ = _discover_in_root(TEMPLATES_ROOT)
+    builtin_t, _ = _discover_builtins()
     override_t, _ = _discover_in_root(os.path.join(workspace_root, "templates"))
     merged: dict[str, TemplateInfo] = {t.id: t for t in builtin_t}
     for t in override_t:
@@ -399,7 +472,7 @@ def _all_templates(workspace_root: str) -> list[TemplateInfo]:
 
 
 def _all_groups(workspace_root: str) -> list[TemplateGroupInfo]:
-    _, builtin_g = _discover_in_root(TEMPLATES_ROOT)
+    _, builtin_g = _discover_builtins()
     _, override_g = _discover_in_root(os.path.join(workspace_root, "templates"))
     merged: dict[str, TemplateGroupInfo] = {g.id: g for g in builtin_g}
     for g in override_g:

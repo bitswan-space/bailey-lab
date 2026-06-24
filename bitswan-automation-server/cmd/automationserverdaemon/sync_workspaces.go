@@ -14,7 +14,7 @@ func newSyncWorkspacesCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sync-workspaces",
 		Short: "Manually trigger workspace list publication to AOC",
-		Long:  "Manually trigger publication of the current workspace list to AOC via MQTT. This ensures the AOC is synchronized with the actual workspaces on this automation server.",
+		Long:  "Manually trigger publication of the current workspace list to AOC. This ensures the AOC is synchronized with the actual workspaces on this automation server.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := daemon.NewClient()
 			if err != nil {

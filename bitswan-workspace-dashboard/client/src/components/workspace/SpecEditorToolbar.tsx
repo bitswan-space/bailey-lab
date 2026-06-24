@@ -55,7 +55,7 @@ import {
 import { listSpecAttachments, type AttachmentRow } from './SpecAttachments';
 
 interface SpecEditorToolbarProps {
-  worktree: string;
+  copy: string;
   bpId: string;
   /** Opens the visual flowchart editor for a new diagram. */
   onInsertDiagram: () => void;
@@ -70,7 +70,7 @@ interface SpecEditorToolbarProps {
  * <ProseMirror> context (it drives the view via editor hooks).
  */
 export function SpecEditorToolbar({
-  worktree,
+  copy,
   bpId,
   onInsertDiagram,
   linkShortcutRef,
@@ -125,7 +125,7 @@ export function SpecEditorToolbar({
     if (open) {
       setImageUrl('');
       // Lazy-load the picker list each open so fresh uploads show up.
-      listSpecAttachments(worktree, bpId)
+      listSpecAttachments(copy, bpId)
         .then(setAttachments)
         .catch(() => setAttachments([]));
     }

@@ -19,7 +19,6 @@ func NewServiceCmd() *cobra.Command {
 	cmd.AddCommand(NewKafkaCmd())
 	cmd.AddCommand(NewPostgresCmd())
 	cmd.AddCommand(NewMinioCmd())
-	cmd.AddCommand(NewEditorCmd())
 	cmd.AddCommand(NewDashboardCmd())
 	cmd.AddCommand(NewCodingAgentCmd())
 

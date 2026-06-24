@@ -50,22 +50,22 @@ func (c *CodingAgentService) CreateDockerCompose(gitopsAgentSecret, codingAgentI
 
 // CreateDockerComposeWithDevMode generates docker-compose with optional dev mode support
 func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, codingAgentImage, domain string, devConfig *CodingAgentDevConfig) (string, error) {
-	// For docker-compose files, use HOST_HOME if available (docker-compose runs on host)
-	// Convert container path to host path for volume mounts
-	homeDir := os.Getenv("HOME")
-	hostHomeDir := os.Getenv("HOST_HOME")
-	if hostHomeDir == "" {
-		hostHomeDir = homeDir
-	}
-
-	// Convert WorkspacePath (container path) to host path for docker-compose
-	gitopsPath := c.WorkspacePath
-	if homeDir != hostHomeDir && strings.HasPrefix(gitopsPath, homeDir) {
-		// Replace container home with host home for docker-compose volume paths
-		gitopsPath = strings.Replace(gitopsPath, homeDir, hostHomeDir, 1)
-	}
-
 	workspaceName := c.WorkspaceName
+
+	// Workspace data lives inside the named `bitswan` Docker volume at
+	// workspaces/<name>/... — mounted via compose long-form volume + subpath.
+	// The host docker daemon resolves the named volume directly, so there's no
+	// container→host path translation to apply here anymore.
+	wsVolume := func(subdir, target string) map[string]interface{} {
+		return map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": target,
+			"volume": map[string]interface{}{
+				"subpath": "workspaces/" + workspaceName + "/" + subdir,
+			},
+		}
+	}
 
 	if codingAgentImage == "" {
 		codingAgentImage = "bitswan/coding-agent:latest"
@@ -82,19 +82,30 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 		"BITSWAN_GITOPS_URL=" + fmt.Sprintf("http://%s-gitops:8079", workspaceName),
 		"BITSWAN_GITOPS_AGENT_SECRET=" + gitopsAgentSecret,
 		"BITSWAN_WORKSPACE_NAME=" + workspaceName,
+		// Canonical repo URL the agent uses as `origin` in each copy. The agent
+		// authenticates with HTTP Basic where the password is the agent secret.
+		"BITSWAN_GIT_REMOTE=" + fmt.Sprintf("http://%s-gitops:8079/git/repo.git", workspaceName),
 	}
 	if sshPubKey != "" {
 		envVars = append(envVars, "EDITOR_SSH_PUBLIC_KEY="+sshPubKey)
 	}
 
-	volumes := []string{
-		gitopsPath + "/workspace/worktrees:/workspace/worktrees:z",
-		gitopsPath + "/coding-agent-home:/home/agent:z",
-		gitopsPath + "/coding-agent-sessions:/var/log/agent-sessions:z",
+	volumes := []interface{}{
+		// Each agent session works in its own copy at /workspace/copies/<name>.
+		wsVolume("copies", "/workspace/copies"),
+		wsVolume("coding-agent-home", "/home/agent"),
+		wsVolume("coding-agent-sessions", "/var/log/agent-sessions"),
 	}
 
-	// Dev mode: mount source files directly into the container
+	// Dev mode: mount source files directly into the container. The dev source
+	// is a real host directory the user supplies, so it stays a bind mount —
+	// translate the container HOME prefix to HOST_HOME for the host daemon.
 	if devConfig != nil && devConfig.DevMode && devConfig.SourceDir != "" {
+		homeDir := os.Getenv("HOME")
+		hostHomeDir := os.Getenv("HOST_HOME")
+		if hostHomeDir == "" {
+			hostHomeDir = homeDir
+		}
 		srcDir := devConfig.SourceDir
 		// Convert to host path if needed
 		if homeDir != hostHomeDir && strings.HasPrefix(srcDir, homeDir) {
@@ -129,6 +140,11 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
+				"external": true,
+			},
+		},
+		"volumes": map[string]interface{}{
+			"bitswan": map[string]interface{}{
 				"external": true,
 			},
 		},
@@ -176,23 +192,18 @@ func (c *CodingAgentService) Enable(gitopsAgentSecret, codingAgentImage, domain 
 		return fmt.Errorf("failed to create coding-agent-sessions directory: %w", err)
 	}
 
-	// Create workspace/worktrees directory
-	worktreesDir := filepath.Join(c.WorkspacePath, "workspace", "worktrees")
-	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
-		return fmt.Errorf("failed to create workspace/worktrees directory: %w", err)
-	}
-
 	hostOsTmp := runtime.GOOS
 
 	if hostOsTmp == "linux" {
-		// Change ownership for Linux
+		// Change ownership for Linux. The per-copy checkouts live under the
+		// `copies` volume subpath (created/owned by gitops); the agent only
+		// needs its home + session dirs here.
 		dirs := []struct {
 			path string
 			name string
 		}{
 			{codingAgentHomeDir, "coding-agent-home"},
 			{codingAgentSessionsDir, "coding-agent-sessions"},
-			{worktreesDir, "workspace/worktrees"},
 		}
 
 		for _, dir := range dirs {

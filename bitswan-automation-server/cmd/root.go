@@ -47,23 +47,24 @@ Contact BitSwan for licensing information:
 func newRootCmd(version string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bitswan",
-		Short: "Deploy your Jupyter pipelines with bitswan",
+		Short: "Deploy and manage your bitswan automations",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
 		},
 	}
 
-	cmd.AddCommand(newVersionCmd(version))                                    // version subcommand
-	cmd.AddCommand(newWorkspaceCmd())                                         // workspace subcommand
-	cmd.AddCommand(newRegisterCmd())                                          // register subcommand
-	cmd.AddCommand(newDisconnectFromAOCCmd())                                 // disconnect-from-aoc subcommand
-	cmd.AddCommand(ingress.NewIngressCmd())                                   // ingress subcommand
-	cmd.AddCommand(caddy.NewCaddyCmd())                                       // caddy subcommand (deprecated)
-	cmd.AddCommand(certauthority.NewCertAuthorityCmd())                       // certificate authority subcommand
-	cmd.AddCommand(automationserverdaemon.NewAutomationServerDaemonCmd())     // automation server daemon subcommand
-	cmd.AddCommand(automation.NewAutomationCmd())                             // automation subcommand
-	cmd.AddCommand(test.NewTestCmd())                                         // _test subcommand (hidden)
-	cmd.AddCommand(newCompletionCmd())                                        // completion subcommand
+	cmd.AddCommand(newVersionCmd(version))                                // version subcommand
+	cmd.AddCommand(newWorkspaceCmd())                                     // workspace subcommand
+	cmd.AddCommand(newRegisterCmd())                                      // register subcommand
+	cmd.AddCommand(newDisconnectFromAOCCmd())                             // disconnect-from-aoc subcommand
+	cmd.AddCommand(ingress.NewIngressCmd())                               // ingress subcommand
+	cmd.AddCommand(caddy.NewCaddyCmd())                                   // caddy subcommand (deprecated)
+	cmd.AddCommand(certauthority.NewCertAuthorityCmd())                   // certificate authority subcommand
+	cmd.AddCommand(automationserverdaemon.NewAutomationServerDaemonCmd()) // automation server daemon subcommand
+	cmd.AddCommand(automation.NewAutomationCmd())                         // automation subcommand
+	cmd.AddCommand(newBaileyCmd())                                        // bailey subcommand (device trust)
+	cmd.AddCommand(test.NewTestCmd())                                     // _test subcommand (hidden)
+	cmd.AddCommand(newCompletionCmd())                                    // completion subcommand
 
 	// Set the version for the daemon server
 	automationserverdaemon.SetVersion(version)
@@ -90,7 +91,6 @@ func newWorkspaceCmd() *cobra.Command {
 	cmd.AddCommand(newUpdateCmd())
 	cmd.AddCommand(newRemoveCmd())
 	cmd.AddCommand(newSelectCmd())
-	cmd.AddCommand(newOpenCmd())
 	cmd.AddCommand(newServiceCmd())
 	cmd.AddCommand(newPullAndDeployCmd())
 	cmd.AddCommand(newStartCmd())

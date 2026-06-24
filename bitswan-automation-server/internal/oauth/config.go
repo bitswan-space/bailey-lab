@@ -104,7 +104,7 @@ func GetInitOauthConfig(oauthConfigFile string) (*Config, error) {
 }
 
 // CreateOAuthEnvVars creates OAuth2 Proxy environment variables from an OAuth config
-// serviceName is used to construct the redirect URL (e.g., "editor" or "gitops")
+// serviceName is used to construct the redirect URL (e.g., "gitops" or "dashboard")
 func CreateOAuthEnvVars(config *Config, serviceName, workspaceName, domain string) []string {
 	if config == nil {
 		return []string{}
