@@ -1176,8 +1176,25 @@ class AutomationService:
                 dep["context"] = m["context"]
             if m.get("relative_path") is not None:
                 dep["relative_path"] = m["relative_path"]
-            if m.get("services") is not None:
-                dep["services"] = m["services"]
+            # Persist the deployment's declared infra services INTO the entry.
+            # The infra driver compiles this bitswan.yaml without access to the
+            # baked image's automation.toml, so it can only merge infra services
+            # (postgres/minio/…) that are explicit here. Prefer an explicit
+            # member `services`, else resolve them from the automation config
+            # now (relative_path/checksum/stage are already set on `dep`). The
+            # old in-process Python compiler backfilled this at compile time;
+            # the driver needs it materialized in the file. Model the relationship
+            # as explicit data — never leave the driver to infer it.
+            svcs = m.get("services")
+            if svcs is None:
+                auto_conf = self.resolve_automation_config(dep)
+                if auto_conf.services:
+                    svcs = {
+                        name: {"enabled": dep_svc.enabled}
+                        for name, dep_svc in auto_conf.services.items()
+                    }
+            if svcs is not None:
+                dep["services"] = svcs
             if m.get("replicas") is not None:
                 dep["replicas"] = m["replicas"]
             # Image-baked deploys: the source lives inside the image. Record the
