@@ -293,8 +293,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const parts: string[] = [];
     // The sonner toast title — the deploy task's live step message (gitops
     // streams "Preparing…", "Building image … <step>", "Starting containers…",
-    // etc into it). Read every toast so a re-rendered/stacked toast still counts.
-    const toasts = dashPage.locator('[data-sonner-toast] [data-title]');
+    // etc into it). The Toaster renders INSIDE the workspace dashboard iframe,
+    // so read it from `d` (the frame) — not `dashPage` (the outer onboard shell),
+    // where it never appears. Read every toast so a re-rendered/stacked toast
+    // still counts.
+    const toasts = d.locator('[data-sonner-toast] [data-title]');
     const n = await toasts.count().catch(() => 0);
     for (let i = 0; i < n; i++) {
       const t = await toasts.nth(i).textContent().catch(() => '');
