@@ -19,11 +19,9 @@ from app.models import DeployedAutomation
 from app.utils import (
     AutomationConfig,
     calculate_git_tree_hash,
-    docker_compose_up,
     ensure_docker_network,
     generate_workspace_url,
     read_bitswan_yaml,
-    reconcile_ingress,
     workspace_route,
     dump_bitswan_yaml,
     load_yaml,
@@ -1965,17 +1963,18 @@ class AutomationService:
         )
         return self.read_backups(bp)
 
-    def _apply_ingress(self) -> None:
-        """Reconcile the daemon's ingress to the routes derived from the CURRENT
-        bitswan.yaml. This is how ingress changes after a state write (swap /
-        promote): the route moves because the desired set changed — `-production`
-        follows `live_slot`, `-dr` follows the standby slot — NOT because we poke
-        the daemon out of band. Best-effort: the recorded state is authoritative,
-        and re-applying bitswan.yaml repairs any ingress that lagged."""
+    async def _apply_ingress(self) -> None:
+        """Re-apply the CURRENT bitswan.yaml through the driver after a state-only
+        write (swap / promote / delete). The driver owns ingress, so a push is how
+        the routes move: `-production` follows `live_slot`, `-dr` follows the
+        standby slot, and a deleted deployment's route is pruned — all because the
+        desired set changed, not via an out-of-band poke. Best-effort: the
+        recorded state is authoritative, and a later apply repairs any lag."""
         try:
             bs_yaml = read_bitswan_yaml(self.gitops_dir) or {}
-            _dc, _infra, routes = self.generate_docker_compose(bs_yaml)
-            reconcile_ingress(self.workspace_name, routes)
+            await self.apply_compose_for_deployments(
+                list(bs_yaml.get("deployments", {}).keys())
+            )
         except Exception as e:  # noqa: BLE001 — recorded state wins; re-apply fixes
             logging.warning("ingress apply deferred: %s", e)
 
@@ -2020,7 +2019,7 @@ class AutomationService:
         # Apply: the ingress reconcile repoints both stable hosts from the new
         # backups state (-production → new live slot, -dr → new standby). No
         # out-of-band repoint — applying bitswan.yaml moves the routes.
-        self._apply_ingress()
+        await self._apply_ingress()
         return self.read_backups(bp)
 
     async def begin_zero_downtime_promote(self, bp: str, by: str | None = None) -> dict:
@@ -2080,7 +2079,7 @@ class AutomationService:
         # Apply: the ingress reconcile repoints -production → the new live slot
         # from the updated backups state. (The orchestrator also re-applies
         # compose afterwards to retire the old slot's containers.)
-        self._apply_ingress()
+        await self._apply_ingress()
         return self.read_backups(bp)
 
     async def zero_downtime_promote(
@@ -3770,7 +3769,7 @@ fi
         # longer declares it.
         await self.remove_automation_from_bitswan(deployment_id)
         await update_git(self.gitops_dir, self.gitops_dir_host, deployment_id, "delete")
-        self._apply_ingress()
+        await self._apply_ingress()
 
         containers = await self.get_container(deployment_id)
         if containers:
@@ -4023,7 +4022,6 @@ fi
 
         active_deployments = self.get_active_automations()
 
-        filtered_bs_yaml = {"deployments": active_deployments}
 
         # Auto-enable services for each active deployment.
         # Read from bitswan.yaml first, fall back to automation config on disk.
@@ -4050,38 +4048,14 @@ fi
             if dep_services:
                 await self.enable_services(dep_services, dep_stage)
 
-        dc_yaml, infra_names, desired_routes = self.generate_docker_compose(
-            filtered_bs_yaml
-        )
-        self._save_docker_compose(dc_yaml)
-        reconcile_ingress(self.workspace_name, desired_routes)
         deployments = active_deployments
-
-        # deploy_automations starts all services (no filter), so infra services
-        # are included automatically via --remove-orphans
-        await self._ensure_stage_networks()
-        deployment_result = await docker_compose_up(self.gitops_dir, dc_yaml)
-        await self._post_deploy_infra_services(filtered_bs_yaml)
-        await self._provision_bp_databases(filtered_bs_yaml, list(deployments.keys()))
-
-        for result in deployment_result.values():
-            if result["return_code"] != 0:
-                print(result["stdout"])
-                print(result["stderr"])
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Error deploying services: \nstdout:\n {result['stdout']}\nstderr:\n{result['stderr']}\n",
-                )
-
-        for deployment_id in deployments.keys():
-            await self.install_certificates_in_container(deployment_id)
-            await self.start_oauth2_proxy_in_container(deployment_id)
-        await self.start_oauth2_proxy_in_infra_services(infra_names)
-
+        # Deploy-all: push the full resolved tree to the driver, which brings
+        # up every service + infra, provisions, installs certs/oauth2, and
+        # configures ingress server-side.
+        await self.apply_compose_for_deployments(list(deployments.keys()))
         return {
             "message": "Deployed services successfully",
             "deployments": list(deployments.keys()),
-            "result": deployment_result,
         }
 
     async def scale_automation(self, deployment_id: str, replicas: int):
@@ -4143,43 +4117,10 @@ fi
         if deploy_services:
             await self.enable_services(deploy_services, stage)
 
-        # Regenerate docker-compose and deploy
-        bs_yaml = read_bitswan_yaml(self.gitops_dir)
-        dc_yaml, infra_service_names, desired_routes = self.generate_docker_compose(
-            bs_yaml
-        )
-        self._save_docker_compose(dc_yaml)
-        reconcile_ingress(self.workspace_name, desired_routes)
-
-        dep_conf = bs_yaml.get("deployments", {}).get(deployment_id, {})
-        compose_svc = make_hostname_label(
-            self.workspace_name,
-            dep_conf.get("automation_name", deployment_id),
-            dep_conf.get("context", ""),
-            dep_conf.get("stage", "production") or "production",
-        )
-        await self._ensure_stage_networks()
-        infra_to_up = await self._infra_services_to_bring_up(infra_service_names)
-        deployment_result = await docker_compose_up(
-            self.gitops_dir,
-            dc_yaml,
-            compose_svc,
-            extra_services=infra_to_up,
-        )
-        await self._post_deploy_infra_services(bs_yaml)
-        await self._provision_bp_databases(bs_yaml, [deployment_id])
-
-        for result in deployment_result.values():
-            if result["return_code"] != 0:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Error scaling deployment: \nstdout:\n {result['stdout']}\nstderr:\n{result['stderr']}\n",
-                )
-
-        # Run post-deploy hooks on all containers
-        await self.install_certificates_in_container(deployment_id)
-        await self.start_oauth2_proxy_in_container(deployment_id)
-        await self.start_oauth2_proxy_in_infra_services(infra_service_names)
+        # Push the mutated tree to the driver; it re-applies the full state
+        # (replica count change included) — compose up, provision, certs/
+        # oauth2, ingress — server-side.
+        await self.apply_compose_for_deployments([deployment_id])
 
         return {
             "status": "success",

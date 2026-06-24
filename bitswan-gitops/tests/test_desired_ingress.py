@@ -67,22 +67,6 @@ def test_collects_a_route_per_exposed_automation(svc, tmp_path):
     assert all(r["upstream"] and r["hostname"] for r in routes)
 
 
-def test_generation_is_pure_no_daemon_call(svc, tmp_path, monkeypatch):
-    """generate_docker_compose must not POST to the daemon — ingress is applied
-    only by the separate reconcile step."""
-    import app.services.automation_service as asvc
-
-    called = {"n": 0}
-    monkeypatch.setattr(
-        asvc,
-        "reconcile_ingress",
-        lambda *a, **k: called.__setitem__("n", called["n"] + 1),
-    )
-    id_a, dep_a = _exposed_frontend(svc, tmp_path, "bpa")
-    svc.generate_docker_compose({"deployments": {id_a: dep_a}})
-    assert called["n"] == 0, "generate_docker_compose must not reconcile/POST ingress"
-
-
 def test_unexposed_automation_has_no_route(svc, tmp_path):
     """A worker (expose=false) contributes no ingress route."""
     ws = tmp_path / "ws"
