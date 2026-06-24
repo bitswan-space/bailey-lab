@@ -447,7 +447,7 @@ async def build_and_restart_deployment(
         )
 
     import json as _json
-    import docker as _docker
+    import shutil as _shutil
 
     async def _stream():
         from app.services.automation_service import read_bitswan_yaml
@@ -499,30 +499,62 @@ async def build_and_restart_deployment(
 
                 yield _ndjson(status=f"Building image {full_tag}...")
 
-                # Build using Docker API directly — streams ndjson
-                client = _docker.from_env()
-                try:
+                # Build on the driver (gitops has no docker.sock). Materialize the
+                # image/ context onto the shared gitops volume (the only path the
+                # driver can read), then stream the driver's build-log lines as
+                # ndjson via a queue (its progress callback runs concurrently).
+                from app.services.infra_driver_client import (
+                    BuildRequest,
+                    InfraDriverError,
+                )
 
-                    def _build():
-                        return client.api.build(
-                            path=image_dir,
-                            tag=full_tag,
-                            rm=True,
-                            decode=True,
+                gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+                build_ctx_dir = os.path.join(
+                    gitops_root, "gitops", ".builds", "agent-" + checksum
+                )
+
+                def _materialize():
+                    _shutil.rmtree(build_ctx_dir, ignore_errors=True)
+                    _shutil.copytree(image_dir, build_ctx_dir, symlinks=True)
+
+                await asyncio.to_thread(_materialize)
+
+                q: asyncio.Queue = asyncio.Queue()
+
+                async def _prog(line: str):
+                    await q.put(
+                        re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", line)
+                    )
+
+                async def _run_build():
+                    try:
+                        await automation_service.infra_driver.build_image(
+                            BuildRequest(
+                                ctx=automation_service._workspace_ctx(),
+                                tag=full_tag,
+                                source_path=build_ctx_dir,
+                                dockerfile="Dockerfile",
+                                source_sha=checksum,
+                            ),
+                            progress_callback=_prog,
                         )
+                        await q.put(None)
+                    except InfraDriverError as e:
+                        await q.put({"error": str(e)})
+                        await q.put(None)
 
-                    build_iter = await asyncio.to_thread(_build)
-                    build_error = None
-                    for line in build_iter:
-                        if "stream" in line:
-                            line["stream"] = re.sub(
-                                r"\x1b\[[0-9;]*[a-zA-Z]", "", line["stream"]
-                            )
-                        yield _json.dumps(line) + "\n"
-                        if "error" in line:
-                            build_error = line["error"]
-                finally:
-                    client.close()
+                build_task = asyncio.create_task(_run_build())
+                build_error = None
+                while True:
+                    item = await q.get()
+                    if item is None:
+                        break
+                    if isinstance(item, dict) and "error" in item:
+                        build_error = item["error"]
+                        yield _json.dumps(item) + "\n"
+                    else:
+                        yield _json.dumps({"stream": item}) + "\n"
+                await build_task
 
                 if build_error:
                     return
