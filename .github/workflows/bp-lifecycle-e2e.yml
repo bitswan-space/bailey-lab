@@ -175,7 +175,7 @@ jobs:
           for c in $(docker ps -a --format '{{.Names}}' | grep -iE 'gitops' || true); do
             echo "::group::gitops deploy progress $c"
             docker logs --tail 5000 "$c" 2>&1 \
-              | grep -iE "deploy_runner|Set deploy|building_images|Preparing [0-9]|updating_config|enabling_services|Pushing deployment|Applying deployment|\[compile\]|\[networks\]|\[compose_up\]|\[provision\]|\[certs\]|\[ingress\]|\[done\]|\[error\]|Deploying |ERROR|Traceback|Permission|Errno|EACCES" \
+              | grep -iE "DEPLOYPROG|deploy_runner|Set deploy|building_images|Preparing [0-9]|updating_config|enabling_services|Pushing deployment|Applying deployment|\[compile\]|\[networks\]|\[compose_up\]|\[provision\]|\[certs\]|\[ingress\]|\[done\]|\[error\]|Deploying |ERROR|Traceback|Permission|Errno|EACCES" \
               | tail -120 || true
             echo "::endgroup::"
           done
