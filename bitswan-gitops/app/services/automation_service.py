@@ -819,6 +819,7 @@ class AutomationService:
         base_image: str,
         mount_path: str,
         source_sha: str,
+        progress_callback: Callable[..., Any] | None = None,
     ) -> tuple[str, str | None]:
         """Bake the merged source tree into a docker image as a final COPY layer.
 
@@ -848,6 +849,20 @@ class AutomationService:
         self._ensure_builds_gitignored()
         await asyncio.to_thread(self._materialize_build_context, ctx, dirs_to_merge)
 
+        # Stream the bake's build-log lines as deploy progress so the toast keeps
+        # moving while the (often multi-minute) source image builds. Without this
+        # the bake is silent and the e2e progress watchdog flags a dark stall.
+        async def _prog(line: str):
+            if progress_callback is not None:
+                try:
+                    await progress_callback(
+                        "building_images",
+                        f"Building image for {auto_name}: {line}",
+                        None,
+                    )
+                except Exception:
+                    logger.debug("build progress report failed", exc_info=True)
+
         try:
             img = await self.infra_driver.build_image(
                 BuildRequest(
@@ -857,7 +872,8 @@ class AutomationService:
                     base_image=base_image,
                     mount_path=mp,
                     source_sha=source_sha,
-                )
+                ),
+                progress_callback=_prog,
             )
         except InfraDriverError as e:
             raise HTTPException(
@@ -1023,7 +1039,12 @@ class AutomationService:
             base_image = base_tag or auto_conf.image
             checksum = await calculate_git_tree_hash(dirs_to_merge)
             image, image_id = await self._bake_source_image(
-                source_dir, dirs_to_merge, base_image, auto_conf.mount_path, checksum
+                source_dir,
+                dirs_to_merge,
+                base_image,
+                auto_conf.mount_path,
+                checksum,
+                progress_callback=progress_callback,
             )
             source_commit = await self._source_commit(source_dir)
             # First build of this image → SBOM (syft) + CVE scan (grype) in the
