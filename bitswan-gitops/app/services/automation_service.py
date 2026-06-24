@@ -3515,8 +3515,21 @@ class AutomationService:
             if relative_path is not None:
                 deployment_config["relative_path"] = relative_path
 
-            if services is not None:
-                deployment_config["services"] = services
+            # Persist declared infra services INTO the entry so the infra driver
+            # (which compiles bitswan.yaml without the baked image's
+            # automation.toml) merges them. Resolve from the automation config
+            # when the caller didn't pass an explicit set. See the matching
+            # logic in write_deployment_entries.
+            svcs = services
+            if svcs is None:
+                auto_conf = self.resolve_automation_config(deployment_config)
+                if auto_conf.services:
+                    svcs = {
+                        name: {"enabled": dep_svc.enabled}
+                        for name, dep_svc in auto_conf.services.items()
+                    }
+            if svcs is not None:
+                deployment_config["services"] = svcs
             if replicas is not None:
                 deployment_config["replicas"] = replicas
 
