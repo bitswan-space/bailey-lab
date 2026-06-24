@@ -227,6 +227,13 @@ jobs:
             docker logs --tail 200 "$c" 2>&1 || true
             echo "::endgroup::"
           done
+          # The deployed bitswan.yaml (does the deployment declare services?) and
+          # the driver-generated compose (was postgres/minio merged in?).
+          for c in $(docker ps -aq --filter "name=bitswan-gitops"); do
+            echo "::group::deployed bitswan.yaml + compose ($c)"
+            docker exec "$c" sh -c 'echo "--- bitswan.yaml ---"; cat /gitops/gitops/bitswan.yaml 2>/dev/null; echo "--- docker-compose.yaml ---"; cat /gitops/gitops/docker-compose.yaml 2>/dev/null' 2>&1 || true
+            echo "::endgroup::"
+          done
 
       - name: Final cleanup
         if: always()
