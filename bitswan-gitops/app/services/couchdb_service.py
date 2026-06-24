@@ -44,24 +44,6 @@ class CouchDBService(InfraService):
             f"COUCHDB_HOST={self.container_name}\n"
         )
 
-    def _generate_compose_dict(self) -> dict:
-        return {
-            "services": {
-                f"couchdb{self.service_suffix}": {
-                    "image": self.image,
-                    "container_name": self.container_name,
-                    "restart": "unless-stopped",
-                    "env_file": [self.secrets_file_path],
-                    "volumes": [f"{self.volume_name}:/opt/couchdb/data"],
-                    "networks": ["bitswan_network"],
-                },
-            },
-            "volumes": {self.volume_name: None},
-            "networks": {
-                "bitswan_network": {"external": True},
-            },
-        }
-
     def _get_caddy_upstream(self) -> str:
         return f"{self.container_name}:5984"
 

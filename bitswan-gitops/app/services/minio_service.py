@@ -47,36 +47,6 @@ class MinioService(InfraService):
             f"MINIO_HOST={self.container_name}\n"
         )
 
-    def _generate_compose_dict(self) -> dict:
-        console_upstream = "http://127.0.0.1:9001"
-
-        minio_entry = {
-            "image": self.minio_image,
-            "container_name": self.container_name,
-            "restart": "unless-stopped",
-            "command": "server /data --console-address :9001",
-            "env_file": [self.secrets_file_path],
-            "volumes": [f"{self.volume_name}-data:/data"],
-            "networks": ["bitswan_network"],
-            "labels": {},
-        }
-
-        # OAuth2-proxy injection for MinIO Console
-        if self.oauth2_enabled:
-            minio_entry["environment"] = self._get_oauth2_env_vars(console_upstream)
-            minio_entry["labels"]["gitops.oauth2.enabled"] = "true"
-            minio_entry["labels"]["gitops.oauth2.upstream"] = console_upstream
-
-        return {
-            "services": {
-                f"minio{self.service_suffix}": minio_entry,
-            },
-            "volumes": {f"{self.volume_name}-data": None},
-            "networks": {
-                "bitswan_network": {"external": True},
-            },
-        }
-
     def _get_caddy_upstream(self) -> str:
         # When oauth2-proxy is active, route through it (port 9999)
         if self.oauth2_enabled:

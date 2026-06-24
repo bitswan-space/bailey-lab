@@ -159,27 +159,6 @@ class InfraService(ABC):
         """Check if OAuth2 proxy is configured in the environment."""
         return any(k.startswith("OAUTH2") for k in os.environ)
 
-    def _get_oauth2_env_vars(self, upstream: str) -> dict:
-        """Build OAuth2 proxy environment variables for a container.
-
-        Args:
-            upstream: The upstream URL oauth2-proxy forwards to (e.g. http://127.0.0.1:80).
-        """
-        oauth2_envs = {k: v for k, v in os.environ.items() if k.startswith("OAUTH2")}
-        oauth2_envs["OAUTH_ENABLED"] = "true"
-        oauth2_envs["OAUTH2_PROXY_UPSTREAMS"] = upstream
-        oauth2_envs["OAUTH2_PROXY_HTTP_ADDRESS"] = "0.0.0.0:9999"
-
-        if "OAUTH2_PROXY_MQTT_ALLOWED_GROUPS_TOPIC" not in oauth2_envs:
-            oauth2_envs["OAUTH2_PROXY_MQTT_ALLOWED_GROUPS_TOPIC"] = "/groups"
-
-        if self.gitops_domain:
-            endpoint = f"https://{self.caddy_hostname()}"
-            oauth2_envs["OAUTH2_PROXY_REDIRECT_URL"] = f"{endpoint}/oauth2/callback"
-            oauth2_envs["BITSWAN_AUTOMATION_URL"] = endpoint
-
-        return oauth2_envs
-
     def is_enabled(self) -> bool:
         """Check if the service is enabled (secrets file exists)."""
         return os.path.exists(self.secrets_file_path)
@@ -203,14 +182,6 @@ class InfraService(ABC):
     @abstractmethod
     def _generate_secrets_content(self) -> str:
         """Generate secrets file content. Returns the content string."""
-
-    @abstractmethod
-    def _generate_compose_dict(self) -> dict:
-        """Generate docker-compose dict structure.
-
-        Called by AutomationService.generate_docker_compose() to merge this
-        service's entries into the main docker-compose.
-        """
 
     @abstractmethod
     def _get_caddy_upstream(self) -> str:
