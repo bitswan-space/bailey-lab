@@ -581,37 +581,6 @@ async def build_and_restart_deployment(
     return StreamingResponse(_stream(), media_type="application/x-ndjson")
 
 
-@router.get("/images/builds/{checksum}/stream")
-async def stream_agent_build_logs(
-    checksum: str,
-    _token=Depends(verify_agent_token),
-):
-    """Stream image build logs (proxied from image service)."""
-    from app.services.image_service import ImageService
-
-    image_service = ImageService()
-    return StreamingResponse(
-        image_service.stream_build_logs(checksum), media_type="text/plain"
-    )
-
-
-@router.get("/deployments/{deployment_id}/deploy-status")
-async def get_deployment_status(
-    deployment_id: str,
-    _token=Depends(verify_agent_token),
-):
-    """Get the active deploy task for a deployment, if any."""
-    from app.deploy_manager import deploy_manager
-
-    task_id = deploy_manager._active_deploys.get(deployment_id)
-    if not task_id:
-        return {"deploying": False}
-    task = deploy_manager.get_task(task_id)
-    if not task:
-        return {"deploying": False}
-    return {"deploying": True, **task.to_dict()}
-
-
 # --- Docker exec endpoint ---
 
 

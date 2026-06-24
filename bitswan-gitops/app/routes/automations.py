@@ -17,9 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.deploy_manager import DeployStatus, DeployStep, deploy_manager
-from app.deploy_runner import spawn_set_deploy
 from app.event_broadcaster import event_broadcaster
-from app.routes.agent import _scan_automations
 from app.services.automation_service import AutomationService, make_hostname_label
 from app.dependencies import get_automation_service
 
@@ -44,11 +42,6 @@ async def get_automations(
 ):
     # Now fully async using aiohttp Docker client
     return await automation_service.get_automations()
-
-
-class StartLiveDevRequest(BaseModel):
-    relative_path: str
-    copy: str | None = None
 
 
 class StartDeployRequest(BaseModel):
@@ -673,138 +666,10 @@ async def promote_bp(
     )
 
 
-@router.post("/deploy-changed")
-async def deploy_changed(
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    """Deploy every main automation whose source differs from (or has no)
-    deployed dev checksum — the same changed+new set the copy-sync hook
-    deploys automatically. Members already being deployed are skipped.
-    """
-    members = await automation_service.changed_dev_members()
-    if not members:
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "noop",
-                "message": "No changed automations",
-                "deployment_ids": [],
-            },
-        )
-
-    res = await spawn_set_deploy(
-        label="deploy-changed",
-        members=members,
-        stage="dev",
-        service=automation_service,
-    )
-    if not res.get("deploy"):
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": res.get("reason") or "error",
-                "skipped": res.get("skipped", []),
-                "error": res.get("error"),
-            },
-        )
-
-    return JSONResponse(
-        status_code=202,
-        content={
-            "task_id": res["deploy"]["task_id"],
-            "deployment_ids": res["deploy"]["deployment_ids"],
-            "skipped": res.get("skipped", []),
-            "status": "pending",
-        },
-    )
-
-
-@router.post("/start-live-dev")
-async def start_live_dev(
-    body: StartLiveDevRequest,
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    """Start a live-dev deployment. Server constructs the deployment ID."""
-    sources = _scan_automations(body.copy)
-    source = next(
-        (s for s in sources if s["relative_path"] == body.relative_path), None
-    )
-    if not source:
-        ctx = f" in copy '{body.copy}'" if body.copy else ""
-        raise HTTPException(
-            status_code=404,
-            detail=f"No automation source at '{body.relative_path}'{ctx}",
-        )
-
-    deployment_id = source["deployment_id"]
-
-    if deploy_manager.is_deploying(deployment_id):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Deployment {deployment_id} is already in progress",
-        )
-
-    task = await deploy_manager.create_task(deployment_id)
-    if task is None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Deployment {deployment_id} is already in progress",
-        )
-
-    deploy_kwargs = dict(
-        deployment_id=deployment_id,
-        checksum="live-dev",
-        stage="live-dev",
-        relative_path=source["relative_path"],
-        automation_name=source["automation_name"],
-        context=source["context"],
-    )
-
-    _spawn_bg(
-        _run_deploy_with_progress(
-            task.task_id, deployment_id, automation_service, deploy_kwargs
-        )
-    )
-
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "")
-    url = ""
-    if gitops_domain:
-        label = make_hostname_label(
-            workspace_name,
-            source["automation_name"],
-            source["context"],
-            source["stage"],
-        )
-        url = f"https://{label}.{gitops_domain}"
-
-    return JSONResponse(
-        status_code=202,
-        content={
-            "task_id": task.task_id,
-            "deployment_id": deployment_id,
-            "url": url,
-            "status": "pending",
-        },
-    )
-
-
 @router.post("/deploy")
 async def deploy_automations(
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    return await automation_service.deploy_automations()
-
-
-@router.post("/apply")
-async def apply_workspace(
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    """Re-apply bitswan.yaml to the live system (kubectl apply / nixos-rebuild
-    switch): regenerate compose for every active deployment, bring it up, and
-    reconcile ingress to the routes derived from the file. Idempotent — safe to
-    re-run any time to repair drift (a broken or stale ingress route, a missing
-    container). The whole system state is a function of bitswan.yaml."""
     return await automation_service.deploy_automations()
 
 
@@ -1145,37 +1010,6 @@ async def restart_automation(
     return await automation_service.restart_automation(deployment_id)
 
 
-@router.post("/{deployment_id}/scale")
-async def scale_automation(
-    deployment_id: str,
-    replicas: str = Form(...),
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    try:
-        replicas_int = int(replicas)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="replicas must be an integer")
-    if replicas_int < 1:
-        raise HTTPException(status_code=400, detail="replicas must be at least 1")
-    return await automation_service.scale_automation(deployment_id, replicas_int)
-
-
-@router.post("/{deployment_id}/activate")
-async def activate_automation(
-    deployment_id: str,
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    return await automation_service.activate_automation(deployment_id)
-
-
-@router.post("/{deployment_id}/deactivate")
-async def deactivate_automation(
-    deployment_id: str,
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    return await automation_service.deactivate_automation(deployment_id)
-
-
 @router.get("/{deployment_id}/logs/stream")
 async def stream_automation_logs(
     deployment_id: str,
@@ -1209,47 +1043,3 @@ async def delete_automation(
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     return await automation_service.delete_automation(deployment_id)
-
-
-@router.get("/assets/{checksum}/download")
-async def download_asset(
-    checksum: str,
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    archive_bytes = automation_service.download_asset(checksum)
-    return StreamingResponse(
-        iter([archive_bytes]),
-        media_type="application/gzip",
-        headers={"Content-Disposition": f'attachment; filename="{checksum}.tar.gz"'},
-    )
-
-
-@router.get("/assets/diff")
-async def get_asset_diff(
-    from_checksum: str = Query(...),
-    to_checksum: str = Query(...),
-    word_diff: bool = Query(False),
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    return await automation_service.get_asset_diff(
-        from_checksum, to_checksum, word_diff
-    )
-
-
-@router.get("/assets")
-async def list_assets(
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    return automation_service.list_assets()
-
-
-@router.get("/{deployment_id}/history")
-async def get_automation_history(
-    deployment_id: str,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    return await automation_service.get_automation_history(
-        deployment_id, page=page, page_size=page_size
-    )

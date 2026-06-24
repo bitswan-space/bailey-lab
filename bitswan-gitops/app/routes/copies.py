@@ -91,43 +91,6 @@ async def _clone_postgres_db(copy_name: str) -> str | None:
     return await clone_postgres_db(workspace_name, copy_name)
 
 
-async def _drop_postgres_db(copy_name: str) -> None:
-    """Drop the copy's Postgres database."""
-    secrets = _get_postgres_secrets("dev")
-    if not secrets:
-        return
-
-    user = secrets["POSTGRES_USER"]
-    password = secrets["POSTGRES_PASSWORD"]
-    new_db = _copy_db_name(copy_name)
-
-    from app.services.bp_databases import _driver_exec
-
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-    container_name = f"{workspace_name}__postgres-dev"
-
-    try:
-        terminate_sql = (
-            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            f"WHERE datname = '{new_db}' AND pid <> pg_backend_pid();"
-        )
-        for sql in [terminate_sql, f'DROP DATABASE IF EXISTS "{new_db}";']:
-            # _driver_exec runs `docker exec` through the driver; a missing
-            # container surfaces as a non-zero rc, which we ignore (nothing to drop).
-            await _driver_exec(
-                "docker",
-                "exec",
-                container_name,
-                "sh",
-                "-c",
-                f"PGPASSWORD='{password}' psql -U {user} -d postgres -c \"{sql}\"",
-            )
-
-        logger.info(f"Dropped Postgres DB '{new_db}' for copy '{copy_name}'")
-    except Exception as e:
-        logger.warning(f"Failed to drop Postgres DB for copy '{copy_name}': {e}")
-
-
 # Copy names are filesystem path segments AND git branch names AND positional
 # git args. Rule out path traversal (no `/`, `.`), leading `-` (option
 # injection), and empty strings.
@@ -361,16 +324,6 @@ async def refresh_copies() -> list[dict]:
     return _copies_cache
 
 
-@router.get("/")
-async def list_copies():
-    return await get_cached_copies()
-
-
-class MergeCopyResponse(BaseModel):
-    status: str
-    message: str
-
-
 async def _fast_forward_main_to_branch(name: str) -> dict:
     """Fast-forward `main` to the copy's branch tip in the canonical (bare)
     repo. Append-only: succeeds only when `main` is an ancestor of the branch
@@ -452,13 +405,6 @@ async def _refresh_main_copy_checkout() -> None:
                 f"could not be realigned: {(err or out).strip()}"
             ),
         )
-
-
-@router.post("/{name}/merge")
-async def merge_copy(name: str):
-    """Fast-forward `main` to the copy's branch tip in the canonical repo."""
-    _validate_copy_name(name)
-    return await _fast_forward_main_to_branch(name)
 
 
 class SyncCopyResponse(BaseModel):
@@ -996,80 +942,6 @@ async def _rm_rf_as_root_in_container(path: str) -> bool:
         )
         return False
     return True
-
-
-class CommitRequest(BaseModel):
-    message: str
-    copy: str | None = None  # None = the main copy
-    paths: list[str] | None = None  # None/empty = stage all changes (-A)
-
-
-@router.post("/commit")
-async def commit_changes(body: CommitRequest):
-    """Stage and commit changes in a copy (or the main copy when copy is
-    None). Used by the dashboard UI to record filesystem changes it just made."""
-    copy = body.copy or "main"
-    repo_path = _resolve_copy_path(copy)
-    if not os.path.exists(repo_path):
-        raise HTTPException(status_code=404, detail=f"Copy '{copy}' not found")
-
-    safe_paths: list[str] | None = None
-    if body.paths:
-        for p in body.paths:
-            if os.path.isabs(p) or any(part == ".." for part in p.split(os.sep)):
-                raise HTTPException(status_code=400, detail=f"Invalid path: {p}")
-        safe_paths = body.paths
-
-    if safe_paths:
-        success = await call_git_command("git", "add", "--", *safe_paths, cwd=repo_path)
-    else:
-        success = await call_git_command("git", "add", "-A", cwd=repo_path)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to stage changes")
-
-    stdout, stderr, rc = await call_git_command_with_output(
-        "git", "commit", "-m", body.message, cwd=repo_path
-    )
-    if rc != 0:
-        combined = (stdout or "") + (stderr or "")
-        if "nothing to commit" in combined:
-            return {"status": "noop", "message": "Nothing to commit"}
-        raise HTTPException(
-            status_code=500, detail=f"Failed to commit: {(stderr or stdout).strip()}"
-        )
-
-    hash_stdout, _, hash_rc = await call_git_command_with_output(
-        "git", "rev-parse", "HEAD", cwd=repo_path
-    )
-    return {
-        "status": "success",
-        "commit_hash": hash_stdout.strip() if hash_rc == 0 else "unknown",
-    }
-
-
-@router.delete("/{name}")
-async def delete_copy(name: str):
-    """Delete a copy: remove its checkout and drop its Postgres database. The
-    published branch in the canonical repo is left intact (append-only)."""
-    copy_path = _resolve_copy_path(name)
-    if not os.path.exists(copy_path):
-        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
-
-    await _drop_postgres_db(name)
-
-    # uid 1000 often can't unlink files created by other containers — try a
-    # plain rmtree, then fall back to a privileged docker-exec rm.
-    import shutil
-
-    try:
-        shutil.rmtree(copy_path)
-    except Exception:
-        if not await _rm_rf_as_root_in_container(copy_path):
-            raise HTTPException(
-                status_code=500, detail=f"Failed to remove copy '{name}'"
-            )
-
-    return {"status": "success", "message": f"Copy '{name}' deleted"}
 
 
 def _is_safe_relative_path(p: str) -> bool:
