@@ -290,6 +290,14 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		// The deployed tree the generated compose's bind-mounts reference
 		// (workspaces/<ws>/gitops/<source>); apply materializes the push here.
 		wsVolume("gitops", "/gitops/gitops"),
+		// The per-copy workspace checkouts (same mount gitops uses). The
+		// compiler resolves each deployment's automation.toml (expose/port/
+		// services) from here when the source is baked into the image and so
+		// has no <checksum>/ tree on the gitops volume — a deployment's
+		// relative_path is always "copies/<copy>/<rel>". Without this the
+		// compiler falls back to defaults (expose=false) and never emits the
+		// frontend's ingress route, so the endpoint 404s.
+		wsVolume("copies", "/workspace-repo/copies"),
 		wsVolume("secrets", "/gitops/secrets"),
 		wsVolume("snapshots", "/gitops/snapshots"),
 		wsVolume("firewall", "/gitops/firewall"),
