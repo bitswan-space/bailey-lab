@@ -51,15 +51,14 @@ type Deployment struct {
 	RelativePath   string                 `yaml:"relative_path"`
 	Image          string                 `yaml:"image"`
 	TagChecksum    string                 `yaml:"tag_checksum"`
-	NetworkMode    string                 `yaml:"network_mode"`
 	Replicas       *int                   `yaml:"replicas"`
-	Networks       []string               `yaml:"networks"`
-	Volumes        []interface{}          `yaml:"volumes"`
-	Ports          []interface{}          `yaml:"ports"`
-	Devices        []interface{}          `yaml:"devices"`
-	ContainerName  string                 `yaml:"container_name"`
 	DeploymentCtx  string                 `yaml:"deployment_context"`
 	Services       map[string]interface{} `yaml:"services"`
+	// NOTE: network_mode / networks / volumes / ports / devices / container_name
+	// are intentionally NOT fields here. The driver is a constraining compiler,
+	// not a compose passthrough — a deployment record must not be able to inject
+	// host bind-mounts, host networking, or attach to bitswan_network. Any such
+	// keys in a pushed bitswan.yaml are silently ignored (no field to bind to).
 
 	// stageSet records whether this deployment came in via the flat form (where
 	// `stage` is explicit) versus the tree form (where it is derived). Used only

@@ -327,10 +327,6 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		}
 	}
 
-	if networkMode == "" && conf.NetworkMode != "" {
-		networkMode = conf.NetworkMode
-	}
-
 	var networksList []string
 	usedExternalTesting := false
 	if networkMode == "" && cfg.ExternalTestingNet {
@@ -340,16 +336,15 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	}
 
 	if networkMode != "" {
+		// network_mode is only ever set by the compiler itself (the firewall
+		// gateway worker pattern). It is NOT taken from the deployment record.
 		entry["network_mode"] = networkMode
 	} else if !cfg.ExternalTestingNet {
-		switch {
-		case len(conf.Networks) > 0:
-			networksList = append([]string{}, conf.Networks...)
-		case len(c.bs.DefaultNetworks) > 0:
-			networksList = append([]string{}, c.bs.DefaultNetworks...)
-		default:
-			networksList = []string{c.stageNetwork(realmForStage(depStage))}
-		}
+		// Automations always attach to their per-(workspace, realm) stage network.
+		// The compiler owns this — the deployment record cannot inject networks or
+		// network_mode (which would let it join bitswan_network and reach the
+		// control plane, defeating the driver's whole purpose).
+		networksList = []string{c.stageNetwork(realmForStage(depStage))}
 	}
 
 	if networkMode == "" {
@@ -380,19 +375,12 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	}
 	_ = usedExternalTesting
 
-	// ---- passthroughs (volumes/ports/devices, container_name) ----
-	if len(conf.Volumes) > 0 {
-		entry["volumes"] = append([]interface{}{}, conf.Volumes...)
-	}
-	if len(conf.Ports) > 0 {
-		entry["ports"] = append([]interface{}{}, conf.Ports...)
-	}
-	if len(conf.Devices) > 0 {
-		entry["devices"] = append([]interface{}{}, conf.Devices...)
-	}
-	if conf.ReplicasOrOne() <= 1 && conf.ContainerName != "" {
-		entry["container_name"] = conf.ContainerName
-	}
+	// NOTE: the deployment record deliberately CANNOT inject volumes / ports /
+	// devices / container_name into the compose. The driver is a constraining
+	// layer, not a passthrough executor — host bind-mounts, host port bindings
+	// and device passthrough would defeat its entire purpose. The only volumes a
+	// service gets are the named-volume subpaths the compiler constructs below;
+	// container_name is the compiler-derived serviceName set earlier.
 
 	deploymentDirHost := filepath.Join(c.gitopsDirHost, source)
 
