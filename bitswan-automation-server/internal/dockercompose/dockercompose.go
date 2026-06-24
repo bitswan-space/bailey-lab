@@ -112,7 +112,10 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 			// layer while the gateways write the volume, and the feed stays empty.
 			wsVolume("firewall", "/gitops/firewall"),
 			wsVolume("ssh", "/home/user1000/.ssh"),
-			"/var/run/docker.sock:/var/run/docker.sock",
+			// NO docker.sock: after the infra-driver cut-over gitops never
+			// touches Docker — it pushes bitswan.yaml to the driver and calls
+			// the driver's scoped primitives. The driver sidecar is the only
+			// container with the socket.
 			"/var/run/bitswan:/var/run/bitswan",
 		},
 		"environment": []string{
