@@ -98,14 +98,21 @@ type ApplyRequest struct {
 	OnlyDeploymentIDs []string         `json:"only_deployment_ids,omitempty"`
 }
 
-// BuildRequest bakes a source tree (on the shared volume) into an image.
+// BuildRequest bakes a source tree (on the shared volume) into an image. Two
+// modes:
+//   - Dockerfile == "": the source-bake — generate `FROM BaseImage` + `COPY .
+//     MountPath` over SourcePath (replaces gitops _bake_source_image).
+//   - Dockerfile != "": build that Dockerfile (a path relative to SourcePath)
+//     as-is — the automation ships its own image/Dockerfile (replaces gitops
+//     _ensure_automation_image). BaseImage/MountPath are ignored.
 type BuildRequest struct {
 	Ctx        WorkspaceContext `json:"ctx"`
 	Tag        string           `json:"tag"`         // full content-addressed image tag gitops wants (e.g. internal/acme-frontend:sha…)
 	SourcePath string           `json:"source_path"` // build context on the shared volume
 	BaseImage  string           `json:"base_image"`
-	MountPath  string           `json:"mount_path"` // where the source is COPY'd in the image
-	SourceSHA  string           `json:"source_sha"` // content address (informational; Tag already encodes it)
+	MountPath  string           `json:"mount_path"`           // where the source is COPY'd in the image (FROM+COPY mode)
+	Dockerfile string           `json:"dockerfile,omitempty"` // path (relative to SourcePath) of a Dockerfile to build as-is
+	SourceSHA  string           `json:"source_sha"`           // content address (informational; Tag already encodes it)
 }
 
 // ImageRef is the result of a BuildImage.

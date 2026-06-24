@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
@@ -18,8 +19,11 @@ import (
 // build `FROM BaseImage` + `COPY . MountPath` over the SourcePath context, tag,
 // and return the ref. Build output is streamed to prog.
 func (d *DockerDriver) BuildImage(ctx context.Context, req infradriver.BuildRequest, prog func(string)) (infradriver.ImageRef, error) {
-	if req.Tag == "" || req.SourcePath == "" || req.BaseImage == "" {
-		return infradriver.ImageRef{}, fmt.Errorf("build: tag, source_path and base_image are required")
+	if req.Tag == "" || req.SourcePath == "" {
+		return infradriver.ImageRef{}, fmt.Errorf("build: tag and source_path are required")
+	}
+	if req.Dockerfile == "" && req.BaseImage == "" {
+		return infradriver.ImageRef{}, fmt.Errorf("build: base_image is required unless dockerfile is set")
 	}
 	// Cache hit: the content-addressed tag already exists.
 	if id := imageID(ctx, req.Tag); id != "" {
@@ -27,24 +31,31 @@ func (d *DockerDriver) BuildImage(ctx context.Context, req infradriver.BuildRequ
 		return infradriver.ImageRef{FullTag: req.Tag, ImageID: id, CacheHit: true}, nil
 	}
 
-	// A generated Dockerfile outside the context (so it isn't COPY'd into the
-	// image and doesn't perturb the content hash).
-	df, err := os.CreateTemp("", "infra-build-*.Dockerfile")
-	if err != nil {
-		return infradriver.ImageRef{}, err
-	}
-	defer os.Remove(df.Name())
-	mount := req.MountPath
-	if mount == "" {
-		mount = "/app"
-	}
-	fmt.Fprintf(df, "FROM %s\nCOPY . %s\n", req.BaseImage, mount)
-	if err := df.Close(); err != nil {
-		return infradriver.ImageRef{}, err
+	dockerfilePath := req.Dockerfile
+	if dockerfilePath == "" {
+		// The source-bake: a generated Dockerfile OUTSIDE the context (so it
+		// isn't COPY'd into the image and doesn't perturb the content hash).
+		df, err := os.CreateTemp("", "infra-build-*.Dockerfile")
+		if err != nil {
+			return infradriver.ImageRef{}, err
+		}
+		defer os.Remove(df.Name())
+		mount := req.MountPath
+		if mount == "" {
+			mount = "/app"
+		}
+		fmt.Fprintf(df, "FROM %s\nCOPY . %s\n", req.BaseImage, mount)
+		if err := df.Close(); err != nil {
+			return infradriver.ImageRef{}, err
+		}
+		dockerfilePath = df.Name()
+	} else if !filepath.IsAbs(dockerfilePath) {
+		// Dockerfile mode: a path relative to the build context.
+		dockerfilePath = filepath.Join(req.SourcePath, dockerfilePath)
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", "build", "--pull=false",
-		"-t", req.Tag, "-f", df.Name(), req.SourcePath)
+		"-t", req.Tag, "-f", dockerfilePath, req.SourcePath)
 	if err := streamCombined(cmd, prog); err != nil {
 		return infradriver.ImageRef{}, fmt.Errorf("docker build %s: %w", req.Tag, err)
 	}
