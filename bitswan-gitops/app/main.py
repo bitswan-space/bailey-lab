@@ -13,6 +13,7 @@ from app.routes.processes import router as processes_router
 from app.routes.copies import router as copies_router
 from app.routes.agent import router as agent_router
 from app.routes.git_http import router as git_http_router
+from app.routes.backups import router as backups_router
 from app.routes.snapshots import router as snapshots_router
 from app.routes.templates import router as templates_router
 from app.dependencies import verify_token
@@ -71,6 +72,9 @@ app.include_router(docs_router)
 app.include_router(agent_router)
 # Smart-HTTP git server — does its own bearer/basic auth against the agent secret
 app.include_router(git_http_router)
+# Backups router — protected by main auth. Currently has no in-repo caller but is
+# a roadmap surface (workspace-level backup config/restore), kept intentionally.
+app.include_router(backups_router, dependencies=[Depends(verify_token)])
 # Per-BP stage snapshots - protected by main auth
 app.include_router(snapshots_router, dependencies=[Depends(verify_token)])
 
