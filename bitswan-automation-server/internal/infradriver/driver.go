@@ -4,15 +4,17 @@
 // Kubernetes later) and reconciles. See README.md for the architecture.
 //
 // The surface is deliberately minimal. There is ONE declarative entry point —
-// Apply, the bitswan.yaml compiler — plus four operational container
-// primitives (list/logs/stop/restart). Everything orchestration-shaped is a
-// bitswan.yaml mutation followed by Apply: deploy is a write+Apply, promote is
-// adding a stage's deployment+Apply, swap is flipping the live slot/db+Apply,
-// scale is changing replicas+Apply, rollback is pinning the version+Apply, and
-// backup/restore is the bitswan.yaml backup state the compiler realizes. If a
-// flow doesn't fit, the fix is to make bitswan.yaml more expressive — NOT to
-// add a driver command. Image building folds into Apply (the compiler builds
-// the images its declaration needs).
+// Apply, the bitswan.yaml compiler — plus operational container primitives
+// (list/logs/stop/restart) and a general exec. Everything orchestration-shaped
+// is a bitswan.yaml mutation followed by Apply: deploy is a write+Apply, promote
+// is adding a stage's deployment+Apply, swap is flipping the live slot/db+Apply,
+// scale is changing replicas+Apply, rollback is pinning the version+Apply. The
+// imperative, artifact-producing operations that are genuinely NOT desired state
+// — backups (pg_dump), restores, MinIO mirrors — run through exec, which gitops
+// orchestrates (a snapshot is a point-in-time event, not state the compiler
+// converges to). For anything else, the fix is to make bitswan.yaml more
+// expressive — NOT to add a bespoke driver command. Image building folds into
+// BuildImage (called before the push so Apply only deploys built images).
 //
 // This file is the in-process Go contract. The HTTP/SSE server (api.go) is a
 // thin adapter over it, and each backend (dockerdriver, k8sdriver) is one
@@ -20,7 +22,10 @@
 // truth and a backend swap touches no gitops code.
 package infradriver
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // Driver realizes declarative workspace intent against a backend.
 type Driver interface {
@@ -58,6 +63,22 @@ type Driver interface {
 	// bitswan.yaml mutation + Apply).
 	ContainerStop(ctx context.Context, req WorkspaceContext, container string) error
 	ContainerRestart(ctx context.Context, req WorkspaceContext, container string) error
+
+	// ContainerExec runs a command in a container — the general escape hatch for
+	// imperative container operations that aren't a state change and don't fit
+	// the narrower primitives: backups (pg_dump | gzip), restores (psql < dump),
+	// MinIO mirrors, ad-hoc maintenance. gitops orchestrates the flow; the driver
+	// (which holds docker.sock) executes. stdin is streamed from in (nil for
+	// none); stdout/stderr chunks are delivered to out as raw bytes (binary-safe
+	// — DB dumps are not text). Returns the command's exit code.
+	ContainerExec(ctx context.Context, req WorkspaceContext, spec ExecSpec, in io.Reader, out func(stderr bool, chunk []byte)) (int, error)
+}
+
+// ExecSpec is one container exec invocation.
+type ExecSpec struct {
+	Container string   `json:"container"`
+	Cmd       []string `json:"cmd"`
+	Tty       bool     `json:"tty,omitempty"`
 }
 
 // WorkspaceContext is everything the compiler needs that is not in bitswan.yaml.

@@ -2,17 +2,20 @@
 // daemon. It shells out to the `docker` CLI (the convention used elsewhere in
 // internal/docker) rather than pulling in the Docker SDK.
 //
-// Apply (the bitswan.yaml compiler) lives in compile.go; this file is the four
-// operational container primitives.
+// Apply (the bitswan.yaml compiler) lives in compile.go; this file is the five
+// operational container primitives (list/logs/stop/restart/exec).
 package dockerdriver
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 )
@@ -150,4 +153,66 @@ func (d *DockerDriver) ContainerRestart(ctx context.Context, _ infradriver.Works
 		return fmt.Errorf("docker restart %s: %w: %s", container, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// ContainerExec runs `docker exec [-i] <container> <cmd...>`, streaming in to
+// the process stdin and its stdout/stderr (as raw, binary-safe chunks) to out.
+// Returns the command's exit code; a non-zero exit is reported via the code, not
+// an error (only a failure to run is an error).
+func (d *DockerDriver) ContainerExec(ctx context.Context, _ infradriver.WorkspaceContext, spec infradriver.ExecSpec, in io.Reader, out func(stderr bool, chunk []byte)) (int, error) {
+	args := []string{"exec"}
+	if in != nil {
+		args = append(args, "-i")
+	}
+	if spec.Tty {
+		args = append(args, "-t")
+	}
+	args = append(args, spec.Container)
+	args = append(args, spec.Cmd...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	if in != nil {
+		cmd.Stdin = in
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return -1, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return -1, err
+	}
+	if err := cmd.Start(); err != nil {
+		return -1, fmt.Errorf("docker exec %s: %w", spec.Container, err)
+	}
+	// Pump both streams as raw byte chunks (not line-scanned — pg_dump output is
+	// binary). out must be safe to call from two goroutines.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	pump := func(r io.Reader, isErr bool) {
+		defer wg.Done()
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := r.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				out(isErr, chunk)
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}
+	go pump(stdout, false)
+	go pump(stderr, true)
+	wg.Wait()
+	err = cmd.Wait()
+	if err == nil {
+		return 0, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode(), nil
+	}
+	return -1, fmt.Errorf("docker exec %s: %w", spec.Container, err)
 }

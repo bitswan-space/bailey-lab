@@ -1,9 +1,12 @@
 package infradriver
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 )
 
 // Server adapts a Driver to the HTTP contract in api.go: the four container
@@ -34,6 +37,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(PathContainersLogs, s.handleLogs)
 	mux.HandleFunc(PathContainersStop, s.handleStop)
 	mux.HandleFunc(PathContainersRestart, s.handleRestart)
+	mux.HandleFunc(PathContainersExec, s.handleExec)
 	if s.GitProjectRoot != "" {
 		// git smart-HTTP lives at the root; /v1/* above takes precedence because
 		// ServeMux longest-prefix matches the explicit primitive paths first.
@@ -99,6 +103,61 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	s.containerAction(w, r, func(ctx WorkspaceContext, name string) error {
 		return s.driver.ContainerRestart(r.Context(), ctx, name)
 	})
+}
+
+// handleExec proxies a container exec: metadata in the X-Bitswan-Exec header,
+// streamed stdin in the request body, and a binary multiplexed
+// stdout/stderr/exit stream in the response (see execframe.go).
+func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	hdr := r.Header.Get(HeaderExec)
+	raw, err := base64.StdEncoding.DecodeString(hdr)
+	if err != nil {
+		http.Error(w, "invalid "+HeaderExec+" header: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var body ExecBody
+	if err := json.Unmarshal(raw, &body); err != nil {
+		http.Error(w, "invalid exec metadata: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	// Do NOT write the response header yet: the first frame's Write emits the
+	// implicit 200. Responding before the request body (streamed stdin) is fully
+	// uploaded makes the client abort the upload — and exec output only appears
+	// after stdin is consumed (pg_dump has none; psql restore reads it all
+	// first), so the first frame naturally lands after the upload completes.
+
+	// Serialize frame writes (two pump goroutines + the terminal frame).
+	var mu sync.Mutex
+	emit := func(stream byte, payload []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = writeExecFrame(w, stream, payload)
+		fl.Flush()
+	}
+	code, err := s.driver.ContainerExec(r.Context(), body.Ctx, body.Spec, r.Body, func(stderr bool, chunk []byte) {
+		if stderr {
+			emit(ExecStreamStderr, chunk)
+		} else {
+			emit(ExecStreamStdout, chunk)
+		}
+	})
+	if err != nil {
+		emit(ExecStreamError, []byte(err.Error()))
+		return
+	}
+	var codeBuf [4]byte
+	binary.BigEndian.PutUint32(codeBuf[:], uint32(int32(code)))
+	emit(ExecStreamExit, codeBuf[:])
 }
 
 func (s *Server) containerAction(w http.ResponseWriter, r *http.Request, run func(WorkspaceContext, string) error) {

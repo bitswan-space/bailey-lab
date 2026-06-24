@@ -99,19 +99,30 @@ primitives + a `git push` to deploy, and **no longer mounts `docker.sock`**.
 
 ## Migration plan (this PR — full, clean transition)
 
-1. **Contract** — `driver.go` + `api.go` + HTTP/SSE server/client for the four
-   primitives (this commit; round-trip tested).
-2. **`bitswan infra-driver serve`** — host the bare git remote (post-receive →
-   `apply`) + serve the four primitives on the UNIX socket.
-3. **`bitswan infra-driver apply`** — the compiler: port `generate_docker_compose`
-   + reconcile to Go, reusing `internal/dockercompose`. Go unit tests vs golden
-   compose fixtures.
+1. **Contract** — `driver.go` + `api.go` + server/client for the five
+   primitives (list/logs/stop/restart/exec) + build-image (round-trip tested).
+2. **`bitswan infra-driver serve`** — host the bare deploy git remote over git
+   smart-HTTP (post-receive → `apply`) + serve the primitives, all over TCP on
+   the internal network, guarded by a shared bearer token.
+3. **`bitswan infra-driver apply`** — the compiler + reconciler: port
+   `generate_docker_compose` + reconcile to Go (`internal/dockercompose` reuse,
+   golden-tested), bring the project up, install certs + oauth2, provision per-BP
+   DBs/buckets, and **configure ingress itself** (`/ingress/reconcile` on the
+   daemon — the applier owns the Ingress, k8s-style).
 4. **Cut gitops over** — replace its Docker code with: resolve+`git push` to the
-   driver for apply, and the HTTP client for list/logs/stop/restart. Delete
-   `async_docker.py`, the compose-generation, `docker_compose_up`/
-   `ensure_docker_network`, cert/oauth2/baking/snapshot Docker code. Remove the
+   driver for apply, and the HTTP client for list/logs/stop/restart, exec, and
+   build-image. Delete `async_docker.py`, the compose-generation,
+   `docker_compose_up`/`ensure_docker_network`, cert/oauth2/baking Docker code,
+   and the deploy-path ingress registration (the driver does it). Remove the
    `docker.sock` mount. Validate the integration test + bp-lifecycle e2e green
    running through the driver.
+
+**Backups note.** A snapshot/restore is a user-triggered point-in-time action
+that produces an artifact (pg_dump → file, mc mirror → tar), not desired state —
+so it does NOT fit "declarative state the compiler converges to." It runs through
+the general `exec` primitive: gitops keeps the snapshot orchestration (streaming
+the dump to/from its snapshots volume) and uses `exec` for the in-container
+`pg_dump`/`psql`/`mc` steps.
 
 ## Kubernetes (later, no custom driver)
 

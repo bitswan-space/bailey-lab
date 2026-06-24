@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -16,9 +18,13 @@ import (
 // has its own (Python) equivalent of this client; the Go one is used by tests
 // and by the daemon when it inspects containers itself.
 type Client struct {
-	http *http.Client
-	base string
+	http  *http.Client
+	base  string
+	token string // bearer token sent on every request when non-empty
 }
+
+// SetToken sets the shared bearer token sent on every request.
+func (c *Client) SetToken(token string) { c.token = token }
 
 // NewUnixClient dials the driver on the given UNIX socket path.
 func NewUnixClient(socketPath string) *Client {
@@ -84,6 +90,28 @@ func (c *Client) BuildImage(ctx context.Context, req BuildRequest, prog func(str
 	return img, err
 }
 
+// ContainerExec runs a command in a container, streaming in to stdin and
+// delivering stdout/stderr chunks to out; returns the exit code.
+func (c *Client) ContainerExec(ctx context.Context, wctx WorkspaceContext, spec ExecSpec, in io.Reader, out func(stderr bool, chunk []byte)) (int, error) {
+	meta, _ := json.Marshal(ExecBody{Ctx: wctx, Spec: spec})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+PathContainersExec, in)
+	if err != nil {
+		return -1, err
+	}
+	req.Header.Set(HeaderExec, base64.StdEncoding.EncodeToString(meta))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	c.auth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return -1, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return -1, fmt.Errorf("%s: HTTP %d", PathContainersExec, resp.StatusCode)
+	}
+	return readExecFrames(resp.Body, out)
+}
+
 // ContainerLogs streams a container's logs to sink until the stream ends.
 func (c *Client) ContainerLogs(ctx context.Context, wctx WorkspaceContext, container string, tail int, follow bool, sink func(LogLine)) error {
 	body := LogsBody{Ctx: wctx, Container: container, Tail: tail, Follow: follow}
@@ -111,6 +139,7 @@ func (c *Client) postJSON(ctx context.Context, path string, reqBody, out any) er
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.auth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -125,6 +154,13 @@ func (c *Client) postJSON(ctx context.Context, path string, reqBody, out any) er
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+// auth adds the shared bearer token when configured.
+func (c *Client) auth(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+}
+
 // stream POSTs reqBody and dispatches each SSE frame to onFrame until the
 // stream ends or onFrame returns an error (e.g. a terminal error frame).
 func (c *Client) stream(ctx context.Context, path string, reqBody any, onFrame func(event string, data []byte) error) error {
@@ -135,6 +171,7 @@ func (c *Client) stream(ctx context.Context, path string, reqBody any, onFrame f
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	c.auth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err

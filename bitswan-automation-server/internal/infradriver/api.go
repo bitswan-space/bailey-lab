@@ -10,7 +10,7 @@ package infradriver
 // rollback/backup is a committed push, the git history IS the audit log. (A k8s
 // backend is then just ArgoCD/Flux watching the same repo — no custom driver.)
 //
-// The RPCs are image building plus four operational container primitives,
+// The RPCs are image building plus five operational container primitives,
 // served as HTTP over TCP on the internal network and guarded by the same
 // shared bearer token as the git endpoint (the driver is reachable only from
 // gitops). None are state changes — state changes go through a push:
@@ -20,6 +20,13 @@ package infradriver
 //	POST /v1/containers/logs    body LogsBody      → SSE: log* (until EOF/close)
 //	POST /v1/containers/stop    body ContainerBody → JSON OKResult (or error)
 //	POST /v1/containers/restart body ContainerBody → JSON OKResult (or error)
+//	POST /v1/containers/exec    hdr X-Bitswan-Exec, body=stdin → framed stdout/stderr/exit
+//
+// exec is the general escape hatch for imperative container operations that
+// aren't a state change and don't fit the narrower primitives — backups
+// (pg_dump), restores (psql < dump), MinIO mirrors. gitops orchestrates them;
+// the driver executes. Its wire shape is a binary multiplexed stream rather
+// than SSE because the payloads are binary and large (DB dumps).
 //
 // build-image exists because, after the cut-over, gitops has no Docker socket:
 // it builds an image here, records the tag in bitswan.yaml, then pushes — so
@@ -36,6 +43,28 @@ const (
 	PathContainersLogs    = "/v1/containers/logs"
 	PathContainersStop    = "/v1/containers/stop"
 	PathContainersRestart = "/v1/containers/restart"
+	PathContainersExec    = "/v1/containers/exec"
+)
+
+// HeaderExec carries the exec metadata (base64 of an ExecBody JSON) so the
+// request body can be pure, streamed stdin (DB dumps are large/binary).
+const HeaderExec = "X-Bitswan-Exec"
+
+// ExecBody is the (base64-encoded, header-borne) metadata of an exec request.
+type ExecBody struct {
+	Ctx  WorkspaceContext `json:"ctx"`
+	Spec ExecSpec         `json:"spec"`
+}
+
+// Exec response framing — a binary multiplexed stream (not SSE: stdout is
+// binary and large). Each frame is: [1 byte stream][4 byte big-endian length][payload].
+// The exit frame's payload is a 4-byte big-endian int32 exit code; the error
+// frame's payload is a UTF-8 message. The exit (or error) frame is terminal.
+const (
+	ExecStreamStdout byte = 1
+	ExecStreamStderr byte = 2
+	ExecStreamExit   byte = 3
+	ExecStreamError  byte = 4
 )
 
 // SSE event names (apply progress rides the git push, not SSE).

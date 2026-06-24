@@ -3,6 +3,7 @@ package infradriver
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http/httptest"
 	"reflect"
 	"strings"
@@ -22,6 +23,11 @@ type fakeDriver struct {
 	buildLogs   []string
 	buildImage  ImageRef
 	buildErr    error
+	execSpec    ExecSpec
+	execStdin   []byte
+	execStdout  []byte
+	execStderr  []byte
+	execCode    int
 }
 
 func (f *fakeDriver) Apply(_ context.Context, _ ApplyRequest, _ func(Progress)) ([]Route, error) {
@@ -56,6 +62,20 @@ func (f *fakeDriver) ContainerStop(_ context.Context, _ WorkspaceContext, contai
 func (f *fakeDriver) ContainerRestart(_ context.Context, _ WorkspaceContext, container string) error {
 	f.restarted = container
 	return f.restartErr
+}
+
+func (f *fakeDriver) ContainerExec(_ context.Context, _ WorkspaceContext, spec ExecSpec, in io.Reader, out func(bool, []byte)) (int, error) {
+	f.execSpec = spec
+	if in != nil {
+		f.execStdin, _ = io.ReadAll(in)
+	}
+	if len(f.execStdout) > 0 {
+		out(false, f.execStdout)
+	}
+	if len(f.execStderr) > 0 {
+		out(true, f.execStderr)
+	}
+	return f.execCode, nil
 }
 
 func newTestPair(d Driver) (*Client, func()) {
@@ -163,6 +183,61 @@ func TestContainerStopAndRestart(t *testing.T) {
 	}
 	if fd.restarted != "c2" {
 		t.Errorf("restarted = %q, want c2", fd.restarted)
+	}
+}
+
+func TestContainerExecRoundTrip(t *testing.T) {
+	fd := &fakeDriver{
+		execStdout: []byte{0x00, 0x01, 0x02, 'P', 'G', 0xff}, // binary-safe (a dump)
+		execStderr: []byte("pg_dump: done"),
+		execCode:   0,
+	}
+	client, closeFn := newTestPair(fd)
+	defer closeFn()
+
+	var gotOut, gotErr []byte
+	code, err := client.ContainerExec(context.Background(), WorkspaceContext{WorkspaceName: "acme"},
+		ExecSpec{Container: "acme-postgres", Cmd: []string{"pg_dump", "-Fc", "db"}},
+		strings.NewReader("stdin-payload"),
+		func(stderr bool, chunk []byte) {
+			if stderr {
+				gotErr = append(gotErr, chunk...)
+			} else {
+				gotOut = append(gotOut, chunk...)
+			}
+		})
+	if err != nil {
+		t.Fatalf("ContainerExec: %v", err)
+	}
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	if !reflect.DeepEqual(gotOut, fd.execStdout) {
+		t.Errorf("stdout = %v, want %v (binary must round-trip)", gotOut, fd.execStdout)
+	}
+	if string(gotErr) != "pg_dump: done" {
+		t.Errorf("stderr = %q", gotErr)
+	}
+	if string(fd.execStdin) != "stdin-payload" {
+		t.Errorf("stdin not streamed to driver: %q", fd.execStdin)
+	}
+	if !reflect.DeepEqual(fd.execSpec.Cmd, []string{"pg_dump", "-Fc", "db"}) {
+		t.Errorf("spec.Cmd = %v", fd.execSpec.Cmd)
+	}
+}
+
+func TestContainerExecNonZeroExit(t *testing.T) {
+	fd := &fakeDriver{execStderr: []byte("psql: FATAL"), execCode: 1}
+	client, closeFn := newTestPair(fd)
+	defer closeFn()
+
+	code, err := client.ContainerExec(context.Background(), WorkspaceContext{}, ExecSpec{Container: "c", Cmd: []string{"false"}}, nil,
+		func(bool, []byte) {})
+	if err != nil {
+		t.Fatalf("ContainerExec: %v", err)
+	}
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
 	}
 }
 
