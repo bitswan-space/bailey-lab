@@ -14,6 +14,7 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/caddyapi"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 	"github.com/bitswan-space/bitswan-workspaces/internal/util"
@@ -669,8 +670,40 @@ providers:
 		wildcardResolver = dnsCertResolverName
 	}
 
-	// No stage networks — just bitswan_network for backward compatibility
-	traefikDockerCompose, err := dockercompose.CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikConfigForCompose, domain, wildcardResolver, nil)
+	// Per-(workspace, stage) network isolation: create the stage networks and
+	// multi-home the workspace sub-traefik across them + bitswan_network. The
+	// sub-traefik is the SOLE bridge from the ingress to stage-isolated
+	// automations (which live ONLY on their {workspace}-{stage} network, never
+	// on bitswan_network — see gitops generate_docker_compose and
+	// network_security_model.md). Without this, automations could reach gitops /
+	// the dashboard / the daemon directly.
+	stageNetworks := []string{
+		workspaceName + "-dev",
+		workspaceName + "-staging",
+		workspaceName + "-production",
+	}
+	for _, net := range stageNetworks {
+		if _, err := docker.EnsureDockerNetwork(net, verbose); err != nil {
+			return false, fmt.Errorf("failed to ensure stage network %s: %w", net, err)
+		}
+	}
+	// The platform-facing HostRegexp catch-all (emitted by
+	// CreateWorkspaceTraefikDockerComposeFile whenever a domain is given) makes
+	// the GLOBAL traefik route every {workspace}-*.{domain} host straight to
+	// this sub-traefik. That is correct only in the bare two-tier topology. In
+	// the protected/wrap topology the global traefik must route those hosts
+	// through bitswan-protected-proxy (oauth) → daemon gate, and the gate
+	// reaches this sub-traefik internally ({ws}__traefik:80, recorded by
+	// saveProtectedRoute). The catch-all router outranks the proxy routes
+	// (longer rule → higher priority) and would serve workspace hosts with NO
+	// authentication — so suppress it by withholding the domain. The
+	// sub-traefik stays internal-only (HTTP :80 over bitswan_network); its
+	// inner→container routes come from the REST provider, not docker labels.
+	catchAllDomain := domain
+	if containerRunning("bitswan-protected-proxy") {
+		catchAllDomain = ""
+	}
+	traefikDockerCompose, err := dockercompose.CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikConfigForCompose, catchAllDomain, wildcardResolver, stageNetworks)
 	if err != nil {
 		return false, fmt.Errorf("failed to create workspace traefik docker-compose file: %w", err)
 	}
@@ -978,6 +1011,48 @@ func isWorkspaceTraefikRunning(workspaceName string) bool {
 // running. In bare environments (CI without protected ingress, dev
 // hosts) the route falls back to single-tier: both hostnames resolve
 // to the upstream directly, with no auth wrap to layer on top.
+// repushWorkspaceRoutesToSubTraefik re-applies ALL of a workspace's recorded
+// routes (dashboard, gitops, every BP/stage) to its per-workspace sub-traefik.
+// The sub-traefik keeps its dynamic config in memory via the REST provider, so
+// a freshly-(re)created sub-traefik starts empty; without this re-push only the
+// routes touched by the current reconcile would resolve and every other host
+// would 404. Idempotent — AddRouteWithTraefik upserts. Cert install is skipped
+// (certs were already provisioned when the route was first added).
+func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
+	// Iterate the protected_routes table — every recorded hostname→upstream —
+	// NOT listAllEndpoints: site services (gitops/dashboard/editor) are routes
+	// but not owned endpoints, so they're absent from the endpoints table and
+	// were the hosts that 404'd through a fresh sub-traefik.
+	routes, err := listProtectedRoutes()
+	if err != nil {
+		return
+	}
+	subURL := traefikapi.GetWorkspaceTraefikBaseURL(workspaceName)
+	// Mirror addRouteTraefik's sub-traefik routes for the active topology:
+	//   - protected wrap: the sub-traefik serves the INNER host only (the
+	//     platform serves the outer host's wrap and the gate forwards the
+	//     post-auth inner request here);
+	//   - bare two-tier (no wrap): the sub-traefik serves BOTH outer and inner,
+	//     because the platform's HostRegexp catch-all sends every
+	//     {workspace}-* host straight here. Restoring inner-only there would
+	//     404 every outer host (gitops, dashboard, frontends) until its next
+	//     deploy.
+	wrapAvailable := containerRunning("bitswan-protected-proxy")
+	for _, r := range routes {
+		if r.Upstream == "" {
+			continue
+		}
+		label, _, _ := strings.Cut(toOuterHost(r.Hostname), ".")
+		if workspaceFromLabel(label) != workspaceName {
+			continue
+		}
+		_ = traefikapi.AddRouteWithTraefik(toInnerHost(r.Hostname), r.Upstream, subURL)
+		if !wrapAvailable {
+			_ = traefikapi.AddRouteWithTraefik(toOuterHost(r.Hostname), r.Upstream, subURL)
+		}
+	}
+}
+
 func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 	if isInnerHost(req.Hostname) {
 		return fmt.Errorf("addRouteTraefik: refusing to register inner hostname %q directly — pass the outer hostname; the inner pair is registered automatically", req.Hostname)
@@ -1025,7 +1100,13 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 		if err := traefikapi.AddRouteWithTLSDomains(outer, "bitswan-protected-proxy:80", "", certResolver, tlsDomains); err != nil {
 			return fmt.Errorf("failed to add outer route to platform traefik: %w", err)
 		}
-		if err := saveProtectedRoute(outer, workspaceName+"__traefik:80"); err != nil {
+		// Record the REAL upstream (the container), not the sub-traefik. The
+		// gate forwards workspace hosts to the sub-traefik via workspaceFromLabel,
+		// not via this record, so protected_routes is consumed only by the
+		// sub-traefik re-push and the reconcile in-sync check — both of which
+		// want the real container upstream (recording the sub-traefik here would
+		// make the re-push push a self-referential route).
+		if err := saveProtectedRoute(outer, req.Upstream); err != nil {
 			fmt.Printf("Warning: failed to record protected route for %s: %v\n", outer, err)
 		}
 	} else if workspaceName != "" && isWorkspaceTraefikRunning(workspaceName) {
@@ -1040,6 +1121,14 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 			if err := traefikapi.AddRouteWithTLSDomains(h, workspaceTraefikUpstream, "", certResolver, tlsDomains); err != nil {
 				return fmt.Errorf("failed to add route to platform traefik for %s: %w", h, err)
 			}
+		}
+		// Record the REAL upstream (not the sub-traefik) so repushWorkspace-
+		// RoutesToSubTraefik can rebuild this route after the sub-traefik is
+		// (re)created — otherwise the platform catch-all captures the host with
+		// nothing behind it in the sub-traefik (404). The gate is absent in this
+		// topology, so this record is consumed only by the re-push.
+		if err := saveProtectedRoute(outer, req.Upstream); err != nil {
+			fmt.Printf("Warning: failed to record protected route for %s: %v\n", outer, err)
 		}
 	} else if wrapAvailable {
 		// No workspace sub-traefik but the protected chain is up:
@@ -1063,6 +1152,12 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 			if err := traefikapi.AddRouteWithTLSDomains(h, req.Upstream, "", certResolver, tlsDomains); err != nil {
 				return fmt.Errorf("failed to add route for %s: %w", h, err)
 			}
+		}
+		// Record the upstream so that if a workspace sub-traefik is created
+		// later (e.g. the first staged-network deploy), the re-push can rebuild
+		// this route through it instead of leaving the catch-all host dangling.
+		if err := saveProtectedRoute(outer, req.Upstream); err != nil {
+			fmt.Printf("Warning: failed to record protected route for %s: %v\n", outer, err)
 		}
 	}
 
@@ -1483,6 +1578,32 @@ func (s *Server) handleIngressReconcile(w http.ResponseWriter, r *http.Request) 
 
 	jwtToken := r.Header.Get("BITSWAN_AUTOMATION_SERVER_DAEMON_TOKEN")
 	resp := IngressReconcileResponse{Success: true, Pruned: []string{}}
+
+	// Ensure the per-workspace sub-traefik exists before we push routes to it.
+	// It is the multi-homed bridge (bitswan_network + {workspace}-{stage}) that
+	// reaches stage-isolated automations the gate itself cannot. initWorkspaceTraefik
+	// is idempotent (returns immediately if the container already exists) and
+	// also (re)creates the stage networks. Domain is taken from a desired route.
+	if len(req.Routes) > 0 {
+		if _, dom, ok := strings.Cut(toOuterHost(req.Routes[0].Hostname), "."); ok && dom != "" {
+			created, err := initWorkspaceTraefik(req.WorkspaceName, dom, false)
+			if err != nil {
+				resp.Warnings = append(resp.Warnings, "init workspace sub-traefik: "+err.Error())
+			}
+			// A freshly (re)created sub-traefik starts with NO routes (its REST
+			// config is in-memory), so re-push ALL of this workspace's recorded
+			// routes — not just the ones in THIS reconcile — or the dashboard /
+			// gitops / other-stage hosts 404 through the gate until their next
+			// deploy. Do this ONLY on an actual (re)creation: the steady-state
+			// routes are kept current by addRouteTraefik on each deploy, so
+			// re-pushing on every reconcile is redundant — it churns the
+			// sub-traefik's router table and opens a window where a route can
+			// briefly resolve to the wrong upstream mid-reconcile.
+			if created {
+				repushWorkspaceRoutesToSubTraefik(req.WorkspaceName)
+			}
+		}
+	}
 
 	// 1. Upsert every desired route and mark it gitops-managed. Skip the
 	//    (multi-write, ~1s) re-apply only when the route is ALREADY resolving to
