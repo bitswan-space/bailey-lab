@@ -10,7 +10,6 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 
-from .async_docker import get_async_docker_client
 from .dependencies import get_automation_service
 from .deploy_manager import deploy_manager
 from .snapshot_manager import snapshot_manager
@@ -358,33 +357,6 @@ async def _broadcast_automations_after_delay():
     await _broadcast_automations()
 
 
-async def _docker_event_watcher():
-    """Watch Docker container events and broadcast automation state changes."""
-    docker_client = get_async_docker_client()
-    workspace = os.environ.get("BITSWAN_WORKSPACE_NAME", "")
-    debounce_task: asyncio.Task | None = None
-
-    filters: dict = {"type": ["container"]}
-    if workspace:
-        filters["label"] = [f"gitops.workspace={workspace}"]
-
-    while True:
-        try:
-            async for event in docker_client.watch_events(filters=filters):
-                action = event.get("Action", "")
-                if action in ("start", "stop", "die", "destroy", "create"):
-                    if debounce_task and not debounce_task.done():
-                        debounce_task.cancel()
-                    debounce_task = asyncio.create_task(
-                        _broadcast_automations_after_delay()
-                    )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.warning("Docker event watcher error: %s, reconnecting in 5s", e)
-            await asyncio.sleep(5)
-
-
 def _start_profiling():
     """Start yappi async-aware profiler if BITSWAN_PROFILING is set.
 
@@ -436,7 +408,6 @@ def _start_profiling():
 async def lifespan(app: FastAPI):
     observer = None
     copy_observer = None
-    watcher_task: asyncio.Task | None = None
     dump_profile = _start_profiling()
 
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -571,26 +542,13 @@ async def lifespan(app: FastAPI):
         )
     )
 
-    # Start Docker event watcher for SSE push updates
-    watcher_task = asyncio.create_task(_docker_event_watcher())
-
-    docker_client = get_async_docker_client()
-
+    # No Docker event watcher: after the infra-driver cut-over gitops has no
+    # Docker socket. Container-state changes are broadcast explicitly via
+    # refresh_all() on each deploy/stop/restart, and the filesystem watcher
+    # covers bitswan.yaml / automation.toml edits.
     try:
         yield
     finally:
-        # Stop Docker event watcher
-        if watcher_task:
-            watcher_task.cancel()
-            try:
-                await watcher_task
-            except asyncio.CancelledError:
-                pass
-
-        # Explicitly close the Docker client session so aiohttp doesn't report
-        # "Unclosed client session" warnings during interpreter shutdown
-        await docker_client.close()
-
         if observer:
             observer.stop()
             # Run blocking join in executor to avoid blocking event loop
