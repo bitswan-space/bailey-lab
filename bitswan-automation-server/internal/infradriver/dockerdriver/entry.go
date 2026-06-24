@@ -622,7 +622,9 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 				"gitops.slot":             k.slot,
 			},
 		}
-		c.externalNetworks["bitswan_network"] = true
+		// Declare the stage network the gateway joins as external, or
+		// `docker compose up` rejects the project ("undefined network <ws>-<realm>").
+		c.externalNetworks[c.stageNetwork(g.realm)] = true
 	}
 	return nil
 }
