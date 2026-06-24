@@ -26,12 +26,14 @@ import "context"
 type Driver interface {
 	// Apply compiles ctx+bitswanYAML into desired backend state and reconciles
 	// to it: ensure networks, generate and bring up the compose project, install
-	// CA certs + oauth2 sidecars, and realize the data state the declaration
-	// implies (blue-green DB seeding, restores). It NEVER builds images — it
-	// deploys the already-built, tagged images bitswan.yaml references (built via
-	// BuildImage first). Idempotent — a no-op when the running state already
-	// matches. prog receives streamed progress; the returned routes let gitops
-	// keep its own view in sync. onlyDeploymentIDs (optional) narrows the set.
+	// CA certs + oauth2 sidecars, CONFIGURE INGRESS (converge the daemon's routes
+	// to the desired set — the applier owns the Ingress, k8s-style), and realize
+	// the data state the declaration implies (blue-green DB seeding, restores). It
+	// NEVER builds images — it deploys the already-built, tagged images
+	// bitswan.yaml references (built via BuildImage first). Idempotent — a no-op
+	// when the running state already matches. prog receives streamed progress; the
+	// returned routes are informational (already reconciled). onlyDeploymentIDs
+	// (optional) narrows the set.
 	Apply(ctx context.Context, req ApplyRequest, prog func(Progress)) ([]Route, error)
 
 	// BuildImage bakes a source tree into an image, content-addressed by
@@ -115,10 +117,19 @@ type Progress struct {
 	Message string `json:"message"`
 }
 
+// Route is one ingress route the applied state implies. The driver itself
+// reconciles these with the daemon ingress (k8s-style: the thing that applies
+// the manifests owns the Ingress) — gitops no longer registers routes.
 type Route struct {
 	Hostname string `json:"hostname"`
 	Upstream string `json:"upstream"`
 	Stage    string `json:"stage"`
+	// ParentEndpoint is the endpoint whose Bailey ACL this route delegates to —
+	// the workspace dashboard, so every member can share what they deploy.
+	ParentEndpoint string `json:"parent_endpoint,omitempty"`
+	// Kind classifies the endpoint for the launcher ("frontend" for exposed
+	// automations).
+	Kind string `json:"kind,omitempty"`
 }
 
 type LogLine struct {

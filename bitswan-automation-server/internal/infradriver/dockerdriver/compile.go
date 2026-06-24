@@ -69,7 +69,7 @@ func (d *DockerDriver) Apply(ctx context.Context, req infradriver.ApplyRequest, 
 		return nil, fmt.Errorf("compile bitswan.yaml: %w", err)
 	}
 
-	if err := reconcile(ctx, req.Ctx, bs, composeYAML, report); err != nil {
+	if err := reconcile(ctx, req.Ctx, bs, composeYAML, routes, report); err != nil {
 		return nil, err
 	}
 	return routes, nil
@@ -285,5 +285,9 @@ func (c *compileState) workspaceRoute(automationName, depContext, depStage strin
 		Hostname: hostname,
 		Upstream: fmt.Sprintf("%s:%d", svcName, port),
 		Stage:    depStage,
+		// Frontends inherit the workspace dashboard's Bailey ACL, so every
+		// workspace member can share what they deploy (mirrors utils.workspace_route).
+		ParentEndpoint: c.workspaceName + "-dashboard." + c.domain,
+		Kind:           "frontend",
 	}
 }

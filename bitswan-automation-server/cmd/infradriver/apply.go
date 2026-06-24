@@ -2,7 +2,6 @@ package infradriver
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -51,23 +50,16 @@ func newApplyCmd() *cobra.Command {
 				SecretsDir:    gitConfig(gitDir, "bitswan.secretsdir"),
 				WrapAvailable: gitConfig(gitDir, "bitswan.wrap") == "true",
 			}
+			// The driver configures ingress itself inside Apply (k8s-style: the
+			// applier owns the Ingress), so the returned routes are informational —
+			// log a one-line summary for the push output, not a contract.
 			routes, err := dockerdriver.New().Apply(cmd.Context(),
 				infradriver.ApplyRequest{Ctx: wctx, BitswanYAML: string(yamlBytes)},
 				func(p infradriver.Progress) { fmt.Printf("[%s] %s\n", p.Step, p.Message) })
 			if err != nil {
 				return err
 			}
-			// Emit the desired ingress routes as parseable stdout lines. git
-			// relays this (the hook's stdout) to the pushing client, so gitops
-			// collects them and registers them with the daemon ingress — the
-			// driver stays out of routing (least privilege: no daemon socket).
-			for _, r := range routes {
-				line, merr := json.Marshal(r)
-				if merr != nil {
-					return merr
-				}
-				fmt.Printf("[route] %s\n", line)
-			}
+			fmt.Printf("[done] applied %d ingress route(s)\n", len(routes))
 			return nil
 		},
 	}

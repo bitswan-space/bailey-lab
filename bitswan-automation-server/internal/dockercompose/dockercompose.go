@@ -276,6 +276,9 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 	volumes := []interface{}{
 		driverBinary + ":/usr/local/bin/bitswan:ro",
 		"/var/run/docker.sock:/var/run/docker.sock",
+		// The daemon ingress socket — the driver configures ingress itself
+		// (converges routes via /ingress/reconcile) after bringing the project up.
+		"/var/run/bitswan:/var/run/bitswan",
 		wsVolume("deploy.git", "/git/deploy.git"),
 		// The deployed tree the generated compose's bind-mounts reference
 		// (workspaces/<ws>/gitops/<source>); apply materializes the push here.

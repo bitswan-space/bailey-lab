@@ -20,7 +20,7 @@ const oauth2ProxyPath = "/usr/local/bin/oauth2-proxy"
 // reconcile brings the generated compose project up and applies the post-up
 // container mutations (CA certs, oauth2 sidecars). Port of
 // automation_service.apply_compose_for_deployments' operational tail.
-func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, composeYAML string, report func(step, msg string)) error {
+func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, composeYAML string, routes []infradriver.Route, report func(step, msg string)) error {
 	// 1. Ensure the per-(workspace, stage) networks the compose references as
 	//    external exist (automation_service._ensure_stage_networks).
 	report("networks", "Ensuring stage networks...")
@@ -52,6 +52,16 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	}
 	report("oauth2", "Starting oauth2 sidecars...")
 	if err := startOAuth2ProxyInContainers(ctx, wctx, report); err != nil {
+		return err
+	}
+
+	// 5. Configure ingress: converge the daemon's gitops-managed routes to the
+	//    desired set. The applier owns the Ingress (k8s-style), so this is the
+	//    single ingress side effect of an apply — gitops no longer registers
+	//    routes. Fail loudly: a route the deploy implies but the ingress lacks
+	//    means the endpoint 404s, which must surface, not be swallowed.
+	report("ingress", "Reconciling ingress routes...")
+	if err := reconcileIngress(ctx, wctx.WorkspaceName, routes); err != nil {
 		return err
 	}
 	return nil
