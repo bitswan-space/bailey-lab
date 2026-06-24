@@ -6,17 +6,27 @@ import (
 	"net/http"
 )
 
-// Server adapts a Driver's container primitives to the HTTP/SSE contract in
-// api.go. Apply is NOT served here — it is the driver's git post-receive hook
-// (see README). The caller wires this onto a listener on the private UNIX
-// socket.
+// Server adapts a Driver to the HTTP contract in api.go: the four container
+// primitives + build-image under /v1/* (SSE/JSON), and — when GitProjectRoot is
+// set — the deploy repo over git smart-HTTP at every other path. Apply itself
+// is NOT an endpoint: it is the deploy repo's post-receive hook (see README),
+// which runs in this process on push. Everything is guarded by a shared bearer
+// token (see tokenAuth).
 type Server struct {
 	driver Driver
+	// GitProjectRoot is the dir containing the bare deploy repo; when non-empty
+	// the handler serves git-http-backend for it. Empty disables git serving
+	// (primitive-only, e.g. tests).
+	GitProjectRoot string
+	// Token is the shared secret guarding every endpoint; empty disables the
+	// guard (single-host dev/test only).
+	Token string
 }
 
 func NewServer(d Driver) *Server { return &Server{driver: d} }
 
-// Handler returns the mux for the container-primitive endpoints.
+// Handler returns the token-guarded mux: /v1/* primitives plus, if
+// GitProjectRoot is set, git smart-HTTP for the deploy repo on all other paths.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(PathBuildImage, s.handleBuildImage)
@@ -24,7 +34,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(PathContainersLogs, s.handleLogs)
 	mux.HandleFunc(PathContainersStop, s.handleStop)
 	mux.HandleFunc(PathContainersRestart, s.handleRestart)
-	return mux
+	if s.GitProjectRoot != "" {
+		// git smart-HTTP lives at the root; /v1/* above takes precedence because
+		// ServeMux longest-prefix matches the explicit primitive paths first.
+		mux.Handle("/", gitCGIHandler(s.GitProjectRoot))
+	}
+	return tokenAuth(s.Token, mux)
 }
 
 func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {

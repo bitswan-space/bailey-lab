@@ -50,25 +50,30 @@ func (f *ctxFlags) bind(cmd *cobra.Command) {
 
 func newServeCmd() *cobra.Command {
 	var (
-		socket string
+		listen string
 		gitDir string
+		token  string
 		cf     ctxFlags
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Host the deploy git remote + serve container primitives on a UNIX socket",
+		Short: "Host the deploy git remote (smart-HTTP) + container primitives over TCP",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if socket == "" || gitDir == "" {
-				return fmt.Errorf("--socket and --git-dir are required")
+			if listen == "" || gitDir == "" {
+				return fmt.Errorf("--listen and --git-dir are required")
+			}
+			if token == "" {
+				token = os.Getenv("BITSWAN_INFRA_DRIVER_TOKEN")
 			}
 			if err := ensureBareRepo(gitDir, cf); err != nil {
 				return err
 			}
-			return serveHTTP(cmd.Context(), socket)
+			return serveHTTP(cmd.Context(), listen, gitDir, token)
 		},
 	}
-	cmd.Flags().StringVar(&socket, "socket", "", "UNIX socket to serve the HTTP API on")
+	cmd.Flags().StringVar(&listen, "listen", "", "TCP address to serve git smart-HTTP + the primitive API on (e.g. :9090)")
 	cmd.Flags().StringVar(&gitDir, "git-dir", "", "bare git repo to host (post-receive applies on push)")
+	cmd.Flags().StringVar(&token, "token", "", "shared bearer token guarding every endpoint (defaults to $BITSWAN_INFRA_DRIVER_TOKEN)")
 	cf.bind(cmd)
 	return cmd
 }
@@ -88,6 +93,8 @@ func ensureBareRepo(gitDir string, cf ctxFlags) error {
 		"bitswan.domain":     cf.domain,
 		"bitswan.secretsdir": cf.secretsDir,
 		"bitswan.wrap":       fmt.Sprintf("%t", cf.wrap),
+		// git-http-backend refuses receive-pack (push) unless this is set.
+		"http.receivepack": "true",
 	} {
 		if err := exec.Command("git", "--git-dir", gitDir, "config", k, v).Run(); err != nil {
 			return fmt.Errorf("git config %s: %w", k, err)
@@ -105,15 +112,18 @@ func ensureBareRepo(gitDir string, cf ctxFlags) error {
 	return nil
 }
 
-// serveHTTP serves the driver's HTTP API (build-image + container primitives)
-// on the UNIX socket until the context is cancelled.
-func serveHTTP(ctx context.Context, socket string) error {
-	_ = os.Remove(socket) // clear a stale socket
-	ln, err := net.Listen("unix", socket)
+// serveHTTP serves the driver over TCP until the context is cancelled: git
+// smart-HTTP for the deploy repo (gitops pushes here; post-receive applies) plus
+// the build-image + container primitives, all guarded by the shared token.
+func serveHTTP(ctx context.Context, listen, gitDir, token string) error {
+	ln, err := net.Listen("tcp", listen)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", socket, err)
+		return fmt.Errorf("listen %s: %w", listen, err)
 	}
-	srv := &http.Server{Handler: infradriver.NewServer(dockerdriver.New()).Handler()}
+	server := infradriver.NewServer(dockerdriver.New())
+	server.GitProjectRoot = filepath.Dir(gitDir) // GIT_PROJECT_ROOT holds the bare repo
+	server.Token = token
+	srv := &http.Server{Handler: server.Handler()}
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -121,7 +131,7 @@ func serveHTTP(ctx context.Context, socket string) error {
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	fmt.Printf("infra-driver serving on %s\n", socket)
+	fmt.Printf("infra-driver serving git+primitives on %s (repo %s)\n", listen, filepath.Base(gitDir))
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}

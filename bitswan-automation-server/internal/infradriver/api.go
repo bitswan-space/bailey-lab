@@ -11,8 +11,9 @@ package infradriver
 // backend is then just ArgoCD/Flux watching the same repo — no custom driver.)
 //
 // The RPCs are image building plus four operational container primitives,
-// served as HTTP over the private UNIX socket (never network-reachable). None
-// are state changes — state changes go through a push:
+// served as HTTP over TCP on the internal network and guarded by the same
+// shared bearer token as the git endpoint (the driver is reachable only from
+// gitops). None are state changes — state changes go through a push:
 //
 //	POST /v1/build-image        body BuildRequest  → SSE: log* then (image|error)
 //	POST /v1/containers/list    body ListBody      → JSON ContainerListResult
