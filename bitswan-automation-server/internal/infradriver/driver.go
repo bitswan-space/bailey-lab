@@ -44,76 +44,76 @@ type Driver interface {
 // Secrets are referenced by path on the shared (read-only) secrets volume;
 // plaintext is never marshalled.
 type WorkspaceContext struct {
-	WorkspaceName string
-	Domain        string
-	GitopsDir     string // shared volume: bitswan.yaml + copies/ + repo
-	SecretsDir    string // shared volume: decrypted secret material
-	WrapAvailable bool   // protected-proxy present → wrap topology; else two-tier
+	WorkspaceName string `json:"workspace_name"`
+	Domain        string `json:"domain"`
+	GitopsDir     string `json:"gitops_dir"`  // shared volume: bitswan.yaml + copies/ + repo
+	SecretsDir    string `json:"secrets_dir"` // shared volume: decrypted secret material
+	WrapAvailable bool   `json:"wrap_available"`
 }
 
 type ApplyRequest struct {
-	Ctx               WorkspaceContext
-	BitswanYAML       string
-	OnlyDeploymentIDs []string
+	Ctx               WorkspaceContext `json:"ctx"`
+	BitswanYAML       string           `json:"bitswan_yaml"`
+	OnlyDeploymentIDs []string         `json:"only_deployment_ids,omitempty"`
 }
 
 type BuildRequest struct {
-	Ctx        WorkspaceContext
-	SourcePath string
-	BaseImage  string
-	MountPath  string
-	SourceSHA  string
+	Ctx        WorkspaceContext `json:"ctx"`
+	SourcePath string           `json:"source_path"`
+	BaseImage  string           `json:"base_image"`
+	MountPath  string           `json:"mount_path"`
+	SourceSHA  string           `json:"source_sha"`
 }
 
 type SnapshotRequest struct {
-	Ctx        WorkspaceContext
-	BP         string
-	Stage      string
-	SnapshotID string
+	Ctx        WorkspaceContext `json:"ctx"`
+	BP         string           `json:"bp"`
+	Stage      string           `json:"stage"`
+	SnapshotID string           `json:"snapshot_id"`
 }
 
 type RestoreRequest struct {
-	Ctx        WorkspaceContext
-	BP         string
-	FromStage  string
-	ToStage    string
-	SnapshotID string
+	Ctx        WorkspaceContext `json:"ctx"`
+	BP         string           `json:"bp"`
+	FromStage  string           `json:"from_stage"`
+	ToStage    string           `json:"to_stage"`
+	SnapshotID string           `json:"snapshot_id"`
 }
 
 // Progress is one step of an Apply/Snapshot/Restore. Step is a stable machine
-// key; Message is the human line. The driver emits these as it works.
+// key; Message is the human line. Streamed as SSE `event: progress` frames.
 type Progress struct {
-	Step    string
-	Message string
+	Step    string `json:"step"`
+	Message string `json:"message"`
 }
 
 type Route struct {
-	Hostname string
-	Upstream string
-	Stage    string
+	Hostname string `json:"hostname"`
+	Upstream string `json:"upstream"`
+	Stage    string `json:"stage"`
 }
 
 type ImageRef struct {
-	FullTag  string
-	ImageID  string
-	CacheHit bool
+	FullTag  string `json:"full_tag"`
+	ImageID  string `json:"image_id"`
+	CacheHit bool   `json:"cache_hit"`
 }
 
 type DeploymentState struct {
-	DeploymentID string
-	Stage        string
-	Image        string
-	Replicas     int
-	Health       string // "healthy" | "starting" | "not_running" | "unknown"
-	Slot         string
+	DeploymentID string `json:"deployment_id"`
+	Stage        string `json:"stage"`
+	Image        string `json:"image"`
+	Replicas     int    `json:"replicas"`
+	Health       string `json:"health"` // "healthy" | "starting" | "not_running" | "unknown"
+	Slot         string `json:"slot,omitempty"`
 }
 
 type LogLine struct {
-	Line   string
-	Stderr bool
+	Line   string `json:"line"`
+	Stderr bool   `json:"stderr"`
 }
 
 type Event struct {
-	Container string
-	Action    string
+	Container string `json:"container"`
+	Action    string `json:"action"`
 }
