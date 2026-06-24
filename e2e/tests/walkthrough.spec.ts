@@ -1058,10 +1058,28 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // deploying this BP's containers; if dev is still "Not deployed yet" and the
     // button is actionable again, press once more — bounded to a few tries.
     let healthy = false;
-    for (let attempt = 0; attempt < 3 && !healthy; attempt++) {
+    for (let attempt = 0; attempt < 4 && !healthy; attempt++) {
       await pressSyncDeploy();
       await clickTopTab(/Deployments/i);
-      await selectStage(/Development/i);
+      // The Development stage only renders once the BP is in `main`. Sync & Deploy
+      // merges the user's copy into main, but that can land a beat AFTER "Working…"
+      // clears (and a first press may only fast-forward main without this BP). So
+      // the Deployments tab can still show the transient "Not in main yet" empty
+      // state with no stage buttons. WAIT for the Development stage to appear
+      // rather than hard-selecting it (selectStage would throw on that empty state
+      // and abort the chapter); if it never shows, re-press while the button is
+      // still actionable and try again.
+      const devStage = d.getByRole('button', { name: /Development/i }).first();
+      const inMain = await devStage
+        .waitFor({ state: 'visible', timeout: SLA })
+        .then(() => true)
+        .catch(() => false);
+      if (!inMain) {
+        await clickTopTab(/Sync & Deploy/i);
+        if (!(await btn.isEnabled().catch(() => false))) break;
+        continue;
+      }
+      await devStage.click().catch(() => {});
       const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
       const none = d.getByText(/Not deployed yet/i).first();
       await Promise.race([
