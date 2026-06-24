@@ -999,17 +999,21 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       } catch {
         // The Sync & Deploy progress toast is a COSMETIC live-progress animation.
         // In the headless walkthrough it can stop updating even though the deploy
-        // completes fine server-side (the deploy task reaches `completed`; the
-        // single-deploy integration test is green). The authoritative success
-        // signal is the Development stage going Healthy, which every caller asserts
-        // right after this returns — so a quiet toast must NOT fail the run here.
-        // Log for visibility, but neither flag an SLA breach nor throw; let the
-        // caller's Healthy assertion be the real gate. (The other long-op
-        // watchdogs are unchanged.)
+        // is still running fine server-side (verified live: the deploy completes
+        // and the Development stage renders normally once it does). A quiet toast
+        // must NOT fail the run — but we also must NOT return while the deploy is
+        // still in flight, or the caller's next step (selectStage → Development)
+        // races a mid-deploy view. So stop REQUIRING on-screen progress and fall
+        // back to the authoritative completion signal: wait for the "Working…"
+        // button to clear (bounded by the same 30-min backstop). The other
+        // long-op watchdogs are unchanged.
         // eslint-disable-next-line no-console
         console.warn(
-          `Sync & Deploy: progress toast quiet >${PROGRESS / 1000}s (last: "${last.slice(0, 120)}") — gating on Development Healthy instead`,
+          `Sync & Deploy: progress toast quiet >${PROGRESS / 1000}s (last: "${last.slice(0, 120)}") — waiting for "Working…" to clear instead`,
         );
+        await working
+          .waitFor({ state: 'hidden', timeout: Math.max(1000, deadline - Date.now()) })
+          .catch(() => {});
         return;
       }
       last = await progressSignature();
