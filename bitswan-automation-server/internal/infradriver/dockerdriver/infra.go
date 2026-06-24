@@ -116,7 +116,7 @@ func minioCompose(n infraNames) map[string]interface{} {
 		"env_file":       []interface{}{n.secretsPath},
 		"volumes":        []interface{}{n.volumeName + "-data:/data"},
 		"networks":       []interface{}{"bitswan_network"},
-		"labels": n.infraLabels(),
+		"labels":         n.infraLabels(),
 	}
 	return map[string]interface{}{
 		"services": map[string]interface{}{"minio" + n.suffix: entry},
@@ -137,7 +137,7 @@ func postgresCompose(secretsDir string, n infraNames) map[string]interface{} {
 			filepath.Join(secretsDir, "pgadmin-servers.json") + ":/pgadmin4/servers.json:ro",
 		},
 		"networks": []interface{}{"bitswan_network"},
-		"labels": n.infraLabels(),
+		"labels":   n.infraLabels(),
 	}
 	return map[string]interface{}{
 		"services": map[string]interface{}{
