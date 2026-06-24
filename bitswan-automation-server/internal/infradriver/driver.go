@@ -64,6 +64,16 @@ type Driver interface {
 	ContainerStop(ctx context.Context, req WorkspaceContext, container string) error
 	ContainerRestart(ctx context.Context, req WorkspaceContext, container string) error
 
+	// ImageList returns the workspace's built images (those tagged
+	// internal/<workspace>-…). Host image ops belong to the driver (it owns
+	// docker); scoping to the workspace's tag prefix keeps one tenant from
+	// seeing another's images.
+	ImageList(ctx context.Context, req WorkspaceContext) ([]Image, error)
+
+	// ImageRemove deletes an image by tag. Refused unless the tag is in this
+	// workspace's namespace (internal/<workspace>-…).
+	ImageRemove(ctx context.Context, req WorkspaceContext, tag string) error
+
 	// ContainerInspect returns the raw `docker inspect` JSON for one container
 	// (workspace-scoped). Read-only. Unlike ContainerList — which deliberately
 	// omits env/config so a bulk listing can't leak secrets — inspect returns the
@@ -128,6 +138,14 @@ type ImageRef struct {
 	FullTag  string `json:"full_tag"`
 	ImageID  string `json:"image_id"`
 	CacheHit bool   `json:"cache_hit"`
+}
+
+// Image is one built image (a workspace-scoped listing entry).
+type Image struct {
+	ID      string `json:"id"`
+	Tag     string `json:"tag"`
+	Created int64  `json:"created"` // unix seconds
+	Size    int64  `json:"size"`    // bytes
 }
 
 // ContainerFilter narrows ContainerList. Empty fields are ignored; Labels are

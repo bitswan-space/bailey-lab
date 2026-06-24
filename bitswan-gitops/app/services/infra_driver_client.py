@@ -41,6 +41,8 @@ PATH_CONTAINERS_LOGS = "/v1/containers/logs"
 PATH_CONTAINERS_STOP = "/v1/containers/stop"
 PATH_CONTAINERS_RESTART = "/v1/containers/restart"
 PATH_CONTAINERS_EXEC = "/v1/containers/exec"
+PATH_IMAGES_LIST = "/v1/images/list"
+PATH_IMAGES_REMOVE = "/v1/images/remove"
 
 # SSE event names (api.go).
 EVENT_LOG = "log"
@@ -346,6 +348,16 @@ class InfraDriverClient:
         body = {"ctx": ctx.to_json(), "filter": {"labels": labels or {}}}
         out = await self._post_json(PATH_CONTAINERS_LIST, body)
         return [Container.from_json(c) for c in (out.get("containers") or [])]
+
+    async def image_list(self, ctx: WorkspaceContext) -> list[dict]:
+        """The workspace's built images (internal/<ws>-…): [{id, tag, created, size}]."""
+        out = await self._post_json(PATH_IMAGES_LIST, {"ctx": ctx.to_json()})
+        return out.get("images") or []
+
+    async def image_remove(self, ctx: WorkspaceContext, tag: str) -> None:
+        await self._post_json(
+            PATH_IMAGES_REMOVE, {"ctx": ctx.to_json(), "tag": tag}
+        )
 
     async def container_inspect(self, ctx: WorkspaceContext, container: str) -> dict:
         """Raw `docker inspect` of one container (the driver returns a 1-element

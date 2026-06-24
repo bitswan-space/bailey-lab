@@ -45,7 +45,20 @@ const (
 	PathContainersStop    = "/v1/containers/stop"
 	PathContainersRestart = "/v1/containers/restart"
 	PathContainersExec    = "/v1/containers/exec"
+	PathImagesList        = "/v1/images/list"
+	PathImagesRemove      = "/v1/images/remove"
 )
+
+// ImageListResult is the JSON response of /v1/images/list.
+type ImageListResult struct {
+	Images []Image `json:"images"`
+}
+
+// ImageBody is the POST body for /v1/images/remove.
+type ImageBody struct {
+	Ctx WorkspaceContext `json:"ctx"`
+	Tag string           `json:"tag"`
+}
 
 // HeaderExec carries the exec metadata (base64 of an ExecBody JSON) so the
 // request body can be pure, streamed stdin (DB dumps are large/binary).

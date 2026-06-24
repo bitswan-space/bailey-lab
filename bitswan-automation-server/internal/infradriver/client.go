@@ -90,6 +90,20 @@ func (c *Client) BuildImage(ctx context.Context, req BuildRequest, prog func(str
 	return img, err
 }
 
+// ImageList returns the workspace's built images.
+func (c *Client) ImageList(ctx context.Context, wctx WorkspaceContext) ([]Image, error) {
+	var out ImageListResult
+	if err := c.postJSON(ctx, PathImagesList, ListBody{Ctx: wctx}, &out); err != nil {
+		return nil, err
+	}
+	return out.Images, nil
+}
+
+// ImageRemove deletes a workspace image by tag.
+func (c *Client) ImageRemove(ctx context.Context, wctx WorkspaceContext, tag string) error {
+	return c.postJSON(ctx, PathImagesRemove, ImageBody{Ctx: wctx, Tag: tag}, &OKResult{})
+}
+
 // ContainerInspect returns the raw `docker inspect` JSON for one container.
 func (c *Client) ContainerInspect(ctx context.Context, wctx WorkspaceContext, container string) ([]byte, error) {
 	body, _ := json.Marshal(ContainerBody{Ctx: wctx, Container: container})

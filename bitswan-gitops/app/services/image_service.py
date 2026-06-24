@@ -9,28 +9,32 @@ import shutil
 from typing import Optional, AsyncGenerator, Dict
 
 from app.utils import bitswan_extract_filter, calculate_git_tree_hash, save_image
-from app.async_docker import get_async_docker_client, DockerError
 from app.event_broadcaster import event_broadcaster
 
-import docker  # Keep for sync build process in background thread
 from fastapi import UploadFile, HTTPException
 
 
 class ImageService:
     def __init__(self):
-        # Sync client for background build thread only
-        self._sync_client = None
         self.bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
         self.gitops_dir = os.path.join(self.bs_home, "gitops")
         self.images_base_dir = os.path.join(self.gitops_dir, "images")
         os.makedirs(self.images_base_dir, exist_ok=True)
 
-    @property
-    def client(self):
-        """Lazy-load sync Docker client (only used in background build thread)."""
-        if self._sync_client is None:
-            self._sync_client = docker.from_env()
-        return self._sync_client
+    def _driver_client_ctx(self):
+        """An infra-driver client + WorkspaceContext (gitops has no docker.sock)."""
+        from app.services.infra_driver_client import (
+            InfraDriverClient,
+            WorkspaceContext,
+        )
+
+        gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+        return InfraDriverClient(), WorkspaceContext(
+            workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local"),
+            domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+            gitops_dir=os.path.join(gitops_root, "gitops"),
+            secrets_dir=os.path.join(gitops_root, "secrets"),
+        )
 
     def _get_image_dir(self, checksum: str) -> str:
         return os.path.join(self.images_base_dir, checksum)
@@ -171,34 +175,36 @@ class ImageService:
         Gets all available tagged docker images. Returns them as a list.
         Uses async Docker client for non-blocking operation.
         """
+        from app.services.infra_driver_client import InfraDriverError
+
         try:
-            docker_client = get_async_docker_client()
-            # Get all images and filter for those with internal/ prefix
-            all_images = await docker_client.list_images()
+            client, ctx = self._driver_client_ctx()
+            # The driver returns the workspace's images (already internal/<ws>-…).
+            all_images = await client.image_list(ctx)
             internal_images = []
             metadata_entries = self._load_metadata_entries()
             seen_tags = set()
 
             for image in all_images:
-                tags = image.get("RepoTags") or []
-                for tag in tags:
-                    if tag.startswith("internal/"):
-                        checksum = self._extract_checksum_from_tag(tag)
-                        build_status = (
-                            self._get_build_status(checksum) if checksum else "ready"
-                        )
-                        internal_images.append(
-                            {
-                                "id": image.get("Id"),
-                                "tag": tag,
-                                "created": image.get("Created"),
-                                "size": image.get("Size"),
-                                "building": build_status == "building",
-                                "build_status": build_status,
-                                "checksum": checksum,
-                            }
-                        )
-                        seen_tags.add(tag)
+                tag = image.get("tag")
+                if not tag:
+                    continue
+                checksum = self._extract_checksum_from_tag(tag)
+                build_status = (
+                    self._get_build_status(checksum) if checksum else "ready"
+                )
+                internal_images.append(
+                    {
+                        "id": image.get("id"),
+                        "tag": tag,
+                        "created": image.get("created"),
+                        "size": image.get("size"),
+                        "building": build_status == "building",
+                        "build_status": build_status,
+                        "checksum": checksum,
+                    }
+                )
+                seen_tags.add(tag)
 
             # Add entries for builds that are still running or failed (no docker image yet)
             for checksum, metadata in metadata_entries.items():
@@ -223,8 +229,8 @@ class ImageService:
                     )
 
             return internal_images
-        except DockerError as e:
-            raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
+        except InfraDriverError as e:
+            raise HTTPException(status_code=500, detail=f"Driver error: {str(e)}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
@@ -255,15 +261,30 @@ class ImageService:
             final_log_path = success_log_file_path
             build_status = "success"
             try:
-                # Build the Docker image and stream logs
-                for line in self.client.api.build(
-                    path=build_context_path, tag=full_tag, rm=True, decode=True
-                ):
-                    if "stream" in line:
-                        with open(building_log_file_path, "a") as f:
-                            f.write(line["stream"])
-                # Tag with latest
-                self.client.images.get(full_tag).tag(tag_root, tag="latest")
+                # Build the image on the driver (gitops has no docker.sock),
+                # streaming build-log lines to the building log file. The build
+                # context is on the shared gitops volume, so the driver reads it.
+                from app.services.infra_driver_client import BuildRequest
+
+                client, ctx = self._driver_client_ctx()
+
+                async def _on_line(line: str):
+                    with open(building_log_file_path, "a") as f:
+                        f.write(line + "\n")
+
+                async def _run():
+                    await client.build_image(
+                        BuildRequest(
+                            ctx=ctx,
+                            tag=full_tag,
+                            source_path=build_context_path,
+                            dockerfile="Dockerfile",
+                            source_sha=checksum,
+                        ),
+                        progress_callback=_on_line,
+                    )
+
+                asyncio.run(_run())
 
                 # Build completed successfully, rename log file
                 with open(building_log_file_path, "a") as f:
@@ -474,15 +495,14 @@ class ImageService:
         }
 
     async def delete_image(self, image_tag: str):
-        """
-        Deletes a docker image with the tag "internal/{image_tag}"
-        Uses async Docker client for non-blocking operation.
-        """
+        """Delete the image internal/{image_tag} via the driver (workspace-scoped)."""
+        from app.services.infra_driver_client import InfraDriverError
+
         full_tag = f"internal/{image_tag}"
 
         try:
-            docker_client = get_async_docker_client()
-            await docker_client.remove_image(full_tag, force=True)
+            client, ctx = self._driver_client_ctx()
+            await client.image_remove(ctx, full_tag)
 
             checksum = self._extract_checksum_from_tag(full_tag)
             if checksum:
@@ -500,12 +520,8 @@ class ImageService:
                 "status": "success",
                 "message": f"Image {image_tag} deleted successfully",
             }
-        except DockerError as e:
-            if e.status_code == 404:
-                raise HTTPException(
-                    status_code=404, detail=f"Image {full_tag} not found"
-                )
-            raise HTTPException(status_code=500, detail=f"Docker API error: {str(e)}")
+        except InfraDriverError as e:
+            raise HTTPException(status_code=500, detail=f"Driver error: {str(e)}")
 
     def get_image_logs(self, image_tag: str, lines: int = 100):
         """

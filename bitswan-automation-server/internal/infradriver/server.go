@@ -39,6 +39,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(PathContainersStop, s.handleStop)
 	mux.HandleFunc(PathContainersRestart, s.handleRestart)
 	mux.HandleFunc(PathContainersExec, s.handleExec)
+	mux.HandleFunc(PathImagesList, s.handleImageList)
+	mux.HandleFunc(PathImagesRemove, s.handleImageRemove)
 	if s.GitProjectRoot != "" {
 		// git smart-HTTP lives at the root; /v1/* above takes precedence because
 		// ServeMux longest-prefix matches the explicit primitive paths first.
@@ -76,6 +78,31 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, ContainerListResult{Containers: containers})
+}
+
+func (s *Server) handleImageList(w http.ResponseWriter, r *http.Request) {
+	var body ListBody // reuses {ctx}
+	if !decode(w, r, &body) {
+		return
+	}
+	images, err := s.driver.ImageList(r.Context(), body.Ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, ImageListResult{Images: images})
+}
+
+func (s *Server) handleImageRemove(w http.ResponseWriter, r *http.Request) {
+	var body ImageBody
+	if !decode(w, r, &body) {
+		return
+	}
+	if err := s.driver.ImageRemove(r.Context(), body.Ctx, body.Tag); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, OKResult{OK: true})
 }
 
 func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {

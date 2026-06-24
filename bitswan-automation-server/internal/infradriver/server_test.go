@@ -12,22 +12,24 @@ import (
 
 // fakeDriver is a programmable Driver for transport tests.
 type fakeDriver struct {
-	containers  []Container
-	gotFilter   ContainerFilter
-	logLines    []LogLine
-	logsErr     error
-	stopped     string
-	restarted   string
-	restartErr  error
-	applyCalled bool
-	buildLogs   []string
-	buildImage  ImageRef
-	buildErr    error
-	execSpec    ExecSpec
-	execStdin   []byte
-	execStdout  []byte
-	execStderr  []byte
-	execCode    int
+	containers   []Container
+	gotFilter    ContainerFilter
+	logLines     []LogLine
+	logsErr      error
+	stopped      string
+	restarted    string
+	restartErr   error
+	applyCalled  bool
+	buildLogs    []string
+	buildImage   ImageRef
+	buildErr     error
+	execSpec     ExecSpec
+	execStdin    []byte
+	execStdout   []byte
+	execStderr   []byte
+	execCode     int
+	images       []Image
+	removedImage string
 }
 
 func (f *fakeDriver) Apply(_ context.Context, _ ApplyRequest, _ func(Progress)) ([]Route, error) {
@@ -62,6 +64,15 @@ func (f *fakeDriver) ContainerStop(_ context.Context, _ WorkspaceContext, contai
 func (f *fakeDriver) ContainerRestart(_ context.Context, _ WorkspaceContext, container string) error {
 	f.restarted = container
 	return f.restartErr
+}
+
+func (f *fakeDriver) ImageList(_ context.Context, _ WorkspaceContext) ([]Image, error) {
+	return f.images, nil
+}
+
+func (f *fakeDriver) ImageRemove(_ context.Context, _ WorkspaceContext, tag string) error {
+	f.removedImage = tag
+	return nil
 }
 
 func (f *fakeDriver) ContainerInspect(_ context.Context, _ WorkspaceContext, container string) ([]byte, error) {
