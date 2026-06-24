@@ -73,21 +73,18 @@ jobs:
           mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
           cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
 
-      # 5) Cross-compile for six target triples
+      # 5) Build the shipped target
       - name: Build binaries
         env:
           VERSION: ${{ steps.calver.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          # Targets you want to ship
+          # Targets you want to ship. Only linux/amd64 is built: the daemon runs
+          # in a linux/amd64 container and the host CLI is used on the same box,
+          # so the other triples aren't shipped (some daemon code is Linux-only).
           TARGETS=(
             "linux/amd64"
-            "linux/arm64"
-            "darwin/amd64"
-            "darwin/arm64"
-            "windows/amd64"
-            "windows/arm64"
           )
           for target in "${TARGETS[@]}"; do
             IFS="/" read -r GOOS GOARCH <<<"$target"
