@@ -133,9 +133,9 @@ class Container:
         )
 
     def to_docker_dict(self) -> dict:
-        """Map to the docker-API /containers/json shape gitops historically got
-        the docker-API container shape gitops historically used, so the existing get_automations
-        overlay (which reads Id/Names/State/Status/Created/Labels) is unchanged."""
+        """Map to the docker-API /containers/json shape gitops historically used,
+        so the existing get_automations overlay (which reads
+        Id/Names/State/Status/Created/Labels) is unchanged."""
         return {
             "Id": self.id,
             "Names": [f"/{self.name}"] if self.name else [],
