@@ -122,11 +122,13 @@ class BpSecretsRequest(BaseModel):
 @router.get("/business-processes/{bp}/secrets")
 async def get_bp_secrets_route(
     bp: str,
+    by: str | None = None,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """A BP's decrypted per-stage secrets: {dev, staging, production} each a
-    {KEY: value} map (Deployments → Secrets)."""
-    return automation_service.read_bp_secrets(bp)
+    {KEY: value} map (Deployments → Secrets). Production values are redacted
+    unless `by` (a shim-verified email) resolves to admin/auditor."""
+    return automation_service.read_bp_secrets(bp, by=by)
 
 
 @router.put("/business-processes/{bp}/secrets")

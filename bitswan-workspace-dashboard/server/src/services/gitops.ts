@@ -545,9 +545,13 @@ export class GitopsClient {
 
   async bpSecrets(
     bp: string,
+    by?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    // `by` is the gate-verified caller email; gitops resolves its role from the
+    // daemon and redacts production secrets for non-admin/auditor callers.
+    const q = by ? `?by=${encodeURIComponent(by)}` : '';
     const r = await fetch(
-      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets${q}`,
       { headers: { Authorization: `Bearer ${this.secret}` } },
     );
     let body: unknown = null;

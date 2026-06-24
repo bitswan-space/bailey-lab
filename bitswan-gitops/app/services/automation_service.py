@@ -17,6 +17,7 @@ from app.models import DeployedAutomation
 from app.utils import (
     AutomationConfig,
     calculate_git_tree_hash,
+    daemon_user_role,
     generate_workspace_url,
     read_bitswan_yaml,
     dump_bitswan_yaml,
@@ -1553,9 +1554,16 @@ class AutomationService:
         the stage has never been deployed."""
         return self._bp_stage_node(bp, stage).get("git_commit")
 
-    def read_bp_secrets(self, bp: str) -> dict:
+    def read_bp_secrets(self, bp: str, by: str | None = None) -> dict:
         """Decrypted per-stage secrets for a BP: {dev, staging, production} each
-        a {KEY: value} map. Each stage is independent (dev covers live-dev)."""
+        a {KEY: value} map. Each stage is independent (dev covers live-dev).
+
+        Production secrets are admin/auditor-only: the production realm is
+        redacted (returned empty) unless `by` resolves — authoritatively, via the
+        daemon's role store — to an admin or auditor. The role is never taken
+        from the caller; an unknown email or any lookup failure fails CLOSED
+        (treated as unprivileged), so dev/staging stay readable but production
+        values are withheld."""
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         enc = (bs.get("secrets") or {}).get(bp) or {}
         out: dict[str, dict] = {}
@@ -1564,7 +1572,22 @@ class AutomationService:
             out[realm] = (
                 bp_secrets.decrypt_secrets(self.secrets_dir, blob) if blob else {}
             )
+        if "production" in out and not self._is_production_role(by):
+            out["production"] = {}
         return out
+
+    def _is_production_role(self, by: str | None) -> bool:
+        """Whether `by` (an email a trusted shim has verified) is allowed to see
+        production secrets — i.e. resolves to admin/auditor in the daemon's
+        authoritative role store. Fails CLOSED on missing identity or any
+        lookup error (never guesses a privileged role)."""
+        if not by:
+            return False
+        try:
+            return daemon_user_role(by) in self._FW_ROLES
+        except Exception:
+            logger.warning("role lookup failed for %s; denying production secrets", by)
+            return False
 
     async def write_bp_secrets(
         self,

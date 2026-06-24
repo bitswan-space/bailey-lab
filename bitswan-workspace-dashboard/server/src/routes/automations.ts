@@ -148,7 +148,10 @@ export function registerAutomationRoutes(
       reply.header('Cache-Control', 'no-store');
       if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
       try {
-        const r = await gitops.bpSecrets(req.params.bp);
+        // Pass the gate-verified email so gitops can authoritatively gate
+        // production secrets to admin/auditor (it resolves the role itself).
+        const email = await emailFromRequest(req, app.log);
+        const r = await gitops.bpSecrets(req.params.bp, email ?? undefined);
         if (!r.ok) {
           return reply
             .code(r.status >= 400 && r.status < 500 ? r.status : 502)
