@@ -11,7 +11,6 @@ This replaces the old shared-``.git`` worktree model. The router is served under
 ``/copies``.
 """
 
-import asyncio
 import datetime
 import logging
 import os
@@ -22,7 +21,6 @@ import tempfile
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from app.async_docker import get_async_docker_client, DockerError
 from app.deploy_runner import spawn_set_deploy
 from app.services.automation_service import scan_workspace_sources
 from app.services.git_server import bare_repo_path
@@ -940,72 +938,64 @@ def _own_container_id_from_proc() -> str | None:
     return None
 
 
-async def _own_container_id_from_api() -> str | None:
-    hostname = os.uname().nodename
-    if not hostname:
-        return None
-    try:
-        client = get_async_docker_client()
-        containers = await client.list_containers(filters={"status": ["running"]})
-        for c in containers:
-            cid = c.get("Id")
-            if not cid:
-                continue
-            try:
-                info = await client.get_container(cid)
-                if info.get("Config", {}).get("Hostname") == hostname:
-                    return cid
-            except DockerError:
-                continue
-    except Exception as e:
-        logger.debug("Docker API container lookup failed: %s", e)
-    return None
-
-
 async def _own_container_id() -> str | None:
-    return _own_container_id_from_proc() or await _own_container_id_from_api()
+    # /proc-based id works without Docker (reads our own cgroup) — gitops has no
+    # docker.sock after the cut-over, so there is no API fallback.
+    return _own_container_id_from_proc()
 
 
 async def _rm_rf_as_root_in_container(path: str) -> bool:
-    """Wipe `path` as root via docker exec into our own container.
-
-    A copy's working tree contains files created by other containers
-    (live-dev automations, build outputs) that uid 1000 often can't unlink. We
-    have the Docker socket, so re-enter our own container as root to remove it.
+    """Wipe `path` as root by re-entering our own container via the driver's
+    exec (--user 0). A copy's working tree contains files created by other
+    containers (live-dev automations, build outputs) that uid 1000 often can't
+    unlink. The driver holds docker.sock and permits this because the gitops
+    container is labelled with this workspace.
     """
     container_id = await _own_container_id()
     if not container_id:
         logger.warning(
-            "rm -rf %s: could not determine own container ID; cannot docker exec as root",
+            "rm -rf %s: could not determine own container ID; cannot exec as root",
             path,
         )
         return False
+    from app.services.infra_driver_client import (
+        ExecSpec,
+        InfraDriverClient,
+        InfraDriverError,
+        WorkspaceContext,
+    )
+
+    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+    client = InfraDriverClient()
+    ctx = WorkspaceContext(
+        workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local"),
+        domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+        gitops_dir=os.path.join(gitops_root, "gitops"),
+        secrets_dir=os.path.join(gitops_root, "secrets"),
+    )
+    err: list[bytes] = []
+
+    async def on_stderr(d: bytes):
+        err.append(d)
+
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker",
-            "exec",
-            "--user",
-            "0",
-            container_id,
-            "rm",
-            "-rf",
-            path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        rc = await client.exec(
+            ctx,
+            ExecSpec(container=container_id, cmd=["rm", "-rf", path], user="0"),
+            on_stderr=on_stderr,
         )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.warning(
-                "rm -rf %s via docker exec failed (%s): %s",
-                path,
-                proc.returncode,
-                stderr.decode(errors="replace").strip(),
-            )
-            return False
-        return True
-    except Exception as e:
-        logger.warning("rm -rf %s via docker exec raised: %s", path, e)
+    except InfraDriverError as e:
+        logger.warning("rm -rf %s via driver exec raised: %s", path, e)
         return False
+    if rc != 0:
+        logger.warning(
+            "rm -rf %s via driver exec failed (%s): %s",
+            path,
+            rc,
+            b"".join(err).decode(errors="replace").strip(),
+        )
+        return False
+    return True
 
 
 class CommitRequest(BaseModel):

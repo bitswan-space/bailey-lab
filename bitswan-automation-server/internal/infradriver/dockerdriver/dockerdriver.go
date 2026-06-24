@@ -241,6 +241,9 @@ func (d *DockerDriver) ContainerExec(ctx context.Context, _ infradriver.Workspac
 	if spec.Tty {
 		args = append(args, "-t")
 	}
+	if spec.User != "" {
+		args = append(args, "--user", spec.User)
+	}
 	args = append(args, spec.Container)
 	args = append(args, spec.Cmd...)
 	cmd := exec.CommandContext(ctx, "docker", args...)

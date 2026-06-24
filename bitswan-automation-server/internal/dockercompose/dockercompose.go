@@ -91,6 +91,10 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		"image":    config.GitopsImage,
 		"restart":  "always",
 		"hostname": config.WorkspaceName + "-gitops",
+		// Labelled with the workspace so the driver permits gitops's scoped
+		// self-exec (root cleanup of copy trees) — the driver refuses any
+		// container not carrying this workspace label.
+		"labels":   map[string]string{"gitops.workspace": config.WorkspaceName},
 		"networks": []string{"bitswan_network"},
 		"volumes": []interface{}{
 			wsVolume("gitops", "/gitops/gitops"),

@@ -86,6 +86,7 @@ type ExecSpec struct {
 	Container string   `json:"container"`
 	Cmd       []string `json:"cmd"`
 	Tty       bool     `json:"tty,omitempty"`
+	User      string   `json:"user,omitempty"` // docker exec --user (e.g. "0" for root)
 }
 
 // WorkspaceContext is everything the compiler needs that is not in bitswan.yaml.

@@ -195,9 +195,15 @@ class ExecSpec:
     container: str
     cmd: list[str]
     tty: bool = False
+    user: str = ""
 
     def to_json(self) -> dict:
-        return {"container": self.container, "cmd": self.cmd, "tty": self.tty}
+        return {
+            "container": self.container,
+            "cmd": self.cmd,
+            "tty": self.tty,
+            "user": self.user,
+        }
 
 
 class InfraDriverClient:
