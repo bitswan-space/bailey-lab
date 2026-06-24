@@ -45,7 +45,7 @@ func (c *compileState) stageNetwork(realm string) string {
 
 // Apply is the bitswan.yaml compiler + reconciler. It parses the declaration,
 // generates the docker-compose project + stage networks + ingress routes, brings
-// it up, installs CA certs + oauth2 sidecars, and returns the routes. Invoked by
+// it up, installs CA certs, and returns the routes. Invoked by
 // the git post-receive hook (see infradriver/README.md), so prog writes to the
 // hook's stdout, which git relays to the pushing client.
 //

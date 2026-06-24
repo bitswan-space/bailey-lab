@@ -56,7 +56,6 @@ _DRIVER_STEP_MAP = {
     "compose_up": DeployStep.DOCKER_COMPOSE_UP,
     "provision": DeployStep.PROVISIONING_SERVICES,
     "certs": DeployStep.INSTALLING_CERTS,
-    "oauth2": DeployStep.STARTING_OAUTH2_PROXY,
     "ingress": DeployStep.RECONCILING_INGRESS,
 }
 

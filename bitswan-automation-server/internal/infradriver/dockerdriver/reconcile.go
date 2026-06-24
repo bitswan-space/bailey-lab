@@ -13,12 +13,8 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 )
 
-// oauth2ProxyPath is the host binary docker-copied into oauth2-enabled
-// containers (gitops oauth2_helpers.OAUTH2_PROXY_PATH).
-const oauth2ProxyPath = "/usr/local/bin/oauth2-proxy"
-
 // reconcile brings the generated compose project up and applies the post-up
-// container mutations (CA certs, oauth2 sidecars). Port of
+// container mutations (CA certs). Port of
 // automation_service.apply_compose_for_deployments' operational tail.
 func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, composeYAML string, routes []infradriver.Route, report func(step, msg string)) error {
 	// 1. Ensure the per-(workspace, stage) networks the compose references as
@@ -53,14 +49,11 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		return fmt.Errorf("ensure live postgres dbs: %w", err)
 	}
 
-	// 4. Install CA certs + start oauth2 sidecars in the freshly-(re)started
-	//    containers selected by their gitops labels.
+	// 4. Install CA certs in the freshly-(re)started containers selected by their
+	//    gitops labels. (No per-container oauth2-proxy: oauth2 is deprecated —
+	//    Bailey's protected-ingress handles auth at the edge.)
 	report("certs", "Installing CA certificates...")
 	if err := installCertificatesInContainers(ctx, wctx, report); err != nil {
-		return err
-	}
-	report("oauth2", "Starting oauth2 sidecars...")
-	if err := startOAuth2ProxyInContainers(ctx, wctx, report); err != nil {
 		return err
 	}
 
@@ -169,47 +162,6 @@ func installCertificatesInContainers(ctx context.Context, wctx infradriver.Works
 		}
 		if out, err := exec.CommandContext(ctx, "docker", "exec", c.id, "sh", "-c", certInstallScript).CombinedOutput(); err != nil {
 			report("certs", fmt.Sprintf("cert install in %s failed: %v: %s", c.id[:12], err, strings.TrimSpace(string(out))))
-		}
-	}
-	return nil
-}
-
-// isOAuth2ProxyRunning checks /proc for an oauth2-proxy process in the container
-// (oauth2_helpers.is_oauth2_proxy_running).
-func isOAuth2ProxyRunning(ctx context.Context, id string) bool {
-	script := `for f in /proc/[0-9]*/comm; do if [ "$(cat $f 2>/dev/null)" = "oauth2-proxy" ]; then exit 0; fi; done; exit 1`
-	return exec.CommandContext(ctx, "docker", "exec", id, "sh", "-c", script).Run() == nil
-}
-
-// startOAuth2ProxyInContainers ports start_oauth2_proxy_in_container: for every
-// running container labelled gitops.oauth2.enabled=true that is not already
-// running oauth2-proxy, docker-cp the binary in and start it detached.
-func startOAuth2ProxyInContainers(ctx context.Context, wctx infradriver.WorkspaceContext, report func(step, msg string)) error {
-	infos, err := listWorkspaceContainers(ctx, wctx)
-	if err != nil {
-		return err
-	}
-	logoutFlag := ""
-	if issuer := strings.TrimSpace(os.Getenv("OAUTH2_PROXY_OIDC_ISSUER_URL")); issuer != "" {
-		logoutFlag = fmt.Sprintf(" --backend-logout-url='%s/protocol/openid-connect/logout?id_token_hint={id_token}'", issuer)
-	}
-	for _, c := range infos {
-		if c.labels["gitops.oauth2.enabled"] != "true" {
-			continue
-		}
-		if c.state != "running" {
-			continue
-		}
-		if isOAuth2ProxyRunning(ctx, c.id) {
-			continue
-		}
-		if out, err := exec.CommandContext(ctx, "docker", "cp", oauth2ProxyPath, c.id+":"+oauth2ProxyPath).CombinedOutput(); err != nil {
-			report("oauth2", fmt.Sprintf("oauth2-proxy copy into %s failed: %v: %s", c.id[:12], err, strings.TrimSpace(string(out))))
-			continue
-		}
-		startCmd := fmt.Sprintf("oauth2-proxy%s > /tmp/oauth2-proxy.log 2>&1 &", logoutFlag)
-		if out, err := exec.CommandContext(ctx, "docker", "exec", c.id, "sh", "-c", startCmd).CombinedOutput(); err != nil {
-			report("oauth2", fmt.Sprintf("oauth2-proxy start in %s failed: %v: %s", c.id[:12], err, strings.TrimSpace(string(out))))
 		}
 	}
 	return nil
