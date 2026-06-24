@@ -91,6 +91,11 @@ func pushedRef() string {
 // deploy-managed content (bitswan.yaml + source trees + the generated
 // docker-compose.yaml); secrets/snapshots/firewall are separate volume subpaths
 // mounted elsewhere, so clearing dest never touches them.
+//
+// CRITICAL: dest is gitops's OWN git working tree (it commits bitswan.yaml there
+// and pushes HEAD to us), so .git is PRESERVED — wiping it would destroy gitops's
+// repo. The pushed tree's content matches what gitops just committed, so keeping
+// .git and refreshing the worktree is consistent.
 func materialize(gitDir, ref, dest string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
@@ -117,13 +122,17 @@ func materialize(gitDir, ref, dest string) error {
 	return nil
 }
 
-// clearDir removes every entry inside dir, keeping dir itself (a volume mount).
+// clearDir removes every entry inside dir, keeping dir itself (a volume mount)
+// AND .git (gitops's working repo lives here — see materialize).
 func clearDir(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
+		if e.Name() == ".git" {
+			continue // preserve gitops's git repo
+		}
 		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
 			return err
 		}
