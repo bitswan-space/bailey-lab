@@ -826,7 +826,7 @@ async def _run_deploy_with_progress(
 
     async def progress_callback(step: str, message: str):
         # Never set COMPLETED here — only _run_deploy_with_progress decides success/failure
-        deploy_step = DeployStep(step)
+        deploy_step = DeployStep.coerce(step)
         await deploy_manager.update_task(
             task_id,
             status=DeployStatus.IN_PROGRESS,
@@ -896,7 +896,7 @@ async def _run_bp_deploy_with_progress(
     """
 
     async def progress_callback(step: str, message: str, current: int | None = None):
-        deploy_step = DeployStep(step)
+        deploy_step = DeployStep.coerce(step)
         if current is not None:
             await deploy_manager.set_current(task_id, current)
         await deploy_manager.update_task(
@@ -972,7 +972,7 @@ async def _run_bp_promote_with_progress(
     """
 
     async def progress_callback(step: str, message: str, current: int | None = None):
-        deploy_step = DeployStep(step)
+        deploy_step = DeployStep.coerce(step)
         if current is not None:
             await deploy_manager.set_current(task_id, current)
         await deploy_manager.update_task(

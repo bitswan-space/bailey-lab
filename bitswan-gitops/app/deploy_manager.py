@@ -33,7 +33,32 @@ class DeployStep(str, Enum):
     INSTALLING_CERTS = "installing_certs"
     STARTING_OAUTH2_PROXY = "starting_oauth2_proxy"
     STORING_TAGS = "storing_tags"
+    DEPLOYING = "deploying"  # generic step for driver-push progress
     DONE = "done"
+
+    @classmethod
+    def coerce(cls, step: str) -> "DeployStep":
+        """Map a progress-step string to a DeployStep. The infra-driver streams
+        its own step vocabulary over the git-push sideband (compile, compose_up,
+        provision, certs, oauth2, ingress, …); translate those to the UI's steps
+        and fall back to DEPLOYING for anything unrecognized, so a new driver
+        step never crashes the deploy task."""
+        try:
+            return cls(step)
+        except ValueError:
+            return _DRIVER_STEP_MAP.get(step, cls.DEPLOYING)
+
+
+# Driver (infra-driver reconcile) step names → the dashboard's DeployStep.
+_DRIVER_STEP_MAP = {
+    "compile": DeployStep.GENERATING_COMPOSE,
+    "networks": DeployStep.GENERATING_COMPOSE,
+    "compose_up": DeployStep.DOCKER_COMPOSE_UP,
+    "provision": DeployStep.PROVISIONING_SERVICES,
+    "certs": DeployStep.INSTALLING_CERTS,
+    "oauth2": DeployStep.STARTING_OAUTH2_PROXY,
+    "ingress": DeployStep.RECONCILING_INGRESS,
+}
 
 
 @dataclass
