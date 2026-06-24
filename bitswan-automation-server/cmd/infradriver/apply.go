@@ -23,48 +23,61 @@ func newApplyCmd() *cobra.Command {
 		Use:   "apply",
 		Short: "Compile + apply the pushed bitswan.yaml (run by the post-receive hook)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if gitDir == "" {
-				return fmt.Errorf("--git-dir is required")
-			}
-			gitopsDir := gitConfig(gitDir, "bitswan.gitopsdir")
-			if gitopsDir == "" {
-				return fmt.Errorf("bitswan.gitopsdir not configured on %s", gitDir)
-			}
-			ref := pushedRef() // post-receive feeds "<old> <new> <ref>" on stdin
-			// Materialize the pushed tree into the gitops volume dir — the
-			// authoritative deployed tree the generated compose bind-mounts
-			// reference (workspaces/<ws>/gitops/<source>). It must mirror the push
-			// exactly (deletions included), so the dir is rebuilt from the archive.
-			if err := materialize(gitDir, ref, gitopsDir); err != nil {
+			// This runs as the deploy repo's post-receive hook, whose non-zero
+			// exit does NOT fail the git push — so an apply error would be
+			// invisible to the pushing gitops. Emit a structured "[error] …" line
+			// (relayed over the git sideband) that gitops's client.deploy detects
+			// and turns into a failed deploy. Fail loudly, never silently.
+			if err := runApply(cmd, gitDir); err != nil {
+				fmt.Printf("[error] %s\n", err)
 				return err
 			}
-
-			yamlBytes, err := os.ReadFile(gitopsDir + "/bitswan.yaml")
-			if err != nil {
-				return fmt.Errorf("read bitswan.yaml from push: %w", err)
-			}
-			wctx := infradriver.WorkspaceContext{
-				WorkspaceName: gitConfig(gitDir, "bitswan.workspace"),
-				Domain:        gitConfig(gitDir, "bitswan.domain"),
-				GitopsDir:     gitopsDir,
-				SecretsDir:    gitConfig(gitDir, "bitswan.secretsdir"),
-				WrapAvailable: gitConfig(gitDir, "bitswan.wrap") == "true",
-			}
-			// The driver configures ingress itself inside Apply (k8s-style: the
-			// applier owns the Ingress), so the returned routes are informational —
-			// log a one-line summary for the push output, not a contract.
-			routes, err := dockerdriver.New(wctx.WorkspaceName).Apply(cmd.Context(),
-				infradriver.ApplyRequest{Ctx: wctx, BitswanYAML: string(yamlBytes)},
-				func(p infradriver.Progress) { fmt.Printf("[%s] %s\n", p.Step, p.Message) })
-			if err != nil {
-				return err
-			}
-			fmt.Printf("[done] applied %d ingress route(s)\n", len(routes))
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&gitDir, "git-dir", "", "the bare repo that received the push")
 	return cmd
+}
+
+func runApply(cmd *cobra.Command, gitDir string) error {
+	if gitDir == "" {
+		return fmt.Errorf("--git-dir is required")
+	}
+	gitopsDir := gitConfig(gitDir, "bitswan.gitopsdir")
+	if gitopsDir == "" {
+		return fmt.Errorf("bitswan.gitopsdir not configured on %s", gitDir)
+	}
+	ref := pushedRef() // post-receive feeds "<old> <new> <ref>" on stdin
+	// Materialize the pushed tree into the gitops volume dir — the authoritative
+	// deployed tree the generated compose bind-mounts reference
+	// (workspaces/<ws>/gitops/<source>). It must mirror the push exactly
+	// (deletions included), so the dir is rebuilt from the archive (.git kept).
+	if err := materialize(gitDir, ref, gitopsDir); err != nil {
+		return err
+	}
+
+	yamlBytes, err := os.ReadFile(gitopsDir + "/bitswan.yaml")
+	if err != nil {
+		return fmt.Errorf("read bitswan.yaml from push: %w", err)
+	}
+	wctx := infradriver.WorkspaceContext{
+		WorkspaceName: gitConfig(gitDir, "bitswan.workspace"),
+		Domain:        gitConfig(gitDir, "bitswan.domain"),
+		GitopsDir:     gitopsDir,
+		SecretsDir:    gitConfig(gitDir, "bitswan.secretsdir"),
+		WrapAvailable: gitConfig(gitDir, "bitswan.wrap") == "true",
+	}
+	// The driver configures ingress itself inside Apply (k8s-style: the applier
+	// owns the Ingress), so the returned routes are informational — log a
+	// one-line summary for the push output, not a contract.
+	routes, err := dockerdriver.New(wctx.WorkspaceName).Apply(cmd.Context(),
+		infradriver.ApplyRequest{Ctx: wctx, BitswanYAML: string(yamlBytes)},
+		func(p infradriver.Progress) { fmt.Printf("[%s] %s\n", p.Step, p.Message) })
+	if err != nil {
+		return err
+	}
+	fmt.Printf("[done] applied %d ingress route(s)\n", len(routes))
+	return nil
 }
 
 // pushedRef reads the updated ref from the post-receive stdin protocol

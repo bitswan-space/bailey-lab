@@ -60,6 +60,7 @@ _EXEC_ERROR = 4
 
 # Markers the driver's apply prints on the post-receive hook's stdout.
 _ROUTE_PREFIX = "[route] "
+_ERROR_PREFIX = "[error] "
 _REMOTE_PREFIX = "remote: "
 
 # A progress callback: (step, message) -> awaitable. Mirrors the gitops deploy
@@ -267,9 +268,10 @@ class InfraDriverClient:
         await self._git(work_tree, *commit_args, error="commit resolved tree")
 
         routes: list[Route] = []
+        errors: list[str] = []
 
         async def on_line(line: str):
-            await self._handle_push_line(line, routes, progress_callback)
+            await self._handle_push_line(line, routes, errors, progress_callback)
 
         rc = await self._run_streaming(
             [
@@ -287,12 +289,18 @@ class InfraDriverClient:
             raise InfraDriverError(
                 f"deploy push to driver failed (git push exit {rc}); see progress log"
             )
+        # The apply runs as the driver's post-receive hook, whose failure does NOT
+        # fail the push, so it emits a "[error] …" line we surface here — otherwise
+        # a failed compile/reconcile would masquerade as a successful deploy.
+        if errors:
+            raise InfraDriverError("driver apply failed: " + "; ".join(errors))
         return routes
 
     async def _handle_push_line(
         self,
         line: str,
         routes: list[Route],
+        errors: list[str],
         progress_callback: Optional[ProgressCallback],
     ):
         # git writes the hook's stdout back as "remote: <line>" on stderr.
@@ -300,6 +308,10 @@ class InfraDriverClient:
             line = line[len(_REMOTE_PREFIX) :]
         line = line.rstrip()
         if not line:
+            return
+        if line.startswith(_ERROR_PREFIX):
+            # apply failed in the post-receive hook; collected and raised by deploy().
+            errors.append(line[len(_ERROR_PREFIX) :])
             return
         if line.startswith(_ROUTE_PREFIX):
             payload = line[len(_ROUTE_PREFIX) :]
