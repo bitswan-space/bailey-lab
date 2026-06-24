@@ -37,18 +37,58 @@ def generate_password(length: int = 32) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+def _driver_client_ctx():
+    """An infra-driver client + WorkspaceContext for these module-level helpers."""
+    from app.services.infra_driver_client import InfraDriverClient, WorkspaceContext
+
+    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+    return InfraDriverClient(), WorkspaceContext(
+        workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local"),
+        domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+        gitops_dir=os.path.join(gitops_root, "gitops"),
+        secrets_dir=os.path.join(gitops_root, "secrets"),
+    )
+
+
 async def run_docker_command(
     *args: str, cwd: str | None = None
 ) -> tuple[str, str, int]:
-    """Run a docker command asynchronously, return (stdout, stderr, returncode)."""
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
+    """Run a `docker exec` through the infra-driver (gitops has no docker.sock).
+    Accepts the ("docker","exec",<container>,*cmd) shape and returns
+    (stdout, stderr, returncode)."""
+    from app.services.infra_driver_client import (
+        ExecSpec,
+        InfraDriverError,
     )
-    stdout, stderr = await proc.communicate()
-    return stdout.decode(), stderr.decode(), proc.returncode
+
+    if len(args) < 3 or args[0] != "docker" or args[1] != "exec":
+        raise ValueError(
+            "run_docker_command now only supports ('docker','exec',<container>,*cmd)"
+        )
+    client, ctx = _driver_client_ctx()
+    out: list[bytes] = []
+    err: list[bytes] = []
+
+    async def on_stdout(d: bytes):
+        out.append(d)
+
+    async def on_stderr(d: bytes):
+        err.append(d)
+
+    try:
+        rc = await client.exec(
+            ctx,
+            ExecSpec(container=args[2], cmd=list(args[3:])),
+            on_stdout=on_stdout,
+            on_stderr=on_stderr,
+        )
+    except InfraDriverError as e:
+        return "", str(e), 1
+    return (
+        b"".join(out).decode(errors="replace"),
+        b"".join(err).decode(errors="replace"),
+        rc,
+    )
 
 
 class InfraService(ABC):
@@ -149,16 +189,12 @@ class InfraService(ABC):
         return os.path.exists(self.secrets_file_path)
 
     async def is_running(self) -> bool:
-        """Check if the service container is running."""
-        stdout, _, rc = await run_docker_command(
-            "docker",
-            "ps",
-            "--filter",
-            f"name=^/{self.container_name}$",
-            "--format",
-            "{{.Names}}",
+        """Check if the service container is running (via the driver's list)."""
+        client, ctx = _driver_client_ctx()
+        conts = await client.container_list(ctx)
+        return any(
+            c.name == self.container_name and c.state == "running" for c in conts
         )
-        return rc == 0 and stdout.strip() != ""
 
     def _save_secrets(self, content: str) -> None:
         """Save secrets env file."""
