@@ -87,6 +87,12 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		gitopsSecretToken = uniuri.NewLen(64)
 	}
 
+	// The infra-driver gets its OWN token, distinct from the gitops API secret.
+	// gitops and its driver are a pair (generated together, so it need not be
+	// persisted), but keeping it separate means a leak of the gitops secret does
+	// not grant driver (push + exec = docker.sock) access, and vice versa.
+	driverToken := uniuri.NewLen(64)
+
 	gitopsService := map[string]interface{}{
 		"image":    config.GitopsImage,
 		"restart":  "always",
@@ -205,11 +211,11 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	// with the bitswan binary bind-mounted exactly as the daemon mounts its own.
 	gitopsService["environment"] = append(gitopsService["environment"].([]string),
 		"BITSWAN_INFRA_DRIVER_URL=http://"+config.WorkspaceName+"-infra-driver:9090",
-		"BITSWAN_INFRA_DRIVER_TOKEN="+gitopsSecretToken,
-		"BITSWAN_DEPLOY_REMOTE=http://x:"+gitopsSecretToken+"@"+config.WorkspaceName+"-infra-driver:9090/deploy.git",
+		"BITSWAN_INFRA_DRIVER_TOKEN="+driverToken,
+		"BITSWAN_DEPLOY_REMOTE=http://x:"+driverToken+"@"+config.WorkspaceName+"-infra-driver:9090/deploy.git",
 	)
 
-	driverService := config.buildDriverService(gitopsSecretToken, wsVolume, homeDir)
+	driverService := config.buildDriverService(driverToken, wsVolume, homeDir)
 
 	// Construct the docker-compose data structure
 	dockerCompose := map[string]interface{}{

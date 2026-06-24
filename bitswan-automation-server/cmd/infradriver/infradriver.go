@@ -67,6 +67,12 @@ func newServeCmd() *cobra.Command {
 			if token == "" {
 				token = os.Getenv("BITSWAN_INFRA_DRIVER_TOKEN")
 			}
+			// Fail loudly rather than serve open: the driver holds docker.sock,
+			// so an unauthenticated serve would expose host-equivalent power. An
+			// empty token must never silently disable the guard.
+			if token == "" {
+				return fmt.Errorf("no driver token configured (set --token or BITSWAN_INFRA_DRIVER_TOKEN); refusing to serve without authentication")
+			}
 			if err := ensureBareRepo(gitDir, cf); err != nil {
 				return err
 			}
