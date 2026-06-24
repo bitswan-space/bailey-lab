@@ -417,7 +417,9 @@ class InfraService(ABC):
 
     async def stop(self) -> dict:
         """Stop the service container via the driver's stop primitive."""
-        logger.info(f"Stopping {self.display_name} container '{self.container_name}'...")
+        logger.info(
+            f"Stopping {self.display_name} container '{self.container_name}'..."
+        )
         client, ctx = _driver_client_ctx()
         try:
             await client.container_stop(ctx, self.container_name)

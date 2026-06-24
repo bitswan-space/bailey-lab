@@ -355,9 +355,7 @@ class InfraDriverClient:
         return out.get("images") or []
 
     async def image_remove(self, ctx: WorkspaceContext, tag: str) -> None:
-        await self._post_json(
-            PATH_IMAGES_REMOVE, {"ctx": ctx.to_json(), "tag": tag}
-        )
+        await self._post_json(PATH_IMAGES_REMOVE, {"ctx": ctx.to_json(), "tag": tag})
 
     async def container_inspect(self, ctx: WorkspaceContext, container: str) -> dict:
         """Raw `docker inspect` of one container (the driver returns a 1-element

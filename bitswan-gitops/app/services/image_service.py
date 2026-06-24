@@ -190,9 +190,7 @@ class ImageService:
                 if not tag:
                     continue
                 checksum = self._extract_checksum_from_tag(tag)
-                build_status = (
-                    self._get_build_status(checksum) if checksum else "ready"
-                )
+                build_status = self._get_build_status(checksum) if checksum else "ready"
                 internal_images.append(
                     {
                         "id": image.get("id"),

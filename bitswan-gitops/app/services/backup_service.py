@@ -500,14 +500,20 @@ async def restore_postgres(
         try:
             code = await client.exec(
                 ctx,
-                ExecSpec(container=container_name, cmd=["psql", "-U", "admin", "-d", "postgres"]),
+                ExecSpec(
+                    container=container_name,
+                    cmd=["psql", "-U", "admin", "-d", "postgres"],
+                ),
                 stdin=dump_content,
                 on_stderr=on_stderr,
             )
         except InfraDriverError as e:
             return False, f"psql restore failed: {e}"
         if code != 0:
-            return False, f"psql restore failed: {b''.join(err_chunks).decode('utf-8', 'replace')}"
+            return (
+                False,
+                f"psql restore failed: {b''.join(err_chunks).decode('utf-8', 'replace')}",
+            )
 
         return True, f"Postgres restored to {stage} stage"
     finally:

@@ -306,7 +306,10 @@ async def _driver_exec(*args: str, cwd: str | None = None) -> tuple[str, str, in
 
     try:
         rc = await client.exec(
-            ctx, ExecSpec(container=container, cmd=cmd), on_stdout=on_stdout, on_stderr=on_stderr
+            ctx,
+            ExecSpec(container=container, cmd=cmd),
+            on_stdout=on_stdout,
+            on_stderr=on_stderr,
         )
     except InfraDriverError as e:
         return "", str(e), 1

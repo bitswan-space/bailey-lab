@@ -777,7 +777,9 @@ class AutomationService:
             if progress_callback is not None:
                 try:
                     await progress_callback(
-                        "building_images", f"Building image for {auto_name}: {line}", None
+                        "building_images",
+                        f"Building image for {auto_name}: {line}",
+                        None,
                     )
                 except Exception:
                     logger.debug("build progress report failed", exc_info=True)
@@ -3580,7 +3582,6 @@ class AutomationService:
             await update_git(self.gitops_dir, self.gitops_dir_host, "all", "initialize")
 
         active_deployments = self.get_active_automations()
-
 
         # Auto-enable services for each active deployment.
         # Read from bitswan.yaml first, fall back to automation config on disk.

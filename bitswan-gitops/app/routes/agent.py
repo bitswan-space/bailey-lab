@@ -522,9 +522,7 @@ async def build_and_restart_deployment(
                 q: asyncio.Queue = asyncio.Queue()
 
                 async def _prog(line: str):
-                    await q.put(
-                        re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", line)
-                    )
+                    await q.put(re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", line))
 
                 async def _run_build():
                     try:
