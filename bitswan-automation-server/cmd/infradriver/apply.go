@@ -2,6 +2,7 @@ package infradriver
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -50,10 +51,24 @@ func newApplyCmd() *cobra.Command {
 				SecretsDir:    gitConfig(gitDir, "bitswan.secretsdir"),
 				WrapAvailable: gitConfig(gitDir, "bitswan.wrap") == "true",
 			}
-			_, err = dockerdriver.New().Apply(cmd.Context(),
+			routes, err := dockerdriver.New().Apply(cmd.Context(),
 				infradriver.ApplyRequest{Ctx: wctx, BitswanYAML: string(yamlBytes)},
 				func(p infradriver.Progress) { fmt.Printf("[%s] %s\n", p.Step, p.Message) })
-			return err
+			if err != nil {
+				return err
+			}
+			// Emit the desired ingress routes as parseable stdout lines. git
+			// relays this (the hook's stdout) to the pushing client, so gitops
+			// collects them and registers them with the daemon ingress — the
+			// driver stays out of routing (least privilege: no daemon socket).
+			for _, r := range routes {
+				line, merr := json.Marshal(r)
+				if merr != nil {
+					return merr
+				}
+				fmt.Printf("[route] %s\n", line)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&gitDir, "git-dir", "", "the bare repo that received the push")
