@@ -104,6 +104,15 @@ func TestCompileGoldenFixtures(t *testing.T) {
 			// same way so the absolute env_file / bind-mount paths line up.
 			gotYAML = strings.ReplaceAll(gotYAML, root, "__ROOT__")
 
+			// BITSWAN_UPDATE_GOLDEN=1 rewrites the fixtures to the current Go
+			// output. The Go compiler is the source of truth now (the Python
+			// compiler it was captured from is deleted); this is the regression
+			// guard. Use after an intentional compose change (e.g. the
+			// gitops.workspace label the driver scoping requires).
+			if os.Getenv("BITSWAN_UPDATE_GOLDEN") == "1" {
+				mustWrite(t, filepath.Join("testdata", name+".golden.yaml"), gotYAML)
+			}
+
 			got := normalize(t, []byte(gotYAML))
 			want := normalize(t, readGolden(t, name))
 

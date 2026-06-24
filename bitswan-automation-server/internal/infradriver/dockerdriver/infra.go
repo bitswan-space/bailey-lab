@@ -31,6 +31,7 @@ type infraNames struct {
 	secretsPath   string
 	containerName string
 	volumeName    string
+	workspaceName string
 }
 
 func infraNamesFor(secretsDir, workspaceName, svcType, stage string) infraNames {
@@ -42,7 +43,15 @@ func infraNamesFor(secretsDir, workspaceName, svcType, stage string) infraNames 
 		secretsPath:   filepath.Join(secretsDir, secretsName),
 		containerName: workspaceName + "__" + svcType + suffix,
 		volumeName:    workspaceName + "-" + svcType + suffix + "-data",
+		workspaceName: workspaceName,
 	}
+}
+
+// infraLabels are stamped on every infra service so the driver's workspace
+// scoping permits gitops-initiated exec into them (snapshots/backups/copy-DB
+// clone target postgres/minio/couchdb by container name).
+func (n infraNames) infraLabels() map[string]interface{} {
+	return map[string]interface{}{"gitops.workspace": n.workspaceName}
 }
 
 // infraEnabled reports is_enabled(): the service's secrets file exists.
@@ -88,6 +97,7 @@ func couchdbCompose(n infraNames) map[string]interface{} {
 				"env_file":       []interface{}{n.secretsPath},
 				"volumes":        []interface{}{n.volumeName + ":/opt/couchdb/data"},
 				"networks":       []interface{}{"bitswan_network"},
+				"labels":         n.infraLabels(),
 			},
 		},
 		"volumes": map[string]interface{}{n.volumeName: nil},
@@ -106,7 +116,7 @@ func minioCompose(n infraNames) map[string]interface{} {
 		"env_file":       []interface{}{n.secretsPath},
 		"volumes":        []interface{}{n.volumeName + "-data:/data"},
 		"networks":       []interface{}{"bitswan_network"},
-		"labels":         map[string]interface{}{},
+		"labels": n.infraLabels(),
 	}
 	return map[string]interface{}{
 		"services": map[string]interface{}{"minio" + n.suffix: entry},
@@ -127,7 +137,7 @@ func postgresCompose(secretsDir string, n infraNames) map[string]interface{} {
 			filepath.Join(secretsDir, "pgadmin-servers.json") + ":/pgadmin4/servers.json:ro",
 		},
 		"networks": []interface{}{"bitswan_network"},
-		"labels":   map[string]interface{}{},
+		"labels": n.infraLabels(),
 	}
 	return map[string]interface{}{
 		"services": map[string]interface{}{
@@ -138,6 +148,7 @@ func postgresCompose(secretsDir string, n infraNames) map[string]interface{} {
 				"env_file":       []interface{}{n.secretsPath},
 				"volumes":        []interface{}{n.volumeName + "-data:/var/lib/postgresql/data"},
 				"networks":       []interface{}{"bitswan_network"},
+				"labels":         n.infraLabels(),
 			},
 			"postgres" + n.suffix + "-pgadmin": pgadmin,
 		},
@@ -187,11 +198,13 @@ func kafkaCompose(secretsDir string, n infraNames) map[string]interface{} {
 		},
 		"env_file": []interface{}{n.secretsPath},
 		"networks": []interface{}{"bitswan_network"},
+		"labels":   n.infraLabels(),
 	}
 	broker := map[string]interface{}{
 		"image":          "confluentinc/cp-kafka:7.5.0",
 		"container_name": n.containerName,
 		"entrypoint":     []interface{}{"/bin/bash", "-c", kafkaEntrypointScript},
+		"labels":         n.infraLabels(),
 		"environment": map[string]interface{}{
 			"KAFKA_NODE_ID":                                  1,
 			"KAFKA_PROCESS_ROLES":                            "broker,controller",
