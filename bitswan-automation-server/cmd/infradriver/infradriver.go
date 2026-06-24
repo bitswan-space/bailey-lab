@@ -84,6 +84,14 @@ func newServeCmd() *cobra.Command {
 // context in its git config, and installs the post-receive hook that runs
 // `bitswan infra-driver apply`.
 func ensureBareRepo(gitDir string, cf ctxFlags) error {
+	// The deploy repo lives on the workspace volume (owned by user1000) but the
+	// driver runs as root, so every git op (init, http-backend receive-pack, the
+	// apply hook's archive) trips git's "dubious ownership" guard and fails. Mark
+	// all repos safe for this process; the global config is inherited by the
+	// git-http-backend CGI children and the post-receive hook (same user/HOME).
+	if out, err := exec.Command("git", "config", "--global", "--add", "safe.directory", "*").CombinedOutput(); err != nil {
+		return fmt.Errorf("git config safe.directory: %w: %s", err, out)
+	}
 	if _, err := os.Stat(filepath.Join(gitDir, "HEAD")); os.IsNotExist(err) {
 		if out, err := exec.Command("git", "init", "--bare", gitDir).CombinedOutput(); err != nil {
 			return fmt.Errorf("git init --bare: %w: %s", err, out)
