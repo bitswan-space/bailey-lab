@@ -38,6 +38,7 @@ type ctxFlags struct {
 	workspace  string
 	domain     string
 	secretsDir string
+	gitopsDir  string
 	wrap       bool
 }
 
@@ -45,6 +46,7 @@ func (f *ctxFlags) bind(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.workspace, "workspace", "", "workspace name")
 	cmd.Flags().StringVar(&f.domain, "domain", "", "workspace domain")
 	cmd.Flags().StringVar(&f.secretsDir, "secrets-dir", "", "shared secrets volume path")
+	cmd.Flags().StringVar(&f.gitopsDir, "gitops-dir", "", "gitops volume dir the push is materialized into (the deployed tree the compose binds reference)")
 	cmd.Flags().BoolVar(&f.wrap, "wrap", false, "protected-proxy present (wrap topology)")
 }
 
@@ -92,6 +94,7 @@ func ensureBareRepo(gitDir string, cf ctxFlags) error {
 		"bitswan.workspace":  cf.workspace,
 		"bitswan.domain":     cf.domain,
 		"bitswan.secretsdir": cf.secretsDir,
+		"bitswan.gitopsdir":  cf.gitopsDir,
 		"bitswan.wrap":       fmt.Sprintf("%t", cf.wrap),
 		// git-http-backend refuses receive-pack (push) unless this is set.
 		"http.receivepack": "true",

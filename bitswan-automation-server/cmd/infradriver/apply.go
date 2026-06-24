@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
@@ -25,21 +26,27 @@ func newApplyCmd() *cobra.Command {
 			if gitDir == "" {
 				return fmt.Errorf("--git-dir is required")
 			}
+			gitopsDir := gitConfig(gitDir, "bitswan.gitopsdir")
+			if gitopsDir == "" {
+				return fmt.Errorf("bitswan.gitopsdir not configured on %s", gitDir)
+			}
 			ref := pushedRef() // post-receive feeds "<old> <new> <ref>" on stdin
-			work, cleanup, err := checkout(gitDir, ref)
-			if err != nil {
+			// Materialize the pushed tree into the gitops volume dir — the
+			// authoritative deployed tree the generated compose bind-mounts
+			// reference (workspaces/<ws>/gitops/<source>). It must mirror the push
+			// exactly (deletions included), so the dir is rebuilt from the archive.
+			if err := materialize(gitDir, ref, gitopsDir); err != nil {
 				return err
 			}
-			defer cleanup()
 
-			yamlBytes, err := os.ReadFile(work + "/bitswan.yaml")
+			yamlBytes, err := os.ReadFile(gitopsDir + "/bitswan.yaml")
 			if err != nil {
 				return fmt.Errorf("read bitswan.yaml from push: %w", err)
 			}
 			wctx := infradriver.WorkspaceContext{
 				WorkspaceName: gitConfig(gitDir, "bitswan.workspace"),
 				Domain:        gitConfig(gitDir, "bitswan.domain"),
-				GitopsDir:     work,
+				GitopsDir:     gitopsDir,
 				SecretsDir:    gitConfig(gitDir, "bitswan.secretsdir"),
 				WrapAvailable: gitConfig(gitDir, "bitswan.wrap") == "true",
 			}
@@ -70,34 +77,51 @@ func pushedRef() string {
 	return "HEAD"
 }
 
-// checkout materializes a ref's tree into a temp dir via `git archive`.
-func checkout(gitDir, ref string) (string, func(), error) {
-	work, err := os.MkdirTemp("", "infra-apply-")
-	if err != nil {
-		return "", func() {}, err
+// materialize rebuilds dest to mirror the pushed ref's tree exactly: it clears
+// dest's contents (dest is the gitops volume subpath mount point, so the mount
+// itself is kept) and extracts the ref via `git archive | tar`. Deletions in
+// the push are reflected because dest is cleared first. dest holds only
+// deploy-managed content (bitswan.yaml + source trees + the generated
+// docker-compose.yaml); secrets/snapshots/firewall are separate volume subpaths
+// mounted elsewhere, so clearing dest never touches them.
+func materialize(gitDir, ref, dest string) error {
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return err
 	}
-	cleanup := func() { _ = os.RemoveAll(work) }
+	if err := clearDir(dest); err != nil {
+		return fmt.Errorf("clear gitops dir %s: %w", dest, err)
+	}
 	archive := exec.Command("git", "--git-dir", gitDir, "archive", ref)
-	untar := exec.Command("tar", "-x", "-C", work)
+	untar := exec.Command("tar", "-x", "-C", dest)
 	pipe, err := archive.StdoutPipe()
 	if err != nil {
-		cleanup()
-		return "", func() {}, err
+		return err
 	}
 	untar.Stdin = pipe
 	if err := untar.Start(); err != nil {
-		cleanup()
-		return "", func() {}, err
+		return err
 	}
 	if err := archive.Run(); err != nil {
-		cleanup()
-		return "", func() {}, fmt.Errorf("git archive %s: %w", ref, err)
+		return fmt.Errorf("git archive %s: %w", ref, err)
 	}
 	if err := untar.Wait(); err != nil {
-		cleanup()
-		return "", func() {}, fmt.Errorf("untar push: %w", err)
+		return fmt.Errorf("untar push into %s: %w", dest, err)
 	}
-	return work, cleanup, nil
+	return nil
+}
+
+// clearDir removes every entry inside dir, keeping dir itself (a volume mount).
+func clearDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func gitConfig(gitDir, key string) string {

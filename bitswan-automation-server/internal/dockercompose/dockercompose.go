@@ -190,11 +190,26 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		)
 	}
 
+	// The infra-driver sidecar: the only container that touches docker.sock
+	// after the cut-over. gitops `git push`es the resolved bitswan.yaml to the
+	// driver's deploy repo (smart-HTTP, hook compiles + applies) and calls its
+	// /v1 primitives — so gitops itself needs no Docker access. The driver runs
+	// the same daemon runtime image (docker CLI + compose + git-http-backend),
+	// with the bitswan binary bind-mounted exactly as the daemon mounts its own.
+	gitopsService["environment"] = append(gitopsService["environment"].([]string),
+		"BITSWAN_INFRA_DRIVER_URL=http://"+config.WorkspaceName+"-infra-driver:9090",
+		"BITSWAN_INFRA_DRIVER_TOKEN="+gitopsSecretToken,
+		"BITSWAN_DEPLOY_REMOTE=http://x:"+gitopsSecretToken+"@"+config.WorkspaceName+"-infra-driver:9090/deploy.git",
+	)
+
+	driverService := config.buildDriverService(gitopsSecretToken, wsVolume, homeDir)
+
 	// Construct the docker-compose data structure
 	dockerCompose := map[string]interface{}{
 		"version": "3.8",
 		"services": map[string]interface{}{
-			"bitswan-gitops": gitopsService,
+			"bitswan-gitops":                       gitopsService,
+			config.WorkspaceName + "-infra-driver": driverService,
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
@@ -218,6 +233,80 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	}
 
 	return buf.String(), gitopsSecretToken, nil
+}
+
+// buildDriverService builds the infra-driver sidecar: the same daemon runtime
+// image (docker CLI + compose + git-http-backend), the bitswan binary
+// bind-mounted as the daemon mounts its own, docker.sock, and the workspace
+// volume subpaths the compiler reads/writes. It serves the deploy repo over
+// git smart-HTTP + the /v1 primitives, guarded by the shared token.
+func (config *DockerComposeConfig) buildDriverService(token string, wsVolume func(string, string) map[string]interface{}, homeDir string) map[string]interface{} {
+	driverImage := os.Getenv("BITSWAN_INFRA_DRIVER_IMAGE")
+	if driverImage == "" {
+		driverImage = "bitswan/automation-server-runtime:latest"
+	}
+	// The host path of the bitswan binary to bind-mount. The daemon forwards its
+	// own host binary path as BITSWAN_HOST_BINARY (it cannot use os.Executable()
+	// from inside its container); a host-CLI `workspace init` falls back to its
+	// own executable.
+	driverBinary := os.Getenv("BITSWAN_HOST_BINARY")
+	if driverBinary == "" {
+		if exe, err := os.Executable(); err == nil {
+			driverBinary = exe
+		} else {
+			driverBinary = "/usr/local/bin/bitswan"
+		}
+	}
+
+	env := []string{
+		"BITSWAN_INFRA_DRIVER_TOKEN=" + token,
+		"BITSWAN_VOLUME_NAME=bitswan",
+		"BITSWAN_GITOPS_DIR_HOST=" + config.GitopsPath,
+		"BITSWAN_CERTS_DIR=" + homeDir + "/.config/bitswan/certauthorities",
+		"BITSWAN_WORKSPACE_NAME=" + config.WorkspaceName,
+	}
+	if config.KeycloakURL != "" {
+		env = append(env, "KEYCLOAK_URL="+config.KeycloakURL)
+	}
+	// The compiler reads the same AOC/OAuth env gitops used (org group path,
+	// oauth2-proxy config it materializes per BP, etc.).
+	env = append(env, config.AocEnvVars...)
+	env = append(env, config.OAuthEnvVars...)
+
+	volumes := []interface{}{
+		driverBinary + ":/usr/local/bin/bitswan:ro",
+		"/var/run/docker.sock:/var/run/docker.sock",
+		wsVolume("deploy.git", "/git/deploy.git"),
+		// The deployed tree the generated compose's bind-mounts reference
+		// (workspaces/<ws>/gitops/<source>); apply materializes the push here.
+		wsVolume("gitops", "/gitops/gitops"),
+		wsVolume("secrets", "/gitops/secrets"),
+		wsVolume("snapshots", "/gitops/snapshots"),
+		wsVolume("firewall", "/gitops/firewall"),
+	}
+	caVolumes, caEnvVars := certauthority.GetCACertMountConfig(config.TrustCA)
+	for _, v := range caVolumes {
+		volumes = append(volumes, v)
+	}
+	env = append(env, caEnvVars...)
+
+	return map[string]interface{}{
+		"image":       driverImage,
+		"restart":     "always",
+		"hostname":    config.WorkspaceName + "-infra-driver",
+		"networks":    []string{"bitswan_network"},
+		"volumes":     volumes,
+		"environment": env,
+		"command": []string{
+			"/usr/local/bin/bitswan", "infra-driver", "serve",
+			"--listen", ":9090",
+			"--git-dir", "/git/deploy.git",
+			"--gitops-dir", "/gitops/gitops",
+			"--secrets-dir", "/gitops/secrets",
+			"--workspace", config.WorkspaceName,
+			"--domain", config.Domain,
+		},
+	}
 }
 
 func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
