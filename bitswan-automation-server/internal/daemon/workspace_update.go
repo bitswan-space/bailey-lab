@@ -97,6 +97,16 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 		}
 	}
 
+	// Ensure the full set of workspace volume subpaths exists before we
+	// regenerate the deployment. Volume-subpath mounts are strict (Docker refuses
+	// to start a container if the subpath is missing), and the set grows over
+	// time — e.g. the infra-driver's bare `deploy.git` was added after the
+	// bind→volume migration, so workspaces migrated before it would otherwise be
+	// missing it and the driver sidecar would fail to start. The one-time
+	// migration only ensures these for not-yet-migrated workspaces; doing it here
+	// too makes every update self-heal an already-migrated workspace.
+	ensureWorkspaceVolumeDirs(workspaceName)
+
 	// Update Docker images and docker-compose file
 	fmt.Println("Updating Docker images and docker-compose file...")
 	if err := workspace.UpdateWorkspaceDeployment(workspaceName, *gitopsImage, *staging, *trustCA); err != nil {
