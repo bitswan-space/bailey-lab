@@ -8,7 +8,6 @@ import re
 import shutil
 import subprocess
 import tarfile
-import tempfile
 import uuid
 import yaml
 import requests
@@ -33,7 +32,6 @@ from app.utils import (
     copy_worktree,
     GitLockContext,
 )
-from app.async_docker import get_async_docker_client, DockerError
 from app.deploy_manager import deploy_manager
 from app.services.image_service import ImageService
 from app.services import bp_secrets
@@ -2619,112 +2617,6 @@ class AutomationService:
         cap = 1_000_000
         return {"path": path, "content": out[:cap], "truncated": len(out) > cap}
 
-    async def _pg_dump_schema(self, stage: str) -> str | None:
-        """`pg_dump --schema-only` of the stage's Postgres via docker exec, or
-        None when Postgres isn't enabled for the stage."""
-        from app.services.bp_databases import get_service_secrets
-
-        secrets = get_service_secrets("postgres", stage)
-        if not secrets or not secrets.get("POSTGRES_USER"):
-            return None
-        user = secrets["POSTGRES_USER"]
-        pw = secrets.get("POSTGRES_PASSWORD", "")
-        db = secrets.get("POSTGRES_DB", "postgres")
-        ws = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace")
-        container = f"{ws}__postgres-{stage}"
-        from app.services.infra_driver_client import ExecSpec
-
-        try:
-            chunks: list[bytes] = []
-
-            async def on_stdout(data: bytes):
-                chunks.append(data)
-
-            code = await self.infra_driver.exec(
-                self._workspace_ctx(),
-                ExecSpec(
-                    container=container,
-                    cmd=[
-                        "sh",
-                        "-c",
-                        f"PGPASSWORD='{pw}' pg_dump --schema-only -U {user} {db}",
-                    ],
-                ),
-                on_stdout=on_stdout,
-            )
-            if code != 0:
-                return None
-            return b"".join(chunks).decode("utf-8", "replace")
-        except Exception as e:
-            logger.warning("pg_dump schema failed for %s: %s", stage, e)
-            return None
-
-    async def bundle_deployment(self, bp: str, stage: str, commit: str) -> str:
-        """Build a downloadable .tar.gz of a deployment: the source at `commit`,
-        a `docker save` of each member image, and the stage's Postgres schema.
-        Returns the path to the temp archive (the route streams + deletes it)."""
-        if not re.fullmatch(r"[0-9a-fA-F]{4,64}", commit or ""):
-            raise HTTPException(status_code=400, detail="invalid commit")
-        stage_key = "production" if stage in ("", "production") else stage
-        members = self._bp_stage_members(bp, stage_key)
-        if not members:
-            raise HTTPException(
-                status_code=404, detail=f"No deployment for {bp}/{stage_key}"
-            )
-        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
-        schema = await self._pg_dump_schema(stage_key)
-
-        def _build() -> str:
-            import docker
-
-            staging = tempfile.mkdtemp(prefix=".bundle-")
-            try:
-                # 1) source at the commit
-                src_dir = os.path.join(staging, "source")
-                os.makedirs(src_dir)
-                src_tar = os.path.join(staging, "source.tar")
-                with open(src_tar, "wb") as f:
-                    rc = subprocess.run(
-                        ["git", "archive", "--format=tar", commit, "--", f"{bp}/"],
-                        cwd=main,
-                        stdout=f,
-                    ).returncode
-                if rc == 0:
-                    with tarfile.open(src_tar) as t:
-                        t.extractall(src_dir)
-                os.remove(src_tar)
-                # 2) docker save each member image
-                client = docker.from_env()
-                img_dir = os.path.join(staging, "images")
-                os.makedirs(img_dir)
-                for dep_id, m in members.items():
-                    ref = (m or {}).get("image") or (m or {}).get("image_id")
-                    if not ref:
-                        continue
-                    image = client.images.get(ref)  # raises if missing — fail loudly
-                    with open(os.path.join(img_dir, f"{dep_id}.tar"), "wb") as f:
-                        for chunk in image.save(named=True):
-                            f.write(chunk)
-                # 3) schema + manifest
-                if schema:
-                    with open(os.path.join(staging, "schema.sql"), "w") as f:
-                        f.write(schema)
-                else:
-                    with open(os.path.join(staging, "README.txt"), "w") as f:
-                        f.write("Postgres not enabled for this stage; no schema.sql.\n")
-                # 4) assemble the archive
-                out_fd, out_path = tempfile.mkstemp(
-                    prefix=f"{bp}-{stage_key}-", suffix=".tar.gz"
-                )
-                os.close(out_fd)
-                with tarfile.open(out_path, "w:gz") as tar:
-                    tar.add(staging, arcname=f"{bp}-{stage_key}-{commit[:8]}")
-                return out_path
-            finally:
-                shutil.rmtree(staging, ignore_errors=True)
-
-        return await asyncio.to_thread(_build)
-
     async def apply_compose_for_deployments(
         self,
         deployment_ids: list[str],
@@ -3444,136 +3336,6 @@ class AutomationService:
             "total_pages": (total + page_size - 1) // page_size,
         }
 
-    async def _infra_services_to_bring_up(
-        self, infra_service_names: list[str]
-    ) -> list[str]:
-        """Filter infra services so an already-present one is SHARED, not recreated.
-
-        Shared infra (postgres/minio/…) is per-REALM and shared across every
-        stage in that realm — notably ``dev`` and ``live-dev`` both map to the
-        ``dev`` realm and therefore to the SAME fixed-named container
-        (``{ws}__postgres-dev`` etc.). Once that container exists, every stage in
-        the realm must REUSE it: re-listing it in ``docker compose up`` would try
-        to recreate the fixed-name container and fail with
-        ``Container … is already in use`` (the live-dev → dev collision).
-
-        So we drop already-present infra from the up-list. A present-but-stopped
-        container is started in place (never recreated). BP containers reach infra
-        over ``bitswan_network`` by name and have no compose ``depends_on`` on it,
-        so leaving it out of the up-list never strands a dependency.
-        """
-        if not infra_service_names:
-            return []
-        docker_client = get_async_docker_client()
-        to_up: list[str] = []
-        for svc_name in infra_service_names:
-            container = f"{self.workspace_name}__{svc_name}"
-            try:
-                found = await docker_client.list_containers(
-                    all=True, filters={"name": [container]}
-                )
-                match = next(
-                    (c for c in found if f"/{container}" in (c.get("Names") or [])),
-                    None,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Could not check infra container '{container}' ({e}); "
-                    "letting compose manage it."
-                )
-                to_up.append(svc_name)
-                continue
-            if match is None:
-                to_up.append(svc_name)  # absent → compose creates it
-                continue
-            if (match.get("State") or "").lower() != "running":
-                # Present but stopped: start it in place rather than recreating.
-                try:
-                    await docker_client.start_container(match.get("Id") or container)
-                    logger.info(
-                        f"Shared infra '{container}' was stopped — started it "
-                        "in place (not recreated)."
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Could not start existing infra '{container}' ({e}); "
-                        "letting compose manage it."
-                    )
-                    to_up.append(svc_name)
-            else:
-                logger.info(
-                    f"Shared infra '{container}' already running — reusing it "
-                    "(dev/live-dev share one container)."
-                )
-        return to_up
-
-    async def install_certificates_in_container(self, deployment_id: str):
-        """Install CA certificates in all running containers for a deployment"""
-        containers = await self.get_container(deployment_id)
-
-        if not containers:
-            return False
-
-        success = True
-        for container in containers:
-            container_id = container.get("Id")
-            labels = container.get("Labels", {})
-            container_name = container.get("Names", [deployment_id])[0].lstrip("/")
-
-            # Check if certificate installation is enabled via labels
-            if labels.get("gitops.certs.enabled") != "true":
-                continue
-
-            # Ensure container is running
-            state = container.get("State", "")
-            if state != "running":
-                print(
-                    f"Warning: Container {container_name} is not running (status: {state}), cannot install certificates"
-                )
-                success = False
-                continue
-
-            try:
-                docker_client = get_async_docker_client()
-
-                # Install certificates: copy from custom dir, rename .pem to .crt, and update
-                cert_install_script = """
-if [ -d /usr/local/share/ca-certificates/custom ]; then
-    cp /usr/local/share/ca-certificates/custom/*.crt /usr/local/share/ca-certificates/ 2>/dev/null || true
-    cp /usr/local/share/ca-certificates/custom/*.pem /usr/local/share/ca-certificates/ 2>/dev/null || true
-    for f in /usr/local/share/ca-certificates/*.pem; do
-        [ -f "$f" ] && mv "$f" "${f%.pem}.crt"
-    done
-    update-ca-certificates 2>&1 | grep -v "WARNING" || true
-    echo "CA certificates installed successfully"
-else
-    echo "No custom CA certificates directory found"
-fi
-"""
-                print(f"Installing CA certificates in container {container_name}")
-                cmd = ["sh", "-c", cert_install_script]
-                exec_id = await docker_client.exec_create(container_id, cmd)
-                output = await docker_client.exec_start(exec_id)
-                exec_info = await docker_client.exec_inspect(exec_id)
-
-                if exec_info.get("ExitCode", 0) == 0:
-                    print(
-                        f"Successfully installed certificates in container {container_name}: {output.strip()}"
-                    )
-                else:
-                    print(
-                        f"Failed to install certificates in container {container_name}: {output.strip()}"
-                    )
-                    success = False
-
-            except Exception as e:
-                print(
-                    f"Exception while installing certificates in container {container_name}: {str(e)}"
-                )
-                success = False
-
-        return success
-
     async def delete_automation(self, deployment_id: str):
         # Drop the deployment from bitswan.yaml, then APPLY: the ingress reconcile
         # prunes the now-absent gitops route (it's no longer in the desired set).
@@ -3590,21 +3352,6 @@ fi
             "status": "success",
             "message": f"Deployment {deployment_id} deleted successfully",
         }
-
-    async def get_tag(self, deployed_image: str):
-        """Get the sha tag for a deployed image using async Docker client."""
-        expected_prefix = f"{deployed_image}:sha"
-        try:
-            docker_client = get_async_docker_client()
-            image = await docker_client.get_image(deployed_image)
-            tags = image.get("RepoTags", []) or []
-            for tag in tags:
-                if tag.startswith(expected_prefix):
-                    deployed_image_checksum_tag = tag[len(expected_prefix) :]
-                    return deployed_image_checksum_tag
-            return None
-        except DockerError:
-            return None
 
     def resolve_automation_config(self, deployment_conf: dict) -> "AutomationConfig":
         """Resolve AutomationConfig for a deployment from the canonical source.

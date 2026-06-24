@@ -13,7 +13,6 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from starlette.background import BackgroundTask
 
 from pydantic import BaseModel
 
@@ -468,24 +467,6 @@ async def get_bp_file_content(
 ):
     """A single file's content from a BP's source at a commit (Inspect → Files)."""
     return await automation_service.bp_file_content(bp, commit, path)
-
-
-@router.get("/business-processes/{bp}/bundle")
-async def get_bp_bundle(
-    bp: str,
-    stage: str = Query(...),
-    commit: str = Query(...),
-    automation_service: AutomationService = Depends(get_automation_service),
-):
-    """Download a deployment bundle (source + docker images + DB schema)."""
-    path = await automation_service.bundle_deployment(bp, stage, commit)
-    filename = f"{bp}-{stage}-{commit[:8]}.tar.gz"
-    return FileResponse(
-        path,
-        media_type="application/gzip",
-        filename=filename,
-        background=BackgroundTask(lambda: os.path.exists(path) and os.remove(path)),
-    )
 
 
 @router.post("/business-processes/{bp}/rollback")
