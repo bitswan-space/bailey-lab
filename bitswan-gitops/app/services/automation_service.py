@@ -3996,96 +3996,17 @@ fi
             with open(bitswan_yaml_path, "w") as f:
                 dump_bitswan_yaml(bs_yaml, f)
 
-        await _report(
-            "generating_compose", "Generating docker-compose configuration..."
+        # Push the resolved tree to the driver — it compiles, brings up the
+        # service + its infra, provisions DBs/buckets, installs certs/oauth2,
+        # and configures ingress server-side. Image tags were recorded into
+        # automation.toml at build time, which the driver's compiler reads.
+        await self.apply_compose_for_deployments(
+            [deployment_id], deployed_by=deployed_by, report=_report
         )
-        dc_yaml, infra_service_names, desired_routes = self.generate_docker_compose(
-            bs_yaml
-        )
-        self._save_docker_compose(dc_yaml)
-        reconcile_ingress(self.workspace_name, desired_routes)
-        deployments = bs_yaml.get("deployments", {})
-
-        dc_config = yaml.safe_load(dc_yaml)
-        dep_conf = bs_yaml.get("deployments", {}).get(deployment_id, {})
-        compose_service_name = make_hostname_label(
-            self.workspace_name,
-            dep_conf.get("automation_name", deployment_id),
-            dep_conf.get("context", ""),
-            dep_conf.get("stage", "production") or "production",
-        )
-
-        # deploy the automation and its infra services
-        await _report("docker_compose_up", "Starting containers...")
-        await self._ensure_stage_networks()
-        infra_to_up = await self._infra_services_to_bring_up(infra_service_names)
-        deployment_result = await docker_compose_up(
-            self.gitops_dir,
-            dc_yaml,
-            compose_service_name,
-            extra_services=infra_to_up,
-            progress_callback=_report,
-        )
-        await self._post_deploy_infra_services(bs_yaml)
-        await self._provision_bp_databases(bs_yaml, [deployment_id])
-
-        # record deployment in bitswan.yaml
-
-        image_tag = None
-        if compose_service_name in dc_config.get("services", {}):
-            deployed_image = dc_config["services"][compose_service_name].get("image")
-            image_tag = await self.get_tag(deployed_image)
-
-        for result in deployment_result.values():
-            if result["return_code"] != 0:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Error deploying services: \ndocker-compose:\n {dc_yaml}\n\nstdout:\n {result['stdout']}\nstderr:\n{result['stderr']}\n",
-                )
-
-        await _report("installing_certs", "Installing certificates...")
-        await self.install_certificates_in_container(deployment_id)
-        await _report("starting_oauth2_proxy", "Starting OAuth2 proxy...")
-        await self.start_oauth2_proxy_in_container(deployment_id)
-        await self.start_oauth2_proxy_in_infra_services(infra_service_names)
-
-        if image_tag:
-            await _report("storing_tags", "Recording image tag...")
-            bs_yaml = read_bitswan_yaml(self.gitops_dir)
-            if (
-                bs_yaml
-                and "deployments" in bs_yaml
-                and deployment_id in bs_yaml["deployments"]
-            ):
-                bs_yaml["deployments"][deployment_id]["tag_checksum"] = image_tag
-
-                bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
-                with open(bitswan_yaml_path, "w") as f:
-                    dump_bitswan_yaml(bs_yaml, f)
-
-                await update_git(
-                    self.gitops_dir,
-                    self.gitops_dir_host,
-                    deployment_id,
-                    "deploy",
-                    deployed_by=deployed_by,
-                )
-
-        # Make the just-applied deployment visible to GET /automations/ right
-        # away. That listing reads a cache (see get_automations) which is
-        # otherwise only refreshed by the inotify filesystem watcher in
-        # lifespan.py. inotify doesn't fire on bind/overlay mounts in some
-        # environments (notably Docker-in-Docker CI), so a successful deploy
-        # would stay invisible to the listing until an unrelated event
-        # triggered a refresh. Refresh explicitly so the listing is correct
-        # regardless of the watcher — and so clients polling right after a
-        # deploy never observe stale state.
-        await self.refresh_all()
 
         return {
             "message": "Deployed services successfully",
-            "deployments": list(deployments.get(deployment_id, {}).keys()),
-            "result": deployment_result,
+            "deployment_id": deployment_id,
         }
 
     async def deploy_automations(self):
