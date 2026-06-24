@@ -2776,111 +2776,19 @@ class AutomationService:
             if report is not None:
                 await report(step, message)
 
-        os.environ["COMPOSE_PROJECT_NAME"] = self.workspace_name
-        bs_yaml = read_bitswan_yaml(self.gitops_dir)
-
-        await _report(
-            "generating_compose", "Generating docker-compose configuration..."
-        )
-        dc_yaml, infra_service_names, desired_routes = self.generate_docker_compose(
-            bs_yaml
-        )
-        self._save_docker_compose(dc_yaml)
-        # Reconcile the daemon's ingress to the FULL desired route set derived
-        # from bitswan.yaml (adds/repoints/prunes only gitops routes; manual
-        # routes preserved; in-sync routes skipped). This is the only place
-        # ingress is touched — applying bitswan.yaml is what converges it.
-        # A promote to a new stage adds that stage's host(s) here (cert mint +
-        # route), which is real work — report it so the deploy never goes dark.
-        await _report("reconciling_ingress", "Configuring ingress routes...")
-        reconcile_ingress(self.workspace_name, desired_routes)
-        dc_config = yaml.safe_load(dc_yaml)
-        services = dc_config.get("services", {})
-
-        # Map each generated service back to the deployment it belongs to via its
-        # label. A production deployment emits MULTIPLE services (one per
-        # blue-green slot, `…-a`/`…-b`, labelled `<dep_id>` for the live slot and
-        # `<dep_id>@<slot>` for the others) — bring up every slot. A member with
-        # no resolvable image is simply absent from the compose and skipped.
-        want = set(deployment_ids)
-        member_services: list[str] = []
-        service_by_dep: dict[str, str] = {}
-        for name, svc in services.items():
-            base = ((svc.get("labels") or {}).get("gitops.deployment_id") or "").split(
-                "@"
-            )[0]
-            if base in want:
-                member_services.append(name)
-                # All of a deployment's slots share one image; any slot's service
-                # is fine for reading the resolved image tag back.
-                service_by_dep.setdefault(base, name)
-
-        await _report("docker_compose_up", "Starting containers...")
-        await self._ensure_stage_networks()
-        infra_to_up = await self._infra_services_to_bring_up(infra_service_names)
-        deployment_result = await docker_compose_up(
-            self.gitops_dir,
-            dc_yaml,
-            container_name=None,
-            extra_services=member_services + infra_to_up,
+        # The cut-over spine: images are already built + tagged upstream and the
+        # resolved bitswan.yaml + source trees live in gitops_dir. Push that tree
+        # to the driver; its post-receive hook compiles to compose and reconciles
+        # EVERYTHING server-side — networks, compose up, per-BP DB/bucket
+        # provisioning, CA certs, oauth2 sidecars, and ingress. gitops no longer
+        # generates compose, brings up containers, or touches the daemon ingress.
+        await _report("deploying", "Pushing deployment to the infra-driver...")
+        await self.infra_driver.deploy(
+            work_tree=self.gitops_dir,
+            commit_message=f"deploy {', '.join(deployment_ids) or 'all'}",
             progress_callback=_report,
+            author=(f"{deployed_by} <{deployed_by}>" if deployed_by else None),
         )
-        await _report("provisioning_services", "Provisioning databases & services...")
-        await self._post_deploy_infra_services(bs_yaml)
-        await self._provision_bp_databases(bs_yaml, deployment_ids)
-
-        for result in deployment_result.values():
-            if result["return_code"] != 0:
-                raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        f"Error deploying services: \ndocker-compose:\n {dc_yaml}\n\n"
-                        f"stdout:\n {result['stdout']}\nstderr:\n{result['stderr']}\n"
-                    ),
-                )
-
-        # Per-member progress: a production promote brings up several members
-        # (each with two blue-green slots), so one static "Installing
-        # certificates…" for the whole set can exceed the deploy progress
-        # window. Report each member as it's handled.
-        for i, dep_id in enumerate(deployment_ids, 1):
-            await _report(
-                "installing_certs",
-                f"Installing certificates… ({i}/{len(deployment_ids)} {dep_id})",
-            )
-            await self.install_certificates_in_container(dep_id)
-        for i, dep_id in enumerate(deployment_ids, 1):
-            await _report(
-                "starting_oauth2_proxy",
-                f"Starting OAuth2 proxy… ({i}/{len(deployment_ids)} {dep_id})",
-            )
-            await self.start_oauth2_proxy_in_container(dep_id)
-        await self.start_oauth2_proxy_in_infra_services(infra_service_names)
-
-        # Record resolved image tags for each member in one final commit.
-        await _report("storing_tags", "Recording image tags...")
-        bs_yaml = read_bitswan_yaml(self.gitops_dir)
-        changed = False
-        for dep_id in deployment_ids:
-            svc_name = service_by_dep.get(dep_id)
-            if not svc_name:
-                continue
-            deployed_image = services[svc_name].get("image")
-            image_tag = await self.get_tag(deployed_image)
-            if image_tag and dep_id in bs_yaml.get("deployments", {}):
-                bs_yaml["deployments"][dep_id]["tag_checksum"] = image_tag
-                changed = True
-        if changed:
-            bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
-            with open(bitswan_yaml_path, "w") as f:
-                dump_bitswan_yaml(bs_yaml, f)
-            await update_git(
-                self.gitops_dir,
-                self.gitops_dir_host,
-                deployment_ids[0] if deployment_ids else "all",
-                "deploy",
-                deployed_by=deployed_by,
-            )
 
         # Refresh the static automation cache so the just-deployed members (and,
         # for a production promote, their blue-green slot containers) show up in
@@ -2888,11 +2796,10 @@ class AutomationService:
         # invalidate the cache does NOT fire in some environments (notably
         # Docker-in-Docker CI), so without this an Inspect/Containers view right
         # after a set-deploy or promote sees "No container found" until an
-        # unrelated event refreshes it. deploy_automation() refreshes for the
-        # single-deployment path; this covers deploy_source_set + promote.
+        # unrelated event refreshes it.
         await self.refresh_all()
 
-        return deployment_result
+        return {"deployment_ids": list(deployment_ids)}
 
     async def deploy_source_set(
         self,
