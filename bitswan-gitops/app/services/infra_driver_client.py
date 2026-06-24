@@ -36,6 +36,7 @@ import httpx
 # /v1 paths (api.go).
 PATH_BUILD_IMAGE = "/v1/build-image"
 PATH_CONTAINERS_LIST = "/v1/containers/list"
+PATH_CONTAINERS_INSPECT = "/v1/containers/inspect"
 PATH_CONTAINERS_LOGS = "/v1/containers/logs"
 PATH_CONTAINERS_STOP = "/v1/containers/stop"
 PATH_CONTAINERS_RESTART = "/v1/containers/restart"
@@ -339,6 +340,16 @@ class InfraDriverClient:
         body = {"ctx": ctx.to_json(), "filter": {"labels": labels or {}}}
         out = await self._post_json(PATH_CONTAINERS_LIST, body)
         return [Container.from_json(c) for c in (out.get("containers") or [])]
+
+    async def container_inspect(self, ctx: WorkspaceContext, container: str) -> dict:
+        """Raw `docker inspect` of one container (the driver returns a 1-element
+        array). Returns the single record, or {} if absent."""
+        out = await self._post_json(
+            PATH_CONTAINERS_INSPECT, {"ctx": ctx.to_json(), "container": container}
+        )
+        if isinstance(out, list):
+            return out[0] if out else {}
+        return out or {}
 
     async def container_stop(self, ctx: WorkspaceContext, container: str) -> None:
         await self._post_json(

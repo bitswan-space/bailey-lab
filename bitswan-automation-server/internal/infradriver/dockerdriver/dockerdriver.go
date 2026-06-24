@@ -141,6 +141,19 @@ func parseInspect(raw []byte) ([]infradriver.Container, error) {
 	return containers, nil
 }
 
+// ContainerInspect returns the raw `docker inspect <container>` JSON (a 1-element
+// array), workspace-scoped.
+func (d *DockerDriver) ContainerInspect(ctx context.Context, _ infradriver.WorkspaceContext, container string) ([]byte, error) {
+	if err := d.assertInWorkspace(ctx, container); err != nil {
+		return nil, err
+	}
+	out, err := exec.CommandContext(ctx, "docker", "inspect", container).Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker inspect %s: %w", container, err)
+	}
+	return out, nil
+}
+
 // ContainerLogs streams a container's logs. tail<=0 means all. follow streams
 // until ctx is cancelled or the container stops.
 func (d *DockerDriver) ContainerLogs(ctx context.Context, _ infradriver.WorkspaceContext, container string, tail int, follow bool, sink func(infradriver.LogLine)) error {

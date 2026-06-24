@@ -64,6 +64,13 @@ type Driver interface {
 	ContainerStop(ctx context.Context, req WorkspaceContext, container string) error
 	ContainerRestart(ctx context.Context, req WorkspaceContext, container string) error
 
+	// ContainerInspect returns the raw `docker inspect` JSON for one container
+	// (workspace-scoped). Read-only. Unlike ContainerList — which deliberately
+	// omits env/config so a bulk listing can't leak secrets — inspect returns the
+	// full record (incl Config.Env) for a single explicitly-named container, for
+	// the coding-agent's inspect/env views.
+	ContainerInspect(ctx context.Context, req WorkspaceContext, container string) ([]byte, error)
+
 	// ContainerExec runs a command in a container — the general escape hatch for
 	// imperative container operations that aren't a state change and don't fit
 	// the narrower primitives: backups (pg_dump | gzip), restores (psql < dump),

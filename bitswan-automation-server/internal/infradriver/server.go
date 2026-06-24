@@ -34,6 +34,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(PathBuildImage, s.handleBuildImage)
 	mux.HandleFunc(PathContainersList, s.handleList)
+	mux.HandleFunc(PathContainersInspect, s.handleInspect)
 	mux.HandleFunc(PathContainersLogs, s.handleLogs)
 	mux.HandleFunc(PathContainersStop, s.handleStop)
 	mux.HandleFunc(PathContainersRestart, s.handleRestart)
@@ -75,6 +76,21 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, ContainerListResult{Containers: containers})
+}
+
+func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
+	var body ContainerBody
+	if !decode(w, r, &body) {
+		return
+	}
+	raw, err := s.driver.ContainerInspect(r.Context(), body.Ctx, body.Container)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// raw is already JSON (the docker inspect array) — pass it through verbatim.
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {

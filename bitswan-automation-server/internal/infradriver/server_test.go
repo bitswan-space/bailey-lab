@@ -64,6 +64,10 @@ func (f *fakeDriver) ContainerRestart(_ context.Context, _ WorkspaceContext, con
 	return f.restartErr
 }
 
+func (f *fakeDriver) ContainerInspect(_ context.Context, _ WorkspaceContext, container string) ([]byte, error) {
+	return []byte(`[{"Id":"` + container + `"}]`), nil
+}
+
 func (f *fakeDriver) ContainerExec(_ context.Context, _ WorkspaceContext, spec ExecSpec, in io.Reader, out func(bool, []byte)) (int, error) {
 	f.execSpec = spec
 	if in != nil {

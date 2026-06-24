@@ -8,7 +8,6 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from app.async_docker import get_async_docker_client, DockerError
 from app.dependencies import get_automation_service
 from app.services.automation_service import (
     AutomationService,
@@ -141,21 +140,17 @@ async def list_agent_deployments(
     # Query running containers to get their state
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
     gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "")
-    docker_client = get_async_docker_client()
     running_states: dict[str, str] = {}
 
     try:
-        containers = await docker_client.list_containers(
-            all=True,
-            filters={"label": [f"gitops.workspace={workspace_name}"]},
-        )
+        containers = await get_automation_service().get_containers()
         for container in containers:
             labels = container.get("Labels", {})
             dep_id = labels.get("gitops.deployment_id", "")
             if f"-copy-{copy}" in dep_id and dep_id.endswith("-live-dev"):
                 running_states[dep_id] = container.get("State", "unknown")
-    except DockerError:
-        pass  # If Docker query fails, we still show sources as "not deployed"
+    except Exception:
+        pass  # If the query fails, we still show sources as "not deployed"
 
     def _make_url(src):
         if gitops_domain:
@@ -304,31 +299,17 @@ async def inspect_deployment(
     """Full inspect of a deployment container."""
     _validate_deployment_id(deployment_id)
 
-    docker_client = get_async_docker_client()
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-
-    try:
-        containers = await docker_client.list_containers(
-            all=True,
-            filters={
-                "label": [
-                    f"gitops.deployment_id={deployment_id}",
-                    f"gitops.workspace={workspace_name}",
-                ]
-            },
-        )
-    except DockerError as e:
-        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
-
+    svc = get_automation_service()
+    containers = await svc.get_container(deployment_id)
     if not containers:
         raise HTTPException(
             status_code=404, detail=f"No container found for '{deployment_id}'"
         )
-
-    container_id = containers[0].get("Id")
     try:
-        info = await docker_client.get_container(container_id)
-    except DockerError as e:
+        info = await svc.infra_driver.container_inspect(
+            svc._workspace_ctx(), containers[0].get("Id")
+        )
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Docker inspect error: {str(e)}")
 
     state = info.get("State", {})
@@ -367,7 +348,7 @@ async def inspect_deployment(
 
     return {
         "deployment_id": deployment_id,
-        "container_id": container_id[:12],
+        "container_id": info.get("Id", "")[:12],
         "container_name": info.get("Name", "").lstrip("/"),
         "image": config.get("Image", ""),
         "state": {
@@ -394,32 +375,18 @@ async def get_deployment_env(
     """Get environment variables for a deployment container (from docker inspect)."""
     _validate_deployment_id(deployment_id)
 
-    docker_client = get_async_docker_client()
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-
-    try:
-        containers = await docker_client.list_containers(
-            all=True,
-            filters={
-                "label": [
-                    f"gitops.deployment_id={deployment_id}",
-                    f"gitops.workspace={workspace_name}",
-                ]
-            },
-        )
-    except DockerError as e:
-        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
-
+    svc = get_automation_service()
+    containers = await svc.get_container(deployment_id)
     if not containers:
         raise HTTPException(
             status_code=404, detail=f"No container found for '{deployment_id}'"
         )
-
-    container_id = containers[0].get("Id")
     try:
-        info = await docker_client.get_container(container_id)
+        info = await svc.infra_driver.container_inspect(
+            svc._workspace_ctx(), containers[0].get("Id")
+        )
         env_list = info.get("Config", {}).get("Env", [])
-    except DockerError as e:
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Docker inspect error: {str(e)}")
 
     # Parse "KEY=VALUE" into dict
@@ -630,39 +597,36 @@ async def exec_in_deployment(
 ):
     _validate_deployment_id(deployment_id)
 
-    docker_client = get_async_docker_client()
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-
-    # Find the container
-    try:
-        containers = await docker_client.list_containers(
-            all=False,
-            filters={
-                "label": [
-                    f"gitops.deployment_id={deployment_id}",
-                    f"gitops.workspace={workspace_name}",
-                ]
-            },
-        )
-    except DockerError as e:
-        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
-
+    svc = get_automation_service()
+    containers = await svc.get_container(deployment_id)
     if not containers:
         raise HTTPException(
             status_code=404,
             detail=f"No running container found for deployment '{deployment_id}'",
         )
 
-    container_id = containers[0].get("Id")
+    from app.services.infra_driver_client import ExecSpec, InfraDriverError
+
+    out_chunks: list[bytes] = []
+    err_chunks: list[bytes] = []
+
+    async def on_stdout(d: bytes):
+        out_chunks.append(d)
+
+    async def on_stderr(d: bytes):
+        err_chunks.append(d)
 
     try:
-        exec_id = await docker_client.exec_create(container_id, body.command)
-        output = await docker_client.exec_start(exec_id)
-        exec_info = await docker_client.exec_inspect(exec_id)
-        exit_code = exec_info.get("ExitCode", -1)
-    except DockerError as e:
+        exit_code = await svc.infra_driver.exec(
+            svc._workspace_ctx(),
+            ExecSpec(container=containers[0].get("Id"), cmd=body.command),
+            on_stdout=on_stdout,
+            on_stderr=on_stderr,
+        )
+    except InfraDriverError as e:
         raise HTTPException(status_code=500, detail=f"Docker exec error: {str(e)}")
 
+    output = (b"".join(out_chunks) + b"".join(err_chunks)).decode("utf-8", "replace")
     return {
         "exit_code": exit_code,
         "output": output,

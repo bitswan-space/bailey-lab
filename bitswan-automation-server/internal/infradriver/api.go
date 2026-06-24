@@ -40,6 +40,7 @@ package infradriver
 const (
 	PathBuildImage        = "/v1/build-image"
 	PathContainersList    = "/v1/containers/list"
+	PathContainersInspect = "/v1/containers/inspect"
 	PathContainersLogs    = "/v1/containers/logs"
 	PathContainersStop    = "/v1/containers/stop"
 	PathContainersRestart = "/v1/containers/restart"

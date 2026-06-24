@@ -90,6 +90,26 @@ func (c *Client) BuildImage(ctx context.Context, req BuildRequest, prog func(str
 	return img, err
 }
 
+// ContainerInspect returns the raw `docker inspect` JSON for one container.
+func (c *Client) ContainerInspect(ctx context.Context, wctx WorkspaceContext, container string) ([]byte, error) {
+	body, _ := json.Marshal(ContainerBody{Ctx: wctx, Container: container})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+PathContainersInspect, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.auth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s: HTTP %d", PathContainersInspect, resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
 // ContainerExec runs a command in a container, streaming in to stdin and
 // delivering stdout/stderr chunks to out; returns the exit code.
 func (c *Client) ContainerExec(ctx context.Context, wctx WorkspaceContext, spec ExecSpec, in io.Reader, out func(stderr bool, chunk []byte)) (int, error) {
