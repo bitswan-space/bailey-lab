@@ -902,19 +902,8 @@ async def get_deploy_status(task_id: str):
     """Poll fallback for SSE drops — returns current deploy task state."""
     task = deploy_manager.get_task(task_id)
     if not task:
-        # TEMP forensics: a poll for an unknown task id is the smoking gun for a
-        # task-id mismatch (dashboard polling a different id than the deploy runs).
-        logger.info("DEPLOYSTATUS poll MISS task=%s (not found)", task_id)
         raise HTTPException(status_code=404, detail="Deploy task not found")
-    d = task.to_dict()
-    logger.info(
-        "DEPLOYSTATUS poll task=%s status=%s step=%s msg=%s",
-        task_id,
-        d.get("status"),
-        d.get("step"),
-        d.get("message"),
-    )
-    return d
+    return task.to_dict()
 
 
 @router.post("/{deployment_id}/deploy")
