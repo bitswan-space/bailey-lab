@@ -201,7 +201,7 @@ def fake_docker(monkeypatch):
         state["calls"].append(list(args))
         return "", "", 0
 
-    monkeypatch.setattr(bp_databases, "run_docker_command", fake_bp_run)
+    monkeypatch.setattr(bp_databases, "_driver_exec", fake_bp_run)
     return state
 
 

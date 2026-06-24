@@ -178,7 +178,7 @@ def fake_docker(monkeypatch):
             return "", "", 0  # DB does not exist yet
         return "", "", 0
 
-    monkeypatch.setattr(bp_databases, "run_docker_command", fake_run)
+    monkeypatch.setattr(bp_databases, "_driver_exec", fake_run)
     return calls
 
 
@@ -270,7 +270,7 @@ async def test_ensure_waits_for_cold_postgres(gitops_home, monkeypatch):
     async def no_sleep(_):
         return None
 
-    monkeypatch.setattr(bp_databases, "run_docker_command", fake_run)
+    monkeypatch.setattr(bp_databases, "_driver_exec", fake_run)
     monkeypatch.setattr("asyncio.sleep", no_sleep)
 
     def fake_get_service(svc_type, workspace, stage="production", **kw):
@@ -713,7 +713,7 @@ async def test_guard_fail_fast_raises_on_create_error(gitops_home, monkeypatch):
             return "", "permission denied", 1
         return "", "", 0
 
-    monkeypatch.setattr(bp_databases, "run_docker_command", fake_run)
+    monkeypatch.setattr(bp_databases, "_driver_exec", fake_run)
     bs_yaml = {
         "deployments": {
             "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
@@ -737,7 +737,7 @@ async def test_guard_clone_idempotent_when_db_exists(gitops_home, monkeypatch):
             return "1", "", 0  # already exists
         return "", "", 0
 
-    monkeypatch.setattr(bp_databases, "run_docker_command", fake_run)
+    monkeypatch.setattr(bp_databases, "_driver_exec", fake_run)
     bs_yaml = {
         "deployments": {
             "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}

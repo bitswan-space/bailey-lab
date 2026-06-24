@@ -53,7 +53,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
-from app.services.infra_service import run_docker_command, stage_for_deployment
+from app.services.infra_service import stage_for_deployment
 from app.utils import SERVICE_REALMS, sanitize_automation_name
 
 logger = logging.getLogger(__name__)
@@ -271,6 +271,52 @@ def _container_name(workspace: str, service_type: str, realm: str) -> str:
     return f"{workspace}__{service_type}{suffix}"
 
 
+async def _driver_exec(*args: str, cwd: str | None = None) -> tuple[str, str, int]:
+    """Run a `docker exec` through the infra-driver (gitops has no docker.sock).
+    Accepts the legacy ("docker", "exec", <container>, *cmd) arg shape so the
+    call sites are a drop-in rename of run_docker_command. Returns
+    (stdout, stderr, returncode)."""
+    from app.services.infra_driver_client import (
+        ExecSpec,
+        InfraDriverClient,
+        InfraDriverError,
+        WorkspaceContext,
+    )
+
+    if len(args) < 3 or args[0] != "docker" or args[1] != "exec":
+        raise ValueError("_driver_exec expects ('docker','exec',<container>,*cmd)")
+    container = args[2]
+    cmd = list(args[3:])
+    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+    client = InfraDriverClient()
+    ctx = WorkspaceContext(
+        workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local"),
+        domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+        gitops_dir=os.path.join(gitops_root, "gitops"),
+        secrets_dir=os.path.join(gitops_root, "secrets"),
+    )
+    out: list[bytes] = []
+    err: list[bytes] = []
+
+    async def on_stdout(d: bytes):
+        out.append(d)
+
+    async def on_stderr(d: bytes):
+        err.append(d)
+
+    try:
+        rc = await client.exec(
+            ctx, ExecSpec(container=container, cmd=cmd), on_stdout=on_stdout, on_stderr=on_stderr
+        )
+    except InfraDriverError as e:
+        return "", str(e), 1
+    return (
+        b"".join(out).decode("utf-8", "replace"),
+        b"".join(err).decode("utf-8", "replace"),
+        rc,
+    )
+
+
 async def _wait_for_postgres(container: str, user: str, timeout: float = 60.0) -> None:
     """Block until a freshly-started Postgres server accepts connections.
 
@@ -286,7 +332,7 @@ async def _wait_for_postgres(container: str, user: str, timeout: float = 60.0) -
     deadline = loop.time() + timeout
     last = ""
     while True:
-        _, stderr, rc = await run_docker_command(
+        _, stderr, rc = await _driver_exec(
             "docker", "exec", container, "pg_isready", "-U", user, "-q"
         )
         if rc == 0:
@@ -301,7 +347,7 @@ async def _wait_for_postgres(container: str, user: str, timeout: float = 60.0) -
 
 async def _postgres_db_exists(container: str, user: str, db_name: str) -> bool:
     sql = f"SELECT 1 FROM pg_database WHERE datname = '{db_name}';"
-    stdout, stderr, rc = await run_docker_command(
+    stdout, stderr, rc = await _driver_exec(
         "docker",
         "exec",
         container,
@@ -323,7 +369,7 @@ async def _postgres_db_exists(container: str, user: str, db_name: str) -> bool:
 async def _create_postgres_db(container: str, user: str, db_name: str) -> None:
     if await _postgres_db_exists(container, user, db_name):
         return
-    stdout, stderr, rc = await run_docker_command(
+    stdout, stderr, rc = await _driver_exec(
         "docker",
         "exec",
         container,
@@ -371,7 +417,7 @@ async def clone_postgres_db(
         f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
         f"WHERE datname = '{source_db}' AND pid <> pg_backend_pid();"
     )
-    await run_docker_command(
+    await _driver_exec(
         "docker",
         "exec",
         container,
@@ -383,7 +429,7 @@ async def clone_postgres_db(
         "-c",
         terminate_sql,
     )
-    _, stderr, rc = await run_docker_command(
+    _, stderr, rc = await _driver_exec(
         "docker",
         "exec",
         container,
@@ -413,7 +459,7 @@ async def _create_minio_bucket(
     deadline = loop.time() + 60.0
     stderr = ""
     while True:
-        _, stderr, rc = await run_docker_command(
+        _, stderr, rc = await _driver_exec(
             "docker",
             "exec",
             container,
@@ -430,7 +476,7 @@ async def _create_minio_bucket(
         if loop.time() >= deadline:
             raise RuntimeError(f"mc alias set failed: {stderr.strip()}")
         await asyncio.sleep(2.0)
-    _, stderr, rc = await run_docker_command(
+    _, stderr, rc = await _driver_exec(
         "docker",
         "exec",
         container,

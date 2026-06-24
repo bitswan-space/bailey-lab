@@ -103,34 +103,27 @@ async def _drop_postgres_db(copy_name: str) -> None:
     password = secrets["POSTGRES_PASSWORD"]
     new_db = _copy_db_name(copy_name)
 
-    docker_client = get_async_docker_client()
+    from app.services.bp_databases import _driver_exec
+
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
     container_name = f"{workspace_name}__postgres-dev"
 
     try:
-        containers = await docker_client.list_containers(
-            all=False,
-            filters={"name": [f"^/{container_name}$"]},
-        )
-        if not containers:
-            return
-
-        cid = containers[0]["Id"]
-
         terminate_sql = (
             f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
             f"WHERE datname = '{new_db}' AND pid <> pg_backend_pid();"
         )
         for sql in [terminate_sql, f'DROP DATABASE IF EXISTS "{new_db}";']:
-            exec_id = await docker_client.exec_create(
-                cid,
-                [
-                    "sh",
-                    "-c",
-                    f"PGPASSWORD='{password}' psql -U {user} -d postgres -c \"{sql}\"",
-                ],
+            # _driver_exec runs `docker exec` through the driver; a missing
+            # container surfaces as a non-zero rc, which we ignore (nothing to drop).
+            await _driver_exec(
+                "docker",
+                "exec",
+                container_name,
+                "sh",
+                "-c",
+                f"PGPASSWORD='{password}' psql -U {user} -d postgres -c \"{sql}\"",
             )
-            await docker_client.exec_start(exec_id)
 
         logger.info(f"Dropped Postgres DB '{new_db}' for copy '{copy_name}'")
     except Exception as e:
