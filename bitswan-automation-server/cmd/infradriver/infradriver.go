@@ -87,9 +87,11 @@ func ensureBareRepo(gitDir string, cf ctxFlags) error {
 	// The deploy repo lives on the workspace volume (owned by user1000) but the
 	// driver runs as root, so every git op (init, http-backend receive-pack, the
 	// apply hook's archive) trips git's "dubious ownership" guard and fails. Mark
-	// all repos safe for this process; the global config is inherited by the
-	// git-http-backend CGI children and the post-receive hook (same user/HOME).
-	if out, err := exec.Command("git", "config", "--global", "--add", "safe.directory", "*").CombinedOutput(); err != nil {
+	// all repos safe in SYSTEM config (/etc/gitconfig) — not --global, because the
+	// git-http-backend CGI child does not inherit HOME and so never reads
+	// ~/.gitconfig; system config is read regardless of HOME. (The CGI handler
+	// also injects this via GIT_CONFIG_* env as a belt-and-suspenders.)
+	if out, err := exec.Command("git", "config", "--system", "--add", "safe.directory", "*").CombinedOutput(); err != nil {
 		return fmt.Errorf("git config safe.directory: %w: %s", err, out)
 	}
 	if _, err := os.Stat(filepath.Join(gitDir, "HEAD")); os.IsNotExist(err) {

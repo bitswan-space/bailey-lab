@@ -31,6 +31,13 @@ func gitCGIHandler(projectRoot string) http.Handler {
 			// Export without a per-repo `git-daemon-export-ok` marker — the repo
 			// is private behind the bearer token + the internal network.
 			"GIT_HTTP_EXPORT_ALL=1",
+			// Trust the volume-backed repo regardless of owner: the driver runs
+			// as root, the repo is user1000-owned, and the receive-pack child
+			// doesn't inherit HOME (so ~/.gitconfig's safe.directory wouldn't
+			// apply). GIT_CONFIG_* is inherited by the git child processes.
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=safe.directory",
+			"GIT_CONFIG_VALUE_0=*",
 		},
 	}
 }
