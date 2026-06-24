@@ -25,13 +25,22 @@ import "context"
 // Driver realizes declarative workspace intent against a backend.
 type Driver interface {
 	// Apply compiles ctx+bitswanYAML into desired backend state and reconciles
-	// to it: build any source images, ensure networks, generate and bring up
-	// the compose project, install CA certs + oauth2 sidecars, and realize the
-	// data state the declaration implies (blue-green DB seeding, restores).
-	// Idempotent — a no-op when the running state already matches. prog receives
-	// streamed progress; the returned routes let gitops keep its own view in
-	// sync. onlyDeploymentIDs (optional) narrows reconciliation to a subset.
+	// to it: ensure networks, generate and bring up the compose project, install
+	// CA certs + oauth2 sidecars, and realize the data state the declaration
+	// implies (blue-green DB seeding, restores). It NEVER builds images — it
+	// deploys the already-built, tagged images bitswan.yaml references (built via
+	// BuildImage first). Idempotent — a no-op when the running state already
+	// matches. prog receives streamed progress; the returned routes let gitops
+	// keep its own view in sync. onlyDeploymentIDs (optional) narrows the set.
 	Apply(ctx context.Context, req ApplyRequest, prog func(Progress)) ([]Route, error)
+
+	// BuildImage bakes a source tree into an image, content-addressed by
+	// SourceSHA (a cache hit returns immediately with CacheHit=true). gitops
+	// calls this BEFORE pushing — it records the resulting tag in bitswan.yaml,
+	// so Apply only ever deploys already-built images. After the cut-over gitops
+	// has no Docker socket, so this is its only way to build. prog receives the
+	// build log lines.
+	BuildImage(ctx context.Context, req BuildRequest, prog func(string)) (ImageRef, error)
 
 	// ContainerList returns the workspace's containers (optionally filtered by
 	// label/stage). gitops derives deployment status from this — health, image,
@@ -64,6 +73,22 @@ type ApplyRequest struct {
 	Ctx               WorkspaceContext `json:"ctx"`
 	BitswanYAML       string           `json:"bitswan_yaml"`
 	OnlyDeploymentIDs []string         `json:"only_deployment_ids,omitempty"`
+}
+
+// BuildRequest bakes a source tree (on the shared volume) into an image.
+type BuildRequest struct {
+	Ctx        WorkspaceContext `json:"ctx"`
+	SourcePath string           `json:"source_path"` // build context on the shared volume
+	BaseImage  string           `json:"base_image"`
+	MountPath  string           `json:"mount_path"` // where the source is COPY'd in the image
+	SourceSHA  string           `json:"source_sha"` // content address; drives the cache + the tag
+}
+
+// ImageRef is the result of a BuildImage.
+type ImageRef struct {
+	FullTag  string `json:"full_tag"`
+	ImageID  string `json:"image_id"`
+	CacheHit bool   `json:"cache_hit"`
 }
 
 // ContainerFilter narrows ContainerList. Empty fields are ignored; Labels are

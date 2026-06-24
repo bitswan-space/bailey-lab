@@ -10,29 +10,37 @@ package infradriver
 // rollback/backup is a committed push, the git history IS the audit log. (A k8s
 // backend is then just ArgoCD/Flux watching the same repo — no custom driver.)
 //
-// The only RPCs are four operational container primitives, served as HTTP over
-// the private UNIX socket (never network-reachable). They are transient actions
-// / reads, NOT state changes — state changes go through a push:
+// The RPCs are image building plus four operational container primitives,
+// served as HTTP over the private UNIX socket (never network-reachable). None
+// are state changes — state changes go through a push:
 //
+//	POST /v1/build-image        body BuildRequest  → SSE: log* then (image|error)
 //	POST /v1/containers/list    body ListBody      → JSON ContainerListResult
 //	POST /v1/containers/logs    body LogsBody      → SSE: log* (until EOF/close)
 //	POST /v1/containers/stop    body ContainerBody → JSON OKResult (or error)
 //	POST /v1/containers/restart body ContainerBody → JSON OKResult (or error)
 //
-// SSE frame names (the `event:` field) for /v1/containers/logs; `data:` is JSON:
+// build-image exists because, after the cut-over, gitops has no Docker socket:
+// it builds an image here, records the tag in bitswan.yaml, then pushes — so
+// apply only ever deploys already-built images.
 //
-//	log   → LogLine
-//	error → ErrorResult   (terminal failure)
+// SSE frame names (the `event:` field); `data:` is JSON:
+//
+//	log   → LogLine    (build/log output)
+//	image → ImageRef   (terminal success of build-image)
+//	error → ErrorResult (terminal failure)
 const (
+	PathBuildImage        = "/v1/build-image"
 	PathContainersList    = "/v1/containers/list"
 	PathContainersLogs    = "/v1/containers/logs"
 	PathContainersStop    = "/v1/containers/stop"
 	PathContainersRestart = "/v1/containers/restart"
 )
 
-// SSE event names (logs only — apply progress rides the git push, not SSE).
+// SSE event names (apply progress rides the git push, not SSE).
 const (
 	EventLog   = "log"
+	EventImage = "image"
 	EventError = "error"
 )
 

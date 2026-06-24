@@ -19,11 +19,21 @@ type fakeDriver struct {
 	restarted   string
 	restartErr  error
 	applyCalled bool
+	buildLogs   []string
+	buildImage  ImageRef
+	buildErr    error
 }
 
 func (f *fakeDriver) Apply(_ context.Context, _ ApplyRequest, _ func(Progress)) ([]Route, error) {
 	f.applyCalled = true
 	return nil, nil
+}
+
+func (f *fakeDriver) BuildImage(_ context.Context, _ BuildRequest, prog func(string)) (ImageRef, error) {
+	for _, l := range f.buildLogs {
+		prog(l)
+	}
+	return f.buildImage, f.buildErr
 }
 
 func (f *fakeDriver) ContainerList(_ context.Context, _ WorkspaceContext, filter ContainerFilter) ([]Container, error) {
@@ -51,6 +61,29 @@ func (f *fakeDriver) ContainerRestart(_ context.Context, _ WorkspaceContext, con
 func newTestPair(d Driver) (*Client, func()) {
 	ts := httptest.NewServer(NewServer(d).Handler())
 	return newClientFor(ts.Client(), ts.URL), ts.Close
+}
+
+func TestBuildImageStreamsLogsThenImage(t *testing.T) {
+	fd := &fakeDriver{
+		buildLogs:  []string{"Step 1/3", "Step 2/3", "Step 3/3"},
+		buildImage: ImageRef{FullTag: "internal/acme-frontend:sha1", ImageID: "sha256:abc", CacheHit: false},
+	}
+	client, closeFn := newTestPair(fd)
+	defer closeFn()
+
+	var logs []string
+	img, err := client.BuildImage(context.Background(),
+		BuildRequest{Ctx: WorkspaceContext{WorkspaceName: "acme"}, SourcePath: "/repo/src", BaseImage: "node:20", SourceSHA: "sha1"},
+		func(l string) { logs = append(logs, l) })
+	if err != nil {
+		t.Fatalf("BuildImage: %v", err)
+	}
+	if !reflect.DeepEqual(logs, fd.buildLogs) {
+		t.Errorf("build logs = %v, want %v", logs, fd.buildLogs)
+	}
+	if img != fd.buildImage {
+		t.Errorf("image = %+v, want %+v", img, fd.buildImage)
+	}
 }
 
 func TestContainerListRoundTrip(t *testing.T) {

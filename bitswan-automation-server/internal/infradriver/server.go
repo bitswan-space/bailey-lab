@@ -19,11 +19,30 @@ func NewServer(d Driver) *Server { return &Server{driver: d} }
 // Handler returns the mux for the container-primitive endpoints.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc(PathBuildImage, s.handleBuildImage)
 	mux.HandleFunc(PathContainersList, s.handleList)
 	mux.HandleFunc(PathContainersLogs, s.handleLogs)
 	mux.HandleFunc(PathContainersStop, s.handleStop)
 	mux.HandleFunc(PathContainersRestart, s.handleRestart)
 	return mux
+}
+
+func (s *Server) handleBuildImage(w http.ResponseWriter, r *http.Request) {
+	var req BuildRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	sse, ok := newSSE(w)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	img, err := s.driver.BuildImage(r.Context(), req, func(line string) { sse.send(EventLog, LogLine{Line: line}) })
+	if err != nil {
+		sse.send(EventError, ErrorResult{Error: err.Error()})
+		return
+	}
+	sse.send(EventImage, img)
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {

@@ -58,6 +58,32 @@ func (c *Client) ContainerRestart(ctx context.Context, wctx WorkspaceContext, co
 	return c.postJSON(ctx, PathContainersRestart, ContainerBody{Ctx: wctx, Container: container}, &OKResult{})
 }
 
+// BuildImage builds a source image, streaming build log lines to prog, and
+// returns the resulting image ref.
+func (c *Client) BuildImage(ctx context.Context, req BuildRequest, prog func(string)) (ImageRef, error) {
+	var img ImageRef
+	err := c.stream(ctx, PathBuildImage, req, func(event string, data []byte) error {
+		switch event {
+		case EventLog:
+			var l LogLine
+			if err := json.Unmarshal(data, &l); err != nil {
+				return err
+			}
+			if prog != nil {
+				prog(l.Line)
+			}
+		case EventImage:
+			if err := json.Unmarshal(data, &img); err != nil {
+				return err
+			}
+		case EventError:
+			return sseError(data)
+		}
+		return nil
+	})
+	return img, err
+}
+
 // ContainerLogs streams a container's logs to sink until the stream ends.
 func (c *Client) ContainerLogs(ctx context.Context, wctx WorkspaceContext, container string, tail int, follow bool, sink func(LogLine)) error {
 	body := LogsBody{Ctx: wctx, Container: container, Tail: tail, Follow: follow}

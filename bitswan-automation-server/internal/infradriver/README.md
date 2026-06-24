@@ -44,19 +44,22 @@ driver git remote ── post-receive ──▶ compile bitswan.yaml + reconcile
 
 ## Surface
 
-There is **no apply RPC**. The only RPCs are four operational container
-primitives — transient actions/reads, not state changes — served as HTTP over
-the private UNIX socket (`api.go`):
+There is **no apply RPC**. The RPCs are image building plus four operational
+container primitives — none are state changes — served as HTTP over the private
+UNIX socket (`api.go`):
 
 | Endpoint | Purpose |
 |---|---|
+| `POST /v1/build-image` | build a source image (SSE log → image); gitops records the tag in bitswan.yaml then pushes, so apply only deploys already-built images |
 | `POST /v1/containers/list` | list workspace containers (+ labels) — gitops derives deployment status/health/slot from this |
 | `POST /v1/containers/logs` | stream a container's logs (SSE) |
 | `POST /v1/containers/stop` | stop one container (transient) |
 | `POST /v1/containers/restart` | restart one container (transient) |
 
-Everything else is a `git push`. If a flow doesn't fit, the fix is to make
-`bitswan.yaml` more expressive — never to add a driver command.
+`build-image` exists because after the cut-over gitops has no Docker socket.
+Everything else (deploy/promote/swap/scale/rollback/backup) is a `git push`. If
+a flow doesn't fit, the fix is to make `bitswan.yaml` more expressive — never to
+add a driver command.
 
 ## Go interface
 
