@@ -915,6 +915,7 @@ class AutomationService:
         )
         return out.strip() if rc == 0 else None
 
+    @staticmethod
     def deployment_id_for(source: dict, stage: str) -> str:
         """Resolve the deployment_id for a scanned source at a given stage.
 
