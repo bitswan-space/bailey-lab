@@ -114,6 +114,7 @@ class Container:
     state: str
     health: str
     image: str
+    created: int = 0
     labels: dict = field(default_factory=dict)
 
     @classmethod
@@ -124,8 +125,23 @@ class Container:
             state=d.get("state", ""),
             health=d.get("health", ""),
             image=d.get("image", ""),
+            created=d.get("created", 0) or 0,
             labels=d.get("labels") or {},
         )
+
+    def to_docker_dict(self) -> dict:
+        """Map to the docker-API /containers/json shape gitops historically got
+        from async_docker.list_containers, so the existing get_automations
+        overlay (which reads Id/Names/State/Status/Created/Labels) is unchanged."""
+        return {
+            "Id": self.id,
+            "Names": [f"/{self.name}"] if self.name else [],
+            "State": self.state,
+            "Status": self.health or self.state,
+            "Created": self.created,
+            "Image": self.image,
+            "Labels": self.labels,
+        }
 
 
 @dataclass

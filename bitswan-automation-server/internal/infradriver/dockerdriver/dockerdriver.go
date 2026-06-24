@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 )
@@ -30,9 +31,10 @@ var _ infradriver.Driver = (*DockerDriver)(nil)
 
 // dockerInspect is the subset of `docker inspect` output we read.
 type dockerInspect struct {
-	ID    string `json:"Id"`
-	Name  string `json:"Name"`
-	State struct {
+	ID      string `json:"Id"`
+	Name    string `json:"Name"`
+	Created string `json:"Created"` // RFC3339Nano
+	State   struct {
 		Status string `json:"Status"`
 		Health *struct {
 			Status string `json:"Status"`
@@ -80,13 +82,20 @@ func parseInspect(raw []byte) ([]infradriver.Container, error) {
 		if di.State.Health != nil {
 			health = di.State.Health.Status
 		}
+		var created int64
+		if di.Created != "" {
+			if t, err := time.Parse(time.RFC3339Nano, di.Created); err == nil {
+				created = t.Unix()
+			}
+		}
 		containers = append(containers, infradriver.Container{
-			ID:     di.ID,
-			Name:   strings.TrimPrefix(di.Name, "/"),
-			State:  di.State.Status,
-			Health: health,
-			Image:  di.Config.Image,
-			Labels: di.Config.Labels,
+			ID:      di.ID,
+			Name:    strings.TrimPrefix(di.Name, "/"),
+			State:   di.State.Status,
+			Health:  health,
+			Image:   di.Config.Image,
+			Created: created,
+			Labels:  di.Config.Labels,
 		})
 	}
 	return containers, nil

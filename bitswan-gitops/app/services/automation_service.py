@@ -357,49 +357,35 @@ class AutomationService:
         logger.info("History cache warm-up: done")
 
     async def get_container(self, deployment_id) -> list[dict]:
-        """Get containers for a specific deployment using async Docker client."""
-        docker_client = get_async_docker_client()
-        containers = await docker_client.list_containers(
-            all=True,
-            filters={
-                "label": [
-                    f"gitops.deployment_id={deployment_id}",
-                    f"gitops.workspace={self.workspace_name}",
-                ]
+        """Containers for a deployment, via the driver (docker-dict shape)."""
+        containers = await self.infra_driver.container_list(
+            self._workspace_ctx(),
+            labels={
+                "gitops.deployment_id": deployment_id,
+                "gitops.workspace": self.workspace_name,
             },
         )
-        return containers
+        return [c.to_docker_dict() for c in containers]
 
     async def inspect_automation(self, deployment_id: str) -> list[dict]:
-        """Get full docker inspect for all containers of a deployment."""
-        containers = await self.get_container(deployment_id)
-        if not containers:
-            return []
-        docker_client = get_async_docker_client()
-        results = []
-        for container in containers:
-            container_id = container.get("Id") or container.get("id")
-            if container_id:
-                try:
-                    inspect_data = await docker_client.get_container(container_id)
-                    results.append(inspect_data)
-                except Exception:
-                    pass  # container may have been removed
-        return results
+        """The deployment's containers (the driver-derived dict). The full raw
+        `docker inspect` is no longer exposed to gitops; callers that needed
+        identity/state read it off these fields."""
+        return await self.get_container(deployment_id)
 
     async def get_containers(self) -> list[dict]:
-        """Get all gitops containers using async Docker client."""
-        docker_client = get_async_docker_client()
-        containers = await docker_client.list_containers(
-            all=True,
-            filters={
-                "label": [
-                    "gitops.deployment_id",
-                    f"gitops.workspace={self.workspace_name}",
-                ]
-            },
+        """All of the workspace's deployment containers, via the driver. The
+        driver filter is exact key=value, so filter by workspace and keep only
+        those carrying a gitops.deployment_id label (the old label-exists filter)."""
+        containers = await self.infra_driver.container_list(
+            self._workspace_ctx(),
+            labels={"gitops.workspace": self.workspace_name},
         )
-        return containers
+        return [
+            c.to_docker_dict()
+            for c in containers
+            if (c.labels or {}).get("gitops.deployment_id")
+        ]
 
     def _yaml_scope(self, relative_path: str | None) -> str | None:
         """Classify a `bitswan.yaml` deployment into a cache scope.
@@ -635,10 +621,8 @@ class AutomationService:
             for a in entries:
                 result.append(a.model_copy() if hasattr(a, "model_copy") else a)
 
-        docker_client = get_async_docker_client()
-        info = await docker_client.info()
         containers = await self.get_containers()
-        self._apply_docker_overlay(result, containers, info, bs_yaml)
+        self._apply_docker_overlay(result, containers, {}, bs_yaml)
         return result
 
     async def materialize_merged_tree(self, dirs: list[str], checksum: str) -> str:
@@ -2670,26 +2654,29 @@ class AutomationService:
         db = secrets.get("POSTGRES_DB", "postgres")
         ws = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace")
         container = f"{ws}__postgres-{stage}"
+        from app.services.infra_driver_client import ExecSpec
+
         try:
-            client = get_async_docker_client()
-            found = await client.list_containers(
-                all=False, filters={"name": [f"^/{container}$"]}
+            chunks: list[bytes] = []
+
+            async def on_stdout(data: bytes):
+                chunks.append(data)
+
+            code = await self.infra_driver.exec(
+                self._workspace_ctx(),
+                ExecSpec(
+                    container=container,
+                    cmd=[
+                        "sh",
+                        "-c",
+                        f"PGPASSWORD='{pw}' pg_dump --schema-only -U {user} {db}",
+                    ],
+                ),
+                on_stdout=on_stdout,
             )
-            if not found:
+            if code != 0:
                 return None
-            cid = found[0]["Id"]
-            exec_id = await client.exec_create(
-                cid,
-                [
-                    "sh",
-                    "-c",
-                    f"PGPASSWORD='{pw}' pg_dump --schema-only -U {user} {db}",
-                ],
-            )
-            out = await client.exec_start(exec_id)
-            return (
-                out if isinstance(out, str) else (out or b"").decode("utf-8", "replace")
-            )
+            return b"".join(chunks).decode("utf-8", "replace")
         except Exception as e:
             logger.warning("pg_dump schema failed for %s: %s", stage, e)
             return None
@@ -4155,13 +4142,12 @@ fi
                 "message": f"Container for deployment {deployment_id} created and started",
             }
 
-        docker_client = get_async_docker_client()
+        # The driver exposes restart (which starts a stopped container); re-apply
+        # so reconcile restores the CA certs + oauth2-proxy on the live container.
+        ctx = self._workspace_ctx()
         for container in containers:
-            container_id = container.get("Id")
-            await docker_client.start_container(container_id)
-
-        await self.install_certificates_in_container(deployment_id)
-        await self.start_oauth2_proxy_in_container(deployment_id)
+            await self.infra_driver.container_restart(ctx, container.get("Id"))
+        await self.apply_compose_for_deployments([deployment_id])
 
         return {
             "status": "success",
@@ -4231,10 +4217,9 @@ fi
                 detail=f"No container found for deployment ID: {deployment_id}",
             )
 
-        docker_client = get_async_docker_client()
+        ctx = self._workspace_ctx()
         for container in containers:
-            container_id = container.get("Id")
-            await docker_client.stop_container(container_id)
+            await self.infra_driver.container_stop(ctx, container.get("Id"))
 
         await self.mark_as_inactive(deployment_id)
 
@@ -4271,13 +4256,15 @@ fi
                 "message": f"Container for deployment {deployment_id} created and started",
             }
 
-        docker_client = get_async_docker_client()
+        ctx = self._workspace_ctx()
         for container in containers:
-            container_id = container.get("Id")
-            await docker_client.restart_container(container_id)
+            await self.infra_driver.container_restart(ctx, container.get("Id"))
 
-        await self.install_certificates_in_container(deployment_id)
-        await self.start_oauth2_proxy_in_container(deployment_id)
+        # A bare restart drops the post-up sidecar setup (CA certs + the
+        # oauth2-proxy process the driver injects via exec). Re-apply so the
+        # driver's reconcile re-installs them — its compose-up is a no-op for the
+        # unchanged service, but the cert/oauth2 steps run on the live container.
+        await self.apply_compose_for_deployments([deployment_id])
 
         return {
             "status": "success",
@@ -4344,20 +4331,23 @@ fi
         }
         yield f"event: metadata\ndata: {json.dumps(metadata)}\n\n"
 
-        docker_client = get_async_docker_client()
+        ctx = self._workspace_ctx()
         queue: asyncio.Queue = asyncio.Queue()
         active_tasks = len(containers)
 
         async def read_replica(index: int, container_id: str):
             nonlocal active_tasks
+
+            async def sink(line: str, stderr: bool):
+                prefix = f"[replica-{index}] " if multiple else ""
+                await queue.put(
+                    f"event: log\ndata: {json.dumps({'replica': index, 'line': prefix + line, 'stream': 'stderr' if stderr else 'stdout'})}\n\n"
+                )
+
             try:
-                async for stream, line in docker_client.stream_container_logs(
-                    container_id, tail=lines, since=since
-                ):
-                    prefix = f"[replica-{index}] " if multiple else ""
-                    await queue.put(
-                        f"event: log\ndata: {json.dumps({'replica': index, 'line': prefix + line, 'stream': stream})}\n\n"
-                    )
+                await self.infra_driver.container_logs(
+                    ctx, container_id, tail=lines, follow=True, sink=sink
+                )
             except Exception as e:
                 await queue.put(
                     f"event: error\ndata: {json.dumps({'replica': index, 'message': str(e)})}\n\n"
@@ -4398,11 +4388,13 @@ fi
                 detail=f"No container found for deployment ID: {deployment_id}",
             )
 
-        docker_client = get_async_docker_client()
+        # Stop the containers via the driver. Actual removal happens when the
+        # deployment leaves bitswan.yaml and a subsequent apply brings the project
+        # up with --remove-orphans (the callers — deactivate/delete — re-apply),
+        # so there is no separate container-rm primitive.
+        ctx = self._workspace_ctx()
         for container in containers:
-            container_id = container.get("Id")
-            await docker_client.stop_container(container_id)
-            await docker_client.remove_container(container_id)
+            await self.infra_driver.container_stop(ctx, container.get("Id"))
 
         return {
             "status": "success",

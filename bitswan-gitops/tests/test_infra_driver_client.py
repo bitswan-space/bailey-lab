@@ -224,7 +224,7 @@ async def test_container_list(driver_server):
     )
     containers = await client.container_list(WCTX, labels={"gitops.stage": "dev"})
     assert containers == [
-        Container("abc", "acme-svc", "running", "healthy", "img:1", {"k": "v"})
+        Container("abc", "acme-svc", "running", "healthy", "img:1", labels={"k": "v"})
     ]
 
 
@@ -315,9 +315,6 @@ async def test_exec_propagates_nonzero_exit(driver_server):
 
 
 async def test_exec_error_frame_raises(driver_server):
-    client = InfraDriverClient(
-        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
-    )
     with pytest.raises(InfraDriverError, match="no such container"):
         # Hit the error endpoint directly via the frame reader path.
         async with __import__("httpx").AsyncClient() as hc:

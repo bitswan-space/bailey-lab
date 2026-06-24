@@ -130,12 +130,13 @@ type ContainerFilter struct {
 
 // Container is one realized container.
 type Container struct {
-	ID     string            `json:"id"`
-	Name   string            `json:"name"`
-	State  string            `json:"state"`  // "running" | "exited" | "created" | ...
-	Health string            `json:"health"` // "healthy" | "starting" | "unhealthy" | "" (no healthcheck)
-	Image  string            `json:"image"`
-	Labels map[string]string `json:"labels,omitempty"`
+	ID      string            `json:"id"`
+	Name    string            `json:"name"`
+	State   string            `json:"state"`  // "running" | "exited" | "created" | ...
+	Health  string            `json:"health"` // "healthy" | "starting" | "unhealthy" | "" (no healthcheck)
+	Image   string            `json:"image"`
+	Created int64             `json:"created"` // unix seconds (gitops overlays created_at from this)
+	Labels  map[string]string `json:"labels,omitempty"`
 }
 
 // Progress is one step of an Apply. Step is a stable machine key; Message is the
