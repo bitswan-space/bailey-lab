@@ -541,41 +541,6 @@ def add_route_to_ingress(
         return False
 
 
-def reconcile_ingress(workspace_name: str, routes: list[dict]) -> bool:
-    """Declaratively converge the workspace's gitops-managed ingress routes to
-    `routes` (the COMPLETE desired set, from `desired_ingress_routes`). The
-    daemon adds/repoints each and prunes any gitops route not in the set; manual
-    routes are preserved. Idempotent — a re-apply with no change is a fast no-op
-    (the daemon skips routes already pointing at the right upstream). This is the
-    single ingress side effect of `apply`; nothing else touches the daemon."""
-    body = {"workspace_name": workspace_name, "routes": routes}
-    try:
-        client, base = _ingress_client_and_base()
-        with client:
-            # Generous timeout: the first reconcile of a workspace applies every
-            # route (each a ~1s Traefik write); later reconciles skip in-sync
-            # routes and finish near-instantly.
-            response = client.post(f"{base}/ingress/reconcile", json=body, timeout=180)
-        if response.status_code != 200:
-            logger.warning(
-                f"Ingress reconcile failed: HTTP {response.status_code} — {response.text}"
-            )
-            return False
-        result = response.json() if response.content else {}
-        pruned = result.get("pruned") or []
-        if result.get("applied") or pruned or result.get("warnings"):
-            logger.info(
-                "Ingress reconcile: applied=%s pruned=%s warnings=%s",
-                result.get("applied", 0),
-                pruned,
-                result.get("warnings") or [],
-            )
-        return True
-    except Exception as e:
-        logger.warning(f"Ingress reconcile request failed: {e}")
-        return False
-
-
 def repoint_route_in_ingress(
     hostname: str, upstream: str, workspace_name: str = ""
 ) -> bool:
@@ -1023,74 +988,6 @@ async def ensure_docker_network(name: str) -> None:
         stderr=asyncio.subprocess.PIPE,
     )
     await create.communicate()  # ignore "already exists" lost-race errors
-
-
-async def docker_compose_up(
-    bitswan_dir: str,
-    docker_compose: str,
-    container_name: str | None = None,
-    extra_services: list[str] | None = None,
-    progress_callback=None,
-) -> dict:
-    docker_compose_cmd = [
-        "docker",
-        "compose",
-        "-f",
-        "/dev/stdin",
-        "up",
-        "-d",
-        "--remove-orphans",
-    ]
-    if container_name:
-        docker_compose_cmd.append(container_name)
-    if extra_services:
-        docker_compose_cmd.extend(extra_services)
-
-    proc = await asyncio.create_subprocess_exec(
-        *docker_compose_cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=bitswan_dir,
-    )
-    # The compose document is small (well under a pipe buffer), so writing it
-    # and closing stdin can't deadlock against the concurrent output pumps.
-    proc.stdin.write(docker_compose.encode())
-    await proc.stdin.drain()
-    proc.stdin.close()
-
-    stdout_chunks: list[bytes] = []
-    stderr_chunks: list[bytes] = []
-
-    async def _pump_stdout():
-        stdout_chunks.append(await proc.stdout.read())
-
-    async def _pump_stderr():
-        last = None
-        while True:
-            raw = await proc.stderr.readline()
-            if not raw:
-                break
-            stderr_chunks.append(raw)
-            if progress_callback is None:
-                continue
-            msg = _compose_event_message(raw.decode("utf-8", "replace"))
-            if msg and msg != last:
-                last = msg
-                await progress_callback("docker_compose_up", msg)
-
-    await asyncio.gather(_pump_stdout(), _pump_stderr())
-    return_code = await proc.wait()
-
-    up_result = {
-        "cmd": docker_compose_cmd,
-        "stdout": b"".join(stdout_chunks).decode("utf-8"),
-        "stderr": b"".join(stderr_chunks).decode("utf-8"),
-        "return_code": return_code,
-    }
-    return {
-        "up_result": up_result,
-    }
 
 
 async def save_image(
