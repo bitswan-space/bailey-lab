@@ -302,6 +302,10 @@ class AutomationService:
         self.workspace_repo_dir = os.environ.get(
             "BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo"
         )
+        # Lazily-constructed infra-driver client (the post-cut-over replacement
+        # for direct Docker access). Lazy so tests that never deploy don't need
+        # the BITSWAN_INFRA_DRIVER_* env the client requires.
+        self._infra_driver = None
         # Cache full history per deployment_id: {deployment_id: (commit_hash, [entries])}
         self._history_cache: dict[str, tuple[str, list]] = {}
         # Scope-keyed cache mirroring ProcessService._cache. Key = copy
@@ -311,6 +315,27 @@ class AutomationService:
         # by the filesystem watchers in app/lifespan.py whenever
         # bitswan.yaml or any automation.toml changes.
         self._cache: dict[str | None, list[DeployedAutomation]] = {}
+
+    @property
+    def infra_driver(self):
+        """The infra-driver client (built/deploy/primitives/exec). Replaces
+        direct Docker access after the cut-over."""
+        if self._infra_driver is None:
+            from app.services.infra_driver_client import InfraDriverClient
+
+            self._infra_driver = InfraDriverClient()
+        return self._infra_driver
+
+    def _workspace_ctx(self):
+        """The WorkspaceContext the driver needs alongside bitswan.yaml."""
+        from app.services.infra_driver_client import WorkspaceContext
+
+        return WorkspaceContext(
+            workspace_name=self.workspace_name,
+            domain=self.gitops_domain or "",
+            gitops_dir=self.gitops_dir,
+            secrets_dir=self.secrets_dir,
+        )
 
     async def warm_history_cache(self):
         """Pre-warm the history cache for all known deployments."""
@@ -844,7 +869,7 @@ class AutomationService:
         cached image — no rebuild. Replaces the old materialize-and-mount path for
         promoted stages: the source now lives INSIDE the image. Returns
         (full_tag, image_id)."""
-        import docker
+        from app.services.infra_driver_client import BuildRequest, InfraDriverError
 
         auto_name = sanitize_automation_name(
             os.path.basename(source_dir.rstrip(os.sep))
@@ -856,43 +881,58 @@ class AutomationService:
         full_tag = f"{tag_root}:sha{source_sha}"
         mp = mount_path or "/app"
 
-        def _build_sync() -> str | None:
-            client = docker.from_env()
-            # Dedup: an image for this exact source already exists — reuse it.
-            try:
-                return client.images.get(full_tag).id
-            except docker.errors.ImageNotFound:
-                pass
-            ctx = tempfile.mkdtemp(prefix=".bswn-bake-")
-            try:
-                # Merge the source dirs (later-wins). symlinks=True PRESERVES
-                # symlinks (e.g. go.mod → /deps/go.mod, an absolute path the
-                # runtime base provides) — `COPY . <mp>` keeps them as symlinks
-                # in the image, resolving at runtime. Following them here would
-                # fail (the target only exists inside the running container).
-                for d in dirs_to_merge:
-                    if os.path.isdir(d):
-                        shutil.copytree(d, ctx, dirs_exist_ok=True, symlinks=True)
-                with open(os.path.join(ctx, ".dockerignore"), "w") as f:
-                    f.write("image/\nDockerfile\n.dockerignore\n")
-                with open(os.path.join(ctx, "Dockerfile"), "w") as f:
-                    f.write(f"FROM {base_image}\nCOPY . {mp}\n")
-                image, _logs = client.images.build(
-                    path=ctx, tag=full_tag, rm=True, pull=False
-                )
-                client.images.get(full_tag).tag(tag_root, "latest")
-                return image.id
-            finally:
-                shutil.rmtree(ctx, ignore_errors=True)
+        # Materialize the merged source under the shared gitops volume so the
+        # driver can read it (it has no /workspace-repo mount). `.builds/` is
+        # gitignored so it is neither committed nor pushed; the driver caches the
+        # built image by tag, so the context is transient.
+        ctx = os.path.join(self.gitops_dir, ".builds", source_sha)
+        self._ensure_builds_gitignored()
+        await asyncio.to_thread(self._materialize_build_context, ctx, dirs_to_merge)
 
         try:
-            image_id = await asyncio.to_thread(_build_sync)
-        except docker.errors.BuildError as e:
+            img = await self.infra_driver.build_image(
+                BuildRequest(
+                    ctx=self._workspace_ctx(),
+                    tag=full_tag,
+                    source_path=ctx,
+                    base_image=base_image,
+                    mount_path=mp,
+                    source_sha=source_sha,
+                )
+            )
+        except InfraDriverError as e:
             raise HTTPException(
                 status_code=500,
                 detail=f"Source image build failed for {full_tag}: {e}",
             )
-        return full_tag, image_id
+        return img.full_tag, img.image_id
+
+    def _ensure_builds_gitignored(self) -> None:
+        """Keep the transient `.builds/` build-context dir out of the deploy push."""
+        gi = os.path.join(self.gitops_dir, ".gitignore")
+        existing = ""
+        if os.path.isfile(gi):
+            with open(gi) as f:
+                existing = f.read()
+        if ".builds/" not in existing.split():
+            sep = "" if (not existing or existing.endswith("\n")) else "\n"
+            with open(gi, "a") as f:
+                f.write(f"{sep}.builds/\n")
+
+    @staticmethod
+    def _materialize_build_context(ctx: str, dirs_to_merge: list[str]) -> None:
+        # Rebuild fresh, then merge the source dirs (later-wins). symlinks=True
+        # PRESERVES symlinks (e.g. go.mod → /deps/go.mod, an absolute path the
+        # runtime base provides) — `COPY . <mp>` keeps them as symlinks in the
+        # image, resolving at runtime. Following them here would fail (the target
+        # only exists inside the running container).
+        shutil.rmtree(ctx, ignore_errors=True)
+        os.makedirs(ctx, exist_ok=True)
+        for d in dirs_to_merge:
+            if os.path.isdir(d):
+                shutil.copytree(d, ctx, dirs_exist_ok=True, symlinks=True)
+        with open(os.path.join(ctx, ".dockerignore"), "w") as f:
+            f.write("image/\nDockerfile\n.dockerignore\n")
 
     async def _source_commit(self, source_dir: str) -> str | None:
         """Git commit of the source tree being deployed (the copy/main HEAD), so a

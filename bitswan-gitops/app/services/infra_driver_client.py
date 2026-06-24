@@ -152,8 +152,11 @@ class BuildRequest:
     ctx: WorkspaceContext
     tag: str
     source_path: str
-    base_image: str
+    base_image: str = ""
     mount_path: str = ""
+    # When set, build this Dockerfile (relative to source_path) as-is instead of
+    # the generated FROM base + COPY . mount_path (driver.go BuildRequest).
+    dockerfile: str = ""
     source_sha: str = ""
 
     def to_json(self) -> dict:
@@ -163,6 +166,7 @@ class BuildRequest:
             "source_path": self.source_path,
             "base_image": self.base_image,
             "mount_path": self.mount_path,
+            "dockerfile": self.dockerfile,
             "source_sha": self.source_sha,
         }
 
