@@ -2678,12 +2678,43 @@ class AutomationService:
         # provisioning, CA certs, oauth2 sidecars, and ingress. gitops no longer
         # generates compose, brings up containers, or touches the daemon ingress.
         await _report("deploying", "Pushing deployment to the infra-driver...")
-        await self.infra_driver.deploy(
-            work_tree=self.gitops_dir,
-            commit_message=f"deploy {', '.join(deployment_ids) or 'all'}",
-            progress_callback=_report,
-            author=(f"{deployed_by} <{deployed_by}>" if deployed_by else None),
-        )
+
+        # The driver applies the whole deploy (compile → compose up → provision →
+        # certs → ingress) inside the post-receive hook and relays its step
+        # progress back over the git smart-HTTP sideband — which the CGI buffers,
+        # so a multi-minute apply can surface no incremental progress until it
+        # returns. Emit an honest elapsed-time heartbeat while the push is in
+        # flight so a long-but-healthy deploy never looks "dark" to a progress
+        # watchdog (the real [step] lines still interleave as they arrive). It is
+        # NOT a hang mask: the push still raises on failure and a true hang is
+        # caught by the caller's overall deploy backstop.
+        async def _heartbeat():
+            ticks = 0
+            try:
+                while True:
+                    await asyncio.sleep(15)
+                    ticks += 1
+                    await _report(
+                        "deploying",
+                        f"Applying deployment on the infra-driver… ({ticks * 15}s elapsed)",
+                    )
+            except asyncio.CancelledError:
+                return
+
+        hb = asyncio.create_task(_heartbeat())
+        try:
+            await self.infra_driver.deploy(
+                work_tree=self.gitops_dir,
+                commit_message=f"deploy {', '.join(deployment_ids) or 'all'}",
+                progress_callback=_report,
+                author=(f"{deployed_by} <{deployed_by}>" if deployed_by else None),
+            )
+        finally:
+            hb.cancel()
+            try:
+                await hb
+            except asyncio.CancelledError:
+                pass
 
         # Refresh the static automation cache so the just-deployed members (and,
         # for a production promote, their blue-green slot containers) show up in
