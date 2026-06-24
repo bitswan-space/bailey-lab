@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -63,13 +62,12 @@ func gatherSystemStats() (*systemStats, error) {
 	}
 
 	s.DiskPath = sysStatsDiskPath()
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(s.DiskPath, &st); err != nil {
+	diskTotal, diskFree, err := diskUsage(s.DiskPath)
+	if err != nil {
 		return nil, fmt.Errorf("statfs %s: %w", s.DiskPath, err)
 	}
-	bs := uint64(st.Bsize)
-	s.DiskTotalBytes = st.Blocks * bs
-	s.DiskFreeBytes = st.Bavail * bs
+	s.DiskTotalBytes = diskTotal
+	s.DiskFreeBytes = diskFree
 	if s.DiskTotalBytes >= s.DiskFreeBytes {
 		s.DiskUsedBytes = s.DiskTotalBytes - s.DiskFreeBytes
 	}
