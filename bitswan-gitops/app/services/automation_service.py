@@ -770,63 +770,41 @@ class AutomationService:
         image_checksum = await calculate_git_tree_hash([image_dir])
         full_tag = f"internal/{tag_root}:sha{image_checksum}"
 
-        image_service = ImageService()
-        existing_status = image_service._get_build_status(image_checksum)
-        images = await image_service.get_images()
-        already_built = any(
-            im.get("tag") == full_tag and im.get("build_status") in (None, "ready")
-            for im in images
-        )
+        # Build the automation's own image via the driver (Dockerfile mode):
+        # materialize the image/ context onto the shared gitops volume (the only
+        # path the driver can read) and build it as-is. Content-addressed by tag,
+        # so an unchanged context is a driver-side cache hit. Build-log lines are
+        # streamed as progress so the deploy toast never goes dark.
+        from app.services.infra_driver_client import BuildRequest, InfraDriverError
 
-        if not already_built and existing_status != "building":
-            logger.info(f"Building automation image {full_tag} from {image_dir}")
-            await image_service.create_image(
-                tag_root,
-                build_context_path=image_dir,
-                checksum=image_checksum,
+        ctx = os.path.join(self.gitops_dir, ".builds", "img-" + image_checksum)
+        self._ensure_builds_gitignored()
+        await asyncio.to_thread(self._copy_tree, image_dir, ctx)
+
+        async def _prog(line: str):
+            if progress_callback is not None:
+                try:
+                    await progress_callback(
+                        "building_images", f"Building image for {auto_name}: {line}", None
+                    )
+                except Exception:
+                    logger.debug("build progress report failed", exc_info=True)
+
+        try:
+            await self.infra_driver.build_image(
+                BuildRequest(
+                    ctx=self._workspace_ctx(),
+                    tag=full_tag,
+                    source_path=ctx,
+                    dockerfile="Dockerfile",
+                    source_sha=image_checksum,
+                ),
+                progress_callback=_prog,
             )
-
-        if not already_built:
-            # Poll until the build finishes (or fails). The 5-minute deadline
-            # bounds a stuck build. On every tick we surface the latest build
-            # log line as progress — a docker build of a real image takes
-            # minutes, and without this the deploy task message would stay on
-            # "Preparing …" the whole time and the dashboard toast would go dark
-            # (no on-screen progress for >15s). Reporting the build-step tail
-            # every ~2s keeps the operator informed without changing what the
-            # build itself does.
-            deadline = asyncio.get_event_loop().time() + 5 * 60
-            last_reported = None
-            while True:
-                status = image_service._get_build_status(image_checksum)
-                if status == "ready":
-                    break
-                if status == "failed":
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Image build failed for {full_tag}",
-                    )
-                if asyncio.get_event_loop().time() >= deadline:
-                    raise HTTPException(
-                        status_code=504,
-                        detail=f"Image build timed out for {full_tag}",
-                    )
-                if progress_callback is not None:
-                    tail = image_service.build_log_tail(image_checksum)
-                    msg = (
-                        f"Building image for {auto_name}: {tail}"
-                        if tail
-                        else f"Building image for {auto_name}…"
-                    )
-                    if msg != last_reported:
-                        last_reported = msg
-                        try:
-                            await progress_callback("building_images", msg, None)
-                        except Exception:
-                            # Progress is best-effort telemetry — never let a
-                            # reporting hiccup abort a real build.
-                            logger.debug("build progress report failed", exc_info=True)
-                await asyncio.sleep(2)
+        except InfraDriverError as e:
+            raise HTTPException(
+                status_code=500, detail=f"Image build failed for {full_tag}: {e}"
+            )
 
         # Write the resolved tag into automation.toml so the rest of the
         # deploy pipeline sees the up-to-date image.
@@ -834,6 +812,12 @@ class AutomationService:
             os.path.join(source_dir, "automation.toml"), full_tag
         )
         return full_tag
+
+    @staticmethod
+    def _copy_tree(src: str, dst: str) -> None:
+        """Materialize a single source dir into a fresh build-context dir."""
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst, symlinks=True)
 
     async def _bake_source_image(
         self,
