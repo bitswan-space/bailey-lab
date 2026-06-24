@@ -50,7 +50,7 @@ services:
         environment:
             BITSWAN_AUTOMATION_STAGE: staging
             BITSWAN_DEPLOY_CHECKSUM: bk
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.795161Z"
+            BITSWAN_DEPLOY_TIME: "2026-06-24T20:48:04.292291Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-staging
             BITSWAN_DEPLOYMENT_ID: backend-acme-staging
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -85,7 +85,7 @@ services:
             BITSWAN_AUTOMATION_STAGE: staging
             BITSWAN_AUTOMATION_URL: https://ws3-frontend-822b-staging.example.com
             BITSWAN_DEPLOY_CHECKSUM: fr
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.795161Z"
+            BITSWAN_DEPLOY_TIME: "2026-06-24T20:48:04.292291Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-staging
             BITSWAN_DEPLOYMENT_ID: frontend-acme-staging
             BITSWAN_GITOPS_DOMAIN: example.com

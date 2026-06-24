@@ -56,7 +56,7 @@ services:
         environment:
             BITSWAN_AUTOMATION_STAGE: dev
             BITSWAN_DEPLOY_CHECKSUM: backsum
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.782573Z"
+            BITSWAN_DEPLOY_TIME: "2026-06-24T20:48:04.279605Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-dev
             BITSWAN_DEPLOYMENT_ID: backend-acme-dev
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -91,7 +91,7 @@ services:
             BITSWAN_AUTOMATION_STAGE: dev
             BITSWAN_AUTOMATION_URL: https://ws1-frontend-822b-dev.example.com
             BITSWAN_DEPLOY_CHECKSUM: frontsum
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.782573Z"
+            BITSWAN_DEPLOY_TIME: "2026-06-24T20:48:04.279605Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-dev
             BITSWAN_DEPLOYMENT_ID: frontend-acme-dev
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -125,17 +125,20 @@ services:
         cap_add:
             - NET_ADMIN
         container_name: ws1-fwgw-822b-dev
+        depends_on:
+            ws1-fwgw-822b-dev-proxy:
+                condition: service_healthy
         environment:
-            BITSWAN_FW_ALLOW: ""
-            BITSWAN_FW_ATTEMPTS: /firewall/acme__dev.attempts.jsonl
             BITSWAN_FW_MODE: monitor
+            BITSWAN_FW_PROXY: ws1-fwgw-822b-dev-proxy
+            BITSWAN_FW_ROLE: owner
         healthcheck:
             interval: 3s
             retries: 10
             start_period: 2s
             test:
                 - CMD-SHELL
-                - nc -z 127.0.0.1 18077
+                - test -f /tmp/fw-ready
             timeout: 3s
         image: bitswan/egress-gateway:latest
         labels:
@@ -147,6 +150,32 @@ services:
             ws1-dev:
                 aliases:
                     - ws1-fwgw-822b-dev
+        restart: unless-stopped
+    ws1-fwgw-822b-dev-proxy:
+        container_name: ws1-fwgw-822b-dev-proxy
+        environment:
+            BITSWAN_FW_ALLOW: ""
+            BITSWAN_FW_ATTEMPTS: /firewall/acme__dev.attempts.jsonl
+            BITSWAN_FW_MODE: monitor
+            BITSWAN_FW_ROLE: proxy
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - nc -z 127.0.0.1 18077
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: acme
+            gitops.firewall_proxy: "true"
+            gitops.slot: ""
+            gitops.stage: dev
+        networks:
+            ws1-dev:
+                aliases:
+                    - ws1-fwgw-822b-dev-proxy
         restart: unless-stopped
         volumes:
             - __ROOT__/firewall:/firewall

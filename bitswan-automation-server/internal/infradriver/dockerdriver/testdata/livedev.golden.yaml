@@ -17,7 +17,7 @@ services:
         environment:
             BITSWAN_AUTOMATION_STAGE: live-dev
             BITSWAN_DEPLOY_CHECKSUM: live-dev
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.801033Z"
+            BITSWAN_DEPLOY_TIME: "2026-06-24T20:48:04.296391Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
             BITSWAN_DEPLOYMENT_ID: backend-copy-bar-acme-live-dev
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -51,7 +51,7 @@ services:
             BITSWAN_AUTOMATION_STAGE: live-dev
             BITSWAN_AUTOMATION_URL: https://ws4-frontend-4337-live-dev.example.com
             BITSWAN_DEPLOY_CHECKSUM: live-dev
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.801033Z"
+            BITSWAN_DEPLOY_TIME: "2026-06-24T20:48:04.296391Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
             BITSWAN_DEPLOYMENT_ID: frontend-copy-bar-acme-live-dev
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -86,17 +86,20 @@ services:
         cap_add:
             - NET_ADMIN
         container_name: ws4-fwgw-4337-live-dev
+        depends_on:
+            ws4-fwgw-4337-live-dev-proxy:
+                condition: service_healthy
         environment:
-            BITSWAN_FW_ALLOW: ""
-            BITSWAN_FW_ATTEMPTS: /firewall/acme__dev.attempts.jsonl
             BITSWAN_FW_MODE: monitor
+            BITSWAN_FW_PROXY: ws4-fwgw-4337-live-dev-proxy
+            BITSWAN_FW_ROLE: owner
         healthcheck:
             interval: 3s
             retries: 10
             start_period: 2s
             test:
                 - CMD-SHELL
-                - nc -z 127.0.0.1 18077
+                - test -f /tmp/fw-ready
             timeout: 3s
         image: bitswan/egress-gateway:latest
         labels:
@@ -108,6 +111,32 @@ services:
             ws4-dev:
                 aliases:
                     - ws4-fwgw-4337-live-dev
+        restart: unless-stopped
+    ws4-fwgw-4337-live-dev-proxy:
+        container_name: ws4-fwgw-4337-live-dev-proxy
+        environment:
+            BITSWAN_FW_ALLOW: ""
+            BITSWAN_FW_ATTEMPTS: /firewall/acme__dev.attempts.jsonl
+            BITSWAN_FW_MODE: monitor
+            BITSWAN_FW_ROLE: proxy
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - nc -z 127.0.0.1 18077
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: acme
+            gitops.firewall_proxy: "true"
+            gitops.slot: ""
+            gitops.stage: dev
+        networks:
+            ws4-dev:
+                aliases:
+                    - ws4-fwgw-4337-live-dev-proxy
         restart: unless-stopped
         volumes:
             - __ROOT__/firewall:/firewall

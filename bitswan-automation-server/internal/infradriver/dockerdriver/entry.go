@@ -582,6 +582,48 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 		if k.slot != "" {
 			slotTag = "__" + k.slot
 		}
+		// Egress enforcement is split into TWO containers so the firewall lives
+		// OUTSIDE the worker's network namespace and cannot be bypassed by the
+		// untrusted worker (which is root and may setuid at will):
+		//
+		//   <gw>        — the netns OWNER. The worker joins this netns
+		//                 (network_mode: service:<gw>) with NET_ADMIN dropped.
+		//                 It installs the egress rules (DNAT :443/:80 to the
+		//                 proxy, with NO uid exemption) and then holds the netns.
+		//                 No proxy runs here, so there is no privileged uid in
+		//                 the worker's namespace to impersonate.
+		//   <gw>-proxy  — the SNI/Host allow-list proxy, in its OWN container and
+		//                 namespace on the stage network. It is never co-resident
+		//                 with the worker, so the worker cannot reach or spoof it.
+		proxy := g.gw + "-proxy"
+		services[proxy] = map[string]interface{}{
+			"image":          c.gatewayImage,
+			"container_name": proxy,
+			"restart":        "unless-stopped",
+			"environment": map[string]interface{}{
+				"BITSWAN_FW_ROLE":     "proxy",
+				"BITSWAN_FW_MODE":     g.mode,
+				"BITSWAN_FW_ALLOW":    strings.Join(g.allow, ","),
+				"BITSWAN_FW_ATTEMPTS": fmt.Sprintf("/firewall/%s__%s%s.attempts.jsonl", g.bp, g.realm, slotTag),
+			},
+			"networks": map[string]interface{}{
+				c.stageNetwork(g.realm): map[string]interface{}{"aliases": []interface{}{proxy}},
+			},
+			"volumes": []interface{}{fwMount},
+			"healthcheck": map[string]interface{}{
+				"test":         []interface{}{"CMD-SHELL", "nc -z 127.0.0.1 18077"},
+				"interval":     "3s",
+				"timeout":      "3s",
+				"retries":      10,
+				"start_period": "2s",
+			},
+			"labels": map[string]interface{}{
+				"gitops.firewall_proxy": "true",
+				"gitops.bp":             g.bp,
+				"gitops.stage":          g.realm,
+				"gitops.slot":           k.slot,
+			},
+		}
 		services[g.gw] = map[string]interface{}{
 			"image":          c.gatewayImage,
 			"container_name": g.gw,
@@ -591,13 +633,16 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 				c.stageNetwork(g.realm): map[string]interface{}{"aliases": []interface{}{g.gw}},
 			},
 			"environment": map[string]interface{}{
-				"BITSWAN_FW_MODE":     g.mode,
-				"BITSWAN_FW_ALLOW":    strings.Join(g.allow, ","),
-				"BITSWAN_FW_ATTEMPTS": fmt.Sprintf("/firewall/%s__%s%s.attempts.jsonl", g.bp, g.realm, slotTag),
+				"BITSWAN_FW_ROLE":  "owner",
+				"BITSWAN_FW_MODE":  g.mode,
+				"BITSWAN_FW_PROXY": proxy,
 			},
-			"volumes": []interface{}{fwMount},
+			// Install rules only once the proxy (the DNAT target) is up.
+			"depends_on": map[string]interface{}{
+				proxy: map[string]interface{}{"condition": "service_healthy"},
+			},
 			"healthcheck": map[string]interface{}{
-				"test":         []interface{}{"CMD-SHELL", "nc -z 127.0.0.1 18077"},
+				"test":         []interface{}{"CMD-SHELL", "test -f /tmp/fw-ready"},
 				"interval":     "3s",
 				"timeout":      "3s",
 				"retries":      10,
@@ -610,8 +655,8 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 				"gitops.slot":             k.slot,
 			},
 		}
-		// Declare the stage network the gateway joins as external, or
-		// `docker compose up` rejects the project ("undefined network <ws>-<realm>").
+		// Declare the stage network both join as external, or `docker compose up`
+		// rejects the project ("undefined network <ws>-<realm>").
 		c.externalNetworks[c.stageNetwork(g.realm)] = true
 	}
 	return nil
