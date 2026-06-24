@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/dockerdriver"
@@ -132,7 +133,45 @@ func materialize(gitDir, ref, dest string) error {
 	if err := untar.Wait(); err != nil {
 		return fmt.Errorf("untar push into %s: %w", dest, err)
 	}
+	// The extraction ran as root (the driver runs as root for docker.sock), so
+	// every freshly-written file is root-owned. But dest is ALSO gitops's own
+	// git working tree (user1000): gitops rewrites bitswan.yaml here and commits
+	// on the NEXT deploy. Root-owned files there make that write fail with EACCES,
+	// so the 2nd+ deploy of a workspace breaks. Chown the materialized tree back
+	// to the working repo's owner (taken from the preserved .git) so gitops keeps
+	// owning its tree. Fail loudly if we can't determine the owner.
+	if err := chownToRepoOwner(dest); err != nil {
+		return err
+	}
 	return nil
+}
+
+// chownToRepoOwner recursively chowns dir to the uid/gid that owns dir/.git —
+// the gitops working repo's owner. The driver runs as root and re-extracts the
+// pushed tree here (root-owned); without this, gitops (a non-root user sharing
+// this volume subpath) can no longer write its own working tree on later
+// deploys. .git is preserved by materialize and was created by gitops, so it is
+// the authoritative owner signal.
+func chownToRepoOwner(dir string) error {
+	fi, err := os.Stat(filepath.Join(dir, ".git"))
+	if err != nil {
+		return fmt.Errorf("stat %s/.git to learn working-tree owner: %w", dir, err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("cannot read uid/gid of %s/.git", dir)
+	}
+	uid, gid := int(st.Uid), int(st.Gid)
+	return filepath.Walk(dir, func(path string, _ os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		// Lchown so symlinks are retargeted, not their referents.
+		if err := os.Lchown(path, uid, gid); err != nil {
+			return fmt.Errorf("chown %s to %d:%d: %w", path, uid, gid, err)
+		}
+		return nil
+	})
 }
 
 // clearDir removes every entry inside dir, keeping dir itself (a volume mount)
