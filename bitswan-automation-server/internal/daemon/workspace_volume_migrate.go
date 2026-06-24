@@ -19,6 +19,7 @@ import (
 var workspaceVolumeSubdirs = []string{
 	"workspace",   // legacy shared working tree (kept for the gitops state worktree)
 	"gitops",      // promoted-deployment materialization/state
+	"deploy.git",  // infra-driver bare deploy repo (git init --bare on serve; the subpath must exist before the sidecar mounts it)
 	"repo.git",    // canonical bare repo (real content created by init/migration)
 	"copies",      // per-copy checkouts base
 	"copies/main", // the main copy (editor working tree / main live-dev source)
