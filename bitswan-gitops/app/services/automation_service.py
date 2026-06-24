@@ -39,11 +39,6 @@ from app.services.image_service import ImageService
 from app.services import bp_secrets
 from app.services import supply_chain_service
 from app.services import firewall_service
-from app.services.oauth2_helpers import (
-    OAUTH2_PROXY_PATH,
-    copy_oauth2_proxy_to_container,
-    is_oauth2_proxy_running,
-)
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
@@ -287,7 +282,6 @@ class AutomationService:
         self.aoc_token = os.environ.get("BITSWAN_AOC_TOKEN")
         self.gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN")
         self.workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME")
-        self.oauth2_proxy_path = OAUTH2_PROXY_PATH
         self.certs_dir_host = os.environ.get("BITSWAN_CERTS_DIR")
         self.gitops_dir = os.path.join(self.bs_home, "gitops")
         self.gitops_dir_host = os.path.join(self.bs_home_host, "gitops")
@@ -3450,81 +3444,6 @@ class AutomationService:
             "total_pages": (total + page_size - 1) // page_size,
         }
 
-    async def start_oauth2_proxy_in_container(self, deployment_id: str):
-        """Start oauth2-proxy in all running containers for a deployment"""
-        containers = await self.get_container(deployment_id)
-
-        if not containers:
-            return False
-
-        success = True
-        for container in containers:
-            container_id = container.get("Id")
-            labels = container.get("Labels", {})
-            container_name = container.get("Names", [deployment_id])[0].lstrip("/")
-
-            # Check if oauth2 is enabled via labels
-            if labels.get("gitops.oauth2.enabled") != "true":
-                continue
-
-            # Ensure container is running
-            state = container.get("State", "")
-            if state != "running":
-                print(
-                    f"Warning: Container {container_name} is not running (status: {state}), cannot start oauth2-proxy"
-                )
-                success = False
-                continue
-
-            try:
-                docker_client = get_async_docker_client()
-
-                # Check if oauth2-proxy is already running to avoid duplicates
-                if await is_oauth2_proxy_running(docker_client, container_id):
-                    print(f"oauth2-proxy already running in container {container_name}")
-                    continue
-
-                # Copy oauth2-proxy binary into the container
-                if not await copy_oauth2_proxy_to_container(
-                    container_id, container_name
-                ):
-                    success = False
-                    continue
-
-                # Build the backend logout URL from the host's OIDC issuer URL
-                logout_flag = ""
-                issuer_url = os.environ.get("OAUTH2_PROXY_OIDC_ISSUER_URL", "").strip()
-                if issuer_url:
-                    logout_url = f"{issuer_url}/protocol/openid-connect/logout?id_token_hint={{id_token}}"
-                    logout_flag = f" --backend-logout-url='{logout_url}'"
-
-                # Start oauth2-proxy in the background
-                print(f"Starting oauth2-proxy in container {container_name}")
-                cmd = [
-                    "sh",
-                    "-c",
-                    f"oauth2-proxy{logout_flag} > /tmp/oauth2-proxy.log 2>&1 &",
-                ]
-                exec_id = await docker_client.exec_create(container_id, cmd)
-                await docker_client.exec_start(exec_id)
-                exec_info = await docker_client.exec_inspect(exec_id)
-
-                if exec_info.get("ExitCode", 0) == 0:
-                    print(
-                        f"Successfully started oauth2-proxy in container {container_name}"
-                    )
-                else:
-                    print(f"Failed to start oauth2-proxy in container {container_name}")
-                    success = False
-
-            except Exception as e:
-                print(
-                    f"Exception while starting oauth2-proxy in container {container_name}: {str(e)}"
-                )
-                success = False
-
-        return success
-
     async def _infra_services_to_bring_up(
         self, infra_service_names: list[str]
     ) -> list[str]:
@@ -3587,84 +3506,6 @@ class AutomationService:
                     "(dev/live-dev share one container)."
                 )
         return to_up
-
-    async def start_oauth2_proxy_in_infra_services(
-        self, infra_service_names: list[str]
-    ):
-        """Start oauth2-proxy in infra service containers that have oauth2 labels.
-
-        Uses the same docker exec pattern as start_oauth2_proxy_in_container
-        but operates on infra service containers (e.g., pgAdmin) identified by
-        their compose service names.
-        """
-        from app.async_docker import get_async_docker_client
-
-        if not infra_service_names:
-            return
-
-        docker_client = get_async_docker_client()
-
-        for svc_name in infra_service_names:
-            try:
-                containers = await docker_client.list_containers(
-                    filters={"label": [f"com.docker.compose.service={svc_name}"]}
-                )
-                for container in containers:
-                    container_id = container.get("Id")
-                    labels = container.get("Labels", {})
-                    container_name = container.get("Names", [svc_name])[0].lstrip("/")
-
-                    if labels.get("gitops.oauth2.enabled") != "true":
-                        continue
-
-                    state = container.get("State", "")
-                    if state != "running":
-                        logger.warning(
-                            f"Container {container_name} not running, "
-                            f"cannot start oauth2-proxy"
-                        )
-                        continue
-
-                    upstream_url = labels.get("gitops.oauth2.upstream")
-                    if not upstream_url:
-                        continue
-
-                    # Check if already running
-                    if await is_oauth2_proxy_running(docker_client, container_id):
-                        logger.info(f"oauth2-proxy already running in {container_name}")
-                        continue
-
-                    # Copy oauth2-proxy binary into the container
-                    if not await copy_oauth2_proxy_to_container(
-                        container_id, container_name
-                    ):
-                        continue
-
-                    logger.info(
-                        f"Starting oauth2-proxy in {container_name} "
-                        f"(upstream: {upstream_url})"
-                    )
-                    cmd = [
-                        "sh",
-                        "-c",
-                        f"oauth2-proxy --upstream={upstream_url} "
-                        f"> /tmp/oauth2-proxy.log 2>&1 &",
-                    ]
-                    exec_id = await docker_client.exec_create(container_id, cmd)
-                    await docker_client.exec_start(exec_id)
-
-                    exec_info = await docker_client.exec_inspect(exec_id)
-                    if exec_info.get("ExitCode", 0) == 0:
-                        logger.info(f"oauth2-proxy started in {container_name}")
-                    else:
-                        logger.error(
-                            f"Failed to start oauth2-proxy in {container_name}"
-                        )
-
-            except Exception as e:
-                logger.error(
-                    f"Exception starting oauth2-proxy for infra service {svc_name}: {e}"
-                )
 
     async def install_certificates_in_container(self, deployment_id: str):
         """Install CA certificates in all running containers for a deployment"""

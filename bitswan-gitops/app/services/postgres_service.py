@@ -159,15 +159,11 @@ class PostgresService(InfraService):
         logger.info(f"pgAdmin servers.json saved to: {servers_file}")
 
     async def start(self) -> dict:
-        """Start both PostgreSQL and pgAdmin containers, then oauth2-proxy."""
-        result = await super().start()
-        try:
-            await run_docker_command("docker", "start", self.pgadmin_container_name)
-        except Exception as e:
-            logger.warning(f"Failed to start pgAdmin container: {e}")
-        # Start oauth2-proxy inside pgAdmin container via docker exec
-        await self._start_oauth2_proxy_in_container(self.pgadmin_container_name)
-        return result
+        """Bring PostgreSQL + pgAdmin up via the driver apply. The apply
+        reconciles both infra containers and, for pgAdmin (labelled
+        gitops.oauth2.enabled), the driver sets up its oauth2-proxy — gitops has
+        no oauth code or docker access of its own."""
+        return await super().start()
 
     async def stop(self) -> dict:
         """Stop both PostgreSQL and pgAdmin containers."""
