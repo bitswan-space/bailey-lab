@@ -1,0 +1,146 @@
+networks:
+  bitswan_network:
+    external: true
+  ws2-production:
+    external: true
+services:
+  ws2-backend-8d90-production-a:
+    container_name: ws2-backend-8d90-production-a
+    env_file:
+    - __ROOT__/secrets/bp/shop/production
+    environment:
+      BITSWAN_AUTOMATION_STAGE: production
+      BITSWAN_DEPLOYMENT_CONTEXT: shop
+      BITSWAN_DEPLOYMENT_ID: backend-shop
+      BITSWAN_DEPLOY_CHECKSUM: bsum
+      BITSWAN_DEPLOY_TIME: '2026-06-24T08:08:10.991836Z'
+      BITSWAN_GITOPS_DOMAIN: example.com
+      BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-a.example.com
+      BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-a:8080
+      BITSWAN_WORKSPACE_NAME: ws2
+      DEPLOYMENT_ID: backend-shop
+    image: internal/ws2-shop-backend:shabsum
+    labels:
+      gitops.automation_name: backend
+      gitops.context: shop
+      gitops.deployment_id: backend-shop
+      gitops.intended_exposed: 'false'
+      gitops.slot: a
+      gitops.stage: production
+      gitops.workspace: ws2
+    networks:
+    - ws2-production
+    restart: always
+    ulimits:
+      nofile:
+        hard: 65536
+        soft: 65536
+    volumes: []
+  ws2-backend-8d90-production-b:
+    container_name: ws2-backend-8d90-production-b
+    env_file:
+    - __ROOT__/secrets/bp/shop/production
+    environment:
+      BITSWAN_AUTOMATION_STAGE: production
+      BITSWAN_DEPLOYMENT_CONTEXT: shop
+      BITSWAN_DEPLOYMENT_ID: backend-shop@b
+      BITSWAN_DEPLOY_CHECKSUM: bsum
+      BITSWAN_DEPLOY_TIME: '2026-06-24T08:08:10.992028Z'
+      BITSWAN_GITOPS_DOMAIN: example.com
+      BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-b.example.com
+      BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-b:8080
+      BITSWAN_WORKSPACE_NAME: ws2
+      DEPLOYMENT_ID: backend-shop@b
+    image: internal/ws2-shop-backend:shabsum
+    labels:
+      gitops.automation_name: backend
+      gitops.context: shop
+      gitops.deployment_id: backend-shop@b
+      gitops.intended_exposed: 'false'
+      gitops.slot: b
+      gitops.stage: production
+      gitops.workspace: ws2
+    networks:
+    - ws2-production
+    restart: always
+    ulimits:
+      nofile:
+        hard: 65536
+        soft: 65536
+    volumes: []
+  ws2-frontend-8d90-production-a:
+    container_name: ws2-frontend-8d90-production-a
+    env_file:
+    - __ROOT__/secrets/bp/shop/production
+    environment:
+      BITSWAN_AUTOMATION_STAGE: production
+      BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-production.example.com
+      BITSWAN_DEPLOYMENT_CONTEXT: shop
+      BITSWAN_DEPLOYMENT_ID: frontend-shop
+      BITSWAN_DEPLOY_CHECKSUM: fsum
+      BITSWAN_DEPLOY_TIME: '2026-06-24T08:08:10.991176Z'
+      BITSWAN_GITOPS_DOMAIN: example.com
+      BITSWAN_URL_PREFIX: https://ws2-
+      BITSWAN_URL_SUFFIX: .example.com
+      BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-a.example.com
+      BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-a:8080
+      BITSWAN_WORKSPACE_NAME: ws2
+      DEPLOYMENT_ID: frontend-shop
+    image: internal/ws2-shop-frontend:shafsum
+    labels:
+      gitops.automation_name: frontend
+      gitops.context: shop
+      gitops.deployment_id: frontend-shop
+      gitops.intended_exposed: 'true'
+      gitops.slot: a
+      gitops.stage: production
+      gitops.workspace: ws2
+    networks:
+      ws2-production:
+        aliases:
+        - ws2-frontend-8d90-production-a.example.com
+    restart: always
+    ulimits:
+      nofile:
+        hard: 65536
+        soft: 65536
+    volumes: []
+  ws2-frontend-8d90-production-b:
+    container_name: ws2-frontend-8d90-production-b
+    env_file:
+    - __ROOT__/secrets/bp/shop/production
+    environment:
+      BITSWAN_AUTOMATION_STAGE: production
+      BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-dr.example.com
+      BITSWAN_DEPLOYMENT_CONTEXT: shop
+      BITSWAN_DEPLOYMENT_ID: frontend-shop@b
+      BITSWAN_DEPLOY_CHECKSUM: fsum
+      BITSWAN_DEPLOY_TIME: '2026-06-24T08:08:10.991594Z'
+      BITSWAN_GITOPS_DOMAIN: example.com
+      BITSWAN_URL_PREFIX: https://ws2-
+      BITSWAN_URL_SUFFIX: .example.com
+      BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-b.example.com
+      BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-b:8080
+      BITSWAN_WORKSPACE_NAME: ws2
+      DEPLOYMENT_ID: frontend-shop@b
+    image: internal/ws2-shop-frontend:shafsum
+    labels:
+      gitops.automation_name: frontend
+      gitops.context: shop
+      gitops.deployment_id: frontend-shop@b
+      gitops.intended_exposed: 'true'
+      gitops.slot: b
+      gitops.stage: production
+      gitops.workspace: ws2
+    networks:
+      ws2-production:
+        aliases:
+        - ws2-frontend-8d90-production-b.example.com
+    restart: always
+    ulimits:
+      nofile:
+        hard: 65536
+        soft: 65536
+    volumes: []
+version: '3'
+

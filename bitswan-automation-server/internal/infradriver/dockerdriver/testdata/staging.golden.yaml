@@ -1,0 +1,117 @@
+networks:
+  bitswan_network:
+    external: true
+  ws3-staging:
+    external: true
+services:
+  minio-staging:
+    command: server /data --console-address :9001
+    container_name: ws3__minio-staging
+    env_file:
+    - __ROOT__/secrets/minio-staging
+    image: minio/minio:latest
+    labels: {}
+    networks:
+    - ws3-staging
+    restart: unless-stopped
+    volumes:
+    - ws3-minio-staging-data-data:/data
+  postgres-staging:
+    container_name: ws3__postgres-staging
+    env_file:
+    - __ROOT__/secrets/postgres-staging
+    image: postgres:16
+    networks:
+    - ws3-staging
+    restart: unless-stopped
+    volumes:
+    - ws3-postgres-staging-data-data:/var/lib/postgresql/data
+  postgres-staging-pgadmin:
+    container_name: ws3__postgres-staging-pgadmin
+    env_file:
+    - __ROOT__/secrets/postgres-staging
+    image: dpage/pgadmin4:latest
+    labels: {}
+    networks:
+    - ws3-staging
+    restart: unless-stopped
+    volumes:
+    - __ROOT__/secrets/pgadmin-servers.json:/pgadmin4/servers.json:ro
+  ws3-backend-822b-staging:
+    container_name: ws3-backend-822b-staging
+    env_file:
+    - __ROOT__/secrets/bp/acme/staging
+    - __ROOT__/secrets/postgres-staging
+    - __ROOT__/secrets/minio-staging
+    environment:
+      BITSWAN_AUTOMATION_STAGE: staging
+      BITSWAN_DEPLOYMENT_CONTEXT: acme-staging
+      BITSWAN_DEPLOYMENT_ID: backend-acme-staging
+      BITSWAN_DEPLOY_CHECKSUM: bk
+      BITSWAN_DEPLOY_TIME: '2026-06-24T08:08:11.630260Z'
+      BITSWAN_GITOPS_DOMAIN: example.com
+      BITSWAN_URL_TEMPLATE: https://ws3-{name}-822b-staging.example.com
+      BITSWAN_WORKER_HOSTS: backend=ws3-backend-822b-staging:8080
+      BITSWAN_WORKSPACE_NAME: ws3
+      DEPLOYMENT_ID: backend-acme-staging
+    image: internal/ws3-acme-backend:shabk
+    labels:
+      gitops.automation_name: backend
+      gitops.context: acme
+      gitops.deployment_id: backend-acme-staging
+      gitops.intended_exposed: 'false'
+      gitops.slot: ''
+      gitops.stage: staging
+      gitops.workspace: ws3
+    networks:
+    - ws3-staging
+    restart: always
+    ulimits:
+      nofile:
+        hard: 65536
+        soft: 65536
+    volumes: []
+  ws3-frontend-822b-staging:
+    container_name: ws3-frontend-822b-staging
+    env_file:
+    - __ROOT__/secrets/bp/acme/staging
+    - __ROOT__/secrets/postgres-staging
+    - __ROOT__/secrets/minio-staging
+    environment:
+      BITSWAN_AUTOMATION_STAGE: staging
+      BITSWAN_AUTOMATION_URL: https://ws3-frontend-822b-staging.example.com
+      BITSWAN_DEPLOYMENT_CONTEXT: acme-staging
+      BITSWAN_DEPLOYMENT_ID: frontend-acme-staging
+      BITSWAN_DEPLOY_CHECKSUM: fr
+      BITSWAN_DEPLOY_TIME: '2026-06-24T08:08:11.629433Z'
+      BITSWAN_GITOPS_DOMAIN: example.com
+      BITSWAN_URL_PREFIX: https://ws3-
+      BITSWAN_URL_SUFFIX: .example.com
+      BITSWAN_URL_TEMPLATE: https://ws3-{name}-822b-staging.example.com
+      BITSWAN_WORKER_HOSTS: backend=ws3-backend-822b-staging:8080
+      BITSWAN_WORKSPACE_NAME: ws3
+      DEPLOYMENT_ID: frontend-acme-staging
+    image: internal/ws3-acme-frontend:shafr
+    labels:
+      gitops.automation_name: frontend
+      gitops.context: acme
+      gitops.deployment_id: frontend-acme-staging
+      gitops.intended_exposed: 'true'
+      gitops.slot: ''
+      gitops.stage: staging
+      gitops.workspace: ws3
+    networks:
+      ws3-staging:
+        aliases:
+        - ws3-frontend-822b-staging.example.com
+    restart: always
+    ulimits:
+      nofile:
+        hard: 65536
+        soft: 65536
+    volumes: []
+version: '3'
+volumes:
+  ws3-minio-staging-data-data: null
+  ws3-postgres-staging-data-data: null
+

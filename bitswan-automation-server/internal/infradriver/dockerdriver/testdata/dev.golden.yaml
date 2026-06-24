@@ -1,0 +1,153 @@
+networks:
+  bitswan_network:
+    external: true
+  ws1-dev:
+    external: true
+services:
+  minio-dev:
+    command: server /data --console-address :9001
+    container_name: ws1__minio-dev
+    env_file:
+    - __ROOT__/secrets/minio-dev
+    image: minio/minio:latest
+    labels: {}
+    networks:
+    - ws1-dev
+    restart: unless-stopped
+    volumes:
+    - ws1-minio-dev-data-data:/data
+  postgres-dev:
+    container_name: ws1__postgres-dev
+    env_file:
+    - __ROOT__/secrets/postgres-dev
+    image: postgres:16
+    networks:
+    - ws1-dev
+    restart: unless-stopped
+    volumes:
+    - ws1-postgres-dev-data-data:/var/lib/postgresql/data
+  postgres-dev-pgadmin:
+    container_name: ws1__postgres-dev-pgadmin
+    env_file:
+    - __ROOT__/secrets/postgres-dev
+    image: dpage/pgadmin4:latest
+    labels: {}
+    networks:
+    - ws1-dev
+    restart: unless-stopped
+    volumes:
+    - __ROOT__/secrets/pgadmin-servers.json:/pgadmin4/servers.json:ro
+  ws1-backend-822b-dev:
+    cap_drop:
+    - NET_ADMIN
+    - NET_RAW
+    container_name: ws1-backend-822b-dev
+    depends_on:
+      ws1-fwgw-822b-dev:
+        condition: service_healthy
+    env_file:
+    - __ROOT__/secrets/bp/acme/dev
+    - __ROOT__/secrets/postgres-dev
+    - __ROOT__/secrets/minio-dev
+    environment:
+      BITSWAN_AUTOMATION_STAGE: dev
+      BITSWAN_DEPLOYMENT_CONTEXT: acme-dev
+      BITSWAN_DEPLOYMENT_ID: backend-acme-dev
+      BITSWAN_DEPLOY_CHECKSUM: backsum
+      BITSWAN_DEPLOY_TIME: '2026-06-24T08:08:10.369603Z'
+      BITSWAN_GITOPS_DOMAIN: example.com
+      BITSWAN_URL_TEMPLATE: https://ws1-{name}-822b-dev.example.com
+      BITSWAN_WORKER_HOSTS: backend=ws1-fwgw-822b-dev:8080
+      BITSWAN_WORKSPACE_NAME: ws1
+      DEPLOYMENT_ID: backend-acme-dev
+    image: bitswan/pipeline-runtime-environment:latest
+    labels:
+      gitops.automation_name: backend
+      gitops.context: acme
+      gitops.deployment_id: backend-acme-dev
+      gitops.intended_exposed: 'false'
+      gitops.slot: ''
+      gitops.stage: dev
+      gitops.workspace: ws1
+    network_mode: service:ws1-fwgw-822b-dev
+    restart: always
+    ulimits:
+      nofile:
+        hard: 65536
+        soft: 65536
+    volumes:
+    - __ROOT__/gitops/backsum:/app/:ro
+  ws1-frontend-822b-dev:
+    container_name: ws1-frontend-822b-dev
+    env_file:
+    - __ROOT__/secrets/bp/acme/dev
+    - __ROOT__/secrets/postgres-dev
+    - __ROOT__/secrets/minio-dev
+    environment:
+      BITSWAN_AUTOMATION_STAGE: dev
+      BITSWAN_AUTOMATION_URL: https://ws1-frontend-822b-dev.example.com
+      BITSWAN_DEPLOYMENT_CONTEXT: acme-dev
+      BITSWAN_DEPLOYMENT_ID: frontend-acme-dev
+      BITSWAN_DEPLOY_CHECKSUM: frontsum
+      BITSWAN_DEPLOY_TIME: '2026-06-24T08:08:10.368783Z'
+      BITSWAN_GITOPS_DOMAIN: example.com
+      BITSWAN_URL_PREFIX: https://ws1-
+      BITSWAN_URL_SUFFIX: .example.com
+      BITSWAN_URL_TEMPLATE: https://ws1-{name}-822b-dev.example.com
+      BITSWAN_WORKER_HOSTS: backend=ws1-fwgw-822b-dev:8080
+      BITSWAN_WORKSPACE_NAME: ws1
+      DEPLOYMENT_ID: frontend-acme-dev
+    image: bitswan/pipeline-runtime-environment:latest
+    labels:
+      gitops.automation_name: frontend
+      gitops.context: acme
+      gitops.deployment_id: frontend-acme-dev
+      gitops.intended_exposed: 'true'
+      gitops.slot: ''
+      gitops.stage: dev
+      gitops.workspace: ws1
+    networks:
+      ws1-dev:
+        aliases:
+        - ws1-frontend-822b-dev.example.com
+    restart: always
+    ulimits:
+      nofile:
+        hard: 65536
+        soft: 65536
+    volumes:
+    - __ROOT__/gitops/frontsum:/app/:ro
+  ws1-fwgw-822b-dev:
+    cap_add:
+    - NET_ADMIN
+    container_name: ws1-fwgw-822b-dev
+    environment:
+      BITSWAN_FW_ALLOW: ''
+      BITSWAN_FW_ATTEMPTS: /firewall/acme__dev.attempts.jsonl
+      BITSWAN_FW_MODE: monitor
+    healthcheck:
+      interval: 3s
+      retries: 10
+      start_period: 2s
+      test:
+      - CMD-SHELL
+      - nc -z 127.0.0.1 18077
+      timeout: 3s
+    image: bitswan/egress-gateway:latest
+    labels:
+      gitops.bp: acme
+      gitops.firewall_gateway: 'true'
+      gitops.slot: ''
+      gitops.stage: dev
+    networks:
+      ws1-dev:
+        aliases:
+        - ws1-fwgw-822b-dev
+    restart: unless-stopped
+    volumes:
+    - __ROOT__/firewall:/firewall
+version: '3'
+volumes:
+  ws1-minio-dev-data-data: null
+  ws1-postgres-dev-data-data: null
+
