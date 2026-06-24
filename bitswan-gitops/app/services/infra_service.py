@@ -49,41 +49,67 @@ def _driver_client_ctx():
 async def run_docker_command(
     *args: str, cwd: str | None = None
 ) -> tuple[str, str, int]:
-    """Run a `docker exec` through the infra-driver (gitops has no docker.sock).
-    Accepts the ("docker","exec",<container>,*cmd) shape and returns
-    (stdout, stderr, returncode)."""
+    """Proxy a constrained docker verb through the infra-driver (gitops has no
+    docker.sock). Dispatches the closed verb set the service modules use to the
+    driver's workspace-scoped primitives. Returns (stdout, stderr, returncode).
+
+    - `docker exec <container> <cmd...>`  -> driver exec
+    - `docker stop <container>`           -> driver container_stop
+    - `docker cp ...`                     -> NOT yet supported (see below)
+    """
     from app.services.infra_driver_client import (
         ExecSpec,
         InfraDriverError,
     )
 
-    if len(args) < 3 or args[0] != "docker" or args[1] != "exec":
-        raise ValueError(
-            "run_docker_command now only supports ('docker','exec',<container>,*cmd)"
-        )
+    if len(args) < 2 or args[0] != "docker":
+        raise ValueError(f"run_docker_command: unsupported invocation {args!r}")
+    verb = args[1]
     client, ctx = _driver_client_ctx()
-    out: list[bytes] = []
-    err: list[bytes] = []
 
-    async def on_stdout(d: bytes):
-        out.append(d)
+    if verb == "exec":
+        if len(args) < 3:
+            raise ValueError("docker exec requires a container")
+        out: list[bytes] = []
+        err: list[bytes] = []
 
-    async def on_stderr(d: bytes):
-        err.append(d)
+        async def on_stdout(d: bytes):
+            out.append(d)
 
-    try:
-        rc = await client.exec(
-            ctx,
-            ExecSpec(container=args[2], cmd=list(args[3:])),
-            on_stdout=on_stdout,
-            on_stderr=on_stderr,
+        async def on_stderr(d: bytes):
+            err.append(d)
+
+        try:
+            rc = await client.exec(
+                ctx,
+                ExecSpec(container=args[2], cmd=list(args[3:])),
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+            )
+        except InfraDriverError as e:
+            return "", str(e), 1
+        return (
+            b"".join(out).decode(errors="replace"),
+            b"".join(err).decode(errors="replace"),
+            rc,
         )
-    except InfraDriverError as e:
-        return "", str(e), 1
-    return (
-        b"".join(out).decode(errors="replace"),
-        b"".join(err).decode(errors="replace"),
-        rc,
+
+    if verb == "stop":
+        if len(args) < 3:
+            raise ValueError("docker stop requires a container")
+        try:
+            await client.container_stop(ctx, args[2])
+        except InfraDriverError as e:
+            return "", str(e), 1
+        return "", "", 0
+
+    # `docker cp` cannot be proxied via exec: the infra images (minio UBI-micro,
+    # etc.) ship no tar/shell, which is exactly why these paths use daemon-side
+    # `docker cp` archiving. It needs a dedicated driver archive primitive
+    # (get/put-archive), tracked as a follow-up. Fail loudly rather than pretend.
+    raise NotImplementedError(
+        f"docker '{verb}' is not yet proxied by the infra-driver "
+        "(supported: exec, stop). 'cp' needs a driver archive primitive."
     )
 
 
