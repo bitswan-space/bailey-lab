@@ -70,7 +70,7 @@ func newServeCmd() *cobra.Command {
 			if err := ensureBareRepo(gitDir, cf); err != nil {
 				return err
 			}
-			return serveHTTP(cmd.Context(), listen, gitDir, token)
+			return serveHTTP(cmd.Context(), listen, gitDir, token, cf.workspace)
 		},
 	}
 	cmd.Flags().StringVar(&listen, "listen", "", "TCP address to serve git smart-HTTP + the primitive API on (e.g. :9090)")
@@ -118,12 +118,14 @@ func ensureBareRepo(gitDir string, cf ctxFlags) error {
 // serveHTTP serves the driver over TCP until the context is cancelled: git
 // smart-HTTP for the deploy repo (gitops pushes here; post-receive applies) plus
 // the build-image + container primitives, all guarded by the shared token.
-func serveHTTP(ctx context.Context, listen, gitDir, token string) error {
+func serveHTTP(ctx context.Context, listen, gitDir, token, workspace string) error {
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", listen, err)
 	}
-	server := infradriver.NewServer(dockerdriver.New())
+	// The driver is scoped to its workspace: container primitives refuse any
+	// container not labelled gitops.workspace=<workspace>.
+	server := infradriver.NewServer(dockerdriver.New(workspace))
 	server.GitProjectRoot = filepath.Dir(gitDir) // GIT_PROJECT_ROOT holds the bare repo
 	server.Token = token
 	srv := &http.Server{Handler: server.Handler()}

@@ -22,10 +22,42 @@ import (
 )
 
 // DockerDriver realizes workspace intent on a local Docker daemon.
-type DockerDriver struct{}
+//
+// workspace is the AUTHORITATIVE workspace name this driver serves, set at
+// construction from the serve-time --workspace flag — NOT from the request
+// (a compromised gitops could lie in the request). Every container primitive
+// refuses to touch a container not labelled gitops.workspace=<workspace>, so
+// gitops can only operate on its own workspace's containers — never the daemon
+// (which holds docker.sock → host root), the host, or another tenant. This is
+// the security boundary that justifies removing docker.sock from gitops: even a
+// fully-compromised gitops is confined to the blast radius it already controls
+// via deploy. An empty workspace disables scoping (single-host dev/tests only).
+type DockerDriver struct {
+	workspace string
+}
 
-// New returns a DockerDriver.
-func New() *DockerDriver { return &DockerDriver{} }
+// New returns a DockerDriver scoped to workspace (empty = unscoped, tests only).
+func New(workspace string) *DockerDriver { return &DockerDriver{workspace: workspace} }
+
+// assertInWorkspace refuses any container that is not labelled with this
+// driver's workspace — the gate that keeps gitops out of the daemon / host /
+// other tenants. A missing or mismatched label is a hard error.
+func (d *DockerDriver) assertInWorkspace(ctx context.Context, container string) error {
+	if d.workspace == "" {
+		return nil // unscoped (tests / single-host dev)
+	}
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "--format",
+		`{{ index .Config.Labels "gitops.workspace" }}`, container).Output()
+	if err != nil {
+		return fmt.Errorf("scope check: inspect %s: %w", container, err)
+	}
+	got := strings.TrimSpace(string(out))
+	if got != d.workspace {
+		return fmt.Errorf("refused: container %q is not in workspace %q (gitops.workspace=%q)",
+			container, d.workspace, got)
+	}
+	return nil
+}
 
 var _ infradriver.Driver = (*DockerDriver)(nil)
 
@@ -51,7 +83,15 @@ type dockerInspect struct {
 func (d *DockerDriver) ContainerList(ctx context.Context, _ infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
 	args := []string{"ps", "--all", "--no-trunc", "--quiet"}
 	for k, v := range filter.Labels {
+		if k == "gitops.workspace" {
+			continue // forced below to the authoritative workspace
+		}
 		args = append(args, "--filter", "label="+k+"="+v)
+	}
+	// Force workspace scoping: a caller can never list another tenant's (or the
+	// daemon's) containers, regardless of the filter it sends.
+	if d.workspace != "" {
+		args = append(args, "--filter", "label=gitops.workspace="+d.workspace)
 	}
 	out, err := exec.CommandContext(ctx, "docker", args...).Output()
 	if err != nil {
@@ -104,6 +144,9 @@ func parseInspect(raw []byte) ([]infradriver.Container, error) {
 // ContainerLogs streams a container's logs. tail<=0 means all. follow streams
 // until ctx is cancelled or the container stops.
 func (d *DockerDriver) ContainerLogs(ctx context.Context, _ infradriver.WorkspaceContext, container string, tail int, follow bool, sink func(infradriver.LogLine)) error {
+	if err := d.assertInWorkspace(ctx, container); err != nil {
+		return err
+	}
 	args := []string{"logs"}
 	if tail > 0 {
 		args = append(args, "--tail", fmt.Sprintf("%d", tail))
@@ -150,6 +193,9 @@ func (d *DockerDriver) ContainerLogs(ctx context.Context, _ infradriver.Workspac
 
 // ContainerStop stops a container.
 func (d *DockerDriver) ContainerStop(ctx context.Context, _ infradriver.WorkspaceContext, container string) error {
+	if err := d.assertInWorkspace(ctx, container); err != nil {
+		return err
+	}
 	if out, err := exec.CommandContext(ctx, "docker", "stop", container).CombinedOutput(); err != nil {
 		return fmt.Errorf("docker stop %s: %w: %s", container, err, strings.TrimSpace(string(out)))
 	}
@@ -158,6 +204,9 @@ func (d *DockerDriver) ContainerStop(ctx context.Context, _ infradriver.Workspac
 
 // ContainerRestart restarts a container.
 func (d *DockerDriver) ContainerRestart(ctx context.Context, _ infradriver.WorkspaceContext, container string) error {
+	if err := d.assertInWorkspace(ctx, container); err != nil {
+		return err
+	}
 	if out, err := exec.CommandContext(ctx, "docker", "restart", container).CombinedOutput(); err != nil {
 		return fmt.Errorf("docker restart %s: %w: %s", container, err, strings.TrimSpace(string(out)))
 	}
@@ -169,6 +218,9 @@ func (d *DockerDriver) ContainerRestart(ctx context.Context, _ infradriver.Works
 // Returns the command's exit code; a non-zero exit is reported via the code, not
 // an error (only a failure to run is an error).
 func (d *DockerDriver) ContainerExec(ctx context.Context, _ infradriver.WorkspaceContext, spec infradriver.ExecSpec, in io.Reader, out func(stderr bool, chunk []byte)) (int, error) {
+	if err := d.assertInWorkspace(ctx, spec.Container); err != nil {
+		return -1, err
+	}
 	args := []string{"exec"}
 	if in != nil {
 		args = append(args, "-i")

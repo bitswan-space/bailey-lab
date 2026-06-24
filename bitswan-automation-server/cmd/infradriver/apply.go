@@ -53,7 +53,7 @@ func newApplyCmd() *cobra.Command {
 			// The driver configures ingress itself inside Apply (k8s-style: the
 			// applier owns the Ingress), so the returned routes are informational —
 			// log a one-line summary for the push output, not a contract.
-			routes, err := dockerdriver.New().Apply(cmd.Context(),
+			routes, err := dockerdriver.New(wctx.WorkspaceName).Apply(cmd.Context(),
 				infradriver.ApplyRequest{Ctx: wctx, BitswanYAML: string(yamlBytes)},
 				func(p infradriver.Progress) { fmt.Printf("[%s] %s\n", p.Step, p.Message) })
 			if err != nil {
