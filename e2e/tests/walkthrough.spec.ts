@@ -1080,18 +1080,19 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         continue;
       }
       await devStage.click().catch(() => {});
+      // The deploy is ASYNC: after the push, the driver builds the image and
+      // brings the containers up in the BACKGROUND — the same build the live-dev
+      // chapter rides, which takes minutes. "Working…" clearing means the push
+      // landed, NOT that the deploy finished. Wait for the Development stage to
+      // actually reach Healthy with a build-sized PLAIN wait (8 min, matching
+      // live-dev's build budget) — not a short SLA race and not the progress
+      // watchdog (a quiet build window must not fail). We do this once: if it's
+      // not Healthy after a full build window, re-pressing won't help — let the
+      // hard assert below report it.
       const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
-      const none = d.getByText(/Not deployed yet/i).first();
-      await Promise.race([
-        ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
-        none.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
-      ]);
+      await ok.waitFor({ state: 'visible', timeout: 12 * 60_000 }).catch(() => {});
       healthy = await ok.isVisible().catch(() => false);
-      if (!healthy) {
-        // Nothing deployed yet — is the button actionable to retry?
-        await clickTopTab(/Sync & Deploy/i);
-        if (!(await btn.isEnabled().catch(() => false))) break;
-      }
+      break;
     }
     // Authoritative success gate: the Development stage must report Healthy (set
     // in the loop above). This — not the cosmetic progress toast — is what makes
