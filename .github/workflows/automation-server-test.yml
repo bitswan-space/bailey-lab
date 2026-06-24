@@ -195,6 +195,16 @@ jobs:
           # can't pull it and every BP deploy fails.
           docker build -t bitswan/egress-gateway:latest -f "${{ github.workspace }}/bitswan-automation-server/cmd/egress-gateway/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
 
+      - name: Build automation-server-runtime image from source
+        run: |
+          # The per-workspace infra-driver sidecar runs this image (debian +
+          # docker CLI + git + git-http-backend) with the bitswan binary mounted
+          # at runtime. The workspace compose references it as
+          # bitswan/automation-server-runtime:latest and brings it up with
+          # `--pull missing`, so build the tag here or the sidecar can't start
+          # and `docker compose up` fails.
+          docker build -t bitswan/automation-server-runtime:latest -f "${{ github.workspace }}/bitswan-automation-server/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
+
       - name: "E2E: create a business process and reach its frontend"
         timeout-minutes: 15
         run: |
