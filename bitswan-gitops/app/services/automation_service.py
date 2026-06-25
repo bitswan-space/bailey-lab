@@ -154,6 +154,12 @@ def update_automation_toml_image(toml_path: str, new_image_value: str) -> None:
 # Directories never considered as automation sources during workspace scans.
 _SCAN_SKIP_DIRS = {"templates", ".git"}
 
+# How many BP members to build/prep concurrently in a single deploy. Bounded so
+# a large BP doesn't launch an unbounded swarm of simultaneous Docker builds
+# (which would thrash CPU/IO and can OOM the daemon); 4 overlaps the common
+# 2-4-automation BP fully while staying safe.
+_MEMBER_BUILD_CONCURRENCY = 4
+
 
 def _copies_dir() -> str:
     """Base directory (inside the gitops container) holding the per-copy
@@ -2764,26 +2770,43 @@ class AutomationService:
                 detail=f"No deployable automations for '{label}'",
             )
 
-        # Prep every member up-front (fail-fast — touches no containers).
+        # Prep every member up-front (fail-fast — touches no containers). Members
+        # are independent: their image builds run against the Docker daemon, the
+        # merged-tree checksum is a pure in-memory hash (calculate_git_tree_hash,
+        # no git index), and each materializes to its own <checksum>/ dir. So we
+        # build them CONCURRENTLY (bounded) instead of summing per-member build
+        # time — the dominant cost of a multi-automation deploy. gather preserves
+        # order, so `prepped` still lines up with `members`.
         total = len(members)
-        prepped: list[dict] = []
-        for i, src in enumerate(members, start=1):
-            await _report(
-                "building_images",
-                f"Preparing {i}/{total}: {src.get('display_name', src['relative_path'])}",
-                current=i - 1,
-            )
+        done = 0
+        done_lock = asyncio.Lock()
+        sem = asyncio.Semaphore(_MEMBER_BUILD_CONCURRENCY)
 
-            # Surface granular image-build progress for THIS member while it
-            # builds (minutes for a real image). Pin the per-member counter so
-            # the build-log tail updates don't reset the i/total progress.
-            async def _build_report(step: str, message: str, _current=None, _i=i):
-                await _report(step, message, current=_i - 1)
+        async def _prep_one(src: dict) -> dict:
+            nonlocal done
+            name = src.get("display_name", src["relative_path"])
 
-            prep = await self.prep_deploy_source(
-                src["relative_path"], stage, copy, progress_callback=_build_report
-            )
-            prepped.append(prep)
+            # Granular build-log progress for THIS member while it builds. The
+            # i/total counter is approximate under concurrency (how many have
+            # finished), which is what the UI/​watchdog needs to see movement.
+            async def _build_report(step: str, message: str, _current=None):
+                await _report(step, message, current=done)
+
+            async with sem:
+                await _report("building_images", f"Preparing: {name}", current=done)
+                prep = await self.prep_deploy_source(
+                    src["relative_path"], stage, copy, progress_callback=_build_report
+                )
+            async with done_lock:
+                done += 1
+                await _report(
+                    "building_images", f"Prepared {done}/{total}: {name}", current=done
+                )
+            return prep
+
+        prepped: list[dict] = list(
+            await asyncio.gather(*(_prep_one(src) for src in members))
+        )
 
         await _report(
             "updating_config", "Updating deployment configuration...", current=total
