@@ -30,6 +30,11 @@ const REPLAYABLE_EVENTS = new Set([
   'images',
   'processes',
   'copies',
+  // The git task queue. gitops sends a `task_queue_snapshot` once per upstream
+  // stream open, but the dashboard server keeps a single long-lived
+  // subscription — so a browser connecting mid-stream would otherwise never see
+  // it. Caching the latest snapshot lets `/api/events` replay it on connect.
+  'task_queue_snapshot',
 ]);
 
 export class GitopsClient {
@@ -1257,6 +1262,26 @@ export class GitopsClient {
       'GET',
       `/snapshots/tasks/${encodeURIComponent(taskId)}`,
     );
+  }
+
+  // ---------------------------------------------------------------------
+  // Git task queue (`/tasks`). The live feed flows over SSE
+  // (`task_queue_snapshot` on connect, `task_queue` per change); these REST
+  // calls back the initial fetch and the admin "clear queue" action.
+  // ---------------------------------------------------------------------
+
+  /** `GET /tasks` — the full git task queue (newest first). */
+  listTasks() {
+    return this.requestJson('GET', '/tasks');
+  }
+
+  /**
+   * `POST /tasks/clear?by=<email>` — cancel all queued/running git tasks.
+   * gitops enforces admin-only via the daemon role store and 403s non-admins;
+   * `by` is the validated requester email, recorded for the audit trail.
+   */
+  clearTasks(by: string) {
+    return this.requestJson('POST', `/tasks/clear?by=${encodeURIComponent(by)}`);
   }
 
   /** Subscribe to upstream events. Returns an unsubscribe function. */

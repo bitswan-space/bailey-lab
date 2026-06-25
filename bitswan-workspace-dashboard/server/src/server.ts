@@ -15,6 +15,7 @@ import { registerSnapshotRoutes } from './routes/snapshots.js';
 import { registerCopyRoutes } from './routes/copies.js';
 import { registerCopyFilesRoutes } from './routes/copy-files.js';
 import { registerMeRoutes } from './routes/me.js';
+import { registerTaskRoutes } from './routes/tasks.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -64,6 +65,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerTemplateRoutes(app, { gitops });
   registerAutomationRoutes(app, { gitops });
   registerSnapshotRoutes(app, { gitops });
+  registerTaskRoutes(app, { gitops });
   registerEventRoutes(app, { gitops });
 
   // Static SPA + SPA-fallback. Registered last so /api and /ws routes

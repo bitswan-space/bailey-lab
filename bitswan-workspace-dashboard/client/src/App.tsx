@@ -9,6 +9,7 @@ import {
 import { SessionProvider } from '@/components/agents/SessionProvider';
 import { Toaster } from '@/components/ui/sonner';
 import { WorkspaceView } from '@/components/views/WorkspaceView';
+import { TaskQueuePanel } from '@/components/workspace/TaskQueuePanel';
 import { api } from '@/lib/api';
 import { getUrlParam, setUrlParams } from '@/lib/urlState';
 import type { FlowTab } from '@/types';
@@ -258,6 +259,9 @@ function Shell() {
       ) : (
         <WorkspaceView bp={bp} wt={wt} tab={tab} onTab={handleTab} />
       )}
+      {/* Persistent git-task-queue panel, anchored bottom-left (the deploy
+          toasts live bottom-right). Collapsible; admin-only "Clear queue". */}
+      <TaskQueuePanel isAdmin={role === 'admin'} />
     </div>
   );
 }
