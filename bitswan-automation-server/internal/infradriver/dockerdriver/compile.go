@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 	yaml "gopkg.in/yaml.v3"
@@ -30,7 +29,6 @@ type compileState struct {
 	orgGroupPath string
 	volumeName   string // BITSWAN_VOLUME_NAME
 	gatewayImage string // BITSWAN_EGRESS_GATEWAY_IMAGE
-	deployTime   string // stamped into BITSWAN_DEPLOY_TIME (UTC isoformat + "Z")
 	firewallDir  string // <gitops_dir>/firewall (created when a gateway is active)
 
 	bs               *Bitswan
@@ -91,7 +89,6 @@ func newCompileState(wctx infradriver.WorkspaceContext, bs *Bitswan) *compileSta
 		orgGroupPath:  os.Getenv("BITSWAN_ALLOWED_GROUP"),
 		volumeName:    os.Getenv("BITSWAN_VOLUME_NAME"),
 		gatewayImage:  envOr("BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest"),
-		deployTime:    time.Now().UTC().Format("2006-01-02T15:04:05.000000") + "Z",
 
 		bs:               bs,
 		registry:         loadRegistry(wctx.SecretsDir),

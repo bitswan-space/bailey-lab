@@ -17,7 +17,6 @@ services:
         environment:
             BITSWAN_AUTOMATION_STAGE: live-dev
             BITSWAN_DEPLOY_CHECKSUM: live-dev
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.801033Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
             BITSWAN_DEPLOYMENT_ID: backend-copy-bar-acme-live-dev
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -51,7 +50,6 @@ services:
             BITSWAN_AUTOMATION_STAGE: live-dev
             BITSWAN_AUTOMATION_URL: https://ws4-frontend-4337-live-dev.example.com
             BITSWAN_DEPLOY_CHECKSUM: live-dev
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.801033Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
             BITSWAN_DEPLOYMENT_ID: frontend-copy-bar-acme-live-dev
             BITSWAN_GITOPS_DOMAIN: example.com

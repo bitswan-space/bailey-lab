@@ -117,6 +117,18 @@ func minioCompose(n infraNames) map[string]interface{} {
 		"volumes":        []interface{}{n.volumeName + "-data:/data"},
 		"networks":       []interface{}{"bitswan_network"},
 		"labels":         n.infraLabels(),
+		// Health is the readiness SIGNAL the driver waits on (docker health
+		// events), not a poll. start_interval makes Docker probe every 250ms
+		// during startup, so "healthy" fires within ~250ms of MinIO actually
+		// serving — no fixed sleep, no app-side poll loop.
+		"healthcheck": map[string]interface{}{
+			"test":           []interface{}{"CMD", "curl", "-f", "http://localhost:9000/minio/health/live"},
+			"interval":       "5s",
+			"timeout":        "3s",
+			"retries":        30,
+			"start_period":   "15s",
+			"start_interval": "250ms",
+		},
 	}
 	return map[string]interface{}{
 		"services": map[string]interface{}{"minio" + n.suffix: entry},
@@ -149,6 +161,17 @@ func postgresCompose(secretsDir string, n infraNames) map[string]interface{} {
 				"volumes":        []interface{}{n.volumeName + "-data:/var/lib/postgresql/data"},
 				"networks":       []interface{}{"bitswan_network"},
 				"labels":         n.infraLabels(),
+				// Readiness SIGNAL the driver waits on (docker health events),
+				// not a poll. start_interval probes every 250ms during startup
+				// so "healthy" fires ~250ms after Postgres accepts connections.
+				"healthcheck": map[string]interface{}{
+					"test":           []interface{}{"CMD-SHELL", `pg_isready -U "$POSTGRES_USER" -q`},
+					"interval":       "5s",
+					"timeout":        "3s",
+					"retries":        30,
+					"start_period":   "30s",
+					"start_interval": "250ms",
+				},
 			},
 			"postgres" + n.suffix + "-pgadmin": pgadmin,
 		},

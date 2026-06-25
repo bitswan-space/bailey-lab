@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
@@ -98,27 +99,84 @@ func serviceSecrets(secretsDir, serviceType, realm string) map[string]string {
 	return info
 }
 
-// waitForPostgres blocks until a freshly-started Postgres accepts connections
-// (pg_isready), so a cold-start deploy's first CREATE DATABASE doesn't race
-// initdb. Port of bp_databases._wait_for_postgres.
-func waitForPostgres(ctx context.Context, container, user string) error {
-	deadline := time.Now().Add(60 * time.Second)
-	var last string
+// waitForHealthy blocks until the container reports a healthy healthcheck,
+// consuming Docker's health-status EVENT stream — never a poll loop or a sleep.
+// It subscribes to `docker events` first, then does ONE inspect to catch a
+// container that was already healthy (the event can fire before we subscribe);
+// thereafter it blocks on the stream. Fails loudly on timeout, and on a
+// container that declares no healthcheck (a misconfig we must not silently wait
+// out — the infra services now all declare one, see infra.go).
+func waitForHealthy(ctx context.Context, container string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ev := exec.CommandContext(ctx, "docker", "events",
+		"--filter", "type=container",
+		"--filter", "container="+container,
+		"--filter", "event=health_status",
+		"--format", "{{.Status}}")
+	stdout, err := ev.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("docker events pipe for %s: %w", container, err)
+	}
+	if err := ev.Start(); err != nil {
+		return fmt.Errorf("docker events for %s: %w", container, err)
+	}
+	defer func() { _ = ev.Process.Kill(); _ = ev.Wait() }()
+
+	switch containerHealth(ctx, container) {
+	case "healthy":
+		return nil
+	case "none":
+		return fmt.Errorf("container %s declares no healthcheck — cannot wait on a readiness event", container)
+	}
+
+	lines := make(chan string, 1)
+	go func() {
+		sc := bufio.NewScanner(stdout)
+		for sc.Scan() {
+			lines <- strings.TrimSpace(sc.Text())
+		}
+		close(lines)
+	}()
 	for {
-		_, stderr, rc := dockerExec(ctx, container, "pg_isready", "-U", user, "-q")
-		if rc == 0 {
-			return nil
-		}
-		last = strings.TrimSpace(stderr)
-		if time.Now().After(deadline) {
-			return fmt.Errorf("postgres in %s not ready after 60s: %s", container, last)
-		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
+			return fmt.Errorf("container %s not healthy within %s: %w", container, timeout, ctx.Err())
+		case line, ok := <-lines:
+			if !ok {
+				// Stream ended (cancel / docker exit) — re-check once before failing.
+				if containerHealth(context.Background(), container) == "healthy" {
+					return nil
+				}
+				return fmt.Errorf("container %s health-event stream ended before healthy", container)
+			}
+			// Status is "health_status: healthy" | "health_status: unhealthy".
+			if strings.Contains(line, "healthy") && !strings.Contains(line, "unhealthy") {
+				return nil
+			}
 		}
 	}
+}
+
+// containerHealth returns "healthy" | "starting" | "unhealthy" | "none" (no
+// healthcheck declared) | "unknown" (inspect failed).
+func containerHealth(ctx context.Context, container string) string {
+	out, err := exec.CommandContext(ctx, "docker", "inspect", "-f",
+		"{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}", container).Output()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// waitForPostgres blocks until a freshly-started Postgres is healthy (its
+// pg_isready healthcheck passes) so a cold-start deploy's first CREATE DATABASE
+// doesn't race initdb. Event-driven via waitForHealthy — no poll. The user arg
+// is retained for call-site compatibility; readiness is now the container's own
+// healthcheck.
+func waitForPostgres(ctx context.Context, container, _ string) error {
+	return waitForHealthy(ctx, container, 60*time.Second)
 }
 
 func postgresDBExists(ctx context.Context, container, user, dbName string) (bool, error) {
@@ -187,28 +245,17 @@ func clonePostgresDB(ctx context.Context, secretsDir, workspace, copyName, sourc
 	return newDB, nil
 }
 
-// createMinioBucket sets the mc alias (retried — the server may have just come
-// up) then `mc mb --ignore-existing`. Port of bp_databases._create_minio_bucket.
+// createMinioBucket waits for MinIO to be healthy (its /minio/health/live
+// healthcheck — event-driven, no retry loop) then sets the mc alias and creates
+// the bucket. Port of bp_databases._create_minio_bucket.
 func createMinioBucket(ctx context.Context, container, accessKey, secretKey, bucket string) error {
-	deadline := time.Now().Add(60 * time.Second)
-	var stderr string
-	for {
-		_, e, rc := dockerExec(ctx, container, "mc", "alias", "set", "local", "http://localhost:9000", accessKey, secretKey)
-		if rc == 0 {
-			break
-		}
-		stderr = strings.TrimSpace(e)
-		if time.Now().After(deadline) {
-			return fmt.Errorf("mc alias set failed: %s", stderr)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
+	if err := waitForHealthy(ctx, container, 60*time.Second); err != nil {
+		return err
 	}
-	_, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+bucket)
-	if rc != 0 {
+	if _, e, rc := dockerExec(ctx, container, "mc", "alias", "set", "local", "http://localhost:9000", accessKey, secretKey); rc != 0 {
+		return fmt.Errorf("mc alias set failed: %s", strings.TrimSpace(e))
+	}
+	if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+bucket); rc != 0 {
 		return fmt.Errorf("mc mb %s failed: %s", bucket, strings.TrimSpace(e))
 	}
 	return nil
@@ -321,6 +368,18 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) {
 	reg := loadRegistry(wctx.SecretsDir)
 	seen := map[string]bool{}
+
+	// Collect the independent per-(BP, realm, db) provisioning jobs, then run
+	// them concurrently: each touches a distinct DB name / bucket, the readiness
+	// waits overlap instead of stacking, and a slow service no longer blocks the
+	// next BP. Best-effort — a failure is reported, never fatal.
+	type job struct {
+		bpSlug string
+		realm  string
+		db     int
+		names  map[string]string
+	}
+	var jobs []job
 	for _, depID := range sortedDepIDs(bs.Deployments) {
 		conf := bs.Deployments[depID]
 		if conf == nil {
@@ -345,12 +404,24 @@ func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceCont
 			dbs = productionDBNumbers(bs, bpSlug)
 		}
 		for _, db := range dbs {
-			names := bpResourceNames(bpSlug, db)
-			if err := provisionBPObjects(ctx, wctx, realm, names); err != nil {
-				report("provision", fmt.Sprintf("per-BP provisioning for %s (db%d) at %s deferred: %v", bpSlug, db, realm, err))
-			}
+			jobs = append(jobs, job{bpSlug, realm, db, bpResourceNames(bpSlug, db)})
 		}
 	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for _, j := range jobs {
+		wg.Add(1)
+		go func(j job) {
+			defer wg.Done()
+			if err := provisionBPObjects(ctx, wctx, j.realm, j.names); err != nil {
+				mu.Lock()
+				report("provision", fmt.Sprintf("per-BP provisioning for %s (db%d) at %s deferred: %v", j.bpSlug, j.db, j.realm, err))
+				mu.Unlock()
+			}
+		}(j)
+	}
+	wg.Wait()
 }
 
 // provisionBPObjects creates the Postgres DB + MinIO bucket for one (BP, realm,

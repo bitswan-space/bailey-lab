@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
@@ -153,16 +154,24 @@ func installCertificatesInContainers(ctx context.Context, wctx infradriver.Works
 	if err != nil {
 		return err
 	}
+	// Install into every eligible container concurrently — each exec is
+	// independent, so a serial loop just sums their latencies for no reason.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	for _, c := range infos {
-		if c.labels["gitops.certs.enabled"] != "true" {
+		if c.labels["gitops.certs.enabled"] != "true" || c.state != "running" {
 			continue
 		}
-		if c.state != "running" {
-			continue
-		}
-		if out, err := exec.CommandContext(ctx, "docker", "exec", c.id, "sh", "-c", certInstallScript).CombinedOutput(); err != nil {
-			report("certs", fmt.Sprintf("cert install in %s failed: %v: %s", c.id[:12], err, strings.TrimSpace(string(out))))
-		}
+		wg.Add(1)
+		go func(c containerInfo) {
+			defer wg.Done()
+			if out, err := exec.CommandContext(ctx, "docker", "exec", c.id, "sh", "-c", certInstallScript).CombinedOutput(); err != nil {
+				mu.Lock()
+				report("certs", fmt.Sprintf("cert install in %s failed: %v: %s", c.id[:12], err, strings.TrimSpace(string(out))))
+				mu.Unlock()
+			}
+		}(c)
 	}
+	wg.Wait()
 	return nil
 }

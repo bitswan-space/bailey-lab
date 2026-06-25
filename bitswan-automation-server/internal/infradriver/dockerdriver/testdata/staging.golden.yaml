@@ -9,6 +9,17 @@ services:
         container_name: ws3__minio-staging
         env_file:
             - __ROOT__/secrets/minio-staging
+        healthcheck:
+            interval: 5s
+            retries: 30
+            start_interval: 250ms
+            start_period: 15s
+            test:
+                - CMD
+                - curl
+                - -f
+                - http://localhost:9000/minio/health/live
+            timeout: 3s
         image: minio/minio:latest
         labels:
             gitops.workspace: ws3
@@ -21,6 +32,15 @@ services:
         container_name: ws3__postgres-staging
         env_file:
             - __ROOT__/secrets/postgres-staging
+        healthcheck:
+            interval: 5s
+            retries: 30
+            start_interval: 250ms
+            start_period: 30s
+            test:
+                - CMD-SHELL
+                - pg_isready -U "$POSTGRES_USER" -q
+            timeout: 3s
         image: postgres:16
         labels:
             gitops.workspace: ws3
@@ -50,7 +70,6 @@ services:
         environment:
             BITSWAN_AUTOMATION_STAGE: staging
             BITSWAN_DEPLOY_CHECKSUM: bk
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.795161Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-staging
             BITSWAN_DEPLOYMENT_ID: backend-acme-staging
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -85,7 +104,6 @@ services:
             BITSWAN_AUTOMATION_STAGE: staging
             BITSWAN_AUTOMATION_URL: https://ws3-frontend-822b-staging.example.com
             BITSWAN_DEPLOY_CHECKSUM: fr
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.795161Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-staging
             BITSWAN_DEPLOYMENT_ID: frontend-acme-staging
             BITSWAN_GITOPS_DOMAIN: example.com

@@ -286,7 +286,14 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	if conf.TagChecksum != "" {
 		env["BITSWAN_IMAGE_CHECKSUM"] = conf.TagChecksum
 	}
-	env["BITSWAN_DEPLOY_TIME"] = c.deployTime
+	// NOTE: we deliberately do NOT stamp a per-deploy wall-clock env (it used to
+	// be BITSWAN_DEPLOY_TIME). Nothing reads it, and a value that changes every
+	// deploy makes `docker compose up` see every container's config as changed —
+	// so it RECREATES every container on every deploy, even a no-op re-deploy.
+	// That was the dominant cost of deploy/promote AND the cause of the
+	// post-"deployed" 404 (every app container restarts and must re-boot). With
+	// it gone, compose recreates only the containers whose image/env/volumes
+	// actually changed; unchanged ones keep serving with zero downtime.
 
 	// ---- networks / network_mode / egress firewall ----
 	var networkMode string

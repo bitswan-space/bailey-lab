@@ -9,6 +9,17 @@ services:
         container_name: ws1__minio-dev
         env_file:
             - __ROOT__/secrets/minio-dev
+        healthcheck:
+            interval: 5s
+            retries: 30
+            start_interval: 250ms
+            start_period: 15s
+            test:
+                - CMD
+                - curl
+                - -f
+                - http://localhost:9000/minio/health/live
+            timeout: 3s
         image: minio/minio:latest
         labels:
             gitops.workspace: ws1
@@ -21,6 +32,15 @@ services:
         container_name: ws1__postgres-dev
         env_file:
             - __ROOT__/secrets/postgres-dev
+        healthcheck:
+            interval: 5s
+            retries: 30
+            start_interval: 250ms
+            start_period: 30s
+            test:
+                - CMD-SHELL
+                - pg_isready -U "$POSTGRES_USER" -q
+            timeout: 3s
         image: postgres:16
         labels:
             gitops.workspace: ws1
@@ -56,7 +76,6 @@ services:
         environment:
             BITSWAN_AUTOMATION_STAGE: dev
             BITSWAN_DEPLOY_CHECKSUM: backsum
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.782573Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-dev
             BITSWAN_DEPLOYMENT_ID: backend-acme-dev
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -91,7 +110,6 @@ services:
             BITSWAN_AUTOMATION_STAGE: dev
             BITSWAN_AUTOMATION_URL: https://ws1-frontend-822b-dev.example.com
             BITSWAN_DEPLOY_CHECKSUM: frontsum
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.782573Z"
             BITSWAN_DEPLOYMENT_CONTEXT: acme-dev
             BITSWAN_DEPLOYMENT_ID: frontend-acme-dev
             BITSWAN_GITOPS_DOMAIN: example.com

@@ -11,7 +11,6 @@ services:
         environment:
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_DEPLOY_CHECKSUM: bsum
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.789099Z"
             BITSWAN_DEPLOYMENT_CONTEXT: shop
             BITSWAN_DEPLOYMENT_ID: backend-shop
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -43,7 +42,6 @@ services:
         environment:
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_DEPLOY_CHECKSUM: bsum
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.789099Z"
             BITSWAN_DEPLOYMENT_CONTEXT: shop
             BITSWAN_DEPLOYMENT_ID: backend-shop@b
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -76,7 +74,6 @@ services:
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-production.example.com
             BITSWAN_DEPLOY_CHECKSUM: fsum
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.789099Z"
             BITSWAN_DEPLOYMENT_CONTEXT: shop
             BITSWAN_DEPLOYMENT_ID: frontend-shop
             BITSWAN_GITOPS_DOMAIN: example.com
@@ -113,7 +110,6 @@ services:
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-dr.example.com
             BITSWAN_DEPLOY_CHECKSUM: fsum
-            BITSWAN_DEPLOY_TIME: "2026-06-24T13:40:57.789099Z"
             BITSWAN_DEPLOYMENT_CONTEXT: shop
             BITSWAN_DEPLOYMENT_ID: frontend-shop@b
             BITSWAN_GITOPS_DOMAIN: example.com
