@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUp, RefreshCw, Upload } from 'lucide-react';
+import { ArrowUp, File as FileIcon, RefreshCw, Search, Upload, X } from 'lucide-react';
 import { useDropzone, type DropEvent } from 'react-dropzone';
 import { toast } from '@/lib/notify';
-import { api, type ChangedKind } from '@/lib/api';
+import { api, type ChangedKind, type FileTreeNode } from '@/lib/api';
 import { useUrlParam } from '@/lib/urlState';
 import { useFileContent } from '@/hooks/useFileContent';
 import { useFileTree } from '@/hooks/useFileTree';
@@ -20,11 +20,32 @@ interface Props {
   bp?: string | null;
 }
 
+const SEARCH_KIND_STYLES: Record<ChangedKind, string> = {
+  A: 'bg-emerald-100 text-emerald-700',
+  M: 'bg-amber-100 text-amber-700',
+  D: 'bg-red-100 text-red-700',
+};
+
+/** Depth-first list of every FILE under `nodes` (folders flattened away) —
+ *  the corpus the explorer search box filters over. */
+function flattenFiles(nodes: FileTreeNode[]): FileTreeNode[] {
+  const out: FileTreeNode[] = [];
+  const walk = (ns: FileTreeNode[]) => {
+    for (const n of ns) {
+      if (n.kind === 'folder') walk(n.children ?? []);
+      else out.push(n);
+    }
+  };
+  walk(nodes);
+  return out;
+}
+
 /**
  * Copy file explorer: 280 px tree on the left, content viewer on the
  * right. Status badges on the tree come from the same `/status` endpoint
  * the Diff tab uses, merged in by path. The tree pane doubles as a drop
- * target for file uploads.
+ * target for file uploads. A search box filters all files (by path) into a
+ * flat result list.
  */
 export function FilesTab({ copy, bp }: Props) {
   const { tree, loading: treeLoading, refresh: refreshTree } = useFileTree(copy);
@@ -43,7 +64,9 @@ export function FilesTab({ copy, bp }: Props) {
   // the user navigates to a different BP / copy so each cd starts
   // scoped again.
   const [showFullTree, setShowFullTree] = useState(false);
-  // Reset the scope toggle and close the open file when the user switches BP
+  // Explorer search query — filters all files (by path) into a flat list.
+  const [query, setQuery] = useState('');
+  // Reset the scope toggle, search, and open file when the user switches BP
   // or copy — but NOT on the initial mount, so a pasted ?file=… link opens.
   const resetReady = useRef(false);
   useEffect(() => {
@@ -52,6 +75,7 @@ export function FilesTab({ copy, bp }: Props) {
       return;
     }
     setShowFullTree(false);
+    setQuery('');
     setOpenPath(null);
   }, [bp, copy, setOpenPath]);
 
@@ -71,6 +95,19 @@ export function FilesTab({ copy, bp }: Props) {
     for (const c of changed) out.set(c.path, c.kind);
     return out;
   }, [changed]);
+
+  // When the search box has a query, filter every file in the current scope by
+  // path (case-insensitive) into a flat result list; null means "not searching"
+  // (show the tree). Capped so a very broad query stays responsive.
+  const RESULT_CAP = 500;
+  const searchMatches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return null;
+    const all = flattenFiles(displayTree).filter((f) =>
+      f.path.toLowerCase().includes(q),
+    );
+    return { items: all.slice(0, RESULT_CAP), total: all.length };
+  }, [query, displayTree]);
 
   // Upload target for the **click** path (the Upload button → OS picker)
   // is the directory the currently-open file lives in, or — when no file
@@ -197,11 +234,88 @@ export function FilesTab({ copy, bp }: Props) {
             </button>
           </div>
         </div>
+        <div className="shrink-0 border-b border-border px-2 py-1.5">
+          <div className="relative">
+            <Search
+              className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search files…"
+              spellCheck={false}
+              aria-label="Search files"
+              className="w-full rounded border border-input bg-background py-1 pl-7 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            {query ? (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                title="Clear search"
+                aria-label="Clear search"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <X className="size-3" aria-hidden />
+              </button>
+            ) : null}
+          </div>
+        </div>
         <div className="flex-1 overflow-auto">
           {treeLoading && tree.length === 0 ? (
             <div className="px-3 py-6 text-center text-xs text-muted-foreground">
               Loading…
             </div>
+          ) : searchMatches ? (
+            searchMatches.items.length === 0 ? (
+              <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                No files match “{query.trim()}”.
+              </div>
+            ) : (
+              <div className="flex flex-col py-1 text-[13px]">
+                {searchMatches.items.map((f) => {
+                  const kind = statusByPath.get(f.path);
+                  const selected = openPath === f.path;
+                  const slash = f.path.lastIndexOf('/');
+                  const dir = slash < 0 ? '' : f.path.slice(0, slash);
+                  return (
+                    <button
+                      key={f.path}
+                      type="button"
+                      onClick={() => setOpenPath(f.path)}
+                      title={f.path}
+                      className={`group flex w-full items-center gap-1.5 rounded px-2 py-0.5 text-left transition-colors ${
+                        selected ? 'bg-muted/60' : 'hover:bg-muted/40'
+                      }`}
+                    >
+                      <FileIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                      <span className="min-w-0 flex-1 truncate">
+                        {f.name}
+                        {dir ? (
+                          <span className="ml-1.5 text-[11px] text-muted-foreground">
+                            {dir}
+                          </span>
+                        ) : null}
+                      </span>
+                      {kind ? (
+                        <span
+                          className={`inline-flex h-4 items-center rounded px-1 text-[10px] font-semibold ${SEARCH_KIND_STYLES[kind]}`}
+                        >
+                          {kind}
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+                {searchMatches.total > searchMatches.items.length ? (
+                  <div className="px-3 py-2 text-center text-[11px] text-muted-foreground">
+                    Showing {searchMatches.items.length} of {searchMatches.total} —
+                    refine your search.
+                  </div>
+                ) : null}
+              </div>
+            )
           ) : displayTree.length === 0 ? (
             <div className="px-3 py-6 text-center text-xs text-muted-foreground">
               {rootDir
