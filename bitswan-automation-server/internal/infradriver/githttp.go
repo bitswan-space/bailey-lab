@@ -39,6 +39,27 @@ func gitCGIHandler(projectRoot string) http.Handler {
 			"GIT_CONFIG_KEY_0=safe.directory",
 			"GIT_CONFIG_VALUE_0=*",
 		},
+		// CRITICAL: the push runs the post-receive hook (`bitswan infra-driver
+		// apply`) as a CGI grandchild, and a CGI child gets ONLY the meta-vars +
+		// Env above — none of the serve process's BITSWAN_* env. But the
+		// compiler reads these from os.Getenv to build the compose (e.g.
+		// BITSWAN_VOLUME_NAME selects the volume-subpath live-dev /app mount;
+		// without it the compiler falls back to a container-path bind that
+		// resolves to an empty dir on the host → live-dev /app is unmounted).
+		// Inherit them so the hook compiles identically to the serve process.
+		InheritEnv: []string{
+			"BITSWAN_VOLUME_NAME",
+			"BITSWAN_GITOPS_DIR_HOST",
+			"BITSWAN_WORKSPACE_DIR_HOST",
+			"BITSWAN_WORKSPACE_REPO_DIR",
+			"BITSWAN_CERTS_DIR",
+			"BITSWAN_ALLOWED_GROUP",
+			"BITSWAN_EGRESS_GATEWAY_IMAGE",
+			"BITSWAN_INGRESS_URL",
+			"BITSWAN_INGRESS_SOCKET",
+			"BITSWAN_INFRA_DRIVER_TOKEN",
+			"KEYCLOAK_URL",
+		},
 	}
 }
 
