@@ -1059,40 +1059,39 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await expect(btn, 'Sync & Deploy never became actionable (nothing to deploy)').toBeEnabled({ timeout: SLA });
     await pressSyncDeploy();
     await clickTopTab(/Deployments/i);
-    // The Development stage renders once the BP is in `main`. Sync & Deploy merges
-    // the copy into main and deploys to dev, but for a scaffolded BP the
-    // copy→main sync + stage registration can lag the "Working…" clear, so allow a
-    // build-sized window for the stage to appear rather than a short SLA.
+    // Sync & Deploy merges the copy into main and surfaces the Development stage
+    // ONLY after the dev image BUILD succeeds — minutes, the same build the
+    // live-dev chapter rides. Until then the Deployments tab reads "Not in main
+    // yet" with no stage buttons. So poll, with a BUILD-SIZED budget, re-opening
+    // Deployments to refresh, for the Development stage to land (= the copy merged
+    // to main on a successful deploy) and report Healthy. (An empty BP merges
+    // instantly — nothing to build — which is why this only bites a real
+    // scaffolded BP.)
+    const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
     const devStage = d.getByRole('button', { name: /Development/i }).first();
-    const inMain = await devStage
-      .waitFor({ state: 'visible', timeout: 3 * 60_000 })
-      .then(() => true)
-      .catch(() => false);
     let healthy = false;
-    if (inMain) {
-      await devStage.click().catch(() => {});
-      // The deploy is ASYNC: after the push the driver builds the image and brings
-      // containers up in the background (the same build live-dev rides — minutes).
-      // Wait for the dev stage to actually reach Healthy with a build-sized plain
-      // wait.
-      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
-      healthy = await ok
-        .waitFor({ state: 'visible', timeout: 12 * 60_000 })
-        .then(() => true)
-        .catch(() => false);
+    const deployDeadline = Date.now() + 12 * 60_000;
+    while (Date.now() < deployDeadline && !healthy) {
+      if (await devStage.isVisible().catch(() => false)) {
+        await devStage.click().catch(() => {});
+        healthy = await ok.waitFor({ state: 'visible', timeout: 20_000 }).then(() => true).catch(() => false);
+        if (healthy) break;
+      }
+      await dashPage.waitForTimeout(7_000);
+      await clickTopTab(/Deployments/i).catch(() => {});
     }
     if (!healthy) {
       // Self-explaining failure: capture exactly what the dashboard shows so a
-      // miss tells us WHY (BP not in main, dev deploy failed, wrong frame, …)
-      // instead of a bare "never Healthy". The trace screencasts the onboard tab,
-      // not this popup, so dump the dashboard body here.
+      // miss tells us WHY (still "Not in main yet" → the dev deploy never
+      // succeeded, etc.) instead of a bare "never Healthy". The trace screencasts
+      // the onboard tab, not this popup, so dump the dashboard body here.
       await clickTopTab(/Deployments/i).catch(() => {});
       const body = await d.locator('body').first().innerText({ timeout: 3000 }).catch(() => '(unreadable)');
       const devVis = await devStage.isVisible().catch(() => false);
       const deplVis = await d.getByRole('button', { name: /Deployments/i }).first().isVisible().catch(() => false);
       // eslint-disable-next-line no-console
       console.log(
-        `deploy DIAG: inMain=${inMain} developmentBtn=${devVis} deploymentsTab=${deplVis}\n` +
+        `deploy DIAG: developmentBtn=${devVis} deploymentsTab=${deplVis}\n` +
           `--- dashboard body (${body.length} chars) ---\n${body.slice(0, 1000)}\n--- end ---`,
       );
       await capture(dashPage, 'deploy-dev-FAILED');
