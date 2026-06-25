@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
-	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 	"github.com/dchest/uniuri"
 )
 
@@ -336,22 +335,25 @@ func (s *Server) Run() error {
 		}
 	}()
 
-	// Re-render the Traefik file-provider config (dynamic.yml) from the saved
-	// state (rest-state.json) on startup. Routes now live in the FILE provider,
-	// which Traefik reloads on its own restart — so a Traefik-only restart no
-	// longer drops routes. This startup render still matters for: (a) UPGRADES
-	// from the old REST-provider deployments, whose dynamic.yml predates the
-	// routes, and (b) self-healing a deleted/corrupt dynamic.yml from the
-	// canonical state. InitTraefik (a no-op modifyState) re-renders the full
-	// saved state to the file. Best-effort with retry.
+	// Ensure the global Traefik is on the CURRENT config on startup — not just a
+	// dynamic.yml re-render. Re-rendering routes (InitTraefik) is not enough when
+	// the daemon UPGRADE changed Traefik's STATIC config: e.g. adding the file
+	// provider's `watch: true`. A Traefik created by an older daemon keeps its
+	// old static config across restarts (the init used to only run on first
+	// setup), so without `watch` it loads dynamic.yml once and never reloads —
+	// every route added afterwards (a fresh live-dev frontend) lands in the file
+	// but never reaches Traefik, and the public URL 404s. initTraefikIngress is a
+	// no-op when the static config already matches and recreates Traefik only on
+	// drift, after which it re-renders the dynamic routes itself. Best-effort
+	// with retry.
 	go func() {
 		time.Sleep(2 * time.Second)
 		for i := 0; i < 6; i++ {
-			if err := traefikapi.InitTraefik(); err == nil {
-				fmt.Println("Rendered saved Traefik dynamic config to the file provider on startup")
+			if _, err := initTraefikIngress(false); err == nil {
+				fmt.Println("Ensured Traefik is on the current static config + routes on startup")
 				break
 			} else if i == 5 {
-				fmt.Printf("Warning: failed to render Traefik dynamic config on startup: %v\n", err)
+				fmt.Printf("Warning: failed to ensure Traefik config on startup: %v\n", err)
 			} else {
 				time.Sleep(2 * time.Second)
 			}
