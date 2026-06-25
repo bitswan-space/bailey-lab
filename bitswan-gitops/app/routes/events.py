@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from app.dependencies import get_automation_service, get_image_service
 from app.deploy_manager import deploy_manager
 from app.event_broadcaster import event_broadcaster
+from app.task_queue import task_queue
 from app.services.process_service import process_service
 from app.routes.copies import get_cached_copies
 
@@ -51,6 +52,10 @@ async def stream_events():
             # Send active deploy tasks so reconnecting clients pick up current state
             for task in deploy_manager.get_all_active_tasks():
                 yield f"event: deploy_progress\ndata: {json.dumps(task.to_dict())}\n\n"
+
+            # Current git task-queue snapshot so a (re)connecting dashboard renders
+            # the queue panel immediately without a REST round-trip.
+            yield f"event: task_queue_snapshot\ndata: {json.dumps(task_queue.snapshot())}\n\n"
 
             while True:
                 try:
