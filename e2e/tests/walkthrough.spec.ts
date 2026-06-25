@@ -1080,22 +1080,48 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // goes dark (no movement for DARK_MS) before Healthy, the deploy is stuck.
     const DARK_MS = 15_000;
     let healthy = false;
+    const startedAt = Date.now();
+    const backstop = startedAt + 30 * 60_000;
+    // A running log of EVERYTHING the deploy showed, so a failure reads as a
+    // story ("got to Building image … then went dark at 105s") instead of a bare
+    // "never Healthy". Each distinct on-screen progress signature is recorded
+    // with the elapsed time it first appeared; we also note when the dev stage
+    // surfaced and how the watch ended (Healthy / went dark / hit the backstop).
+    const elapsed = () => ((Date.now() - startedAt) / 1000).toFixed(1) + 's';
+    const timeline: string[] = [];
+    const note = (msg: string) => {
+      const row = `[${elapsed()}] ${msg}`;
+      timeline.push(row);
+      // eslint-disable-next-line no-console
+      console.log(`  deploy ▸ ${row}`);
+    };
     let lastSig = await progressSignature();
+    note(`start · signature: "${lastSig || '(blank screen)'}"`);
     let lastMoved = Date.now();
-    const backstop = Date.now() + 30 * 60_000;
+    let devStageSeenAt = '';
+    let exit: 'healthy' | 'dark' | 'backstop' = 'backstop';
     for (let i = 0; Date.now() < backstop; i++) {
       if (await devStage.isVisible().catch(() => false)) {
+        if (!devStageSeenAt) {
+          devStageSeenAt = elapsed();
+          note('Development stage surfaced (merge to main landed)');
+        }
         await devStage.click().catch(() => {});
         if (await ok.isVisible().catch(() => false)) {
           healthy = true;
+          exit = 'healthy';
+          note('Development stage reports Healthy ✓');
           break;
         }
       }
       const sig = await progressSignature();
       if (sig !== lastSig) {
+        note(`progress: "${sig || '(blank)'}"`);
         lastSig = sig;
         lastMoved = Date.now();
       } else if (Date.now() - lastMoved > DARK_MS) {
+        exit = 'dark';
+        note(`went dark — no on-screen change for >${DARK_MS / 1000}s; last signature held: "${lastSig || '(blank)'}"`);
         break; // went dark — no on-screen progress and not Healthy → stuck
       }
       await dashPage.waitForTimeout(3_000);
@@ -1103,23 +1129,40 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       // lands. The progress toast is global, so this doesn't lose the signal.
       if (i % 5 === 4) await clickTopTab(/Deployments/i).catch(() => {});
     }
+    if (exit === 'backstop') note('hit the 30-min backstop without reaching Healthy');
     if (!healthy) {
-      // Self-explaining failure: capture exactly what the dashboard shows so a
-      // miss tells us WHY (still "Not in main yet" → the dev deploy never
-      // succeeded, etc.) instead of a bare "never Healthy". The trace screencasts
-      // the onboard tab, not this popup, so dump the dashboard body here.
+      // Self-explaining failure: replay the whole on-screen progression, say
+      // exactly HOW it ended, and dump what the dashboard shows now — so a miss
+      // tells us WHERE it got (e.g. "reached Building image … then dark at 105s",
+      // or still "Not in main yet" → the dev deploy never merged) instead of a
+      // bare "never Healthy". The trace screencasts the onboard tab, not this
+      // popup, so dump the dashboard body here too.
       await clickTopTab(/Deployments/i).catch(() => {});
       const body = await d.locator('body').first().innerText({ timeout: 3000 }).catch(() => '(unreadable)');
       const devVis = await devStage.isVisible().catch(() => false);
       const deplVis = await d.getByRole('button', { name: /Deployments/i }).first().isVisible().catch(() => false);
+      const ranFor = elapsed();
+      const summary =
+        exit === 'dark'
+          ? `screen went DARK (no progress for >${DARK_MS / 1000}s) after ${ranFor}; last shown: "${lastSig || '(blank)'}"`
+          : `hit the 30-min backstop (${ranFor}) still not Healthy; last shown: "${lastSig || '(blank)'}"`;
       // eslint-disable-next-line no-console
       console.log(
-        `deploy DIAG: developmentBtn=${devVis} deploymentsTab=${deplVis}\n` +
-          `--- dashboard body (${body.length} chars) ---\n${body.slice(0, 1000)}\n--- end ---`,
+        `\n===== deploy FAILED — ${summary} =====\n` +
+          `developmentStageSurfaced=${devStageSeenAt || 'NEVER'} developmentBtnNow=${devVis} deploymentsTabNow=${deplVis}\n` +
+          `--- on-screen progress timeline (${timeline.length} steps) ---\n${timeline.join('\n')}\n` +
+          `--- dashboard body now (${body.length} chars) ---\n${body.slice(0, 1500)}\n===== end deploy diagnostics =====`,
       );
       await capture(dashPage, 'deploy-dev-FAILED');
     }
-    expect(healthy, 'Development stage never became Healthy after Sync & Deploy').toBe(true);
+    // Fail with the STORY, not just the verdict: the assertion message itself now
+    // carries where the deploy got and how it ended, so the CI summary line is
+    // actionable without digging into the captured log.
+    const failMsg =
+      exit === 'dark'
+        ? `Development stage never became Healthy: deploy went dark after ${elapsed()} (last on-screen: "${lastSig || '(blank)'}", dev stage surfaced: ${devStageSeenAt || 'NEVER'}). Progress timeline:\n${timeline.join('\n')}`
+        : `Development stage never became Healthy: hit the 30-min backstop (last on-screen: "${lastSig || '(blank)'}", dev stage surfaced: ${devStageSeenAt || 'NEVER'}). Progress timeline:\n${timeline.join('\n')}`;
+    expect(healthy, healthy ? undefined : failMsg).toBe(true);
     await waitDeployDone();
     await capture(dashPage, 'deploy-dev');
   });
