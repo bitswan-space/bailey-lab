@@ -166,9 +166,7 @@ class TaskQueue:
             granted.set()
             await released.wait()
 
-        task_id = self.submit(
-            kind, _hold, requester_email=requester_email, label=label
-        )
+        task_id = self.submit(kind, _hold, requester_email=requester_email, label=label)
         self._releases[task_id] = released
         # Wait until granted (running) OR cancelled while still queued.
         while not granted.is_set():
@@ -247,7 +245,9 @@ class TaskQueue:
     # --------------------------------------------------------------- observable
     def snapshot(self) -> list[dict]:
         """Queued + running + recent-finished tasks, newest first."""
-        return [self._tasks[t].to_dict() for t in reversed(self._order) if t in self._tasks]
+        return [
+            self._tasks[t].to_dict() for t in reversed(self._order) if t in self._tasks
+        ]
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue[dict] = asyncio.Queue()
@@ -267,7 +267,11 @@ class TaskQueue:
 
     def _trim_history(self) -> None:
         finished = (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)
-        done_ids = [t for t in self._order if self._tasks.get(t) and self._tasks[t].status in finished]
+        done_ids = [
+            t
+            for t in self._order
+            if self._tasks.get(t) and self._tasks[t].status in finished
+        ]
         while len(done_ids) > self._HISTORY:
             old = done_ids.pop(0)
             self._order.remove(old)

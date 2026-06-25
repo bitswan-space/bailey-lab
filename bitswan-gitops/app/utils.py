@@ -51,7 +51,10 @@ class GitLockContext:
     """
 
     def __init__(
-        self, timeout: float = 10.0, kind: str = "git operation", label: str | None = None
+        self,
+        timeout: float = 10.0,
+        kind: str = "git operation",
+        label: str | None = None,
     ):
         self.timeout = timeout
         self.kind = kind

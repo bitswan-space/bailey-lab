@@ -69,7 +69,10 @@ class _RequesterMiddleware:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
-        headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+        headers = {
+            k.decode("latin1").lower(): v.decode("latin1")
+            for k, v in scope.get("headers", [])
+        }
         qs = parse_qs(scope.get("query_string", b"").decode("latin1"))
         requester = (
             headers.get("x-forwarded-email")
