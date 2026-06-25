@@ -7,7 +7,6 @@ import {
   useCopies,
 } from '@/components/workspace/WorkspaceProvider';
 import { SessionProvider } from '@/components/agents/SessionProvider';
-import { Toaster } from '@/components/ui/sonner';
 import { WorkspaceView } from '@/components/views/WorkspaceView';
 import { TaskQueuePanel } from '@/components/workspace/TaskQueuePanel';
 import { api } from '@/lib/api';
@@ -20,7 +19,6 @@ export function App() {
       <WorkspaceProvider>
         <SessionProvider>
           <Shell />
-          <Toaster position="bottom-right" richColors closeButton />
         </SessionProvider>
       </WorkspaceProvider>
     </AuthGate>
@@ -259,8 +257,9 @@ function Shell() {
       ) : (
         <WorkspaceView bp={bp} wt={wt} tab={tab} onTab={handleTab} />
       )}
-      {/* Persistent git-task-queue panel, anchored bottom-left (the deploy
-          toasts live bottom-right). Collapsible; admin-only "Clear queue". */}
+      {/* The single activity surface, anchored bottom-left: server-side git
+          tasks AND transient notifications (former toasts) in one collapsible
+          panel. Admin-only "Clear queue". */}
       <TaskQueuePanel isAdmin={role === 'admin'} />
     </div>
   );

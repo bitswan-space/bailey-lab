@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, RefreshCw, Upload } from 'lucide-react';
 import { useDropzone, type DropEvent } from 'react-dropzone';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import { api, type ChangedKind } from '@/lib/api';
 import { useUrlParam } from '@/lib/urlState';
 import { useFileContent } from '@/hooks/useFileContent';

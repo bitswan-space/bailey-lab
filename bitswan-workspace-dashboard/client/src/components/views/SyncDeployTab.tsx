@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Rocket } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import { useSessions } from '@/components/agents/SessionProvider';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
 import { DiffTab } from '@/components/diff/DiffTab';

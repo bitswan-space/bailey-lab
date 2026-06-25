@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, Save } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import {
   ProseMirror,
   ProseMirrorDoc,

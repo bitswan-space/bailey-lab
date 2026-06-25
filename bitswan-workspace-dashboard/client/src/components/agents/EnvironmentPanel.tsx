@@ -15,7 +15,7 @@ import {
   Plus,
   Trash2,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import { api } from '@/lib/api';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
