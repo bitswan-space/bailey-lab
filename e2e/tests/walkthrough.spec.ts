@@ -303,11 +303,15 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       const t = await toasts.nth(i).textContent().catch(() => '');
       if (t && t.trim()) parts.push('toast:' + t.trim());
     }
-    // The action button label ("Working…" vs "Sync & Deploy"/"Promote").
-    const btn = await d.getByRole('button', { name: /Working|Sync & Deploy|Promote|Switching|Starting/i }).first().textContent().catch(() => '');
+    // The action button label ("Working…" vs "Sync & Deploy"/"Promote"). Use a
+    // SHORT per-read timeout: when the element is absent (e.g. on a tab that
+    // doesn't show it), textContent() otherwise blocks the full default timeout
+    // (and the .catch hides it) — turning a single signature read into a 60s
+    // stall and breaking the watchdog's timing. A quick miss → empty part.
+    const btn = await d.getByRole('button', { name: /Working|Sync & Deploy|Promote|Switching|Starting/i }).first().textContent({ timeout: 1500 }).catch(() => '');
     if (btn && btn.trim()) parts.push('btn:' + btn.trim());
     // The stage card status line + version (changes when a deploy lands).
-    const status = await d.getByText(/Healthy|services? not running|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|Generating|Configuring|Reconciling|Provisioning|Installing|Recording|Updating|updated|never deployed/i).first().textContent().catch(() => '');
+    const status = await d.getByText(/Healthy|services? not running|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|Generating|Configuring|Reconciling|Provisioning|Installing|Recording|Updating|updated|never deployed/i).first().textContent({ timeout: 1500 }).catch(() => '');
     if (status && status.trim()) parts.push('status:' + status.trim());
     return parts.join(' | ');
   };
