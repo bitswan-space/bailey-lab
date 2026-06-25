@@ -357,6 +357,68 @@ async def _broadcast_automations_after_delay():
     await _broadcast_automations()
 
 
+async def _watch_container_events() -> None:
+    """Re-broadcast automation state whenever a workspace container comes up,
+    goes away, or flips health — driven by the infra-driver's Docker event
+    stream.
+
+    After the infra-driver cut-over gitops has no Docker socket of its own, so
+    this stream is its ONLY live signal of container-state changes. Without it
+    the dashboard's automation / environment panels go stale until the next
+    deploy or file edit (the bug where a freshly-deployed frontend's link never
+    appears because the container finished starting *after* the deploy's
+    refresh_all). The driver scopes the stream to this workspace.
+
+    A single debouncer coalesces the burst of events a deploy produces into one
+    re-broadcast; `get_automations()` reads live state fresh, so one delayed
+    broadcast captures the settled state. Reconnects if the stream drops (driver
+    restart / sidecar redeploy) — the backoff is connection recovery, not a
+    state poll.
+    """
+    from app.services.infra_driver_client import (
+        InfraDriverClient,
+        WorkspaceContext,
+    )
+
+    workspace = os.environ.get("BITSWAN_WORKSPACE_NAME", "")
+    client = InfraDriverClient()
+    ctx = WorkspaceContext(
+        workspace_name=workspace, domain="", gitops_dir="", secrets_dir=""
+    )
+
+    dirty = asyncio.Event()
+
+    async def debouncer() -> None:
+        while True:
+            await dirty.wait()
+            dirty.clear()
+            await _broadcast_automations_after_delay()
+
+    async def on_event(_ev: dict) -> None:
+        dirty.set()
+
+    debounce_task = asyncio.create_task(debouncer())
+    backoff = 1.0
+    try:
+        while True:
+            try:
+                await client.container_events(ctx, on_event)
+                # Clean end (server closed the stream) — reconnect promptly.
+                backoff = 1.0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "container-events stream dropped, reconnecting in %.0fs: %s",
+                    backoff,
+                    e,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+    finally:
+        debounce_task.cancel()
+
+
 def _start_profiling():
     """Start yappi async-aware profiler if BITSWAN_PROFILING is set.
 
@@ -542,13 +604,27 @@ async def lifespan(app: FastAPI):
         )
     )
 
-    # No Docker event watcher: after the infra-driver cut-over gitops has no
-    # Docker socket. Container-state changes are broadcast explicitly via
-    # refresh_all() on each deploy/stop/restart, and the filesystem watcher
-    # covers bitswan.yaml / automation.toml edits.
+    # React to container state changes (start / die / health) by re-broadcasting
+    # automation state. This is gitops's live signal post-cut-over — it has no
+    # Docker socket, so it watches the infra-driver's event stream instead.
+    _events_task = asyncio.create_task(_watch_container_events())
+    _events_task.add_done_callback(
+        lambda t: (
+            logger.warning("container-events watcher exited: %s", t.exception())
+            if not t.cancelled() and t.exception()
+            else None
+        )
+    )
+
+    # Container-state changes reach gitops two ways: explicit refresh_all() on
+    # each deploy/stop/restart, and — because gitops has no Docker socket after
+    # the cut-over — the infra-driver's Docker event stream (see
+    # _watch_container_events above). The filesystem watcher covers bitswan.yaml
+    # / automation.toml edits.
     try:
         yield
     finally:
+        _events_task.cancel()
         if observer:
             observer.stop()
             # Run blocking join in executor to avoid blocking event loop

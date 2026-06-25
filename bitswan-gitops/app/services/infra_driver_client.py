@@ -36,6 +36,7 @@ import httpx
 # /v1 paths (api.go).
 PATH_BUILD_IMAGE = "/v1/build-image"
 PATH_CONTAINERS_LIST = "/v1/containers/list"
+PATH_CONTAINERS_EVENTS = "/v1/containers/events"
 PATH_CONTAINERS_INSPECT = "/v1/containers/inspect"
 PATH_CONTAINERS_LOGS = "/v1/containers/logs"
 PATH_CONTAINERS_STOP = "/v1/containers/stop"
@@ -50,6 +51,7 @@ PATH_IMAGES_SBOM = "/v1/images/sbom"
 # SSE event names (api.go).
 EVENT_LOG = "log"
 EVENT_IMAGE = "image"
+EVENT_CONTAINER_STATE = "container-event"
 EVENT_ERROR = "error"
 
 # exec wire (api.go / execframe.go): metadata rides this header (base64 of
@@ -429,6 +431,29 @@ class InfraDriverClient:
                 )
 
         await self._stream(PATH_CONTAINERS_LOGS, body, on_frame)
+
+    async def container_events(
+        self,
+        ctx: WorkspaceContext,
+        sink: Callable[[dict], Awaitable[None]],
+    ) -> None:
+        """Stream this workspace's container state transitions (start / die /
+        destroy / health_status) until the connection drops. After the cut-over
+        gitops has no Docker socket, so this is how it learns a container came
+        up / went away / became healthy. Each ``sink`` payload is a dict with
+        ``action`` / ``container`` / ``id``. Runs until cancelled or the stream
+        ends — the caller is responsible for re-connecting."""
+        body = {"ctx": ctx.to_json()}
+
+        async def on_frame(event: str, data: dict):
+            if event == EVENT_CONTAINER_STATE:
+                await sink(data)
+            elif event == EVENT_ERROR:
+                raise InfraDriverError(
+                    f"container events: {data.get('error', 'unknown')}"
+                )
+
+        await self._stream(PATH_CONTAINERS_EVENTS, body, on_frame)
 
     # ---- exec (general escape hatch: backups/restores/maintenance) ----------
 
