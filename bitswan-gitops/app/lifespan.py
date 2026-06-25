@@ -616,6 +616,23 @@ async def lifespan(app: FastAPI):
         )
     )
 
+    # Bridge the git task queue onto the SSE feed: forward every queue change to
+    # the existing /events/stream as a `task_queue` event, so the dashboard's
+    # activity log renders the queue on the connection it already holds.
+    from app.task_queue import task_queue
+    from app.event_broadcaster import event_broadcaster
+
+    async def _relay_task_queue():
+        q = task_queue.subscribe()
+        try:
+            while True:
+                payload = await q.get()
+                await event_broadcaster.broadcast("task_queue", payload)
+        finally:
+            task_queue.unsubscribe(q)
+
+    queue_relay = asyncio.create_task(_relay_task_queue())
+
     # Container-state changes reach gitops two ways: explicit refresh_all() on
     # each deploy/stop/restart, and — because gitops has no Docker socket after
     # the cut-over — the infra-driver's Docker event stream (see
@@ -625,6 +642,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         _events_task.cancel()
+        queue_relay.cancel()
         if observer:
             observer.stop()
             # Run blocking join in executor to avoid blocking event loop

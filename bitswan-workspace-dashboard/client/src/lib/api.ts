@@ -1,5 +1,6 @@
 import type {
   DockerInspect,
+  GitTask,
   Snapshot,
   SnapshotListResponse,
   SnapshotEligibility,
@@ -781,6 +782,12 @@ export const api = {
   copyFiles: {
     tree: (name: string) =>
       getJson<FileTreeNode[]>(`/api/copies/${encodeURIComponent(name)}/files`),
+    /** Full-text search across the copy's files (optionally scoped to a dir). */
+    search: (name: string, q: string, scope?: string) =>
+      getJson<FileSearchResponse>(
+        `/api/copies/${encodeURIComponent(name)}/files/search?q=${encodeURIComponent(q)}` +
+          (scope ? `&scope=${encodeURIComponent(scope)}` : ''),
+      ),
     content: (name: string, p: string) =>
       getJson<FileContentResponse>(
         `/api/copies/${encodeURIComponent(name)}/files/content?path=${encodeURIComponent(p)}`,
@@ -924,6 +931,13 @@ export const api = {
         `/api/business-processes/${encodeURIComponent(bpId)}/requirements/${encodeURIComponent(id)}?copy=${encodeURIComponent(copy)}`,
       ),
   },
+
+  /** Git task queue. The live feed comes over the `/api/events` SSE stream;
+   *  this is the initial snapshot fetch on mount. */
+  tasks: () => getJson<{ tasks: GitTask[] }>('/api/tasks'),
+  /** Admin-only: cancel all queued/running git tasks (gitops 403s non-admins,
+   *  and the server route gates it too). Returns the cancelled count. */
+  clearTasks: () => postJson<{ cancelled: number }>('/api/tasks/clear', {}),
 };
 
 export interface FileTreeNode {
@@ -932,6 +946,18 @@ export interface FileTreeNode {
   /** Workspace-relative path (without the `copies/<name>/` prefix). */
   path: string;
   children?: FileTreeNode[];
+}
+
+/** One line matching a full-text file search. */
+export interface FileSearchMatch {
+  path: string;
+  line: number;
+  text: string;
+}
+
+export interface FileSearchResponse {
+  matches: FileSearchMatch[];
+  truncated: boolean;
 }
 
 export type ChangedKind = 'A' | 'M' | 'D';

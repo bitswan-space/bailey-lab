@@ -16,7 +16,10 @@ from app.routes.git_http import router as git_http_router
 from app.routes.backups import router as backups_router
 from app.routes.snapshots import router as snapshots_router
 from app.routes.templates import router as templates_router
+from app.routes.tasks import router as tasks_router
+from app.task_queue import current_requester
 from app.dependencies import verify_token
+from urllib.parse import parse_qs
 
 
 import os
@@ -52,6 +55,39 @@ async def log_slow_requests(request: Request, call_next):
     return response
 
 
+class _RequesterMiddleware:
+    """Pure-ASGI middleware (runs in the request's own task, so the contextvar
+    propagates to the endpoint and the git ops it triggers — unlike a
+    BaseHTTPMiddleware). Attributes the request's git task-queue work to the
+    initiating user, read from the gate-forwarded identity header or the
+    by/deployed_by/author query param."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+        qs = parse_qs(scope.get("query_string", b"").decode("latin1"))
+        requester = (
+            headers.get("x-forwarded-email")
+            or headers.get("x-auth-request-email")
+            or (qs.get("by") or [None])[0]
+            or (qs.get("deployed_by") or [None])[0]
+            or (qs.get("author") or [None])[0]
+        )
+        token = current_requester.set(requester)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            current_requester.reset(token)
+
+
+app.add_middleware(_RequesterMiddleware)
+
+
 # Apply auth to protected routes only.
 # Templates router is registered BEFORE automations router so its concrete
 # `POST /automations/from-template` route wins against the parameterised
@@ -77,6 +113,7 @@ app.include_router(git_http_router)
 app.include_router(backups_router, dependencies=[Depends(verify_token)])
 # Per-BP stage snapshots - protected by main auth
 app.include_router(snapshots_router, dependencies=[Depends(verify_token)])
+app.include_router(tasks_router, dependencies=[Depends(verify_token)])
 
 
 def custom_openapi():

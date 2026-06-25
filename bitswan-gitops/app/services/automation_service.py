@@ -650,7 +650,7 @@ class AutomationService:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
 
-        async with GitLockContext(timeout=10.0):
+        async with GitLockContext(timeout=10.0, kind="prepare deploy tree"):
             await call_git_command("git", "add", f"{checksum}", cwd=self.gitops_dir)
             await call_git_command(
                 "git",
@@ -3562,7 +3562,7 @@ class AutomationService:
             dump_bitswan_yaml(bs_yaml, f)
 
         # Commit with a descriptive message using GitLockContext
-        async with GitLockContext(timeout=10.0):
+        async with GitLockContext(timeout=10.0, kind="scale automation"):
             await call_git_command("git", "add", "bitswan.yaml", cwd=self.gitops_dir)
             await call_git_command(
                 "git",

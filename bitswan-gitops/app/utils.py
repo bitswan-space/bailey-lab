@@ -32,53 +32,62 @@ def load_yaml(text: str):
     return yaml.load(text, Loader=_SAFE_LOADER)
 
 
-# Thread-safe git lock that works across both async and sync contexts
-# Uses a threading.Lock as the underlying mechanism for cross-thread safety
+# Legacy raw lock, retained only for the (currently unused) synchronous
+# background-thread path below. The async path — every real caller — now
+# serializes through the git task queue instead.
 _git_thread_lock = threading.Lock()
 
 
 class GitLockContext:
-    """
-    Context manager for git lock that works in both async and sync contexts.
-    Uses a threading.Lock internally for cross-thread safety (needed for background threads).
+    """Serializes git-mutating operations through the git TASK QUEUE (replacing
+    the old global lock). Each ``async with`` becomes a visible queue task that
+    waits its FIFO turn — same serialization the lock gave, but it QUEUES instead
+    of failing on contention, and the wait is observable + admin-clearable.
+
+    ``kind`` labels the task in the queue panel; the initiating user's email is
+    read from the request contextvar so deep call sites need not thread it
+    through. ``timeout`` is accepted for call-site compatibility but unused — the
+    queue never times out on contention; it waits its turn.
     """
 
-    def __init__(self, timeout: float = 10.0):
+    def __init__(
+        self, timeout: float = 10.0, kind: str = "git operation", label: str | None = None
+    ):
         self.timeout = timeout
-        self._acquired = False
+        self.kind = kind
+        self.label = label
+        self._task_id = None
+        self._sync_acquired = False
 
     async def __aenter__(self):
-        """Async context manager entry - acquires lock without blocking event loop."""
-        loop = asyncio.get_event_loop()
-        # Run the blocking lock acquisition in a thread pool to avoid blocking the event loop
-        acquired = await loop.run_in_executor(
-            None, lambda: _git_thread_lock.acquire(timeout=self.timeout)
+        from app.task_queue import task_queue, current_requester
+
+        self._task_id = await task_queue.acquire(
+            self.kind, requester_email=current_requester.get(), label=self.label
         )
-        if not acquired:
-            raise Exception(f"Failed to acquire git lock within {self.timeout} seconds")
-        self._acquired = True
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit - releases lock."""
-        if self._acquired:
-            _git_thread_lock.release()
-            self._acquired = False
+        from app.task_queue import task_queue
+
+        if self._task_id is not None:
+            task_queue.release(self._task_id)
+            self._task_id = None
         return False
 
     def __enter__(self):
-        """Sync context manager entry - for use in background threads."""
+        """Synchronous path for background threads (no running event loop). Falls
+        back to the raw lock since the task queue is async-only. Currently unused."""
         acquired = _git_thread_lock.acquire(timeout=self.timeout)
         if not acquired:
             raise Exception(f"Failed to acquire git lock within {self.timeout} seconds")
-        self._acquired = True
+        self._sync_acquired = True
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Sync context manager exit - for use in background threads."""
-        if self._acquired:
+        if self._sync_acquired:
             _git_thread_lock.release()
-            self._acquired = False
+            self._sync_acquired = False
         return False
 
 
@@ -825,7 +834,7 @@ async def update_git(
             current_branch = stdout.strip() or None
 
     # Use async lock with shorter timeout - operations should be fast
-    async with GitLockContext(timeout=10.0):
+    async with GitLockContext(timeout=10.0, kind="commit changes"):
         # Pull latest changes if we have a remote and the remote tracking
         # branch exists. Skip the pull for branches that only live locally
         # (e.g. new copy branches that have never been pushed).
@@ -1043,7 +1052,7 @@ async def save_image(
     )
 
     # Use async lock for the actual git operations
-    async with GitLockContext(timeout=10.0):
+    async with GitLockContext(timeout=10.0, kind="store image refs"):
         if has_remote:
             res = await call_git_command(
                 "git", "pull", "--rebase=false", cwd=bitswan_dir
@@ -1161,7 +1170,7 @@ async def copy_worktree(branch_name: str = None):
 
     try:
         # Use async lock for git operations
-        async with GitLockContext(timeout=15.0):
+        async with GitLockContext(timeout=15.0, kind="sync from branch"):
             if not await call_git_command(
                 "git", "fetch", "origin", "--prune", "--tags", cwd=repo
             ):
@@ -1197,7 +1206,7 @@ async def copy_worktree(branch_name: str = None):
         await merge_worktree(worktree_path, repo)
 
         # Re-acquire lock for staging and committing
-        async with GitLockContext(timeout=10.0):
+        async with GitLockContext(timeout=10.0, kind="sync to main"):
             if not await call_git_command("git", "add", "-A", cwd=repo):
                 raise HTTPException(status_code=409, detail="Failed to stage files")
 

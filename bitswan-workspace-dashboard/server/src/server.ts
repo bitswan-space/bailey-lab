@@ -15,6 +15,8 @@ import { registerSnapshotRoutes } from './routes/snapshots.js';
 import { registerCopyRoutes } from './routes/copies.js';
 import { registerCopyFilesRoutes } from './routes/copy-files.js';
 import { registerMeRoutes } from './routes/me.js';
+import { registerTaskRoutes } from './routes/tasks.js';
+import { requestContext } from './lib/requestContext.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -32,6 +34,15 @@ export interface BuildServerOptions {
  */
 export async function buildServer({ gitops }: BuildServerOptions): Promise<FastifyInstance> {
   const app = Fastify({ logger: true });
+
+  // Capture the gate-verified user email per request into AsyncLocalStorage so
+  // the gitops client can forward it as X-Forwarded-Email on every upstream
+  // call — gitops then attributes each git task-queue entry to that user.
+  app.addHook('onRequest', (req, _reply, done) => {
+    const raw = req.headers['x-forwarded-email'] ?? req.headers['x-auth-request-email'];
+    const email = (Array.isArray(raw) ? raw[0] : raw)?.trim() || null;
+    requestContext.run({ email }, done);
+  });
 
   // CSP frame-ancestors header for iframe embedding. Skip on responses that
   // already set their own CSP (SSE endpoints set headers via reply.raw).
@@ -64,6 +75,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerTemplateRoutes(app, { gitops });
   registerAutomationRoutes(app, { gitops });
   registerSnapshotRoutes(app, { gitops });
+  registerTaskRoutes(app, { gitops });
   registerEventRoutes(app, { gitops });
 
   // Static SPA + SPA-fallback. Registered last so /api and /ws routes

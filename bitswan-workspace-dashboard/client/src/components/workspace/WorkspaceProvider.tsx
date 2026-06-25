@@ -5,7 +5,13 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { BusinessProcess, DeployedAutomation, Copy } from '@/types';
+import { api } from '@/lib/api';
+import type {
+  BusinessProcess,
+  DeployedAutomation,
+  Copy,
+  GitTask,
+} from '@/types';
 
 export type StreamStatus = 'connecting' | 'live' | 'error';
 
@@ -18,6 +24,10 @@ interface WorkspaceContextValue {
   /** Latest copy listing — same payload as the old `/api/copies` REST. */
   // eslint-disable-next-line no-restricted-syntax -- nullable until first delivery
   copies: Copy[] | null;
+  /** Git task queue (newest first). `null` until the first delivery so the UI
+   *  can tell "loading" from "empty". */
+  // eslint-disable-next-line no-restricted-syntax -- nullable until first delivery
+  tasks: GitTask[] | null;
   /** Live status of the SSE subscription. */
   status: StreamStatus;
 }
@@ -63,7 +73,31 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [automations, setAutomations] = useState<DeployedAutomation[]>([]);
   const [processes, setProcesses] = useState<BusinessProcess[] | null>(null);
   const [copies, setCopies] = useState<Copy[] | null>(null);
+  const [tasks, setTasks] = useState<GitTask[] | null>(null);
   const [status, setStatus] = useState<StreamStatus>('connecting');
+
+  // Initial git-task-queue snapshot on mount. The server replays the latest
+  // `task_queue_snapshot` over SSE on connect, but a one-shot REST fetch
+  // guarantees the queue is populated even if no snapshot has flowed yet
+  // (e.g. gitops restarted after the dashboard's stream opened).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .tasks()
+      .then((res) => {
+        if (cancelled) return;
+        // Only seed if the SSE feed hasn't already delivered a snapshot — the
+        // live feed is authoritative.
+        setTasks((cur) => (cur === null ? res.tasks : cur));
+      })
+      .catch(() => {
+        // gitops down / not configured — leave null so the panel stays in its
+        // loading state until the SSE feed delivers (or never shows).
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const es = new EventSource('/api/events', { withCredentials: true });
@@ -99,6 +133,57 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
     };
 
+    // Git task queue: full-array snapshot on connect, single-task upsert per
+    // change (keyed by task_id; gitops sends newest first, which we preserve
+    // by replacing in place / prepending new ones).
+    const handleTaskSnapshot = (raw: string) => {
+      try {
+        const payload = JSON.parse(raw);
+        if (!Array.isArray(payload)) return;
+        const snap = payload as GitTask[];
+        // MERGE, don't replace. The panel is a full session log, but gitops's
+        // task queue is in-memory: it trims finished tasks (keeps the last N)
+        // and resets entirely on a gitops restart. A naive replace would drop
+        // tasks we already showed every time a smaller/empty snapshot arrives
+        // (SSE reconnect, restart) — they'd appear then vanish. Merging by id
+        // updates known tasks and adds new ones while keeping the history.
+        setTasks((cur) => {
+          if (!cur || cur.length === 0) return snap;
+          const byId = new Map(cur.map((t) => [t.task_id, t]));
+          for (const t of snap) byId.set(t.task_id, t);
+          return Array.from(byId.values());
+        });
+      } catch {
+        // ignore non-JSON event data
+      }
+    };
+    const handleTaskUpsert = (raw: string) => {
+      try {
+        const payload = JSON.parse(raw);
+        if (!payload || typeof payload !== 'object') return;
+        const task = payload as GitTask;
+        if (!task.task_id) return;
+        setTasks((cur) => {
+          const list = cur ?? [];
+          const idx = list.findIndex((t) => t.task_id === task.task_id);
+          if (idx === -1) return [task, ...list];
+          const next = list.slice();
+          next[idx] = task;
+          return next;
+        });
+      } catch {
+        // ignore
+      }
+    };
+
+    es.addEventListener('task_queue_snapshot', (ev) => {
+      handleTaskSnapshot((ev as MessageEvent).data);
+      setStatus('live');
+    });
+    es.addEventListener('task_queue', (ev) => {
+      handleTaskUpsert((ev as MessageEvent).data);
+      setStatus('live');
+    });
     es.addEventListener('automations', (ev) => {
       handleAutomationsPayload((ev as MessageEvent).data);
       setStatus('live');
@@ -118,7 +203,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <WorkspaceContext.Provider value={{ automations, processes, copies, status }}>
+    <WorkspaceContext.Provider value={{ automations, processes, copies, tasks, status }}>
       {children}
     </WorkspaceContext.Provider>
   );
@@ -161,4 +246,19 @@ export function useCopies(): {
   const v = useContext(WorkspaceContext);
   if (!v) throw new Error('useCopies must be used inside <WorkspaceProvider>');
   return { copies: v.copies, status: v.status };
+}
+
+/**
+ * Read the shared git-task-queue snapshot. Returns `null` until the first
+ * delivery (SSE or the mount REST fetch) so callers can distinguish "still
+ * loading" from "empty queue".
+ */
+export function useTaskQueue(): {
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing delivered yet
+  tasks: GitTask[] | null;
+  status: StreamStatus;
+} {
+  const v = useContext(WorkspaceContext);
+  if (!v) throw new Error('useTaskQueue must be used inside <WorkspaceProvider>');
+  return { tasks: v.tasks, status: v.status };
 }

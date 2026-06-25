@@ -1,4 +1,4 @@
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import { api, isTransientNetworkError, type DeployStatusResponse } from './api';
 
 const POLL_INTERVAL_MS = 3000;
