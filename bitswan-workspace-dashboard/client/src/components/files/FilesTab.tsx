@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, File as FileIcon, RefreshCw, Search, Upload, X } from 'lucide-react';
 import { useDropzone, type DropEvent } from 'react-dropzone';
 import { toast } from '@/lib/notify';
-import { api, type ChangedKind, type FileTreeNode } from '@/lib/api';
+import { api, type ChangedKind, type FileSearchMatch } from '@/lib/api';
 import { useUrlParam } from '@/lib/urlState';
 import { useFileContent } from '@/hooks/useFileContent';
 import { useFileTree } from '@/hooks/useFileTree';
@@ -26,17 +26,29 @@ const SEARCH_KIND_STYLES: Record<ChangedKind, string> = {
   D: 'bg-red-100 text-red-700',
 };
 
-/** Depth-first list of every FILE under `nodes` (folders flattened away) —
- *  the corpus the explorer search box filters over. */
-function flattenFiles(nodes: FileTreeNode[]): FileTreeNode[] {
-  const out: FileTreeNode[] = [];
-  const walk = (ns: FileTreeNode[]) => {
-    for (const n of ns) {
-      if (n.kind === 'folder') walk(n.children ?? []);
-      else out.push(n);
+/** Split `text` around case-insensitive occurrences of `q` so the matched
+ *  substrings can be emphasised in a search result line. */
+function highlight(text: string, q: string): React.ReactNode {
+  if (!q) return text;
+  const out: React.ReactNode[] = [];
+  const lower = text.toLowerCase();
+  const needle = q.toLowerCase();
+  let i = 0;
+  let k = 0;
+  for (;;) {
+    const hit = lower.indexOf(needle, i);
+    if (hit < 0) {
+      out.push(text.slice(i));
+      break;
     }
-  };
-  walk(nodes);
+    if (hit > i) out.push(text.slice(i, hit));
+    out.push(
+      <mark key={k++} className="rounded-sm bg-amber-200 text-foreground">
+        {text.slice(hit, hit + needle.length)}
+      </mark>,
+    );
+    i = hit + needle.length;
+  }
   return out;
 }
 
@@ -44,8 +56,8 @@ function flattenFiles(nodes: FileTreeNode[]): FileTreeNode[] {
  * Copy file explorer: 280 px tree on the left, content viewer on the
  * right. Status badges on the tree come from the same `/status` endpoint
  * the Diff tab uses, merged in by path. The tree pane doubles as a drop
- * target for file uploads. A search box filters all files (by path) into a
- * flat result list.
+ * target for file uploads. A search box runs a full-text search across the
+ * copy's files (server-side grep) and lists matching lines grouped by file.
  */
 export function FilesTab({ copy, bp }: Props) {
   const { tree, loading: treeLoading, refresh: refreshTree } = useFileTree(copy);
@@ -96,18 +108,54 @@ export function FilesTab({ copy, bp }: Props) {
     return out;
   }, [changed]);
 
-  // When the search box has a query, filter every file in the current scope by
-  // path (case-insensitive) into a flat result list; null means "not searching"
-  // (show the tree). Capped so a very broad query stays responsive.
-  const RESULT_CAP = 500;
-  const searchMatches = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return null;
-    const all = flattenFiles(displayTree).filter((f) =>
-      f.path.toLowerCase().includes(q),
-    );
-    return { items: all.slice(0, RESULT_CAP), total: all.length };
-  }, [query, displayTree]);
+  // Full-text search: a debounced server-side grep across the copy's files
+  // (scoped to the BP folder when cd'd in). `results === null` means "not
+  // searching" (show the tree).
+  const [results, setResults] = useState<{
+    matches: FileSearchMatch[];
+    truncated: boolean;
+  } | null>(null);
+  const [searching, setSearching] = useState(false);
+  const trimmedQuery = query.trim();
+  useEffect(() => {
+    if (!trimmedQuery) {
+      setResults(null);
+      setSearching(false);
+      return;
+    }
+    let cancelled = false;
+    setSearching(true);
+    const id = setTimeout(() => {
+      api.copyFiles
+        .search(copy, trimmedQuery, rootDir || undefined)
+        .then((r) => {
+          if (!cancelled) setResults(r);
+        })
+        .catch(() => {
+          if (!cancelled) setResults({ matches: [], truncated: false });
+        })
+        .finally(() => {
+          if (!cancelled) setSearching(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(id);
+    };
+  }, [trimmedQuery, copy, rootDir]);
+
+  // Group consecutive matches by file (the server walks file-by-file, so
+  // same-file lines already arrive contiguously).
+  const resultGroups = useMemo(() => {
+    if (!results) return null;
+    const groups: { path: string; lines: FileSearchMatch[] }[] = [];
+    for (const m of results.matches) {
+      const last = groups[groups.length - 1];
+      if (last && last.path === m.path) last.lines.push(m);
+      else groups.push({ path: m.path, lines: [m] });
+    }
+    return groups;
+  }, [results]);
 
   // Upload target for the **click** path (the Upload button → OS picker)
   // is the directory the currently-open file lives in, or — when no file
@@ -244,9 +292,9 @@ export function FilesTab({ copy, bp }: Props) {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search files…"
+              placeholder="Search in files…"
               spellCheck={false}
-              aria-label="Search files"
+              aria-label="Search in files"
               className="w-full rounded border border-input bg-background py-1 pl-7 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
             />
             {query ? (
@@ -267,51 +315,72 @@ export function FilesTab({ copy, bp }: Props) {
             <div className="px-3 py-6 text-center text-xs text-muted-foreground">
               Loading…
             </div>
-          ) : searchMatches ? (
-            searchMatches.items.length === 0 ? (
+          ) : trimmedQuery ? (
+            !results ? (
               <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-                No files match “{query.trim()}”.
+                Searching…
+              </div>
+            ) : results.matches.length === 0 ? (
+              <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                No matches for “{trimmedQuery}”.
               </div>
             ) : (
               <div className="flex flex-col py-1 text-[13px]">
-                {searchMatches.items.map((f) => {
-                  const kind = statusByPath.get(f.path);
-                  const selected = openPath === f.path;
-                  const slash = f.path.lastIndexOf('/');
-                  const dir = slash < 0 ? '' : f.path.slice(0, slash);
+                {(resultGroups ?? []).map((g) => {
+                  const kind = statusByPath.get(g.path);
+                  const slash = g.path.lastIndexOf('/');
+                  const name = slash < 0 ? g.path : g.path.slice(slash + 1);
+                  const dir = slash < 0 ? '' : g.path.slice(0, slash);
                   return (
-                    <button
-                      key={f.path}
-                      type="button"
-                      onClick={() => setOpenPath(f.path)}
-                      title={f.path}
-                      className={`group flex w-full items-center gap-1.5 rounded px-2 py-0.5 text-left transition-colors ${
-                        selected ? 'bg-muted/60' : 'hover:bg-muted/40'
-                      }`}
-                    >
-                      <FileIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                      <span className="min-w-0 flex-1 truncate">
-                        {f.name}
-                        {dir ? (
-                          <span className="ml-1.5 text-[11px] text-muted-foreground">
-                            {dir}
+                    <div key={g.path} className="mb-1">
+                      <button
+                        type="button"
+                        onClick={() => setOpenPath(g.path)}
+                        title={g.path}
+                        className="group flex w-full items-center gap-1.5 px-2 py-0.5 text-left hover:bg-muted/40"
+                      >
+                        <FileIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                        <span className="min-w-0 flex-1 truncate font-medium">
+                          {name}
+                          {dir ? (
+                            <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
+                              {dir}
+                            </span>
+                          ) : null}
+                        </span>
+                        {kind ? (
+                          <span
+                            className={`inline-flex h-4 items-center rounded px-1 text-[10px] font-semibold ${SEARCH_KIND_STYLES[kind]}`}
+                          >
+                            {kind}
                           </span>
                         ) : null}
-                      </span>
-                      {kind ? (
-                        <span
-                          className={`inline-flex h-4 items-center rounded px-1 text-[10px] font-semibold ${SEARCH_KIND_STYLES[kind]}`}
+                      </button>
+                      {g.lines.map((m, i) => (
+                        <button
+                          key={`${m.line}:${i}`}
+                          type="button"
+                          onClick={() => setOpenPath(g.path)}
+                          title={`${g.path}:${m.line}`}
+                          className={`flex w-full items-baseline gap-2 rounded px-2 py-0.5 pl-7 text-left transition-colors ${
+                            openPath === g.path ? 'bg-muted/60' : 'hover:bg-muted/40'
+                          }`}
                         >
-                          {kind}
-                        </span>
-                      ) : null}
-                    </button>
+                          <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                            {m.line}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+                            {highlight(m.text, trimmedQuery)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
                   );
                 })}
-                {searchMatches.total > searchMatches.items.length ? (
+                {results.truncated ? (
                   <div className="px-3 py-2 text-center text-[11px] text-muted-foreground">
-                    Showing {searchMatches.items.length} of {searchMatches.total} —
-                    refine your search.
+                    Showing the first {results.matches.length} matches — refine
+                    your search.
                   </div>
                 ) : null}
               </div>

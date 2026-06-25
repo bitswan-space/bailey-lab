@@ -7,6 +7,7 @@ import {
   ensureCopyDir,
   readCopyFile,
   readCopyTree,
+  searchCopyFiles,
   statCopyFile,
   writeCopyFile,
   type FileEtag,
@@ -46,6 +47,29 @@ export function registerCopyFilesRoutes(
       }
     },
   );
+
+  app.get<{
+    Params: { name: string };
+    Querystring: { q?: string; scope?: string };
+  }>('/api/copies/:name/files/search', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!isValidCopyName(req.params.name)) {
+      return reply.code(400).send({ error: 'invalid copy' });
+    }
+    const q = (req.query.q ?? '').toString();
+    if (!q.trim()) return { matches: [], truncated: false };
+    try {
+      return await searchCopyFiles({
+        copy: req.params.name,
+        workspaceRoot,
+        query: q,
+        scope: req.query.scope || undefined,
+      });
+    } catch (err) {
+      app.log.warn({ err, name: req.params.name }, 'file search failed');
+      return reply.code(500).send({ error: String(err) });
+    }
+  });
 
   app.get<{
     Params: { name: string };

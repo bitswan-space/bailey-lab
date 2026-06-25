@@ -782,6 +782,12 @@ export const api = {
   copyFiles: {
     tree: (name: string) =>
       getJson<FileTreeNode[]>(`/api/copies/${encodeURIComponent(name)}/files`),
+    /** Full-text search across the copy's files (optionally scoped to a dir). */
+    search: (name: string, q: string, scope?: string) =>
+      getJson<FileSearchResponse>(
+        `/api/copies/${encodeURIComponent(name)}/files/search?q=${encodeURIComponent(q)}` +
+          (scope ? `&scope=${encodeURIComponent(scope)}` : ''),
+      ),
     content: (name: string, p: string) =>
       getJson<FileContentResponse>(
         `/api/copies/${encodeURIComponent(name)}/files/content?path=${encodeURIComponent(p)}`,
@@ -940,6 +946,18 @@ export interface FileTreeNode {
   /** Workspace-relative path (without the `copies/<name>/` prefix). */
   path: string;
   children?: FileTreeNode[];
+}
+
+/** One line matching a full-text file search. */
+export interface FileSearchMatch {
+  path: string;
+  line: number;
+  text: string;
+}
+
+export interface FileSearchResponse {
+  matches: FileSearchMatch[];
+  truncated: boolean;
 }
 
 export type ChangedKind = 'A' | 'M' | 'D';
