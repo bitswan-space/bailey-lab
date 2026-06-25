@@ -281,8 +281,12 @@ func initIngress(verbose bool) (bool, error) {
 		// Caddy is already running, keep using it
 		return false, nil
 	case IngressTraefik:
-		// Check if Traefik is already running and functional
-		if err := traefikapi.InitTraefik(); err == nil {
+		// Skip only if Traefik is actually RUNNING. Probe the container directly:
+		// InitTraefik no longer pushes to Traefik's REST API (it renders the
+		// file-provider config to disk) so it always succeeds and can't tell us
+		// whether Traefik is up. If it's running, just refresh its config.
+		if containerRunning("traefik") {
+			_ = traefikapi.InitTraefik()
 			return false, nil
 		}
 		// Nothing running — check if user wants to force Caddy
