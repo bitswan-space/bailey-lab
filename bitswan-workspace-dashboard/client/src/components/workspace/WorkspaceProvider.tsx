@@ -139,7 +139,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     const handleTaskSnapshot = (raw: string) => {
       try {
         const payload = JSON.parse(raw);
-        if (Array.isArray(payload)) setTasks(payload as GitTask[]);
+        if (!Array.isArray(payload)) return;
+        const snap = payload as GitTask[];
+        // MERGE, don't replace. The panel is a full session log, but gitops's
+        // task queue is in-memory: it trims finished tasks (keeps the last N)
+        // and resets entirely on a gitops restart. A naive replace would drop
+        // tasks we already showed every time a smaller/empty snapshot arrives
+        // (SSE reconnect, restart) — they'd appear then vanish. Merging by id
+        // updates known tasks and adds new ones while keeping the history.
+        setTasks((cur) => {
+          if (!cur || cur.length === 0) return snap;
+          const byId = new Map(cur.map((t) => [t.task_id, t]));
+          for (const t of snap) byId.set(t.task_id, t);
+          return Array.from(byId.values());
+        });
       } catch {
         // ignore non-JSON event data
       }
