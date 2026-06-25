@@ -27,6 +27,14 @@ export interface Notification {
   created_at: number;
   /** epoch ms — last updated (loading→terminal transitions). */
   updated_at: number;
+  /**
+   * Every distinct message this notification has shown, oldest→newest. A
+   * long-running op (deploy/promote) updates a single notification's message
+   * through many progress lines; instead of those replacing each other and
+   * being lost, we keep them all here so the row can be "unrolled" to show the
+   * full trail. `message` is always the latest (== the last trail entry).
+   */
+  trail: { text: string; at: number }[];
 }
 
 interface ToastOptions {
@@ -60,14 +68,23 @@ function upsert(status: NotifyStatus, message: Msg, opts?: ToastOptions): string
   const id = opts?.id != null ? String(opts.id) : `n${++seq}`;
   const now = Date.now();
   const existing = items.find((n) => n.id === id);
+  const msg = String(message ?? '');
+  // Append to the trail when the message actually changed, so an updating
+  // notification keeps the full history of what it reported (never loses a
+  // progress line) without recording duplicate ticks.
+  const prevTrail = existing?.trail ?? [];
+  const lastText = prevTrail.length ? prevTrail[prevTrail.length - 1]!.text : undefined;
+  const trail =
+    msg && msg !== lastText ? [...prevTrail, { text: msg, at: now }] : prevTrail;
   const next: Notification = {
     id,
     status,
-    message: String(message ?? ''),
+    message: msg,
     description: opts?.description ?? existing?.description,
     action: opts?.action ?? existing?.action,
     created_at: existing?.created_at ?? now,
     updated_at: now,
+    trail,
   };
   // Replace any prior entry with the same id (loading → success/error updates),
   // keeping the rest in place. Newest-first internally.

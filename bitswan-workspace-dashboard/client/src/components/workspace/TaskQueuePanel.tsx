@@ -62,6 +62,10 @@ interface ActivityItem {
   stampMs: number;
   /** Creation time — the stable chronological ordering key (oldest first). */
   sortMs: number;
+  /** Every message this item has shown (oldest→newest). When it has more than
+   *  one, the row can be unrolled to reveal the full trail instead of only the
+   *  latest. */
+  trail?: { text: string; at: number }[];
 }
 
 const STATUS_META: Record<
@@ -128,56 +132,103 @@ function notificationToItem(n: Notification): ActivityItem {
     action: n.action,
     stampMs: n.updated_at,
     sortMs: n.created_at,
+    trail: n.trail,
   };
 }
 
 function ActivityRow({ item, now }: { item: ActivityItem; now: number }) {
   const meta = STATUS_META[item.status];
   const { Icon } = meta;
+  const trail = item.trail ?? [];
+  // A row is unrollable once it has reported more than one distinct message
+  // (a long op whose single notification cycled through progress lines).
+  const expandable = trail.length > 1;
+  const [expanded, setExpanded] = useState(false);
   return (
-    <li className="flex items-start gap-2 px-3 py-2 text-xs">
-      <Icon
-        className={cn(
-          'mt-0.5 size-3.5 shrink-0',
-          meta.text,
-          item.status === 'running' && 'animate-spin',
-        )}
-      />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="font-medium text-foreground">{item.title}</span>
-          {item.label ? (
-            <span className="truncate text-muted-foreground">· {item.label}</span>
+    <li className="px-3 py-2 text-xs">
+      <div className="flex items-start gap-2">
+        <Icon
+          className={cn(
+            'mt-0.5 size-3.5 shrink-0',
+            meta.text,
+            item.status === 'running' && 'animate-spin',
+          )}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5">
+            {expandable ? (
+              <button
+                type="button"
+                onClick={() => setExpanded((v) => !v)}
+                aria-expanded={expanded}
+                title={expanded ? 'Collapse messages' : `Show all ${trail.length} messages`}
+                className="-ml-1 shrink-0 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <ChevronDown
+                  className={cn('size-3 transition-transform', !expanded && '-rotate-90')}
+                  aria-hidden
+                />
+              </button>
+            ) : null}
+            <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+              {item.title}
+            </span>
+            {item.label ? (
+              <span className="truncate text-muted-foreground">· {item.label}</span>
+            ) : null}
+          </div>
+          {item.who ? (
+            <div className="truncate text-muted-foreground">{item.who}</div>
+          ) : null}
+          {item.detail ? (
+            <div
+              className={cn(
+                'mt-0.5 truncate',
+                item.status === 'failed' ? 'text-destructive' : 'text-muted-foreground',
+              )}
+              title={item.detail}
+            >
+              {item.detail}
+            </div>
+          ) : null}
+          {expandable && !expanded ? (
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              className="mt-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              + {trail.length - 1} earlier message{trail.length - 1 === 1 ? '' : 's'}
+            </button>
+          ) : null}
+          {item.action ? (
+            <button
+              type="button"
+              onClick={item.action.onClick}
+              className="mt-1 rounded-md border border-input px-2 py-0.5 text-[11px] font-medium text-foreground hover:bg-accent"
+            >
+              {item.action.label}
+            </button>
           ) : null}
         </div>
-        {item.who ? (
-          <div className="truncate text-muted-foreground">{item.who}</div>
-        ) : null}
-        {item.detail ? (
-          <div
-            className={cn(
-              'mt-0.5 truncate',
-              item.status === 'failed' ? 'text-destructive' : 'text-muted-foreground',
-            )}
-            title={item.detail}
-          >
-            {item.detail}
-          </div>
-        ) : null}
-        {item.action ? (
-          <button
-            type="button"
-            onClick={item.action.onClick}
-            className="mt-1 rounded-md border border-input px-2 py-0.5 text-[11px] font-medium text-foreground hover:bg-accent"
-          >
-            {item.action.label}
-          </button>
-        ) : null}
+        <div className="flex shrink-0 flex-col items-end gap-0.5 text-right">
+          {meta.label ? <span className={cn('font-medium', meta.text)}>{meta.label}</span> : null}
+          <span className="text-muted-foreground">{relativeTime(item.stampMs, now)}</span>
+        </div>
       </div>
-      <div className="flex shrink-0 flex-col items-end gap-0.5 text-right">
-        {meta.label ? <span className={cn('font-medium', meta.text)}>{meta.label}</span> : null}
-        <span className="text-muted-foreground">{relativeTime(item.stampMs, now)}</span>
-      </div>
+      {expandable && expanded ? (
+        <ol className="ml-5 mt-1 space-y-0.5 border-l border-border pl-2">
+          {trail.map((t, i) => (
+            <li key={i} className="flex items-baseline gap-2">
+              <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                {relativeTime(t.at, now)}
+              </span>
+              <span className="min-w-0 flex-1 break-words font-mono text-[11px] text-muted-foreground">
+                {t.text}
+              </span>
+            </li>
+          ))}
+        </ol>
+      ) : null}
     </li>
   );
 }
