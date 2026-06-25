@@ -353,10 +353,10 @@ func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
 				// (:2019) allows FULL reconfiguration (load arbitrary config) and must
 				// never be reachable from outside the host; the daemon reaches it
 				// in-network (caddy:2019 on bitswan_network), so it is not published.
-				"ports":          []string{"80:80", "443:443"},
-				"networks":       []string{"bitswan_network"},
-				"volumes":        caddyVolumes,
-				"entrypoint":     []string{"caddy", "run", "--resume", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"},
+				"ports":      []string{"80:80", "443:443"},
+				"networks":   []string{"bitswan_network"},
+				"volumes":    caddyVolumes,
+				"entrypoint": []string{"caddy", "run", "--resume", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"},
 			},
 		},
 		"networks": map[string]interface{}{
@@ -545,6 +545,17 @@ func CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikPath, domain,
 			"target": "/etc/traefik/traefik.yml",
 			"volume": map[string]interface{}{
 				"subpath": "workspaces/" + workspaceName + "/traefik/traefik.yml",
+			},
+		},
+		// The file-provider dynamic config (routes), shared with the daemon via
+		// the same volume subpath. Traefik reloads it on change and on its own
+		// restart, so workspace routes survive a sub-traefik restart.
+		map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": "/etc/traefik/dynamic.yml",
+			"volume": map[string]interface{}{
+				"subpath": "workspaces/" + workspaceName + "/traefik/dynamic.yml",
 			},
 		},
 	}

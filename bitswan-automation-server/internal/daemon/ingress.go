@@ -411,6 +411,14 @@ const traefikDynamicConfig = `tls:
         - http/1.1
 `
 
+// emptyTraefikDynamicConfig seeds a workspace sub-traefik's file-provider config
+// before any route exists — the volume-subpath mount requires the file present.
+// The daemon rewrites it with real routes via the traefikapi state on push.
+const emptyTraefikDynamicConfig = `http:
+  routers: {}
+  services: {}
+`
+
 func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
 	cfg := fmt.Sprintf(`entryPoints:
   web:
@@ -422,8 +430,7 @@ api:
 providers:
   file:
     filename: /etc/traefik/dynamic.yml
-  rest:
-    insecure: true
+    watch: true
   docker:
     exposedByDefault: false
     network: bitswan_network
@@ -628,20 +635,35 @@ func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, err
 		return false, fmt.Errorf("failed to create workspace traefik config directory: %w", err)
 	}
 
-	// Traefik static config enabling REST provider and web entrypoint (HTTP only for workspace)
+	// Traefik static config: web entrypoint (HTTP only for the workspace
+	// sub-traefik) + the FILE provider (durable across restarts). Routes are
+	// written to /etc/traefik/dynamic.yml (a bitswan-volume subpath shared with
+	// the daemon) and reloaded by Traefik on change — no in-memory REST push.
 	traefikStaticConfig := `entryPoints:
   web:
     address: ":80"
 api:
   insecure: true
 providers:
-  rest:
-    insecure: true
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
 `
 
 	traefikConfigFilePath := traefikConfig + "/traefik.yml"
 	if err := os.WriteFile(traefikConfigFilePath, []byte(traefikStaticConfig), 0755); err != nil {
 		return false, fmt.Errorf("failed to write workspace traefik.yml: %w", err)
+	}
+
+	// The file provider needs dynamic.yml to exist before the sub-traefik mounts
+	// it (volume-subpath mounts are strict). Seed an empty one if absent; the
+	// daemon rewrites it with the real routes via modifyState when routes are
+	// pushed — and never clobbers an existing one with routes.
+	workspaceDynamicFilePath := traefikConfig + "/dynamic.yml"
+	if _, err := os.Stat(workspaceDynamicFilePath); os.IsNotExist(err) {
+		if err := os.WriteFile(workspaceDynamicFilePath, []byte(emptyTraefikDynamicConfig), 0644); err != nil {
+			return false, fmt.Errorf("failed to write workspace dynamic.yml: %w", err)
+		}
 	}
 
 	// For docker-compose, use HOST_HOME if available
@@ -658,6 +680,12 @@ providers:
 		if _, err := os.Stat(traefikConfigFilePathHost); os.IsNotExist(err) {
 			if err := os.WriteFile(traefikConfigFilePathHost, []byte(traefikStaticConfig), 0755); err != nil {
 				return false, fmt.Errorf("failed to write workspace traefik.yml on host: %w", err)
+			}
+		}
+		dynamicFilePathHost := traefikConfigForCompose + "/dynamic.yml"
+		if _, err := os.Stat(dynamicFilePathHost); os.IsNotExist(err) {
+			if err := os.WriteFile(dynamicFilePathHost, []byte(emptyTraefikDynamicConfig), 0644); err != nil {
+				return false, fmt.Errorf("failed to write workspace dynamic.yml on host: %w", err)
 			}
 		}
 	}

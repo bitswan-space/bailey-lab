@@ -336,25 +336,22 @@ func (s *Server) Run() error {
 		}
 	}()
 
-	// Reconcile-drop self-heal: on EVERY startup re-push the saved Traefik
-	// dynamic config (rest-state.json) to Traefik. The daemon's
-	// protected_routes table + the REST state file are the source of truth,
-	// but Traefik's REST provider holds its config in memory — so a daemon
-	// recreate (or a Traefik restart) can leave Traefik missing every
-	// workspace route while the records still say "in sync" (the ingress
-	// reconcile compares the recorded upstream, not Traefik, so it skips
-	// re-applying). InitTraefik (a no-op modifyState) re-pushes the full
-	// saved state, so any restart/recreate self-heals instead of silently
-	// dropping all routes. Best-effort with retry — Traefik may not be
-	// reachable the instant the daemon boots.
+	// Re-render the Traefik file-provider config (dynamic.yml) from the saved
+	// state (rest-state.json) on startup. Routes now live in the FILE provider,
+	// which Traefik reloads on its own restart — so a Traefik-only restart no
+	// longer drops routes. This startup render still matters for: (a) UPGRADES
+	// from the old REST-provider deployments, whose dynamic.yml predates the
+	// routes, and (b) self-healing a deleted/corrupt dynamic.yml from the
+	// canonical state. InitTraefik (a no-op modifyState) re-renders the full
+	// saved state to the file. Best-effort with retry.
 	go func() {
 		time.Sleep(2 * time.Second)
 		for i := 0; i < 6; i++ {
 			if err := traefikapi.InitTraefik(); err == nil {
-				fmt.Println("Re-pushed saved Traefik dynamic config on startup")
+				fmt.Println("Rendered saved Traefik dynamic config to the file provider on startup")
 				break
 			} else if i == 5 {
-				fmt.Printf("Warning: failed to re-push Traefik state on startup: %v\n", err)
+				fmt.Printf("Warning: failed to render Traefik dynamic config on startup: %v\n", err)
 			} else {
 				time.Sleep(2 * time.Second)
 			}
