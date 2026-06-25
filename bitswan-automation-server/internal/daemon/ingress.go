@@ -530,14 +530,20 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	traefikConfigFilePath := traefikConfig + "/traefik.yml"
 	traefikDockerComposePath := traefikConfig + "/docker-compose.yml"
 
-	// Check if Traefik is already running with REST provider support and
-	// matching configuration — nothing to do then. If the configuration has
-	// drifted (e.g. the DNS-01 resolver was just enabled), fall through and
-	// recreate the container; InitTraefik re-pushes the saved routes after.
-	if err := traefikapi.InitTraefik(); err == nil {
+	// Skip the restart only if Traefik is actually RUNNING with matching config —
+	// nothing to do then. Probe the CONTAINER directly: the old probe used
+	// InitTraefik's REST push (which failed when Traefik was down), but routes
+	// now go through the file provider so InitTraefik just writes a local file
+	// and always succeeds — it can no longer tell whether Traefik is up. If the
+	// config has drifted (e.g. the DNS-01 resolver was just enabled), fall
+	// through and recreate the container.
+	if containerRunning("traefik") {
 		currentConfig, _ := os.ReadFile(traefikConfigFilePath)
 		currentCompose, _ := os.ReadFile(traefikDockerComposePath)
 		if string(currentConfig) == traefikStaticConfig && string(currentCompose) == traefikDockerCompose {
+			// Running and unchanged — just refresh the file-provider config from
+			// the saved state in case it drifted, then leave it.
+			_ = traefikapi.InitTraefik()
 			return false, nil
 		}
 		if verbose {
