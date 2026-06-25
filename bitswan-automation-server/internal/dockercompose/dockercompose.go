@@ -422,9 +422,15 @@ func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, n
 		"image":          "traefik:v3.6",
 		"restart":        "always",
 		"container_name": "traefik",
-		"ports":          []string{"80:80", "443:443", "9080:8080"},
-		"networks":       traefikNetworks,
-		"volumes":        traefikVolumes,
+		// Only the public web entrypoints are published. Traefik's API/dashboard
+		// (:8080, api.insecure — unauthenticated; leaks the full routing topology)
+		// is NOT published to the host: the daemon and workspace components reach it
+		// in-network via BITSWAN_TRAEFIK_HOST=traefik:8080 on bitswan_network (which
+		// automations are not attached to), so there is no reason to expose it on
+		// the host at all.
+		"ports":    []string{"80:80", "443:443"},
+		"networks": traefikNetworks,
+		"volumes":  traefikVolumes,
 	}
 	if len(env) > 0 {
 		// Sorted for deterministic output — the daemon compares the rendered
