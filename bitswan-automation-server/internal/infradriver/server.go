@@ -35,6 +35,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(PathBuildImage, s.handleBuildImage)
 	mux.HandleFunc(PathContainersList, s.handleList)
+	mux.HandleFunc(PathContainersEvents, s.handleEvents)
 	mux.HandleFunc(PathContainersInspect, s.handleInspect)
 	mux.HandleFunc(PathContainersLogs, s.handleLogs)
 	mux.HandleFunc(PathContainersStop, s.handleStop)
@@ -151,6 +152,25 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.driver.ContainerLogs(r.Context(), body.Ctx, body.Container, body.Tail, body.Follow,
 		func(l LogLine) { sse.send(EventLog, l) }); err != nil {
+		sse.send(EventError, ErrorResult{Error: err.Error()})
+	}
+}
+
+// handleEvents streams this workspace's container state transitions as SSE
+// (container-event frames) until the client disconnects. gitops consumes this
+// to re-broadcast automation state — it has no Docker socket after the cut-over.
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	var body EventsBody
+	if !decode(w, r, &body) {
+		return
+	}
+	sse, ok := newSSE(w)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	if err := s.driver.ContainerEvents(r.Context(), body.Ctx,
+		func(e ContainerEvent) { sse.send(EventContainerState, e) }); err != nil {
 		sse.send(EventError, ErrorResult{Error: err.Error()})
 	}
 }

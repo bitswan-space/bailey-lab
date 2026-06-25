@@ -232,6 +232,24 @@ func (c *Client) ContainerLogs(ctx context.Context, wctx WorkspaceContext, conta
 	})
 }
 
+func (c *Client) ContainerEvents(ctx context.Context, wctx WorkspaceContext, sink func(ContainerEvent)) error {
+	return c.stream(ctx, PathContainersEvents, EventsBody{Ctx: wctx}, func(event string, data []byte) error {
+		switch event {
+		case EventContainerState:
+			var e ContainerEvent
+			if err := json.Unmarshal(data, &e); err != nil {
+				return err
+			}
+			if sink != nil {
+				sink(e)
+			}
+		case EventError:
+			return sseError(data)
+		}
+		return nil
+	})
+}
+
 func (c *Client) postJSON(ctx context.Context, path string, reqBody, out any) error {
 	body, _ := json.Marshal(reqBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))

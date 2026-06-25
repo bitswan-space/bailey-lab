@@ -204,6 +204,55 @@ func (d *DockerDriver) ContainerLogs(ctx context.Context, _ infradriver.Workspac
 	return nil
 }
 
+// ContainerEvents streams this workspace's container state transitions
+// (start/die/destroy/health_status) until ctx is done, by tailing
+// `docker events`. Scoped to the driver's workspace via the gitops.workspace
+// label filter (empty workspace = unscoped, tests only). Never polls — it
+// blocks on Docker's event stream, mirroring waitForHealthy in provision.go.
+func (d *DockerDriver) ContainerEvents(ctx context.Context, _ infradriver.WorkspaceContext, sink func(infradriver.ContainerEvent)) error {
+	args := []string{"events", "--filter", "type=container"}
+	if d.workspace != "" {
+		args = append(args, "--filter", "label=gitops.workspace="+d.workspace)
+	}
+	// Only the transitions that change what gitops publishes (running + URL):
+	// a container coming up, going away, or flipping health.
+	for _, ev := range []string{"start", "die", "destroy", "health_status"} {
+		args = append(args, "--filter", "event="+ev)
+	}
+	// Tab-separated: action <tab> name <tab> id. Action carries the health
+	// status verbatim (e.g. "health_status: healthy"). The tab is a literal byte
+	// docker emits as-is.
+	args = append(args, "--format", "{{.Action}}\t{{index .Actor.Attributes \"name\"}}\t{{.Actor.ID}}")
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("docker events: %w", err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+
+	sc := bufio.NewScanner(stdout)
+	for sc.Scan() {
+		parts := strings.SplitN(sc.Text(), "\t", 3)
+		ev := infradriver.ContainerEvent{Action: strings.TrimSpace(parts[0])}
+		if len(parts) > 1 {
+			ev.Container = parts[1]
+		}
+		if len(parts) > 2 {
+			ev.ID = parts[2]
+		}
+		sink(ev)
+	}
+	// A cancelled stream (ctx done) is a clean shutdown, not an error.
+	if ctx.Err() != nil {
+		return nil
+	}
+	return sc.Err()
+}
+
 // ContainerStop stops a container.
 func (d *DockerDriver) ContainerStop(ctx context.Context, _ infradriver.WorkspaceContext, container string) error {
 	if err := d.assertInWorkspace(ctx, container); err != nil {

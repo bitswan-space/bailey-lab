@@ -18,6 +18,7 @@ package infradriver
 //	POST /v1/build-image        body BuildRequest  → SSE: log* then (image|error)
 //	POST /v1/containers/list    body ListBody      → JSON ContainerListResult
 //	POST /v1/containers/logs    body LogsBody      → SSE: log* (until EOF/close)
+//	POST /v1/containers/events  body EventsBody    → SSE: container-event* (until close)
 //	POST /v1/containers/stop    body ContainerBody → JSON OKResult (or error)
 //	POST /v1/containers/restart body ContainerBody → JSON OKResult (or error)
 //	POST /v1/containers/exec    hdr X-Bitswan-Exec, body=stdin → framed stdout/stderr/exit
@@ -42,12 +43,14 @@ package infradriver
 //
 // SSE frame names (the `event:` field); `data:` is JSON:
 //
-//	log   → LogLine    (build/log output)
-//	image → ImageRef   (terminal success of build-image)
-//	error → ErrorResult (terminal failure)
+//	log             → LogLine        (build/log output)
+//	image           → ImageRef       (terminal success of build-image)
+//	container-event → ContainerEvent (a workspace container state transition)
+//	error           → ErrorResult    (terminal failure)
 const (
 	PathBuildImage        = "/v1/build-image"
 	PathContainersList    = "/v1/containers/list"
+	PathContainersEvents  = "/v1/containers/events"
 	PathContainersInspect = "/v1/containers/inspect"
 	PathContainersLogs    = "/v1/containers/logs"
 	PathContainersStop    = "/v1/containers/stop"
@@ -120,15 +123,24 @@ const (
 
 // SSE event names (apply progress rides the git push, not SSE).
 const (
-	EventLog   = "log"
-	EventImage = "image"
-	EventError = "error"
+	EventLog            = "log"
+	EventImage          = "image"
+	EventContainerState = "container-event"
+	EventError          = "error"
 )
 
 // ListBody is the POST body for /v1/containers/list.
 type ListBody struct {
 	Ctx    WorkspaceContext `json:"ctx"`
 	Filter ContainerFilter  `json:"filter"`
+}
+
+// EventsBody is the POST body for /v1/containers/events. The stream is always
+// workspace-scoped by the driver's serve-time --workspace flag (the Ctx is
+// carried for symmetry with the other endpoints; the driver ignores it for
+// scoping, exactly like ContainerList).
+type EventsBody struct {
+	Ctx WorkspaceContext `json:"ctx"`
 }
 
 // LogsBody is the POST body for /v1/containers/logs.

@@ -17,6 +17,8 @@ type fakeDriver struct {
 	gotFilter    ContainerFilter
 	logLines     []LogLine
 	logsErr      error
+	events       []ContainerEvent
+	eventsErr    error
 	stopped      string
 	restarted    string
 	restartErr   error
@@ -31,6 +33,8 @@ type fakeDriver struct {
 	execCode     int
 	images       []Image
 	removedImage string
+	sbom         []byte
+	sbomErr      error
 	// copy-out: the TAR the driver streams back, and the request it saw.
 	copyOutTar     []byte
 	copyOutErr     error
@@ -67,6 +71,13 @@ func (f *fakeDriver) ContainerLogs(_ context.Context, _ WorkspaceContext, _ stri
 	return f.logsErr
 }
 
+func (f *fakeDriver) ContainerEvents(_ context.Context, _ WorkspaceContext, sink func(ContainerEvent)) error {
+	for _, e := range f.events {
+		sink(e)
+	}
+	return f.eventsErr
+}
+
 func (f *fakeDriver) ContainerStop(_ context.Context, _ WorkspaceContext, container string) error {
 	f.stopped = container
 	return nil
@@ -84,6 +95,10 @@ func (f *fakeDriver) ImageList(_ context.Context, _ WorkspaceContext) ([]Image, 
 func (f *fakeDriver) ImageRemove(_ context.Context, _ WorkspaceContext, tag string) error {
 	f.removedImage = tag
 	return nil
+}
+
+func (f *fakeDriver) ImageSBOM(_ context.Context, _ WorkspaceContext, _ string) ([]byte, error) {
+	return f.sbom, f.sbomErr
 }
 
 func (f *fakeDriver) ContainerInspect(_ context.Context, _ WorkspaceContext, container string) ([]byte, error) {
@@ -185,6 +200,47 @@ func TestContainerLogsStream(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, fd.logLines) {
 		t.Errorf("log lines = %v, want %v", got, fd.logLines)
+	}
+}
+
+func TestContainerEventsStream(t *testing.T) {
+	fd := &fakeDriver{events: []ContainerEvent{
+		{Action: "start", Container: "ws-frontend-a16f", ID: "abc"},
+		{Action: "health_status: healthy", Container: "ws-frontend-a16f", ID: "abc"},
+		{Action: "die", Container: "ws-worker-x", ID: "def"},
+	}}
+	client, closeFn := newTestPair(fd)
+	defer closeFn()
+
+	var got []ContainerEvent
+	if err := client.ContainerEvents(context.Background(), WorkspaceContext{},
+		func(e ContainerEvent) { got = append(got, e) }); err != nil {
+		t.Fatalf("ContainerEvents: %v", err)
+	}
+	if !reflect.DeepEqual(got, fd.events) {
+		t.Errorf("events = %v, want %v", got, fd.events)
+	}
+}
+
+func TestContainerEventsError(t *testing.T) {
+	fd := &fakeDriver{
+		events:    []ContainerEvent{{Action: "start", Container: "c"}},
+		eventsErr: errors.New("docker events died"),
+	}
+	client, closeFn := newTestPair(fd)
+	defer closeFn()
+
+	var got []ContainerEvent
+	err := client.ContainerEvents(context.Background(), WorkspaceContext{},
+		func(e ContainerEvent) { got = append(got, e) })
+	if err == nil {
+		t.Fatal("expected an error from the terminal error frame")
+	}
+	if len(got) != 1 {
+		t.Errorf("events before error = %d, want 1", len(got))
+	}
+	if want := "docker events died"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), want)
 	}
 }
 

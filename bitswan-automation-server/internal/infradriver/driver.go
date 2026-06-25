@@ -58,6 +58,13 @@ type Driver interface {
 	// (follow) or EOF.
 	ContainerLogs(ctx context.Context, req WorkspaceContext, container string, tail int, follow bool, sink func(LogLine)) error
 
+	// ContainerEvents streams this workspace's container state transitions
+	// (start/die/destroy/health_status) to sink until ctx is done. gitops has no
+	// Docker socket after the cut-over, so this is how it learns a container came
+	// up / went away / became healthy and re-broadcasts automation state. Always
+	// scoped to the driver's workspace.
+	ContainerEvents(ctx context.Context, req WorkspaceContext, sink func(ContainerEvent)) error
+
 	// ContainerStop / ContainerRestart are operational primitives — a transient
 	// action on one container, NOT a state change (state changes go through a
 	// bitswan.yaml mutation + Apply).
@@ -210,4 +217,15 @@ type Route struct {
 type LogLine struct {
 	Line   string `json:"line"`
 	Stderr bool   `json:"stderr"`
+}
+
+// ContainerEvent is one workspace container state transition from the Docker
+// event stream (start | die | destroy | health_status: …). gitops reacts to
+// these to re-broadcast automation state — after the cut-over it has no Docker
+// socket of its own, so this stream is its only signal that a container came
+// up, went down, or became healthy.
+type ContainerEvent struct {
+	Action    string `json:"action"`    // e.g. "start", "die", "destroy", "health_status: healthy"
+	Container string `json:"container"` // container name
+	ID        string `json:"id,omitempty"`
 }
