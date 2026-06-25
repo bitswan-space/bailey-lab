@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
@@ -50,13 +49,10 @@ func newCodingAgentEnableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			options := make(map[string]interface{})
@@ -113,13 +109,10 @@ func newCodingAgentDisableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.DisableService("coding-agent", workspace, "")
@@ -152,13 +145,10 @@ func newCodingAgentStatusCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.GetServiceStatus("coding-agent", workspace, "", false)
@@ -208,13 +198,10 @@ func newCodingAgentStartCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.StartService("coding-agent", workspace, "")
@@ -247,13 +234,10 @@ func newCodingAgentStopCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.StopService("coding-agent", workspace, "")
@@ -288,13 +272,10 @@ func newCodingAgentUpdateCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			options := make(map[string]interface{})
@@ -335,14 +316,17 @@ restarts the coding agent container with the new image and dev mode
 enabled. Dev mode mounts agent-session-wrapper and AGENTS.md from
 the source directory so future changes take effect without rebuilding.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var err error
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace. Use --workspace or 'bitswan workspace select'\n")
-					os.Exit(1)
-				}
+			client, err := daemon.NewClient()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				fmt.Fprintln(os.Stderr, "Run 'bitswan automation-server-daemon init' to start it.")
+				os.Exit(1)
+			}
+
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace. Use --workspace or 'bitswan workspace select'\n")
+				os.Exit(1)
 			}
 
 			if sourceDir == "" {
@@ -377,10 +361,6 @@ the source directory so future changes take effect without rebuilding.`,
 
 			// Re-enable with new image + dev mode
 			fmt.Println("Restarting with new image and dev mode...")
-			client, err := daemon.NewClient()
-			if err != nil {
-				return fmt.Errorf("daemon not running: %w", err)
-			}
 			options := map[string]interface{}{
 				"coding_agent_image": imageTag,
 				"dev_mode":           true,

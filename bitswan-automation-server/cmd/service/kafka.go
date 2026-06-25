@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
@@ -45,13 +44,10 @@ func newKafkaEnableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			options := make(map[string]interface{})
@@ -93,13 +89,10 @@ func newKafkaDisableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.DisableService("kafka", workspace, stage)
@@ -135,13 +128,10 @@ func newKafkaStatusCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.GetServiceStatus("kafka", workspace, stage, showPasswords)
@@ -193,13 +183,10 @@ func newKafkaStartCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.StartService("kafka", workspace, stage)
@@ -234,13 +221,10 @@ func newKafkaStopCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.StopService("kafka", workspace, stage)
@@ -277,13 +261,10 @@ func newKafkaUpdateCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			options := make(map[string]interface{})

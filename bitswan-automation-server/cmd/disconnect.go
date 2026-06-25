@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
@@ -19,14 +18,22 @@ func newDisconnectFromAOCCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Check if actually registered
-			cfg := config.NewAutomationServerConfig()
-			settings, err := cfg.GetAutomationOperationsCenterSettings()
-			if err != nil || settings.AccessToken == "" {
+			// Ask the daemon (the config owner) whether we're registered — the
+			// host's ~/.config/bitswan no longer holds AOC settings.
+			client, err := daemon.NewClient()
+			if err != nil {
+				return fmt.Errorf("failed to create daemon client (daemon may not be running): %w", err)
+			}
+
+			status, err := client.AOCStatus()
+			if err != nil {
+				return fmt.Errorf("failed to query AOC status from the daemon: %w", err)
+			}
+			if !status.Registered {
 				return fmt.Errorf("this automation server is not registered to any AOC instance")
 			}
 
-			fmt.Printf("This automation server is registered to AOC at %s.\n\n", settings.AOCUrl)
+			fmt.Printf("This automation server is registered to AOC at %s.\n\n", status.AOCUrl)
 			fmt.Println("Disconnecting will remove the AOC connection and restart workspace services.")
 			fmt.Println("Your workspaces and their data will NOT be deleted.")
 			fmt.Println()
@@ -44,11 +51,6 @@ func newDisconnectFromAOCCmd() *cobra.Command {
 			}
 
 			fmt.Println()
-
-			client, err := daemon.NewClient()
-			if err != nil {
-				return fmt.Errorf("failed to create daemon client (daemon may not be running): %w", err)
-			}
 
 			if err := client.DisconnectFromAOC(); err != nil {
 				return err
