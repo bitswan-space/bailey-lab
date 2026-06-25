@@ -1057,53 +1057,47 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // authoritative on-screen signal that a deploy will do something.
     const btn = d.getByRole('button', { name: /^Sync & Deploy$|Working/ }).last();
     await expect(btn, 'Sync & Deploy never became actionable (nothing to deploy)').toBeEnabled({ timeout: SLA });
-    // Press, then check the Development stage. The scaffold can land a beat after
-    // the BP is created, so a first press might fast-forward main without
-    // deploying this BP's containers; if dev is still "Not deployed yet" and the
-    // button is actionable again, press once more — bounded to a few tries.
+    await pressSyncDeploy();
+    await clickTopTab(/Deployments/i);
+    // The Development stage renders once the BP is in `main`. Sync & Deploy merges
+    // the copy into main and deploys to dev, but for a scaffolded BP the
+    // copy→main sync + stage registration can lag the "Working…" clear, so allow a
+    // build-sized window for the stage to appear rather than a short SLA.
+    const devStage = d.getByRole('button', { name: /Development/i }).first();
+    const inMain = await devStage
+      .waitFor({ state: 'visible', timeout: 3 * 60_000 })
+      .then(() => true)
+      .catch(() => false);
     let healthy = false;
-    for (let attempt = 0; attempt < 4 && !healthy; attempt++) {
-      await pressSyncDeploy();
-      await clickTopTab(/Deployments/i);
-      // The Development stage only renders once the BP is in `main`. Sync & Deploy
-      // merges the user's copy into main, but that can land a beat AFTER "Working…"
-      // clears (and a first press may only fast-forward main without this BP). So
-      // the Deployments tab can still show the transient "Not in main yet" empty
-      // state with no stage buttons. WAIT for the Development stage to appear
-      // rather than hard-selecting it (selectStage would throw on that empty state
-      // and abort the chapter); if it never shows, re-press while the button is
-      // still actionable and try again.
-      const devStage = d.getByRole('button', { name: /Development/i }).first();
-      const inMain = await devStage
-        .waitFor({ state: 'visible', timeout: SLA })
+    if (inMain) {
+      await devStage.click().catch(() => {});
+      // The deploy is ASYNC: after the push the driver builds the image and brings
+      // containers up in the background (the same build live-dev rides — minutes).
+      // Wait for the dev stage to actually reach Healthy with a build-sized plain
+      // wait.
+      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+      healthy = await ok
+        .waitFor({ state: 'visible', timeout: 12 * 60_000 })
         .then(() => true)
         .catch(() => false);
-      if (!inMain) {
-        await clickTopTab(/Sync & Deploy/i);
-        if (!(await btn.isEnabled().catch(() => false))) break;
-        continue;
-      }
-      await devStage.click().catch(() => {});
-      // The deploy is ASYNC: after the push, the driver builds the image and
-      // brings the containers up in the BACKGROUND — the same build the live-dev
-      // chapter rides, which takes minutes. "Working…" clearing means the push
-      // landed, NOT that the deploy finished. Wait for the Development stage to
-      // actually reach Healthy with a build-sized PLAIN wait (8 min, matching
-      // live-dev's build budget) — not a short SLA race and not the progress
-      // watchdog (a quiet build window must not fail). We do this once: if it's
-      // not Healthy after a full build window, re-pressing won't help — let the
-      // hard assert below report it.
-      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
-      await ok.waitFor({ state: 'visible', timeout: 12 * 60_000 }).catch(() => {});
-      healthy = await ok.isVisible().catch(() => false);
-      break;
     }
-    // Authoritative success gate: the Development stage must report Healthy (set
-    // in the loop above). This — not the cosmetic progress toast — is what makes
-    // the deploy chapter pass/fail.
+    if (!healthy) {
+      // Self-explaining failure: capture exactly what the dashboard shows so a
+      // miss tells us WHY (BP not in main, dev deploy failed, wrong frame, …)
+      // instead of a bare "never Healthy". The trace screencasts the onboard tab,
+      // not this popup, so dump the dashboard body here.
+      await clickTopTab(/Deployments/i).catch(() => {});
+      const body = await d.locator('body').first().innerText({ timeout: 3000 }).catch(() => '(unreadable)');
+      const devVis = await devStage.isVisible().catch(() => false);
+      const deplVis = await d.getByRole('button', { name: /Deployments/i }).first().isVisible().catch(() => false);
+      // eslint-disable-next-line no-console
+      console.log(
+        `deploy DIAG: inMain=${inMain} developmentBtn=${devVis} deploymentsTab=${deplVis}\n` +
+          `--- dashboard body (${body.length} chars) ---\n${body.slice(0, 1000)}\n--- end ---`,
+      );
+      await capture(dashPage, 'deploy-dev-FAILED');
+    }
     expect(healthy, 'Development stage never became Healthy after Sync & Deploy').toBe(true);
-    await clickTopTab(/Deployments/i);
-    await selectStage(/Development/i);
     await waitDeployDone();
     await capture(dashPage, 'deploy-dev');
   });
