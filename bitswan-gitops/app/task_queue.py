@@ -27,6 +27,7 @@ This module replaces that lock with an explicit, observable task queue:
 """
 
 import asyncio
+import contextvars
 import logging
 import uuid
 from collections import deque
@@ -36,6 +37,14 @@ from enum import Enum
 from typing import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+# The email of the user whose request is currently being served, set by the HTTP
+# middleware (from X-Forwarded-Email / the by/deployed_by param). Git operations
+# deep in the call stack read it to attribute their queue task without threading
+# the email through every function. Defaults to None for background work.
+current_requester: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_requester", default=None
+)
 
 
 class TaskStatus(str, Enum):
@@ -95,11 +104,16 @@ class TaskQueue:
     _HISTORY = 50
 
     def __init__(self) -> None:
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        # The asyncio.Queue + worker are created lazily inside the RUNNING event
+        # loop (not at import time, which would bind them to the wrong/no loop),
+        # and recreated if the loop changes (e.g. across test cases).
+        self._queue: asyncio.Queue[str] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._tasks: dict[str, Task] = {}
         self._fns: dict[str, TaskFn] = {}
         self._order: deque[str] = deque()  # creation order for snapshot()
         self._cancelled: set[str] = set()
+        self._releases: dict[str, asyncio.Event] = {}  # lease task_id → release event
         self._subscribers: set[asyncio.Queue[dict]] = set()
         self._worker: asyncio.Task | None = None
         self._running_id: str | None = None
@@ -134,9 +148,54 @@ class TaskQueue:
         self._broadcast(task)
         return task.task_id
 
+    # -------------------------------------------------------------------- lease
+    async def acquire(
+        self, kind: str, *, requester_email: str | None = None, label: str | None = None
+    ) -> str:
+        """Take the queue's exclusive turn for a critical section (the git-lock
+        replacement). Enqueues a task and AWAITS until it reaches the front and
+        the worker grants it (status → running); then the caller runs its git
+        ops and must call ``release(task_id)``. Serialized FIFO like the lock,
+        but it queues (never fails on contention) and is visible. If the task is
+        cancelled while queued (admin clear), this raises ``asyncio.CancelledError``.
+        """
+        granted: asyncio.Event = asyncio.Event()
+        released: asyncio.Event = asyncio.Event()
+
+        async def _hold() -> None:
+            granted.set()
+            await released.wait()
+
+        task_id = self.submit(
+            kind, _hold, requester_email=requester_email, label=label
+        )
+        self._releases[task_id] = released
+        # Wait until granted (running) OR cancelled while still queued.
+        while not granted.is_set():
+            task = self._tasks.get(task_id)
+            if task is None or task.status == TaskStatus.CANCELLED:
+                self._releases.pop(task_id, None)
+                raise asyncio.CancelledError("git task cancelled while queued")
+            await asyncio.sleep(0.05)
+        return task_id
+
+    def release(self, task_id: str) -> None:
+        """Release a lease taken with ``acquire`` so the worker advances."""
+        ev = self._releases.pop(task_id, None)
+        if ev is not None:
+            ev.set()
+
     # ------------------------------------------------------------------- worker
     def _ensure_worker(self) -> None:
-        if self._worker is None or self._worker.done():
+        """Create the queue + worker in the current running loop, (re)binding if
+        the loop changed. Always called from within a running loop (submit is
+        invoked from async handlers / acquire)."""
+        loop = asyncio.get_running_loop()
+        if self._queue is None or self._loop is not loop:
+            self._queue = asyncio.Queue()
+            self._loop = loop
+            self._worker = asyncio.create_task(self._run())
+        elif self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run())
 
     async def _run(self) -> None:
