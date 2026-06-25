@@ -1069,16 +1069,39 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // scaffolded BP.)
     const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
     const devStage = d.getByRole('button', { name: /Development/i }).first();
+    // Ride the deploy the way an operator does: keep waiting AS LONG AS the screen
+    // shows progress, with NO flat cap. Sync & Deploy builds the dev image
+    // (minutes — the same build live-dev rides) and only merges the copy into main
+    // + surfaces the Development stage when that build succeeds; throughout, the
+    // deploy streams progress (the sonner toast steps through "Building image …",
+    // "Starting containers…"; the status line / button move). So we require the
+    // on-screen progress SIGNATURE to change at least every DARK_MS, with the
+    // Development stage reporting Healthy as the terminal success. If the screen
+    // goes dark (no movement for DARK_MS) before Healthy, the deploy is stuck.
+    const DARK_MS = 15_000;
     let healthy = false;
-    const deployDeadline = Date.now() + 12 * 60_000;
-    while (Date.now() < deployDeadline && !healthy) {
+    let lastSig = await progressSignature();
+    let lastMoved = Date.now();
+    const backstop = Date.now() + 30 * 60_000;
+    for (let i = 0; Date.now() < backstop; i++) {
       if (await devStage.isVisible().catch(() => false)) {
         await devStage.click().catch(() => {});
-        healthy = await ok.waitFor({ state: 'visible', timeout: 20_000 }).then(() => true).catch(() => false);
-        if (healthy) break;
+        if (await ok.isVisible().catch(() => false)) {
+          healthy = true;
+          break;
+        }
       }
-      await dashPage.waitForTimeout(7_000);
-      await clickTopTab(/Deployments/i).catch(() => {});
+      const sig = await progressSignature();
+      if (sig !== lastSig) {
+        lastSig = sig;
+        lastMoved = Date.now();
+      } else if (Date.now() - lastMoved > DARK_MS) {
+        break; // went dark — no on-screen progress and not Healthy → stuck
+      }
+      await dashPage.waitForTimeout(3_000);
+      // Periodically re-open Deployments so the dev stage renders once the merge
+      // lands. The progress toast is global, so this doesn't lose the signal.
+      if (i % 5 === 4) await clickTopTab(/Deployments/i).catch(() => {});
     }
     if (!healthy) {
       // Self-explaining failure: capture exactly what the dashboard shows so a
