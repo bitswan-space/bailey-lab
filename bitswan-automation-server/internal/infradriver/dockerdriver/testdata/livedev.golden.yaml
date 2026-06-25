@@ -84,17 +84,20 @@ services:
         cap_add:
             - NET_ADMIN
         container_name: ws4-fwgw-4337-live-dev
+        depends_on:
+            ws4-fwgw-4337-live-dev-proxy:
+                condition: service_healthy
         environment:
-            BITSWAN_FW_ALLOW: ""
-            BITSWAN_FW_ATTEMPTS: /firewall/acme__dev.attempts.jsonl
             BITSWAN_FW_MODE: monitor
+            BITSWAN_FW_PROXY: ws4-fwgw-4337-live-dev-proxy
+            BITSWAN_FW_ROLE: owner
         healthcheck:
             interval: 3s
             retries: 10
             start_period: 2s
             test:
                 - CMD-SHELL
-                - nc -z 127.0.0.1 18077
+                - test -f /tmp/fw-ready
             timeout: 3s
         image: bitswan/egress-gateway:latest
         labels:
@@ -106,6 +109,32 @@ services:
             ws4-dev:
                 aliases:
                     - ws4-fwgw-4337-live-dev
+        restart: unless-stopped
+    ws4-fwgw-4337-live-dev-proxy:
+        container_name: ws4-fwgw-4337-live-dev-proxy
+        environment:
+            BITSWAN_FW_ALLOW: ""
+            BITSWAN_FW_ATTEMPTS: /firewall/acme__dev.attempts.jsonl
+            BITSWAN_FW_MODE: monitor
+            BITSWAN_FW_ROLE: proxy
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - nc -z 127.0.0.1 18077
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: acme
+            gitops.firewall_proxy: "true"
+            gitops.slot: ""
+            gitops.stage: dev
+        networks:
+            ws4-dev:
+                aliases:
+                    - ws4-fwgw-4337-live-dev-proxy
         restart: unless-stopped
         volumes:
             - __ROOT__/firewall:/firewall

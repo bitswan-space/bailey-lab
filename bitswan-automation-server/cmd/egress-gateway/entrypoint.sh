@@ -1,65 +1,78 @@
 #!/bin/sh
-# Egress-gateway entrypoint. Runs as root to install the netns-wide iptables
-# interception, then drops to the unprivileged proxy uid. BP containers share
-# this netns (network_mode: service:<gateway>) but have NET_ADMIN dropped, so
-# they cannot alter these rules — and the proxy's own outbound (uid 8765) is the
-# only traffic exempt from redirection.
-set -e
-PROXY_UID=8765
-
-# nat OUTPUT: exempt the proxy's own dials, redirect everyone else's :443/:80
-# to the local SNI/Host filter. Applies in BOTH modes (monitor needs it to log).
+# Egress-gateway entrypoint. Two roles, selected by $BITSWAN_FW_ROLE:
 #
-# Flushing OUTPUT drops the jump Docker installs to its embedded-DNS DNAT chain
-# (`-d 127.0.0.11/32 -j DOCKER_OUTPUT`), which would silently break name
-# resolution for EVERY container sharing this netns (they'd resolve nothing —
-# not infra peers, not the internet). The DOCKER_OUTPUT chain itself survives the
-# flush (only the OUTPUT-chain jump to it is lost), so re-add that jump FIRST, so
-# DNS to 127.0.0.11:53 is DNAT'd to the resolver before our :443/:80 redirects.
-iptables -t nat -F OUTPUT
-if iptables -t nat -L DOCKER_OUTPUT >/dev/null 2>&1; then
-  iptables -t nat -A OUTPUT -d 127.0.0.11/32 -j DOCKER_OUTPUT
-fi
-iptables -t nat -A OUTPUT -m owner --uid-owner "$PROXY_UID" -j RETURN
-iptables -t nat -A OUTPUT -p tcp --dport 443 -j REDIRECT --to-ports 18443
-iptables -t nat -A OUTPUT -p tcp --dport 80  -j REDIRECT --to-ports 18080
+#   owner  — installs the egress rules in this network namespace and HOLDS it.
+#            The BP worker joins this netns (network_mode: service:<owner>) with
+#            NET_ADMIN dropped, so it cannot alter the rules. Critically, NO
+#            proxy runs here: the worker's :443/:80 is DNAT'd to the proxy
+#            container (a separate namespace), so there is no privileged uid in
+#            the worker's namespace to impersonate. A root worker that setuid()s
+#            to anything is still fully subject to these rules — the firewall is
+#            enforced OUTSIDE everything the worker can reach.
+#
+#   proxy  — the SNI/Host allow-list filter (the egress-gateway binary). Runs in
+#            its own container/namespace on the stage network, unprivileged.
+set -e
+ROLE="${BITSWAN_FW_ROLE:-proxy}"
 
-if [ "$BITSWAN_FW_MODE" = "enforce" ]; then
-  # Default-deny egress. Allow: loopback, established, the proxy's dials, DNS,
-  # RFC1918 (infra services on the docker networks), and :80/:443 (which are
-  # redirected to the proxy, where the allow-list is actually enforced).
-  iptables -F OUTPUT
-  iptables -A OUTPUT -o lo -j ACCEPT
-  iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-  iptables -A OUTPUT -m owner --uid-owner "$PROXY_UID" -j ACCEPT
-  iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-  iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-  iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
-  iptables -A OUTPUT -d 10.0.0.0/8 -j ACCEPT
-  iptables -A OUTPUT -d 172.16.0.0/12 -j ACCEPT
-  iptables -A OUTPUT -d 192.168.0.0/16 -j ACCEPT
-  iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
-  iptables -A OUTPUT -p tcp --dport 80  -j ACCEPT
-  iptables -A OUTPUT -j DROP
+if [ "$ROLE" = "owner" ]; then
+  [ -n "$BITSWAN_FW_PROXY" ] || { echo "owner: BITSWAN_FW_PROXY unset"; exit 1; }
+  # Resolve the proxy to an IP (iptables DNAT needs an address). `host` is from
+  # bind-tools; fall back to nslookup (busybox) if absent.
+  PROXY_IP=$(host -t A "$BITSWAN_FW_PROXY" 2>/dev/null | awk '/has address/{print $NF; exit}')
+  [ -n "$PROXY_IP" ] || PROXY_IP=$(nslookup "$BITSWAN_FW_PROXY" 2>/dev/null | awk -F'[: \t]+' '/^Address/ && $0 !~ /#/ {ip=$2} END{print ip}')
+  [ -n "$PROXY_IP" ] || { echo "owner: cannot resolve proxy $BITSWAN_FW_PROXY"; exit 1; }
+
+  # The worker's own stage-network subnet (shared netns → owner's interface).
+  # Used to scope the infra-peer allowance instead of all of RFC1918.
+  STAGE_SUBNET=$(ip -o -f inet addr show scope global 2>/dev/null | awk '{print $4; exit}')
+
+  # nat OUTPUT: keep Docker's embedded-DNS DNAT (flushing OUTPUT drops the jump
+  # to DOCKER_OUTPUT), then DNAT all :443/:80 to the external proxy. NO uid
+  # exemption — nothing in this netns is exempt.
+  iptables -t nat -F OUTPUT
+  if iptables -t nat -L DOCKER_OUTPUT >/dev/null 2>&1; then
+    iptables -t nat -A OUTPUT -d 127.0.0.11/32 -j DOCKER_OUTPUT
+  fi
+  iptables -t nat -A OUTPUT -p tcp --dport 443 -j DNAT --to-destination "$PROXY_IP:18443"
+  iptables -t nat -A OUTPUT -p tcp --dport 80  -j DNAT --to-destination "$PROXY_IP:18080"
+
+  if [ "$BITSWAN_FW_MODE" = "enforce" ]; then
+    # Default-deny egress. Allow: loopback, established, DNS to Docker's embedded
+    # resolver ONLY (direct :53 to arbitrary resolvers is dropped — no DNS
+    # tunnelling), the worker's own stage subnet (infra peers — not all RFC1918),
+    # the proxy, and the :80/:443 the proxy enforces.
+    iptables -F OUTPUT
+    iptables -A OUTPUT -o lo -j ACCEPT
+    iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    iptables -A OUTPUT -d 127.0.0.11/32 -p udp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -d 127.0.0.11/32 -p tcp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
+    [ -n "$STAGE_SUBNET" ] && iptables -A OUTPUT -d "$STAGE_SUBNET" -j ACCEPT
+    iptables -A OUTPUT -d "$PROXY_IP/32" -j ACCEPT
+    iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
+    iptables -A OUTPUT -p tcp --dport 80  -j ACCEPT
+    iptables -A OUTPUT -j DROP
+  fi
+
+  # Signal readiness (the worker gates its start on this via the healthcheck) and
+  # hold the namespace open for the worker that shares it.
+  touch /tmp/fw-ready
+  echo "egress-gateway[owner]: rules installed (mode=${BITSWAN_FW_MODE:-monitor}, proxy=$PROXY_IP); holding netns"
+  exec tail -f /dev/null
 fi
 
-# The attempts feed lives on a bind-mounted volume (/firewall) created by the
-# gitops container as root. The proxy runs unprivileged (uid $PROXY_UID), so it
-# could not create/append its JSONL there — the writes would fail silently and
-# "Needs review" would stay empty. Grant the proxy uid ownership of the mount
-# while we are still root, before dropping privileges. The attempts path is the
-# directory containing the configured BITSWAN_FW_ATTEMPTS file (default /firewall).
+# ROLE=proxy — the SNI/Host filter. No NET_ADMIN; never shares the worker's netns.
+PROXY_UID=8765
 if [ -n "$BITSWAN_FW_ATTEMPTS" ]; then
   ATTEMPTS_DIR=$(dirname "$BITSWAN_FW_ATTEMPTS")
 else
   ATTEMPTS_DIR=/firewall
 fi
 if [ -d "$ATTEMPTS_DIR" ]; then
-  # Only chown the mount root, not recursively — keeps it cheap and avoids
-  # touching other BPs' files that may already be owned by the proxy uid.
-  chown "$PROXY_UID:$PROXY_UID" "$ATTEMPTS_DIR" || \
-    echo "egress-gateway: WARNING could not chown $ATTEMPTS_DIR (attempts log may not be writable)"
+  chown "$PROXY_UID:$PROXY_UID" "$ATTEMPTS_DIR" 2>/dev/null || \
+    echo "egress-gateway[proxy]: WARNING could not chown $ATTEMPTS_DIR (attempts log may not be writable)"
 fi
 
-echo "egress-gateway: iptables installed (mode=${BITSWAN_FW_MODE:-monitor}); dropping to uid $PROXY_UID"
+echo "egress-gateway[proxy]: starting SNI/Host filter on :18443/:18080 (mode=${BITSWAN_FW_MODE:-monitor})"
 exec su-exec "$PROXY_UID:$PROXY_UID" /usr/local/bin/egress-gateway
