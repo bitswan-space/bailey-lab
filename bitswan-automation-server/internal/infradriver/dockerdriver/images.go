@@ -68,3 +68,21 @@ func (d *DockerDriver) ImageRemove(ctx context.Context, _ infradriver.WorkspaceC
 	}
 	return nil
 }
+
+// ImageSBOM runs `syft <tag> -o syft-json` and returns the SBOM document. syft
+// reads the image from the local docker daemon (which the driver owns), so only
+// the SBOM — not the (possibly multi-GB) image — leaves the driver. Refused
+// outside the workspace's namespace.
+func (d *DockerDriver) ImageSBOM(ctx context.Context, _ infradriver.WorkspaceContext, tag string) ([]byte, error) {
+	if prefix := d.imageTagPrefix(); prefix != "" && !strings.HasPrefix(tag, prefix) {
+		return nil, fmt.Errorf("refused: image %q is not in workspace %q's namespace", tag, d.workspace)
+	}
+	cmd := exec.CommandContext(ctx, "syft", tag, "-o", "syft-json")
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("syft %s: %w: %s", tag, err, strings.TrimSpace(stderr.String()))
+	}
+	return []byte(stdout.String()), nil
+}

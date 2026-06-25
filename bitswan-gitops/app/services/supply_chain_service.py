@@ -158,6 +158,21 @@ def parse_grype(raw: dict) -> list[dict]:
 
 
 # ── scanning ─────────────────────────────────────────────────────────────────
+async def _driver_sbom(image_ref: str) -> dict:
+    """Fetch the syft-json SBOM for an image from the infra-driver (which owns
+    docker). Constructed per-call — these scans are fire-and-forget and rare."""
+    from app.services.infra_driver_client import InfraDriverClient, WorkspaceContext
+
+    client = InfraDriverClient()
+    ctx = WorkspaceContext(
+        workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", ""),
+        domain="",
+        gitops_dir="",
+        secrets_dir="",
+    )
+    return await client.image_sbom(ctx, image_ref)
+
+
 async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) -> None:
     """Ensure an SBOM (built once) and a CVE scan exist for an image. `image_ref`
     is what syft/grype scan (a tag or id resolvable via the docker daemon);
@@ -171,13 +186,18 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
     sbom_path, cve_path = _sbom_path(d, k), _cve_path(d, k)
     try:
         if not os.path.exists(sbom_path):
-            rc, out, err = await _run("syft", image_ref, "-o", "syft-json")
-            if rc != 0 or not out:
-                _write_unavailable(
-                    cve_path, f"syft failed: {err.decode(errors='replace')}"
-                )
+            # syft must read the image from the docker daemon, which gitops no
+            # longer has after the cut-over. Run it on the infra-driver (which
+            # owns docker) and fetch back only the small SBOM — not the image.
+            try:
+                sbom = await _driver_sbom(image_ref)
+            except Exception as e:  # noqa: BLE001 — record, never crash
+                _write_unavailable(cve_path, f"sbom via driver failed: {e}")
                 return
-            _atomic_write(sbom_path, out.decode(errors="replace"))
+            if not sbom:
+                _write_unavailable(cve_path, "driver returned an empty SBOM")
+                return
+            _atomic_write(sbom_path, json.dumps(sbom))
 
         cve_doc = _read_json(cve_path)
         if not force_cve and cve_doc and cve_doc.get("status") == "ok":

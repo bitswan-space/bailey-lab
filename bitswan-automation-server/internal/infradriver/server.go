@@ -44,6 +44,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(PathContainersCopyIn, s.handleCopyIn)
 	mux.HandleFunc(PathImagesList, s.handleImageList)
 	mux.HandleFunc(PathImagesRemove, s.handleImageRemove)
+	mux.HandleFunc(PathImagesSBOM, s.handleImageSBOM)
 	if s.GitProjectRoot != "" {
 		// git smart-HTTP lives at the root; /v1/* above takes precedence because
 		// ServeMux longest-prefix matches the explicit primitive paths first.
@@ -106,6 +107,21 @@ func (s *Server) handleImageRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, OKResult{OK: true})
+}
+
+func (s *Server) handleImageSBOM(w http.ResponseWriter, r *http.Request) {
+	var body ImageBody
+	if !decode(w, r, &body) {
+		return
+	}
+	sbom, err := s.driver.ImageSBOM(r.Context(), body.Ctx, body.Tag)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The SBOM is already syft-json; pass it through as the response body.
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(sbom)
 }
 
 func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {

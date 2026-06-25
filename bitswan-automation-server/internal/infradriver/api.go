@@ -57,6 +57,12 @@ const (
 	PathContainersCopyIn  = "/v1/containers/copy-in"
 	PathImagesList        = "/v1/images/list"
 	PathImagesRemove      = "/v1/images/remove"
+	// PathImagesSBOM runs `syft <tag>` against a workspace image (the driver owns
+	// docker; gitops doesn't after the cut-over) and returns the syft-json SBOM.
+	// Only the small SBOM crosses the wire — NOT the (potentially multi-GB)
+	// image. gitops then runs grype on the SBOM locally (no docker needed). The
+	// response body is the raw syft-json document.
+	PathImagesSBOM = "/v1/images/sbom"
 )
 
 // ImageListResult is the JSON response of /v1/images/list.

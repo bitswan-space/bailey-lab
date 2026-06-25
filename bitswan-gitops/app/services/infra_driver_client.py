@@ -45,6 +45,7 @@ PATH_CONTAINERS_COPY_OUT = "/v1/containers/copy-out"
 PATH_CONTAINERS_COPY_IN = "/v1/containers/copy-in"
 PATH_IMAGES_LIST = "/v1/images/list"
 PATH_IMAGES_REMOVE = "/v1/images/remove"
+PATH_IMAGES_SBOM = "/v1/images/sbom"
 
 # SSE event names (api.go).
 EVENT_LOG = "log"
@@ -374,6 +375,14 @@ class InfraDriverClient:
 
     async def image_remove(self, ctx: WorkspaceContext, tag: str) -> None:
         await self._post_json(PATH_IMAGES_REMOVE, {"ctx": ctx.to_json(), "tag": tag})
+
+    async def image_sbom(self, ctx: WorkspaceContext, tag: str) -> dict:
+        """Run syft against a workspace image (driver-side, where docker lives)
+        and return the syft-json SBOM. Only the SBOM crosses the wire — not the
+        image. gitops then runs grype on it locally (no docker needed)."""
+        return await self._post_json(
+            PATH_IMAGES_SBOM, {"ctx": ctx.to_json(), "tag": tag}
+        )
 
     async def container_inspect(self, ctx: WorkspaceContext, container: str) -> dict:
         """Raw `docker inspect` of one container (the driver returns a 1-element

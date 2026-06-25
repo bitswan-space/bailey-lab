@@ -104,6 +104,28 @@ func (c *Client) ImageRemove(ctx context.Context, wctx WorkspaceContext, tag str
 	return c.postJSON(ctx, PathImagesRemove, ImageBody{Ctx: wctx, Tag: tag}, &OKResult{})
 }
 
+// ImageSBOM runs syft against a workspace image (driver-side) and returns the
+// syft-json SBOM bytes.
+func (c *Client) ImageSBOM(ctx context.Context, wctx WorkspaceContext, tag string) ([]byte, error) {
+	body, _ := json.Marshal(ImageBody{Ctx: wctx, Tag: tag})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+PathImagesSBOM, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.auth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("%s: HTTP %d: %s", PathImagesSBOM, resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	return io.ReadAll(resp.Body)
+}
+
 // ContainerInspect returns the raw `docker inspect` JSON for one container.
 func (c *Client) ContainerInspect(ctx context.Context, wctx WorkspaceContext, container string) ([]byte, error) {
 	body, _ := json.Marshal(ContainerBody{Ctx: wctx, Container: container})

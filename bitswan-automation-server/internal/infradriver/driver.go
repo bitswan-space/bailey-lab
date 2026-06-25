@@ -74,6 +74,12 @@ type Driver interface {
 	// workspace's namespace (internal/<workspace>-…).
 	ImageRemove(ctx context.Context, req WorkspaceContext, tag string) error
 
+	// ImageSBOM runs syft against a workspace image and returns the syft-json
+	// SBOM bytes. The driver owns docker (gitops doesn't after the cut-over), so
+	// the scan runs here and only the small SBOM is returned — not the image.
+	// Refused unless the tag is in this workspace's namespace.
+	ImageSBOM(ctx context.Context, req WorkspaceContext, tag string) ([]byte, error)
+
 	// ContainerInspect returns the raw `docker inspect` JSON for one container
 	// (workspace-scoped). Read-only. Unlike ContainerList — which deliberately
 	// omits env/config so a bulk listing can't leak secrets — inspect returns the
