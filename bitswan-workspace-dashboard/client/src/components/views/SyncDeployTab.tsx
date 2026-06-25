@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Rocket } from 'lucide-react';
+import { Rocket, CheckCircle2, SlidersHorizontal } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { useSessions } from '@/components/agents/SessionProvider';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
@@ -21,6 +21,9 @@ interface SyncDeployTabProps {
   /** Called once the dev deploy finishes successfully — used to jump to the
    *  Deployments tab (Development stage) so the user sees the result. */
   onDeployed: () => void;
+  /** Switches the shell to the Deployments tab. Surfaced as "Manage
+   *  Deployments" when this BP is already up to date (nothing to sync). */
+  onManageDeployments: () => void;
 }
 
 /**
@@ -41,6 +44,7 @@ export function SyncDeployTab({
   wt,
   onShowAgents,
   onDeployed,
+  onManageDeployments,
 }: SyncDeployTabProps) {
   const { changed } = useCopyStatus(wt.name);
   const { startSyncSession, setSelectedFor, agentStatus, ensureAgent } =
@@ -230,20 +234,38 @@ export function SyncDeployTab({
             )}
           </div>
         </div>
-        <Button
-          size="lg"
-          className="shrink-0"
-          disabled={!actionable || busy}
-          title={
-            !actionable
-              ? 'Already up to date with main'
-              : 'Commit, fast-forward into main, and deploy to dev'
-          }
-          onClick={() => void runSyncDeploy()}
-        >
-          <Rocket className="size-4" aria-hidden />
-          {busy ? 'Working…' : 'Sync & Deploy'}
-        </Button>
+        {actionable ? (
+          <Button
+            size="lg"
+            className="shrink-0"
+            disabled={busy}
+            title="Commit, fast-forward into main, and deploy to dev"
+            onClick={() => void runSyncDeploy()}
+          >
+            <Rocket className="size-4" aria-hidden />
+            {busy ? 'Working…' : 'Sync & Deploy'}
+          </Button>
+        ) : (
+          // Nothing to sync — this BP already matches main and is deployed.
+          // Point the user at the Deployments tab to manage what's live instead
+          // of dangling a dead, greyed-out action.
+          <div className="flex shrink-0 flex-col items-end gap-2">
+            <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-emerald-600">
+              <CheckCircle2 className="size-4" aria-hidden />
+              All deployed and up to date
+            </span>
+            <Button
+              size="lg"
+              variant="outline"
+              className="shrink-0"
+              title="Manage this business process's deployments, secrets and history"
+              onClick={onManageDeployments}
+            >
+              <SlidersHorizontal className="size-4" aria-hidden />
+              Manage Deployments
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Diff (what becomes main) / History (copy + main commits, deploy tags). */}
