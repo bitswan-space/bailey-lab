@@ -631,13 +631,31 @@ func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, err
 	traefikProjectName := fmt.Sprintf("bitswan-%s-traefik", workspaceName)
 	containerName := fmt.Sprintf("%s__traefik", workspaceName)
 
-	// Check if workspace traefik container already exists
+	// Check if workspace traefik container already exists.
 	traefikContainerId, err := exec.Command("docker", "ps", "-q", "-f", fmt.Sprintf("name=%s", containerName)).Output()
 	if err != nil {
 		return false, fmt.Errorf("failed to check if workspace traefik container exists: %w", err)
 	}
 	if strings.TrimSpace(string(traefikContainerId)) != "" {
-		return false, nil
+		// A sub-traefik created before the file-provider migration mounts only
+		// traefik.yml and serves the in-memory REST provider — it ignores the
+		// dynamic.yml this daemon now writes routes into, so every new route goes
+		// stale on it (and never recovers, since this function used to just skip
+		// when the container existed). Detect that by the absence of the
+		// dynamic.yml mount and recreate it on the current (file-provider) config;
+		// an already-migrated sub-traefik has the mount and is a no-op.
+		mounts, err := exec.Command("docker", "inspect", "--format",
+			"{{range .Mounts}}{{.Destination}}\n{{end}}", containerName).Output()
+		if err != nil {
+			return false, fmt.Errorf("failed to inspect workspace traefik mounts: %w", err)
+		}
+		if strings.Contains(string(mounts), "/etc/traefik/dynamic.yml") {
+			return false, nil // up to date — reads dynamic.yml already
+		}
+		if out, rmErr := exec.Command("docker", "rm", "-f", containerName).CombinedOutput(); rmErr != nil {
+			return false, fmt.Errorf("failed to remove stale (REST-provider) workspace traefik %s: %w: %s", containerName, rmErr, strings.TrimSpace(string(out)))
+		}
+		// Fall through to recreate with the file provider + dynamic.yml mount.
 	}
 
 	// Create workspace traefik config directory
