@@ -774,17 +774,11 @@ providers:
 	resp, err := client.Get(workspaceTraefikURL)
 	if err == nil {
 		defer resp.Body.Close()
-		originalTraefikHost := os.Getenv("BITSWAN_TRAEFIK_HOST")
-		os.Setenv("BITSWAN_TRAEFIK_HOST", workspaceTraefikURL)
-		defer func() {
-			if originalTraefikHost != "" {
-				os.Setenv("BITSWAN_TRAEFIK_HOST", originalTraefikHost)
-			} else {
-				os.Unsetenv("BITSWAN_TRAEFIK_HOST")
-			}
-		}()
-
-		if err := traefikapi.InitWorkspaceTraefik(); err != nil {
+		// Target the sub-traefik by explicit workspace name. Do NOT mutate the
+		// process-global BITSWAN_TRAEFIK_HOST: it is shared by every concurrent
+		// request, so a global route push racing this window would be redirected
+		// into this sub-traefik and dump the entire global route table here.
+		if err := traefikapi.InitWorkspaceTraefik(workspaceName); err != nil {
 			if verbose {
 				fmt.Printf("Warning: failed to init workspace traefik API: %v\n", err)
 			}

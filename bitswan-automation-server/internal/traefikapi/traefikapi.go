@@ -392,10 +392,13 @@ func InitTraefik() error {
 	})
 }
 
-// InitWorkspaceTraefik initialises a workspace Traefik (HTTP-only).
-// Callers must set BITSWAN_TRAEFIK_HOST to target the correct workspace instance.
-func InitWorkspaceTraefik() error {
-	traefikBaseURL := getTraefikBaseURL()
+// InitWorkspaceTraefik initialises a workspace Traefik (HTTP-only). The target
+// is selected by the explicit workspaceName — NOT by mutating the process-global
+// BITSWAN_TRAEFIK_HOST env, which is shared by every concurrent request and would
+// race: a global push running while the env pointed at a sub-traefik would land
+// the whole global route table inside that sub-traefik.
+func InitWorkspaceTraefik(workspaceName string) error {
+	traefikBaseURL := getTraefikBaseURL(workspaceName)
 	return modifyState(traefikBaseURL, func(_ *traefikDynConfig) error {
 		return nil
 	})
