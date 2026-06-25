@@ -38,6 +38,20 @@ KEEP=0; [ "${1:-}" = "--keep" ] && KEEP=1
 [ -e /dev/kvm ] || { echo "ERROR: /dev/kvm not present — enable virtualization."; exit 1; }
 ip link show "$BRIDGE" >/dev/null 2>&1 || { echo "ERROR: bridge $BRIDGE missing (start libvirt 'default' net)."; exit 1; }
 
+# Ensure libvirt's NAT/forward rules for the guest subnet are present. Docker
+# rewrites iptables when it (re)configures bridges and routinely flushes
+# libvirt's MASQUERADE rule for 192.168.122.0/24 out from under it — the guest
+# then boots fine but has NO outbound internet, so apt/docker pulls fail with
+# "Temporary failure resolving …" and provisioning dies. Re-assert the default
+# network so its rules are reinstalled (idempotent; no-op if already correct).
+if [ "$BRIDGE" = "virbr0" ] && command -v virsh >/dev/null 2>&1; then
+  if ! sudo iptables -t nat -S 2>/dev/null | grep -q '192.168.122.0/24.*MASQUERADE'; then
+    echo "--- libvirt NAT for guest subnet missing; restarting 'default' network ---"
+    sudo virsh net-destroy default >/dev/null 2>&1 || true
+    sudo virsh net-start default  >/dev/null 2>&1 || true
+  fi
+fi
+
 # Step profiler for the HOST-side phases (boot / rsync / provision / run / copy).
 # The guest keeps its own timeline (build steps, test, manual gen); both are
 # merged into one slowest-first profile at the end.
