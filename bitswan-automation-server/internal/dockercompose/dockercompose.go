@@ -349,7 +349,11 @@ func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
 				"image":          "caddy:2.9",
 				"restart":        "always",
 				"container_name": "caddy",
-				"ports":          []string{"80:80", "443:443", "2019:2019"},
+				// Only the public web entrypoints are published. Caddy's admin API
+				// (:2019) allows FULL reconfiguration (load arbitrary config) and must
+				// never be reachable from outside the host; the daemon reaches it
+				// in-network (caddy:2019 on bitswan_network), so it is not published.
+				"ports":          []string{"80:80", "443:443"},
 				"networks":       []string{"bitswan_network"},
 				"volumes":        caddyVolumes,
 				"entrypoint":     []string{"caddy", "run", "--resume", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"},
