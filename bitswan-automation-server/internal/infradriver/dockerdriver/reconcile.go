@@ -28,17 +28,34 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		}
 	}
 
-	// 2. Write the generated compose to the gitops dir (the daemon also keeps it
-	//    for debugging — _save_docker_compose).
+	// 2. Stamp each egress (network_mode:service) worker with a stable
+	//    desired-config hash label, then write the compose. docker compose
+	//    recreates those netns-sharing workers on every `up` (its own config-hash
+	//    for them is unstable), so we reconcile them ourselves below.
 	composePath := filepath.Join(wctx.GitopsDir, "docker-compose.yaml")
-	if err := os.WriteFile(composePath, []byte(composeYAML), 0o644); err != nil {
+	finalYAML, workers, allServices, perr := prepareComposeForEgress(composeYAML)
+	if perr != nil {
+		// Couldn't analyze the compose — fall back to writing it as-is and a
+		// plain full up (correctness over the egress optimization).
+		report("compose_up", fmt.Sprintf("egress pre-pass skipped (%v) — full reconcile", perr))
+		finalYAML, workers = composeYAML, nil
+	}
+	if err := os.WriteFile(composePath, []byte(finalYAML), 0o644); err != nil {
 		return fmt.Errorf("write docker-compose.yaml: %w", err)
 	}
 
-	// 3. docker compose up -d, streaming output to prog.
-	report("compose_up", "Bringing up docker-compose project...")
-	if err := composeUp(ctx, wctx, composePath, report); err != nil {
-		return err
+	// 3. Reconcile. With egress workers present, bring everything else up
+	//    normally and recreate only the workers whose hash changed (or whose
+	//    gateway was recreated); otherwise a plain full `compose up`.
+	if len(workers) > 0 {
+		if err := reconcileEgressAware(ctx, wctx, composePath, workers, allServices, report); err != nil {
+			return err
+		}
+	} else {
+		report("compose_up", "Bringing up docker-compose project...")
+		if err := composeUpServices(ctx, wctx, composePath, nil, true /*removeOrphans*/, false /*noDeps*/, report); err != nil {
+			return err
+		}
 	}
 
 	// 3b. Fail-fast: ensure the live Postgres DB each backend connects to exists
@@ -76,9 +93,20 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	return nil
 }
 
-// composeUp runs `docker compose -p <ws> -f <file> up -d` and streams output.
-func composeUp(ctx context.Context, wctx infradriver.WorkspaceContext, composePath string, report func(step, msg string)) error {
-	args := []string{"compose", "-p", wctx.WorkspaceName, "-f", composePath, "up", "-d", "--remove-orphans"}
+// composeUpServices runs `docker compose -p <ws> -f <file> up -d [flags]
+// [services...]` and streams output. An empty services slice means the whole
+// project. removeOrphans is only safe for a whole-project / non-worker up (it
+// removes containers no longer in the file); noDeps recreates exactly the named
+// services without touching their dependencies.
+func composeUpServices(ctx context.Context, wctx infradriver.WorkspaceContext, composePath string, services []string, removeOrphans, noDeps bool, report func(step, msg string)) error {
+	args := []string{"compose", "-p", wctx.WorkspaceName, "-f", composePath, "up", "-d"}
+	if removeOrphans {
+		args = append(args, "--remove-orphans")
+	}
+	if noDeps {
+		args = append(args, "--no-deps")
+	}
+	args = append(args, services...)
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Env = append(os.Environ(), "COMPOSE_PROJECT_NAME="+wctx.WorkspaceName)
 	stdout, err := cmd.StdoutPipe()
