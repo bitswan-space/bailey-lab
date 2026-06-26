@@ -204,32 +204,18 @@ func createPostgresDB(ctx context.Context, container, user, dbName string) error
 	return nil
 }
 
-// clonePostgresDB ensures a non-main copy's live-dev DB (postgres_copy_<copy>)
-// exists, cloning it from the realm default via CREATE DATABASE ... WITH
-// TEMPLATE. Returns "" when Postgres isn't enabled. Port of
-// bp_databases.clone_postgres_db.
-func clonePostgresDB(ctx context.Context, secretsDir, workspace, copyName, sourceRealm string) (string, error) {
-	secrets := serviceSecrets(secretsDir, "postgres", sourceRealm)
-	if secrets == nil || secrets["POSTGRES_USER"] == "" {
-		return "", nil
-	}
-	user := secrets["POSTGRES_USER"]
-	sourceDB := secrets["POSTGRES_DB"]
-	if sourceDB == "" {
-		sourceDB = "postgres"
-	}
-	newDB := copyDBName(copyName)
-	container := serviceContainerName(workspace, "postgres", sourceRealm)
-
-	if err := waitForPostgres(ctx, container, user); err != nil {
-		return "", err
-	}
-	exists, err := postgresDBExists(ctx, container, user, newDB)
+// clonePostgresDBAs creates targetDB as a clone of sourceDB (CREATE DATABASE ...
+// WITH TEMPLATE), idempotently (a no-op when targetDB already exists). The
+// caller must ensure Postgres is ready and sourceDB exists. Used to give a
+// non-main copy's live-dev a per-(copy, BP) database seeded from the BP's dev
+// data. Port of bp_databases.clone_postgres_db_as.
+func clonePostgresDBAs(ctx context.Context, container, user, targetDB, sourceDB string) error {
+	exists, err := postgresDBExists(ctx, container, user, targetDB)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if exists {
-		return newDB, nil
+		return nil
 	}
 	// WITH TEMPLATE needs no other sessions on the template DB — drop them first
 	// (best-effort; the CREATE is authoritative).
@@ -238,11 +224,11 @@ func clonePostgresDB(ctx context.Context, secretsDir, workspace, copyName, sourc
 		sourceDB)
 	_, _, _ = dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c", terminate)
 	_, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
-		fmt.Sprintf("CREATE DATABASE %q WITH TEMPLATE %q;", newDB, sourceDB))
+		fmt.Sprintf("CREATE DATABASE %q WITH TEMPLATE %q;", targetDB, sourceDB))
 	if rc != 0 && !strings.Contains(stderr, "already exists") {
-		return "", fmt.Errorf("clone CREATE DATABASE %s failed: %s", newDB, strings.TrimSpace(stderr))
+		return fmt.Errorf("clone CREATE DATABASE %s (template %s) failed: %s", targetDB, sourceDB, strings.TrimSpace(stderr))
 	}
-	return newDB, nil
+	return nil
 }
 
 // productionDBNumbers is the blue-green db numbers a production BP's slots use
@@ -329,16 +315,36 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 			continue
 		}
 
-		// 1) A non-main copy's live-dev backend connects to the cloned per-copy DB.
-		if stage == "live-dev" && copyName != "" {
-			if seen["copy:"+copyName] {
+		// 1) A non-main copy's live-dev backend gets its OWN per-(copy, BP)
+		//    database, seeded from that BP's dev DB (bp_<slug>) if it exists, else
+		//    the shared dev default. Per (copy, BP) — isolated from other BPs in
+		//    the copy and from other copies.
+		if stage == "live-dev" && copyName != "" && bpSlug != "" {
+			target := copyBPResourceNames(copyName, bpSlug)["postgres_db"]
+			if seen["copybp:"+target] {
 				continue
 			}
-			seen["copy:"+copyName] = true
-			if serviceSecrets(wctx.SecretsDir, "postgres", realm) == nil {
+			seen["copybp:"+target] = true
+			secrets := serviceSecrets(wctx.SecretsDir, "postgres", realm)
+			if secrets == nil || secrets["POSTGRES_USER"] == "" {
 				continue // Postgres not enabled — can't create a server
 			}
-			if _, err := clonePostgresDB(ctx, wctx.SecretsDir, wctx.WorkspaceName, copyName, realm); err != nil {
+			user := secrets["POSTGRES_USER"]
+			container := serviceContainerName(wctx.WorkspaceName, "postgres", realm)
+			if err := waitForPostgres(ctx, container, user); err != nil {
+				return err
+			}
+			// Seed from the BP's dev DB if it exists, else the shared dev default.
+			source := secrets["POSTGRES_DB"]
+			if source == "" {
+				source = "postgres"
+			}
+			devBPDB := bpResourceNames(bpSlug, 0)["postgres_db"]
+			if ex, err := postgresDBExists(ctx, container, user, devBPDB); err == nil && ex {
+				source = devBPDB
+			}
+			report("provision", "Cloning live-dev database "+target+" from "+source)
+			if err := clonePostgresDBAs(ctx, container, user, target, source); err != nil {
 				return err
 			}
 			continue
@@ -398,12 +404,31 @@ func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceCont
 			continue
 		}
 		bpSlug, copyName := deriveBPAndCopy(conf.RelativePath)
-		if bpSlug == "" || copyName != "" {
+		if bpSlug == "" {
 			continue
 		}
 		realm := realmForStage(conf.StageOrProduction())
 		if realm != "dev" && realm != "staging" && realm != "production" {
 			continue
+		}
+
+		// A non-main copy's live-dev backend gets its own per-(copy, BP) MinIO
+		// bucket (its Postgres DB is created fail-fast in ensureLivePostgresDBs).
+		// Unconditional — every BP in the copy is isolated.
+		if conf.StageOrProduction() == "live-dev" && copyName != "" {
+			bucket := copyBPResourceNames(copyName, bpSlug)["minio_bucket"]
+			if seen["copybucket:"+bucket] {
+				continue
+			}
+			seen["copybucket:"+bucket] = true
+			if minioWant[realm] == nil {
+				minioWant[realm] = map[string]bool{}
+			}
+			minioWant[realm][bucket] = true
+			continue
+		}
+		if copyName != "" {
+			continue // other copy stages have no per-BP namespaces
 		}
 		key := bpSlug + ":" + realm
 		if seen[key] || !reg.isRegistered(bpSlug, realm) {

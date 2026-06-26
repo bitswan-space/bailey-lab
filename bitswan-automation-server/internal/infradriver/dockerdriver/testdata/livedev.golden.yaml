@@ -23,8 +23,10 @@ services:
             BITSWAN_URL_TEMPLATE: https://ws4-{name}-4337-live-dev.example.com
             BITSWAN_WORKER_HOSTS: backend=ws4-fwgw-4337-live-dev:8080
             BITSWAN_WORKSPACE_NAME: ws4
+            COUCHDB_DB_PREFIX: copy-bar-bp-acme-
             DEPLOYMENT_ID: backend-copy-bar-acme-live-dev
-            POSTGRES_DB: postgres_copy_bar
+            MINIO_BUCKET: copy-bar-bp-acme
+            POSTGRES_DB: copy_bar_bp_acme
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: backend
@@ -58,8 +60,10 @@ services:
             BITSWAN_URL_TEMPLATE: https://ws4-{name}-4337-live-dev.example.com
             BITSWAN_WORKER_HOSTS: backend=ws4-fwgw-4337-live-dev:8080
             BITSWAN_WORKSPACE_NAME: ws4
+            COUCHDB_DB_PREFIX: copy-bar-bp-acme-
             DEPLOYMENT_ID: frontend-copy-bar-acme-live-dev
-            POSTGRES_DB: postgres_copy_bar
+            MINIO_BUCKET: copy-bar-bp-acme
+            POSTGRES_DB: copy_bar_bp_acme
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: frontend

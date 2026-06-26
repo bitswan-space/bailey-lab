@@ -258,8 +258,15 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		env["COUCHDB_DB_PREFIX"] = names["couchdb_prefix"]
 		env["MINIO_BUCKET"] = names["minio_bucket"]
 	}
-	if wtName != "" && stage == "live-dev" {
-		env["POSTGRES_DB"] = copyDBName(wtName)
+	// A non-main copy's live-dev backend gets its OWN per-(copy, BP) namespaces
+	// (database + bucket + couch prefix), isolated from other BPs in the copy and
+	// from other copies. Unconditional (not gated on registration) — overrides
+	// the dev per-BP names above for every BP in the copy.
+	if wtName != "" && stage == "live-dev" && bpSanitized != "" {
+		names := copyBPResourceNames(wtName, bpSanitized)
+		env["POSTGRES_DB"] = names["postgres_db"]
+		env["COUCHDB_DB_PREFIX"] = names["couchdb_prefix"]
+		env["MINIO_BUCKET"] = names["minio_bucket"]
 	}
 
 	if c.workspaceName != "" && c.domain != "" {
