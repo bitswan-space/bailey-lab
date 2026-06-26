@@ -7,7 +7,6 @@ BITSWAN_GITOPS_DIR points at a tmp_path.
 """
 
 import os
-import re
 
 import pytest
 
@@ -413,15 +412,24 @@ def _write_pg_secrets(gitops_home, stage="dev"):
     )
 
 
-def test_copy_db_name_matches_env_injection():
-    # Must equal the formula generate_docker_compose injects as POSTGRES_DB.
-    for raw in ("alice", "Tomas-Peroutka.Wingsdata-ai", "X_Y", "main2"):
-        expected = "postgres_copy_" + re.sub(r"[^a-z0-9_]", "_", raw.lower())
-        assert bp_databases.copy_db_name(raw) == expected
+def test_copy_bp_resource_names_per_copy_and_bp():
+    # Per-(copy, BP): postgres uses underscores, minio/couch use hyphens, all
+    # encode BOTH the copy and the BP so distinct (copy, BP) pairs never collide.
+    names = bp_databases.copy_bp_resource_names("alice", "my-bp")
+    assert names["postgres_db"] == "copy_alice_bp_my_bp"
+    assert names["minio_bucket"] == "copy-alice-bp-my-bp"
+    assert names["couchdb_prefix"] == "copy-alice-bp-my-bp-"
+    # Different BP in the same copy → different names (isolation).
+    other = bp_databases.copy_bp_resource_names("alice", "shop")
+    assert other["postgres_db"] != names["postgres_db"]
+    # Same BP in a different copy → different names too.
+    cross = bp_databases.copy_bp_resource_names("bob", "my-bp")
+    assert cross["postgres_db"] != names["postgres_db"]
 
 
-async def test_guard_clones_copy_db_at_deploy(gitops_home, fake_docker):
-    """The copy live-dev DB skipped at copy-create gets cloned at deploy."""
+async def test_guard_clones_per_copy_bp_db_at_deploy(gitops_home, fake_docker):
+    """A non-main copy's live-dev backend gets its OWN per-(copy, BP) DB at
+    deploy, cloned from the BP's dev DB (or the shared dev default)."""
     _write_pg_secrets(gitops_home, "dev")
     bs_yaml = {
         "deployments": {
@@ -430,10 +438,13 @@ async def test_guard_clones_copy_db_at_deploy(gitops_home, fake_docker):
     }
     await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
     joined = [" ".join(c) for c in fake_docker]
+    # bp_my_bp doesn't exist (fresh BP) → seed from the dev default "postgres".
     assert any(
-        'CREATE DATABASE "postgres_copy_alice" WITH TEMPLATE "postgres"' in j
+        'CREATE DATABASE "copy_alice_bp_my_bp" WITH TEMPLATE "postgres"' in j
         for j in joined
     ), joined
+    # No old single-per-copy database anymore.
+    assert not any("postgres_copy_alice" in j for j in joined), joined
 
 
 async def test_guard_skips_copy_when_postgres_not_enabled(gitops_home, fake_docker):

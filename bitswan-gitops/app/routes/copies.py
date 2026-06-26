@@ -62,35 +62,6 @@ def _get_postgres_secrets(stage: str = "dev") -> dict | None:
     return None
 
 
-def _copy_db_name(copy_name: str) -> str:
-    """Generate a Postgres database name for a copy.
-
-    Thin wrapper over the canonical name helper so copy-create, the deploy-time
-    ensure guard, and the POSTGRES_DB env injection all agree.
-    """
-    from app.services.bp_databases import copy_db_name
-
-    return copy_db_name(copy_name)
-
-
-async def _clone_postgres_db(copy_name: str) -> str | None:
-    """Ensure a copy's live-dev Postgres database (``postgres_copy_<copy>``)
-    exists. Returns its name, or None when Postgres isn't enabled in this
-    workspace.
-
-    A workspace with no Postgres yet (a fresh one where a user's personal copy
-    is created before any business process) simply has nothing to clone, so this
-    returns None — the per-copy DB is then provisioned at deploy by the
-    ensure-Postgres guard (`bp_databases.ensure_live_postgres_dbs`). Delegates to
-    the shared, readiness-aware `bp_databases.clone_postgres_db`, so copy-create
-    and deploy create the database by the exact same code path.
-    """
-    from app.services.bp_databases import clone_postgres_db
-
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-    return await clone_postgres_db(workspace_name, copy_name)
-
-
 # Copy names are filesystem path segments AND git branch names AND positional
 # git args. Rule out path traversal (no `/`, `.`), leading `-` (option
 # injection), and empty strings.
@@ -190,14 +161,11 @@ async def create_copy(body: CreateCopyRequest):
         "git", "remote", "set-url", "origin", _git_remote_url(), cwd=copy_path
     )
 
-    # Clone the Postgres dev database for this copy — the copy's live-dev
-    # backends connect to it, so a failure aborts creation.
-    try:
-        cloned_db = await _clone_postgres_db(name)
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    result = {"name": name, "path": copy_path, "postgres_db": cloned_db}
+    # No per-copy database at copy-create. Each BP's live-dev backend in this
+    # copy gets its OWN per-(copy, BP) database (copy_<copy>_bp_<slug>), created
+    # at deploy by the driver's ensure guard and seeded from that BP's dev DB —
+    # so there is nothing to clone here.
+    result = {"name": name, "path": copy_path}
 
     # Auto-start live-dev for every automation in the new copy (best-effort).
     try:
