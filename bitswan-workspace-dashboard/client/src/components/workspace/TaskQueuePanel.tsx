@@ -414,7 +414,9 @@ export function TaskQueuePanel({
   );
 }
 
-/** A copyable, full-text line for one activity item (no truncation). */
+/** A copyable, full-text record of one activity item (no truncation). Includes
+ *  the entry's full message trail when it has one, so "Copy all" captures the
+ *  same history the rows expose, not just the latest line. */
 function itemToText(item: ActivityItem): string {
   const meta = STATUS_META[item.status];
   const head = [
@@ -425,8 +427,17 @@ function itemToText(item: ActivityItem): string {
   ]
     .filter(Boolean)
     .join(' ');
-  const when = new Date(item.stampMs).toISOString();
-  return item.detail ? `${head}\n${item.detail}\n${when}` : `${head}\n${when}`;
+  const lines = [head];
+  const trail = item.trail ?? [];
+  if (trail.length > 1) {
+    for (const t of trail) {
+      lines.push(`  ${new Date(t.at).toISOString()}  ${t.text}`);
+    }
+  } else if (item.detail) {
+    lines.push(item.detail);
+  }
+  lines.push(new Date(item.stampMs).toISOString());
+  return lines.join('\n');
 }
 
 async function copyText(text: string): Promise<void> {
@@ -501,7 +512,23 @@ function ActivityLogModal({
                   {item.who ? (
                     <div className="text-muted-foreground">{item.who}</div>
                   ) : null}
-                  {item.detail ? (
+                  {(item.trail?.length ?? 0) > 1 ? (
+                    // The log shows the FULL message trail (every line the entry
+                    // cycled through), always expanded — same content the inline
+                    // row reveals when unrolled, but never collapsed here.
+                    <ol className="mt-1 space-y-0.5 border-l border-border pl-2">
+                      {item.trail!.map((t, i) => (
+                        <li key={i} className="flex items-baseline gap-2">
+                          <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                            {relativeTime(t.at, now)}
+                          </span>
+                          <span className="min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
+                            {t.text}
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : item.detail ? (
                     <pre
                       className={cn(
                         'mt-0.5 whitespace-pre-wrap break-words font-mono text-[11px]',
