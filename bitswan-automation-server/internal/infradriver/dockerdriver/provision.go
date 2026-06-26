@@ -279,13 +279,48 @@ func productionDBNumbers(bs *Bitswan, bpSlug string) []int {
 // each deploying backend connects to before the backend's connect-retry, and
 // raises when Postgres is enabled but the DB can't be created. Port of
 // bp_databases.ensure_live_postgres_dbs.
-func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) error {
+// freshDeploymentIDs returns the set of deployment ids whose container was
+// (re)created in this apply (its id wasn't in preExistingIDs), keyed by the
+// gitops.deployment_id label. Returns nil — meaning "couldn't scope, treat all
+// as fresh" — when there's no pre-snapshot or the container list can't be read.
+func freshDeploymentIDs(ctx context.Context, wctx infradriver.WorkspaceContext, preExistingIDs map[string]bool) map[string]bool {
+	if len(preExistingIDs) == 0 {
+		return nil
+	}
+	infos, err := listWorkspaceContainers(ctx, wctx)
+	if err != nil {
+		return nil
+	}
+	fresh := map[string]bool{}
+	for _, c := range infos {
+		if preExistingIDs[c.id] {
+			continue
+		}
+		if dep := c.labels["gitops.deployment_id"]; dep != "" {
+			fresh[dep] = true
+		}
+	}
+	return fresh
+}
+
+func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, preExistingIDs map[string]bool, report func(step, msg string)) error {
+	// Only the backends THIS apply (re)created can have a not-yet-existing live
+	// DB — one that's been running already proved its DB exists. Match a
+	// deployment to its container by the gitops.deployment_id label; a container
+	// whose id wasn't present before this apply is fresh. fresh==nil means we
+	// couldn't scope (no pre-snapshot, or the container list failed) → process
+	// every deployment, the old whole-workspace behavior (safe).
+	fresh := freshDeploymentIDs(ctx, wctx, preExistingIDs)
+
 	reg := loadRegistry(wctx.SecretsDir)
 	seen := map[string]bool{}
 	for _, depID := range sortedDepIDs(bs.Deployments) {
 		conf := bs.Deployments[depID]
 		if conf == nil {
 			continue
+		}
+		if fresh != nil && !fresh[depID] {
+			continue // unchanged backend — its live DB already exists
 		}
 		bpSlug, copyName := deriveBPAndCopy(conf.RelativePath)
 		stage := conf.StageOrProduction()

@@ -69,12 +69,14 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		}
 	}
 
-	// 3b. Fail-fast: ensure the live Postgres DB each backend connects to exists
-	//     before it settles into a connect-retry loop (bp_databases.
-	//     ensure_live_postgres_dbs). Raises if Postgres is enabled but the DB
-	//     can't be created — a clear deploy error beats a silent crash-loop.
-	report("provision", "Ensuring live databases...")
-	if err := ensureLivePostgresDBs(ctx, wctx, bs, report); err != nil {
+	// 3b. Fail-fast: ensure the live Postgres DB exists for each backend THIS
+	//     apply (re)created, before it settles into a connect-retry loop
+	//     (bp_databases.ensure_live_postgres_dbs). Scoped to fresh containers via
+	//     the same shadow-DOM analysis as certs — a backend that was already
+	//     running has a working DB, so there's nothing to fail-fast on. Raises if
+	//     Postgres is enabled but a needed DB can't be created.
+	report("provision", "Ensuring live databases for (re)created backends...")
+	if err := ensureLivePostgresDBs(ctx, wctx, bs, preExistingIDs, report); err != nil {
 		return fmt.Errorf("ensure live postgres dbs: %w", err)
 	}
 
