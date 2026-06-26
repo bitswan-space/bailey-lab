@@ -10,26 +10,35 @@ import type {
 import { authHeader, clearAccessToken } from './auth-token';
 import { notifySessionExpired, SessionExpiredError } from './session';
 
+// When the oauth2-proxy SESSION expires, it answers API calls with a 302 to the
+// Keycloak auth endpoint — NOT a 401. With the default `redirect: 'follow'` the
+// browser chases that cross-origin redirect, the page CSP `connect-src` blocks
+// it, and the fetch throws an opaque `TypeError: Failed to fetch` that looks
+// like a transient network blip. So every request uses `redirect: 'manual'`:
+// an auth redirect then comes back as an *opaque-redirect response*
+// (`type === 'opaqueredirect'`, status 0) we can detect cleanly — and the CSP
+// violation never happens. That (or a 401) means "session gone → re-login".
+const FETCH_BASE: RequestInit = {
+  credentials: 'include',
+  cache: 'no-store',
+  redirect: 'manual',
+};
+
+function isSessionGone(r: Response): boolean {
+  return r.type === 'opaqueredirect' || r.status === 0 || r.status === 401;
+}
+
 async function getJson<T>(url: string): Promise<T> {
-  let r = await fetch(url, {
-    credentials: 'include',
-    cache: 'no-store',
-    headers: await authHeader(),
-  });
-  if (r.status === 401) {
-    // Token may have expired — refetch from /oauth2/auth and retry once.
+  let r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
+  if (isSessionGone(r)) {
+    // Access token may just be stale — refetch from /oauth2/auth and retry once.
     clearAccessToken();
-    r = await fetch(url, {
-      credentials: 'include',
-      cache: 'no-store',
-      headers: await authHeader(),
-    });
+    r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
   }
-  // Still 401 after a token refresh → the oauth2-proxy SESSION is gone, not
-  // just the access token. Raise the app-wide signal (one banner prompts
-  // re-login) and throw a typed error so callers stay silent instead of
-  // rendering their own failure.
-  if (r.status === 401) {
+  // Still redirected/401 after a refresh → the oauth2-proxy SESSION is gone, not
+  // just the token. Raise the app-wide signal (one banner prompts re-login) and
+  // throw a typed error so callers stay silent instead of rendering a failure.
+  if (isSessionGone(r)) {
     notifySessionExpired();
     throw new SessionExpiredError();
   }
@@ -48,19 +57,18 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
   for (let attempt = 0; ; attempt++) {
     try {
       const r = await fetch(url, {
-        credentials: 'include',
-        cache: 'no-store',
+        ...FETCH_BASE,
         ...init,
         headers: { ...(init.headers as Record<string, string>), ...(await authHeader()) },
       });
-      if (r.status === 401 && !refreshedToken) {
-        // Token may have expired — refetch from /oauth2/auth and retry once.
+      if (isSessionGone(r) && !refreshedToken) {
+        // Token may just be stale — refetch from /oauth2/auth and retry once.
         refreshedToken = true;
         clearAccessToken();
         continue;
       }
-      // Still 401 after the refresh → expired oauth2-proxy session (see getJson).
-      if (r.status === 401) {
+      // Still redirected/401 after the refresh → expired session (see getJson).
+      if (isSessionGone(r)) {
         notifySessionExpired();
         throw new SessionExpiredError();
       }
