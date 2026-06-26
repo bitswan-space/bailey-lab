@@ -149,6 +149,20 @@ $SSH "$VM" 'echo "[route]"; ip -4 route; echo "[resolv]"; cat /etc/resolv.conf 2
   echo "[inet]"; ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && echo inet-OK || echo inet-FAIL; \
   echo "[dns]"; getent hosts archive.ubuntu.com >/dev/null 2>&1 && echo dns-OK || echo dns-FAIL' 2>&1 || true
 
+# Cloud-init renders our static nameservers through systemd-resolved, whose
+# 127.0.0.53 stub fails to forward in this guest — apt then dies with "Temporary
+# failure resolving 'archive.ubuntu.com'". Host NAT for 192.168.122.0/24 is
+# correct (LIBVIRT_PRT masquerade + ip_forward + FORWARD virbr0 ACCEPT all
+# verified), so the guest CAN reach public DNS directly. Stop resolved from
+# owning resolv.conf and point it straight at public resolvers. (ICMP egress is
+# blocked on this cloud even for the host, so the probe's ping-based inet check
+# is unreliable; DNS resolution is the real readiness signal.)
+echo "=== fix guest DNS (bypass broken systemd-resolved stub) ==="
+$SSH "$VM" 'sudo systemctl stop systemd-resolved 2>/dev/null; sudo systemctl mask systemd-resolved 2>/dev/null; \
+  sudo rm -f /etc/resolv.conf; printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\n" | sudo tee /etc/resolv.conf >/dev/null; \
+  getent hosts archive.ubuntu.com >/dev/null 2>&1 && echo dns-FIXED-OK || echo dns-STILL-FAIL' 2>&1 || true
+mark "host: fix guest DNS"
+
 echo "=== sync repo into guest ==="
 $SSH "$VM" 'sudo mkdir -p /repo && sudo chown ubuntu /repo'
 rsync -a -e "$SSH" --exclude node_modules --exclude .git --exclude 'dist/' \
