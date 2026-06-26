@@ -6,9 +6,20 @@ const POLL_INTERVAL_MS = 3000;
 // caps each image build at 5 minutes), so several members can legitimately
 // take a while. The loop is a cheap GET every few seconds.
 const TIMEOUT_MS = 30 * 60_000;
-// Consecutive poll failures before giving up (gitops restarted and forgot
-// the task, auth broke, …).
+// Consecutive HARD poll failures (network down, auth broke) before giving up.
 const MAX_POLL_FAILURES = 5;
+// `deploy-status` is a NON-authoritative poll fallback (gitops's own docstring):
+// a 404 / transient blip means "can't read the task right now" — e.g. an
+// ingress hiccup on the dashboard's inner host — NOT that the deploy failed
+// (gitops keeps the task for an hour). The deploy runs independently of this
+// endpoint, so a missing status must never be reported as a failed deploy.
+// Tolerate a long run of "not found" (well past a normal deploy) before giving
+// up, and even then report it NEUTRALLY, never as "Failed".
+const MAX_STATUS_UNAVAILABLE = 40;
+// A poll error whose message carries an HTTP 404 ("…returned 404") — task not
+// found, i.e. status temporarily unreadable, not a deploy failure.
+const isNotFound = (e: unknown): boolean =>
+  e instanceof Error && /\b404\b/.test(e.message);
 
 export type BpDeployOutcome = 'completed' | 'failed' | 'timeout' | 'lost';
 
@@ -51,18 +62,37 @@ export async function watchDeployTask(
 
   const deadline = Date.now() + TIMEOUT_MS;
   let failures = 0;
+  let unavailable = 0;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     let status: DeployStatusResponse;
     try {
       status = await api.deployStatus(taskId);
       failures = 0;
-    } catch {
+      unavailable = 0;
+    } catch (e) {
+      // A 404 (task not found) is the status endpoint being transiently
+      // unreadable — NOT a failed deploy. Keep polling; the deploy is running
+      // regardless and the next reachable poll will report its real outcome.
+      if (isNotFound(e)) {
+        unavailable += 1;
+        if (unavailable >= MAX_STATUS_UNAVAILABLE) {
+          // Never confirmed the status. Do NOT cry "failed" — the deploy very
+          // likely completed; point the user at the authoritative view.
+          const msg =
+            "couldn't read the deploy status (the deploy may have finished) — check the Deployments tab";
+          toast.message(`${copy.loading}: ${msg}`, { id: toastId, duration: 9000 });
+          copy.onProgress?.(msg);
+          return 'lost';
+        }
+        continue;
+      }
       failures += 1;
       if (failures >= MAX_POLL_FAILURES) {
-        const msg = 'lost track of the deploy task — check the container logs';
-        toast.error(`${copy.failurePrefix}: ${msg}`, { id: toastId, duration: 8000 });
-        copy.onError?.(msg);
+        const msg =
+          "couldn't reach the deploy status endpoint — check the Deployments tab";
+        toast.message(`${copy.loading}: ${msg}`, { id: toastId, duration: 8000 });
+        copy.onProgress?.(msg);
         return 'lost';
       }
       continue;
