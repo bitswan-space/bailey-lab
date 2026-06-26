@@ -7,5 +7,5 @@
     {"checksum": "bsum", "toml": "[deployment]\nexpose = false\nport = 8080\n"}
   ],
   "secrets_files": [],
-  "bitswan_yaml": "backups:\n  shop:\n    slots:\n      a:\n        db: 1\n      b:\n        db: 2\n    live_db: 1\ndeployments:\n  frontend-shop:\n    automation_name: frontend\n    context: shop\n    stage: ''\n    checksum: fsum\n    image: internal/ws2-shop-frontend:shafsum\n    relative_path: copies/main/shop/frontend\n  backend-shop:\n    automation_name: backend\n    context: shop\n    stage: ''\n    checksum: bsum\n    image: internal/ws2-shop-backend:shabsum\n    relative_path: copies/main/shop/backend\n"
+  "bitswan_yaml": "backups:\n  shop:\n    slots:\n      blue:\n        db: 1\n      green:\n        db: 2\n    live_db: 1\ndeployments:\n  frontend-shop:\n    automation_name: frontend\n    context: shop\n    stage: ''\n    checksum: fsum\n    image: internal/ws2-shop-frontend:shafsum\n    relative_path: copies/main/shop/frontend\n  backend-shop:\n    automation_name: backend\n    context: shop\n    stage: ''\n    checksum: bsum\n    image: internal/ws2-shop-backend:shabsum\n    relative_path: copies/main/shop/backend\n"
 }

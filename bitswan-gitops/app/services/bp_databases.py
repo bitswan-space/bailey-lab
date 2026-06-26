@@ -735,7 +735,7 @@ def _production_db_numbers(bs_yaml: dict | None, bp_slug: str) -> list[int]:
     to one of the two persistent production databases.
     """
     rec = ((bs_yaml or {}).get("backups") or {}).get(bp_slug) or {}
-    slots = rec.get("slots") or {"a": {"db": 1}, "b": {"db": 2}}
+    slots = rec.get("slots") or {"blue": {"db": 1}, "green": {"db": 2}}
     nums = sorted(
         {
             int((slots[s] or {}).get("db"))

@@ -24,7 +24,7 @@ const (
 )
 
 // appSlots is the blue-green app slot order (AutomationService.APP_SLOTS).
-var appSlots = [3]string{"a", "b", "c"}
+var appSlots = [3]string{"blue", "green", "purple"}
 
 var (
 	sanitizeRe = regexp.MustCompile(`[^a-z0-9-]`)
@@ -44,7 +44,7 @@ func sanitizeAutomationName(name string) string {
 }
 
 // makeHostnameLabel builds a DNS hostname label from structured components
-// (automation_service.make_hostname_label). slot ("a"/"b") is appended as a
+// (automation_service.make_hostname_label). slot ("blue"/"green") is appended as a
 // trailing segment; pass "" for non-production.
 func makeHostnameLabel(workspaceName, automationName, context, stage, slot string) string {
 	ws := truncate(workspaceName, maxNameLen)

@@ -220,7 +220,7 @@ func (c *compileState) slotsFor(rec *BackupRec) map[string]*SlotRec {
 		return rec.Slots
 	}
 	one, two := 1, 2
-	return map[string]*SlotRec{"a": {DB: &one}, "b": {DB: &two}}
+	return map[string]*SlotRec{"blue": {DB: &one}, "green": {DB: &two}}
 }
 
 // liveSlotFor ports _live_slot_for.
@@ -240,7 +240,7 @@ func (c *compileState) liveSlotFor(conf *Deployment) string {
 			return s
 		}
 	}
-	return "a"
+	return "blue"
 }
 
 // drSlotFor ports _dr_slot_for.

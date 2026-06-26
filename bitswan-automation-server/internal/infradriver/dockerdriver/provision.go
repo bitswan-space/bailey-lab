@@ -256,7 +256,7 @@ func productionDBNumbers(bs *Bitswan, bpSlug string) []int {
 	}
 	if slots == nil {
 		one, two := 1, 2
-		slots = map[string]*SlotRec{"a": {DB: &one}, "b": {DB: &two}}
+		slots = map[string]*SlotRec{"blue": {DB: &one}, "green": {DB: &two}}
 	}
 	set := map[int]bool{}
 	for _, sr := range slots {

@@ -53,7 +53,7 @@ func TestProductionDBNumbers(t *testing.T) {
 	}
 	// Explicit slots → sorted unique db numbers.
 	bs = &Bitswan{Backups: map[string]*BackupRec{
-		"x": {Slots: map[string]*SlotRec{"a": {DB: &three}, "b": {DB: &one}, "c": {DB: &two}}},
+		"x": {Slots: map[string]*SlotRec{"blue": {DB: &three}, "green": {DB: &one}, "purple": {DB: &two}}},
 	}}
 	if got := productionDBNumbers(bs, "x"); !reflect.DeepEqual(got, []int{1, 2, 3}) {
 		t.Errorf("explicit slots = %v, want [1 2 3]", got)

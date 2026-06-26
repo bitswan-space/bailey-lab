@@ -253,11 +253,11 @@ def make_hostname_label(
     workspace_name and automation_name are each capped at 24 chars to
     guarantee the result fits within the 63-char DNS label limit.
 
-    `slot` ('a'/'b') is the blue-green production slot. It is appended as a
-    trailing segment so each slot's containers get a distinct, stable name
-    (`…-a` / `…-b`); the ingress repoint switches which slot the production
-    hostname resolves to. Non-production deployments pass slot=None and are
-    byte-identical to before.
+    `slot` ('blue'/'green') is the blue-green production slot. It is appended as
+    a trailing segment so each slot's containers get a distinct, stable name
+    (`…-blue` / `…-green`); the ingress repoint switches which slot the
+    production hostname resolves to. Non-production deployments pass slot=None
+    and are byte-identical to before.
     """
     ws = workspace_name[:MAX_NAME_LEN]
     an = automation_name[:MAX_NAME_LEN]
@@ -1814,10 +1814,13 @@ class AutomationService:
 
     # ── Backups: blue-green production (3 app slots over 2 DBs) + audit ───────
     # A production BP has TWO persistent logical databases (db 1 and db 2) and
-    # up to THREE app-container slots (a/b/c). Two pointers drive everything:
-    #   • live_db   (1|2)   — which DB is Production; the other is the DR standby.
-    #   • live_slot (a|b|c) — which app slot the production ingress serves.
-    # `slots` records each ACTIVE app slot's DB wiring ({a: {db: 1}, ...}); a
+    # up to THREE app-container slots (blue/green/purple). Two pointers drive
+    # everything:
+    #   • live_db   (1|2)               — which DB is Production; the other is
+    #                                     the DR standby.
+    #   • live_slot (blue|green|purple) — which app slot the production ingress
+    #                                     serves.
+    # `slots` records each ACTIVE app slot's DB wiring ({blue: {db: 1}, ...}); a
     # slot absent from `slots` is idle (no containers). Steady state runs two
     # slots — the live one (wired to live_db) and the DR one (wired to the
     # standby db) — leaving one idle as the zero-downtime-promote buffer.
@@ -1832,7 +1835,7 @@ class AutomationService:
     # audit log live in bitswan.yaml under `backups` (versioned like
     # secrets/firewall/dr); the git log is the full audit trail.
     BACKUP_DEFAULT_RETENTION = {"daily": 7, "weekly": 0, "monthly": 3}
-    APP_SLOTS = ("a", "b", "c")
+    APP_SLOTS = ("blue", "green", "purple")
 
     @staticmethod
     def _other_db(db: int) -> int:
@@ -1846,11 +1849,11 @@ class AutomationService:
         rec = (bs.get("backups") or {}).get(bp) or {}
         live_db = int(rec.get("live_db") or 1)
         standby_db = self._other_db(live_db)
-        # Default fresh wiring: slot a is live on db1, slot b is DR on db2,
-        # slot c idle (the promote buffer).
-        slots = rec.get("slots") or {"a": {"db": 1}, "b": {"db": 2}}
+        # Default fresh wiring: blue is live on db1, green is DR on db2,
+        # purple idle (the promote buffer).
+        slots = rec.get("slots") or {"blue": {"db": 1}, "green": {"db": 2}}
         live_slot = rec.get("live_slot") or next(
-            (s for s, m in slots.items() if (m or {}).get("db") == live_db), "a"
+            (s for s, m in slots.items() if (m or {}).get("db") == live_db), "blue"
         )
         dr_slot = next(
             (
