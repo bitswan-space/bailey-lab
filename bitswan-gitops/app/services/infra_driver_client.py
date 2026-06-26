@@ -288,7 +288,10 @@ class InfraDriverClient:
                 "-C",
                 work_tree,
                 "push",
-                "--force",
+                # No --force: the driver rejects non-fast-forward pushes
+                # (receive.denyNonFastForwards) so the deploy history can never be
+                # clobbered. Deploys are roll-forward; a non-ff push is a real
+                # error and must fail loudly here, not overwrite history.
                 self.deploy_remote,
                 "HEAD:refs/heads/main",
             ],

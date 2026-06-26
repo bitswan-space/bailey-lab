@@ -114,6 +114,14 @@ func ensureBareRepo(gitDir string, cf ctxFlags) error {
 		"bitswan.wrap":       fmt.Sprintf("%t", cf.wrap),
 		// git-http-backend refuses receive-pack (push) unless this is set.
 		"http.receivepack": "true",
+		// Forbid force-push and ref deletion server-side: the deploy history is
+		// the authoritative record of what was deployed, and a non-fast-forward
+		// push would rewrite/clobber it. Enforced at the repo regardless of what
+		// any client sends — `git push --force` is rejected here, not just absent
+		// from our own client. Deploys are always roll-FORWARD (a rollback is a
+		// new commit that restores a prior tree), so this never blocks a deploy.
+		"receive.denyNonFastForwards": "true",
+		"receive.denyDeletes":         "true",
 	} {
 		if err := exec.Command("git", "--git-dir", gitDir, "config", k, v).Run(); err != nil {
 			return fmt.Errorf("git config %s: %w", k, err)
