@@ -470,7 +470,7 @@ async def test_guard_creates_both_blue_green_prod_dbs(gitops_home, fake_docker):
         "deployments": {
             "d1": {"relative_path": "copies/main/My BP/backend", "stage": "production"}
         },
-        "backups": {"my-bp": {"slots": {"a": {"db": 1}, "b": {"db": 2}}}},
+        "backups": {"my-bp": {"slots": {"blue": {"db": 1}, "green": {"db": 2}}}},
     }
     await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
     joined = [" ".join(c) for c in fake_docker]
