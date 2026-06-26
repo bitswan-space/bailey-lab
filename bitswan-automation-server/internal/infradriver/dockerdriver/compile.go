@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 	yaml "gopkg.in/yaml.v3"
@@ -127,13 +128,20 @@ func compile(wctx infradriver.WorkspaceContext, bs *Bitswan) (composeYAML string
 	workerHosts := c.computeWorkerHosts(deployments, fwScope)
 
 	for _, depID := range sortedDepIDs(deployments) {
+		if strings.Contains(depID, "@") {
+			// A `<base_id>@<slot>` entry is a per-slot version overlay, not a
+			// standalone deployment — it is applied to its base deployment's
+			// matching slot in effectiveSlotConf below, never emitted on its own.
+			continue
+		}
 		conf := deployments[depID]
 		if conf == nil {
 			conf = &Deployment{}
 			deployments[depID] = conf
 		}
 		for _, sd := range c.slotDBPairs(conf) {
-			entry, serviceName, route, emit, derr := c.buildServiceEntry(depID, conf, sd.slot, sd.db, workerHosts, fwScope)
+			slotConf := c.effectiveSlotConf(depID, conf, sd.slot, deployments)
+			entry, serviceName, route, emit, derr := c.buildServiceEntry(depID, slotConf, sd.slot, sd.db, workerHosts, fwScope)
 			if derr != nil {
 				return "", nil, nil, derr
 			}
@@ -206,6 +214,43 @@ func (c *compileState) slotDBPairs(conf *Deployment) []slotDB {
 		return []slotDB{{"", 0}}
 	}
 	return pairs
+}
+
+// effectiveSlotConf returns the deployment config the compiler should use for a
+// given slot. A zero-downtime blue-green promote pins a NEW version onto the
+// idle slot by adding a `<base_id>@<slot>` overlay entry to deployments — same
+// automation, different code. When that overlay exists, the version-bearing
+// fields (checksum/source/relative_path/image/tag) come from it while
+// everything else (automation_name/context/stage/replicas/services) stays from
+// the base — so the live and idle slots can run DIFFERENT versions during the
+// promote, and the driver's health-gated ingress flip then cuts over to the
+// idle slot. Without an overlay (the steady state, and every non-production
+// slot) the base conf is returned unchanged.
+func (c *compileState) effectiveSlotConf(baseID string, base *Deployment, slot string, deployments map[string]*Deployment) *Deployment {
+	if slot == "" {
+		return base
+	}
+	overlay := deployments[baseID+"@"+slot]
+	if overlay == nil {
+		return base
+	}
+	eff := *base
+	if overlay.Checksum != "" {
+		eff.Checksum = overlay.Checksum
+	}
+	if overlay.Source != "" {
+		eff.Source = overlay.Source
+	}
+	if overlay.RelativePath != "" {
+		eff.RelativePath = overlay.RelativePath
+	}
+	if overlay.Image != "" {
+		eff.Image = overlay.Image
+	}
+	if overlay.TagChecksum != "" {
+		eff.TagChecksum = overlay.TagChecksum
+	}
+	return &eff
 }
 
 func (c *compileState) backupRec(bpSlug string) *BackupRec {
