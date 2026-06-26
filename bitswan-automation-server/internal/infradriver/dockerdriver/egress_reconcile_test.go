@@ -1,6 +1,7 @@
 package dockerdriver
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -74,5 +75,20 @@ func TestEgressHashStableAndSensitive(t *testing.T) {
 	_, w3, _, _ := prepareComposeForEgress(changed)
 	if w3[0].desiredHash == w1[0].desiredHash {
 		t.Error("hash did not change when the worker image changed")
+	}
+}
+
+func TestComposeServiceNames(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/dc.yaml"
+	if err := os.WriteFile(p, []byte("services:\n  a:\n    image: x\n  b:\n    image: y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := composeServiceNames(p)
+	if !got["a"] || !got["b"] || len(got) != 2 {
+		t.Errorf("services = %v, want {a,b}", got)
+	}
+	if composeServiceNames(dir+"/missing.yaml") != nil {
+		t.Error("missing file should yield nil (skip retirement)")
 	}
 }

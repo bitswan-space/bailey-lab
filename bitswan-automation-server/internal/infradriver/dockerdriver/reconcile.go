@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
+	yaml "gopkg.in/yaml.v3"
 )
 
 // reconcile brings the generated compose project up and applies the post-up
@@ -64,7 +66,10 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		}
 	} else {
 		report("compose_up", "Bringing up docker-compose project...")
-		if err := composeUpServices(ctx, wctx, composePath, nil, true /*removeOrphans*/, false /*noDeps*/, report); err != nil {
+		// removeOrphans=false: a production promote retires the OLD live slot,
+		// but we must keep its containers serving until AFTER the ingress flips
+		// to the new slot (step 5b). Orphans are reaped post-cutover.
+		if err := composeUpServices(ctx, wctx, composePath, nil, false /*removeOrphans*/, false /*noDeps*/, report); err != nil {
 			return err
 		}
 	}
@@ -96,16 +101,110 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	report("provision", "Provisioning per-BP namespaces...")
 	provisionForDeployments(ctx, wctx, bs, report)
 
-	// 5. Configure ingress: converge the daemon's gitops-managed routes to the
+	// 5. Zero-downtime gate: never hand a production host to an upstream that
+	//    isn't ready. A promote brought the target slot up in step 3; wait for
+	//    its healthcheck before the cutover. Steady-state reconciles and DR
+	//    restores (target already healthy) pass through instantly.
+	waitProductionUpstreamsHealthy(ctx, routes, report)
+
+	// 5a. Configure ingress: converge the daemon's gitops-managed routes to the
 	//    desired set. The applier owns the Ingress (k8s-style), so this is the
 	//    single ingress side effect of an apply — gitops no longer registers
-	//    routes. Fail loudly: a route the deploy implies but the ingress lacks
-	//    means the endpoint 404s, which must surface, not be swallowed.
+	//    routes. For a promote this is the atomic cutover to the new live slot.
+	//    Fail loudly: a route the deploy implies but the ingress lacks means the
+	//    endpoint 404s, which must surface, not be swallowed.
 	report("ingress", "Reconciling ingress routes...")
 	if err := reconcileIngress(ctx, wctx.WorkspaceName, routes); err != nil {
 		return err
 	}
+
+	// 5b. Retire orphans (a promote's old live slot, a removed deployment) AFTER
+	//     the ingress flip, so nothing routes to a container we remove. Targeted
+	//     removal scoped to the app project — not a `compose up --remove-orphans`,
+	//     which would re-evaluate and spuriously recreate the egress workers.
+	retireOrphanedContainers(ctx, wctx, composePath, report)
 	return nil
+}
+
+// waitProductionUpstreamsHealthy blocks until every production-stage route's
+// upstream container reports healthy (those that declare a healthcheck). It is
+// the zero-downtime gate: the production/DR hosts are only flipped to slots that
+// are actually ready. Best-effort per upstream — a missing/healthcheck-less
+// container is skipped, not fatal; a genuine timeout is reported.
+func waitProductionUpstreamsHealthy(ctx context.Context, routes []infradriver.Route, report func(step, msg string)) {
+	seen := map[string]bool{}
+	for _, r := range routes {
+		if r.Stage != "production" {
+			continue
+		}
+		c := r.Upstream
+		if i := strings.IndexByte(c, ':'); i > 0 {
+			c = c[:i]
+		}
+		if c == "" || seen[c] {
+			continue
+		}
+		seen[c] = true
+		// already healthy → no wait; "none"/"unknown" (no healthcheck declared,
+		// or container absent) can't be gated, so don't block on them either.
+		switch containerHealth(ctx, c) {
+		case "healthy", "none", "unknown":
+			continue
+		}
+		if err := waitForHealthy(ctx, c, 120*time.Second); err != nil {
+			report("ingress", fmt.Sprintf("production upstream %s not healthy before cutover: %v", c, err))
+		}
+	}
+}
+
+// retireOrphanedContainers removes running containers in the app compose project
+// whose service is no longer in the desired compose (e.g. the old live slot a
+// promote replaced). Done after the ingress cutover so a removed container is
+// never one a route still points at. Scoped to wctx.WorkspaceName's project, so
+// it never touches the site/dashboard/driver containers.
+func retireOrphanedContainers(ctx context.Context, wctx infradriver.WorkspaceContext, composePath string, report func(step, msg string)) {
+	desired := composeServiceNames(composePath)
+	if desired == nil {
+		return // couldn't parse the compose — don't remove anything
+	}
+	infos, err := listWorkspaceContainers(ctx, wctx)
+	if err != nil {
+		return
+	}
+	for _, c := range infos {
+		if c.labels["com.docker.compose.project"] != wctx.WorkspaceName {
+			continue // only the app deployment project, never site/dashboard
+		}
+		svc := c.labels["com.docker.compose.service"]
+		if svc == "" || desired[svc] {
+			continue
+		}
+		if out, err := exec.CommandContext(ctx, "docker", "rm", "-f", c.id).CombinedOutput(); err != nil {
+			report("provision", fmt.Sprintf("retire orphan %s failed: %v: %s", svc, err, strings.TrimSpace(string(out))))
+		} else {
+			report("provision", fmt.Sprintf("retired orphaned container %s", svc))
+		}
+	}
+}
+
+// composeServiceNames returns the set of service names in a compose file, or nil
+// if it can't be read/parsed (caller then skips orphan retirement).
+func composeServiceNames(composePath string) map[string]bool {
+	raw, err := os.ReadFile(composePath)
+	if err != nil {
+		return nil
+	}
+	var doc struct {
+		Services map[string]interface{} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	set := make(map[string]bool, len(doc.Services))
+	for name := range doc.Services {
+		set[name] = true
+	}
+	return set
 }
 
 // composeUpServices runs `docker compose -p <ws> -f <file> up -d [flags]

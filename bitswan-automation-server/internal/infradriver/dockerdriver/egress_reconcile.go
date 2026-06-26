@@ -124,7 +124,10 @@ func reconcileEgressAware(ctx context.Context, wctx infradriver.WorkspaceContext
 	// Phase 1: reconcile everything except the egress workers. Compose no-ops
 	// unchanged services and recreates genuinely-changed ones (incl. gateways).
 	report("compose_up", fmt.Sprintf("Reconciling %d service(s) (egress workers handled separately)...", len(nonWorkers)))
-	if err := composeUpServices(ctx, wctx, composePath, nonWorkers, true /*removeOrphans*/, false /*noDeps*/, report); err != nil {
+	// removeOrphans=false: orphan reaping (retired slots) is deferred to after the
+	// ingress cutover (reconcile step 5b) so we never remove a container a route
+	// still points at.
+	if err := composeUpServices(ctx, wctx, composePath, nonWorkers, false /*removeOrphans*/, false /*noDeps*/, report); err != nil {
 		return err
 	}
 
