@@ -105,6 +105,15 @@ func ensureBareRepo(gitDir string, cf ctxFlags) error {
 			return fmt.Errorf("git init --bare: %w: %s", err, out)
 		}
 	}
+	// gitops pushes to refs/heads/main, but `git init --bare` points HEAD at
+	// init.defaultBranch (often 'master'). The post-receive hook's apply reads
+	// the pushed tree via `git archive HEAD`, so a HEAD that doesn't track the
+	// branch gitops pushes resolves to an unborn ref and every deploy fails with
+	// "git archive HEAD: exit status 128". Pin HEAD to main (idempotent, every
+	// serve) so the apply always sees the deployed tree.
+	if out, err := exec.Command("git", "--git-dir", gitDir, "symbolic-ref", "HEAD", "refs/heads/main").CombinedOutput(); err != nil {
+		return fmt.Errorf("git symbolic-ref HEAD main: %w: %s", err, out)
+	}
 	// Record the context so the hook can rebuild it without flags.
 	for k, v := range map[string]string{
 		"bitswan.workspace":  cf.workspace,
