@@ -395,6 +395,17 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // modal left open intercepts later clicks, so we assert it closed (loud fail
   // here beats a cascade into unrelated chapters). Safe when nothing is open.
   const closeAnyModal = async () => {
+    // The activity-log panel is a fixed bottom-right overlay; expanded, it sits
+    // over content (e.g. a stage's container Logs/Inspect buttons) and
+    // intercepts clicks. Collapse it into its corner button first so it never
+    // blocks a later click. Its toggle is the only aria-expanded button labelled
+    // "Activity"; in the collapsed state that label is gone, so this no-ops.
+    const activityToggle = d
+      .locator('button[aria-expanded]:visible', { hasText: /Activity/ })
+      .first();
+    if (await activityToggle.isVisible().catch(() => false)) {
+      await activityToggle.click().catch(() => {});
+    }
     // Radix dialog/alertdialog (Cancel/Close button) or the custom Inspect
     // overlay (aria-label="Close" ×). Track that specific closer: its
     // disappearance is the precise "modal closed" signal. We must match only a
