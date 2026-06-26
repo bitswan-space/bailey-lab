@@ -117,7 +117,12 @@ ethernets:
       - to: default
         via: $VM_GW
     nameservers:
-      addresses: [8.8.8.8, 1.1.1.1]
+      # libvirt dnsmasq on the bridge gateway — reachable from the guest and
+      # forwards to the host's upstream (public resolvers may be blocked for the
+      # guest on some clouds). A static resolv.conf override is also applied
+      # post-boot (see "fix guest DNS" below) since systemd-resolved's stub can
+      # fail to forward.
+      addresses: [$VM_GW]
 EOF
 cloud-localds --network-config "$WORK/network-config" "$WORK/seed.iso" "$WORK/user-data" "$WORK/meta-data"
 
@@ -151,16 +156,19 @@ $SSH "$VM" 'echo "[route]"; ip -4 route; echo "[resolv]"; cat /etc/resolv.conf 2
 
 # Cloud-init renders our static nameservers through systemd-resolved, whose
 # 127.0.0.53 stub fails to forward in this guest — apt then dies with "Temporary
-# failure resolving 'archive.ubuntu.com'". Host NAT for 192.168.122.0/24 is
-# correct (LIBVIRT_PRT masquerade + ip_forward + FORWARD virbr0 ACCEPT all
-# verified), so the guest CAN reach public DNS directly. Stop resolved from
-# owning resolv.conf and point it straight at public resolvers. (ICMP egress is
-# blocked on this cloud even for the host, so the probe's ping-based inet check
-# is unreliable; DNS resolution is the real readiness signal.)
-echo "=== fix guest DNS (bypass broken systemd-resolved stub) ==="
-$SSH "$VM" 'sudo systemctl stop systemd-resolved 2>/dev/null; sudo systemctl mask systemd-resolved 2>/dev/null; \
-  sudo rm -f /etc/resolv.conf; printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\n" | sudo tee /etc/resolv.conf >/dev/null; \
-  getent hosts archive.ubuntu.com >/dev/null 2>&1 && echo dns-FIXED-OK || echo dns-STILL-FAIL' 2>&1 || true
+# failure resolving 'archive.ubuntu.com'". Point resolv.conf at the libvirt
+# dnsmasq on the bridge gateway (192.168.122.1): it is always reachable from the
+# guest (on-link, no internet egress needed for the query itself) and forwards
+# to whatever upstream the HOST uses — which works even on clouds (e.g. Hetzner)
+# that block the guest from reaching public resolvers like 8.8.8.8/1.1.1.1
+# directly. Stop resolved from reclaiming the file. NB: this only fixes name
+# resolution — if the HOST has no internet egress at all (cloud firewall down),
+# the subsequent package fetch still fails; that is an environment outage, not
+# something this script can repair.
+echo "=== fix guest DNS (point at libvirt dnsmasq on $VM_GW) ==="
+$SSH "$VM" "sudo systemctl stop systemd-resolved 2>/dev/null; sudo systemctl mask systemd-resolved 2>/dev/null; \
+  sudo rm -f /etc/resolv.conf; printf 'nameserver $VM_GW\noptions edns0\n' | sudo tee /etc/resolv.conf >/dev/null; \
+  getent hosts archive.ubuntu.com >/dev/null 2>&1 && echo dns-FIXED-OK || echo dns-STILL-FAIL" 2>&1 || true
 mark "host: fix guest DNS"
 
 echo "=== sync repo into guest ==="
