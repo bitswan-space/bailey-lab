@@ -13,9 +13,15 @@ import (
 	toml "github.com/BurntSushi/toml"
 )
 
-// maxNameLen caps a workspace/automation name component so the resulting DNS
-// label fits the 63-char limit (gitops automation_service.MAX_NAME_LEN = 24).
-const maxNameLen = 24
+// maxNameLen caps a workspace/automation name component (gitops
+// automation_service.MAX_NAME_LEN = 24). maxLabelLen is the hard DNS label
+// limit the FULL hostname must never exceed — see makeHostnameLabel, which caps
+// the assembled label there while preserving the discriminating tail (context
+// hash + stage + slot), since the color slot names are far longer than a/b/c.
+const (
+	maxNameLen  = 24
+	maxLabelLen = 63
+)
 
 // appSlots is the blue-green app slot order (AutomationService.APP_SLOTS).
 var appSlots = [3]string{"a", "b", "c"}
@@ -43,26 +49,51 @@ func sanitizeAutomationName(name string) string {
 func makeHostnameLabel(workspaceName, automationName, context, stage, slot string) string {
 	ws := truncate(workspaceName, maxNameLen)
 	an := truncate(automationName, maxNameLen)
-	suffix := ""
-	if slot != "" {
-		suffix = "-" + slot
-	}
-	var base string
+
+	// Build the discriminating tail (context hash + stage + slot). These MUST
+	// survive intact: the hash keeps distinct contexts distinct, the stage keeps
+	// dev/staging/production/dr distinct, and the slot keeps blue/green/purple
+	// distinct. Only the human-readable ws/an names are truncated to fit 63.
+	tail := []string{}
 	if context != "" {
-		h := shortHash(context)
-		if stage != "" {
-			base = ws + "-" + an + "-" + h + "-" + stage
-		} else {
-			base = ws + "-" + an + "-" + h
-		}
-	} else {
-		if stage != "" {
-			base = ws + "-" + an + "-" + stage
-		} else {
-			base = ws + "-" + an
+		tail = append(tail, shortHash(context))
+	}
+	if stage != "" {
+		tail = append(tail, stage)
+	}
+	if slot != "" {
+		tail = append(tail, slot)
+	}
+
+	label := joinNonEmpty("-", ws, an, joinNonEmpty("-", tail...))
+	if len(label) <= maxLabelLen {
+		return label
+	}
+
+	// Over the limit (long workspace+automation names + a long slot name like
+	// "purple"): shrink ws+an to the remaining budget, splitting it between them,
+	// keeping the tail whole. Collisions would need the same ws/an prefixes AND
+	// the same context hash — vanishingly unlikely.
+	tailStr := joinNonEmpty("-", tail...)
+	budget := maxLabelLen - len(tailStr) - 2 // 2 separators: ws-an-tail
+	if budget < 2 {
+		budget = 2
+	}
+	half := budget / 2
+	ws = truncate(ws, half)
+	an = truncate(an, budget-len(ws))
+	return joinNonEmpty("-", ws, an, tailStr)
+}
+
+// joinNonEmpty joins the non-empty parts with sep.
+func joinNonEmpty(sep string, parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
 		}
 	}
-	return base + suffix
+	return strings.Join(out, sep)
 }
 
 func truncate(s string, n int) string {
