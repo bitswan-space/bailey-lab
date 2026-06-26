@@ -245,22 +245,6 @@ func clonePostgresDB(ctx context.Context, secretsDir, workspace, copyName, sourc
 	return newDB, nil
 }
 
-// createMinioBucket waits for MinIO to be healthy (its /minio/health/live
-// healthcheck — event-driven, no retry loop) then sets the mc alias and creates
-// the bucket. Port of bp_databases._create_minio_bucket.
-func createMinioBucket(ctx context.Context, container, accessKey, secretKey, bucket string) error {
-	if err := waitForHealthy(ctx, container, 60*time.Second); err != nil {
-		return err
-	}
-	if _, e, rc := dockerExec(ctx, container, "mc", "alias", "set", "local", "http://localhost:9000", accessKey, secretKey); rc != 0 {
-		return fmt.Errorf("mc alias set failed: %s", strings.TrimSpace(e))
-	}
-	if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+bucket); rc != 0 {
-		return fmt.Errorf("mc mb %s failed: %s", bucket, strings.TrimSpace(e))
-	}
-	return nil
-}
-
 // productionDBNumbers is the blue-green db numbers a production BP's slots use
 // (default [1,2]). Port of bp_databases._production_db_numbers.
 func productionDBNumbers(bs *Bitswan, bpSlug string) []int {
@@ -369,17 +353,10 @@ func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceCont
 	reg := loadRegistry(wctx.SecretsDir)
 	seen := map[string]bool{}
 
-	// Collect the independent per-(BP, realm, db) provisioning jobs, then run
-	// them concurrently: each touches a distinct DB name / bucket, the readiness
-	// waits overlap instead of stacking, and a slow service no longer blocks the
-	// next BP. Best-effort — a failure is reported, never fatal.
-	type job struct {
-		bpSlug string
-		realm  string
-		db     int
-		names  map[string]string
-	}
-	var jobs []job
+	// Collect the DESIRED resource names grouped by realm, so each shared
+	// postgres/minio container is touched ONCE — not once per business process.
+	pgWant := map[string]map[string]bool{}    // realm -> set(db name)
+	minioWant := map[string]map[string]bool{} // realm -> set(bucket name)
 	for _, depID := range sortedDepIDs(bs.Deployments) {
 		conf := bs.Deployments[depID]
 		if conf == nil {
@@ -404,52 +381,144 @@ func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceCont
 			dbs = productionDBNumbers(bs, bpSlug)
 		}
 		for _, db := range dbs {
-			jobs = append(jobs, job{bpSlug, realm, db, bpResourceNames(bpSlug, db)})
+			names := bpResourceNames(bpSlug, db)
+			if pgWant[realm] == nil {
+				pgWant[realm] = map[string]bool{}
+			}
+			pgWant[realm][names["postgres_db"]] = true
+			if minioWant[realm] == nil {
+				minioWant[realm] = map[string]bool{}
+			}
+			minioWant[realm][names["minio_bucket"]] = true
 		}
 	}
 
+	// One reconcile unit per (realm, service) — a handful at most. Each issues a
+	// single list query that BOTH confirms the service is up and reveals what
+	// already exists, then creates only the missing names. A normal redeploy
+	// (everything already there) lists once per service and creates nothing.
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	for _, j := range jobs {
+	for realm, want := range pgWant {
 		wg.Add(1)
-		go func(j job) {
+		go func(realm string, want map[string]bool) {
 			defer wg.Done()
-			if err := provisionBPObjects(ctx, wctx, j.realm, j.names); err != nil {
-				mu.Lock()
-				report("provision", fmt.Sprintf("per-BP provisioning for %s (db%d) at %s deferred: %v", j.bpSlug, j.db, j.realm, err))
-				mu.Unlock()
-			}
-		}(j)
+			reconcilePostgresDBs(ctx, wctx, realm, want, report)
+		}(realm, want)
+	}
+	for realm, want := range minioWant {
+		wg.Add(1)
+		go func(realm string, want map[string]bool) {
+			defer wg.Done()
+			reconcileMinioBuckets(ctx, wctx, realm, want, report)
+		}(realm, want)
 	}
 	wg.Wait()
 }
 
-// provisionBPObjects creates the Postgres DB + MinIO bucket for one (BP, realm,
-// db) when those services are enabled and running. couchdb is lazy (automations
-// create {prefix}* DBs themselves). Mirrors ensure_bp_databases' per-service body.
-func provisionBPObjects(ctx context.Context, wctx infradriver.WorkspaceContext, realm string, names map[string]string) error {
-	if secrets := serviceSecrets(wctx.SecretsDir, "postgres", realm); secrets != nil {
-		container := serviceContainerName(wctx.WorkspaceName, "postgres", realm)
-		if containerRunning(ctx, container) {
-			user := secrets["POSTGRES_USER"]
-			if user == "" {
-				user = "admin"
-			}
-			if err := waitForPostgres(ctx, container, user); err != nil {
-				return err
-			}
-			if err := createPostgresDB(ctx, container, user, names["postgres_db"]); err != nil {
-				return err
-			}
+// reconcilePostgresDBs ensures every desired database exists in the realm's
+// postgres, k8s-style: ONE `SELECT datname` lists what's there (and proves
+// postgres is accepting connections — no separate health probe), then it
+// creates only the missing ones. The 60s health wait is paid ONLY on the cold
+// path (the list failed to connect), never on a normal redeploy.
+func reconcilePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext, realm string, want map[string]bool, report func(step, msg string)) {
+	secrets := serviceSecrets(wctx.SecretsDir, "postgres", realm)
+	if secrets == nil || !containerRunning(ctx, serviceContainerName(wctx.WorkspaceName, "postgres", realm)) {
+		return
+	}
+	container := serviceContainerName(wctx.WorkspaceName, "postgres", realm)
+	user := secrets["POSTGRES_USER"]
+	if user == "" {
+		user = "admin"
+	}
+	existing, err := listPostgresDBs(ctx, container, user)
+	if err != nil {
+		// Not accepting connections yet (cold start / just recreated): wait once
+		// on the health-event stream, then retry. Fail loudly if it never comes.
+		if werr := waitForHealthy(ctx, container, 60*time.Second); werr != nil {
+			report("provision", fmt.Sprintf("postgres %s not ready: %v", realm, werr))
+			return
+		}
+		if existing, err = listPostgresDBs(ctx, container, user); err != nil {
+			report("provision", fmt.Sprintf("postgres %s list databases deferred: %v", realm, err))
+			return
 		}
 	}
-	if secrets := serviceSecrets(wctx.SecretsDir, "minio", realm); secrets != nil {
-		container := serviceContainerName(wctx.WorkspaceName, "minio", realm)
-		if containerRunning(ctx, container) {
-			if err := createMinioBucket(ctx, container, secrets["MINIO_ROOT_USER"], secrets["MINIO_ROOT_PASSWORD"], names["minio_bucket"]); err != nil {
-				return err
-			}
+	for db := range want {
+		if existing[db] {
+			continue
+		}
+		if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
+			fmt.Sprintf("CREATE DATABASE %q;", db)); rc != 0 && !strings.Contains(stderr, "already exists") {
+			report("provision", fmt.Sprintf("create database %s deferred: %s", db, strings.TrimSpace(stderr)))
 		}
 	}
-	return nil
+}
+
+// listPostgresDBs returns the set of existing database names. A non-zero exit
+// means postgres is not accepting connections — surfaced as an error so the
+// caller takes the cold-start (wait-then-retry) path.
+func listPostgresDBs(ctx context.Context, container, user string) (map[string]bool, error) {
+	stdout, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres",
+		"-t", "-A", "-c", "SELECT datname FROM pg_database")
+	if rc != 0 {
+		return nil, fmt.Errorf("%s", strings.TrimSpace(stderr))
+	}
+	set := map[string]bool{}
+	for _, line := range strings.Split(stdout, "\n") {
+		if n := strings.TrimSpace(line); n != "" {
+			set[n] = true
+		}
+	}
+	return set, nil
+}
+
+// reconcileMinioBuckets ensures every desired bucket exists in the realm's
+// minio: ONE `mc ls` lists what's there (and proves minio answers), then it
+// creates only the missing ones. Same cold-path-only health wait as postgres.
+func reconcileMinioBuckets(ctx context.Context, wctx infradriver.WorkspaceContext, realm string, want map[string]bool, report func(step, msg string)) {
+	secrets := serviceSecrets(wctx.SecretsDir, "minio", realm)
+	if secrets == nil || !containerRunning(ctx, serviceContainerName(wctx.WorkspaceName, "minio", realm)) {
+		return
+	}
+	container := serviceContainerName(wctx.WorkspaceName, "minio", realm)
+	ak, sk := secrets["MINIO_ROOT_USER"], secrets["MINIO_ROOT_PASSWORD"]
+	existing, err := listMinioBuckets(ctx, container, ak, sk)
+	if err != nil {
+		if werr := waitForHealthy(ctx, container, 60*time.Second); werr != nil {
+			report("provision", fmt.Sprintf("minio %s not ready: %v", realm, werr))
+			return
+		}
+		if existing, err = listMinioBuckets(ctx, container, ak, sk); err != nil {
+			report("provision", fmt.Sprintf("minio %s list buckets deferred: %v", realm, err))
+			return
+		}
+	}
+	for b := range want {
+		if existing[b] {
+			continue
+		}
+		if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+b); rc != 0 {
+			report("provision", fmt.Sprintf("create bucket %s deferred: %s", b, strings.TrimSpace(e)))
+		}
+	}
+}
+
+// listMinioBuckets sets the mc alias (which fails if minio isn't answering) and
+// returns the set of existing bucket names.
+func listMinioBuckets(ctx context.Context, container, accessKey, secretKey string) (map[string]bool, error) {
+	if _, e, rc := dockerExec(ctx, container, "mc", "alias", "set", "local", "http://localhost:9000", accessKey, secretKey); rc != 0 {
+		return nil, fmt.Errorf("mc alias set: %s", strings.TrimSpace(e))
+	}
+	stdout, e, rc := dockerExec(ctx, container, "mc", "ls", "local")
+	if rc != 0 {
+		return nil, fmt.Errorf("mc ls: %s", strings.TrimSpace(e))
+	}
+	set := map[string]bool{}
+	for _, line := range strings.Split(stdout, "\n") {
+		// `mc ls local` rows end with the bucket name (with a trailing slash).
+		if f := strings.Fields(strings.TrimSpace(line)); len(f) > 0 {
+			set[strings.TrimRight(f[len(f)-1], "/")] = true
+		}
+	}
+	return set, nil
 }
