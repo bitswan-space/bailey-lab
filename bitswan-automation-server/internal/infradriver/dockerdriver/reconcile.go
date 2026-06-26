@@ -28,6 +28,17 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		}
 	}
 
+	// Snapshot existing container ids BEFORE bringing the project up, so the cert
+	// step can target only the containers THIS apply (re)creates — a recreate
+	// yields a new id, so any cert-enabled container whose id isn't in this set
+	// is fresh and needs its CA trust store set up. Best-effort: on error the set
+	// is empty, so every cert-enabled container is treated as fresh (safe).
+	preInfos, _ := listWorkspaceContainers(ctx, wctx)
+	preExistingIDs := make(map[string]bool, len(preInfos))
+	for _, c := range preInfos {
+		preExistingIDs[c.id] = true
+	}
+
 	// 2. Stamp each egress (network_mode:service) worker with a stable
 	//    desired-config hash label, then write the compose. docker compose
 	//    recreates those netns-sharing workers on every `up` (its own config-hash
@@ -67,11 +78,13 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		return fmt.Errorf("ensure live postgres dbs: %w", err)
 	}
 
-	// 4. Install CA certs in the freshly-(re)started containers selected by their
-	//    gitops labels. (No per-container oauth2-proxy: oauth2 is deprecated —
-	//    Bailey's protected-ingress handles auth at the edge.)
-	report("certs", "Installing CA certificates...")
-	if err := installCertificatesInContainers(ctx, wctx, report); err != nil {
+	// 4. Install CA certs into the containers THIS apply (re)created — a
+	//    long-running container already set its trust store up at creation, so
+	//    re-exec'ing into every cert-enabled container each deploy is wasted work.
+	//    (No per-container oauth2-proxy: oauth2 is deprecated — Bailey's
+	//    protected-ingress handles auth at the edge.)
+	report("certs", "Installing CA certificates in (re)created containers...")
+	if err := installCertificatesInContainers(ctx, wctx, preExistingIDs, report); err != nil {
 		return err
 	}
 
@@ -177,18 +190,23 @@ fi`
 // installCertificatesInContainers ports install_certificates_in_container: for
 // every running container labelled gitops.certs.enabled=true, exec the cert
 // install script.
-func installCertificatesInContainers(ctx context.Context, wctx infradriver.WorkspaceContext, report func(step, msg string)) error {
+func installCertificatesInContainers(ctx context.Context, wctx infradriver.WorkspaceContext, preExistingIDs map[string]bool, report func(step, msg string)) error {
 	infos, err := listWorkspaceContainers(ctx, wctx)
 	if err != nil {
 		return err
 	}
-	// Install into every eligible container concurrently — each exec is
-	// independent, so a serial loop just sums their latencies for no reason.
+	// Install into the freshly-(re)created cert-enabled containers concurrently —
+	// each exec is independent, so a serial loop just sums their latencies. A
+	// container whose id was already present before this apply kept its CA trust
+	// store from when it was created, so it's skipped.
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	for _, c := range infos {
 		if c.labels["gitops.certs.enabled"] != "true" || c.state != "running" {
 			continue
+		}
+		if preExistingIDs[c.id] {
+			continue // unchanged since before this apply — certs already installed
 		}
 		wg.Add(1)
 		go func(c containerInfo) {
