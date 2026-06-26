@@ -140,6 +140,15 @@ for i in $(seq 1 90); do $SSH "$VM" true 2>/dev/null && break; sleep 4; \
   [ "$i" = 90 ] && { echo "ERROR: guest SSH never came up"; tail -40 "$WORK/serial.log" 2>/dev/null; exit 1; }; done
 mark "host: boot guest + wait for SSH"
 
+# Connectivity probe: provisioning fails at apt with "Temporary failure
+# resolving" even when host NAT is present, so capture from INSIDE the guest
+# exactly where egress breaks (default route / gateway reach / internet / DNS).
+echo "=== guest connectivity probe ==="
+$SSH "$VM" 'echo "[route]"; ip -4 route; echo "[resolv]"; cat /etc/resolv.conf 2>/dev/null; \
+  echo "[gw]"; ping -c1 -W2 192.168.122.1 >/dev/null 2>&1 && echo gw-OK || echo gw-FAIL; \
+  echo "[inet]"; ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && echo inet-OK || echo inet-FAIL; \
+  echo "[dns]"; getent hosts archive.ubuntu.com >/dev/null 2>&1 && echo dns-OK || echo dns-FAIL' 2>&1 || true
+
 echo "=== sync repo into guest ==="
 $SSH "$VM" 'sudo mkdir -p /repo && sudo chown ubuntu /repo'
 rsync -a -e "$SSH" --exclude node_modules --exclude .git --exclude 'dist/' \
