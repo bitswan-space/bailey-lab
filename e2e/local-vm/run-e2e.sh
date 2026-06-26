@@ -21,7 +21,14 @@ echo "=== install + run Playwright ==="
 cd /repo/e2e
 npm ci || npm install
 mark "e2e: npm ci (Playwright deps)"
-npx playwright install --with-deps chromium
+# Retry: `--with-deps` runs apt-get update, which can transiently 403 when
+# archive.ubuntu.com load-balances onto a stale/bad mirror (especially via a
+# proxy). Retry a few times so a flaky mirror doesn't fail the whole run.
+for attempt in 1 2 3; do
+  npx playwright install --with-deps chromium && break
+  echo "playwright install attempt $attempt failed; retrying..." >&2
+  sleep 5
+done
 mark "e2e: playwright install chromium"
 npm test || true   # always build the manual even if a chapter fails the SLA
 # No aggregate mark here — the walkthrough records its OWN per-chapter timings
