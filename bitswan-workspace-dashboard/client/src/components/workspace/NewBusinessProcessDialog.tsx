@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { api, isTransientNetworkError } from '@/lib/api';
+import { SessionExpiredError } from '@/lib/session';
 import { watchDeployTask } from '@/lib/deployBp';
 
 const BP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
@@ -65,9 +66,11 @@ export function NewBusinessProcessDialog({
         loading: `Creating "${trimmed}" in ${target}…`,
         success: `Business process "${trimmed}" created`,
         error: (err: unknown) =>
-          isTransientNetworkError(err)
-            ? `Business process "${trimmed}" created`
-            : `Failed to create business process: ${String(err)}`,
+          err instanceof SessionExpiredError
+            ? undefined // expired session → the re-login banner says it; no scary "Failed" here
+            : isTransientNetworkError(err)
+              ? `Business process "${trimmed}" created`
+              : `Failed to create business process: ${String(err)}`,
       });
       try {
         const res = await work;

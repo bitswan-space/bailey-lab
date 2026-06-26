@@ -8,6 +8,7 @@ import type {
   SnapshotTask,
 } from '@/types';
 import { authHeader, clearAccessToken } from './auth-token';
+import { notifySessionExpired, SessionExpiredError } from './session';
 
 async function getJson<T>(url: string): Promise<T> {
   let r = await fetch(url, {
@@ -23,6 +24,14 @@ async function getJson<T>(url: string): Promise<T> {
       cache: 'no-store',
       headers: await authHeader(),
     });
+  }
+  // Still 401 after a token refresh → the oauth2-proxy SESSION is gone, not
+  // just the access token. Raise the app-wide signal (one banner prompts
+  // re-login) and throw a typed error so callers stay silent instead of
+  // rendering their own failure.
+  if (r.status === 401) {
+    notifySessionExpired();
+    throw new SessionExpiredError();
   }
   if (!r.ok) throw new Error(`${url} returned ${r.status}`);
   return (await r.json()) as T;
@@ -49,6 +58,11 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
         refreshedToken = true;
         clearAccessToken();
         continue;
+      }
+      // Still 401 after the refresh → expired oauth2-proxy session (see getJson).
+      if (r.status === 401) {
+        notifySessionExpired();
+        throw new SessionExpiredError();
       }
       if (!r.ok) throw new Error(`${url} returned ${r.status}`);
       return r;

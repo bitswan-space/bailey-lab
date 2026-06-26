@@ -1,5 +1,6 @@
 import { toast } from '@/lib/notify';
 import { api, isTransientNetworkError, type DeployStatusResponse } from './api';
+import { SessionExpiredError } from './session';
 
 const POLL_INTERVAL_MS = 3000;
 // Generous ceiling: a BP deploy builds member images sequentially (gitops
@@ -71,6 +72,13 @@ export async function watchDeployTask(
       failures = 0;
       unavailable = 0;
     } catch (e) {
+      // Session expired mid-deploy: the app-wide banner already prompts re-login
+      // (see SessionExpiredBanner). Stop quietly — don't add a per-deploy error
+      // on top of it. The deploy keeps running server-side.
+      if (e instanceof SessionExpiredError) {
+        toast.dismiss?.(toastId);
+        return 'lost';
+      }
       // A 404 (task not found) is the status endpoint being transiently
       // unreadable — NOT a failed deploy. Keep polling; the deploy is running
       // regardless and the next reachable poll will report its real outcome.

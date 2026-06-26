@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AuthGate } from '@/components/auth/AuthGate';
+import { SessionExpiredBanner } from '@/components/auth/SessionExpiredBanner';
 import { TopNav } from '@/components/workspace/TopNav';
 import {
   WorkspaceProvider,
@@ -16,6 +17,7 @@ import type { FlowTab } from '@/types';
 export function App() {
   return (
     <AuthGate>
+      <SessionExpiredBanner />
       <WorkspaceProvider>
         <SessionProvider>
           <Shell />

@@ -93,15 +93,21 @@ function upsert(status: NotifyStatus, message: Msg, opts?: ToastOptions): string
   return id;
 }
 
-function resolveMsg<T>(m: Msg | ((data: T) => Msg) | undefined, data: T): Msg | undefined {
-  if (typeof m === 'function') return (m as (d: T) => Msg)(data);
+function resolveMsg<T>(
+  m: Msg | ((data: T) => Msg | undefined) | undefined,
+  data: T,
+): Msg | undefined {
+  if (typeof m === 'function') return (m as (d: T) => Msg | undefined)(data);
   return m;
 }
 
 interface PromiseMessages<T> {
   loading: Msg;
   success?: Msg | ((data: T) => Msg);
-  error?: Msg | ((err: unknown) => Msg);
+  // Returning `undefined` from `error` suppresses the toast entirely (the
+  // promise is rejected, but the failure is handled elsewhere — e.g. an expired
+  // session is surfaced by the app-wide re-login banner, not a per-op error).
+  error?: Msg | ((err: unknown) => Msg | undefined);
 }
 
 type ToastFn = ((message: Msg, opts?: ToastOptions) => string) & {
