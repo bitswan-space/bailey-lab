@@ -75,7 +75,9 @@ def test_zero_downtime_promote_uses_idle_slot_keeps_db(tmp_path, monkeypatch):
     # Stage the new version on the idle slot (wired to the CURRENT live db).
     staged = asyncio.run(svc.begin_zero_downtime_promote("shop", by="tim@x"))
     assert staged["target_slot"] == "purple"
-    assert staged["slots"]["purple"]["db"] == 1  # same live db — promote never moves data
+    assert (
+        staged["slots"]["purple"]["db"] == 1
+    )  # same live db — promote never moves data
     # Cut over: purple becomes live, old live slot blue retires to idle, db unchanged.
     done = asyncio.run(svc.finish_zero_downtime_promote("shop", "purple", by="tim@x"))
     assert done["live_slot"] == "purple" and done["live_db"] == 1
