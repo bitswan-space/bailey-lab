@@ -53,7 +53,11 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
-from app.services.infra_service import run_docker_command, stage_for_deployment
+from app.services.infra_service import (
+    generate_password,
+    run_docker_command,
+    stage_for_deployment,
+)
 from app.utils import SERVICE_REALMS, sanitize_automation_name
 
 logger = logging.getLogger(__name__)
@@ -443,6 +447,231 @@ async def _create_minio_bucket(
         raise RuntimeError(f"mc mb {bucket} failed: {stderr.strip()}")
 
 
+# --- Per-BP scoped service principals -------------------------------------
+#
+# A BP backend used to receive the shared Postgres superuser + MinIO root.
+# Instead, each BP gets a login role / MinIO user scoped to ONLY its own
+# database(s) and bucket(s), so one BP can't touch another's data on the
+# shared per-(workspace, realm) server. The principals are named distinctly
+# from the resources (bpu_* / bpu-*) to avoid any role-vs-db name confusion.
+
+
+def _bp_pg_role(bp_slug: str) -> str:
+    """Login role name for a BP's scoped Postgres access (per realm server)."""
+    return ("bpu_" + bp_slug.replace("-", "_"))[:63]
+
+
+def _bp_minio_user(bp_slug: str) -> str:
+    """MinIO user name for a BP's scoped object access (per realm server)."""
+    return ("bpu-" + bp_slug)[:63]
+
+
+def _bp_creds_path(bp_slug: str, realm: str) -> str:
+    bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
+    return os.path.join(bs_home, "secrets", "bp", bp_slug, f"{realm}.svc.json")
+
+
+def get_or_create_bp_creds(bp_slug: str, realm: str) -> dict:
+    """Stable per-(BP, realm) scoped service credentials.
+
+    Generated once and persisted 0600 under
+    ``secrets/bp/<slug>/<realm>.svc.json`` so compose-gen (which injects them
+    into the backend) and the deploy guard (which creates the role/user with
+    them) always agree on the same password/secret. Passwords are alphanumeric
+    (`generate_password`), so they're safe to interpolate into SQL literals and
+    CLI args.
+    """
+    validate_bp_slug(bp_slug)
+    path = _bp_creds_path(bp_slug, realm)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if data.get("pg_password") and data.get("minio_secret"):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    data = {
+        "pg_user": _bp_pg_role(bp_slug),
+        "pg_password": generate_password(),
+        "minio_user": _bp_minio_user(bp_slug),
+        "minio_secret": generate_password(),
+    }
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f)
+    return data
+
+
+async def ensure_bp_pg_role(
+    container: str, admin_user: str, bp_slug: str, realm: str, db_name: str
+) -> None:
+    """Create (idempotently) the BP's scoped Postgres login role and make it own
+    ``db_name`` so the backend can run its own DDL (AutoMigrate / CREATE TABLE)
+    on that database — and ONLY that database. Reassigns any objects a prior
+    superuser deploy created so existing data stays accessible. Runs as the
+    superuser (``admin_user``). For a production BP this is called once per
+    blue-green db, so the single role ends up owning both.
+    """
+    creds = get_or_create_bp_creds(bp_slug, realm)
+    role = creds["pg_user"]
+    pw = creds["pg_password"]
+
+    role_sql = (
+        "DO $$ BEGIN "
+        f"IF EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') THEN "
+        f"ALTER ROLE \"{role}\" LOGIN PASSWORD '{pw}'; "
+        "ELSE "
+        f"CREATE ROLE \"{role}\" LOGIN PASSWORD '{pw}'; "
+        "END IF; END $$;"
+    )
+    _, stderr, rc = await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        admin_user,
+        "-d",
+        "postgres",
+        "-c",
+        role_sql,
+    )
+    if rc != 0:
+        raise RuntimeError(f"ensure role {role} failed: {stderr.strip()}")
+
+    # Own the DB (gives CREATE on its public schema via pg_database_owner on
+    # PG15+), then within the DB reassign any superuser-owned objects + grant
+    # schema rights so both fresh and pre-existing databases work.
+    _, stderr, rc = await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        admin_user,
+        "-d",
+        "postgres",
+        "-c",
+        f'ALTER DATABASE "{db_name}" OWNER TO "{role}";',
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"chown database {db_name} -> {role} failed: {stderr.strip()}"
+        )
+
+    indb_sql = (
+        f'REASSIGN OWNED BY "{admin_user}" TO "{role}"; '
+        f'GRANT ALL ON SCHEMA public TO "{role}";'
+    )
+    _, stderr, rc = await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        admin_user,
+        "-d",
+        db_name,
+        "-c",
+        indb_sql,
+    )
+    if rc != 0:
+        raise RuntimeError(f"grant on {db_name} -> {role} failed: {stderr.strip()}")
+
+
+async def ensure_bp_minio_user(
+    container: str,
+    root_key: str,
+    root_secret: str,
+    bp_slug: str,
+    realm: str,
+    buckets: list[str],
+) -> None:
+    """Create (idempotently) the BP's scoped MinIO user + a policy limited to
+    exactly ``buckets`` (its own bucket, or both blue-green buckets), and attach
+    it. Runs `mc admin` as root. Best-effort by contract — the caller wraps this
+    so a MinIO hiccup never fails a deploy.
+    """
+    creds = get_or_create_bp_creds(bp_slug, realm)
+    user = creds["minio_user"]
+    secret = creds["minio_secret"]
+
+    await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "mc",
+        "alias",
+        "set",
+        "local",
+        "http://localhost:9000",
+        root_key,
+        root_secret,
+    )
+    # add user (tolerate "already exists" — creds are stable)
+    await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "mc",
+        "admin",
+        "user",
+        "add",
+        "local",
+        user,
+        secret,
+    )
+
+    resources: list[str] = []
+    for b in buckets:
+        resources += [f"arn:aws:s3:::{b}", f"arn:aws:s3:::{b}/*"]
+    policy = json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow", "Action": ["s3:*"], "Resource": resources}
+            ],
+        }
+    )
+    pol = user
+    # Write the policy file inside the container, then (re)create + attach. The
+    # JSON has no single quotes, so single-quoting it for sh is safe.
+    await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "sh",
+        "-c",
+        f"printf '%s' '{policy}' > /tmp/{pol}.json",
+    )
+    await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "mc",
+        "admin",
+        "policy",
+        "create",
+        "local",
+        pol,
+        f"/tmp/{pol}.json",
+    )
+    await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "mc",
+        "admin",
+        "policy",
+        "attach",
+        "local",
+        pol,
+        "--user",
+        user,
+    )
+
+
 async def ensure_bp_databases(
     workspace: str,
     bp_slug: str,
@@ -730,17 +959,25 @@ async def ensure_live_postgres_dbs(
         # 1) A non-main copy's live-dev backends connect to the cloned per-copy
         #    DB (the env injection overrides POSTGRES_DB to it unconditionally).
         if stage == "live-dev" and copy:
-            if ("copy", copy) in seen:
-                continue
-            seen.add(("copy", copy))
-            if get_service_secrets("postgres", realm) is None:
+            psec = get_service_secrets("postgres", realm)
+            if psec is None or not psec.get("POSTGRES_USER"):
                 logger.info(
                     "Postgres not enabled (%s); skipping copy DB for '%s'",
                     realm,
                     copy,
                 )
                 continue
-            await clone_postgres_db(workspace, copy, source_realm=realm)
+            container = _container_name(workspace, "postgres", realm)
+            # Clone the shared per-copy DB once across all BPs in the copy.
+            if ("copy", copy) not in seen:
+                seen.add(("copy", copy))
+                await clone_postgres_db(workspace, copy, source_realm=realm)
+            # Grant THIS BP's scoped (dev-realm) role on the per-copy DB so its
+            # copy backend — which connects as that role — can use it.
+            if bp_slug:
+                await ensure_bp_pg_role(
+                    container, psec["POSTGRES_USER"], bp_slug, realm, copy_db_name(copy)
+                )
             continue
 
         # 2) A registered BP's per-stage database(s). Unregistered BPs use the
@@ -767,3 +1004,62 @@ async def ensure_live_postgres_dbs(
             seen.add(("bp", db_name))
             await _wait_for_postgres(container, user)
             await _create_postgres_db(container, user, db_name)
+            await ensure_bp_pg_role(container, user, bp_slug, realm, db_name)
+
+
+async def ensure_bp_minio_principals(
+    workspace: str, bs_yaml: dict | None, deployment_ids: list[str]
+) -> None:
+    """Best-effort: ensure each deploying BP's scoped MinIO user + policy exists,
+    granting access to ONLY that BP's bucket(s). Runs every deploy (unlike the
+    registry-gated bucket creation), so existing BPs pick up scoped creds on
+    their next deploy. The bucket itself is created by `provision_for_deployments`.
+    Never raises — MinIO plumbing must not fail a deploy.
+    """
+    try:
+        deployments = (bs_yaml or {}).get("deployments") or {}
+        registry = load_registry()
+        seen: set[tuple[str, str]] = set()
+        for dep_id in deployment_ids:
+            conf = deployments.get(dep_id) or {}
+            bp_slug, copy = derive_bp_and_copy(conf.get("relative_path"))
+            if not bp_slug:
+                continue
+            stage = conf.get("stage") or "production"
+            realm = stage_for_deployment(stage)
+            if realm not in SERVICE_REALMS or (bp_slug, realm) in seen:
+                continue
+            # The per-BP bucket only exists for registered BPs; copies share the
+            # registered BP's bucket (its dev-realm user covers it).
+            if not is_registered(registry, bp_slug, realm):
+                continue
+            secrets = get_service_secrets("minio", realm)
+            if not secrets or not secrets.get("MINIO_ROOT_USER"):
+                continue
+            seen.add((bp_slug, realm))
+            container = _container_name(workspace, "minio", realm)
+            if realm == "production":
+                buckets = [
+                    bp_resource_names(bp_slug, n)["minio_bucket"]
+                    for n in _production_db_numbers(bs_yaml, bp_slug)
+                ]
+            else:
+                buckets = [bp_resource_names(bp_slug)["minio_bucket"]]
+            try:
+                await ensure_bp_minio_user(
+                    container,
+                    secrets["MINIO_ROOT_USER"],
+                    secrets.get("MINIO_ROOT_PASSWORD", ""),
+                    bp_slug,
+                    realm,
+                    buckets,
+                )
+            except Exception as e:  # noqa: BLE001 - best-effort per BP
+                logger.warning(
+                    "Scoped MinIO user for BP '%s' at %s failed: %s",
+                    bp_slug,
+                    realm,
+                    e,
+                )
+    except Exception as e:  # noqa: BLE001 - never fail a deploy on this
+        logger.warning("Per-BP MinIO principal provisioning failed (non-fatal): %s", e)

@@ -745,3 +745,82 @@ async def test_guard_clone_idempotent_when_db_exists(gitops_home, monkeypatch):
     }
     await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
     assert not any("CREATE DATABASE" in " ".join(c) for c in calls)
+
+
+# ---------------------------------------------------------------------------
+# Per-BP scoped service credentials (Postgres role + MinIO user/policy)
+# ---------------------------------------------------------------------------
+
+
+def test_get_or_create_bp_creds_stable(gitops_home):
+    a = bp_databases.get_or_create_bp_creds("my-bp", "dev")
+    b = bp_databases.get_or_create_bp_creds("my-bp", "dev")
+    assert a == b  # stable across calls
+    assert a["pg_user"] == "bpu_my_bp"
+    assert a["minio_user"] == "bpu-my-bp"
+    assert a["pg_password"] and a["minio_secret"]
+    assert (gitops_home / "secrets" / "bp" / "my-bp" / "dev.svc.json").exists()
+
+
+async def test_guard_creates_scoped_pg_role(gitops_home, fake_docker):
+    """The deploy guard also creates a scoped login role that OWNS the BP's DB
+    (so the backend never connects as the superuser)."""
+    _write_pg_secrets(gitops_home, "dev")
+    reg = load_registry()
+    register_bp_stage(reg, "my-bp", "My BP", "dev")
+    save_registry(reg)
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/main/My BP/backend", "stage": "dev"}
+        }
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    joined = [" ".join(c) for c in fake_docker]
+    assert any(
+        'CREATE ROLE "bpu_my_bp"' in j or 'ALTER ROLE "bpu_my_bp"' in j for j in joined
+    ), joined
+    assert any('ALTER DATABASE "bp_my_bp" OWNER TO "bpu_my_bp"' in j for j in joined), (
+        joined
+    )
+    assert any('REASSIGN OWNED BY "admin" TO "bpu_my_bp"' in j for j in joined), joined
+
+
+async def test_guard_grants_copy_role_on_copy_db(gitops_home, fake_docker):
+    """A live-dev copy backend gets its BP's dev role granted on the copy DB."""
+    _write_pg_secrets(gitops_home, "dev")
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
+        }
+    }
+    await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
+    joined = [" ".join(c) for c in fake_docker]
+    assert any(
+        'ALTER DATABASE "postgres_copy_alice" OWNER TO "bpu_my_bp"' in j for j in joined
+    ), joined
+
+
+async def test_minio_principals_creates_scoped_user(gitops_home, fake_docker):
+    """ensure_bp_minio_principals creates a per-BP MinIO user + a policy scoped
+    to ONLY that BP's bucket, and attaches it."""
+    secrets_dir = gitops_home / "secrets"
+    secrets_dir.mkdir(exist_ok=True)
+    (secrets_dir / "minio-dev").write_text(
+        "MINIO_ROOT_USER=admin\nMINIO_ROOT_PASSWORD=pw\nMINIO_HOST=h\n"
+    )
+    reg = load_registry()
+    register_bp_stage(reg, "my-bp", "My BP", "dev")
+    save_registry(reg)
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/main/My BP/backend", "stage": "dev"}
+        }
+    }
+    await bp_databases.ensure_bp_minio_principals("ws-test", bs_yaml, ["d1"])
+    joined = [" ".join(c) for c in fake_docker]
+    assert any("admin user add local bpu-my-bp" in j for j in joined), joined
+    assert any("admin policy create local bpu-my-bp" in j for j in joined), joined
+    assert any(
+        "admin policy attach local bpu-my-bp --user bpu-my-bp" in j for j in joined
+    ), joined
+    assert any("arn:aws:s3:::bp-my-bp" in j for j in joined), joined

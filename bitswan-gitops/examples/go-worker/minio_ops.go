@@ -12,7 +12,9 @@ import (
 	"gorm.io/gorm"
 )
 
-const galleryBucket = "gallery"
+// galleryBucket is the per-BP bucket injected by gitops as MINIO_BUCKET — no
+// hardcoded bucket name. Empty (unset) is caught at startup in ensureBucket.
+var galleryBucket = envOr("MINIO_BUCKET", "")
 
 func mustInitMinio() *minio.Client {
 	host := envOr("MINIO_HOST", "localhost")
@@ -24,8 +26,10 @@ func mustInitMinio() *minio.Client {
 	}
 
 	endpoint := host + ":9000"
-	accessKey := envOr("MINIO_ROOT_USER", "minioadmin")
-	secretKey := envOr("MINIO_ROOT_PASSWORD", "minioadmin")
+	// Scoped per-BP credentials (limited to this BP's bucket) — not the MinIO
+	// root. gitops injects these; falls back to dev defaults for standalone runs.
+	accessKey := envOr("MINIO_ACCESS_KEY", "minioadmin")
+	secretKey := envOr("MINIO_SECRET_KEY", "minioadmin")
 
 	mc, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
@@ -38,16 +42,22 @@ func mustInitMinio() *minio.Client {
 }
 
 func ensureBucket(mc *minio.Client) {
+	if galleryBucket == "" {
+		log.Fatal("MINIO_BUCKET is not set")
+	}
 	ctx := context.Background()
 	exists, err := mc.BucketExists(ctx, galleryBucket)
 	if err != nil {
 		log.Fatalf("checking bucket: %v", err)
 	}
 	if !exists {
+		// gitops normally pre-creates the bucket; a scoped user may not be able
+		// to create it, so don't make this fatal.
 		if err := mc.MakeBucket(ctx, galleryBucket, minio.MakeBucketOptions{}); err != nil {
-			log.Fatalf("creating bucket: %v", err)
+			log.Printf("warning: could not create bucket %s (expected if gitops provisions it): %v", galleryBucket, err)
+		} else {
+			log.Printf("created bucket: %s", galleryBucket)
 		}
-		log.Printf("created bucket: %s", galleryBucket)
 	}
 }
 

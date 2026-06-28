@@ -4790,12 +4790,16 @@ fi
              (couch/minio + the standby blue-green db); never fails a deploy.
         """
         from app.services.bp_databases import (
+            ensure_bp_minio_principals,
             ensure_live_postgres_dbs,
             provision_for_deployments,
         )
 
         await ensure_live_postgres_dbs(self.workspace_name, bs_yaml, deployment_ids)
         await provision_for_deployments(self.workspace_name, bs_yaml, deployment_ids)
+        # Scoped MinIO user+policy per BP (best-effort; the buckets themselves are
+        # created by provision_for_deployments above).
+        await ensure_bp_minio_principals(self.workspace_name, bs_yaml, deployment_ids)
 
     def get_org_group_path(self):
         """Fetch the Keycloak org group path for this workspace from AOC.
@@ -4946,6 +4950,8 @@ fi
             bp_resource_names,
             copy_db_name,
             derive_bp_and_copy,
+            get_or_create_bp_creds,
+            get_service_secrets,
             is_registered,
             load_registry,
         )
@@ -5275,15 +5281,40 @@ fi
             # `environment:` beats the shared defaults coming from the
             # service secrets env_file. Names are stage-independent so
             # snapshots restore across stages without rewriting.
+            # When True, the backend has scoped per-BP Postgres/MinIO creds, so
+            # the shared superuser/root secret env_file is NOT attached below.
+            scoped_pg = False
+            scoped_minio = False
             if bp_sanitized and is_registered(
                 bp_registry, bp_sanitized, stage_for_deployment(stage)
             ):
+                realm = stage_for_deployment(stage)
                 # Production slots wire to their own DB (1/2); other stages use
                 # the single-backend names (db=None).
                 bp_names = bp_resource_names(bp_sanitized, db)
                 entry["environment"]["POSTGRES_DB"] = bp_names["postgres_db"]
                 entry["environment"]["COUCHDB_DB_PREFIX"] = bp_names["couchdb_prefix"]
                 entry["environment"]["MINIO_BUCKET"] = bp_names["minio_bucket"]
+
+                # Scoped per-BP credentials (env: beats env_file). The role/user
+                # is created + granted only on this BP's DB(s)/bucket(s) by the
+                # deploy guard, so the backend can't touch other BPs' data and
+                # never sees the superuser/root secret.
+                creds = get_or_create_bp_creds(bp_sanitized, realm)
+                pg_sec = get_service_secrets("postgres", realm)
+                if pg_sec:
+                    entry["environment"]["POSTGRES_USER"] = creds["pg_user"]
+                    entry["environment"]["POSTGRES_PASSWORD"] = creds["pg_password"]
+                    entry["environment"]["POSTGRES_HOST"] = pg_sec.get(
+                        "POSTGRES_HOST", ""
+                    )
+                    scoped_pg = True
+                mo_sec = get_service_secrets("minio", realm)
+                if mo_sec:
+                    entry["environment"]["MINIO_ACCESS_KEY"] = creds["minio_user"]
+                    entry["environment"]["MINIO_SECRET_KEY"] = creds["minio_secret"]
+                    entry["environment"]["MINIO_HOST"] = mo_sec.get("MINIO_HOST", "")
+                    scoped_minio = True
 
             # For non-main copy live-devs, override POSTGRES_DB to use the
             # cloned database. Ordering is load-bearing: this MUST come after
@@ -5371,10 +5402,18 @@ fi
                     entry["env_file"].append(bp_secret_env)
 
             # Service dependency secrets (from [services.*] in automation.toml).
+            # Skip the shared postgres/minio secret (superuser/root) when this
+            # backend already got scoped per-BP creds above — otherwise the
+            # superuser/root would still sit in the container env.
             service_secret_names = self._resolve_service_secrets(
                 automation_config, stage
             )
             for svc_secret_name in service_secret_names:
+                base = svc_secret_name.split("-", 1)[0]
+                if (scoped_pg and base == "postgres") or (
+                    scoped_minio and base == "minio"
+                ):
+                    continue
                 svc_secret_path = os.path.join(self.secrets_dir, svc_secret_name)
                 if os.path.exists(svc_secret_path):
                     entry.setdefault("env_file", [])
