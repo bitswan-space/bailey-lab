@@ -540,9 +540,12 @@ async def ensure_bp_pg_role(
     if rc != 0:
         raise RuntimeError(f"ensure role {role} failed: {stderr.strip()}")
 
-    # Own the DB (gives CREATE on its public schema via pg_database_owner on
-    # PG15+), then within the DB reassign any superuser-owned objects + grant
-    # schema rights so both fresh and pre-existing databases work.
+    # Own the DB, then inside it give the role full control of the public
+    # schema and any pre-existing user tables/sequences so AutoMigrate and
+    # existing data both work. We deliberately do NOT use `REASSIGN OWNED BY
+    # <superuser>` — the admin role owns system-pinned objects, so Postgres
+    # refuses ("required by the database system"); reassign only public-schema
+    # user objects instead (a no-op on a fresh/cloned DB).
     _, stderr, rc = await run_docker_command(
         "docker",
         "exec",
@@ -561,7 +564,15 @@ async def ensure_bp_pg_role(
         )
 
     indb_sql = (
-        f'REASSIGN OWNED BY "{admin_user}" TO "{role}"; '
+        f'ALTER SCHEMA public OWNER TO "{role}"; '
+        "DO $$ DECLARE r record; BEGIN "
+        "FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP "
+        f"EXECUTE 'ALTER TABLE public.' || quote_ident(r.tablename) || ' OWNER TO \"{role}\"'; "
+        "END LOOP; "
+        "FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = 'public' LOOP "
+        f"EXECUTE 'ALTER SEQUENCE public.' || quote_ident(r.sequencename) || ' OWNER TO \"{role}\"'; "
+        "END LOOP; "
+        "END $$; "
         f'GRANT ALL ON SCHEMA public TO "{role}";'
     )
     _, stderr, rc = await run_docker_command(
