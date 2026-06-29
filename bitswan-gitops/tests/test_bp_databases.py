@@ -808,16 +808,16 @@ async def test_guard_creates_scoped_pg_role(gitops_home, fake_docker):
         for j in joined
     ), joined
     # schema privileges, NOT db/schema ownership (so it can't DROP DATABASE/SCHEMA).
-    assert any('GRANT ALL ON SCHEMA public TO "u_bp_my_bp"' in j for j in joined), (
-        joined
-    )
-    assert any('ALTER DATABASE "bp_my_bp" OWNER TO "admin"' in j for j in joined), (
-        joined
-    )
+    assert any(
+        'GRANT ALL ON SCHEMA public TO "u_bp_my_bp"' in j for j in joined
+    ), joined
+    assert any(
+        'ALTER DATABASE "bp_my_bp" OWNER TO "admin"' in j for j in joined
+    ), joined
     assert any('ALTER SCHEMA public OWNER TO "admin"' in j for j in joined), joined
-    assert not any('OWNER TO "u_bp_my_bp"' in j and "DATABASE" in j for j in joined), (
-        joined
-    )
+    assert not any(
+        'OWNER TO "u_bp_my_bp"' in j and "DATABASE" in j for j in joined
+    ), joined
     assert not any("REASSIGN OWNED" in j for j in joined), joined
     # CONNECT locked down to this one role (default-deny isolation).
     assert any(
