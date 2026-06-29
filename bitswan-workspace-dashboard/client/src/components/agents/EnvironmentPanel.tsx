@@ -29,8 +29,10 @@ import { cn } from '@/lib/utils';
  *   - Frontends: reachable through Bailey, access controlled by the share
  *     button (no public/internal type — all frontends are the same kind).
  *     "Add frontend" scaffolds one directly.
- *   - Worker containers: private backends on the Docker network. "Add worker
- *     container" offers a type (only the Go backend wired today).
+ *   - Worker containers: private backends on the Docker network. List-only —
+ *     there is no "Add worker container" button (see the Worker section below
+ *     for why: a BP's workers share one egress-gateway netns on a fixed :8080,
+ *     so only the template's single `backend` worker can run).
  *
  * Full CRUD wired to the gitops endpoints; the automations SSE snapshot
  * drives the list. Rename is an inline input; status is the dot on the
@@ -51,11 +53,6 @@ interface Item {
   expose: boolean;
 }
 
-const WORKER_TYPES: { type: string; label: string }[] = [
-  { type: 'go', label: 'Go backend' },
-  { type: 'fastapi', label: 'FastAPI (Python)' },
-];
-
 export function EnvironmentPanel({ bp, copy }: Props) {
   const { automations } = useAutomations();
   const [collapsed, setCollapsed] = useState(false);
@@ -63,10 +60,10 @@ export function EnvironmentPanel({ bp, copy }: Props) {
   // eslint-disable-next-line no-restricted-syntax -- null = nothing being renamed
   const [renaming, setRenaming] = useState<string | null>(null);
   // A pending "add" awaiting the user to name it. null = nothing being added.
+  // Only frontends are addable from here — see the Worker section for why
+  // there's no worker-add path.
   // eslint-disable-next-line no-restricted-syntax -- null = not adding
-  const [adding, setAdding] = useState<
-    { kind: 'frontend' } | { kind: 'worker'; type: string } | null
-  >(null);
+  const [adding, setAdding] = useState<{ kind: 'frontend' } | null>(null);
 
   const { frontends, workers } = useMemo(() => {
     const prefix = `copies/${copy}/${bp}/`;
@@ -118,21 +115,14 @@ export function EnvironmentPanel({ bp, copy }: Props) {
     for (let i = 2; ; i++) if (!names.has(`${base}-${i}`)) return `${base}-${i}`;
   };
 
-  // Clicking an "add" button doesn't scaffold immediately — it opens a draft
+  // Clicking "Add frontend" doesn't scaffold immediately — it opens a draft
   // row so the user names the automation first. commitAdd fires the scaffold
-  // (which now also auto-deploys it) once they confirm a non-empty name.
-  const commitAdd = (
-    draft: { kind: 'frontend' } | { kind: 'worker'; type: string },
-    rawName: string,
-  ) => {
+  // (which also auto-deploys it) once they confirm a non-empty name.
+  const commitAdd = (rawName: string) => {
     setAdding(null);
     const name = rawName.trim();
     if (!name) return; // empty / cancelled
-    if (draft.kind === 'frontend') {
-      void mutate('Add frontend', api.addFrontend({ bp, name, copy }));
-    } else {
-      void mutate('Add worker', api.addWorker({ bp, name, type: draft.type, copy }));
-    }
+    void mutate('Add frontend', api.addFrontend({ bp, name, copy }));
   };
 
   const doRename = (oldName: string, next: string) => {
@@ -212,7 +202,7 @@ export function EnvironmentPanel({ bp, copy }: Props) {
               iconClass="text-blue-500"
               defaultName={uniqueName('new-frontend', frontends)}
               busy={busy}
-              onCommit={(name) => commitAdd({ kind: 'frontend' }, name)}
+              onCommit={(name) => commitAdd(name)}
               onCancel={() => setAdding(null)}
             />
           ) : (
@@ -240,21 +230,20 @@ export function EnvironmentPanel({ bp, copy }: Props) {
               onDelete={() => remove(w, 'worker container')}
             />
           ))}
-          {adding?.kind === 'worker' ? (
-            <DraftRow
-              icon={Cog}
-              iconClass="text-muted-foreground"
-              defaultName={uniqueName('new-worker', workers)}
-              busy={busy}
-              onCommit={(name) => commitAdd({ kind: 'worker', type: adding.type }, name)}
-              onCancel={() => setAdding(null)}
-            />
-          ) : (
-            <AddWorkerButton
-              onAdd={(type) => setAdding({ kind: 'worker', type })}
-              disabled={busy}
-            />
-          )}
+          {/*
+            No "Add worker container" button: a BP's workers all run inside a
+            SINGLE shared egress-gateway network namespace (network_mode:
+            service:<gateway>, so the firewall can police their egress — see
+            gitops automation_service.py ~5078-5340), and the worker template
+            hardcodes port 8080. The template's `backend` worker already holds
+            :8080 there, so a second worker can't bind it (EADDRINUSE) and
+            BITSWAN_WORKER_HOSTS can't address it separately either. A FastAPI
+            worker crash-loops on this; a Go worker only *looks* up because
+            `air` (its PID 1) survives the failed bind. So adding a worker
+            here can't produce a working one — the button is removed until
+            workers get distinct ports + routing. List/rename/delete of the
+            existing worker stay. See issue #53.
+          */}
         </Section>
 
         <DevSecrets bp={bp} />
@@ -388,47 +377,6 @@ function AddButton({
       <Plus className="size-3" aria-hidden />
       {label}
     </button>
-  );
-}
-
-function AddWorkerButton({
-  onAdd,
-  disabled,
-}: {
-  onAdd: (type: string) => void;
-  disabled: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const only = WORKER_TYPES.length === 1 ? WORKER_TYPES[0] : undefined;
-  if (only) {
-    return (
-      <AddButton
-        onClick={() => onAdd(only.type)}
-        disabled={disabled}
-        label="Add worker container"
-      />
-    );
-  }
-  return (
-    <div className="relative">
-      <AddButton onClick={() => setOpen((o) => !o)} disabled={disabled} label="Add worker container" />
-      {open && (
-        <div className="absolute z-10 mt-1 w-full overflow-hidden rounded-md border border-border bg-background shadow-md">
-          {WORKER_TYPES.map((w) => (
-            <button
-              key={w.type}
-              onClick={() => {
-                setOpen(false);
-                onAdd(w.type);
-              }}
-              className="block w-full px-3 py-2 text-left text-xs text-foreground hover:bg-muted"
-            >
-              {w.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }
 
