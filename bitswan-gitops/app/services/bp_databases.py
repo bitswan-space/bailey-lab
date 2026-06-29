@@ -1021,10 +1021,11 @@ async def ensure_live_postgres_dbs(
 async def ensure_bp_minio_principals(
     workspace: str, bs_yaml: dict | None, deployment_ids: list[str]
 ) -> None:
-    """Best-effort: ensure each deploying BP's scoped MinIO user + policy exists,
-    granting access to ONLY that BP's bucket(s). Runs every deploy (unlike the
-    registry-gated bucket creation), so existing BPs pick up scoped creds on
-    their next deploy. The bucket itself is created by `provision_for_deployments`.
+    """Best-effort: ensure each deploying BP's scoped MinIO user + policy exists
+    (and its bucket), granting access to ONLY that BP's bucket(s). Runs every
+    deploy (unlike the registry-gated bucket creation), so existing BPs pick up
+    scoped creds on their next deploy. Covers copy live-dev deploys too (which
+    never register but still get scoped creds + share the per-BP dev bucket).
     Never raises — MinIO plumbing must not fail a deploy.
     """
     try:
@@ -1040,9 +1041,11 @@ async def ensure_bp_minio_principals(
             realm = stage_for_deployment(stage)
             if realm not in SERVICE_REALMS or (bp_slug, realm) in seen:
                 continue
-            # The per-BP bucket only exists for registered BPs; copies share the
-            # registered BP's bucket (its dev-realm user covers it).
-            if not is_registered(registry, bp_slug, realm):
+            # Process registered BPs AND copy live-dev deploys (the latter never
+            # register but still connect with the BP's scoped dev user, sharing
+            # the per-BP dev bucket).
+            is_copy = bool(copy) and stage == "live-dev"
+            if not is_copy and not is_registered(registry, bp_slug, realm):
                 continue
             secrets = get_service_secrets("minio", realm)
             if not secrets or not secrets.get("MINIO_ROOT_USER"):
@@ -1057,10 +1060,17 @@ async def ensure_bp_minio_principals(
             else:
                 buckets = [bp_resource_names(bp_slug)["minio_bucket"]]
             try:
+                # Ensure the bucket(s) exist — for copy deploys nothing else
+                # creates them (provision_for_deployments skips worktrees);
+                # idempotent for registered BPs.
+                root_key = secrets["MINIO_ROOT_USER"]
+                root_secret = secrets.get("MINIO_ROOT_PASSWORD", "")
+                for b in buckets:
+                    await _create_minio_bucket(container, root_key, root_secret, b)
                 await ensure_bp_minio_user(
                     container,
-                    secrets["MINIO_ROOT_USER"],
-                    secrets.get("MINIO_ROOT_PASSWORD", ""),
+                    root_key,
+                    root_secret,
                     bp_slug,
                     realm,
                     buckets,

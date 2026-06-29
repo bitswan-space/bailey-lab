@@ -826,3 +826,26 @@ async def test_minio_principals_creates_scoped_user(gitops_home, fake_docker):
         "admin policy attach local bpu-my-bp --user bpu-my-bp" in j for j in joined
     ), joined
     assert any("arn:aws:s3:::bp-my-bp" in j for j in joined), joined
+
+
+async def test_minio_principals_covers_copy_live_dev(gitops_home, fake_docker):
+    """A copy live-dev deploy (never registered) still gets a scoped MinIO user
+    + the shared per-BP dev bucket created — no superuser/root needed."""
+    secrets_dir = gitops_home / "secrets"
+    secrets_dir.mkdir(exist_ok=True)
+    (secrets_dir / "minio-dev").write_text(
+        "MINIO_ROOT_USER=admin\nMINIO_ROOT_PASSWORD=pw\nMINIO_HOST=h\n"
+    )
+    # No register_bp_stage — copies never register, yet must still be covered.
+    bs_yaml = {
+        "deployments": {
+            "d1": {"relative_path": "copies/alice/My BP/backend", "stage": "live-dev"}
+        }
+    }
+    await bp_databases.ensure_bp_minio_principals("ws-test", bs_yaml, ["d1"])
+    joined = [" ".join(c) for c in fake_docker]
+    assert any("local/bp-my-bp" in j for j in joined), joined  # bucket ensured
+    assert any("admin user add local bpu-my-bp" in j for j in joined), joined
+    assert any(
+        "admin policy attach local bpu-my-bp --user bpu-my-bp" in j for j in joined
+    ), joined

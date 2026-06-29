@@ -5316,11 +5316,38 @@ fi
                     entry["environment"]["MINIO_HOST"] = mo_sec.get("MINIO_HOST", "")
                     scoped_minio = True
 
-            # For non-main copy live-devs, override POSTGRES_DB to use the
-            # cloned database. Ordering is load-bearing: this MUST come after
-            # the per-BP injection above so the copy clone wins.
+            # For non-main copy live-devs, override POSTGRES_DB to the cloned
+            # per-copy database and inject the BP's scoped DEV credentials. The
+            # deploy guard provisions a scoped role/user for the copy (the role
+            # owns the per-copy DB) regardless of registration, so we must inject
+            # those here too — otherwise a copy-only deploy (which never
+            # registers) would fall back to the superuser/root. Ordering is
+            # load-bearing: this MUST come after the per-BP block above so the
+            # copy clone wins.
             if wt_name and stage == "live-dev":
                 entry["environment"]["POSTGRES_DB"] = copy_db_name(wt_name)
+                if bp_sanitized:
+                    creds = get_or_create_bp_creds(bp_sanitized, "dev")
+                    pg_sec = get_service_secrets("postgres", "dev")
+                    if pg_sec:
+                        entry["environment"]["POSTGRES_USER"] = creds["pg_user"]
+                        entry["environment"]["POSTGRES_PASSWORD"] = creds["pg_password"]
+                        entry["environment"]["POSTGRES_HOST"] = pg_sec.get(
+                            "POSTGRES_HOST", ""
+                        )
+                        scoped_pg = True
+                    mo_sec = get_service_secrets("minio", "dev")
+                    if mo_sec:
+                        # Copies share the per-BP dev bucket.
+                        entry["environment"]["MINIO_BUCKET"] = bp_resource_names(
+                            bp_sanitized
+                        )["minio_bucket"]
+                        entry["environment"]["MINIO_ACCESS_KEY"] = creds["minio_user"]
+                        entry["environment"]["MINIO_SECRET_KEY"] = creds["minio_secret"]
+                        entry["environment"]["MINIO_HOST"] = mo_sec.get(
+                            "MINIO_HOST", ""
+                        )
+                        scoped_minio = True
 
             if self.workspace_name and self.gitops_domain:
                 if dep_context:
