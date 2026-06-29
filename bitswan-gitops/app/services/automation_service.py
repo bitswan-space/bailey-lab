@@ -5304,7 +5304,7 @@ fi
                 # never sees the superuser/root secret.
                 pg_sec = get_service_secrets("postgres", realm)
                 if pg_sec:
-                    pg_creds = get_or_create_db_creds(bp_names["postgres_db"])
+                    pg_creds = get_or_create_db_creds(realm, bp_names["postgres_db"])
                     entry["environment"]["POSTGRES_USER"] = pg_creds["pg_user"]
                     entry["environment"]["POSTGRES_PASSWORD"] = pg_creds["pg_password"]
                     entry["environment"]["POSTGRES_HOST"] = pg_sec.get(
@@ -5313,7 +5313,9 @@ fi
                     scoped_pg = True
                 mo_sec = get_service_secrets("minio", realm)
                 if mo_sec:
-                    mo_creds = get_or_create_bucket_creds(bp_names["minio_bucket"])
+                    mo_creds = get_or_create_bucket_creds(
+                        realm, bp_names["minio_bucket"]
+                    )
                     entry["environment"]["MINIO_ACCESS_KEY"] = mo_creds["minio_user"]
                     entry["environment"]["MINIO_SECRET_KEY"] = mo_creds["minio_secret"]
                     entry["environment"]["MINIO_HOST"] = mo_sec.get("MINIO_HOST", "")
@@ -5334,7 +5336,7 @@ fi
                     pg_sec = get_service_secrets("postgres", "dev")
                     if pg_sec:
                         # This copy's own database has its own scoped role.
-                        pg_creds = get_or_create_db_creds(copy_db)
+                        pg_creds = get_or_create_db_creds("dev", copy_db)
                         entry["environment"]["POSTGRES_USER"] = pg_creds["pg_user"]
                         entry["environment"]["POSTGRES_PASSWORD"] = pg_creds[
                             "pg_password"
@@ -5347,7 +5349,7 @@ fi
                     if mo_sec:
                         # Copies share the per-BP dev bucket (no per-copy bucket).
                         dev_bucket = bp_resource_names(bp_sanitized)["minio_bucket"]
-                        mo_creds = get_or_create_bucket_creds(dev_bucket)
+                        mo_creds = get_or_create_bucket_creds("dev", dev_bucket)
                         entry["environment"]["MINIO_BUCKET"] = dev_bucket
                         entry["environment"]["MINIO_ACCESS_KEY"] = mo_creds[
                             "minio_user"

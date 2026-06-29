@@ -753,26 +753,37 @@ async def test_guard_clone_idempotent_when_db_exists(gitops_home, monkeypatch):
 
 
 def test_get_or_create_db_creds_stable(gitops_home):
-    a = bp_databases.get_or_create_db_creds("bp_my_bp")
-    b = bp_databases.get_or_create_db_creds("bp_my_bp")
+    a = bp_databases.get_or_create_db_creds("dev", "bp_my_bp")
+    b = bp_databases.get_or_create_db_creds("dev", "bp_my_bp")
     assert a == b  # stable across calls
     assert a["pg_user"] == "u_bp_my_bp"  # role scoped to this one DB
     assert a["pg_password"]
-    assert (gitops_home / "secrets" / "dbcreds" / "bp_my_bp.json").exists()
-    # a different database gets a DIFFERENT role/password.
-    other = bp_databases.get_or_create_db_creds("postgres_copy_alice")
+    assert (gitops_home / "secrets" / "dbcreds" / "dev" / "bp_my_bp.json").exists()
+    # a different database gets a DIFFERENT password.
+    other = bp_databases.get_or_create_db_creds("dev", "postgres_copy_alice")
     assert other["pg_user"] == "u_postgres_copy_alice"
     assert other["pg_password"] != a["pg_password"]
+    # SAME db name on a DIFFERENT realm gets a DIFFERENT password (so dev and
+    # staging — which share the stage-independent name — are not interchangeable).
+    staging = bp_databases.get_or_create_db_creds("staging", "bp_my_bp")
+    assert staging["pg_user"] == "u_bp_my_bp"
+    assert staging["pg_password"] != a["pg_password"]
 
 
 def test_get_or_create_bucket_creds_stable(gitops_home):
-    a = bp_databases.get_or_create_bucket_creds("bp-my-bp")
-    assert bp_databases.get_or_create_bucket_creds("bp-my-bp") == a
+    a = bp_databases.get_or_create_bucket_creds("dev", "bp-my-bp")
+    assert bp_databases.get_or_create_bucket_creds("dev", "bp-my-bp") == a
     assert a["minio_user"] == "u-bp-my-bp"
     assert a["minio_secret"]
     # different bucket -> different user (blue-green isolation).
-    assert bp_databases.get_or_create_bucket_creds("bp-my-bp-1")["minio_user"] == (
-        "u-bp-my-bp-1"
+    assert (
+        bp_databases.get_or_create_bucket_creds("dev", "bp-my-bp-1")["minio_user"]
+        == "u-bp-my-bp-1"
+    )
+    # same bucket name, different realm -> different secret.
+    assert (
+        bp_databases.get_or_create_bucket_creds("staging", "bp-my-bp")["minio_secret"]
+        != a["minio_secret"]
     )
 
 

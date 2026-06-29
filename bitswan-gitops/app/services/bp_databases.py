@@ -469,16 +469,20 @@ def _bucket_user(bucket: str) -> str:
     return ("u-" + bucket)[:63]
 
 
-def _creds_path(kind: str, name: str) -> str:
+def _creds_path(kind: str, realm: str, name: str) -> str:
+    # Keyed by (realm, name): db/bucket names are stage-independent (so snapshots
+    # restore across stages), but credentials must NOT be — otherwise dev and
+    # staging, which share e.g. the name `bp_bp`, would get the same password and
+    # be isolated only by network. Per-realm subdir gives each server its own.
     bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
-    return os.path.join(bs_home, "secrets", kind, f"{name}.json")
+    return os.path.join(bs_home, "secrets", kind, realm, f"{name}.json")
 
 
-def _get_or_create_creds(kind: str, name: str, fields: dict) -> dict:
-    """Read or create+persist (0600) a small per-resource creds file. ``fields``
-    supplies freshly generated defaults used only when the file is absent, so a
-    cache hit always returns the stable stored values."""
-    path = _creds_path(kind, name)
+def _get_or_create_creds(kind: str, realm: str, name: str, fields: dict) -> dict:
+    """Read or create+persist (0600) a small per-(realm, resource) creds file.
+    ``fields`` supplies freshly generated defaults used only when the file is
+    absent, so a cache hit always returns the stable stored values."""
+    path = _creds_path(kind, realm, name)
     try:
         with open(path) as f:
             data = json.load(f)
@@ -493,28 +497,34 @@ def _get_or_create_creds(kind: str, name: str, fields: dict) -> dict:
     return fields
 
 
-def get_or_create_db_creds(db_name: str) -> dict:
-    """Stable scoped Postgres login credentials for a single database. Persisted
-    under ``secrets/dbcreds/<db_name>.json`` so compose-gen (inject) and the
-    deploy guard (provision) agree. Alphanumeric password — safe in SQL/CLI."""
+def get_or_create_db_creds(realm: str, db_name: str) -> dict:
+    """Stable scoped Postgres login credentials for one database on one realm's
+    server. Persisted under ``secrets/dbcreds/<realm>/<db_name>.json`` — keyed by
+    realm so the same db name on different stage servers gets independent
+    passwords. Alphanumeric password — safe in SQL/CLI."""
     return _get_or_create_creds(
         "dbcreds",
+        realm,
         db_name,
         {"pg_user": _db_role(db_name), "pg_password": generate_password()},
     )
 
 
-def get_or_create_bucket_creds(bucket: str) -> dict:
-    """Stable scoped MinIO user credentials for a single bucket. Persisted under
-    ``secrets/miniocreds/<bucket>.json``."""
+def get_or_create_bucket_creds(realm: str, bucket: str) -> dict:
+    """Stable scoped MinIO user credentials for one bucket on one realm's server.
+    Persisted under ``secrets/miniocreds/<realm>/<bucket>.json`` (keyed by realm,
+    as for db creds)."""
     return _get_or_create_creds(
         "miniocreds",
+        realm,
         bucket,
         {"minio_user": _bucket_user(bucket), "minio_secret": generate_password()},
     )
 
 
-async def ensure_db_role(container: str, admin_user: str, db_name: str) -> None:
+async def ensure_db_role(
+    container: str, admin_user: str, realm: str, db_name: str
+) -> None:
     """Create (idempotently) a Postgres login role scoped to exactly ``db_name``
     and nothing else: it can CONNECT to and run table DDL (AutoMigrate /
     CREATE TABLE) in that one database, but cannot reach any other database
@@ -523,7 +533,7 @@ async def ensure_db_role(container: str, admin_user: str, db_name: str) -> None:
     different stages/copies/blue-green DBs of the same BP are mutually isolated.
     Runs as the superuser (``admin_user``).
     """
-    creds = get_or_create_db_creds(db_name)
+    creds = get_or_create_db_creds(realm, db_name)
     role = creds["pg_user"]
     pw = creds["pg_password"]
 
@@ -639,6 +649,7 @@ async def ensure_bucket_user(
     container: str,
     root_key: str,
     root_secret: str,
+    realm: str,
     bucket: str,
 ) -> None:
     """Create (idempotently) a MinIO user scoped to exactly one ``bucket`` + a
@@ -647,7 +658,7 @@ async def ensure_bucket_user(
     `mc admin` as root. Best-effort by contract — the caller wraps this so a
     MinIO hiccup never fails a deploy.
     """
-    creds = get_or_create_bucket_creds(bucket)
+    creds = get_or_create_bucket_creds(realm, bucket)
     user = creds["minio_user"]
     secret = creds["minio_secret"]
     buckets = [bucket]
@@ -1030,7 +1041,7 @@ async def ensure_live_postgres_dbs(
                 seen.add(("copy", copy))
                 await clone_postgres_db(workspace, copy, source_realm=realm)
                 await ensure_db_role(
-                    container, psec["POSTGRES_USER"], copy_db_name(copy)
+                    container, psec["POSTGRES_USER"], realm, copy_db_name(copy)
                 )
             continue
 
@@ -1058,7 +1069,7 @@ async def ensure_live_postgres_dbs(
             seen.add(("bp", db_name))
             await _wait_for_postgres(container, user)
             await _create_postgres_db(container, user, db_name)
-            await ensure_db_role(container, user, db_name)
+            await ensure_db_role(container, user, realm, db_name)
 
 
 async def ensure_bp_minio_principals(
@@ -1111,7 +1122,7 @@ async def ensure_bp_minio_principals(
                 root_secret = secrets.get("MINIO_ROOT_PASSWORD", "")
                 for b in buckets:
                     await _create_minio_bucket(container, root_key, root_secret, b)
-                    await ensure_bucket_user(container, root_key, root_secret, b)
+                    await ensure_bucket_user(container, root_key, root_secret, realm, b)
             except Exception as e:  # noqa: BLE001 - best-effort per BP
                 logger.warning(
                     "Scoped MinIO users for BP '%s' at %s failed: %s",
