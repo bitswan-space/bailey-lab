@@ -35,6 +35,7 @@ async def _broadcast_scanned(image_id: str, status: str) -> None:
     except Exception as e:  # noqa: BLE001
         logger.debug("supply_chain broadcast failed: %s", e)
 
+
 _SEVERITIES = ("critical", "high", "medium", "low")
 
 
