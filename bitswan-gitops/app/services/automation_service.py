@@ -5112,6 +5112,19 @@ fi
             return fw if fw and fw["ok"] else None
 
         worker_hosts_by_scope: dict[tuple[str, str, str | None], list[str]] = {}
+        # Listen port assigned to each worker, keyed by (ctx, stage, slot, name).
+        # A firewalled group's workers all share their gateway's single network
+        # namespace (network_mode: service:<gw>), so two workers that both want
+        # :8080 collide — the first binds it and the second fails with
+        # `[Errno 98] Address in use` (FastAPI crash-loops; Go's `air` supervisor
+        # survives the failed bind and the container stays Up but never serves).
+        # Give each worker in a shared netns a distinct port: it keeps its
+        # declared port when free, else the next free one. Non-firewalled workers
+        # each own their netns, so they keep their declared port unchanged. The
+        # resolved port is injected as $PORT (workers listen on it) and advertised
+        # in BITSWAN_WORKER_HOSTS so peers/frontends route to the right port.
+        worker_port_by_key: dict[tuple[str, str, str | None, str], int] = {}
+        used_ports_by_scope: dict[tuple[str, str, str | None], set[int]] = {}
         for _dep_id, _conf in deployments.items():
             if not _conf:
                 continue
@@ -5129,6 +5142,18 @@ fi
                 # backend. When firewalled, the worker lives in its slot's
                 # gateway netns, so peers reach it at the gateway's hostname.
                 _fw = _fw_active(_ctx, _stage, _slot)
+                _scope = (_ctx, _stage, _slot)
+                _want = _cfg.port or 8080
+                if _fw:
+                    # Shared netns — resolve a collision-free port for this worker.
+                    _used = used_ports_by_scope.setdefault(_scope, set())
+                    _port = _want
+                    while _port in _used:
+                        _port += 1
+                    _used.add(_port)
+                else:
+                    _port = _want
+                worker_port_by_key[(_ctx, _stage, _slot, _name)] = _port
                 _host = (
                     _fw["gw"]
                     if _fw
@@ -5136,8 +5161,8 @@ fi
                         self.workspace_name, _name, _ctx, _stage, _slot
                     )
                 )
-                worker_hosts_by_scope.setdefault((_ctx, _stage, _slot), []).append(
-                    f"{_name}={_host}:{_cfg.port}"
+                worker_hosts_by_scope.setdefault(_scope, []).append(
+                    f"{_name}={_host}:{_port}"
                 )
 
         work_items = [
@@ -5244,6 +5269,17 @@ fi
             )
             if _worker_hosts:
                 entry["environment"]["BITSWAN_WORKER_HOSTS"] = ",".join(_worker_hosts)
+            # A worker listens on the port resolved in the pre-pass above (its
+            # declared port, or a collision-free one when it shares a firewall
+            # gateway's netns with peers). Inject it as $PORT — templates honour
+            # it (e.g. uvicorn --port "$PORT", Go's PORT env) — so the advertised
+            # BITSWAN_WORKER_HOSTS entry and the actual listen port stay in sync.
+            if not automation_config.expose:
+                _worker_port = worker_port_by_key.get(
+                    (dep_context, dep_stage, slot, dep_automation_name)
+                )
+                if _worker_port is not None:
+                    entry["environment"]["PORT"] = str(_worker_port)
             if self.workspace_name:
                 entry["environment"]["BITSWAN_WORKSPACE_NAME"] = self.workspace_name
             if self.gitops_domain:

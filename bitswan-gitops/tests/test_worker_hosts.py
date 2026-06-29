@@ -90,6 +90,52 @@ def test_worker_hosts_injected_into_all_containers(svc):
         assert "frontend=" not in hosts
 
 
+def test_multiple_workers_get_distinct_ports(svc):
+    # Two workers in one firewalled BP share the egress gateway's single netns,
+    # so they must not both bind :8080. Each is assigned a distinct $PORT and is
+    # advertised at that port in BITSWAN_WORKER_HOSTS.
+    _write_automation(svc, "fe", expose=True)
+    _write_automation(svc, "be", expose=False)  # wants :8080
+    _write_automation(svc, "w2", expose=False)  # also wants :8080
+    bs_yaml = _bp("fe", "be")
+    bs_yaml["deployments"]["worker2-bp-dev"] = {
+        "stage": "dev",
+        "checksum": "w2",
+        "relative_path": "BP/worker2",
+        "automation_name": "worker2",
+        "context": "bp",
+    }
+    services = _services(svc, bs_yaml)
+
+    # Each worker gets a $PORT; the second is bumped off the taken :8080. The
+    # exposed frontend is not a worker, so no $PORT is injected.
+    ports = {}
+    for entry in services.values():
+        labels = entry.get("labels") or {}
+        if labels.get("gitops.firewall_gateway") == "true":
+            continue
+        env = entry.get("environment", {})
+        if "PORT" in env:
+            ports[labels.get("gitops.automation_name")] = env["PORT"]
+    assert ports.get("backend") == "8080", ports
+    assert ports.get("worker2") == "8081", ports
+    assert "frontend" not in ports, ports
+
+    # BITSWAN_WORKER_HOSTS advertises both workers at their distinct ports, on
+    # the one shared gateway host.
+    fe = next(
+        e
+        for e in services.values()
+        if (e.get("labels") or {}).get("gitops.automation_name") == "frontend"
+    )
+    hosts = dict(
+        h.split("=") for h in fe["environment"]["BITSWAN_WORKER_HOSTS"].split(",")
+    )
+    assert hosts["backend"].endswith(":8080"), hosts
+    assert hosts["worker2"].endswith(":8081"), hosts
+    assert hosts["backend"].rsplit(":", 1)[0] == hosts["worker2"].rsplit(":", 1)[0]
+
+
 def test_expose_does_not_wire_oauth2_proxy(svc):
     _write_automation(svc, "fe", expose=True)
     _write_automation(svc, "be", expose=False)
