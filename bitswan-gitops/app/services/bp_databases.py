@@ -447,73 +447,83 @@ async def _create_minio_bucket(
         raise RuntimeError(f"mc mb {bucket} failed: {stderr.strip()}")
 
 
-# --- Per-BP scoped service principals -------------------------------------
+# --- Per-database / per-bucket scoped principals --------------------------
 #
 # A BP backend used to receive the shared Postgres superuser + MinIO root.
-# Instead, each BP gets a login role / MinIO user scoped to ONLY its own
-# database(s) and bucket(s), so one BP can't touch another's data on the
-# shared per-(workspace, realm) server. The principals are named distinctly
-# from the resources (bpu_* / bpu-*) to avoid any role-vs-db name confusion.
+# Instead, each DATABASE gets its own Postgres login role and each BUCKET its
+# own MinIO user, scoped to ONLY that one resource. So isolation is complete
+# not just across BPs but across every database of the same BP — each live-dev
+# copy, dev, staging, and the two production blue-green databases are mutually
+# unreachable (a role can connect to exactly the one DB it's scoped to; a MinIO
+# user can touch exactly its one bucket). Principals are named from the resource
+# (u_<db> / u-<bucket>), capped at the 63-char identifier limit.
 
 
-def _bp_pg_role(bp_slug: str) -> str:
-    """Login role name for a BP's scoped Postgres access (per realm server)."""
-    return ("bpu_" + bp_slug.replace("-", "_"))[:63]
+def _db_role(db_name: str) -> str:
+    """Login role name scoped to a single Postgres database."""
+    return ("u_" + db_name)[:63]
 
 
-def _bp_minio_user(bp_slug: str) -> str:
-    """MinIO user name for a BP's scoped object access (per realm server)."""
-    return ("bpu-" + bp_slug)[:63]
+def _bucket_user(bucket: str) -> str:
+    """MinIO user name scoped to a single bucket."""
+    return ("u-" + bucket)[:63]
 
 
-def _bp_creds_path(bp_slug: str, realm: str) -> str:
+def _creds_path(kind: str, name: str) -> str:
     bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
-    return os.path.join(bs_home, "secrets", "bp", bp_slug, f"{realm}.svc.json")
+    return os.path.join(bs_home, "secrets", kind, f"{name}.json")
 
 
-def get_or_create_bp_creds(bp_slug: str, realm: str) -> dict:
-    """Stable per-(BP, realm) scoped service credentials.
-
-    Generated once and persisted 0600 under
-    ``secrets/bp/<slug>/<realm>.svc.json`` so compose-gen (which injects them
-    into the backend) and the deploy guard (which creates the role/user with
-    them) always agree on the same password/secret. Passwords are alphanumeric
-    (`generate_password`), so they're safe to interpolate into SQL literals and
-    CLI args.
-    """
-    validate_bp_slug(bp_slug)
-    path = _bp_creds_path(bp_slug, realm)
+def _get_or_create_creds(kind: str, name: str, fields: dict) -> dict:
+    """Read or create+persist (0600) a small per-resource creds file. ``fields``
+    supplies freshly generated defaults used only when the file is absent, so a
+    cache hit always returns the stable stored values."""
+    path = _creds_path(kind, name)
     try:
         with open(path) as f:
             data = json.load(f)
-        if data.get("pg_password") and data.get("minio_secret"):
+        if all(data.get(k) for k in fields):
             return data
     except (FileNotFoundError, json.JSONDecodeError):
         pass
-    data = {
-        "pg_user": _bp_pg_role(bp_slug),
-        "pg_password": generate_password(),
-        "minio_user": _bp_minio_user(bp_slug),
-        "minio_secret": generate_password(),
-    }
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
-        json.dump(data, f)
-    return data
+        json.dump(fields, f)
+    return fields
 
 
-async def ensure_bp_pg_role(
-    container: str, admin_user: str, bp_slug: str, realm: str, db_name: str
-) -> None:
-    """Create (idempotently) the BP's scoped Postgres login role and make it own
-    ``db_name`` so the backend can run its own DDL (AutoMigrate / CREATE TABLE)
-    on that database — and ONLY that database. Reassigns any objects a prior
-    superuser deploy created so existing data stays accessible. Runs as the
-    superuser (``admin_user``). For a production BP this is called once per
-    blue-green db, so the single role ends up owning both.
+def get_or_create_db_creds(db_name: str) -> dict:
+    """Stable scoped Postgres login credentials for a single database. Persisted
+    under ``secrets/dbcreds/<db_name>.json`` so compose-gen (inject) and the
+    deploy guard (provision) agree. Alphanumeric password — safe in SQL/CLI."""
+    return _get_or_create_creds(
+        "dbcreds",
+        db_name,
+        {"pg_user": _db_role(db_name), "pg_password": generate_password()},
+    )
+
+
+def get_or_create_bucket_creds(bucket: str) -> dict:
+    """Stable scoped MinIO user credentials for a single bucket. Persisted under
+    ``secrets/miniocreds/<bucket>.json``."""
+    return _get_or_create_creds(
+        "miniocreds",
+        bucket,
+        {"minio_user": _bucket_user(bucket), "minio_secret": generate_password()},
+    )
+
+
+async def ensure_db_role(container: str, admin_user: str, db_name: str) -> None:
+    """Create (idempotently) a Postgres login role scoped to exactly ``db_name``
+    and nothing else: it can CONNECT to and run table DDL (AutoMigrate /
+    CREATE TABLE) in that one database, but cannot reach any other database
+    (CONNECT is revoked from PUBLIC and granted only to this role) and cannot
+    DROP the database/schema (those stay admin-owned). One role per database, so
+    different stages/copies/blue-green DBs of the same BP are mutually isolated.
+    Runs as the superuser (``admin_user``).
     """
-    creds = get_or_create_bp_creds(bp_slug, realm)
+    creds = get_or_create_db_creds(db_name)
     role = creds["pg_user"]
     pw = creds["pg_password"]
 
@@ -625,22 +635,22 @@ async def ensure_bp_pg_role(
         raise RuntimeError(f"grant on {db_name} -> {role} failed: {stderr.strip()}")
 
 
-async def ensure_bp_minio_user(
+async def ensure_bucket_user(
     container: str,
     root_key: str,
     root_secret: str,
-    bp_slug: str,
-    realm: str,
-    buckets: list[str],
+    bucket: str,
 ) -> None:
-    """Create (idempotently) the BP's scoped MinIO user + a policy limited to
-    exactly ``buckets`` (its own bucket, or both blue-green buckets), and attach
-    it. Runs `mc admin` as root. Best-effort by contract — the caller wraps this
-    so a MinIO hiccup never fails a deploy.
+    """Create (idempotently) a MinIO user scoped to exactly one ``bucket`` + a
+    policy limited to it, and attach it. One user per bucket, so different
+    stages/blue-green buckets of the same BP are mutually isolated. Runs
+    `mc admin` as root. Best-effort by contract — the caller wraps this so a
+    MinIO hiccup never fails a deploy.
     """
-    creds = get_or_create_bp_creds(bp_slug, realm)
+    creds = get_or_create_bucket_creds(bucket)
     user = creds["minio_user"]
     secret = creds["minio_secret"]
+    buckets = [bucket]
 
     await run_docker_command(
         "docker",
@@ -1013,15 +1023,14 @@ async def ensure_live_postgres_dbs(
                 )
                 continue
             container = _container_name(workspace, "postgres", realm)
-            # Clone the shared per-copy DB once across all BPs in the copy.
+            # Clone the per-copy DB and give it its OWN scoped role — once per
+            # copy. One role per database, so this copy's backend can reach only
+            # this copy's database (not the dev DB or sibling copies).
             if ("copy", copy) not in seen:
                 seen.add(("copy", copy))
                 await clone_postgres_db(workspace, copy, source_realm=realm)
-            # Grant THIS BP's scoped (dev-realm) role on the per-copy DB so its
-            # copy backend — which connects as that role — can use it.
-            if bp_slug:
-                await ensure_bp_pg_role(
-                    container, psec["POSTGRES_USER"], bp_slug, realm, copy_db_name(copy)
+                await ensure_db_role(
+                    container, psec["POSTGRES_USER"], copy_db_name(copy)
                 )
             continue
 
@@ -1049,7 +1058,7 @@ async def ensure_live_postgres_dbs(
             seen.add(("bp", db_name))
             await _wait_for_postgres(container, user)
             await _create_postgres_db(container, user, db_name)
-            await ensure_bp_pg_role(container, user, bp_slug, realm, db_name)
+            await ensure_db_role(container, user, db_name)
 
 
 async def ensure_bp_minio_principals(
@@ -1094,24 +1103,18 @@ async def ensure_bp_minio_principals(
             else:
                 buckets = [bp_resource_names(bp_slug)["minio_bucket"]]
             try:
-                # Ensure the bucket(s) exist — for copy deploys nothing else
-                # creates them (provision_for_deployments skips worktrees);
-                # idempotent for registered BPs.
+                # One user per bucket, each scoped to only that bucket — so the
+                # two production blue-green buckets are mutually isolated. Ensure
+                # the bucket exists first (for copy deploys nothing else creates
+                # it; idempotent for registered BPs).
                 root_key = secrets["MINIO_ROOT_USER"]
                 root_secret = secrets.get("MINIO_ROOT_PASSWORD", "")
                 for b in buckets:
                     await _create_minio_bucket(container, root_key, root_secret, b)
-                await ensure_bp_minio_user(
-                    container,
-                    root_key,
-                    root_secret,
-                    bp_slug,
-                    realm,
-                    buckets,
-                )
+                    await ensure_bucket_user(container, root_key, root_secret, b)
             except Exception as e:  # noqa: BLE001 - best-effort per BP
                 logger.warning(
-                    "Scoped MinIO user for BP '%s' at %s failed: %s",
+                    "Scoped MinIO users for BP '%s' at %s failed: %s",
                     bp_slug,
                     realm,
                     e,

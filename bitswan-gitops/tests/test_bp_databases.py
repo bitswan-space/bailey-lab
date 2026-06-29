@@ -748,23 +748,38 @@ async def test_guard_clone_idempotent_when_db_exists(gitops_home, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Per-BP scoped service credentials (Postgres role + MinIO user/policy)
+# Per-database / per-bucket scoped credentials
 # ---------------------------------------------------------------------------
 
 
-def test_get_or_create_bp_creds_stable(gitops_home):
-    a = bp_databases.get_or_create_bp_creds("my-bp", "dev")
-    b = bp_databases.get_or_create_bp_creds("my-bp", "dev")
+def test_get_or_create_db_creds_stable(gitops_home):
+    a = bp_databases.get_or_create_db_creds("bp_my_bp")
+    b = bp_databases.get_or_create_db_creds("bp_my_bp")
     assert a == b  # stable across calls
-    assert a["pg_user"] == "bpu_my_bp"
-    assert a["minio_user"] == "bpu-my-bp"
-    assert a["pg_password"] and a["minio_secret"]
-    assert (gitops_home / "secrets" / "bp" / "my-bp" / "dev.svc.json").exists()
+    assert a["pg_user"] == "u_bp_my_bp"  # role scoped to this one DB
+    assert a["pg_password"]
+    assert (gitops_home / "secrets" / "dbcreds" / "bp_my_bp.json").exists()
+    # a different database gets a DIFFERENT role/password.
+    other = bp_databases.get_or_create_db_creds("postgres_copy_alice")
+    assert other["pg_user"] == "u_postgres_copy_alice"
+    assert other["pg_password"] != a["pg_password"]
+
+
+def test_get_or_create_bucket_creds_stable(gitops_home):
+    a = bp_databases.get_or_create_bucket_creds("bp-my-bp")
+    assert bp_databases.get_or_create_bucket_creds("bp-my-bp") == a
+    assert a["minio_user"] == "u-bp-my-bp"
+    assert a["minio_secret"]
+    # different bucket -> different user (blue-green isolation).
+    assert bp_databases.get_or_create_bucket_creds("bp-my-bp-1")["minio_user"] == (
+        "u-bp-my-bp-1"
+    )
 
 
 async def test_guard_creates_scoped_pg_role(gitops_home, fake_docker):
-    """The deploy guard also creates a scoped login role that OWNS the BP's DB
-    (so the backend never connects as the superuser)."""
+    """The deploy guard creates a login role scoped to exactly this database —
+    it can run table DDL but the DB/schema stay admin-owned (no self-drop), and
+    CONNECT is locked to this role only."""
     _write_pg_secrets(gitops_home, "dev")
     reg = load_registry()
     register_bp_stage(reg, "my-bp", "My BP", "dev")
@@ -776,37 +791,35 @@ async def test_guard_creates_scoped_pg_role(gitops_home, fake_docker):
     }
     await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
     joined = [" ".join(c) for c in fake_docker]
+    # role is named per-database (u_<db>), not per-BP.
     assert any(
-        'CREATE ROLE "bpu_my_bp"' in j or 'ALTER ROLE "bpu_my_bp"' in j for j in joined
+        'CREATE ROLE "u_bp_my_bp"' in j or 'ALTER ROLE "u_bp_my_bp"' in j
+        for j in joined
     ), joined
-    # Role gets schema privileges, NOT db/schema ownership — so it can run table
-    # DDL but cannot DROP DATABASE / DROP SCHEMA on its own platform DB. DB +
-    # schema ownership are (re)set to admin.
-    assert any('GRANT ALL ON SCHEMA public TO "bpu_my_bp"' in j for j in joined), joined
+    # schema privileges, NOT db/schema ownership (so it can't DROP DATABASE/SCHEMA).
+    assert any('GRANT ALL ON SCHEMA public TO "u_bp_my_bp"' in j for j in joined), (
+        joined
+    )
     assert any('ALTER DATABASE "bp_my_bp" OWNER TO "admin"' in j for j in joined), (
         joined
     )
-    assert not any(
-        'ALTER DATABASE "bp_my_bp" OWNER TO "bpu_my_bp"' in j for j in joined
-    ), joined
     assert any('ALTER SCHEMA public OWNER TO "admin"' in j for j in joined), joined
-    assert not any('ALTER SCHEMA public OWNER TO "bpu_my_bp"' in j for j in joined), (
+    assert not any('OWNER TO "u_bp_my_bp"' in j and "DATABASE" in j for j in joined), (
         joined
     )
-    # must NOT use the all-or-nothing REASSIGN OWNED (fails on the superuser).
     assert not any("REASSIGN OWNED" in j for j in joined), joined
-    # CONNECT locked down to the scoped role (default-deny isolation).
+    # CONNECT locked down to this one role (default-deny isolation).
     assert any(
         'REVOKE CONNECT ON DATABASE "bp_my_bp" FROM PUBLIC' in j for j in joined
     ), joined
     assert any(
-        'GRANT CONNECT ON DATABASE "bp_my_bp" TO "bpu_my_bp"' in j for j in joined
+        'GRANT CONNECT ON DATABASE "bp_my_bp" TO "u_bp_my_bp"' in j for j in joined
     ), joined
 
 
-async def test_guard_grants_copy_role_on_copy_db(gitops_home, fake_docker):
-    """A live-dev copy backend gets its BP's dev role scoped on the copy DB
-    (CONNECT + schema privileges), without owning the database."""
+async def test_guard_creates_per_copy_role(gitops_home, fake_docker):
+    """A live-dev copy DB gets its OWN role (u_postgres_copy_<copy>) scoped to it
+    — not a shared per-BP role — so copies are mutually isolated."""
     _write_pg_secrets(gitops_home, "dev")
     bs_yaml = {
         "deployments": {
@@ -816,11 +829,9 @@ async def test_guard_grants_copy_role_on_copy_db(gitops_home, fake_docker):
     await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
     joined = [" ".join(c) for c in fake_docker]
     assert any(
-        'GRANT CONNECT ON DATABASE "postgres_copy_alice" TO "bpu_my_bp"' in j
+        'GRANT CONNECT ON DATABASE "postgres_copy_alice" TO "u_postgres_copy_alice"'
+        in j
         for j in joined
-    ), joined
-    assert not any(
-        'ALTER DATABASE "postgres_copy_alice" OWNER TO "bpu_my_bp"' in j for j in joined
     ), joined
 
 
@@ -842,10 +853,10 @@ async def test_minio_principals_creates_scoped_user(gitops_home, fake_docker):
     }
     await bp_databases.ensure_bp_minio_principals("ws-test", bs_yaml, ["d1"])
     joined = [" ".join(c) for c in fake_docker]
-    assert any("admin user add local bpu-my-bp" in j for j in joined), joined
-    assert any("admin policy create local bpu-my-bp" in j for j in joined), joined
+    assert any("admin user add local u-bp-my-bp" in j for j in joined), joined
+    assert any("admin policy create local u-bp-my-bp" in j for j in joined), joined
     assert any(
-        "admin policy attach local bpu-my-bp --user bpu-my-bp" in j for j in joined
+        "admin policy attach local u-bp-my-bp --user u-bp-my-bp" in j for j in joined
     ), joined
     assert any("arn:aws:s3:::bp-my-bp" in j for j in joined), joined
 
@@ -867,7 +878,7 @@ async def test_minio_principals_covers_copy_live_dev(gitops_home, fake_docker):
     await bp_databases.ensure_bp_minio_principals("ws-test", bs_yaml, ["d1"])
     joined = [" ".join(c) for c in fake_docker]
     assert any("local/bp-my-bp" in j for j in joined), joined  # bucket ensured
-    assert any("admin user add local bpu-my-bp" in j for j in joined), joined
+    assert any("admin user add local u-bp-my-bp" in j for j in joined), joined
     assert any(
-        "admin policy attach local bpu-my-bp --user bpu-my-bp" in j for j in joined
+        "admin policy attach local u-bp-my-bp --user u-bp-my-bp" in j for j in joined
     ), joined

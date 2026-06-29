@@ -4950,7 +4950,8 @@ fi
             bp_resource_names,
             copy_db_name,
             derive_bp_and_copy,
-            get_or_create_bp_creds,
+            get_or_create_bucket_creds,
+            get_or_create_db_creds,
             get_service_secrets,
             is_registered,
             load_registry,
@@ -5296,23 +5297,25 @@ fi
                 entry["environment"]["COUCHDB_DB_PREFIX"] = bp_names["couchdb_prefix"]
                 entry["environment"]["MINIO_BUCKET"] = bp_names["minio_bucket"]
 
-                # Scoped per-BP credentials (env: beats env_file). The role/user
-                # is created + granted only on this BP's DB(s)/bucket(s) by the
-                # deploy guard, so the backend can't touch other BPs' data and
+                # Per-DATABASE / per-bucket scoped creds (env: beats env_file).
+                # The role/user is created + scoped to ONLY this exact database /
+                # bucket by the deploy guard, so the backend can't reach another
+                # BP's — or another stage/copy/blue-green db of its own BP — and
                 # never sees the superuser/root secret.
-                creds = get_or_create_bp_creds(bp_sanitized, realm)
                 pg_sec = get_service_secrets("postgres", realm)
                 if pg_sec:
-                    entry["environment"]["POSTGRES_USER"] = creds["pg_user"]
-                    entry["environment"]["POSTGRES_PASSWORD"] = creds["pg_password"]
+                    pg_creds = get_or_create_db_creds(bp_names["postgres_db"])
+                    entry["environment"]["POSTGRES_USER"] = pg_creds["pg_user"]
+                    entry["environment"]["POSTGRES_PASSWORD"] = pg_creds["pg_password"]
                     entry["environment"]["POSTGRES_HOST"] = pg_sec.get(
                         "POSTGRES_HOST", ""
                     )
                     scoped_pg = True
                 mo_sec = get_service_secrets("minio", realm)
                 if mo_sec:
-                    entry["environment"]["MINIO_ACCESS_KEY"] = creds["minio_user"]
-                    entry["environment"]["MINIO_SECRET_KEY"] = creds["minio_secret"]
+                    mo_creds = get_or_create_bucket_creds(bp_names["minio_bucket"])
+                    entry["environment"]["MINIO_ACCESS_KEY"] = mo_creds["minio_user"]
+                    entry["environment"]["MINIO_SECRET_KEY"] = mo_creds["minio_secret"]
                     entry["environment"]["MINIO_HOST"] = mo_sec.get("MINIO_HOST", "")
                     scoped_minio = True
 
@@ -5325,25 +5328,33 @@ fi
             # load-bearing: this MUST come after the per-BP block above so the
             # copy clone wins.
             if wt_name and stage == "live-dev":
-                entry["environment"]["POSTGRES_DB"] = copy_db_name(wt_name)
+                copy_db = copy_db_name(wt_name)
+                entry["environment"]["POSTGRES_DB"] = copy_db
                 if bp_sanitized:
-                    creds = get_or_create_bp_creds(bp_sanitized, "dev")
                     pg_sec = get_service_secrets("postgres", "dev")
                     if pg_sec:
-                        entry["environment"]["POSTGRES_USER"] = creds["pg_user"]
-                        entry["environment"]["POSTGRES_PASSWORD"] = creds["pg_password"]
+                        # This copy's own database has its own scoped role.
+                        pg_creds = get_or_create_db_creds(copy_db)
+                        entry["environment"]["POSTGRES_USER"] = pg_creds["pg_user"]
+                        entry["environment"]["POSTGRES_PASSWORD"] = pg_creds[
+                            "pg_password"
+                        ]
                         entry["environment"]["POSTGRES_HOST"] = pg_sec.get(
                             "POSTGRES_HOST", ""
                         )
                         scoped_pg = True
                     mo_sec = get_service_secrets("minio", "dev")
                     if mo_sec:
-                        # Copies share the per-BP dev bucket.
-                        entry["environment"]["MINIO_BUCKET"] = bp_resource_names(
-                            bp_sanitized
-                        )["minio_bucket"]
-                        entry["environment"]["MINIO_ACCESS_KEY"] = creds["minio_user"]
-                        entry["environment"]["MINIO_SECRET_KEY"] = creds["minio_secret"]
+                        # Copies share the per-BP dev bucket (no per-copy bucket).
+                        dev_bucket = bp_resource_names(bp_sanitized)["minio_bucket"]
+                        mo_creds = get_or_create_bucket_creds(dev_bucket)
+                        entry["environment"]["MINIO_BUCKET"] = dev_bucket
+                        entry["environment"]["MINIO_ACCESS_KEY"] = mo_creds[
+                            "minio_user"
+                        ]
+                        entry["environment"]["MINIO_SECRET_KEY"] = mo_creds[
+                            "minio_secret"
+                        ]
                         entry["environment"]["MINIO_HOST"] = mo_sec.get(
                             "MINIO_HOST", ""
                         )
