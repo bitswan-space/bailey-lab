@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Check, Eye, EyeOff, Loader2, Plus, Trash2 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import { api, type BpSecrets } from '@/lib/api';
 import { cn } from '@/lib/utils';
 

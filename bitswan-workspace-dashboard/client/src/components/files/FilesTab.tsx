@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUp, RefreshCw, Upload } from 'lucide-react';
+import { ArrowUp, File as FileIcon, RefreshCw, Search, Upload, X } from 'lucide-react';
 import { useDropzone, type DropEvent } from 'react-dropzone';
-import { toast } from 'sonner';
-import { api, type ChangedKind } from '@/lib/api';
+import { toast } from '@/lib/notify';
+import { api, type ChangedKind, type FileSearchMatch } from '@/lib/api';
 import { useUrlParam } from '@/lib/urlState';
 import { useFileContent } from '@/hooks/useFileContent';
 import { useFileTree } from '@/hooks/useFileTree';
@@ -20,11 +20,44 @@ interface Props {
   bp?: string | null;
 }
 
+const SEARCH_KIND_STYLES: Record<ChangedKind, string> = {
+  A: 'bg-emerald-100 text-emerald-700',
+  M: 'bg-amber-100 text-amber-700',
+  D: 'bg-red-100 text-red-700',
+};
+
+/** Split `text` around case-insensitive occurrences of `q` so the matched
+ *  substrings can be emphasised in a search result line. */
+function highlight(text: string, q: string): React.ReactNode {
+  if (!q) return text;
+  const out: React.ReactNode[] = [];
+  const lower = text.toLowerCase();
+  const needle = q.toLowerCase();
+  let i = 0;
+  let k = 0;
+  for (;;) {
+    const hit = lower.indexOf(needle, i);
+    if (hit < 0) {
+      out.push(text.slice(i));
+      break;
+    }
+    if (hit > i) out.push(text.slice(i, hit));
+    out.push(
+      <mark key={k++} className="rounded-sm bg-amber-200 text-foreground">
+        {text.slice(hit, hit + needle.length)}
+      </mark>,
+    );
+    i = hit + needle.length;
+  }
+  return out;
+}
+
 /**
  * Copy file explorer: 280 px tree on the left, content viewer on the
  * right. Status badges on the tree come from the same `/status` endpoint
  * the Diff tab uses, merged in by path. The tree pane doubles as a drop
- * target for file uploads.
+ * target for file uploads. A search box runs a full-text search across the
+ * copy's files (server-side grep) and lists matching lines grouped by file.
  */
 export function FilesTab({ copy, bp }: Props) {
   const { tree, loading: treeLoading, refresh: refreshTree } = useFileTree(copy);
@@ -43,7 +76,9 @@ export function FilesTab({ copy, bp }: Props) {
   // the user navigates to a different BP / copy so each cd starts
   // scoped again.
   const [showFullTree, setShowFullTree] = useState(false);
-  // Reset the scope toggle and close the open file when the user switches BP
+  // Explorer search query — filters all files (by path) into a flat list.
+  const [query, setQuery] = useState('');
+  // Reset the scope toggle, search, and open file when the user switches BP
   // or copy — but NOT on the initial mount, so a pasted ?file=… link opens.
   const resetReady = useRef(false);
   useEffect(() => {
@@ -52,6 +87,7 @@ export function FilesTab({ copy, bp }: Props) {
       return;
     }
     setShowFullTree(false);
+    setQuery('');
     setOpenPath(null);
   }, [bp, copy, setOpenPath]);
 
@@ -71,6 +107,55 @@ export function FilesTab({ copy, bp }: Props) {
     for (const c of changed) out.set(c.path, c.kind);
     return out;
   }, [changed]);
+
+  // Full-text search: a debounced server-side grep across the copy's files
+  // (scoped to the BP folder when cd'd in). `results === null` means "not
+  // searching" (show the tree).
+  const [results, setResults] = useState<{
+    matches: FileSearchMatch[];
+    truncated: boolean;
+  } | null>(null);
+  const [searching, setSearching] = useState(false);
+  const trimmedQuery = query.trim();
+  useEffect(() => {
+    if (!trimmedQuery) {
+      setResults(null);
+      setSearching(false);
+      return;
+    }
+    let cancelled = false;
+    setSearching(true);
+    const id = setTimeout(() => {
+      api.copyFiles
+        .search(copy, trimmedQuery, rootDir || undefined)
+        .then((r) => {
+          if (!cancelled) setResults(r);
+        })
+        .catch(() => {
+          if (!cancelled) setResults({ matches: [], truncated: false });
+        })
+        .finally(() => {
+          if (!cancelled) setSearching(false);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(id);
+    };
+  }, [trimmedQuery, copy, rootDir]);
+
+  // Group consecutive matches by file (the server walks file-by-file, so
+  // same-file lines already arrive contiguously).
+  const resultGroups = useMemo(() => {
+    if (!results) return null;
+    const groups: { path: string; lines: FileSearchMatch[] }[] = [];
+    for (const m of results.matches) {
+      const last = groups[groups.length - 1];
+      if (last && last.path === m.path) last.lines.push(m);
+      else groups.push({ path: m.path, lines: [m] });
+    }
+    return groups;
+  }, [results]);
 
   // Upload target for the **click** path (the Upload button → OS picker)
   // is the directory the currently-open file lives in, or — when no file
@@ -197,11 +282,109 @@ export function FilesTab({ copy, bp }: Props) {
             </button>
           </div>
         </div>
+        <div className="shrink-0 border-b border-border px-2 py-1.5">
+          <div className="relative">
+            <Search
+              className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search in files…"
+              spellCheck={false}
+              aria-label="Search in files"
+              className="w-full rounded border border-input bg-background py-1 pl-7 pr-7 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            {query ? (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                title="Clear search"
+                aria-label="Clear search"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <X className="size-3" aria-hidden />
+              </button>
+            ) : null}
+          </div>
+        </div>
         <div className="flex-1 overflow-auto">
           {treeLoading && tree.length === 0 ? (
             <div className="px-3 py-6 text-center text-xs text-muted-foreground">
               Loading…
             </div>
+          ) : trimmedQuery ? (
+            !results ? (
+              <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                Searching…
+              </div>
+            ) : results.matches.length === 0 ? (
+              <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+                No matches for “{trimmedQuery}”.
+              </div>
+            ) : (
+              <div className="flex flex-col py-1 text-[13px]">
+                {(resultGroups ?? []).map((g) => {
+                  const kind = statusByPath.get(g.path);
+                  const slash = g.path.lastIndexOf('/');
+                  const name = slash < 0 ? g.path : g.path.slice(slash + 1);
+                  const dir = slash < 0 ? '' : g.path.slice(0, slash);
+                  return (
+                    <div key={g.path} className="mb-1">
+                      <button
+                        type="button"
+                        onClick={() => setOpenPath(g.path)}
+                        title={g.path}
+                        className="group flex w-full items-center gap-1.5 px-2 py-0.5 text-left hover:bg-muted/40"
+                      >
+                        <FileIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                        <span className="min-w-0 flex-1 truncate font-medium">
+                          {name}
+                          {dir ? (
+                            <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
+                              {dir}
+                            </span>
+                          ) : null}
+                        </span>
+                        {kind ? (
+                          <span
+                            className={`inline-flex h-4 items-center rounded px-1 text-[10px] font-semibold ${SEARCH_KIND_STYLES[kind]}`}
+                          >
+                            {kind}
+                          </span>
+                        ) : null}
+                      </button>
+                      {g.lines.map((m, i) => (
+                        <button
+                          key={`${m.line}:${i}`}
+                          type="button"
+                          onClick={() => setOpenPath(g.path)}
+                          title={`${g.path}:${m.line}`}
+                          className={`flex w-full items-baseline gap-2 rounded px-2 py-0.5 pl-7 text-left transition-colors ${
+                            openPath === g.path ? 'bg-muted/60' : 'hover:bg-muted/40'
+                          }`}
+                        >
+                          <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                            {m.line}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
+                            {highlight(m.text, trimmedQuery)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+                {results.truncated ? (
+                  <div className="px-3 py-2 text-center text-[11px] text-muted-foreground">
+                    Showing the first {results.matches.length} matches — refine
+                    your search.
+                  </div>
+                ) : null}
+              </div>
+            )
           ) : displayTree.length === 0 ? (
             <div className="px-3 py-6 text-center text-xs text-muted-foreground">
               {rootDir

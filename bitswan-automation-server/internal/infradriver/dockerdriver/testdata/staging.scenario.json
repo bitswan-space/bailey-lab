@@ -1,0 +1,11 @@
+{
+  "workspace_name": "ws3",
+  "domain": "example.com",
+  "gitops_dir_host": "/host/gitops",
+  "sources": [
+    {"checksum": "fr", "toml": "[deployment]\nexpose = true\nport = 8080\n\n[services.postgres]\nenabled = true\n[services.minio]\nenabled = true\n"},
+    {"checksum": "bk", "toml": "[deployment]\nexpose = false\nport = 8080\n\n[services.postgres]\nenabled = true\n[services.minio]\nenabled = true\n"}
+  ],
+  "secrets_files": ["postgres-staging", "minio-staging"],
+  "bitswan_yaml": "deployments:\n  frontend-acme-staging:\n    automation_name: frontend\n    context: acme\n    stage: staging\n    checksum: fr\n    image: internal/ws3-acme-frontend:shafr\n    relative_path: copies/main/acme/frontend\n  backend-acme-staging:\n    automation_name: backend\n    context: acme\n    stage: staging\n    checksum: bk\n    image: internal/ws3-acme-backend:shabk\n    relative_path: copies/main/acme/backend\n"
+}

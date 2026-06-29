@@ -1,0 +1,11 @@
+{
+  "workspace_name": "ws4",
+  "domain": "example.com",
+  "sources": [],
+  "secrets_files": [],
+  "bitswan_yaml": "deployments:\n  backend-copy-bar-acme-live-dev:\n    automation_name: backend\n    context: copy-bar-acme\n    stage: live-dev\n    checksum: live-dev\n    relative_path: copies/bar/acme/backend\n  frontend-copy-bar-acme-live-dev:\n    automation_name: frontend\n    context: copy-bar-acme\n    stage: live-dev\n    checksum: live-dev\n    relative_path: copies/bar/acme/frontend\n",
+  "workspace_repo": {
+    "copies/bar/acme/backend/automation.toml": "[deployment]\nexpose = false\nport = 8080\n",
+    "copies/bar/acme/frontend/automation.toml": "[deployment]\nexpose = true\nport = 8080\n"
+  }
+}

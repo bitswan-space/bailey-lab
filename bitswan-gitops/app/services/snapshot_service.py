@@ -24,7 +24,6 @@ snapshot files — never buffered whole in Python (unlike the legacy
 whole-server `postgres_service.backup()`).
 """
 
-import asyncio
 import gzip
 import json
 import logging
@@ -84,83 +83,174 @@ def new_snapshot_id() -> str:
 # ---------------------------------------------------------------------------
 
 
+# All snapshot/restore docker work runs through the infra-driver (gitops has no
+# docker.sock). These three helpers keep their old signatures — callers and test
+# fakes are unchanged — but execute via the driver's exec primitive, which is
+# workspace-scoped (it refuses containers outside this workspace).
+def _driver_client_ctx():
+    from app.services.infra_driver_client import InfraDriverClient, WorkspaceContext
+
+    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+    return InfraDriverClient(), WorkspaceContext(
+        workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local"),
+        domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+        gitops_dir=os.path.join(gitops_root, "gitops"),
+        secrets_dir=os.path.join(gitops_root, "secrets"),
+    )
+
+
+def _exec_spec(args):
+    """Map the legacy ('docker','exec',<container>,*cmd) arg shape to an ExecSpec."""
+    from app.services.infra_driver_client import ExecSpec
+
+    if len(args) < 3 or args[0] != "docker" or args[1] != "exec":
+        raise ValueError("expected ('docker','exec',<container>,*cmd)")
+    # `docker exec [-i] <container> <cmd...>`: skip the streaming flags the
+    # caller adds; the driver decides -i itself from whether stdin is supplied.
+    rest = list(args[2:])
+    while rest and rest[0] in ("-i", "-t", "-it"):
+        rest = rest[1:]
+    return ExecSpec(container=rest[0], cmd=rest[1:])
+
+
+def _cp_container_ref(operand: str) -> tuple[str, str]:
+    """Split a `docker cp` ``container:path`` operand into (container, path).
+    Fails loudly on a malformed operand (the other operand was `-`)."""
+    container, sep, path = operand.partition(":")
+    if not sep or not container or not path:
+        raise ValueError(f"docker cp: expected container:path, got {operand!r}")
+    return container, path
+
+
 async def run_docker_command_to_file(
     args: list[str], out_path: str, gzip_output: bool = False
 ) -> tuple[str, int]:
-    """Run a command and stream its stdout to `out_path` chunk by chunk.
+    """Stream a command's output (or a `docker cp` archive) to `out_path` chunk
+    by chunk (via the driver). With `gzip_output=True` the stream is
+    gzip-compressed on the way down. Returns (stderr, returncode). Constant
+    memory regardless of dump/archive size.
 
-    With `gzip_output=True` the stream is gzip-compressed on the way down.
-    Returns (stderr, returncode). Constant memory regardless of dump size.
+    `docker cp <container>:<path> -` archives the path inside the container and
+    streams the TAR out (copy_out) — the only way to get bytes off the tar-less
+    infra images; everything else is a `docker exec` whose stdout we capture.
     """
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    # Drain stderr concurrently so a chatty command can't deadlock the pipe.
-    stderr_task = asyncio.create_task(proc.stderr.read())
+    from app.services.infra_driver_client import InfraDriverError
+
+    client, ctx = _driver_client_ctx()
+
     opener = gzip.open if gzip_output else open
     with opener(out_path, "wb") as f:
-        while True:
-            chunk = await proc.stdout.read(1 << 16)
-            if not chunk:
-                break
-            f.write(chunk)
-    stderr = await stderr_task
-    rc = await proc.wait()
-    return stderr.decode(errors="replace"), rc
+
+        async def on_chunk(d: bytes):
+            f.write(d)
+
+        # `docker cp <container>:<path> -`: the daemon-side archive primitive.
+        if args[:2] == ["docker", "cp"] and args[-1] == "-":
+            container, path = _cp_container_ref(args[2])
+            try:
+                await client.copy_out(ctx, container, path, on_chunk)
+            except InfraDriverError as ex:
+                return str(ex), 1
+            return "", 0
+
+        err: list[bytes] = []
+
+        async def on_stderr(d: bytes):
+            err.append(d)
+
+        try:
+            rc = await client.exec(
+                ctx, _exec_spec(args), on_stdout=on_chunk, on_stderr=on_stderr
+            )
+        except InfraDriverError as ex:
+            return str(ex), 1
+    return b"".join(err).decode(errors="replace"), rc
 
 
 async def run_docker_command_from_file(
     args: list[str], in_path: str, gunzip_input: bool = False
 ) -> tuple[str, str, int]:
-    """Run a command streaming `in_path` into its stdin chunk by chunk.
+    """Stream `in_path` into a command's stdin (or extract it as a `docker cp`
+    archive) chunk by chunk (via the driver). With `gunzip_input=True` the file
+    is gunzipped on the way up. Returns (stdout, stderr, returncode).
 
-    With `gunzip_input=True` the file is gzip-decompressed on the way up.
-    Returns (stdout, stderr, returncode).
+    `docker cp - <container>:<path>` extracts the incoming TAR into the
+    container path (copy_in) — the daemon-side counterpart of copy_out;
+    everything else is a `docker exec` we feed on stdin.
     """
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout_task = asyncio.create_task(proc.stdout.read())
-    stderr_task = asyncio.create_task(proc.stderr.read())
+    from app.services.infra_driver_client import InfraDriverError
+
+    client, ctx = _driver_client_ctx()
     opener = gzip.open if gunzip_input else open
-    try:
+
+    async def stdin_chunks():
         with opener(in_path, "rb") as f:
             while True:
                 chunk = f.read(1 << 16)
                 if not chunk:
                     break
-                proc.stdin.write(chunk)
-                await proc.stdin.drain()
-    except (BrokenPipeError, ConnectionResetError):
-        pass  # command exited early — its rc/stderr tell the story
-    finally:
+                yield chunk
+
+    # `docker cp - <container>:<path>`: the daemon-side extraction primitive.
+    if args[:2] == ["docker", "cp"] and args[2] == "-":
+        container, path = _cp_container_ref(args[3])
         try:
-            proc.stdin.close()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-    stdout = await stdout_task
-    stderr = await stderr_task
-    rc = await proc.wait()
-    return stdout.decode(errors="replace"), stderr.decode(errors="replace"), rc
+            await client.copy_in(ctx, container, path, stdin_chunks())
+        except InfraDriverError as ex:
+            return "", str(ex), 1
+        return "", "", 0
+
+    out: list[bytes] = []
+    err: list[bytes] = []
+
+    async def on_stdout(d: bytes):
+        out.append(d)
+
+    async def on_stderr(d: bytes):
+        err.append(d)
+
+    try:
+        rc = await client.exec(
+            ctx,
+            _exec_spec(args),
+            stdin=stdin_chunks(),
+            on_stdout=on_stdout,
+            on_stderr=on_stderr,
+        )
+    except InfraDriverError as ex:
+        return "", str(ex), 1
+    return (
+        b"".join(out).decode(errors="replace"),
+        b"".join(err).decode(errors="replace"),
+        rc,
+    )
 
 
 async def run_docker_command(*args: str) -> tuple[str, str, int]:
-    """Plain (non-streaming) command. Module-level so tests can fake it."""
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
+    """Plain (non-streaming) command via the driver. Module-level so tests can
+    fake it. Returns (stdout, stderr, returncode)."""
+    from app.services.infra_driver_client import InfraDriverError
+
+    client, ctx = _driver_client_ctx()
+    out: list[bytes] = []
+    err: list[bytes] = []
+
+    async def on_stdout(d: bytes):
+        out.append(d)
+
+    async def on_stderr(d: bytes):
+        err.append(d)
+
+    try:
+        rc = await client.exec(
+            ctx, _exec_spec(args), on_stdout=on_stdout, on_stderr=on_stderr
+        )
+    except InfraDriverError as ex:
+        return "", str(ex), 1
     return (
-        stdout.decode(errors="replace"),
-        stderr.decode(errors="replace"),
-        proc.returncode,
+        b"".join(out).decode(errors="replace"),
+        b"".join(err).decode(errors="replace"),
+        rc,
     )
 
 

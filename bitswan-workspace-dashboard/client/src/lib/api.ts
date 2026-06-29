@@ -1,5 +1,6 @@
 import type {
   DockerInspect,
+  GitTask,
   Snapshot,
   SnapshotListResponse,
   SnapshotEligibility,
@@ -7,21 +8,39 @@ import type {
   SnapshotTask,
 } from '@/types';
 import { authHeader, clearAccessToken } from './auth-token';
+import { notifySessionExpired, SessionExpiredError } from './session';
+
+// When the oauth2-proxy SESSION expires, it answers API calls with a 302 to the
+// Keycloak auth endpoint — NOT a 401. With the default `redirect: 'follow'` the
+// browser chases that cross-origin redirect, the page CSP `connect-src` blocks
+// it, and the fetch throws an opaque `TypeError: Failed to fetch` that looks
+// like a transient network blip. So every request uses `redirect: 'manual'`:
+// an auth redirect then comes back as an *opaque-redirect response*
+// (`type === 'opaqueredirect'`, status 0) we can detect cleanly — and the CSP
+// violation never happens. That (or a 401) means "session gone → re-login".
+const FETCH_BASE: RequestInit = {
+  credentials: 'include',
+  cache: 'no-store',
+  redirect: 'manual',
+};
+
+function isSessionGone(r: Response): boolean {
+  return r.type === 'opaqueredirect' || r.status === 0 || r.status === 401;
+}
 
 async function getJson<T>(url: string): Promise<T> {
-  let r = await fetch(url, {
-    credentials: 'include',
-    cache: 'no-store',
-    headers: await authHeader(),
-  });
-  if (r.status === 401) {
-    // Token may have expired — refetch from /oauth2/auth and retry once.
+  let r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
+  if (isSessionGone(r)) {
+    // Access token may just be stale — refetch from /oauth2/auth and retry once.
     clearAccessToken();
-    r = await fetch(url, {
-      credentials: 'include',
-      cache: 'no-store',
-      headers: await authHeader(),
-    });
+    r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
+  }
+  // Still redirected/401 after a refresh → the oauth2-proxy SESSION is gone, not
+  // just the token. Raise the app-wide signal (one banner prompts re-login) and
+  // throw a typed error so callers stay silent instead of rendering a failure.
+  if (isSessionGone(r)) {
+    notifySessionExpired();
+    throw new SessionExpiredError();
   }
   if (!r.ok) throw new Error(`${url} returned ${r.status}`);
   return (await r.json()) as T;
@@ -38,16 +57,20 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
   for (let attempt = 0; ; attempt++) {
     try {
       const r = await fetch(url, {
-        credentials: 'include',
-        cache: 'no-store',
+        ...FETCH_BASE,
         ...init,
         headers: { ...(init.headers as Record<string, string>), ...(await authHeader()) },
       });
-      if (r.status === 401 && !refreshedToken) {
-        // Token may have expired — refetch from /oauth2/auth and retry once.
+      if (isSessionGone(r) && !refreshedToken) {
+        // Token may just be stale — refetch from /oauth2/auth and retry once.
         refreshedToken = true;
         clearAccessToken();
         continue;
+      }
+      // Still redirected/401 after the refresh → expired session (see getJson).
+      if (isSessionGone(r)) {
+        notifySessionExpired();
+        throw new SessionExpiredError();
       }
       if (!r.ok) throw new Error(`${url} returned ${r.status}`);
       return r;
@@ -781,6 +804,12 @@ export const api = {
   copyFiles: {
     tree: (name: string) =>
       getJson<FileTreeNode[]>(`/api/copies/${encodeURIComponent(name)}/files`),
+    /** Full-text search across the copy's files (optionally scoped to a dir). */
+    search: (name: string, q: string, scope?: string) =>
+      getJson<FileSearchResponse>(
+        `/api/copies/${encodeURIComponent(name)}/files/search?q=${encodeURIComponent(q)}` +
+          (scope ? `&scope=${encodeURIComponent(scope)}` : ''),
+      ),
     content: (name: string, p: string) =>
       getJson<FileContentResponse>(
         `/api/copies/${encodeURIComponent(name)}/files/content?path=${encodeURIComponent(p)}`,
@@ -924,6 +953,13 @@ export const api = {
         `/api/business-processes/${encodeURIComponent(bpId)}/requirements/${encodeURIComponent(id)}?copy=${encodeURIComponent(copy)}`,
       ),
   },
+
+  /** Git task queue. The live feed comes over the `/api/events` SSE stream;
+   *  this is the initial snapshot fetch on mount. */
+  tasks: () => getJson<{ tasks: GitTask[] }>('/api/tasks'),
+  /** Admin-only: cancel all queued/running git tasks (gitops 403s non-admins,
+   *  and the server route gates it too). Returns the cancelled count. */
+  clearTasks: () => postJson<{ cancelled: number }>('/api/tasks/clear', {}),
 };
 
 export interface FileTreeNode {
@@ -932,6 +968,18 @@ export interface FileTreeNode {
   /** Workspace-relative path (without the `copies/<name>/` prefix). */
   path: string;
   children?: FileTreeNode[];
+}
+
+/** One line matching a full-text file search. */
+export interface FileSearchMatch {
+  path: string;
+  line: number;
+  text: string;
+}
+
+export interface FileSearchResponse {
+  matches: FileSearchMatch[];
+  truncated: boolean;
 }
 
 export type ChangedKind = 'A' | 'M' | 'D';

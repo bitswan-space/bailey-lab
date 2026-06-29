@@ -10,7 +10,6 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 
-from .async_docker import get_async_docker_client
 from .dependencies import get_automation_service
 from .deploy_manager import deploy_manager
 from .snapshot_manager import snapshot_manager
@@ -358,31 +357,66 @@ async def _broadcast_automations_after_delay():
     await _broadcast_automations()
 
 
-async def _docker_event_watcher():
-    """Watch Docker container events and broadcast automation state changes."""
-    docker_client = get_async_docker_client()
+async def _watch_container_events() -> None:
+    """Re-broadcast automation state whenever a workspace container comes up,
+    goes away, or flips health — driven by the infra-driver's Docker event
+    stream.
+
+    After the infra-driver cut-over gitops has no Docker socket of its own, so
+    this stream is its ONLY live signal of container-state changes. Without it
+    the dashboard's automation / environment panels go stale until the next
+    deploy or file edit (the bug where a freshly-deployed frontend's link never
+    appears because the container finished starting *after* the deploy's
+    refresh_all). The driver scopes the stream to this workspace.
+
+    A single debouncer coalesces the burst of events a deploy produces into one
+    re-broadcast; `get_automations()` reads live state fresh, so one delayed
+    broadcast captures the settled state. Reconnects if the stream drops (driver
+    restart / sidecar redeploy) — the backoff is connection recovery, not a
+    state poll.
+    """
+    from app.services.infra_driver_client import (
+        InfraDriverClient,
+        WorkspaceContext,
+    )
+
     workspace = os.environ.get("BITSWAN_WORKSPACE_NAME", "")
-    debounce_task: asyncio.Task | None = None
+    client = InfraDriverClient()
+    ctx = WorkspaceContext(
+        workspace_name=workspace, domain="", gitops_dir="", secrets_dir=""
+    )
 
-    filters: dict = {"type": ["container"]}
-    if workspace:
-        filters["label"] = [f"gitops.workspace={workspace}"]
+    dirty = asyncio.Event()
 
-    while True:
-        try:
-            async for event in docker_client.watch_events(filters=filters):
-                action = event.get("Action", "")
-                if action in ("start", "stop", "die", "destroy", "create"):
-                    if debounce_task and not debounce_task.done():
-                        debounce_task.cancel()
-                    debounce_task = asyncio.create_task(
-                        _broadcast_automations_after_delay()
-                    )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.warning("Docker event watcher error: %s, reconnecting in 5s", e)
-            await asyncio.sleep(5)
+    async def debouncer() -> None:
+        while True:
+            await dirty.wait()
+            dirty.clear()
+            await _broadcast_automations_after_delay()
+
+    async def on_event(_ev: dict) -> None:
+        dirty.set()
+
+    debounce_task = asyncio.create_task(debouncer())
+    backoff = 1.0
+    try:
+        while True:
+            try:
+                await client.container_events(ctx, on_event)
+                # Clean end (server closed the stream) — reconnect promptly.
+                backoff = 1.0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "container-events stream dropped, reconnecting in %.0fs: %s",
+                    backoff,
+                    e,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+    finally:
+        debounce_task.cancel()
 
 
 def _start_profiling():
@@ -436,7 +470,6 @@ def _start_profiling():
 async def lifespan(app: FastAPI):
     observer = None
     copy_observer = None
-    watcher_task: asyncio.Task | None = None
     dump_profile = _start_profiling()
 
     scheduler = AsyncIOScheduler(timezone="UTC")
@@ -571,26 +604,45 @@ async def lifespan(app: FastAPI):
         )
     )
 
-    # Start Docker event watcher for SSE push updates
-    watcher_task = asyncio.create_task(_docker_event_watcher())
+    # React to container state changes (start / die / health) by re-broadcasting
+    # automation state. This is gitops's live signal post-cut-over — it has no
+    # Docker socket, so it watches the infra-driver's event stream instead.
+    _events_task = asyncio.create_task(_watch_container_events())
+    _events_task.add_done_callback(
+        lambda t: (
+            logger.warning("container-events watcher exited: %s", t.exception())
+            if not t.cancelled() and t.exception()
+            else None
+        )
+    )
 
-    docker_client = get_async_docker_client()
+    # Bridge the git task queue onto the SSE feed: forward every queue change to
+    # the existing /events/stream as a `task_queue` event, so the dashboard's
+    # activity log renders the queue on the connection it already holds.
+    from app.task_queue import task_queue
+    from app.event_broadcaster import event_broadcaster
 
+    async def _relay_task_queue():
+        q = task_queue.subscribe()
+        try:
+            while True:
+                payload = await q.get()
+                await event_broadcaster.broadcast("task_queue", payload)
+        finally:
+            task_queue.unsubscribe(q)
+
+    queue_relay = asyncio.create_task(_relay_task_queue())
+
+    # Container-state changes reach gitops two ways: explicit refresh_all() on
+    # each deploy/stop/restart, and — because gitops has no Docker socket after
+    # the cut-over — the infra-driver's Docker event stream (see
+    # _watch_container_events above). The filesystem watcher covers bitswan.yaml
+    # / automation.toml edits.
     try:
         yield
     finally:
-        # Stop Docker event watcher
-        if watcher_task:
-            watcher_task.cancel()
-            try:
-                await watcher_task
-            except asyncio.CancelledError:
-                pass
-
-        # Explicitly close the Docker client session so aiohttp doesn't report
-        # "Unclosed client session" warnings during interpreter shutdown
-        await docker_client.close()
-
+        _events_task.cancel()
+        queue_relay.cancel()
         if observer:
             observer.stop()
             # Run blocking join in executor to avoid blocking event loop

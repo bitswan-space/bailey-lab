@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AuthGate } from '@/components/auth/AuthGate';
+import { SessionExpiredBanner } from '@/components/auth/SessionExpiredBanner';
 import { TopNav } from '@/components/workspace/TopNav';
 import {
   WorkspaceProvider,
@@ -7,8 +8,8 @@ import {
   useCopies,
 } from '@/components/workspace/WorkspaceProvider';
 import { SessionProvider } from '@/components/agents/SessionProvider';
-import { Toaster } from '@/components/ui/sonner';
 import { WorkspaceView } from '@/components/views/WorkspaceView';
+import { TaskQueuePanel } from '@/components/workspace/TaskQueuePanel';
 import { api } from '@/lib/api';
 import { getUrlParam, setUrlParams } from '@/lib/urlState';
 import type { FlowTab } from '@/types';
@@ -16,10 +17,10 @@ import type { FlowTab } from '@/types';
 export function App() {
   return (
     <AuthGate>
+      <SessionExpiredBanner />
       <WorkspaceProvider>
         <SessionProvider>
           <Shell />
-          <Toaster position="bottom-right" richColors closeButton />
         </SessionProvider>
       </WorkspaceProvider>
     </AuthGate>
@@ -258,6 +259,10 @@ function Shell() {
       ) : (
         <WorkspaceView bp={bp} wt={wt} tab={tab} onTab={handleTab} />
       )}
+      {/* The single activity surface, anchored bottom-left: server-side git
+          tasks AND transient notifications (former toasts) in one collapsible
+          panel. Admin-only "Clear queue". */}
+      <TaskQueuePanel isAdmin={role === 'admin'} />
     </div>
   );
 }

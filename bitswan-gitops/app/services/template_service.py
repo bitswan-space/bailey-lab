@@ -303,7 +303,7 @@ async def _commit(
 ) -> Optional[str]:
     """Stage everything under `cwd` and commit. Returns commit hash or None
     if there was nothing to commit. Raises on hard failures."""
-    async with GitLockContext(timeout=15.0):
+    async with GitLockContext(timeout=15.0, kind="apply template"):
         ok = await call_git_command("git", "add", "-A", cwd=cwd)
         if not ok:
             raise RuntimeError("git add -A failed")

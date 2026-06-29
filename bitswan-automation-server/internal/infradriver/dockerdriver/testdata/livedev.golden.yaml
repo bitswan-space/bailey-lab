@@ -1,0 +1,145 @@
+networks:
+    bitswan_network:
+        external: true
+    ws4-dev:
+        external: true
+services:
+    ws4-backend-4337-live-dev:
+        cap_drop:
+            - NET_ADMIN
+            - NET_RAW
+        container_name: ws4-backend-4337-live-dev
+        depends_on:
+            ws4-fwgw-4337-live-dev:
+                condition: service_healthy
+        env_file:
+            - __ROOT__/secrets/bp/acme/dev
+        environment:
+            BITSWAN_AUTOMATION_STAGE: live-dev
+            BITSWAN_DEPLOY_CHECKSUM: live-dev
+            BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
+            BITSWAN_DEPLOYMENT_ID: backend-copy-bar-acme-live-dev
+            BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_URL_TEMPLATE: https://ws4-{name}-4337-live-dev.example.com
+            BITSWAN_WORKER_HOSTS: backend=ws4-fwgw-4337-live-dev:8080
+            BITSWAN_WORKSPACE_NAME: ws4
+            COUCHDB_DB_PREFIX: copy-bar-bp-acme-
+            DEPLOYMENT_ID: backend-copy-bar-acme-live-dev
+            MINIO_BUCKET: copy-bar-bp-acme
+            POSTGRES_DB: copy_bar_bp_acme
+        image: bitswan/pipeline-runtime-environment:latest
+        labels:
+            gitops.automation_name: backend
+            gitops.context: copy-bar-acme
+            gitops.deployment_id: backend-copy-bar-acme-live-dev
+            gitops.intended_exposed: "false"
+            gitops.slot: ""
+            gitops.stage: live-dev
+            gitops.workspace: ws4
+        network_mode: service:ws4-fwgw-4337-live-dev
+        restart: always
+        ulimits:
+            nofile:
+                hard: 65536
+                soft: 65536
+        volumes:
+            - __ROOT__/workspace/copies/bar/acme/backend:/app/:ro
+    ws4-frontend-4337-live-dev:
+        container_name: ws4-frontend-4337-live-dev
+        env_file:
+            - __ROOT__/secrets/bp/acme/dev
+        environment:
+            BITSWAN_AUTOMATION_STAGE: live-dev
+            BITSWAN_AUTOMATION_URL: https://ws4-frontend-4337-live-dev.example.com
+            BITSWAN_DEPLOY_CHECKSUM: live-dev
+            BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
+            BITSWAN_DEPLOYMENT_ID: frontend-copy-bar-acme-live-dev
+            BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_URL_PREFIX: https://ws4-
+            BITSWAN_URL_SUFFIX: .example.com
+            BITSWAN_URL_TEMPLATE: https://ws4-{name}-4337-live-dev.example.com
+            BITSWAN_WORKER_HOSTS: backend=ws4-fwgw-4337-live-dev:8080
+            BITSWAN_WORKSPACE_NAME: ws4
+            COUCHDB_DB_PREFIX: copy-bar-bp-acme-
+            DEPLOYMENT_ID: frontend-copy-bar-acme-live-dev
+            MINIO_BUCKET: copy-bar-bp-acme
+            POSTGRES_DB: copy_bar_bp_acme
+        image: bitswan/pipeline-runtime-environment:latest
+        labels:
+            gitops.automation_name: frontend
+            gitops.context: copy-bar-acme
+            gitops.deployment_id: frontend-copy-bar-acme-live-dev
+            gitops.intended_exposed: "true"
+            gitops.slot: ""
+            gitops.stage: live-dev
+            gitops.workspace: ws4
+        networks:
+            ws4-dev:
+                aliases:
+                    - ws4-frontend-4337-live-dev.example.com
+        restart: always
+        ulimits:
+            nofile:
+                hard: 65536
+                soft: 65536
+        volumes:
+            - __ROOT__/workspace/copies/bar/acme/frontend:/app/:ro
+    ws4-fwgw-4337-live-dev:
+        cap_add:
+            - NET_ADMIN
+        container_name: ws4-fwgw-4337-live-dev
+        depends_on:
+            ws4-fwgw-4337-live-dev-proxy:
+                condition: service_healthy
+        environment:
+            BITSWAN_FW_MODE: monitor
+            BITSWAN_FW_PROXY: ws4-fwgw-4337-live-dev-proxy
+            BITSWAN_FW_ROLE: owner
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - test -f /tmp/fw-ready
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: acme
+            gitops.firewall_gateway: "true"
+            gitops.slot: ""
+            gitops.stage: dev
+        networks:
+            ws4-dev:
+                aliases:
+                    - ws4-fwgw-4337-live-dev
+        restart: unless-stopped
+    ws4-fwgw-4337-live-dev-proxy:
+        container_name: ws4-fwgw-4337-live-dev-proxy
+        environment:
+            BITSWAN_FW_ALLOW: ""
+            BITSWAN_FW_ATTEMPTS: /firewall/acme__dev.attempts.jsonl
+            BITSWAN_FW_MODE: monitor
+            BITSWAN_FW_ROLE: proxy
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - nc -z 127.0.0.1 18077
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: acme
+            gitops.firewall_proxy: "true"
+            gitops.slot: ""
+            gitops.stage: dev
+        networks:
+            ws4-dev:
+                aliases:
+                    - ws4-fwgw-4337-live-dev-proxy
+        restart: unless-stopped
+        volumes:
+            - __ROOT__/firewall:/firewall
+version: "3"

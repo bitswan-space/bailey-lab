@@ -32,53 +32,65 @@ def load_yaml(text: str):
     return yaml.load(text, Loader=_SAFE_LOADER)
 
 
-# Thread-safe git lock that works across both async and sync contexts
-# Uses a threading.Lock as the underlying mechanism for cross-thread safety
+# Legacy raw lock, retained only for the (currently unused) synchronous
+# background-thread path below. The async path — every real caller — now
+# serializes through the git task queue instead.
 _git_thread_lock = threading.Lock()
 
 
 class GitLockContext:
-    """
-    Context manager for git lock that works in both async and sync contexts.
-    Uses a threading.Lock internally for cross-thread safety (needed for background threads).
+    """Serializes git-mutating operations through the git TASK QUEUE (replacing
+    the old global lock). Each ``async with`` becomes a visible queue task that
+    waits its FIFO turn — same serialization the lock gave, but it QUEUES instead
+    of failing on contention, and the wait is observable + admin-clearable.
+
+    ``kind`` labels the task in the queue panel; the initiating user's email is
+    read from the request contextvar so deep call sites need not thread it
+    through. ``timeout`` is accepted for call-site compatibility but unused — the
+    queue never times out on contention; it waits its turn.
     """
 
-    def __init__(self, timeout: float = 10.0):
+    def __init__(
+        self,
+        timeout: float = 10.0,
+        kind: str = "git operation",
+        label: str | None = None,
+    ):
         self.timeout = timeout
-        self._acquired = False
+        self.kind = kind
+        self.label = label
+        self._task_id = None
+        self._sync_acquired = False
 
     async def __aenter__(self):
-        """Async context manager entry - acquires lock without blocking event loop."""
-        loop = asyncio.get_event_loop()
-        # Run the blocking lock acquisition in a thread pool to avoid blocking the event loop
-        acquired = await loop.run_in_executor(
-            None, lambda: _git_thread_lock.acquire(timeout=self.timeout)
+        from app.task_queue import task_queue, current_requester
+
+        self._task_id = await task_queue.acquire(
+            self.kind, requester_email=current_requester.get(), label=self.label
         )
-        if not acquired:
-            raise Exception(f"Failed to acquire git lock within {self.timeout} seconds")
-        self._acquired = True
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit - releases lock."""
-        if self._acquired:
-            _git_thread_lock.release()
-            self._acquired = False
+        from app.task_queue import task_queue
+
+        if self._task_id is not None:
+            task_queue.release(self._task_id)
+            self._task_id = None
         return False
 
     def __enter__(self):
-        """Sync context manager entry - for use in background threads."""
+        """Synchronous path for background threads (no running event loop). Falls
+        back to the raw lock since the task queue is async-only. Currently unused."""
         acquired = _git_thread_lock.acquire(timeout=self.timeout)
         if not acquired:
             raise Exception(f"Failed to acquire git lock within {self.timeout} seconds")
-        self._acquired = True
+        self._sync_acquired = True
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Sync context manager exit - for use in background threads."""
-        if self._acquired:
+        if self._sync_acquired:
             _git_thread_lock.release()
-            self._acquired = False
+            self._sync_acquired = False
         return False
 
 
@@ -541,41 +553,6 @@ def add_route_to_ingress(
         return False
 
 
-def reconcile_ingress(workspace_name: str, routes: list[dict]) -> bool:
-    """Declaratively converge the workspace's gitops-managed ingress routes to
-    `routes` (the COMPLETE desired set, from `desired_ingress_routes`). The
-    daemon adds/repoints each and prunes any gitops route not in the set; manual
-    routes are preserved. Idempotent — a re-apply with no change is a fast no-op
-    (the daemon skips routes already pointing at the right upstream). This is the
-    single ingress side effect of `apply`; nothing else touches the daemon."""
-    body = {"workspace_name": workspace_name, "routes": routes}
-    try:
-        client, base = _ingress_client_and_base()
-        with client:
-            # Generous timeout: the first reconcile of a workspace applies every
-            # route (each a ~1s Traefik write); later reconciles skip in-sync
-            # routes and finish near-instantly.
-            response = client.post(f"{base}/ingress/reconcile", json=body, timeout=180)
-        if response.status_code != 200:
-            logger.warning(
-                f"Ingress reconcile failed: HTTP {response.status_code} — {response.text}"
-            )
-            return False
-        result = response.json() if response.content else {}
-        pruned = result.get("pruned") or []
-        if result.get("applied") or pruned or result.get("warnings"):
-            logger.info(
-                "Ingress reconcile: applied=%s pruned=%s warnings=%s",
-                result.get("applied", 0),
-                pruned,
-                result.get("warnings") or [],
-            )
-        return True
-    except Exception as e:
-        logger.warning(f"Ingress reconcile request failed: {e}")
-        return False
-
-
 def repoint_route_in_ingress(
     hostname: str, upstream: str, workspace_name: str = ""
 ) -> bool:
@@ -860,7 +837,7 @@ async def update_git(
             current_branch = stdout.strip() or None
 
     # Use async lock with shorter timeout - operations should be fast
-    async with GitLockContext(timeout=10.0):
+    async with GitLockContext(timeout=10.0, kind="commit changes"):
         # Pull latest changes if we have a remote and the remote tracking
         # branch exists. Skip the pull for branches that only live locally
         # (e.g. new copy branches that have never been pushed).
@@ -1025,74 +1002,6 @@ async def ensure_docker_network(name: str) -> None:
     await create.communicate()  # ignore "already exists" lost-race errors
 
 
-async def docker_compose_up(
-    bitswan_dir: str,
-    docker_compose: str,
-    container_name: str | None = None,
-    extra_services: list[str] | None = None,
-    progress_callback=None,
-) -> dict:
-    docker_compose_cmd = [
-        "docker",
-        "compose",
-        "-f",
-        "/dev/stdin",
-        "up",
-        "-d",
-        "--remove-orphans",
-    ]
-    if container_name:
-        docker_compose_cmd.append(container_name)
-    if extra_services:
-        docker_compose_cmd.extend(extra_services)
-
-    proc = await asyncio.create_subprocess_exec(
-        *docker_compose_cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=bitswan_dir,
-    )
-    # The compose document is small (well under a pipe buffer), so writing it
-    # and closing stdin can't deadlock against the concurrent output pumps.
-    proc.stdin.write(docker_compose.encode())
-    await proc.stdin.drain()
-    proc.stdin.close()
-
-    stdout_chunks: list[bytes] = []
-    stderr_chunks: list[bytes] = []
-
-    async def _pump_stdout():
-        stdout_chunks.append(await proc.stdout.read())
-
-    async def _pump_stderr():
-        last = None
-        while True:
-            raw = await proc.stderr.readline()
-            if not raw:
-                break
-            stderr_chunks.append(raw)
-            if progress_callback is None:
-                continue
-            msg = _compose_event_message(raw.decode("utf-8", "replace"))
-            if msg and msg != last:
-                last = msg
-                await progress_callback("docker_compose_up", msg)
-
-    await asyncio.gather(_pump_stdout(), _pump_stderr())
-    return_code = await proc.wait()
-
-    up_result = {
-        "cmd": docker_compose_cmd,
-        "stdout": b"".join(stdout_chunks).decode("utf-8"),
-        "stderr": b"".join(stderr_chunks).decode("utf-8"),
-        "return_code": return_code,
-    }
-    return {
-        "up_result": up_result,
-    }
-
-
 async def save_image(
     build_context_path: str,
     build_context_hash: str,
@@ -1146,7 +1055,7 @@ async def save_image(
     )
 
     # Use async lock for the actual git operations
-    async with GitLockContext(timeout=10.0):
+    async with GitLockContext(timeout=10.0, kind="store image refs"):
         if has_remote:
             res = await call_git_command(
                 "git", "pull", "--rebase=false", cwd=bitswan_dir
@@ -1264,7 +1173,7 @@ async def copy_worktree(branch_name: str = None):
 
     try:
         # Use async lock for git operations
-        async with GitLockContext(timeout=15.0):
+        async with GitLockContext(timeout=15.0, kind="sync from branch"):
             if not await call_git_command(
                 "git", "fetch", "origin", "--prune", "--tags", cwd=repo
             ):
@@ -1300,7 +1209,7 @@ async def copy_worktree(branch_name: str = None):
         await merge_worktree(worktree_path, repo)
 
         # Re-acquire lock for staging and committing
-        async with GitLockContext(timeout=10.0):
+        async with GitLockContext(timeout=10.0, kind="sync to main"):
             if not await call_git_command("git", "add", "-A", cwd=repo):
                 raise HTTPException(status_code=409, detail="Failed to stage files")
 

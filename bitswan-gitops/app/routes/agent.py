@@ -8,7 +8,6 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from app.async_docker import get_async_docker_client, DockerError
 from app.dependencies import get_automation_service
 from app.services.automation_service import (
     AutomationService,
@@ -141,21 +140,17 @@ async def list_agent_deployments(
     # Query running containers to get their state
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
     gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "")
-    docker_client = get_async_docker_client()
     running_states: dict[str, str] = {}
 
     try:
-        containers = await docker_client.list_containers(
-            all=True,
-            filters={"label": [f"gitops.workspace={workspace_name}"]},
-        )
+        containers = await get_automation_service().get_containers()
         for container in containers:
             labels = container.get("Labels", {})
             dep_id = labels.get("gitops.deployment_id", "")
             if f"-copy-{copy}" in dep_id and dep_id.endswith("-live-dev"):
                 running_states[dep_id] = container.get("State", "unknown")
-    except DockerError:
-        pass  # If Docker query fails, we still show sources as "not deployed"
+    except Exception:
+        pass  # If the query fails, we still show sources as "not deployed"
 
     def _make_url(src):
         if gitops_domain:
@@ -304,31 +299,17 @@ async def inspect_deployment(
     """Full inspect of a deployment container."""
     _validate_deployment_id(deployment_id)
 
-    docker_client = get_async_docker_client()
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-
-    try:
-        containers = await docker_client.list_containers(
-            all=True,
-            filters={
-                "label": [
-                    f"gitops.deployment_id={deployment_id}",
-                    f"gitops.workspace={workspace_name}",
-                ]
-            },
-        )
-    except DockerError as e:
-        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
-
+    svc = get_automation_service()
+    containers = await svc.get_container(deployment_id)
     if not containers:
         raise HTTPException(
             status_code=404, detail=f"No container found for '{deployment_id}'"
         )
-
-    container_id = containers[0].get("Id")
     try:
-        info = await docker_client.get_container(container_id)
-    except DockerError as e:
+        info = await svc.infra_driver.container_inspect(
+            svc._workspace_ctx(), containers[0].get("Id")
+        )
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Docker inspect error: {str(e)}")
 
     state = info.get("State", {})
@@ -367,7 +348,7 @@ async def inspect_deployment(
 
     return {
         "deployment_id": deployment_id,
-        "container_id": container_id[:12],
+        "container_id": info.get("Id", "")[:12],
         "container_name": info.get("Name", "").lstrip("/"),
         "image": config.get("Image", ""),
         "state": {
@@ -394,32 +375,18 @@ async def get_deployment_env(
     """Get environment variables for a deployment container (from docker inspect)."""
     _validate_deployment_id(deployment_id)
 
-    docker_client = get_async_docker_client()
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-
-    try:
-        containers = await docker_client.list_containers(
-            all=True,
-            filters={
-                "label": [
-                    f"gitops.deployment_id={deployment_id}",
-                    f"gitops.workspace={workspace_name}",
-                ]
-            },
-        )
-    except DockerError as e:
-        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
-
+    svc = get_automation_service()
+    containers = await svc.get_container(deployment_id)
     if not containers:
         raise HTTPException(
             status_code=404, detail=f"No container found for '{deployment_id}'"
         )
-
-    container_id = containers[0].get("Id")
     try:
-        info = await docker_client.get_container(container_id)
+        info = await svc.infra_driver.container_inspect(
+            svc._workspace_ctx(), containers[0].get("Id")
+        )
         env_list = info.get("Config", {}).get("Env", [])
-    except DockerError as e:
+    except Exception as e:
         raise HTTPException(status_code=500, detail=f"Docker inspect error: {str(e)}")
 
     # Parse "KEY=VALUE" into dict
@@ -480,7 +447,7 @@ async def build_and_restart_deployment(
         )
 
     import json as _json
-    import docker as _docker
+    import shutil as _shutil
 
     async def _stream():
         from app.services.automation_service import read_bitswan_yaml
@@ -532,30 +499,60 @@ async def build_and_restart_deployment(
 
                 yield _ndjson(status=f"Building image {full_tag}...")
 
-                # Build using Docker API directly — streams ndjson
-                client = _docker.from_env()
-                try:
+                # Build on the driver (gitops has no docker.sock). Materialize the
+                # image/ context onto the shared gitops volume (the only path the
+                # driver can read), then stream the driver's build-log lines as
+                # ndjson via a queue (its progress callback runs concurrently).
+                from app.services.infra_driver_client import (
+                    BuildRequest,
+                    InfraDriverError,
+                )
 
-                    def _build():
-                        return client.api.build(
-                            path=image_dir,
-                            tag=full_tag,
-                            rm=True,
-                            decode=True,
+                gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+                build_ctx_dir = os.path.join(
+                    gitops_root, "gitops", ".builds", "agent-" + checksum
+                )
+
+                def _materialize():
+                    _shutil.rmtree(build_ctx_dir, ignore_errors=True)
+                    _shutil.copytree(image_dir, build_ctx_dir, symlinks=True)
+
+                await asyncio.to_thread(_materialize)
+
+                q: asyncio.Queue = asyncio.Queue()
+
+                async def _prog(line: str):
+                    await q.put(re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", line))
+
+                async def _run_build():
+                    try:
+                        await automation_service.infra_driver.build_image(
+                            BuildRequest(
+                                ctx=automation_service._workspace_ctx(),
+                                tag=full_tag,
+                                source_path=build_ctx_dir,
+                                dockerfile="Dockerfile",
+                                source_sha=checksum,
+                            ),
+                            progress_callback=_prog,
                         )
+                        await q.put(None)
+                    except InfraDriverError as e:
+                        await q.put({"error": str(e)})
+                        await q.put(None)
 
-                    build_iter = await asyncio.to_thread(_build)
-                    build_error = None
-                    for line in build_iter:
-                        if "stream" in line:
-                            line["stream"] = re.sub(
-                                r"\x1b\[[0-9;]*[a-zA-Z]", "", line["stream"]
-                            )
-                        yield _json.dumps(line) + "\n"
-                        if "error" in line:
-                            build_error = line["error"]
-                finally:
-                    client.close()
+                build_task = asyncio.create_task(_run_build())
+                build_error = None
+                while True:
+                    item = await q.get()
+                    if item is None:
+                        break
+                    if isinstance(item, dict) and "error" in item:
+                        build_error = item["error"]
+                        yield _json.dumps(item) + "\n"
+                    else:
+                        yield _json.dumps({"stream": item}) + "\n"
+                await build_task
 
                 if build_error:
                     return
@@ -584,37 +581,6 @@ async def build_and_restart_deployment(
     return StreamingResponse(_stream(), media_type="application/x-ndjson")
 
 
-@router.get("/images/builds/{checksum}/stream")
-async def stream_agent_build_logs(
-    checksum: str,
-    _token=Depends(verify_agent_token),
-):
-    """Stream image build logs (proxied from image service)."""
-    from app.services.image_service import ImageService
-
-    image_service = ImageService()
-    return StreamingResponse(
-        image_service.stream_build_logs(checksum), media_type="text/plain"
-    )
-
-
-@router.get("/deployments/{deployment_id}/deploy-status")
-async def get_deployment_status(
-    deployment_id: str,
-    _token=Depends(verify_agent_token),
-):
-    """Get the active deploy task for a deployment, if any."""
-    from app.deploy_manager import deploy_manager
-
-    task_id = deploy_manager._active_deploys.get(deployment_id)
-    if not task_id:
-        return {"deploying": False}
-    task = deploy_manager.get_task(task_id)
-    if not task:
-        return {"deploying": False}
-    return {"deploying": True, **task.to_dict()}
-
-
 # --- Docker exec endpoint ---
 
 
@@ -630,39 +596,36 @@ async def exec_in_deployment(
 ):
     _validate_deployment_id(deployment_id)
 
-    docker_client = get_async_docker_client()
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-
-    # Find the container
-    try:
-        containers = await docker_client.list_containers(
-            all=False,
-            filters={
-                "label": [
-                    f"gitops.deployment_id={deployment_id}",
-                    f"gitops.workspace={workspace_name}",
-                ]
-            },
-        )
-    except DockerError as e:
-        raise HTTPException(status_code=500, detail=f"Docker error: {str(e)}")
-
+    svc = get_automation_service()
+    containers = await svc.get_container(deployment_id)
     if not containers:
         raise HTTPException(
             status_code=404,
             detail=f"No running container found for deployment '{deployment_id}'",
         )
 
-    container_id = containers[0].get("Id")
+    from app.services.infra_driver_client import ExecSpec, InfraDriverError
+
+    out_chunks: list[bytes] = []
+    err_chunks: list[bytes] = []
+
+    async def on_stdout(d: bytes):
+        out_chunks.append(d)
+
+    async def on_stderr(d: bytes):
+        err_chunks.append(d)
 
     try:
-        exec_id = await docker_client.exec_create(container_id, body.command)
-        output = await docker_client.exec_start(exec_id)
-        exec_info = await docker_client.exec_inspect(exec_id)
-        exit_code = exec_info.get("ExitCode", -1)
-    except DockerError as e:
+        exit_code = await svc.infra_driver.exec(
+            svc._workspace_ctx(),
+            ExecSpec(container=containers[0].get("Id"), cmd=body.command),
+            on_stdout=on_stdout,
+            on_stderr=on_stderr,
+        )
+    except InfraDriverError as e:
         raise HTTPException(status_code=500, detail=f"Docker exec error: {str(e)}")
 
+    output = (b"".join(out_chunks) + b"".join(err_chunks)).decode("utf-8", "replace")
     return {
         "exit_code": exit_code,
         "output": output,

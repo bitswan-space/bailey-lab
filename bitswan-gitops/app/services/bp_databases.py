@@ -53,7 +53,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
-from app.services.infra_service import run_docker_command, stage_for_deployment
+from app.services.infra_service import stage_for_deployment
 from app.utils import SERVICE_REALMS, sanitize_automation_name
 
 logger = logging.getLogger(__name__)
@@ -109,15 +109,24 @@ def bp_resource_names(bp_slug: str, db: int | None = None) -> dict:
     }
 
 
-def copy_db_name(copy_name: str) -> str:
-    """Postgres database backing a non-main copy's live-dev backends.
+def copy_bp_resource_names(copy_name: str, bp_slug: str) -> dict:
+    """Per-(copy, BP) live-dev resource names. A non-main copy is a developer's
+    sandbox: each BP's live-dev backend gets its OWN database, MinIO bucket and
+    CouchDB prefix there — isolated from other BPs in the copy, from other
+    copies, and from dev. Capped at the 63-byte Postgres/MinIO limit (a
+    truncation collision surfaces as a deploy error, not silent data sharing).
 
-    Single source of truth shared by copy-create (the clone), the deploy-time
-    ensure guard, and the POSTGRES_DB env injection in generate_docker_compose —
-    they MUST agree, or a backend connects to a database nobody created.
+    Single source of truth shared by the deploy-time ensure guard and the
+    POSTGRES_DB/MINIO_BUCKET/COUCHDB_DB_PREFIX env injection — they MUST agree,
+    or a backend connects to a namespace nobody created.
     """
-    safe = re.sub(r"[^a-z0-9_]", "_", copy_name.lower())
-    return f"postgres_copy_{safe}"
+    cp_u = re.sub(r"[^a-z0-9_]", "_", copy_name.lower())  # [a-z0-9_] for pg
+    cp_d = re.sub(r"[^a-z0-9-]", "-", copy_name.lower()).strip("-")  # for minio/couch
+    bp_u = bp_slug.replace("-", "_")
+    pg = f"copy_{cp_u}_bp_{bp_u}"[:63]
+    bucket = f"copy-{cp_d}-bp-{bp_slug}"[:63].rstrip("-")
+    couch = f"copy-{cp_d}-bp-{bp_slug}-"
+    return {"postgres_db": pg, "couchdb_prefix": couch, "minio_bucket": bucket}
 
 
 def derive_bp_and_copy(relative_path: str | None) -> tuple[str, str]:
@@ -271,6 +280,55 @@ def _container_name(workspace: str, service_type: str, realm: str) -> str:
     return f"{workspace}__{service_type}{suffix}"
 
 
+async def _driver_exec(*args: str, cwd: str | None = None) -> tuple[str, str, int]:
+    """Run a `docker exec` through the infra-driver (gitops has no docker.sock).
+    Accepts the legacy ("docker", "exec", <container>, *cmd) arg shape so the
+    call sites are a drop-in rename of run_docker_command. Returns
+    (stdout, stderr, returncode)."""
+    from app.services.infra_driver_client import (
+        ExecSpec,
+        InfraDriverClient,
+        InfraDriverError,
+        WorkspaceContext,
+    )
+
+    if len(args) < 3 or args[0] != "docker" or args[1] != "exec":
+        raise ValueError("_driver_exec expects ('docker','exec',<container>,*cmd)")
+    container = args[2]
+    cmd = list(args[3:])
+    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+    client = InfraDriverClient()
+    ctx = WorkspaceContext(
+        workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local"),
+        domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+        gitops_dir=os.path.join(gitops_root, "gitops"),
+        secrets_dir=os.path.join(gitops_root, "secrets"),
+    )
+    out: list[bytes] = []
+    err: list[bytes] = []
+
+    async def on_stdout(d: bytes):
+        out.append(d)
+
+    async def on_stderr(d: bytes):
+        err.append(d)
+
+    try:
+        rc = await client.exec(
+            ctx,
+            ExecSpec(container=container, cmd=cmd),
+            on_stdout=on_stdout,
+            on_stderr=on_stderr,
+        )
+    except InfraDriverError as e:
+        return "", str(e), 1
+    return (
+        b"".join(out).decode("utf-8", "replace"),
+        b"".join(err).decode("utf-8", "replace"),
+        rc,
+    )
+
+
 async def _wait_for_postgres(container: str, user: str, timeout: float = 60.0) -> None:
     """Block until a freshly-started Postgres server accepts connections.
 
@@ -286,7 +344,7 @@ async def _wait_for_postgres(container: str, user: str, timeout: float = 60.0) -
     deadline = loop.time() + timeout
     last = ""
     while True:
-        _, stderr, rc = await run_docker_command(
+        _, stderr, rc = await _driver_exec(
             "docker", "exec", container, "pg_isready", "-U", user, "-q"
         )
         if rc == 0:
@@ -301,7 +359,7 @@ async def _wait_for_postgres(container: str, user: str, timeout: float = 60.0) -
 
 async def _postgres_db_exists(container: str, user: str, db_name: str) -> bool:
     sql = f"SELECT 1 FROM pg_database WHERE datname = '{db_name}';"
-    stdout, stderr, rc = await run_docker_command(
+    stdout, stderr, rc = await _driver_exec(
         "docker",
         "exec",
         container,
@@ -323,7 +381,7 @@ async def _postgres_db_exists(container: str, user: str, db_name: str) -> bool:
 async def _create_postgres_db(container: str, user: str, db_name: str) -> None:
     if await _postgres_db_exists(container, user, db_name):
         return
-    stdout, stderr, rc = await run_docker_command(
+    stdout, stderr, rc = await _driver_exec(
         "docker",
         "exec",
         container,
@@ -339,30 +397,17 @@ async def _create_postgres_db(container: str, user: str, db_name: str) -> None:
         raise RuntimeError(f"CREATE DATABASE {db_name} failed: {stderr.strip()}")
 
 
-async def clone_postgres_db(
-    workspace: str, copy_name: str, source_realm: str = "dev"
-) -> str | None:
-    """Ensure a non-main copy's live-dev database (``postgres_copy_<copy>``)
-    exists, cloning it from the realm's default database
-    (``CREATE DATABASE ... WITH TEMPLATE``).
-
-    Returns the database name, or ``None`` when Postgres isn't enabled in this
-    workspace (nothing to clone — the caller decides whether that's fatal).
-    Idempotent: a no-op when the database already exists. Waits for the server
-    to accept connections first, so a cold-start deploy doesn't race initdb.
-    Shared by copy-create (``routes/copies.py``) and the deploy-time guard.
+async def clone_postgres_db_as(
+    container: str, user: str, target_db: str, source_db: str
+) -> None:
+    """Create ``target_db`` as a clone of ``source_db``
+    (``CREATE DATABASE ... WITH TEMPLATE``), idempotently (a no-op when
+    ``target_db`` already exists). Caller ensures Postgres is ready and
+    ``source_db`` exists. Used to give a non-main copy's live-dev a
+    per-(copy, BP) database seeded from that BP's dev data.
     """
-    secrets = get_service_secrets("postgres", source_realm)
-    if not secrets or not secrets.get("POSTGRES_USER"):
-        return None
-    user = secrets["POSTGRES_USER"]
-    source_db = secrets.get("POSTGRES_DB", "postgres")
-    new_db = copy_db_name(copy_name)
-    container = _container_name(workspace, "postgres", source_realm)
-
-    await _wait_for_postgres(container, user)
-    if await _postgres_db_exists(container, user, new_db):
-        return new_db
+    if await _postgres_db_exists(container, user, target_db):
+        return
 
     # CREATE DATABASE ... WITH TEMPLATE requires no other sessions on the
     # template DB — drop them first (best-effort; the CREATE below is the
@@ -371,7 +416,7 @@ async def clone_postgres_db(
         f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
         f"WHERE datname = '{source_db}' AND pid <> pg_backend_pid();"
     )
-    await run_docker_command(
+    await _driver_exec(
         "docker",
         "exec",
         container,
@@ -383,7 +428,7 @@ async def clone_postgres_db(
         "-c",
         terminate_sql,
     )
-    _, stderr, rc = await run_docker_command(
+    _, stderr, rc = await _driver_exec(
         "docker",
         "exec",
         container,
@@ -393,14 +438,14 @@ async def clone_postgres_db(
         "-d",
         "postgres",
         "-c",
-        f'CREATE DATABASE "{new_db}" WITH TEMPLATE "{source_db}";',
+        f'CREATE DATABASE "{target_db}" WITH TEMPLATE "{source_db}";',
     )
     if rc != 0 and "already exists" not in (stderr or ""):
-        raise RuntimeError(f"clone CREATE DATABASE {new_db} failed: {stderr.strip()}")
-    logger.info(
-        "Cloned Postgres '%s' -> '%s' (copy '%s')", source_db, new_db, copy_name
-    )
-    return new_db
+        raise RuntimeError(
+            f"clone CREATE DATABASE {target_db} (template {source_db}) failed: "
+            f"{stderr.strip()}"
+        )
+    logger.info("Cloned Postgres '%s' -> '%s'", source_db, target_db)
 
 
 async def _create_minio_bucket(
@@ -413,7 +458,7 @@ async def _create_minio_bucket(
     deadline = loop.time() + 60.0
     stderr = ""
     while True:
-        _, stderr, rc = await run_docker_command(
+        _, stderr, rc = await _driver_exec(
             "docker",
             "exec",
             container,
@@ -430,7 +475,7 @@ async def _create_minio_bucket(
         if loop.time() >= deadline:
             raise RuntimeError(f"mc alias set failed: {stderr.strip()}")
         await asyncio.sleep(2.0)
-    _, stderr, rc = await run_docker_command(
+    _, stderr, rc = await _driver_exec(
         "docker",
         "exec",
         container,
@@ -686,7 +731,7 @@ def _production_db_numbers(bs_yaml: dict | None, bp_slug: str) -> list[int]:
     to one of the two persistent production databases.
     """
     rec = ((bs_yaml or {}).get("backups") or {}).get(bp_slug) or {}
-    slots = rec.get("slots") or {"a": {"db": 1}, "b": {"db": 2}}
+    slots = rec.get("slots") or {"blue": {"db": 1}, "green": {"db": 2}}
     nums = sorted(
         {
             int((slots[s] or {}).get("db"))
@@ -703,8 +748,9 @@ async def ensure_live_postgres_dbs(
     """Fail-fast guard: ensure the Postgres database each deploying backend will
     connect to actually exists, before relying on the backend's connect retry.
 
-    Mirrors the POSTGRES_DB resolution in generate_docker_compose:
-      - live-dev non-main copy -> ``postgres_copy_<copy>`` (cloned from dev default)
+    Mirrors the POSTGRES_DB resolution in the driver's compiler:
+      - live-dev non-main copy -> ``copy_<copy>_bp_<slug>`` (cloned from that
+                                  BP's dev DB, else the shared dev default)
       - registered BP          -> ``bp_<slug>`` (dev/staging), or ``bp_<slug>_<db>``
                                   for each blue-green db a production BP's slots use
       - otherwise (shared default DB) -> nothing to create
@@ -727,20 +773,33 @@ async def ensure_live_postgres_dbs(
         if realm not in SERVICE_REALMS:
             continue
 
-        # 1) A non-main copy's live-dev backends connect to the cloned per-copy
-        #    DB (the env injection overrides POSTGRES_DB to it unconditionally).
-        if stage == "live-dev" and copy:
-            if ("copy", copy) in seen:
+        # 1) A non-main copy's live-dev backend gets its OWN per-(copy, BP)
+        #    database, seeded from that BP's dev DB (bp_<slug>) if it exists, else
+        #    the shared dev default. Per (copy, BP) — isolated from other BPs in
+        #    the copy and from other copies. (The env injection points POSTGRES_DB
+        #    at this name unconditionally.)
+        if stage == "live-dev" and copy and bp_slug:
+            target = copy_bp_resource_names(copy, bp_slug)["postgres_db"]
+            if ("copybp", target) in seen:
                 continue
-            seen.add(("copy", copy))
-            if get_service_secrets("postgres", realm) is None:
+            seen.add(("copybp", target))
+            secrets = get_service_secrets("postgres", realm)
+            if not secrets or not secrets.get("POSTGRES_USER"):
                 logger.info(
-                    "Postgres not enabled (%s); skipping copy DB for '%s'",
+                    "Postgres not enabled (%s); skipping live-dev DB '%s'",
                     realm,
-                    copy,
+                    target,
                 )
                 continue
-            await clone_postgres_db(workspace, copy, source_realm=realm)
+            user = secrets["POSTGRES_USER"]
+            container = _container_name(workspace, "postgres", realm)
+            await _wait_for_postgres(container, user)
+            # Seed from the BP's dev DB if it exists, else the shared dev default.
+            source = secrets.get("POSTGRES_DB", "postgres")
+            dev_bp_db = bp_resource_names(bp_slug)["postgres_db"]
+            if await _postgres_db_exists(container, user, dev_bp_db):
+                source = dev_bp_db
+            await clone_postgres_db_as(container, user, target, source)
             continue
 
         # 2) A registered BP's per-stage database(s). Unregistered BPs use the

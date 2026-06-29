@@ -1,4 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import { currentEmail } from '../lib/requestContext.js';
 
 export interface UpstreamEvent {
   event: string;
@@ -30,7 +31,13 @@ const REPLAYABLE_EVENTS = new Set([
   'images',
   'processes',
   'copies',
+  // The git task queue. gitops sends a `task_queue_snapshot` once per upstream
+  // stream open, but the dashboard server keeps a single long-lived
+  // subscription — so a browser connecting mid-stream would otherwise never see
+  // it. Caching the latest snapshot lets `/api/events` replay it on connect.
+  'task_queue_snapshot',
 ]);
+
 
 export class GitopsClient {
   private readonly baseUrl: string;
@@ -48,6 +55,18 @@ export class GitopsClient {
   constructor(baseUrl: string, secret: string) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.secret = secret;
+  }
+
+  /**
+   * Outbound headers for every gitops call: the API bearer token plus, when a
+   * user request is in flight, their gate-verified email as X-Forwarded-Email —
+   * gitops reads it to attribute the git task-queue entry to that user.
+   */
+  private authHeaders(): Record<string, string> {
+    const h: Record<string, string> = { Authorization: `Bearer ${this.secret}` };
+    const email = currentEmail();
+    if (email) h['X-Forwarded-Email'] = email;
+    return h;
   }
 
   /**
@@ -89,7 +108,7 @@ export class GitopsClient {
     try {
       const r = await fetch(
         `${this.baseUrl}/automations/user-role?email=${encodeURIComponent(email)}`,
-        { headers: { Authorization: `Bearer ${this.secret}` } },
+        { headers: { ...this.authHeaders() } },
       );
       if (!r.ok) return 'member';
       const body = (await r.json()) as { role?: string };
@@ -115,7 +134,7 @@ export class GitopsClient {
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           'Content-Type': 'application/json',
         },
         body: '{}',
@@ -138,7 +157,7 @@ export class GitopsClient {
     const r = await fetch(`${this.baseUrl}/processes/`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.secret}`,
+        ...this.authHeaders(),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(input),
@@ -159,7 +178,7 @@ export class GitopsClient {
    */
   async getTemplates(): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/templates/`, {
-      headers: { Authorization: `Bearer ${this.secret}` },
+      headers: { ...this.authHeaders() },
     });
     let body: unknown = null;
     try {
@@ -185,7 +204,7 @@ export class GitopsClient {
     const r = await fetch(`${this.baseUrl}/automations/from-template`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.secret}`,
+        ...this.authHeaders(),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(input),
@@ -244,7 +263,7 @@ export class GitopsClient {
     const r = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.secret}`,
+        ...this.authHeaders(),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(input),
@@ -268,7 +287,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/copies/${encodeURIComponent(name)}/status`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -291,7 +310,7 @@ export class GitopsClient {
     const qs = path ? `?path=${encodeURIComponent(path)}` : '';
     const r = await fetch(
       `${this.baseUrl}/copies/${encodeURIComponent(name)}/diff${qs}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -313,7 +332,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -337,7 +356,7 @@ export class GitopsClient {
     const r = await fetch(`${this.baseUrl}/copies/create`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.secret}`,
+        ...this.authHeaders(),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(input),
@@ -373,7 +392,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/copies/${encodeURIComponent(name)}/history`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -390,7 +409,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/copies/${encodeURIComponent(name)}/divergence?bp=${encodeURIComponent(bp)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -415,7 +434,7 @@ export class GitopsClient {
     const r = await fetch(`${this.baseUrl}/automations/start-deploy`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.secret}`,
+        ...this.authHeaders(),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(input),
@@ -444,7 +463,7 @@ export class GitopsClient {
     const r = await fetch(`${this.baseUrl}/automations/deploy-bp`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.secret}`,
+        ...this.authHeaders(),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(input),
@@ -472,7 +491,7 @@ export class GitopsClient {
     const r = await fetch(`${this.baseUrl}/automations/promote-bp`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${this.secret}`,
+        ...this.authHeaders(),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(input),
@@ -497,7 +516,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/deploy-status/${encodeURIComponent(taskId)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -514,7 +533,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/history?stage=${encodeURIComponent(stage)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -532,7 +551,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -545,10 +564,14 @@ export class GitopsClient {
 
   async bpSecrets(
     bp: string,
+    by?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    // `by` is the gate-verified caller email; gitops resolves its role from the
+    // daemon and redacts production secrets for non-admin/auditor callers.
+    const q = by ? `?by=${encodeURIComponent(by)}` : '';
     const r = await fetch(
-      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets${q}`,
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -568,7 +591,7 @@ export class GitopsClient {
       {
         method: 'PUT',
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ values }),
@@ -588,7 +611,7 @@ export class GitopsClient {
   async dr(bp: string): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/dr`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -604,7 +627,7 @@ export class GitopsClient {
   async backups(bp: string): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/backups`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -628,7 +651,7 @@ export class GitopsClient {
       {
         method,
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
@@ -650,7 +673,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall?stage=${encodeURIComponent(stage)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -675,7 +698,7 @@ export class GitopsClient {
       {
         method,
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
@@ -715,7 +738,7 @@ export class GitopsClient {
     form.set('file', blob, input.filename);
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall/dpa`,
-      { method: 'POST', headers: { Authorization: `Bearer ${this.secret}` }, body: form },
+      { method: 'POST', headers: { ...this.authHeaders() }, body: form },
     );
     let body: unknown = null;
     try {
@@ -733,7 +756,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: Buffer; contentType: string }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/firewall/dpa?host=${encodeURIComponent(host)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     const buf = Buffer.from(await r.arrayBuffer());
     return {
@@ -751,7 +774,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -771,7 +794,7 @@ export class GitopsClient {
     const q = copy ? `?copy=${encodeURIComponent(copy)}` : '';
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/preview${q}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -800,7 +823,7 @@ export class GitopsClient {
       {
         method,
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
@@ -825,7 +848,7 @@ export class GitopsClient {
       {
         method: 'PUT',
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ policy }),
@@ -851,7 +874,7 @@ export class GitopsClient {
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
@@ -873,7 +896,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/snapshots/${encodeURIComponent(bp)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -894,7 +917,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/services/${encodeURIComponent(type)}/status?stage=${encodeURIComponent(stage)}&show_passwords=true`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let raw: unknown = null;
     try {
@@ -931,7 +954,7 @@ export class GitopsClient {
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ stage, replicas }),
@@ -952,7 +975,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/files?commit=${encodeURIComponent(commit)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -970,7 +993,7 @@ export class GitopsClient {
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/file-content?commit=${encodeURIComponent(commit)}&path=${encodeURIComponent(path)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
     try {
@@ -986,7 +1009,7 @@ export class GitopsClient {
   async bpBundle(bp: string, stage: string, commit: string): Promise<Response> {
     return fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/bundle?stage=${encodeURIComponent(stage)}&commit=${encodeURIComponent(commit)}`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
   }
 
@@ -1004,7 +1027,7 @@ export class GitopsClient {
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(rest),
@@ -1053,7 +1076,7 @@ export class GitopsClient {
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: form.toString(),
@@ -1080,7 +1103,7 @@ export class GitopsClient {
       `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}`,
       {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.secret}` },
+        headers: { ...this.authHeaders() },
       },
     );
     return { ok: r.ok, status: r.status };
@@ -1093,7 +1116,7 @@ export class GitopsClient {
   async inspectAutomation(deploymentId: string): Promise<DockerInspect[]> {
     const r = await fetch(
       `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/inspect`,
-      { headers: { Authorization: `Bearer ${this.secret}` } },
+      { headers: { ...this.authHeaders() } },
     );
     if (!r.ok) {
       throw new Error(`gitops inspect returned ${r.status}`);
@@ -1115,7 +1138,7 @@ export class GitopsClient {
       `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/logs/stream`,
       {
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           Accept: 'text/event-stream',
         },
         signal,
@@ -1141,7 +1164,7 @@ export class GitopsClient {
       `${this.baseUrl}/images/builds/${encodeURIComponent(checksum)}/stream`,
       {
         headers: {
-          Authorization: `Bearer ${this.secret}`,
+          ...this.authHeaders(),
           Accept: 'text/plain',
         },
         signal,
@@ -1168,7 +1191,7 @@ export class GitopsClient {
     const r = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers: {
-        Authorization: `Bearer ${this.secret}`,
+        ...this.authHeaders(),
         ...(bodyObj !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       ...(bodyObj !== undefined ? { body: JSON.stringify(bodyObj) } : {}),
@@ -1255,6 +1278,26 @@ export class GitopsClient {
     );
   }
 
+  // ---------------------------------------------------------------------
+  // Git task queue (`/tasks`). The live feed flows over SSE
+  // (`task_queue_snapshot` on connect, `task_queue` per change); these REST
+  // calls back the initial fetch and the admin "clear queue" action.
+  // ---------------------------------------------------------------------
+
+  /** `GET /tasks` — the full git task queue (newest first). */
+  listTasks() {
+    return this.requestJson('GET', '/tasks');
+  }
+
+  /**
+   * `POST /tasks/clear?by=<email>` — cancel all queued/running git tasks.
+   * gitops enforces admin-only via the daemon role store and 403s non-admins;
+   * `by` is the validated requester email, recorded for the audit trail.
+   */
+  clearTasks(by: string) {
+    return this.requestJson('POST', `/tasks/clear?by=${encodeURIComponent(by)}`);
+  }
+
   /** Subscribe to upstream events. Returns an unsubscribe function. */
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);
@@ -1298,7 +1341,7 @@ export class GitopsClient {
   private async consumeStream(signal: AbortSignal): Promise<void> {
     const r = await fetch(`${this.baseUrl}/events/stream`, {
       headers: {
-        Authorization: `Bearer ${this.secret}`,
+        ...this.authHeaders(),
         Accept: 'text/event-stream',
       },
       signal,

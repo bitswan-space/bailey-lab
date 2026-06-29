@@ -281,8 +281,12 @@ func initIngress(verbose bool) (bool, error) {
 		// Caddy is already running, keep using it
 		return false, nil
 	case IngressTraefik:
-		// Check if Traefik is already running and functional
-		if err := traefikapi.InitTraefik(); err == nil {
+		// Skip only if Traefik is actually RUNNING. Probe the container directly:
+		// InitTraefik no longer pushes to Traefik's REST API (it renders the
+		// file-provider config to disk) so it always succeeds and can't tell us
+		// whether Traefik is up. If it's running, just refresh its config.
+		if containerRunning("traefik") {
+			_ = traefikapi.InitTraefik()
 			return false, nil
 		}
 		// Nothing running — check if user wants to force Caddy
@@ -411,6 +415,14 @@ const traefikDynamicConfig = `tls:
         - http/1.1
 `
 
+// emptyTraefikDynamicConfig seeds a workspace sub-traefik's file-provider config
+// before any route exists — the volume-subpath mount requires the file present.
+// The daemon rewrites it with real routes via the traefikapi state on push.
+const emptyTraefikDynamicConfig = `http:
+  routers: {}
+  services: {}
+`
+
 func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
 	cfg := fmt.Sprintf(`entryPoints:
   web:
@@ -422,8 +434,7 @@ api:
 providers:
   file:
     filename: /etc/traefik/dynamic.yml
-  rest:
-    insecure: true
+    watch: true
   docker:
     exposedByDefault: false
     network: bitswan_network
@@ -523,14 +534,20 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	traefikConfigFilePath := traefikConfig + "/traefik.yml"
 	traefikDockerComposePath := traefikConfig + "/docker-compose.yml"
 
-	// Check if Traefik is already running with REST provider support and
-	// matching configuration — nothing to do then. If the configuration has
-	// drifted (e.g. the DNS-01 resolver was just enabled), fall through and
-	// recreate the container; InitTraefik re-pushes the saved routes after.
-	if err := traefikapi.InitTraefik(); err == nil {
+	// Skip the restart only if Traefik is actually RUNNING with matching config —
+	// nothing to do then. Probe the CONTAINER directly: the old probe used
+	// InitTraefik's REST push (which failed when Traefik was down), but routes
+	// now go through the file provider so InitTraefik just writes a local file
+	// and always succeeds — it can no longer tell whether Traefik is up. If the
+	// config has drifted (e.g. the DNS-01 resolver was just enabled), fall
+	// through and recreate the container.
+	if containerRunning("traefik") {
 		currentConfig, _ := os.ReadFile(traefikConfigFilePath)
 		currentCompose, _ := os.ReadFile(traefikDockerComposePath)
 		if string(currentConfig) == traefikStaticConfig && string(currentCompose) == traefikDockerCompose {
+			// Running and unchanged — just refresh the file-provider config from
+			// the saved state in case it drifted, then leave it.
+			_ = traefikapi.InitTraefik()
 			return false, nil
 		}
 		if verbose {
@@ -614,13 +631,31 @@ func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, err
 	traefikProjectName := fmt.Sprintf("bitswan-%s-traefik", workspaceName)
 	containerName := fmt.Sprintf("%s__traefik", workspaceName)
 
-	// Check if workspace traefik container already exists
+	// Check if workspace traefik container already exists.
 	traefikContainerId, err := exec.Command("docker", "ps", "-q", "-f", fmt.Sprintf("name=%s", containerName)).Output()
 	if err != nil {
 		return false, fmt.Errorf("failed to check if workspace traefik container exists: %w", err)
 	}
 	if strings.TrimSpace(string(traefikContainerId)) != "" {
-		return false, nil
+		// A sub-traefik created before the file-provider migration mounts only
+		// traefik.yml and serves the in-memory REST provider — it ignores the
+		// dynamic.yml this daemon now writes routes into, so every new route goes
+		// stale on it (and never recovers, since this function used to just skip
+		// when the container existed). Detect that by the absence of the
+		// dynamic.yml mount and recreate it on the current (file-provider) config;
+		// an already-migrated sub-traefik has the mount and is a no-op.
+		mounts, err := exec.Command("docker", "inspect", "--format",
+			"{{range .Mounts}}{{.Destination}}\n{{end}}", containerName).Output()
+		if err != nil {
+			return false, fmt.Errorf("failed to inspect workspace traefik mounts: %w", err)
+		}
+		if strings.Contains(string(mounts), "/etc/traefik/dynamic.yml") {
+			return false, nil // up to date — reads dynamic.yml already
+		}
+		if out, rmErr := exec.Command("docker", "rm", "-f", containerName).CombinedOutput(); rmErr != nil {
+			return false, fmt.Errorf("failed to remove stale (REST-provider) workspace traefik %s: %w: %s", containerName, rmErr, strings.TrimSpace(string(out)))
+		}
+		// Fall through to recreate with the file provider + dynamic.yml mount.
 	}
 
 	// Create workspace traefik config directory
@@ -628,20 +663,35 @@ func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, err
 		return false, fmt.Errorf("failed to create workspace traefik config directory: %w", err)
 	}
 
-	// Traefik static config enabling REST provider and web entrypoint (HTTP only for workspace)
+	// Traefik static config: web entrypoint (HTTP only for the workspace
+	// sub-traefik) + the FILE provider (durable across restarts). Routes are
+	// written to /etc/traefik/dynamic.yml (a bitswan-volume subpath shared with
+	// the daemon) and reloaded by Traefik on change — no in-memory REST push.
 	traefikStaticConfig := `entryPoints:
   web:
     address: ":80"
 api:
   insecure: true
 providers:
-  rest:
-    insecure: true
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
 `
 
 	traefikConfigFilePath := traefikConfig + "/traefik.yml"
 	if err := os.WriteFile(traefikConfigFilePath, []byte(traefikStaticConfig), 0755); err != nil {
 		return false, fmt.Errorf("failed to write workspace traefik.yml: %w", err)
+	}
+
+	// The file provider needs dynamic.yml to exist before the sub-traefik mounts
+	// it (volume-subpath mounts are strict). Seed an empty one if absent; the
+	// daemon rewrites it with the real routes via modifyState when routes are
+	// pushed — and never clobbers an existing one with routes.
+	workspaceDynamicFilePath := traefikConfig + "/dynamic.yml"
+	if _, err := os.Stat(workspaceDynamicFilePath); os.IsNotExist(err) {
+		if err := os.WriteFile(workspaceDynamicFilePath, []byte(emptyTraefikDynamicConfig), 0644); err != nil {
+			return false, fmt.Errorf("failed to write workspace dynamic.yml: %w", err)
+		}
 	}
 
 	// For docker-compose, use HOST_HOME if available
@@ -658,6 +708,12 @@ providers:
 		if _, err := os.Stat(traefikConfigFilePathHost); os.IsNotExist(err) {
 			if err := os.WriteFile(traefikConfigFilePathHost, []byte(traefikStaticConfig), 0755); err != nil {
 				return false, fmt.Errorf("failed to write workspace traefik.yml on host: %w", err)
+			}
+		}
+		dynamicFilePathHost := traefikConfigForCompose + "/dynamic.yml"
+		if _, err := os.Stat(dynamicFilePathHost); os.IsNotExist(err) {
+			if err := os.WriteFile(dynamicFilePathHost, []byte(emptyTraefikDynamicConfig), 0644); err != nil {
+				return false, fmt.Errorf("failed to write workspace dynamic.yml on host: %w", err)
 			}
 		}
 	}
@@ -736,17 +792,11 @@ providers:
 	resp, err := client.Get(workspaceTraefikURL)
 	if err == nil {
 		defer resp.Body.Close()
-		originalTraefikHost := os.Getenv("BITSWAN_TRAEFIK_HOST")
-		os.Setenv("BITSWAN_TRAEFIK_HOST", workspaceTraefikURL)
-		defer func() {
-			if originalTraefikHost != "" {
-				os.Setenv("BITSWAN_TRAEFIK_HOST", originalTraefikHost)
-			} else {
-				os.Unsetenv("BITSWAN_TRAEFIK_HOST")
-			}
-		}()
-
-		if err := traefikapi.InitWorkspaceTraefik(); err != nil {
+		// Target the sub-traefik by explicit workspace name. Do NOT mutate the
+		// process-global BITSWAN_TRAEFIK_HOST: it is shared by every concurrent
+		// request, so a global route push racing this window would be redirected
+		// into this sub-traefik and dump the entire global route table here.
+		if err := traefikapi.InitWorkspaceTraefik(workspaceName); err != nil {
 			if verbose {
 				fmt.Printf("Warning: failed to init workspace traefik API: %v\n", err)
 			}

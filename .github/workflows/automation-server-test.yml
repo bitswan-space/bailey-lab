@@ -195,6 +195,16 @@ jobs:
           # can't pull it and every BP deploy fails.
           docker build -t bitswan/egress-gateway:latest -f "${{ github.workspace }}/bitswan-automation-server/cmd/egress-gateway/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
 
+      - name: Build automation-server-runtime image from source
+        run: |
+          # The per-workspace infra-driver sidecar runs this image (debian +
+          # docker CLI + git + git-http-backend) with the bitswan binary mounted
+          # at runtime. The workspace compose references it as
+          # bitswan/automation-server-runtime:latest and brings it up with
+          # `--pull missing`, so build the tag here or the sidecar can't start
+          # and `docker compose up` fails.
+          docker build -t bitswan/automation-server-runtime:latest -f "${{ github.workspace }}/bitswan-automation-server/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
+
       - name: "E2E: create a business process and reach its frontend"
         timeout-minutes: 15
         run: |
@@ -215,6 +225,13 @@ jobs:
             name=$(docker inspect --format '{{.Name}} ({{.State.Status}}, exit={{.State.ExitCode}})' "$c" 2>/dev/null || echo "$c")
             echo "::group::logs $name"
             docker logs --tail 200 "$c" 2>&1 || true
+            echo "::endgroup::"
+          done
+          # The deployed bitswan.yaml (does the deployment declare services?) and
+          # the driver-generated compose (was postgres/minio merged in?).
+          for c in $(docker ps -aq --filter "name=bitswan-gitops"); do
+            echo "::group::deployed bitswan.yaml + compose ($c)"
+            docker exec "$c" sh -c 'echo "--- bitswan.yaml ---"; cat /gitops/gitops/bitswan.yaml 2>/dev/null; echo "--- docker-compose.yaml ---"; cat /gitops/gitops/docker-compose.yaml 2>/dev/null' 2>&1 || true
             echo "::endgroup::"
           done
 

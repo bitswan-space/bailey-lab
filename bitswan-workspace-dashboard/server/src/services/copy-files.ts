@@ -124,6 +124,99 @@ function statEtag(st: import('node:fs').Stats): FileEtag {
   return { mtimeMs: Math.floor(st.mtimeMs), size: st.size };
 }
 
+/** One line that matched a full-text search. */
+export interface SearchMatch {
+  /** Workspace-relative path (without the `copies/<name>/` prefix). */
+  path: string;
+  /** 1-based line number. */
+  line: number;
+  /** The matching line, trimmed and length-capped. */
+  text: string;
+}
+
+export interface SearchResult {
+  matches: SearchMatch[];
+  /** True when the match cap was hit (there may be more). */
+  truncated: boolean;
+}
+
+/**
+ * Full-text search across a copy's files: walk the bind-mounted tree (skipping
+ * the same noise as the explorer + binary / oversized files) and collect every
+ * line containing `query` (case-insensitive). Bounded by `maxMatches` so a broad
+ * query stays responsive. `scope` optionally restricts the walk to a
+ * copy-relative subdirectory (e.g. the selected BP folder).
+ */
+export async function searchCopyFiles(opts: {
+  copy: string;
+  workspaceRoot: string;
+  query: string;
+  scope?: string;
+  maxMatches?: number;
+}): Promise<SearchResult> {
+  const root = copyRoot(opts);
+  const needle = opts.query.toLowerCase();
+  if (!needle) return { matches: [], truncated: false };
+  const max = opts.maxMatches ?? 300;
+  const matches: SearchMatch[] = [];
+
+  let startDir = root;
+  if (opts.scope) {
+    try {
+      startDir = resolveInsideCopy(root, opts.scope);
+    } catch {
+      return { matches: [], truncated: false };
+    }
+  }
+
+  async function walk(dir: string): Promise<void> {
+    if (matches.length >= max) return;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (matches.length >= max) return;
+      if (HIDDEN_NAMES.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        await walk(full);
+        continue;
+      }
+      if (!(e.isFile() || e.isSymbolicLink())) continue;
+      let st: import('node:fs').Stats;
+      try {
+        st = await fs.stat(full);
+      } catch {
+        continue;
+      }
+      if (!st.isFile() || st.size === 0 || st.size > FILE_SIZE_LIMIT) continue;
+      let buf: Buffer;
+      try {
+        buf = await fs.readFile(full);
+      } catch {
+        continue;
+      }
+      // Skip binaries by the same NUL-probe heuristic as readCopyFile.
+      if (buf.subarray(0, BINARY_PROBE_BYTES).includes(0)) continue;
+      const rel = path.relative(root, full).split(path.sep).join('/');
+      const lines = buf.toString('utf8').split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const ln = lines[i] ?? '';
+        if (ln.toLowerCase().includes(needle)) {
+          matches.push({ path: rel, line: i + 1, text: ln.trim().slice(0, 240) });
+          if (matches.length >= max) return;
+        }
+      }
+    }
+  }
+
+  await walk(startDir);
+  return { matches, truncated: matches.length >= max };
+}
+
 export type FileReadResult =
   | { content: string; truncated: boolean; etag: FileEtag }
   | { error: 'binary' | 'too-large' | 'not-found' };

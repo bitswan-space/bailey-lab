@@ -11,7 +11,7 @@ import {
   Pencil,
   ShieldCheck,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import { api, type BpSnapshot, type DrPolicy, type DrStatus } from '@/lib/api';
 import type { SnapshotTask } from '@/types';
 import { snapshotStepLabel, watchSnapshotTask } from '@/lib/snapshotTask';

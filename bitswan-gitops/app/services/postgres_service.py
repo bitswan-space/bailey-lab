@@ -61,47 +61,6 @@ class PostgresService(InfraService):
             f"PGADMIN_DEFAULT_PASSWORD={pgadmin_password}\n"
         )
 
-    def _generate_compose_dict(self) -> dict:
-        pgadmin_upstream = "http://127.0.0.1:80"
-
-        pgadmin_entry = {
-            "container_name": self.pgadmin_container_name,
-            "restart": "unless-stopped",
-            "image": self.pgadmin_image,
-            "env_file": [self.secrets_file_path],
-            "volumes": [
-                f"{os.path.join(self.secrets_dir, 'pgadmin-servers.json')}:/pgadmin4/servers.json:ro",
-            ],
-            "networks": ["bitswan_network"],
-            "labels": {},
-        }
-
-        # OAuth2-proxy injection for pgAdmin
-        # Env vars are set at compose time; the oauth2-proxy binary is copied
-        # into the container and started via docker exec after boot.
-        if self.oauth2_enabled:
-            pgadmin_entry["environment"] = self._get_oauth2_env_vars(pgadmin_upstream)
-            pgadmin_entry["labels"]["gitops.oauth2.enabled"] = "true"
-            pgadmin_entry["labels"]["gitops.oauth2.upstream"] = pgadmin_upstream
-
-        return {
-            "services": {
-                f"postgres{self.service_suffix}": {
-                    "image": self.postgres_image,
-                    "container_name": self.container_name,
-                    "restart": "unless-stopped",
-                    "env_file": [self.secrets_file_path],
-                    "volumes": [f"{self.volume_name}-data:/var/lib/postgresql/data"],
-                    "networks": ["bitswan_network"],
-                },
-                f"postgres{self.service_suffix}-pgadmin": pgadmin_entry,
-            },
-            "volumes": {f"{self.volume_name}-data": None},
-            "networks": {
-                "bitswan_network": {"external": True},
-            },
-        }
-
     def _get_caddy_upstream(self) -> str:
         # When oauth2-proxy is active, route through it (port 9999)
         if self.oauth2_enabled:
@@ -159,15 +118,11 @@ class PostgresService(InfraService):
         logger.info(f"pgAdmin servers.json saved to: {servers_file}")
 
     async def start(self) -> dict:
-        """Start both PostgreSQL and pgAdmin containers, then oauth2-proxy."""
-        result = await super().start()
-        try:
-            await run_docker_command("docker", "start", self.pgadmin_container_name)
-        except Exception as e:
-            logger.warning(f"Failed to start pgAdmin container: {e}")
-        # Start oauth2-proxy inside pgAdmin container via docker exec
-        await self._start_oauth2_proxy_in_container(self.pgadmin_container_name)
-        return result
+        """Bring PostgreSQL + pgAdmin up via the driver apply. The apply
+        reconciles both infra containers and, for pgAdmin (labelled
+        gitops.oauth2.enabled), the driver sets up its oauth2-proxy — gitops has
+        no oauth code or docker access of its own."""
+        return await super().start()
 
     async def stop(self) -> dict:
         """Stop both PostgreSQL and pgAdmin containers."""

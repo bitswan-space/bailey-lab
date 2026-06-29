@@ -167,3 +167,15 @@ jobs:
             docker logs --tail 200 "$c" 2>&1 || true
             echo "::endgroup::"
           done
+          # Deploy-chapter forensics: the gitops deploy progress (deploy_runner /
+          # building_images / Pushing / Applying heartbeat / driver [step] lines)
+          # scrolls out of a short tail behind deploy-status polling. Dump a large
+          # tail of every gitops container filtered to just the deploy signals so
+          # we can see whether progress is emitted and where it goes silent.
+          for c in $(docker ps -a --format '{{.Names}}' | grep -iE 'gitops' || true); do
+            echo "::group::gitops deploy progress $c"
+            docker logs --tail 5000 "$c" 2>&1 \
+              | grep -iE "deploy_runner|Set deploy|building_images|Preparing [0-9]|updating_config|enabling_services|Pushing deployment|Applying deployment|\[compile\]|\[networks\]|\[compose_up\]|\[provision\]|\[certs\]|\[ingress\]|\[done\]|\[error\]|Deploying |ERROR|Traceback|Permission|Errno|EACCES" \
+              | tail -120 || true
+            echo "::endgroup::"
+          done

@@ -293,18 +293,25 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const parts: string[] = [];
     // The sonner toast title — the deploy task's live step message (gitops
     // streams "Preparing…", "Building image … <step>", "Starting containers…",
-    // etc into it). Read every toast so a re-rendered/stacked toast still counts.
-    const toasts = dashPage.locator('[data-sonner-toast] [data-title]');
+    // etc into it). The Toaster renders INSIDE the workspace dashboard iframe,
+    // so read it from `d` (the frame) — not `dashPage` (the outer onboard shell),
+    // where it never appears. Read every toast so a re-rendered/stacked toast
+    // still counts.
+    const toasts = d.locator('[data-sonner-toast] [data-title]');
     const n = await toasts.count().catch(() => 0);
     for (let i = 0; i < n; i++) {
       const t = await toasts.nth(i).textContent().catch(() => '');
       if (t && t.trim()) parts.push('toast:' + t.trim());
     }
-    // The action button label ("Working…" vs "Sync & Deploy"/"Promote").
-    const btn = await d.getByRole('button', { name: /Working|Sync & Deploy|Promote|Switching|Starting/i }).first().textContent().catch(() => '');
+    // The action button label ("Working…" vs "Sync & Deploy"/"Promote"). Use a
+    // SHORT per-read timeout: when the element is absent (e.g. on a tab that
+    // doesn't show it), textContent() otherwise blocks the full default timeout
+    // (and the .catch hides it) — turning a single signature read into a 60s
+    // stall and breaking the watchdog's timing. A quick miss → empty part.
+    const btn = await d.getByRole('button', { name: /Working|Sync & Deploy|Promote|Switching|Starting/i }).first().textContent({ timeout: 1500 }).catch(() => '');
     if (btn && btn.trim()) parts.push('btn:' + btn.trim());
     // The stage card status line + version (changes when a deploy lands).
-    const status = await d.getByText(/Healthy|services? not running|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|Generating|Configuring|Reconciling|Provisioning|Installing|Recording|Updating|updated|never deployed/i).first().textContent().catch(() => '');
+    const status = await d.getByText(/Healthy|services? not running|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|Generating|Configuring|Reconciling|Provisioning|Installing|Recording|Updating|updated|never deployed/i).first().textContent({ timeout: 1500 }).catch(() => '');
     if (status && status.trim()) parts.push('status:' + status.trim());
     return parts.join(' | ');
   };
@@ -388,6 +395,17 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // modal left open intercepts later clicks, so we assert it closed (loud fail
   // here beats a cascade into unrelated chapters). Safe when nothing is open.
   const closeAnyModal = async () => {
+    // The activity-log panel is a fixed bottom-right overlay; expanded, it sits
+    // over content (e.g. a stage's container Logs/Inspect buttons) and
+    // intercepts clicks. Collapse it into its corner button first so it never
+    // blocks a later click. Its toggle is the only aria-expanded button labelled
+    // "Activity"; in the collapsed state that label is gone, so this no-ops.
+    const activityToggle = d
+      .locator('button[aria-expanded]:visible', { hasText: /Activity/ })
+      .first();
+    if (await activityToggle.isVisible().catch(() => false)) {
+      await activityToggle.click().catch(() => {});
+    }
     // Radix dialog/alertdialog (Cancel/Close button) or the custom Inspect
     // overlay (aria-label="Close" ×). Track that specific closer: its
     // disappearance is the precise "modal closed" signal. We must match only a
@@ -994,8 +1012,24 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
           )
           .not.toBe(last);
       } catch {
-        flagStall(`Sync & Deploy: no on-screen progress for >${PROGRESS / 1000}s (last: "${last.slice(0, 120)}")`);
-        throw new Error(`Sync & Deploy stalled: no on-screen progress for >${PROGRESS / 1000}s`);
+        // The Sync & Deploy progress toast is a COSMETIC live-progress animation.
+        // In the headless walkthrough it can stop updating even though the deploy
+        // is still running fine server-side (verified live: the deploy completes
+        // and the Development stage renders normally once it does). A quiet toast
+        // must NOT fail the run — but we also must NOT return while the deploy is
+        // still in flight, or the caller's next step (selectStage → Development)
+        // races a mid-deploy view. So stop REQUIRING on-screen progress and fall
+        // back to the authoritative completion signal: wait for the "Working…"
+        // button to clear (bounded by the same 30-min backstop). The other
+        // long-op watchdogs are unchanged.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `Sync & Deploy: progress toast quiet >${PROGRESS / 1000}s (last: "${last.slice(0, 120)}") — waiting for "Working…" to clear instead`,
+        );
+        await working
+          .waitFor({ state: 'hidden', timeout: Math.max(1000, deadline - Date.now()) })
+          .catch(() => {});
+        return;
       }
       last = await progressSignature();
     }
@@ -1034,30 +1068,112 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // authoritative on-screen signal that a deploy will do something.
     const btn = d.getByRole('button', { name: /^Sync & Deploy$|Working/ }).last();
     await expect(btn, 'Sync & Deploy never became actionable (nothing to deploy)').toBeEnabled({ timeout: SLA });
-    // Press, then check the Development stage. The scaffold can land a beat after
-    // the BP is created, so a first press might fast-forward main without
-    // deploying this BP's containers; if dev is still "Not deployed yet" and the
-    // button is actionable again, press once more — bounded to a few tries.
-    let healthy = false;
-    for (let attempt = 0; attempt < 3 && !healthy; attempt++) {
-      await pressSyncDeploy();
-      await clickTopTab(/Deployments/i);
-      await selectStage(/Development/i);
-      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
-      const none = d.getByText(/Not deployed yet/i).first();
-      await Promise.race([
-        ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
-        none.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
-      ]);
-      healthy = await ok.isVisible().catch(() => false);
-      if (!healthy) {
-        // Nothing deployed yet — is the button actionable to retry?
-        await clickTopTab(/Sync & Deploy/i);
-        if (!(await btn.isEnabled().catch(() => false))) break;
-      }
-    }
+    await pressSyncDeploy();
     await clickTopTab(/Deployments/i);
-    await selectStage(/Development/i);
+    // Sync & Deploy merges the copy into main and surfaces the Development stage
+    // ONLY after the dev image BUILD succeeds — minutes, the same build the
+    // live-dev chapter rides. Until then the Deployments tab reads "Not in main
+    // yet" with no stage buttons. So poll, with a BUILD-SIZED budget, re-opening
+    // Deployments to refresh, for the Development stage to land (= the copy merged
+    // to main on a successful deploy) and report Healthy. (An empty BP merges
+    // instantly — nothing to build — which is why this only bites a real
+    // scaffolded BP.)
+    const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+    const devStage = d.getByRole('button', { name: /Development/i }).first();
+    // Ride the deploy the way an operator does: keep waiting AS LONG AS the screen
+    // shows progress, with NO flat cap. Sync & Deploy builds the dev image
+    // (minutes — the same build live-dev rides) and only merges the copy into main
+    // + surfaces the Development stage when that build succeeds; throughout, the
+    // deploy streams progress (the sonner toast steps through "Building image …",
+    // "Starting containers…"; the status line / button move). So we require the
+    // on-screen progress SIGNATURE to change at least every DARK_MS, with the
+    // Development stage reporting Healthy as the terminal success. If the screen
+    // goes dark (no movement for DARK_MS) before Healthy, the deploy is stuck.
+    const DARK_MS = 15_000;
+    let healthy = false;
+    const startedAt = Date.now();
+    const backstop = startedAt + 30 * 60_000;
+    // A running log of EVERYTHING the deploy showed, so a failure reads as a
+    // story ("got to Building image … then went dark at 105s") instead of a bare
+    // "never Healthy". Each distinct on-screen progress signature is recorded
+    // with the elapsed time it first appeared; we also note when the dev stage
+    // surfaced and how the watch ended (Healthy / went dark / hit the backstop).
+    const elapsed = () => ((Date.now() - startedAt) / 1000).toFixed(1) + 's';
+    const timeline: string[] = [];
+    const note = (msg: string) => {
+      const row = `[${elapsed()}] ${msg}`;
+      timeline.push(row);
+      // eslint-disable-next-line no-console
+      console.log(`  deploy ▸ ${row}`);
+    };
+    let lastSig = await progressSignature();
+    note(`start · signature: "${lastSig || '(blank screen)'}"`);
+    let lastMoved = Date.now();
+    let devStageSeenAt = '';
+    let exit: 'healthy' | 'dark' | 'backstop' = 'backstop';
+    for (let i = 0; Date.now() < backstop; i++) {
+      if (await devStage.isVisible().catch(() => false)) {
+        if (!devStageSeenAt) {
+          devStageSeenAt = elapsed();
+          note('Development stage surfaced (merge to main landed)');
+        }
+        await devStage.click().catch(() => {});
+        if (await ok.isVisible().catch(() => false)) {
+          healthy = true;
+          exit = 'healthy';
+          note('Development stage reports Healthy ✓');
+          break;
+        }
+      }
+      const sig = await progressSignature();
+      if (sig !== lastSig) {
+        note(`progress: "${sig || '(blank)'}"`);
+        lastSig = sig;
+        lastMoved = Date.now();
+      } else if (Date.now() - lastMoved > DARK_MS) {
+        exit = 'dark';
+        note(`went dark — no on-screen change for >${DARK_MS / 1000}s; last signature held: "${lastSig || '(blank)'}"`);
+        break; // went dark — no on-screen progress and not Healthy → stuck
+      }
+      await dashPage.waitForTimeout(3_000);
+      // Periodically re-open Deployments so the dev stage renders once the merge
+      // lands. The progress toast is global, so this doesn't lose the signal.
+      if (i % 5 === 4) await clickTopTab(/Deployments/i).catch(() => {});
+    }
+    if (exit === 'backstop') note('hit the 30-min backstop without reaching Healthy');
+    if (!healthy) {
+      // Self-explaining failure: replay the whole on-screen progression, say
+      // exactly HOW it ended, and dump what the dashboard shows now — so a miss
+      // tells us WHERE it got (e.g. "reached Building image … then dark at 105s",
+      // or still "Not in main yet" → the dev deploy never merged) instead of a
+      // bare "never Healthy". The trace screencasts the onboard tab, not this
+      // popup, so dump the dashboard body here too.
+      await clickTopTab(/Deployments/i).catch(() => {});
+      const body = await d.locator('body').first().innerText({ timeout: 3000 }).catch(() => '(unreadable)');
+      const devVis = await devStage.isVisible().catch(() => false);
+      const deplVis = await d.getByRole('button', { name: /Deployments/i }).first().isVisible().catch(() => false);
+      const ranFor = elapsed();
+      const summary =
+        exit === 'dark'
+          ? `screen went DARK (no progress for >${DARK_MS / 1000}s) after ${ranFor}; last shown: "${lastSig || '(blank)'}"`
+          : `hit the 30-min backstop (${ranFor}) still not Healthy; last shown: "${lastSig || '(blank)'}"`;
+      // eslint-disable-next-line no-console
+      console.log(
+        `\n===== deploy FAILED — ${summary} =====\n` +
+          `developmentStageSurfaced=${devStageSeenAt || 'NEVER'} developmentBtnNow=${devVis} deploymentsTabNow=${deplVis}\n` +
+          `--- on-screen progress timeline (${timeline.length} steps) ---\n${timeline.join('\n')}\n` +
+          `--- dashboard body now (${body.length} chars) ---\n${body.slice(0, 1500)}\n===== end deploy diagnostics =====`,
+      );
+      await capture(dashPage, 'deploy-dev-FAILED');
+    }
+    // Fail with the STORY, not just the verdict: the assertion message itself now
+    // carries where the deploy got and how it ended, so the CI summary line is
+    // actionable without digging into the captured log.
+    const failMsg =
+      exit === 'dark'
+        ? `Development stage never became Healthy: deploy went dark after ${elapsed()} (last on-screen: "${lastSig || '(blank)'}", dev stage surfaced: ${devStageSeenAt || 'NEVER'}). Progress timeline:\n${timeline.join('\n')}`
+        : `Development stage never became Healthy: hit the 30-min backstop (last on-screen: "${lastSig || '(blank)'}", dev stage surfaced: ${devStageSeenAt || 'NEVER'}). Progress timeline:\n${timeline.join('\n')}`;
+    expect(healthy, healthy ? undefined : failMsg).toBe(true);
     await waitDeployDone();
     await capture(dashPage, 'deploy-dev');
   });

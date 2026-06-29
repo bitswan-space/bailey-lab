@@ -1,19 +1,14 @@
 package traefikapi
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -252,16 +247,51 @@ func saveState(path string, state *traefikDynConfig) error {
 	return nil
 }
 
-// pushState PUTs the full dynamic config to Traefik's REST provider endpoint.
-func pushState(traefikBaseURL string, state *traefikDynConfig) error {
-	data, err := json.Marshal(state)
+// dynamicConfigPath returns the Traefik FILE-provider config path, alongside
+// the state file (both live in the `bitswan` volume subpath that Traefik mounts
+// — global: traefik/, workspace: workspaces/<ws>/traefik/). Traefik's file
+// provider watches this file and (re)loads it on its OWN startup, so routes
+// survive a Traefik-only restart with no dependency on the daemon re-pushing.
+func dynamicConfigPath(traefikBaseURL string) string {
+	return filepath.Join(filepath.Dir(getStateFilePath(traefikBaseURL)), "dynamic.yml")
+}
+
+// writeDynamicConfig renders the full dynamic config (http routers + services)
+// plus the fixed TLS options to the file-provider file as YAML. This replaces
+// the in-memory REST push: the REST provider lost everything on a Traefik
+// restart (recoverable only on the next daemon restart); the file provider is
+// durable and reloaded by Traefik itself.
+func writeDynamicConfig(traefikBaseURL string, state *traefikDynConfig) error {
+	// Round-trip through the JSON tags into a generic map so the emitted YAML
+	// keys match Traefik's dynamic-config schema (http/routers/services/rule/
+	// service/loadBalancer/servers/url/tls/…) without duplicating yaml tags.
+	raw, err := json.Marshal(state)
 	if err != nil {
-		return fmt.Errorf("failed to marshal state for push: %w", err)
+		return fmt.Errorf("failed to marshal dynamic config: %w", err)
 	}
-	url := traefikBaseURL + "/api/providers/rest"
-	_, err = sendRequest("PUT", url, data)
+	m := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return fmt.Errorf("failed to convert dynamic config: %w", err)
+	}
+	// Preserve the http/1.1-only ALPN TLS option the protected-ingress websocket
+	// chain depends on (it was the entire content of the old static dynamic.yml).
+	// Merge into any existing tls block rather than clobbering it.
+	tls, _ := m["tls"].(map[string]interface{})
+	if tls == nil {
+		tls = map[string]interface{}{}
+	}
+	tls["options"] = map[string]interface{}{
+		"default": map[string]interface{}{"alpnProtocols": []string{"http/1.1"}},
+	}
+	m["tls"] = tls
+
+	out, err := yaml.Marshal(m)
 	if err != nil {
-		return fmt.Errorf("failed to push state to Traefik: %w", err)
+		return fmt.Errorf("failed to marshal dynamic config to YAML: %w", err)
+	}
+	path := dynamicConfigPath(traefikBaseURL)
+	if err := os.WriteFile(path, out, 0644); err != nil {
+		return fmt.Errorf("failed to write dynamic config %s: %w", path, err)
 	}
 	return nil
 }
@@ -289,8 +319,11 @@ func modifyState(traefikBaseURL string, fn func(*traefikDynConfig) error) error 
 		return fmt.Errorf("failed to save state: %w", err)
 	}
 
-	if err := pushState(traefikBaseURL, state); err != nil {
-		return fmt.Errorf("failed to push state: %w", err)
+	// Render the file-provider config. rest-state.json stays the canonical
+	// record; dynamic.yml is what Traefik actually serves (and reloads on its
+	// own restart — no REST re-push needed).
+	if err := writeDynamicConfig(traefikBaseURL, state); err != nil {
+		return fmt.Errorf("failed to write dynamic config: %w", err)
 	}
 
 	return nil
@@ -340,36 +373,6 @@ func extractHostFromRule(rule string) string {
 	return rule
 }
 
-func sendRequest(method, url string, payload []byte) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewBuffer(payload))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to call Traefik API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("Traefik API returned status code %d: %s", resp.StatusCode, string(body))
-	}
-
-	return body, nil
-}
-
 // ============================================================
 // Public functions
 // ============================================================
@@ -389,10 +392,13 @@ func InitTraefik() error {
 	})
 }
 
-// InitWorkspaceTraefik initialises a workspace Traefik (HTTP-only).
-// Callers must set BITSWAN_TRAEFIK_HOST to target the correct workspace instance.
-func InitWorkspaceTraefik() error {
-	traefikBaseURL := getTraefikBaseURL()
+// InitWorkspaceTraefik initialises a workspace Traefik (HTTP-only). The target
+// is selected by the explicit workspaceName — NOT by mutating the process-global
+// BITSWAN_TRAEFIK_HOST env, which is shared by every concurrent request and would
+// race: a global push running while the env pointed at a sub-traefik would land
+// the whole global route table inside that sub-traefik.
+func InitWorkspaceTraefik(workspaceName string) error {
+	traefikBaseURL := getTraefikBaseURL(workspaceName)
 	return modifyState(traefikBaseURL, func(_ *traefikDynConfig) error {
 		return nil
 	})

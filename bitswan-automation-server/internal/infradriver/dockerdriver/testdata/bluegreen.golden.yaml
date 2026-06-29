@@ -1,0 +1,141 @@
+networks:
+    bitswan_network:
+        external: true
+    ws2-production:
+        external: true
+services:
+    ws2-backend-8d90-production-blue:
+        container_name: ws2-backend-8d90-production-blue
+        env_file:
+            - __ROOT__/secrets/bp/shop/production
+        environment:
+            BITSWAN_AUTOMATION_STAGE: production
+            BITSWAN_DEPLOY_CHECKSUM: bsum
+            BITSWAN_DEPLOYMENT_CONTEXT: shop
+            BITSWAN_DEPLOYMENT_ID: backend-shop
+            BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-blue.example.com
+            BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-blue:8080
+            BITSWAN_WORKSPACE_NAME: ws2
+            DEPLOYMENT_ID: backend-shop
+        image: internal/ws2-shop-backend:shabsum
+        labels:
+            gitops.automation_name: backend
+            gitops.context: shop
+            gitops.deployment_id: backend-shop
+            gitops.intended_exposed: "false"
+            gitops.slot: blue
+            gitops.stage: production
+            gitops.workspace: ws2
+        networks:
+            - ws2-production
+        restart: always
+        ulimits:
+            nofile:
+                hard: 65536
+                soft: 65536
+        volumes: []
+    ws2-backend-8d90-production-green:
+        container_name: ws2-backend-8d90-production-green
+        env_file:
+            - __ROOT__/secrets/bp/shop/production
+        environment:
+            BITSWAN_AUTOMATION_STAGE: production
+            BITSWAN_DEPLOY_CHECKSUM: bsum
+            BITSWAN_DEPLOYMENT_CONTEXT: shop
+            BITSWAN_DEPLOYMENT_ID: backend-shop@green
+            BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-green.example.com
+            BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-green:8080
+            BITSWAN_WORKSPACE_NAME: ws2
+            DEPLOYMENT_ID: backend-shop@green
+        image: internal/ws2-shop-backend:shabsum
+        labels:
+            gitops.automation_name: backend
+            gitops.context: shop
+            gitops.deployment_id: backend-shop@green
+            gitops.intended_exposed: "false"
+            gitops.slot: green
+            gitops.stage: production
+            gitops.workspace: ws2
+        networks:
+            - ws2-production
+        restart: always
+        ulimits:
+            nofile:
+                hard: 65536
+                soft: 65536
+        volumes: []
+    ws2-frontend-8d90-production-blue:
+        container_name: ws2-frontend-8d90-production-blue
+        env_file:
+            - __ROOT__/secrets/bp/shop/production
+        environment:
+            BITSWAN_AUTOMATION_STAGE: production
+            BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-production.example.com
+            BITSWAN_DEPLOY_CHECKSUM: fsum
+            BITSWAN_DEPLOYMENT_CONTEXT: shop
+            BITSWAN_DEPLOYMENT_ID: frontend-shop
+            BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_URL_PREFIX: https://ws2-
+            BITSWAN_URL_SUFFIX: .example.com
+            BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-blue.example.com
+            BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-blue:8080
+            BITSWAN_WORKSPACE_NAME: ws2
+            DEPLOYMENT_ID: frontend-shop
+        image: internal/ws2-shop-frontend:shafsum
+        labels:
+            gitops.automation_name: frontend
+            gitops.context: shop
+            gitops.deployment_id: frontend-shop
+            gitops.intended_exposed: "true"
+            gitops.slot: blue
+            gitops.stage: production
+            gitops.workspace: ws2
+        networks:
+            ws2-production:
+                aliases:
+                    - ws2-frontend-8d90-production-blue.example.com
+        restart: always
+        ulimits:
+            nofile:
+                hard: 65536
+                soft: 65536
+        volumes: []
+    ws2-frontend-8d90-production-green:
+        container_name: ws2-frontend-8d90-production-green
+        env_file:
+            - __ROOT__/secrets/bp/shop/production
+        environment:
+            BITSWAN_AUTOMATION_STAGE: production
+            BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-dr.example.com
+            BITSWAN_DEPLOY_CHECKSUM: fsum
+            BITSWAN_DEPLOYMENT_CONTEXT: shop
+            BITSWAN_DEPLOYMENT_ID: frontend-shop@green
+            BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_URL_PREFIX: https://ws2-
+            BITSWAN_URL_SUFFIX: .example.com
+            BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-green.example.com
+            BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-green:8080
+            BITSWAN_WORKSPACE_NAME: ws2
+            DEPLOYMENT_ID: frontend-shop@green
+        image: internal/ws2-shop-frontend:shafsum
+        labels:
+            gitops.automation_name: frontend
+            gitops.context: shop
+            gitops.deployment_id: frontend-shop@green
+            gitops.intended_exposed: "true"
+            gitops.slot: green
+            gitops.stage: production
+            gitops.workspace: ws2
+        networks:
+            ws2-production:
+                aliases:
+                    - ws2-frontend-8d90-production-green.example.com
+        restart: always
+        ulimits:
+            nofile:
+                hard: 65536
+                soft: 65536
+        volumes: []
+version: "3"

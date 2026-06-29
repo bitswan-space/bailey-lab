@@ -23,6 +23,13 @@ RUN install -m 0755 -d /etc/apt/keyrings && \
     apt-get update && \
     apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin
 
+# syft: the driver runs it (it owns docker) to produce an image SBOM for the
+# supply-chain panel, returning only the SBOM — gitops has no docker socket
+# after the cut-over, so it can't scan the local image itself. grype stays in
+# gitops (it scans the SBOM, which needs no docker).
+RUN curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+        | sh -s -- -b /usr/local/bin
+
 # The binary will be mounted at runtime
 # Just create a placeholder to ensure the directory exists
 RUN mkdir -p /usr/local/bin
