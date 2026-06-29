@@ -540,12 +540,14 @@ async def ensure_bp_pg_role(
     if rc != 0:
         raise RuntimeError(f"ensure role {role} failed: {stderr.strip()}")
 
-    # Own the DB, then inside it give the role full control of the public
-    # schema and any pre-existing user tables/sequences so AutoMigrate and
-    # existing data both work. We deliberately do NOT use `REASSIGN OWNED BY
-    # <superuser>` — the admin role owns system-pinned objects, so Postgres
-    # refuses ("required by the database system"); reassign only public-schema
-    # user objects instead (a no-op on a fresh/cloned DB).
+    # The role deliberately does NOT own the database or the public schema — a
+    # non-superuser can DROP a database/schema it owns, which would let a BP
+    # delete its own platform-managed database out from under us. Keep both
+    # admin-owned (and reset them, in case an earlier build made the role the
+    # owner); the role gets only CONNECT + schema CREATE/USAGE + ownership of its
+    # own tables (below), so it can run full table DDL (AutoMigrate,
+    # create/alter/drop tables) but cannot DROP DATABASE/SCHEMA. Mirrors MinIO,
+    # where the BP user gets object ops but not bucket admin.
     _, stderr, rc = await run_docker_command(
         "docker",
         "exec",
@@ -556,11 +558,11 @@ async def ensure_bp_pg_role(
         "-d",
         "postgres",
         "-c",
-        f'ALTER DATABASE "{db_name}" OWNER TO "{role}";',
+        f'ALTER DATABASE "{db_name}" OWNER TO "{admin_user}";',
     )
     if rc != 0:
         raise RuntimeError(
-            f"chown database {db_name} -> {role} failed: {stderr.strip()}"
+            f"reset database owner {db_name} -> {admin_user} failed: {stderr.strip()}"
         )
 
     # Lock down CONNECT: Postgres grants CONNECT to PUBLIC by default, so without
@@ -590,8 +592,14 @@ async def ensure_bp_pg_role(
             f"lock CONNECT on {db_name} -> {role} failed: {stderr.strip()}"
         )
 
+    # Give the role CREATE/USAGE on public (so it can create its own tables) and
+    # ownership of any pre-existing user tables/sequences (so AutoMigrate can
+    # alter them and existing data stays usable). The schema itself stays
+    # admin-owned, so the role can't drop it. The loops are a no-op on a fresh or
+    # freshly-cloned database.
     indb_sql = (
-        f'ALTER SCHEMA public OWNER TO "{role}"; '
+        f'ALTER SCHEMA public OWNER TO "{admin_user}"; '
+        f'GRANT ALL ON SCHEMA public TO "{role}"; '
         "DO $$ DECLARE r record; BEGIN "
         "FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP "
         f"EXECUTE 'ALTER TABLE public.' || quote_ident(r.tablename) || ' OWNER TO \"{role}\"'; "
@@ -599,8 +607,7 @@ async def ensure_bp_pg_role(
         "FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = 'public' LOOP "
         f"EXECUTE 'ALTER SEQUENCE public.' || quote_ident(r.sequencename) || ' OWNER TO \"{role}\"'; "
         "END LOOP; "
-        "END $$; "
-        f'GRANT ALL ON SCHEMA public TO "{role}";'
+        "END $$;"
     )
     _, stderr, rc = await run_docker_command(
         "docker",
