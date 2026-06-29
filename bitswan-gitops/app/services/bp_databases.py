@@ -563,6 +563,33 @@ async def ensure_bp_pg_role(
             f"chown database {db_name} -> {role} failed: {stderr.strip()}"
         )
 
+    # Lock down CONNECT: Postgres grants CONNECT to PUBLIC by default, so without
+    # this any BP role could connect to (and read PUBLIC/legacy-owned tables in)
+    # another BP's database. Revoke PUBLIC and grant only the owning role — the
+    # superuser still bypasses this, so provisioning/pgAdmin keep working. GRANTs
+    # accumulate per role, so a per-copy DB shared by several BPs stays reachable
+    # by each BP's role as it deploys.
+    connect_sql = (
+        f'REVOKE CONNECT ON DATABASE "{db_name}" FROM PUBLIC; '
+        f'GRANT CONNECT ON DATABASE "{db_name}" TO "{role}";'
+    )
+    _, stderr, rc = await run_docker_command(
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        admin_user,
+        "-d",
+        "postgres",
+        "-c",
+        connect_sql,
+    )
+    if rc != 0:
+        raise RuntimeError(
+            f"lock CONNECT on {db_name} -> {role} failed: {stderr.strip()}"
+        )
+
     indb_sql = (
         f'ALTER SCHEMA public OWNER TO "{role}"; '
         "DO $$ DECLARE r record; BEGIN "

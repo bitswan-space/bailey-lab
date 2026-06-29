@@ -785,6 +785,13 @@ async def test_guard_creates_scoped_pg_role(gitops_home, fake_docker):
     assert any('ALTER SCHEMA public OWNER TO "bpu_my_bp"' in j for j in joined), joined
     # must NOT use the all-or-nothing REASSIGN OWNED (fails on the superuser).
     assert not any("REASSIGN OWNED" in j for j in joined), joined
+    # CONNECT locked down to the owning role (default-deny isolation).
+    assert any(
+        'REVOKE CONNECT ON DATABASE "bp_my_bp" FROM PUBLIC' in j for j in joined
+    ), joined
+    assert any(
+        'GRANT CONNECT ON DATABASE "bp_my_bp" TO "bpu_my_bp"' in j for j in joined
+    ), joined
 
 
 async def test_guard_grants_copy_role_on_copy_db(gitops_home, fake_docker):
