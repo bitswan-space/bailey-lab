@@ -8,19 +8,20 @@ interface Props {
 }
 
 /**
- * Pill badge for a requirement's status. Five colours from Tailwind's
- * standard palette to keep contrast against the dashboard's light bg.
- * `proposed` uses violet so AI-proposed rows pop visually.
+ * Pill badge for a requirement's status. Colours and geometry match the
+ * design's requirements table (compact 9px/700 uppercase chips); `pass`,
+ * `fail`, `retest` and `pending` map onto the design's pass/fail/review/todo
+ * tones, and `proposed` uses violet so AI-proposed rows pop visually.
  */
 export function StatusBadge({ status, onClick, ariaLabel }: Props) {
   const styles: Record<ReqStatus, string> = {
-    pass: 'bg-emerald-100 text-emerald-700',
+    pass: 'bg-green-100 text-green-700',
     fail: 'bg-red-100 text-red-700',
     retest: 'bg-amber-100 text-amber-700',
-    pending: 'bg-zinc-100 text-zinc-600',
+    pending: 'bg-slate-100 text-slate-600',
     proposed: 'bg-violet-100 text-violet-700',
   };
-  const className = `inline-flex h-5 items-center rounded px-1.5 text-[10px] font-semibold uppercase tracking-wide ${styles[status]}`;
+  const className = `inline-flex items-center rounded-[3px] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide ${styles[status]}`;
   if (onClick) {
     return (
       <button
