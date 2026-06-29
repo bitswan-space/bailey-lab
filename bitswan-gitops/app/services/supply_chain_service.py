@@ -14,8 +14,26 @@ recorded as an "unavailable" marker rather than crashing a build or a request.
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+
+async def _broadcast_scanned(image_id: str, status: str) -> None:
+    """Tell SSE subscribers a supply-chain scan just finished, so the open
+    Checks / Supply chain panel refreshes itself the moment results exist — the
+    user never has to come back and re-open the tab. Best-effort: a notify
+    failure must never surface as a scan error."""
+    try:
+        from app.event_broadcaster import event_broadcaster
+
+        await event_broadcaster.broadcast(
+            "supply_chain", {"image_id": image_id, "status": status}
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("supply_chain broadcast failed: %s", e)
 
 _SEVERITIES = ("critical", "high", "medium", "low")
 
@@ -184,6 +202,9 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
     os.makedirs(d, exist_ok=True)
     k = _key(image_id or image_ref)
     sbom_path, cve_path = _sbom_path(d, k), _cve_path(d, k)
+    # Whether this call produced a terminal result (ok/unavailable) to announce.
+    # An early "already scanned" return leaves it False — nothing new to notify.
+    outcome: str | None = None
     try:
         if not os.path.exists(sbom_path):
             # syft must read the image from the docker daemon, which gitops no
@@ -193,9 +214,11 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
                 sbom = await _driver_sbom(image_ref)
             except Exception as e:  # noqa: BLE001 — record, never crash
                 _write_unavailable(cve_path, f"sbom via driver failed: {e}")
+                outcome = "unavailable"
                 return
             if not sbom:
                 _write_unavailable(cve_path, "driver returned an empty SBOM")
+                outcome = "unavailable"
                 return
             _atomic_write(sbom_path, json.dumps(sbom))
 
@@ -210,14 +233,20 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
             _write_unavailable(
                 cve_path, f"grype failed: {err.decode(errors='replace')}"
             )
+            outcome = "unavailable"
             return
         matches = parse_grype(json.loads(out))
         _atomic_write(
             cve_path,
             json.dumps({"scanned_at": _now(), "status": "ok", "matches": matches}),
         )
+        outcome = "ok"
     except Exception as e:  # never break a build/deploy on a scan failure
         _write_unavailable(cve_path, f"scan error: {e}")
+        outcome = "unavailable"
+    finally:
+        if outcome is not None:
+            await _broadcast_scanned(image_id or image_ref, outcome)
 
 
 # Strong refs to fire-and-forget scan tasks so they aren't GC'd mid-run.

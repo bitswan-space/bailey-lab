@@ -161,13 +161,14 @@ _SCAN_SKIP_DIRS = {"templates", ".git"}
 _MEMBER_BUILD_CONCURRENCY = 4
 
 # Per-image-tag build locks. Members of a deploy are prepped concurrently
-# (see _MEMBER_BUILD_CONCURRENCY), and two members can share one image
-# (identical `image/` tree → same content-addressed tag) — e.g. two BPs with the
-# same frontend. They'd otherwise race the SAME `.builds/img-<checksum>` context
-# dir (concurrent rmtree+copytree → mkdir EEXIST → "File exists" deploy failure),
-# and double-build the same tag. Serialize per tag so same-image members build
-# once; different images still prep in parallel. asyncio is single-threaded, so
-# the get-or-create below needs no extra mutex.
+# (see _MEMBER_BUILD_CONCURRENCY), and two callers can ask to build/bake the
+# SAME image at once — two members sharing one image (identical `image/` tree →
+# same content-addressed tag), or a deploy and a Checks/supply-chain preview, or
+# repeated previews as a scan completes. They'd otherwise race the SAME
+# `.builds/<checksum>` context dir (concurrent rmtree+copytree → mkdir EEXIST →
+# "File exists" failure) and double-build the same tag. Serialize per tag so
+# same-image work runs once; different images still proceed in parallel. asyncio
+# is single-threaded, so the get-or-create below needs no extra mutex.
 _build_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -873,8 +874,6 @@ class AutomationService:
         # gitignored so it is neither committed nor pushed; the driver caches the
         # built image by tag, so the context is transient.
         ctx = os.path.join(self.gitops_dir, ".builds", source_sha)
-        self._ensure_builds_gitignored()
-        await asyncio.to_thread(self._materialize_build_context, ctx, dirs_to_merge)
 
         # Stream the bake's build-log lines as deploy progress so the toast keeps
         # moving while the (often multi-minute) source image builds. Without this
@@ -890,18 +889,27 @@ class AutomationService:
                 except Exception:
                     logger.debug("build progress report failed", exc_info=True)
 
+        # Serialize materialize + build for THIS tag so two concurrent callers
+        # (deploy vs preview, or repeated previews) don't race the shared build
+        # context. The driver caches the built image by tag, so the second
+        # holder of the lock is a fast cache hit.
         try:
-            img = await self.infra_driver.build_image(
-                BuildRequest(
-                    ctx=self._workspace_ctx(),
-                    tag=full_tag,
-                    source_path=ctx,
-                    base_image=base_image,
-                    mount_path=mp,
-                    source_sha=source_sha,
-                ),
-                progress_callback=_prog,
-            )
+            async with _build_lock(full_tag):
+                self._ensure_builds_gitignored()
+                await asyncio.to_thread(
+                    self._materialize_build_context, ctx, dirs_to_merge
+                )
+                img = await self.infra_driver.build_image(
+                    BuildRequest(
+                        ctx=self._workspace_ctx(),
+                        tag=full_tag,
+                        source_path=ctx,
+                        base_image=base_image,
+                        mount_path=mp,
+                        source_sha=source_sha,
+                    ),
+                    progress_callback=_prog,
+                )
         except InfraDriverError as e:
             raise HTTPException(
                 status_code=500,

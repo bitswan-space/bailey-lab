@@ -28,6 +28,10 @@ interface WorkspaceContextValue {
    *  can tell "loading" from "empty". */
   // eslint-disable-next-line no-restricted-syntax -- nullable until first delivery
   tasks: GitTask[] | null;
+  /** Monotonic counter bumped each time a supply-chain scan finishes (SSE
+   *  `supply_chain` event). The Checks / Supply chain panel watches it to
+   *  refresh itself the moment results exist — no manual "check back". */
+  supplyChainTick: number;
   /** Live status of the SSE subscription. */
   status: StreamStatus;
 }
@@ -74,6 +78,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [processes, setProcesses] = useState<BusinessProcess[] | null>(null);
   const [copies, setCopies] = useState<Copy[] | null>(null);
   const [tasks, setTasks] = useState<GitTask[] | null>(null);
+  const [supplyChainTick, setSupplyChainTick] = useState(0);
   const [status, setStatus] = useState<StreamStatus>('connecting');
 
   // Initial git-task-queue snapshot on mount. The server replays the latest
@@ -196,6 +201,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       handleCopiesPayload((ev as MessageEvent).data);
       setStatus('live');
     });
+    es.addEventListener('supply_chain', () => {
+      // A scan finished — bump the counter so any open Checks / Supply chain
+      // panel refetches and shows the result without a manual refresh.
+      setSupplyChainTick((n) => n + 1);
+      setStatus('live');
+    });
     es.addEventListener('open', () => setStatus('live'));
     es.addEventListener('error', () => setStatus('error'));
 
@@ -203,7 +214,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <WorkspaceContext.Provider value={{ automations, processes, copies, tasks, status }}>
+    <WorkspaceContext.Provider
+      value={{ automations, processes, copies, tasks, supplyChainTick, status }}
+    >
       {children}
     </WorkspaceContext.Provider>
   );
@@ -261,4 +274,16 @@ export function useTaskQueue(): {
   const v = useContext(WorkspaceContext);
   if (!v) throw new Error('useTaskQueue must be used inside <WorkspaceProvider>');
   return { tasks: v.tasks, status: v.status };
+}
+
+/**
+ * A counter that increments whenever a supply-chain scan finishes (SSE
+ * `supply_chain` event). Components showing scan results re-fetch when it
+ * changes, so a pending scan resolves on screen with no manual refresh.
+ */
+export function useSupplyChainTick(): number {
+  const v = useContext(WorkspaceContext);
+  if (!v)
+    throw new Error('useSupplyChainTick must be used inside <WorkspaceProvider>');
+  return v.supplyChainTick;
 }

@@ -604,6 +604,22 @@ async def lifespan(app: FastAPI):
         )
     )
 
+    # Pre-warm the grype vulnerability DB in the background. A fresh gitops image
+    # ships without it (downloaded at runtime), so without this the FIRST
+    # supply-chain scan after a deploy pays the multi-second DB download — the
+    # main reason Checks used to sit "scanning" for a while. Doing it at startup
+    # means the DB is usually ready before the first deploy's scan runs.
+    from app.services import supply_chain_service
+
+    _db_task = asyncio.create_task(supply_chain_service.ensure_vuln_db())
+    _db_task.add_done_callback(
+        lambda t: (
+            logger.warning("grype DB pre-warm failed: %s", t.exception())
+            if not t.cancelled() and t.exception()
+            else None
+        )
+    )
+
     # React to container state changes (start / die / health) by re-broadcasting
     # automation state. This is gitops's live signal post-cut-over — it has no
     # Docker socket, so it watches the infra-driver's event stream instead.
