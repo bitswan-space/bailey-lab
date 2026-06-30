@@ -130,6 +130,18 @@ func newRegisterCmd() *cobra.Command {
 				} else {
 					fmt.Println("Protected proxy deployed; endpoints are now authenticated through Bailey.")
 				}
+
+				// Tell the AOC where this server's Bailey console lives (and,
+				// implicitly, that this is a Bailey server rather than a legacy
+				// one). Best-effort: an older AOC without this endpoint must not
+				// fail registration.
+				baileyURL := fmt.Sprintf("https://bailey.%s", serverInfo.Domain)
+				fmt.Printf("\n📓 Reporting Bailey console URL to the AOC: %s\n", baileyURL)
+				if err := aocClient.ReportBaileyURL(baileyURL); err != nil {
+					fmt.Printf("Warning: Failed to report Bailey URL to the AOC: %v\n", err)
+				} else {
+					fmt.Println("Bailey console URL reported.")
+				}
 			}
 
 			// Now connect existing workspaces to AOC via daemon. With the
