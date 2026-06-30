@@ -432,6 +432,175 @@ var reqNextCmd = &cobra.Command{
 	},
 }
 
+// execResult mirrors the JSON returned by gitops POST /agent/deployments/{id}/exec.
+type execResult struct {
+	ExitCode int    `json:"exit_code"`
+	Output   string `json:"output"`
+}
+
+// liveDevSuffix is the deployment-ID suffix that identifies a BP's per-copy
+// live-dev container: {automation}-copy-{copy}-{bp}-live-dev.
+func liveDevSuffix(copy, bp string) string {
+	return fmt.Sprintf("-copy-%s-%s-live-dev", copy, bp)
+}
+
+// resolveLiveDevDeployment finds the live-dev deployment to exec the tests in.
+// An explicit --deployment wins (this is what the dashboard "Run" button passes).
+// Otherwise it lists the copy's deployments and picks the single one belonging to
+// this BP; if that is ambiguous (0 or >1, e.g. a BP with several automations) it
+// errors and prints the candidates so the caller can pass --deployment.
+func resolveLiveDevDeployment(deploymentFlag, bpDir string) (string, error) {
+	if deploymentFlag != "" {
+		return deploymentFlag, nil
+	}
+	copy, err := detectCopyOrFlag(copyFlag)
+	if err != nil {
+		return "", fmt.Errorf("cannot detect copy (pass --deployment): %w", err)
+	}
+	var deployments []deployment
+	if err := agentRequestJSON("GET", fmt.Sprintf("/deployments?copy=%s", copy), nil, &deployments); err != nil {
+		return "", err
+	}
+	bp := filepath.Base(bpDir)
+	var matches []string
+	for _, d := range deployments {
+		if strings.HasSuffix(d.DeploymentID, liveDevSuffix(copy, bp)) {
+			matches = append(matches, d.DeploymentID)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	var all []string
+	for _, d := range deployments {
+		all = append(all, d.DeploymentID)
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("could not auto-detect a live-dev deployment for BP %q in copy %q; pass --deployment <id>. Available: %s",
+			bp, copy, strings.Join(all, ", "))
+	}
+	return "", fmt.Errorf("multiple live-dev deployments match BP %q; pass --deployment <id>. Candidates: %s",
+		bp, strings.Join(matches, ", "))
+}
+
+// testCommand renders the runner template for a requirement into the shell
+// command to exec. The requirement ID's hyphens become underscores
+// (REQ-003 -> REQ_003) so the ID can appear in a test function/identifier name,
+// and {id} in the template is replaced with that token; a template without {id}
+// runs unchanged (e.g. a whole-suite runner).
+func testCommand(runner, reqID string) []string {
+	token := strings.ReplaceAll(reqID, "-", "_")
+	return []string{"sh", "-c", strings.ReplaceAll(runner, "{id}", token)}
+}
+
+// execInDeployment runs command in the given live-dev container and returns its
+// exit code + combined output.
+func execInDeployment(deploymentID string, command []string) (*execResult, error) {
+	var res execResult
+	body := map[string]interface{}{"command": command}
+	if err := agentRequestJSON("POST", fmt.Sprintf("/deployments/%s/exec", deploymentID), body, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+var reqTestCmd = &cobra.Command{
+	Use:   "test",
+	Short: "Run requirements' tests in the live-dev container and record pass/fail",
+	Long: `Run the deterministic test for each requirement inside the BP's live-dev
+container and write the verdict (pass/fail) back to testable-requirements.toml.
+
+This is the mechanical counterpart to the "Write tests" agent flow: the agent
+authors tests whose name carries the requirement ID (hyphens become underscores,
+so REQ-003 -> REQ_003); this command runs them by that key and records the result.
+No model is involved — the exit code of the test runner is the verdict.
+
+CONVENTION
+  A requirement's test is any test selected by the runner filter for its ID
+  token. The default runner is pytest: ` + "`pytest -k <ID_TOKEN> -v`" + `. Override
+  per-BP with --runner using a {id} placeholder, e.g.
+    --runner "go test -run {id} ./..."
+
+EXAMPLES
+  bitswan-coding-agent requirements test                 # run every requirement
+  bitswan-coding-agent requirements test --id REQ-003    # run one requirement
+  bitswan-coding-agent requirements test --deployment backend-copy-dev1-shop-live-dev`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		dir, err := resolveRequirementsDir(reqBPFlag)
+		if err != nil {
+			return err
+		}
+		reqs, err := readRequirements(dir)
+		if err != nil {
+			return err
+		}
+		if len(reqs) == 0 {
+			fmt.Println("No requirements found.")
+			return nil
+		}
+
+		// Select targets: one requirement (--id) or every non-proposed one.
+		var targets []*Requirement
+		if reqID != "" {
+			for i := range reqs {
+				if reqs[i].ID == reqID {
+					targets = append(targets, &reqs[i])
+				}
+			}
+			if len(targets) == 0 {
+				return fmt.Errorf("requirement %s not found", reqID)
+			}
+		} else {
+			for i := range reqs {
+				if reqs[i].Status == "proposed" {
+					continue // not accepted by a human yet
+				}
+				targets = append(targets, &reqs[i])
+			}
+			if len(targets) == 0 {
+				fmt.Println("No testable requirements (all proposed).")
+				return nil
+			}
+		}
+
+		deploymentID, err := resolveLiveDevDeployment(reqTestDeployment, dir)
+		if err != nil {
+			return err
+		}
+
+		runner := reqTestRunner
+		if runner == "" {
+			runner = "pytest -k {id} -v"
+		}
+
+		passed, failed := 0, 0
+		for _, r := range targets {
+			res, err := execInDeployment(deploymentID, testCommand(runner, r.ID))
+			if err != nil {
+				return fmt.Errorf("exec test for %s: %w", r.ID, err)
+			}
+			if res.ExitCode == 0 {
+				r.Status = "pass"
+				passed++
+				fmt.Printf("PASS %s\n", r.ID)
+			} else {
+				r.Status = "fail"
+				failed++
+				fmt.Printf("FAIL %s (exit %d)\n", r.ID, res.ExitCode)
+				for _, line := range strings.Split(strings.TrimRight(res.Output, "\n"), "\n") {
+					fmt.Printf("     %s\n", line)
+				}
+			}
+		}
+
+		if err := writeRequirements(dir, reqs); err != nil {
+			return err
+		}
+		fmt.Printf("\n%d passed, %d failed (in %s)\n", passed, failed, deploymentID)
+		return nil
+	},
+}
+
 var reqOutputJSONCmd = &cobra.Command{
 	Use:   "json",
 	Short: "Output requirements as JSON",
@@ -454,12 +623,15 @@ var reqOutputJSONCmd = &cobra.Command{
 }
 
 var (
-	reqBPFlag string
-	reqText   string
+	reqBPFlag    string
+	reqText      string
 	reqStatus    string
 	reqAddStatus string
 	reqID        string
 	reqParent    string
+
+	reqTestDeployment string
+	reqTestRunner     string
 )
 
 func init() {
@@ -471,6 +643,7 @@ func init() {
 	requirementsCmd.AddCommand(reqUpdateCmd)
 	requirementsCmd.AddCommand(reqRemoveCmd)
 	requirementsCmd.AddCommand(reqNextCmd)
+	requirementsCmd.AddCommand(reqTestCmd)
 	requirementsCmd.AddCommand(reqOutputJSONCmd)
 
 	reqAddCmd.Flags().StringVar(&reqText, "text", "", "Requirement description")
@@ -480,4 +653,9 @@ func init() {
 	reqUpdateCmd.Flags().StringVar(&reqStatus, "status", "", "New status (pass|fail|pending|retest|proposed)")
 	reqUpdateCmd.Flags().StringVar(&reqText, "text", "", "Updated description")
 	reqRemoveCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID to remove")
+
+	reqTestCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID to test (default: all non-proposed)")
+	reqTestCmd.Flags().StringVar(&reqTestDeployment, "deployment", "", "Live-dev deployment ID to exec in (default: auto-detect from copy + BP)")
+	reqTestCmd.Flags().StringVar(&reqTestRunner, "runner", "", "Test runner template; {id} is replaced with the requirement's ID token (default: \"pytest -k {id} -v\")")
+	reqTestCmd.Flags().StringVar(&copyFlag, "copy", "", "Copy name (auto-detected from $PWD if omitted)")
 }
