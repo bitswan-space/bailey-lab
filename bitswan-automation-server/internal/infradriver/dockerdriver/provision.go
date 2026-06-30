@@ -147,11 +147,27 @@ func waitForHealthy(ctx context.Context, container string, timeout time.Duration
 			return fmt.Errorf("container %s not healthy within %s: %w", container, timeout, ctx.Err())
 		case line, ok := <-lines:
 			if !ok {
-				// Stream ended (cancel / docker exit) — re-check once before failing.
-				if containerHealth(context.Background(), container) == "healthy" {
-					return nil
+				// `docker events` exited before we saw a healthy event (a daemon
+				// hiccup, or the container being recreated mid-wait closes the
+				// stream bound to the old instance). Don't fail on a single
+				// re-check — fall back to polling the container's health until the
+				// same deadline, so a container that becomes healthy moments later
+				// still passes.
+				tick := time.NewTicker(500 * time.Millisecond)
+				defer tick.Stop()
+				for {
+					switch containerHealth(context.Background(), container) {
+					case "healthy":
+						return nil
+					case "none":
+						return fmt.Errorf("container %s declares no healthcheck — cannot wait on a readiness event", container)
+					}
+					select {
+					case <-ctx.Done():
+						return fmt.Errorf("container %s not healthy within %s: %w", container, timeout, ctx.Err())
+					case <-tick.C:
+					}
 				}
-				return fmt.Errorf("container %s health-event stream ended before healthy", container)
 			}
 			// Status is "health_status: healthy" | "health_status: unhealthy".
 			if strings.Contains(line, "healthy") && !strings.Contains(line, "unhealthy") {
