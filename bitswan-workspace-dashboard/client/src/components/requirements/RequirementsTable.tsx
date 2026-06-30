@@ -17,6 +17,9 @@ interface Props {
   onAddRoot: () => void;
   onDelete: (req: Requirement) => void;
   onRunAgent: (req: Requirement) => void;
+  onRunTest: (req: Requirement) => void;
+  /** Ids whose test is currently running (per-row or part of an all-run). */
+  runningIds: ReadonlySet<string>;
 }
 
 /**
@@ -61,6 +64,8 @@ export function RequirementsTable({
   onAddRoot,
   onDelete,
   onRunAgent,
+  onRunTest,
+  runningIds,
 }: Props) {
   const rows = useMemo(() => flatten(requirements), [requirements]);
   return (
@@ -70,7 +75,7 @@ export function RequirementsTable({
         <span className="w-[70px] shrink-0">ID</span>
         <span className="w-16 shrink-0">Status</span>
         <span className="flex-1">Description</span>
-        <span className="w-[112px] shrink-0" />
+        <span className="w-[140px] shrink-0" />
       </div>
 
       {loading && rows.length === 0 ? (
@@ -94,6 +99,8 @@ export function RequirementsTable({
             onAddChild={() => onAddChild(req)}
             onDelete={() => onDelete(req)}
             onRunAgent={() => onRunAgent(req)}
+            onRunTest={() => onRunTest(req)}
+            running={runningIds.has(req.id)}
           />
         ))
       )}

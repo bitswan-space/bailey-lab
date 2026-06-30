@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { Bot, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Bot, Loader2, Pencil, Play, Plus, Trash2 } from 'lucide-react';
 import type { Requirement } from '@/lib/api';
 import { StatusBadge, nextStatus } from './StatusBadge';
 
@@ -18,6 +18,10 @@ interface Props {
   onAddChild: () => void;
   onDelete: () => void;
   onRunAgent: () => void;
+  /** Run the deterministic test for this requirement in the live-dev container. */
+  onRunTest: () => void;
+  /** True while this row's test (or an all-run that includes it) is executing. */
+  running?: boolean;
 }
 
 /**
@@ -35,6 +39,8 @@ export function RequirementRow({
   onAddChild,
   onDelete,
   onRunAgent,
+  onRunTest,
+  running = false,
 }: Props) {
   const [editing, setEditing] = useState(!!editOnMount);
   const [draft, setDraft] = useState(req.description);
@@ -124,12 +130,24 @@ export function RequirementRow({
           </button>
         )}
       </div>
-      <div className="flex w-[112px] shrink-0 items-center justify-end gap-0.5 pt-0.5 opacity-70 transition-opacity group-hover:opacity-100">
+      <div className="flex w-[140px] shrink-0 items-center justify-end gap-0.5 pt-0.5 opacity-70 transition-opacity group-hover:opacity-100">
         <IconButton title="Edit description" onClick={() => setEditing(true)}>
           <Pencil className="size-3.5" />
         </IconButton>
         <IconButton title="Add child requirement" onClick={onAddChild}>
           <Plus className="size-3.5" />
+        </IconButton>
+        <IconButton
+          title={running ? 'Running test…' : 'Run this requirement’s test'}
+          onClick={onRunTest}
+          disabled={running}
+          className="hover:text-foreground"
+        >
+          {running ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Play className="size-3.5" />
+          )}
         </IconButton>
         <IconButton title="Run agent on this requirement" onClick={onRunAgent}>
           <Bot className="size-3.5" />
@@ -150,11 +168,13 @@ function IconButton({
   title,
   onClick,
   className = '',
+  disabled = false,
   children,
 }: {
   title: string;
   onClick: () => void;
   className?: string;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -162,7 +182,8 @@ function IconButton({
       type="button"
       title={title}
       onClick={onClick}
-      className={`inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground ${className}`}
+      disabled={disabled}
+      className={`inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent ${className}`}
     >
       {children}
     </button>

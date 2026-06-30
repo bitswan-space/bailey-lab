@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import { FlaskConical, Search, X } from 'lucide-react';
+import { FlaskConical, Loader2, Play, Search, X } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   AlertDialog,
@@ -55,6 +55,7 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     add,
     update,
     remove,
+    runTests,
   } = useRequirements(copy, bp);
   const {
     startSession,
@@ -75,6 +76,16 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   const [filter, setFilter] = useUrlEnum('filter', FILTERS, 'all');
   const [pendingEditId, setPendingEditId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Requirement | null>(null);
+  // Ids whose test is in flight (drives per-row spinners). An all-run marks
+  // every non-proposed id at once; a per-row run marks just that one.
+  const [runningIds, setRunningIds] = useState<ReadonlySet<string>>(new Set());
+  const [runningAll, setRunningAll] = useState(false);
+  // Last run's combined output, shown in a dismissible panel under the toolbar
+  // (the row badges already reflect pass/fail; this is for detail + errors).
+  const [runResult, setRunResult] = useState<{ ok: boolean; output: string } | null>(
+    null,
+  );
+  const anyRunning = runningAll || runningIds.size > 0;
 
   const counts = useMemo(() => {
     const c = { total: 0, pass: 0, fail: 0, pending: 0, retest: 0, proposed: 0 };
@@ -150,6 +161,50 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     onShowAgents();
   };
 
+  // Run the deterministic test(s) in the BP's live-dev container via the
+  // server, which drives `bitswan-coding-agent requirements test`. The hook
+  // adopts the canonical statuses the CLI wrote, so badges flip on resolve.
+  const onRunTest = async (r: Requirement) => {
+    if (anyRunning) return;
+    setRunningIds(new Set([r.id]));
+    try {
+      const res = await runTests(r.id);
+      setRunResult({ ok: res.ok, output: res.output });
+      if (!res.ok) {
+        toast.error(`Test run for ${r.id} did not complete — see output below`);
+      }
+    } catch (err) {
+      toast.error(`Failed to run test for ${r.id}: ${String(err)}`);
+    } finally {
+      setRunningIds(new Set());
+    }
+  };
+
+  const onRunAll = async () => {
+    if (anyRunning) return;
+    // The CLI skips `proposed` requirements; mirror that in the spinners so we
+    // don't imply we're running rows the server will ignore.
+    const ids = requirements.filter((r) => r.status !== 'proposed').map((r) => r.id);
+    if (ids.length === 0) {
+      toast.info('No testable requirements (all are still proposed).');
+      return;
+    }
+    setRunningAll(true);
+    setRunningIds(new Set(ids));
+    try {
+      const res = await runTests();
+      setRunResult({ ok: res.ok, output: res.output });
+      if (!res.ok) {
+        toast.error('Test run did not complete — see output below');
+      }
+    } catch (err) {
+      toast.error(`Failed to run tests: ${String(err)}`);
+    } finally {
+      setRunningAll(false);
+      setRunningIds(new Set());
+    }
+  };
+
   // "Write tests" / "Build automation": same launch flow as onRunAgent but
   // against the whole requirements set — the server picks the canned prompt
   // from the kind.
@@ -222,6 +277,20 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
 
         <div className="ml-auto flex items-center gap-2">
           <Button
+            onClick={() => void onRunAll()}
+            size="sm"
+            variant="outline"
+            disabled={anyRunning}
+            title="Run every requirement's test in the live-dev container and record pass/fail"
+          >
+            {runningAll ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+            ) : (
+              <Play className="size-3.5" aria-hidden />
+            )}
+            Run tests
+          </Button>
+          <Button
             onClick={() => void onStartCanned('write-tests')}
             size="sm"
             variant="outline"
@@ -232,6 +301,39 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
           </Button>
         </div>
       </div>
+
+      {runResult && (
+        <div
+          className={cn(
+            'shrink-0 border-b px-6 py-2.5',
+            runResult.ok
+              ? 'border-border bg-muted/40'
+              : 'border-red-200 bg-red-50',
+          )}
+        >
+          <div className="mb-1 flex items-center justify-between">
+            <span
+              className={cn(
+                'text-[11px] font-semibold uppercase tracking-wide',
+                runResult.ok ? 'text-muted-foreground' : 'text-red-700',
+              )}
+            >
+              {runResult.ok ? 'Test run output' : 'Test run failed'}
+            </span>
+            <button
+              type="button"
+              onClick={() => setRunResult(null)}
+              aria-label="Dismiss test output"
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <X className="size-3.5" aria-hidden />
+            </button>
+          </div>
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground">
+            {runResult.output.trim() || '(no output)'}
+          </pre>
+        </div>
+      )}
 
       <div className="flex-1 overflow-auto px-6 py-4">
         <RequirementsTable
@@ -245,6 +347,8 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
           onAddRoot={() => void onNew()}
           onDelete={(r) => setDeleteTarget(r)}
           onRunAgent={(r) => void onRunAgent(r)}
+          onRunTest={(r) => void onRunTest(r)}
+          runningIds={runningIds}
         />
       </div>
 

@@ -12,6 +12,11 @@ import {
   updateRequirement,
   type ReqStatus,
 } from '../services/requirements.js';
+import {
+  isSafeRequirementId,
+  runRequirementTests,
+} from '../services/agent-exec.js';
+import { emailFromRequest } from '../lib/user.js';
 import type { GitopsClient } from '../services/gitops.js';
 
 export interface BusinessProcessRoutesOptions {
@@ -110,6 +115,50 @@ export function registerBusinessProcessRoutes(
       const msg = e instanceof Error ? e.message : String(e);
       app.log.warn({ err: e, id: req.params.id }, 'requirements list failed');
       return reply.code(500).send({ error: msg });
+    }
+  });
+
+  // Run the deterministic tests for one requirement (`{ id }`) or every
+  // non-proposed requirement (empty body). Drives
+  // `bitswan-coding-agent requirements test` inside the BP's live-dev
+  // container over SSH — the CLI writes pass/fail back to the TOML, which we
+  // re-read and return so the UI reflects the new statuses immediately.
+  app.post<{
+    Params: { id: string };
+    Querystring: { copy?: string };
+    Body: { id?: string };
+  }>('/api/business-processes/:id/requirements/run-tests', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const bp = req.params.id;
+    const copy = req.query.copy;
+    const err = validateBpCopy(bp, copy);
+    if (err) return reply.code(400).send({ error: err });
+    const reqId = req.body?.id;
+    if (reqId !== undefined && (typeof reqId !== 'string' || !isSafeRequirementId(reqId))) {
+      return reply.code(400).send({ error: 'invalid requirement id' });
+    }
+    const email = await emailFromRequest(req, app.log);
+    if (!email) return reply.code(401).send({ error: 'not authenticated' });
+    try {
+      const result = await runRequirementTests({
+        copy: copy!,
+        bp,
+        email,
+        ...(reqId ? { id: reqId } : {}),
+      });
+      // The CLI wrote the verdicts into the TOML; hand back the canonical list
+      // alongside the run output so the client doesn't need a second fetch.
+      const requirements = await listRequirements({ workspaceRoot, copy: copy!, bp });
+      return {
+        ok: result.exitCode === 0,
+        exitCode: result.exitCode,
+        output: result.output,
+        requirements,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      app.log.warn({ err: e, id: bp }, 'requirements run-tests failed');
+      return reply.code(502).send({ error: msg });
     }
   });
 
