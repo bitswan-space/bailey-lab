@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
@@ -22,6 +23,12 @@ type fwGroup struct {
 
 type fwKey struct {
 	ctx, stage, slot string
+}
+
+// workerPortKey identifies one non-exposed worker's resolved listen port within
+// a (ctx, stage, slot) scope.
+type workerPortKey struct {
+	ctx, stage, slot, name string
 }
 
 // computeFirewallScope ports the firewall pre-pass in generate_docker_compose:
@@ -82,9 +89,23 @@ func fwActive(scope map[fwKey]*fwGroup, ctx, stage, slot string) *fwGroup {
 }
 
 // computeWorkerHosts ports the BITSWAN_WORKER_HOSTS pre-pass: a `name=host:port`
-// list per (ctx, stage, slot) for every non-exposed worker.
-func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fwScope map[fwKey]*fwGroup) map[fwKey][]string {
+// list per (ctx, stage, slot) for every non-exposed worker, plus the listen
+// port resolved for each worker (keyed by ctx/stage/slot/name) so the service
+// builder can inject it as PORT.
+//
+// Workers in a firewalled group all share their gateway's single network
+// namespace (network_mode: service:<gw>), so two that both bind the declared
+// port collide — the first wins and the second dies with `[Errno 98] Address in
+// use` (FastAPI crash-loops; Go's `air` supervisor survives the failed bind so
+// the container stays Up but never serves). Hand each worker in a shared netns a
+// distinct port: keep its declared port when free, else the next free one.
+// Non-firewalled workers each own their netns and keep their declared port. The
+// resolved port is advertised in BITSWAN_WORKER_HOSTS and injected as PORT so
+// the routing entry and the actual listen port stay in sync.
+func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fwScope map[fwKey]*fwGroup) (map[fwKey][]string, map[workerPortKey]int) {
 	out := map[fwKey][]string{}
+	ports := map[workerPortKey]int{}
+	usedByScope := map[fwKey]map[int]bool{}
 	for _, depID := range sortedDepIDs(deployments) {
 		conf := deployments[depID]
 		if conf == nil {
@@ -98,18 +119,30 @@ func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fw
 			continue
 		}
 		for _, sd := range c.slotDBPairs(conf) {
+			key := fwKey{depCtx, stage, sd.slot}
 			fw := fwActive(fwScope, depCtx, stage, sd.slot)
+			port := cfg.Port
 			var host string
 			if fw != nil {
 				host = fw.gw
+				// Shared netns — resolve a collision-free port within the scope.
+				used := usedByScope[key]
+				if used == nil {
+					used = map[int]bool{}
+					usedByScope[key] = used
+				}
+				for used[port] {
+					port++
+				}
+				used[port] = true
 			} else {
 				host = makeHostnameLabel(c.workspaceName, name, depCtx, stage, sd.slot)
 			}
-			key := fwKey{depCtx, stage, sd.slot}
-			out[key] = append(out[key], fmt.Sprintf("%s=%s:%d", name, host, cfg.Port))
+			ports[workerPortKey{depCtx, stage, sd.slot, name}] = port
+			out[key] = append(out[key], fmt.Sprintf("%s=%s:%d", name, host, port))
 		}
 	}
-	return out
+	return out, ports
 }
 
 // resolveAutomationConfig ports resolve_automation_config: read automation.toml
@@ -146,7 +179,7 @@ func (c *compileState) resolveAutomationConfig(conf *Deployment) automationConfi
 // buildServiceEntry ports the per-(deployment, slot) body of the main loop. It
 // returns the compose entry, its service name, the desired route (or nil), and
 // whether to emit (conf.enabled).
-func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot string, db int, workerHosts map[fwKey][]string, fwScope map[fwKey]*fwGroup) (map[string]interface{}, string, *infradriver.Route, bool, error) {
+func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot string, db int, workerHosts map[fwKey][]string, workerPorts map[workerPortKey]int, fwScope map[fwKey]*fwGroup) (map[string]interface{}, string, *infradriver.Route, bool, error) {
 	depStage := conf.StageOrProduction()
 	depAutomationName := conf.AutomationNameOr(depID)
 	depCtx := conf.Context
@@ -218,6 +251,17 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 
 	if wh := workerHosts[fwKey{depCtx, depStage, slot}]; len(wh) > 0 {
 		env["BITSWAN_WORKER_HOSTS"] = strings.Join(wh, ",")
+	}
+	// A non-exposed worker listens on the port resolved in the computeWorkerHosts
+	// pre-pass (its declared port, or a collision-free one when it shares a
+	// firewall gateway's netns with peers). Inject it as PORT — worker templates
+	// honour it (uvicorn --port "$PORT", the go-worker's PORT env) — so the
+	// advertised BITSWAN_WORKER_HOSTS entry and the actual listen port stay in
+	// sync.
+	if !cfg.Expose {
+		if p, ok := workerPorts[workerPortKey{depCtx, depStage, slot, depAutomationName}]; ok {
+			env["PORT"] = strconv.Itoa(p)
+		}
 	}
 	if c.workspaceName != "" {
 		env["BITSWAN_WORKSPACE_NAME"] = c.workspaceName

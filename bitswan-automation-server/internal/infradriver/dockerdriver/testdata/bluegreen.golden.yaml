@@ -18,6 +18,7 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-blue:8080
             BITSWAN_WORKSPACE_NAME: ws2
             DEPLOYMENT_ID: backend-shop
+            PORT: "8080"
         image: internal/ws2-shop-backend:shabsum
         labels:
             gitops.automation_name: backend
@@ -49,6 +50,7 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-green:8080
             BITSWAN_WORKSPACE_NAME: ws2
             DEPLOYMENT_ID: backend-shop@green
+            PORT: "8080"
         image: internal/ws2-shop-backend:shabsum
         labels:
             gitops.automation_name: backend

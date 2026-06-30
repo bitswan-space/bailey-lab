@@ -26,6 +26,7 @@ services:
             COUCHDB_DB_PREFIX: copy-bar-bp-acme-
             DEPLOYMENT_ID: backend-copy-bar-acme-live-dev
             MINIO_BUCKET: copy-bar-bp-acme
+            PORT: "8080"
             POSTGRES_DB: copy_bar_bp_acme
         image: bitswan/pipeline-runtime-environment:latest
         labels:

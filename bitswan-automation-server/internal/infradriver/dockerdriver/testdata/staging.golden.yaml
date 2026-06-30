@@ -77,6 +77,7 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws3-backend-822b-staging:8080
             BITSWAN_WORKSPACE_NAME: ws3
             DEPLOYMENT_ID: backend-acme-staging
+            PORT: "8080"
         image: internal/ws3-acme-backend:shabk
         labels:
             gitops.automation_name: backend

@@ -106,8 +106,11 @@ func main() {
 
 	handler := corsMiddleware(mux)
 
-	log.Println("listening on :8080")
-	if err := http.ListenAndServe(":8080", handler); err != nil {
+	// Listen on $PORT so gitops can place several workers in one shared
+	// firewall-gateway netns without :8080 collisions; defaults to 8080.
+	addr := ":" + envOr("PORT", "8080")
+	log.Println("listening on " + addr)
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatal(err)
 	}
 }
