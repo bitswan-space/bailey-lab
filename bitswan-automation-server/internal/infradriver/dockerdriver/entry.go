@@ -706,7 +706,14 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 		//                 with the worker, so the worker cannot reach or spoof it.
 		proxy := g.gw + "-proxy"
 		services[proxy] = map[string]interface{}{
-			"image":          c.gatewayImage,
+			"image": c.gatewayImage,
+			// Always re-pull: the gateway image is a floating tag (default
+			// bitswan/egress-gateway:latest) tied to the automation-server version,
+			// and the driver's `compose up` passes no --pull flag — so without this
+			// a host keeps a stale local image indefinitely (e.g. the pre-role-split
+			// proxy that crash-loops on iptables). Per-service so the local-only
+			// internal/* BP images are never pull-attempted.
+			"pull_policy":    "always",
 			"container_name": proxy,
 			"restart":        "unless-stopped",
 			"environment": map[string]interface{}{
@@ -734,7 +741,9 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 			},
 		}
 		services[g.gw] = map[string]interface{}{
-			"image":          c.gatewayImage,
+			"image": c.gatewayImage,
+			// Always re-pull the floating gateway image (see the proxy above).
+			"pull_policy":    "always",
 			"container_name": g.gw,
 			"restart":        "unless-stopped",
 			"cap_add":        []interface{}{"NET_ADMIN"},
