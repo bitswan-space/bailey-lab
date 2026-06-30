@@ -83,6 +83,7 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws1-fwgw-822b-dev:8080
             BITSWAN_WORKSPACE_NAME: ws1
             DEPLOYMENT_ID: backend-acme-dev
+            PORT: "8080"
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: backend

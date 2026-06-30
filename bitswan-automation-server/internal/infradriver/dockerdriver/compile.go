@@ -125,7 +125,7 @@ func compile(wctx infradriver.WorkspaceContext, bs *Bitswan) (composeYAML string
 	}
 
 	fwScope := c.computeFirewallScope(deployments)
-	workerHosts := c.computeWorkerHosts(deployments, fwScope)
+	workerHosts, workerPorts := c.computeWorkerHosts(deployments, fwScope)
 
 	for _, depID := range sortedDepIDs(deployments) {
 		if strings.Contains(depID, "@") {
@@ -141,7 +141,7 @@ func compile(wctx infradriver.WorkspaceContext, bs *Bitswan) (composeYAML string
 		}
 		for _, sd := range c.slotDBPairs(conf) {
 			slotConf := c.effectiveSlotConf(depID, conf, sd.slot, deployments)
-			entry, serviceName, route, emit, derr := c.buildServiceEntry(depID, slotConf, sd.slot, sd.db, workerHosts, fwScope)
+			entry, serviceName, route, emit, derr := c.buildServiceEntry(depID, slotConf, sd.slot, sd.db, workerHosts, workerPorts, fwScope)
 			if derr != nil {
 				return "", nil, nil, derr
 			}

@@ -47,7 +47,7 @@ backups:
 	services := map[string]interface{}{}
 	deployments := bs.Deployments
 	fwScope := c.computeFirewallScope(deployments)
-	workerHosts := c.computeWorkerHosts(deployments, fwScope)
+	workerHosts, workerPorts := c.computeWorkerHosts(deployments, fwScope)
 	for _, depID := range sortedDepIDs(deployments) {
 		if depID == "dep1@green" {
 			// overlay must NOT be emitted as a standalone service
@@ -56,7 +56,7 @@ backups:
 		conf := deployments[depID]
 		for _, sd := range c.slotDBPairs(conf) {
 			slotConf := c.effectiveSlotConf(depID, conf, sd.slot, deployments)
-			entry, name, _, emit, derr := c.buildServiceEntry(depID, slotConf, sd.slot, sd.db, workerHosts, fwScope)
+			entry, name, _, emit, derr := c.buildServiceEntry(depID, slotConf, sd.slot, sd.db, workerHosts, workerPorts, fwScope)
 			if derr != nil {
 				t.Fatalf("buildServiceEntry(%s,%s): %v", depID, sd.slot, derr)
 			}
