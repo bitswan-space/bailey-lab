@@ -179,6 +179,35 @@ func (c *AOCClient) GetAutomationServerInfo() (*AutomationServerInfo, error) {
 	return &serverInfo, nil
 }
 
+// ReportBaileyURL self-reports this server's Bailey console URL to the AOC
+// (PATCH /api/automation_server/info). The AOC uses it both to link to the
+// console and to tell Bailey servers apart from legacy ones. Callers treat
+// failures as non-fatal: registration must still succeed against an older AOC
+// that predates this endpoint.
+func (c *AOCClient) ReportBaileyURL(baileyURL string) error {
+	payload := map[string]interface{}{
+		"bailey_url": baileyURL,
+	}
+
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal bailey_url request: %w", err)
+	}
+
+	resp, err := c.sendRequest("PATCH", fmt.Sprintf("%s/api/automation_server/info", c.settings.AOCUrl), jsonBytes)
+	if err != nil {
+		return fmt.Errorf("error sending bailey_url report: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to report bailey_url: %s - %s", resp.Status, string(body))
+	}
+
+	return nil
+}
+
 // GetAutomationServerToken gets the automation server token (deprecated, use GetAutomationServerInfo)
 func (c *AOCClient) GetAutomationServerToken() (string, error) {
 	// For backward compatibility, return the stored access token
