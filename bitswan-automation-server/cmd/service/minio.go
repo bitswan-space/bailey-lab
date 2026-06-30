@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
@@ -47,13 +46,10 @@ func newMinioEnableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			options := make(map[string]interface{})
@@ -95,13 +91,10 @@ func newMinioDisableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.DisableService("minio", workspace, stage)
@@ -137,13 +130,10 @@ func newMinioStatusCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.GetServiceStatus("minio", workspace, stage, showPasswords)
@@ -195,13 +185,10 @@ func newMinioStartCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.StartService("minio", workspace, stage)
@@ -236,13 +223,10 @@ func newMinioStopCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.StopService("minio", workspace, stage)
@@ -278,13 +262,10 @@ func newMinioUpdateCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			options := make(map[string]interface{})
@@ -341,13 +322,10 @@ func newMinioBackupCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.BackupMinio(workspace, stage, absBackupPath)
@@ -399,13 +377,10 @@ func newMinioRestoreCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			err = client.RestoreMinioInteractive(workspace, stage, absBackupPath)

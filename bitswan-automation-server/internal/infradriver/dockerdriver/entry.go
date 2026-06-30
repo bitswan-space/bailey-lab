@@ -333,8 +333,59 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		appendEnvFile(entry, envFile)
 	}
 
+	// ---- scoped per-BP database / bucket credentials ----
+	// A scoped backend authenticates as its OWN Postgres role / MinIO user
+	// (limited to its own database / bucket), generated and persisted by the
+	// driver. The creds live in a per-resource env_file (only its path lands in
+	// the compose; the values stay 0600 on the secrets volume). When scoped, the
+	// shared postgres*/minio* service secrets are NOT attached below, so the
+	// superuser/root never reaches the backend. A BP gets a per-resource name
+	// (and thus scoping) either by being registered (per-stage) or by being a
+	// non-main copy's live-dev backend — both set POSTGRES_DB / MINIO_BUCKET above.
+	credRealm := realmForStage(stage)
+	pgDB, _ := env["POSTGRES_DB"].(string)
+	minioBucket, _ := env["MINIO_BUCKET"].(string)
+	scopedPG := pgDB != ""
+	scopedMinio := minioBucket != ""
+	if scopedPG {
+		if _, _, err := getOrCreateDBCreds(c.secretsDir, credRealm, pgDB); err != nil {
+			return nil, "", nil, false, err
+		}
+		appendEnvFile(entry, dbCredsPath(c.secretsDir, credRealm, pgDB))
+		// Carry the (non-secret) connection coordinates the shared postgres
+		// service secret would have supplied, since it's no longer attached.
+		if pg := serviceSecrets(c.secretsDir, "postgres", credRealm); pg != nil {
+			for _, k := range []string{"POSTGRES_HOST", "POSTGRES_PORT"} {
+				if v := pg[k]; v != "" {
+					env[k] = v
+				}
+			}
+		}
+	}
+	if scopedMinio {
+		if _, _, err := getOrCreateBucketCreds(c.secretsDir, credRealm, minioBucket); err != nil {
+			return nil, "", nil, false, err
+		}
+		appendEnvFile(entry, bucketCredsPath(c.secretsDir, credRealm, minioBucket))
+		if mn := serviceSecrets(c.secretsDir, "minio", credRealm); mn != nil {
+			for _, k := range []string{"MINIO_HOST", "MINIO_PORT"} {
+				if v := mn[k]; v != "" {
+					env[k] = v
+				}
+			}
+		}
+	}
+
 	// ---- service dependency secrets ----
 	for _, secretName := range c.resolveServiceSecrets(cfg, stage) {
+		// A scoped backend has its own postgres/minio principal (above); never
+		// attach the shared superuser/root service secret to it.
+		if scopedPG && strings.HasPrefix(secretName, "postgres") {
+			continue
+		}
+		if scopedMinio && strings.HasPrefix(secretName, "minio") {
+			continue
+		}
 		p := filepath.Join(c.secretsDir, secretName)
 		if _, err := os.Stat(p); err == nil {
 			appendEnvFile(entry, p)

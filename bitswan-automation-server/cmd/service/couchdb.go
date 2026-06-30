@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
@@ -48,13 +47,10 @@ func newCouchDBEnableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			options := make(map[string]interface{})
@@ -96,13 +92,10 @@ func newCouchDBDisableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.DisableService("couchdb", workspace, stage)
@@ -138,13 +131,10 @@ func newCouchDBStatusCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.GetServiceStatus("couchdb", workspace, stage, showPasswords)
@@ -196,13 +186,10 @@ func newCouchDBStartCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.StartService("couchdb", workspace, stage)
@@ -237,13 +224,10 @@ func newCouchDBStopCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.StopService("couchdb", workspace, stage)
@@ -279,13 +263,10 @@ func newCouchDBUpdateCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			options := make(map[string]interface{})
@@ -343,13 +324,10 @@ func newCouchDBBackupCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.BackupCouchDB(workspace, stage, absBackupPath)
@@ -402,13 +380,10 @@ func newCouchDBRestoreCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			// Use interactive job API for restore to handle prompts

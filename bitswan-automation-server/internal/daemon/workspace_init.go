@@ -67,6 +67,23 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	bitswanConfig := os.Getenv("HOME") + "/.config/bitswan/"
 	var err error
 
+	// The daemon is a long-lived process. Init shells out to `docker compose`
+	// from the deployment dir via os.Chdir below, which mutates the daemon's
+	// process-global CWD. If we left it parked inside this workspace's
+	// directory and the workspace were later removed (rm -rf), the daemon's CWD
+	// would become an unlinked directory — and the next command that calls
+	// getcwd() (notably `git clone` with no -C, during a same-name re-init)
+	// fails with "fatal: unable to read current working directory" (exit 128)
+	// until the daemon is restarted. Restore the original CWD on return so a
+	// removed workspace can never strand the daemon in a dead directory.
+	if origWD, wdErr := os.Getwd(); wdErr == nil {
+		defer func() {
+			if cerr := os.Chdir(origWD); cerr != nil {
+				fmt.Printf("Warning: failed to restore working directory to %s: %v\n", origWD, cerr)
+			}
+		}()
+	}
+
 	if err := os.MkdirAll(bitswanConfig, 0755); err != nil {
 		return fmt.Errorf("failed to create BitSwan config directory: %w", err)
 	}
@@ -1114,6 +1131,12 @@ func createSSHConfig(workspacePath, workspaceName string, repoInfo *RepositoryIn
 func setupCanonicalRepoAndMainCopy(workspaceName, gitopsConfig, seedTree string, verbose bool) error {
 	runU := func(cmd string) error {
 		c := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", cmd) //nolint:gosec
+		// Run from the workspace config dir (guaranteed to exist by this point)
+		// rather than inheriting the daemon's CWD. The daemon's CWD may be an
+		// unlinked directory after a prior workspace was removed, which would
+		// make git commands without -C (e.g. the clone below) fail at getcwd()
+		// with exit 128.
+		c.Dir = gitopsConfig
 		return util.RunCommandVerbose(c, verbose)
 	}
 	bareRepo := filepath.Join(gitopsConfig, "repo.git")

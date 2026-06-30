@@ -672,6 +672,30 @@ func (c *Client) ListWorkspaces(long, showPasswords bool) (*WorkspaceListRespons
 	return &result, nil
 }
 
+// ActiveWorkspace returns the daemon's currently selected workspace. The daemon
+// owns ~/.config/bitswan (it lives in the daemon's volume), so this — not the
+// host config — is the source of truth. Errors when no workspace is selected.
+func (c *Client) ActiveWorkspace() (string, error) {
+	resp, err := c.ListWorkspaces(false, false)
+	if err != nil {
+		return "", err
+	}
+	if resp.ActiveWorkspace == "" {
+		return "", fmt.Errorf("no active workspace set")
+	}
+	return resp.ActiveWorkspace, nil
+}
+
+// ResolveWorkspace returns arg when non-empty, otherwise the daemon's active
+// workspace. Replaces the host-config GetActiveWorkspace() defaulting that the
+// CLI commands used to do locally.
+func (c *Client) ResolveWorkspace(arg string) (string, error) {
+	if arg != "" {
+		return arg, nil
+	}
+	return c.ActiveWorkspace()
+}
+
 // ListCertAuthorities returns the list of certificate authorities
 func (c *Client) ListCertAuthorities() (*CertAuthorityListResponse, error) {
 	req, err := http.NewRequest("GET", "http://unix/certauthority/list", nil)

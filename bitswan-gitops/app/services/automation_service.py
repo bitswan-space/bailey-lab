@@ -160,6 +160,24 @@ _SCAN_SKIP_DIRS = {"templates", ".git"}
 # 2-4-automation BP fully while staying safe.
 _MEMBER_BUILD_CONCURRENCY = 4
 
+# Per-image-tag build locks. Members of a deploy are prepped concurrently
+# (see _MEMBER_BUILD_CONCURRENCY), and two members can share one image
+# (identical `image/` tree → same content-addressed tag) — e.g. two BPs with the
+# same frontend. They'd otherwise race the SAME `.builds/img-<checksum>` context
+# dir (concurrent rmtree+copytree → mkdir EEXIST → "File exists" deploy failure),
+# and double-build the same tag. Serialize per tag so same-image members build
+# once; different images still prep in parallel. asyncio is single-threaded, so
+# the get-or-create below needs no extra mutex.
+_build_locks: dict[str, asyncio.Lock] = {}
+
+
+def _build_lock(tag: str) -> asyncio.Lock:
+    lock = _build_locks.get(tag)
+    if lock is None:
+        lock = asyncio.Lock()
+        _build_locks[tag] = lock
+    return lock
+
 
 def _copies_dir() -> str:
     """Base directory (inside the gitops container) holding the per-copy
@@ -775,7 +793,6 @@ class AutomationService:
 
         ctx = os.path.join(self.gitops_dir, ".builds", "img-" + image_checksum)
         self._ensure_builds_gitignored()
-        await asyncio.to_thread(self._copy_tree, image_dir, ctx)
 
         async def _prog(line: str):
             if progress_callback is not None:
@@ -788,21 +805,26 @@ class AutomationService:
                 except Exception:
                     logger.debug("build progress report failed", exc_info=True)
 
-        try:
-            await self.infra_driver.build_image(
-                BuildRequest(
-                    ctx=self._workspace_ctx(),
-                    tag=full_tag,
-                    source_path=ctx,
-                    dockerfile="Dockerfile",
-                    source_sha=image_checksum,
-                ),
-                progress_callback=_prog,
-            )
-        except InfraDriverError as e:
-            raise HTTPException(
-                status_code=500, detail=f"Image build failed for {full_tag}: {e}"
-            )
+        # Serialize per image tag: concurrently-prepped members that share this
+        # image must not race the shared `.builds/img-<checksum>` context dir.
+        # The first materializes + builds; the rest are a driver cache hit by tag.
+        async with _build_lock(full_tag):
+            await asyncio.to_thread(self._copy_tree, image_dir, ctx)
+            try:
+                await self.infra_driver.build_image(
+                    BuildRequest(
+                        ctx=self._workspace_ctx(),
+                        tag=full_tag,
+                        source_path=ctx,
+                        dockerfile="Dockerfile",
+                        source_sha=image_checksum,
+                    ),
+                    progress_callback=_prog,
+                )
+            except InfraDriverError as e:
+                raise HTTPException(
+                    status_code=500, detail=f"Image build failed for {full_tag}: {e}"
+                )
 
         # Write the resolved tag into automation.toml so the rest of the
         # deploy pipeline sees the up-to-date image.
