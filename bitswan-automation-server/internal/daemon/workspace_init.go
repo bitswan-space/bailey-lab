@@ -103,6 +103,20 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		}
 	}
 
+	// When neither --domain nor --local supplies a domain, fall back to the
+	// server's configured domain so operators on an AOC-registered server
+	// don't have to re-type a domain the daemon already knows. LoadConfig
+	// failure (no config file) is non-fatal: resolveWorkspaceInitDomain then
+	// leaves the domain empty, preserving today's behavior.
+	var initCfg *config.Config
+	if cfg, cfgErr := config.NewAutomationServerConfig().LoadConfig(); cfgErr == nil {
+		initCfg = cfg
+	}
+	if resolved := resolveWorkspaceInitDomain(*domain, *local, initCfg); resolved != *domain {
+		*domain = resolved
+		fmt.Printf("No --domain provided; defaulting to the server's configured domain: %s\n", *domain)
+	}
+
 	// Handle certificate generation and installation
 	if *mkCerts || *certsDir != "" {
 		ingressType := DetectIngressType()
@@ -808,6 +822,21 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	return nil
+}
+
+// resolveWorkspaceInitDomain decides the domain for a new workspace when the
+// operator didn't pass --domain. --local already defaults to
+// bs-<name>.localhost upstream, so this only fills an omitted, non-local
+// domain from the server's configured domain — ProtectedHostnameDomain(),
+// which is the AOC-assigned domain in the common case and honors the
+// protected-domain override when set. An explicit --domain always wins; when
+// no config (or no configured domain) is available it returns the input
+// unchanged, preserving today's behavior.
+func resolveWorkspaceInitDomain(domain string, local bool, cfg *config.Config) string {
+	if domain != "" || local || cfg == nil {
+		return domain
+	}
+	return cfg.ProtectedHostnameDomain()
 }
 
 // Helper functions moved from cmd/init.go
