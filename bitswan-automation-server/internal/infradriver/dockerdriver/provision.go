@@ -35,7 +35,9 @@ var bpDataServices = [...]string{"postgres", "couchdb", "minio"}
 // dockerExec runs `docker exec <container> <args...>` and returns stdout,
 // stderr, and the process exit code (rc). rc is -1 if the command could not be
 // started.
-func dockerExec(ctx context.Context, container string, args ...string) (string, string, int) {
+// dockerExec is a package var (not a plain func) so tests can stub it to record
+// the psql/mc commands the provisioners issue without a real Docker daemon.
+var dockerExec = func(ctx context.Context, container string, args ...string) (string, string, int) {
 	full := append([]string{"exec", container}, args...)
 	cmd := exec.CommandContext(ctx, "docker", full...)
 	var stdout, stderr strings.Builder
@@ -231,6 +233,81 @@ func clonePostgresDBAs(ctx context.Context, container, user, targetDB, sourceDB 
 	return nil
 }
 
+// ensureBPRole creates (or password-syncs) the scoped Postgres LOGIN role a BP
+// backend authenticates as, and scopes it to exactly its own database: it gets
+// full use of the public schema and its objects but NOT ownership (so it can't
+// drop the database/schema), and CONNECT is locked to it (the superuser bypasses
+// CONNECT, so admin/provisioning still works). Idempotent. adminUser is the
+// shared superuser the driver connects as; the scoped password comes from the
+// per-resource cred store (the same value the compiler injected into the env).
+func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, dbName string) error {
+	role, pass, err := getOrCreateDBCreds(secretsDir, realm, dbName)
+	if err != nil {
+		return err
+	}
+	// Create the LOGIN role or sync its password — one idempotent statement.
+	createOrAlter := fmt.Sprintf(
+		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %q LOGIN PASSWORD '%s'; ELSE ALTER ROLE %q WITH LOGIN PASSWORD '%s'; END IF; END $$;",
+		role, role, pass, role, pass)
+	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", createOrAlter); rc != 0 {
+		return fmt.Errorf("ensure role %s: %s", role, strings.TrimSpace(stderr))
+	}
+	// Use (not own) the public schema + its existing objects, and stay usable for
+	// objects admin creates later. Connected to the BP's own database.
+	grants := strings.Join([]string{
+		fmt.Sprintf("GRANT ALL ON SCHEMA public TO %q;", role),
+		fmt.Sprintf("GRANT ALL ON ALL TABLES IN SCHEMA public TO %q;", role),
+		fmt.Sprintf("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO %q;", role),
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO %q;", role),
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO %q;", role),
+	}, " ")
+	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", grants); rc != 0 {
+		return fmt.Errorf("grant on %s to %s: %s", dbName, role, strings.TrimSpace(stderr))
+	}
+	// Lock CONNECT to this role so no other BP role can reach this database.
+	lock := fmt.Sprintf("REVOKE CONNECT ON DATABASE %q FROM PUBLIC; GRANT CONNECT ON DATABASE %q TO %q;", dbName, dbName, role)
+	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", lock); rc != 0 {
+		return fmt.Errorf("lock connect on %s: %s", dbName, strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
+// ensureBPMinioUser creates (idempotently) the scoped MinIO user a BP backend
+// authenticates as, and attaches a policy granting it full access to exactly its
+// own bucket (and its objects) — nothing else. rootAK/rootSK are the MinIO root
+// the driver administers as; the scoped secret comes from the per-resource cred
+// store (the same value the compiler injected).
+func ensureBPMinioUser(ctx context.Context, container, rootAK, rootSK, secretsDir, realm, bucket string) error {
+	ak, sk, err := getOrCreateBucketCreds(secretsDir, realm, bucket)
+	if err != nil {
+		return err
+	}
+	if _, e, rc := dockerExec(ctx, container, "mc", "alias", "set", "local", "http://localhost:9000", rootAK, rootSK); rc != 0 {
+		return fmt.Errorf("mc alias set: %s", strings.TrimSpace(e))
+	}
+	// User add — tolerate already-exists (creds are stable, so no re-sync needed).
+	if _, e, rc := dockerExec(ctx, container, "mc", "admin", "user", "add", "local", ak, sk); rc != 0 && !strings.Contains(strings.ToLower(e), "already") {
+		return fmt.Errorf("mc admin user add %s: %s", ak, strings.TrimSpace(e))
+	}
+	// Policy: s3:* on this bucket + its objects only. Write the doc into the
+	// container (heredoc, no shell interpolation), then create + attach it.
+	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"]}]}`, bucket, bucket)
+	polPath := "/tmp/" + ak + ".json"
+	if _, e, rc := dockerExec(ctx, container, "sh", "-c", fmt.Sprintf("cat > %s <<'POLICYEOF'\n%s\nPOLICYEOF", polPath, policy)); rc != 0 {
+		return fmt.Errorf("write minio policy for %s: %s", ak, strings.TrimSpace(e))
+	}
+	if _, e, rc := dockerExec(ctx, container, "mc", "admin", "policy", "create", "local", ak, polPath); rc != 0 && !strings.Contains(strings.ToLower(e), "already exists") {
+		return fmt.Errorf("mc admin policy create %s: %s", ak, strings.TrimSpace(e))
+	}
+	if _, e, rc := dockerExec(ctx, container, "mc", "admin", "policy", "attach", "local", ak, "--user", ak); rc != 0 {
+		le := strings.ToLower(e)
+		if !strings.Contains(le, "already") && !strings.Contains(le, "attached") {
+			return fmt.Errorf("mc admin policy attach %s: %s", ak, strings.TrimSpace(e))
+		}
+	}
+	return nil
+}
+
 // productionDBNumbers is the blue-green db numbers a production BP's slots use
 // (default [1,2]). Port of bp_databases._production_db_numbers.
 func productionDBNumbers(bs *Bitswan, bpSlug string) []int {
@@ -347,6 +424,11 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 			if err := clonePostgresDBAs(ctx, container, user, target, source); err != nil {
 				return err
 			}
+			// Scope a per-DB login role NOW (fail-fast): the backend was injected
+			// scoped creds and can't fall back to the superuser.
+			if err := ensureBPRole(ctx, container, user, wctx.SecretsDir, realm, target); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -376,6 +458,11 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 				return err
 			}
 			if err := createPostgresDB(ctx, container, user, dbName); err != nil {
+				return err
+			}
+			// Scope a per-DB login role NOW (fail-fast): the backend was injected
+			// scoped creds and can't fall back to the superuser.
+			if err := ensureBPRole(ctx, container, user, wctx.SecretsDir, realm, dbName); err != nil {
 				return err
 			}
 		}
@@ -504,12 +591,18 @@ func reconcilePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext
 		}
 	}
 	for db := range want {
-		if existing[db] {
-			continue
+		if !existing[db] {
+			if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
+				fmt.Sprintf("CREATE DATABASE %q;", db)); rc != 0 && !strings.Contains(stderr, "already exists") {
+				report("provision", fmt.Sprintf("create database %s deferred: %s", db, strings.TrimSpace(stderr)))
+				continue
+			}
 		}
-		if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
-			fmt.Sprintf("CREATE DATABASE %q;", db)); rc != 0 && !strings.Contains(stderr, "already exists") {
-			report("provision", fmt.Sprintf("create database %s deferred: %s", db, strings.TrimSpace(stderr)))
+		// Scope the per-DB login role (covers standby blue-green slots and any
+		// pre-existing DB being scoped for the first time); best-effort here, the
+		// live DB's role is created fail-fast in ensureLivePostgresDBs.
+		if err := ensureBPRole(ctx, container, user, wctx.SecretsDir, realm, db); err != nil {
+			report("provision", fmt.Sprintf("scope role for %s deferred: %v", db, err))
 		}
 	}
 }
@@ -554,11 +647,17 @@ func reconcileMinioBuckets(ctx context.Context, wctx infradriver.WorkspaceContex
 		}
 	}
 	for b := range want {
-		if existing[b] {
-			continue
+		if !existing[b] {
+			if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+b); rc != 0 {
+				report("provision", fmt.Sprintf("create bucket %s deferred: %s", b, strings.TrimSpace(e)))
+				continue
+			}
 		}
-		if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+b); rc != 0 {
-			report("provision", fmt.Sprintf("create bucket %s deferred: %s", b, strings.TrimSpace(e)))
+		// Scope a per-bucket MinIO user+policy so the backend reaches only its own
+		// bucket. Best-effort: runs before the production health gate, so a fresh
+		// backend that briefly raced it recovers on its next connect.
+		if err := ensureBPMinioUser(ctx, container, ak, sk, wctx.SecretsDir, realm, b); err != nil {
+			report("provision", fmt.Sprintf("scope minio user for %s deferred: %v", b, err))
 		}
 	}
 }

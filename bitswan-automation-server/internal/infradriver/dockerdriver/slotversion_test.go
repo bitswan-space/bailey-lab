@@ -34,7 +34,9 @@ backups:
 	if err != nil {
 		t.Fatalf("parseBitswanYAML: %v", err)
 	}
-	wctx := infradriver.WorkspaceContext{WorkspaceName: "ws", Domain: "example.com"}
+	// SecretsDir on a temp dir: compile materializes the per-BP secrets env file
+	// there; without it the default relative "secrets/" would pollute the package.
+	wctx := infradriver.WorkspaceContext{WorkspaceName: "ws", Domain: "example.com", SecretsDir: t.TempDir()}
 	_, _, _, err = compile(wctx, bs)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
