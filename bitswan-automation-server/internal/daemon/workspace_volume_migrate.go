@@ -95,7 +95,15 @@ func (s *Server) migrateWorkspaceDeploymentsToVolumes() {
 				continue
 			}
 		}
-		if err := s.runWorkspaceUpdate([]string{ws.Name}); err != nil {
+		// Carry the workspace's current gitops image forward — this is a
+		// mechanical data-layout regeneration, not an image upgrade. Passing no
+		// image would resolve the latest PRODUCTION gitops and silently downgrade
+		// a staging/newer-pinned workspace (see currentGitopsImage).
+		updateArgs := []string{ws.Name}
+		if img := currentGitopsImage(ws.Name); img != "" {
+			updateArgs = append(updateArgs, "--gitops-image", img)
+		}
+		if err := s.runWorkspaceUpdate(updateArgs); err != nil {
 			fmt.Printf("Warning: failed to migrate workspace %q to volume mounts (will retry on next start): %v\n", ws.Name, err)
 			continue
 		}

@@ -50,8 +50,12 @@ func (s *Server) runDisconnectFromAOC() error {
 // restartWorkspace regenerates docker-compose files and restarts gitops
 // for a single workspace. Unlike runWorkspaceUpdate this skips example updates.
 func restartWorkspace(workspaceName string) error {
-	// Regenerate and restart gitops
-	if err := workspace.UpdateWorkspaceDeployment(workspaceName, "", false, false); err != nil {
+	// Regenerate and restart gitops, preserving the current gitops image. This is
+	// a mechanical regeneration (clearing AOC config), not an image upgrade, so it
+	// must not downgrade a staging/newer-pinned workspace to the latest production
+	// gitops (an empty image resolves ResolveGitopsImage(false); see
+	// currentGitopsImage).
+	if err := workspace.UpdateWorkspaceDeployment(workspaceName, currentGitopsImage(workspaceName), false, false); err != nil {
 		return fmt.Errorf("gitops: %w", err)
 	}
 
