@@ -169,6 +169,7 @@ services:
             ws1-dev:
                 aliases:
                     - ws1-fwgw-822b-dev
+        pull_policy: always
         restart: unless-stopped
     ws1-fwgw-822b-dev-proxy:
         container_name: ws1-fwgw-822b-dev-proxy
@@ -195,6 +196,7 @@ services:
             ws1-dev:
                 aliases:
                     - ws1-fwgw-822b-dev-proxy
+        pull_policy: always
         restart: unless-stopped
         volumes:
             - __ROOT__/firewall:/firewall
