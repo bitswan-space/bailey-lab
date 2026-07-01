@@ -6,6 +6,15 @@ projectname?=bitswan
 CONSOLE_DIR?=../bitswan-server-console
 CONSOLE_EMBED:=internal/daemon/serverconsole_dist
 
+# Per-BP egress firewall gateway image. The daemon's Go infra-driver GENERATES
+# the gateway's docker-compose spec (internal/infradriver/dockerdriver), so the
+# binary and this image are two halves of one contract and must be built from
+# the same source — a stale image against a newer spec crash-loops the gateway
+# and fails every deploy (e.g. the owner/proxy split expects a role-aware
+# entrypoint the pre-split image doesn't have). Keep this tag in sync with the
+# driver's BITSWAN_EGRESS_GATEWAY_IMAGE default (compile.go).
+EGRESS_GATEWAY_IMAGE?=bitswan/egress-gateway:latest
+
 default: help
 
 .PHONY: help
@@ -25,8 +34,12 @@ console: ## build the Server Console SPA and stage it for go:embed
 	@cp -r "$(CONSOLE_DIR)/dist/." "$(CONSOLE_EMBED)/"
 	@touch "$(CONSOLE_EMBED)/.gitkeep"
 
+.PHONY: egress-gateway
+egress-gateway: ## build the per-BP egress firewall gateway image (must track the daemon's infra-driver spec)
+	docker build -f cmd/egress-gateway/Dockerfile -t $(EGRESS_GATEWAY_IMAGE) .
+
 .PHONY: build
-build: console ## build golang binary with the Server Console SPA embedded
+build: console egress-gateway ## build golang binary (Console SPA embedded) + the matching egress-gateway image
 	@CGO_ENABLED=0 go build \
 		-ldflags "-X main.version=$(shell git describe --abbrev=0 --tags) -w -s -extldflags '-static'" \
 		-a \
