@@ -133,6 +133,16 @@ async def git_http(path: str, request: Request):
     if not _valid_git_path(path):
         return Response(status_code=404)
 
+    # Read the whole request body BEFORE we touch git-http-backend's pipes.
+    # Git smart-HTTP request bodies are bounded (a fetch's negotiation is a
+    # few hundred bytes; a push's packfile is bounded by the BP repo), so
+    # buffering is cheap. Feeding it as a concurrent task while we simultaneously
+    # read stdout raced git-http-backend's blocking stdin read: intermittently
+    # both it and `upload-pack` parked in pipe_read waiting for a stdin close
+    # the feeder task hadn't reached yet, wedging the clone forever. Writing the
+    # full body and closing stdin up front removes the race entirely.
+    body = await request.body()
+
     proc = await asyncio.create_subprocess_exec(
         GIT_HTTP_BACKEND,
         env=_cgi_env(request, path),
@@ -140,22 +150,10 @@ async def git_http(path: str, request: Request):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-
-    async def feed_stdin():
-        try:
-            async for chunk in request.stream():
-                if chunk:
-                    proc.stdin.write(chunk)
-                    await proc.stdin.drain()
-        except Exception as e:  # client disconnect, etc.
-            logger.debug("git-http: stdin feed interrupted: %s", e)
-        finally:
-            try:
-                proc.stdin.close()
-            except Exception:
-                pass
-
-    feed_task = asyncio.create_task(feed_stdin())
+    if body:
+        proc.stdin.write(body)
+        await proc.stdin.drain()
+    proc.stdin.close()  # EOF — git-http-backend now produces its response
 
     # Parse the CGI header block (lines terminated by a blank line).
     status_code = 200
@@ -179,6 +177,10 @@ async def git_http(path: str, request: Request):
             headers[key] = value
 
     async def body_stream():
+        # Drain stderr concurrently: a chatty git (pack progress on a large
+        # fetch) must never fill the stderr pipe and wedge the backend
+        # mid-write to stdout.
+        stderr_task = asyncio.create_task(proc.stderr.read())
         try:
             while True:
                 chunk = await proc.stdout.read(65536)
@@ -186,11 +188,9 @@ async def git_http(path: str, request: Request):
                     break
                 yield chunk
         finally:
-            await feed_task
             await proc.wait()
-            if proc.returncode:
-                stderr = (await proc.stderr.read()).decode("utf-8", "replace")
-                if stderr.strip():
-                    logger.warning("git-http-backend stderr: %s", stderr.strip())
+            stderr = (await stderr_task).decode("utf-8", "replace")
+            if proc.returncode and stderr.strip():
+                logger.warning("git-http-backend stderr: %s", stderr.strip())
 
     return StreamingResponse(body_stream(), status_code=status_code, headers=headers)

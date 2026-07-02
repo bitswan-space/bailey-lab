@@ -1728,6 +1728,11 @@ func verifyGitServer(gitopsURL, secret, repoPath string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "git", args...)
+		// git spawns children (git-remote-https) that hold the stdout/stderr
+		// pipes, so a plain context kill leaves CombinedOutput blocked on the
+		// pipes. WaitDelay forces them closed shortly after the deadline so the
+		// call actually returns and fails loudly instead of hanging.
+		cmd.WaitDelay = 10 * time.Second
 		cmd.Env = append(os.Environ(),
 			"GIT_TERMINAL_PROMPT=0",
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@bitswan.local",
