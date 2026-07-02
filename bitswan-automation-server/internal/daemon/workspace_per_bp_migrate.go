@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -168,9 +169,12 @@ func cloneSwapBPDir(run gitRunner, wsName, copyDir, bp, bare, branch string) err
 	}
 	// Copy back anything the clone lacks (untracked artifacts). Tracked files
 	// are identical (the import commit was taken from this very tree moments
-	// ago); --skip-old-files keeps them and adds only what's missing.
-	backfill := fmt.Sprintf(`cd %q && tar --exclude=./.git -cf - . | (cd %q && tar -xf - --skip-old-files)`, staging, bpDir)
-	if _, err := run(copyDir, backfill); err != nil {
+	// ago), so we add only what's missing and never overwrite. Done in Go
+	// rather than shelling out to tar: macOS/BSD tar has no --skip-old-files,
+	// and the daemon always runs on Linux anyway — this keeps the unit test
+	// green on every CI platform. (Ownership is fixed by the workspace-wide
+	// chown at the end of the migration.)
+	if err := backfillMissing(staging, bpDir); err != nil {
 		return fmt.Errorf("backfill untracked: %w", err)
 	}
 	remote := fmt.Sprintf("http://%s-gitops:8079/git/%s.git", wsName, bp)
@@ -183,6 +187,72 @@ func cloneSwapBPDir(run gitRunner, wsName, copyDir, bp, bare, branch string) err
 		_, _ = run(bpDir, fmt.Sprintf("git push -q %q HEAD:refs/heads/%s", bare, branch))
 	}
 	return os.RemoveAll(staging)
+}
+
+// backfillMissing copies every entry under src into dst that dst does NOT
+// already have — the portable equivalent of `tar --skip-old-files` (which BSD/
+// macOS tar lacks). The clone's tracked files are byte-identical to src, so
+// this only materializes the untracked/ignored artifacts (build outputs,
+// virtualenvs) that live-dev containers bind-mount and depend on. It never
+// overwrites an existing file, and skips the source clone's own top-level
+// ".git" (the fresh clone has its own).
+func backfillMissing(src, dst string) error {
+	sep := string(os.PathSeparator)
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+sep) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if _, err := os.Lstat(target); err == nil {
+			// Already present in the clone — never overwrite (descend into
+			// existing dirs so their missing children still get copied).
+			return nil
+		}
+		switch {
+		case info.IsDir():
+			return os.MkdirAll(target, info.Mode().Perm())
+		case info.Mode()&os.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		default:
+			return copyRegularFile(path, target, info.Mode().Perm())
+		}
+	})
+}
+
+// copyRegularFile copies src to dst with the given mode, failing if dst already
+// exists (O_EXCL) so backfill can never clobber a tracked file.
+func copyRegularFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // migrateToPerBPRepos performs the fresh-start migration for one workspace.

@@ -3,6 +3,7 @@ package test
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
@@ -166,21 +167,6 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
 		return fmt.Errorf("business process %q created but its auto-deploy did not start", bp)
 	}
 
-	// Verify the embedded fast-forward-only git server against the BP's OWN
-	// repo (every business process has one): clone it, push a fast-forward on
-	// a branch (succeeds), push to main (rejected — deploy-only), and attempt
-	// a history rewrite / force-push (rejected by the pre-receive hook). Also
-	// probe that the legacy single-repo path is gone.
-	fmt.Println("\nVerifying fast-forward-only per-BP git server...")
-	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret, "/git/"+bp+".git"); err != nil {
-		cleanupOnFailure()
-		return fmt.Errorf("git server verification failed: %w", err)
-	}
-	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret, "/git/repo.git"); err == nil {
-		cleanupOnFailure()
-		return fmt.Errorf("legacy /git/repo.git is still being served — per-BP migration incomplete")
-	}
-	fmt.Println("✓ Git server: per-BP clone + ff push OK; main push + force-push rejected; legacy repo gone")
 	fmt.Printf("✓ Business process %q created (automations: %s)\n", bp, strings.Join(automationsCreated, ", "))
 
 	// Step 4: Wait for the BP deploy pipeline to finish. This builds the
@@ -192,6 +178,24 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
 		return fmt.Errorf("business-process deploy did not complete: %w", err)
 	}
 	fmt.Println("✓ Business process deployed")
+
+	// Verify the embedded fast-forward-only git server against the BP's OWN
+	// repo (every business process has one): clone it, push a fast-forward on
+	// a branch (succeeds), push to main (rejected — deploy-only), and attempt
+	// a history rewrite / force-push (rejected by the pre-receive hook). Also
+	// probe that the legacy single-repo path is gone. Run this AFTER the deploy
+	// settles so the verification never races the background build the BP's
+	// creation kicks off.
+	fmt.Println("\nVerifying fast-forward-only per-BP git server...")
+	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret, "/git/"+bp+".git"); err != nil {
+		cleanupOnFailure()
+		return fmt.Errorf("git server verification failed: %w", err)
+	}
+	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret, "/git/repo.git"); err == nil {
+		cleanupOnFailure()
+		return fmt.Errorf("legacy /git/repo.git is still being served — per-BP migration incomplete")
+	}
+	fmt.Println("✓ Git server: per-BP clone + ff push OK; main push + force-push rejected; legacy repo gone")
 
 	// Step 5: The frontend is the only part exposed through Bailey. Wait for it
 	// to be running and confirm it serves its app shell — that's "the frontend
@@ -1717,14 +1721,22 @@ func verifyGitServer(gitopsURL, secret, repoPath string) error {
 	defer os.RemoveAll(tmp)
 	work := filepath.Join(tmp, "work")
 
+	// Each git op talks to an idle local git server, so it should complete in
+	// seconds. Bound every call so a server-side stall fails loudly with the
+	// offending command rather than hanging the whole job until its timeout.
 	runGit := func(args ...string) (string, error) {
-		cmd := exec.Command("git", args...)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Env = append(os.Environ(),
 			"GIT_TERMINAL_PROMPT=0",
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@bitswan.local",
 			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@bitswan.local",
 		)
 		out, err := cmd.CombinedOutput()
+		if ctx.Err() == context.DeadlineExceeded {
+			return string(out), fmt.Errorf("git %s timed out after 120s (server stalled): %s", strings.Join(args, " "), out)
+		}
 		return string(out), err
 	}
 
