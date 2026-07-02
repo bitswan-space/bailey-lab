@@ -228,8 +228,8 @@ def discover_templates(workspace_root: str) -> dict:
 
 def _copy_dir_recursive(src: str, dest: str, skip: Optional[set[str]] = None) -> None:
     """Symlink-preserving recursive copy. Symlinks are re-created with their
-    original (verbatim) target, since templates ship links pointing at
-    in-container paths (e.g. `bitswan_lib` → `/workspace/bitswan_lib`)."""
+    original (verbatim) target, since templates may ship links pointing at
+    in-container paths."""
     if not os.path.isdir(src):
         raise ValueError(f"Template source is not a directory: {src}")
     os.makedirs(dest, exist_ok=True)

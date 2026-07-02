@@ -452,7 +452,7 @@ export class GitopsClient {
   /**
    * `POST /automations/start-deploy` — workspace-bind-mount deploy. Body is
    * `{ relative_path, stage, copy? }`. Gitops resolves the source under
-   * `/workspace-repo`, merges `bitswan_lib`, computes the checksum, and
+   * `/workspace-repo`, computes the checksum, and
    * spawns the deploy in the background.
    */
   async startDeploy(input: {

@@ -970,7 +970,7 @@ class AutomationService:
             deployment_id format stays canonical),
           * build the per-automation runtime image if it ships an
             `image/Dockerfile` (`_ensure_automation_image`),
-          * compute the merged-tree checksum (with `bitswan_lib`) and
+          * compute the source-tree checksum and
             materialize `<gitops_dir>/<checksum>/` (skipped for live-dev).
 
         Returns: {deployment_id, checksum, stage, relative_path,
@@ -999,7 +999,6 @@ class AutomationService:
 
         deployment_id = self.deployment_id_for(source, stage)
 
-        # Resolve source dir + optional bitswan_lib for the merge.
         source_dir = os.path.realpath(
             os.path.join(self.workspace_repo_dir, relative_path)
         )
@@ -1008,10 +1007,7 @@ class AutomationService:
             source_dir == ws_root_real or source_dir.startswith(ws_root_real + os.sep)
         ):
             raise HTTPException(status_code=400, detail="Source escapes workspace")
-        bitswan_lib_dir = os.path.join(self.workspace_repo_dir, "bitswan_lib")
         dirs_to_merge = [source_dir]
-        if os.path.isdir(bitswan_lib_dir):
-            dirs_to_merge.append(bitswan_lib_dir)
 
         # Build the per-automation runtime image if the source ships a
         # Dockerfile under `image/`. This MUST run before the
@@ -1081,8 +1077,8 @@ class AutomationService:
         """Deploy a single automation directly from the bind-mounted workspace.
 
         Thin wrapper over `prep_deploy_source` that additionally reserves the
-        deploy task. Discovers the source, merges `bitswan_lib`, materializes
-        the merged tree under `<gitops_dir>/<checksum>/`, and returns the
+        deploy task. Discovers the source, materializes
+        the source tree under `<gitops_dir>/<checksum>/`, and returns the
         kwargs the deploy pipeline (`deploy_automation`) consumes.
 
         `stage="live-dev"` skips materialization and uses the literal
@@ -2252,10 +2248,7 @@ class AutomationService:
             source_dir == ws_root_real or source_dir.startswith(ws_root_real + os.sep)
         ):
             raise HTTPException(status_code=400, detail="Source escapes workspace")
-        bitswan_lib_dir = os.path.join(self.workspace_repo_dir, "bitswan_lib")
         dirs_to_merge = [source_dir]
-        if os.path.isdir(bitswan_lib_dir):
-            dirs_to_merge.append(bitswan_lib_dir)
         base_tag = await self._ensure_automation_image(source_dir)
         auto_conf = read_automation_config(source_dir)
         base_image = base_tag or auto_conf.image
