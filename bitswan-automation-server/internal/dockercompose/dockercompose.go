@@ -135,17 +135,19 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 			// this (+ BITSWAN_WORKSPACE_NAME) to mount business-process containers
 			// off the volume via subpaths instead of host bind paths.
 			"BITSWAN_VOLUME_NAME=bitswan",
-			// Canonical bare repo (served over smart-HTTP, fast-forward only)
-			// and the per-copy checkouts under the workspace-repo dir. Keeping
-			// copies at <workspace-repo>/copies makes a deployment's
-			// workspace-root-relative path ("copies/<copy>/<rel>") resolve
-			// correctly both as a container-local path (join with
-			// BITSWAN_WORKSPACE_REPO_DIR) and as a volume subpath
-			// (workspaces/<ws>/<rel-path>). The `main` copy is the default scope.
+			// Per-BP canonical bare repos (<bp>.git, served over smart-HTTP,
+			// fast-forward only) and the per-copy checkouts under the
+			// workspace-repo dir. Keeping copies at <workspace-repo>/copies
+			// makes a deployment's workspace-root-relative path
+			// ("copies/<copy>/<rel>") resolve correctly both as a
+			// container-local path (join with BITSWAN_WORKSPACE_REPO_DIR) and
+			// as a volume subpath (workspaces/<ws>/<rel-path>). The `main`
+			// copy is the default scope. BITSWAN_GIT_REMOTE is the BASE URL:
+			// each BP clone's origin is <base>/<bp>.git.
 			"BITSWAN_GIT_REPOS_DIR=/git",
 			"BITSWAN_WORKSPACE_REPO_DIR=/workspace-repo",
 			"BITSWAN_COPIES_DIR=/workspace-repo/copies",
-			"BITSWAN_GIT_REMOTE=http://" + config.WorkspaceName + "-gitops:8079/git/repo.git",
+			"BITSWAN_GIT_REMOTE=http://" + config.WorkspaceName + "-gitops:8079/git",
 		},
 	}
 
@@ -190,11 +192,11 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), caEnvVars...)
 	}
 
-	// Mount the canonical bare repo (served over smart-HTTP) and the per-copy
-	// checkouts (the deploy unit). These replace the old shared workspace
-	// working-tree mount + gitops orphan-worktree gitdir rewrite.
+	// Mount the per-BP bare repos dir (each <bp>.git served over smart-HTTP)
+	// and the per-copy checkouts (the deploy unit). These replace the old
+	// shared workspace working-tree mount + single canonical repo.
 	gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
-		wsVolume("repo.git", "/git/repo.git"),
+		wsVolume("git-repos", "/git"),
 		wsVolume("copies", "/workspace-repo/copies"),
 	)
 	if hostOs == WindowsMac {

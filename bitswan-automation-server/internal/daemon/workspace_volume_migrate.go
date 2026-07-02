@@ -3,7 +3,9 @@ package daemon
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/automations"
@@ -20,9 +22,10 @@ var workspaceVolumeSubdirs = []string{
 	"workspace",   // legacy shared working tree (kept for the gitops state worktree)
 	"gitops",      // promoted-deployment materialization/state
 	"deploy.git",  // infra-driver bare deploy repo (git init --bare on serve; the subpath must exist before the sidecar mounts it)
-	"repo.git",    // canonical bare repo (real content created by init/migration)
+	"git-repos",   // per-BP canonical bare repos (<bp>.git, created by gitops at BP creation / by migration)
+	"repo.git",    // legacy single canonical repo (archived by the per-BP migration; kept one release so stale composes can still mount the subpath)
 	"copies",      // per-copy checkouts base
-	"copies/main", // the main copy (editor working tree / main live-dev source)
+	"copies/main", // the main copy (per-BP checkouts of each repo's main)
 	"secrets",
 	"snapshots",
 	// Egress-firewall attempt telemetry (per-BP JSONL the egress gateways
@@ -68,30 +71,41 @@ func (s *Server) migrateWorkspaceDeploymentsToVolumes() {
 	home := os.Getenv("HOME")
 	for _, ws := range list.Workspaces {
 		wsDir := filepath.Join(home, ".config", "bitswan", "workspaces", ws.Name)
-		// `.gitserver-migrated` covers both the bind→volume move and the
-		// worktree→copy / canonical-repo move, so workspaces already volume-
-		// migrated under the old marker are reprocessed once to gain repo.git +
-		// copies (otherwise their regenerated gitops compose can't mount them).
-		marker := filepath.Join(wsDir, ".gitserver-migrated")
-		if _, err := os.Stat(marker); err == nil {
-			continue // already migrated
+		// `.gitserver-migrated` covers the bind→volume move; the per-BP-repos
+		// migration has its own marker so already-volume-migrated workspaces
+		// are reprocessed exactly once to split the shared repo.
+		volumeMarker := filepath.Join(wsDir, ".gitserver-migrated")
+		_, volumeErr := os.Stat(volumeMarker)
+		volumeDone := volumeErr == nil
+		perBPDone := false
+		if _, err := os.Stat(filepath.Join(wsDir, perBPMigratedMarker)); err == nil {
+			perBPDone = true
+		}
+		if volumeDone && perBPDone {
+			continue // fully migrated
 		}
 		// Skip anything that isn't a fully-deployed workspace.
 		if _, err := os.Stat(filepath.Join(wsDir, "deployment", "docker-compose.yml")); err != nil {
 			continue
 		}
 
-		fmt.Printf("Migrating workspace %q to docker volumes + git server...\n", ws.Name)
+		fmt.Printf("Migrating workspace %q to docker volumes + per-BP git repos...\n", ws.Name)
 		// Guarantee every subpath the compose will mount exists in the volume.
 		ensureWorkspaceVolumeDirs(ws.Name)
-		// Create the canonical bare repo + main copy from the legacy working
-		// tree if they don't exist yet (idempotent — skipped once repo.git is a
-		// real bare repo). Leaves the legacy workspace/ + worktrees as backup.
-		if _, err := os.Stat(filepath.Join(wsDir, "repo.git", "objects")); err != nil {
-			if err := setupCanonicalRepoAndMainCopy(
-				ws.Name, wsDir, filepath.Join(wsDir, "workspace"), false,
-			); err != nil {
-				fmt.Printf("Warning: failed to set up canonical repo for %q (will retry): %v\n", ws.Name, err)
+		// A workspace that never got the (now legacy) canonical-repo migration
+		// jumps straight to per-BP repos: seed the main copy's content from the
+		// legacy working tree so the importer below has something to split.
+		if !volumeDone {
+			if err := seedMainCopyFromLegacyTree(wsDir); err != nil {
+				fmt.Printf("Warning: failed to seed main copy for %q (will retry): %v\n", ws.Name, err)
+				continue
+			}
+		}
+		// Split the shared repo into per-BP repos (fresh-start import; the old
+		// repo.git is archived). Idempotent + marker-guarded.
+		if !perBPDone {
+			if err := migrateToPerBPRepos(ws.Name, wsDir, user1000Runner(false)); err != nil {
+				fmt.Printf("Warning: per-BP repo migration failed for %q (will retry on next start): %v\n", ws.Name, err)
 				continue
 			}
 		}
@@ -118,9 +132,31 @@ func (s *Server) migrateWorkspaceDeploymentsToVolumes() {
 			continue
 		}
 
-		_ = os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
-		fmt.Printf("Workspace %q now runs off the bitswan docker volume.\n", ws.Name)
+		_ = os.WriteFile(volumeMarker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
+		fmt.Printf("Workspace %q now runs off the bitswan docker volume with per-BP repos.\n", ws.Name)
 	}
+}
+
+// seedMainCopyFromLegacyTree populates copies/main with the legacy shared
+// working tree's BP directories (content only, no git) when the workspace
+// predates even the canonical-repo layout. The per-BP importer then splits
+// them into their own repos.
+func seedMainCopyFromLegacyTree(wsDir string) error {
+	mainCopy := filepath.Join(wsDir, "copies", "main")
+	if len(listSubdirs(mainCopy)) > 0 {
+		return nil // main copy already has content
+	}
+	legacyTree := filepath.Join(wsDir, "workspace")
+	for _, bp := range listSubdirs(legacyTree) {
+		src := filepath.Join(legacyTree, bp)
+		dst := filepath.Join(mainCopy, bp)
+		cmd := fmt.Sprintf(`mkdir -p %q && cd %q && tar --exclude=./.git -cf - . | (cd %q && tar -xf -)`, dst, src, dst)
+		if out, err := exec.Command("sh", "-c", cmd).CombinedOutput(); err != nil { //nolint:gosec
+			return fmt.Errorf("seed %s: %v (%s)", bp, err, strings.TrimSpace(string(out)))
+		}
+	}
+	_ = exec.Command("chown", "-R", "1000:1000", mainCopy).Run()
+	return nil
 }
 
 // redeployWorkspaceAutomations asks the workspace's gitops service to redeploy
