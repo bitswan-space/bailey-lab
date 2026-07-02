@@ -329,9 +329,11 @@ export class GitopsClient {
   async copyCommitDiff(
     name: string,
     sha: string,
+    bp?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const qs = bp ? `?bp=${encodeURIComponent(bp)}` : '';
     const r = await fetch(
-      `${this.baseUrl}/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff`,
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff${qs}`,
       { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
@@ -397,12 +399,16 @@ export class GitopsClient {
     });
   }
 
-  /** `GET /copies/{name}/history` — copy + main commit logs with deploy tags. */
+  /** `GET /copies/{name}/history` — copy + main commit logs with deploy
+   *  tags. With `bp` (the normal, BP-scoped view) the logs come from that
+   *  BP's own repo. */
   async copyHistory(
     name: string,
+    bp?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const qs = bp ? `?bp=${encodeURIComponent(bp)}` : '';
     const r = await fetch(
-      `${this.baseUrl}/copies/${encodeURIComponent(name)}/history`,
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/history${qs}`,
       { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;

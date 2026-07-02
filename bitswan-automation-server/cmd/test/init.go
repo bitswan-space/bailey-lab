@@ -149,16 +149,6 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
 	}
 	fmt.Println("✓ Gitops service ready")
 
-	// Step 2.5: Verify the embedded fast-forward-only git server: clone the
-	// canonical repo, push a fast-forward (succeeds), and attempt a history
-	// rewrite / force-push (must be rejected by the pre-receive hook).
-	fmt.Println("\nVerifying fast-forward-only git server...")
-	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret); err != nil {
-		cleanupOnFailure()
-		return fmt.Errorf("git server verification failed: %w", err)
-	}
-	fmt.Println("✓ Git server: clone + fast-forward push OK; force-push rejected")
-
 	// Step 3: Create a business process. Gitops scaffolds the default template
 	// group (BITSWAN_DEFAULT_TEMPLATE_GROUP, "business-process": one frontend
 	// exposed through Bailey + one private backend worker) into <bp>/ and kicks
@@ -175,6 +165,22 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
 		cleanupOnFailure()
 		return fmt.Errorf("business process %q created but its auto-deploy did not start", bp)
 	}
+
+	// Verify the embedded fast-forward-only git server against the BP's OWN
+	// repo (every business process has one): clone it, push a fast-forward on
+	// a branch (succeeds), push to main (rejected — deploy-only), and attempt
+	// a history rewrite / force-push (rejected by the pre-receive hook). Also
+	// probe that the legacy single-repo path is gone.
+	fmt.Println("\nVerifying fast-forward-only per-BP git server...")
+	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret, "/git/"+bp+".git"); err != nil {
+		cleanupOnFailure()
+		return fmt.Errorf("git server verification failed: %w", err)
+	}
+	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret, "/git/repo.git"); err == nil {
+		cleanupOnFailure()
+		return fmt.Errorf("legacy /git/repo.git is still being served — per-BP migration incomplete")
+	}
+	fmt.Println("✓ Git server: per-BP clone + ff push OK; main push + force-push rejected; legacy repo gone")
 	fmt.Printf("✓ Business process %q created (automations: %s)\n", bp, strings.Join(automationsCreated, ", "))
 
 	// Step 4: Wait for the BP deploy pipeline to finish. This builds the
@@ -1695,13 +1701,13 @@ func cleanupWorkspace(workspaceName string) error {
 // commit (must succeed), then rewrites history and force-pushes (must be
 // rejected by the pre-receive hook). Credentials are the gitops secret, which
 // the git server accepts via HTTP Basic.
-func verifyGitServer(gitopsURL, secret string) error {
+func verifyGitServer(gitopsURL, secret, repoPath string) error {
 	u, err := url.Parse(gitopsURL)
 	if err != nil {
 		return fmt.Errorf("parse gitops url: %w", err)
 	}
 	u.User = url.UserPassword("x", secret)
-	u.Path = "/git/repo.git"
+	u.Path = repoPath
 	gitURL := u.String()
 
 	tmp, err := os.MkdirTemp("", "gitsrv-")
@@ -1724,6 +1730,9 @@ func verifyGitServer(gitopsURL, secret string) error {
 
 	if out, err := runGit("clone", gitURL, work); err != nil {
 		return fmt.Errorf("clone failed: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "checkout", "-b", "git-server-test-branch"); err != nil {
+		return fmt.Errorf("branch: %w: %s", err, out)
 	}
 	if err := os.WriteFile(filepath.Join(work, "git-server-test.txt"), []byte("ok\n"), 0644); err != nil {
 		return err

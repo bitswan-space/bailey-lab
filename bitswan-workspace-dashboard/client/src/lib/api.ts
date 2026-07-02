@@ -869,10 +869,11 @@ export const api = {
         `/api/copies/${encodeURIComponent(name)}/diff${p ? `?path=${encodeURIComponent(p)}` : ''}`,
       ),
     /** Unified diff introduced by a single commit (`git show`), for the
-     *  clickable rows in the History view. */
-    commitDiff: (name: string, sha: string) =>
+     *  clickable rows in the History view. `bp` names the business-process
+     *  repo the commit lives in (each BP is its own repo). */
+    commitDiff: (name: string, sha: string, bp?: string) =>
       getJson<{ diff: string }>(
-        `/api/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff`,
+        `/api/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff${bp ? `?bp=${encodeURIComponent(bp)}` : ''}`,
       ),
     /**
      * Sync the copy into main. Commits WIP and, when the copy is a pure
@@ -896,8 +897,12 @@ export const api = {
         `/api/copies/${encodeURIComponent(name)}/rebase`,
         {},
       ),
-    history: (name: string) =>
-      getJson<CopyHistory>(`/api/copies/${encodeURIComponent(name)}/history`),
+    /** Copy-branch + main commit logs with deploy tags, scoped to one
+     *  business process's repo. */
+    history: (name: string, bp: string) =>
+      getJson<CopyHistory>(
+        `/api/copies/${encodeURIComponent(name)}/history?bp=${encodeURIComponent(bp)}`,
+      ),
   },
 
   snapshots: {

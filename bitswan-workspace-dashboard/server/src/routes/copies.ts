@@ -84,7 +84,7 @@ export function registerCopyRoutes(
     },
   );
 
-  app.get<{ Params: { name: string } }>(
+  app.get<{ Params: { name: string }; Querystring: { bp?: string } }>(
     '/api/copies/:name/history',
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
@@ -92,7 +92,7 @@ export function registerCopyRoutes(
         return reply.code(503).send({ error: 'gitops not configured' });
       }
       try {
-        const r = await gitops.copyHistory(req.params.name);
+        const r = await gitops.copyHistory(req.params.name, req.query.bp);
         if (!r.ok) {
           return reply
             .code(r.status >= 400 && r.status < 500 ? r.status : 502)
