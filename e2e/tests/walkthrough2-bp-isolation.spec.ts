@@ -33,18 +33,47 @@ function mainSubjects(bp: string): string {
 test('per-BP repos: syncing one business process never drags another', async ({ page }) => {
   test.setTimeout(30 * 60_000);
 
-  // ---- Enter the workspace dashboard (fresh context → SSO may prompt) ----
-  await page.goto(`https://${WORKSPACE.name}-dashboard.${ENV.domain}/`);
-  if (
-    await page
-      .locator('#username, input[name="username"]')
+  // ---- Enter the workspace dashboard the SAME way the walkthrough does ----
+  // The dashboard subdomain is only reachable THROUGH the Server Console: sign
+  // in via OIDC, land on Workspaces, then click the workspace's Open button
+  // (which spawns the dashboard in a new tab). A direct goto to the dashboard
+  // host does not complete the SSO handshake, so we drive the console instead.
+  // The `finance` workspace already exists — the walkthrough spec created it
+  // earlier in this same (workers=1) run.
+  await page.goto(ENV.onboardUrl + '/');
+  await oidcLogin(page, ENV.operatorEmail, ENV.operatorPassword);
+  // Idempotent claim: already-claimed servers skip straight to the console.
+  const claim = page.getByRole('button', { name: /Claim this server/i });
+  await Promise.race([
+    claim.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+    page.getByRole('heading', { name: /Workspaces/i }).waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+  ]);
+  if (await claim.isVisible().catch(() => false)) await claim.click();
+  await expect(page.getByRole('heading', { name: /Workspaces/i })).toBeVisible({ timeout: SLA });
+
+  // Open the workspace dashboard (its Open button opens a new tab). Cold
+  // containers can make the first Open land on a not-yet-ready shell, so retry
+  // Open until the BP selector trigger ("Process <bp>") actually renders.
+  let dashPage = page;
+  let d: FrameOrPage = page;
+  const open = page.getByRole('button', { name: /^Open$/ }).or(page.getByRole('link', { name: /^Open$/ })).first();
+  let ready = false;
+  for (let attempt = 0; attempt < 4 && !ready; attempt++) {
+    const popupP = page.context().waitForEvent('page', { timeout: 20_000 }).catch(() => null);
+    await open.click();
+    const popup = await popupP;
+    if (popup) dashPage = popup;
+    d = await dashboard(dashPage);
+    ready = await d
+      .getByRole('button', { name: /^Process\b/ })
       .first()
-      .isVisible()
-      .catch(() => false)
-  ) {
-    await oidcLogin(page, ENV.operatorEmail, ENV.operatorPassword);
+      .waitFor({ state: 'visible', timeout: SLA })
+      .then(() => true)
+      .catch(() => false);
   }
-  const d: FrameOrPage = await dashboard(page);
+  expect(ready, 'workspace dashboard never rendered the BP selector after retries').toBe(true);
+  await d.getByText(/Loading business processes/i).first()
+    .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
   // The shell is up once the flow tabs render.
   await expect(d.getByRole('button', { name: /Sync & Deploy/i }).first()).toBeVisible({
     timeout: SLA,
