@@ -1,9 +1,10 @@
 """Embedded fast-forward-only smart-HTTP git server.
 
-Serves the workspace's canonical bare repo (`repo.git`) over git's smart-HTTP
-protocol by driving the stock ``git http-backend`` CGI. Coding agents and the
-editor clone/fetch/push here with plain git; the bare repo's ``pre-receive``
-hook (see ``app/services/git_server.py``) keeps history append-only.
+Serves every business process's canonical bare repo (``<bp>.git`` under the
+repos dir) over git's smart-HTTP protocol by driving the stock
+``git http-backend`` CGI. Coding agents and the editor clone/fetch/push each
+BP's repo with plain git; every bare repo's ``pre-receive`` hook (see
+``app/services/git_server.py``) keeps history append-only.
 
 Auth reuses the existing coding-agent bearer secret. git clients authenticate
 with HTTP Basic (any username, password = the agent secret) via a credential
@@ -14,6 +15,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
@@ -22,6 +24,24 @@ from app.routes.agent import _resolve_agent_secret
 from app.services.git_server import GIT_REPOS_DIR
 
 logger = logging.getLogger(__name__)
+
+# First path segment must be a well-formed repo name (`<bp>.git`); later
+# segments are git protocol paths (info/refs, git-upload-pack, objects/…) —
+# plain names, never traversal. git-http-backend gets PATH_INFO verbatim, so
+# reject anything suspicious before spawning the CGI.
+_REPO_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.git$")
+_SUB_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _valid_git_path(path: str) -> bool:
+    segments = path.split("/")
+    if not segments or not _REPO_SEGMENT_RE.match(segments[0]):
+        return False
+    for seg in segments[1:]:
+        if seg in ("", ".", "..") or not _SUB_SEGMENT_RE.match(seg):
+            return False
+    return True
+
 
 router = APIRouter(prefix="/git", tags=["git"])
 
@@ -109,6 +129,9 @@ def _cgi_env(request: Request, path: str) -> dict:
 async def git_http(path: str, request: Request):
     if not _authorized(request):
         return Response(status_code=401, headers=_UNAUTH_HEADERS)
+    # 404 (not 400) for malformed paths — don't hand probes an oracle.
+    if not _valid_git_path(path):
+        return Response(status_code=404)
 
     proc = await asyncio.create_subprocess_exec(
         GIT_HTTP_BACKEND,
