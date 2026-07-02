@@ -643,16 +643,22 @@ func reconcilePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext
 		}
 	}
 	for db := range want {
-		if !existing[db] {
-			if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
-				fmt.Sprintf("CREATE DATABASE %q;", db)); rc != 0 && !strings.Contains(stderr, "already exists") {
-				report("provision", fmt.Sprintf("create database %s deferred: %s", db, strings.TrimSpace(stderr)))
-				continue
-			}
+		if existing[db] {
+			// Already provisioned by an earlier apply — its role/grants/ownership
+			// are in place. Re-running ensureBPRole (several psql execs) for EVERY
+			// database on EVERY apply was the dominant deploy cost (tens of seconds
+			// on a large workspace). Skip it for existing DBs; the LIVE DB's role is
+			// re-ensured fail-fast in ensureLivePostgresDBs whenever its backend is
+			// (re)created, so ownership repairs still reach live DBs.
+			continue
 		}
-		// Scope the per-DB login role (covers standby blue-green slots and any
-		// pre-existing DB being scoped for the first time); best-effort here, the
-		// live DB's role is created fail-fast in ensureLivePostgresDBs.
+		if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
+			fmt.Sprintf("CREATE DATABASE %q;", db)); rc != 0 && !strings.Contains(stderr, "already exists") {
+			report("provision", fmt.Sprintf("create database %s deferred: %s", db, strings.TrimSpace(stderr)))
+			continue
+		}
+		// Scope the per-DB login role for the just-created database (covers standby
+		// blue-green slots created on a promote).
 		if err := ensureBPRole(ctx, container, user, wctx.SecretsDir, realm, db); err != nil {
 			report("provision", fmt.Sprintf("scope role for %s deferred: %v", db, err))
 		}
@@ -699,15 +705,18 @@ func reconcileMinioBuckets(ctx context.Context, wctx infradriver.WorkspaceContex
 		}
 	}
 	for b := range want {
-		if !existing[b] {
-			if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+b); rc != 0 {
-				report("provision", fmt.Sprintf("create bucket %s deferred: %s", b, strings.TrimSpace(e)))
-				continue
-			}
+		if existing[b] {
+			// Already provisioned (bucket + scoped user/policy) by an earlier apply.
+			// Re-running ensureBPMinioUser (several mc execs) for EVERY bucket on
+			// EVERY apply was a dominant deploy cost. Skip existing buckets.
+			continue
 		}
-		// Scope a per-bucket MinIO user+policy so the backend reaches only its own
-		// bucket. Best-effort: runs before the production health gate, so a fresh
-		// backend that briefly raced it recovers on its next connect.
+		if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+b); rc != 0 {
+			report("provision", fmt.Sprintf("create bucket %s deferred: %s", b, strings.TrimSpace(e)))
+			continue
+		}
+		// Scope a per-bucket MinIO user+policy for the just-created bucket so the
+		// backend reaches only its own bucket.
 		if err := ensureBPMinioUser(ctx, container, ak, sk, wctx.SecretsDir, realm, b); err != nil {
 			report("provision", fmt.Sprintf("scope minio user for %s deferred: %v", b, err))
 		}
