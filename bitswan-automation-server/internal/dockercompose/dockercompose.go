@@ -283,6 +283,16 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 	if config.KeycloakURL != "" {
 		env = append(env, "KEYCLOAK_URL="+config.KeycloakURL)
 	}
+	// Pin the egress-gateway image the compiler stamps into every BP's firewall
+	// workers. Forward the daemon's pinned tag (set at release time, same as
+	// BITSWAN_GITOPS_IMAGE / BITSWAN_INFRA_DRIVER_IMAGE) so the compose
+	// references an IMMUTABLE tag. That lets the gateway services use
+	// pull_policy: missing — pulled once when the version changes, never
+	// re-pulled or churned — instead of the old pull_policy: always, which hit
+	// the registry for every worker on every deploy and recreated them all.
+	if gw := os.Getenv("BITSWAN_EGRESS_GATEWAY_IMAGE"); gw != "" {
+		env = append(env, "BITSWAN_EGRESS_GATEWAY_IMAGE="+gw)
+	}
 	// The compiler reads the same AOC/OAuth env gitops used (org group path,
 	// oauth2-proxy config it materializes per BP, etc.).
 	env = append(env, config.AocEnvVars...)

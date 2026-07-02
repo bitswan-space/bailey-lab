@@ -707,13 +707,15 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 		proxy := g.gw + "-proxy"
 		services[proxy] = map[string]interface{}{
 			"image": c.gatewayImage,
-			// Always re-pull: the gateway image is a floating tag (default
-			// bitswan/egress-gateway:latest) tied to the automation-server version,
-			// and the driver's `compose up` passes no --pull flag — so without this
-			// a host keeps a stale local image indefinitely (e.g. the pre-role-split
-			// proxy that crash-loops on iptables). Per-service so the local-only
-			// internal/* BP images are never pull-attempted.
-			"pull_policy":    "always",
+			// pull_policy: missing, NOT always — combined with an IMMUTABLE version
+			// tag (see gatewayImage). "always" made every one of the (often dozens
+			// of) gateway services hit the registry on every deploy AND, because a
+			// re-pull of a floating tag can yield a new image id, forced docker to
+			// recreate every netns-sharing worker each time — the dominant cost of
+			// deploy/promote. With a version-pinned tag the image content is fixed,
+			// so "missing" pulls it exactly once (when the version changes) and never
+			// re-pulls or churns workers, while never serving a stale image.
+			"pull_policy":    "missing",
 			"container_name": proxy,
 			"restart":        "unless-stopped",
 			"environment": map[string]interface{}{
@@ -742,8 +744,8 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 		}
 		services[g.gw] = map[string]interface{}{
 			"image": c.gatewayImage,
-			// Always re-pull the floating gateway image (see the proxy above).
-			"pull_policy":    "always",
+			// pull_policy: missing — refreshed once per apply, see the proxy above.
+			"pull_policy":    "missing",
 			"container_name": g.gw,
 			"restart":        "unless-stopped",
 			"cap_add":        []interface{}{"NET_ADMIN"},
