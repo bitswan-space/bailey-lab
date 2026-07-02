@@ -118,7 +118,7 @@ services:
             ws4-dev:
                 aliases:
                     - ws4-fwgw-4337-live-dev
-        pull_policy: always
+        pull_policy: missing
         restart: unless-stopped
     ws4-fwgw-4337-live-dev-proxy:
         container_name: ws4-fwgw-4337-live-dev-proxy
@@ -145,7 +145,7 @@ services:
             ws4-dev:
                 aliases:
                     - ws4-fwgw-4337-live-dev-proxy
-        pull_policy: always
+        pull_policy: missing
         restart: unless-stopped
         volumes:
             - __ROOT__/firewall:/firewall

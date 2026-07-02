@@ -500,7 +500,7 @@ async def start_deploy(
     Replaces the editor's upload+deploy flow for environments where the
     workspace is co-located with gitops. The body is intentionally minimal
     (relative_path, stage, copy?) — gitops reads the automation source
-    directly from `/workspace-repo`, merges `bitswan_lib` if present,
+    directly from `/workspace-repo`,
     computes the merged-tree checksum, materialises `<checksum>/` if needed,
     and kicks off the existing deploy pipeline.
     """

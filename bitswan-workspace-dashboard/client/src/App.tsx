@@ -11,6 +11,9 @@ import { SessionProvider } from '@/components/agents/SessionProvider';
 import { WorkspaceView } from '@/components/views/WorkspaceView';
 import { TaskQueuePanel } from '@/components/workspace/TaskQueuePanel';
 import { api } from '@/lib/api';
+import { toast } from '@/lib/notify';
+import { watchDeployTask } from '@/lib/deployBp';
+import { SessionExpiredError } from '@/lib/session';
 import { getUrlParam, setUrlParams } from '@/lib/urlState';
 import type { FlowTab } from '@/types';
 
@@ -228,6 +231,56 @@ function Shell() {
     });
   }, [copiesSnapshot, myCopy, myCopyResolved]);
 
+  // Pull main's new commits into a copy (rebase it onto main). A clean pull
+  // redeploys live-dev only for BPs whose image dir changed; a conflict can't be
+  // resolved automatically, so we route the user to the Coding Agent on that
+  // copy to finish the rebase by hand.
+  const handlePullCopy = useCallback(
+    async (copyName: string) => {
+      const id = `pull-copy-${copyName}`;
+      toast.loading(`Pulling main into ${copyName}…`, {
+        id,
+        duration: Infinity,
+      });
+      try {
+        const res = await api.copyFiles.rebase(copyName);
+        if (res.status === 'noop') {
+          toast.success(`${copyName} is already up to date with main`, {
+            id,
+            duration: 4000,
+          });
+          return;
+        }
+        if (res.status === 'needs_rebase') {
+          toast.error(`${copyName}: ${res.message}`, { id, duration: 10000 });
+          // Hand off to the Coding Agent on this copy to resolve the conflict.
+          setCopy(copyName);
+          handleTab('agent');
+          return;
+        }
+        toast.success(res.message, { id, duration: 6000 });
+        (res.deploy_task_ids ?? []).forEach((tid: string, i: number) => {
+          void watchDeployTask(tid, `${id}-deploy-${i}`, {
+            loading: `Redeploying ${copyName} live-dev…`,
+            success: `${copyName} live-dev updated`,
+            failurePrefix: `Live-dev redeploy for ${copyName} failed`,
+          });
+        });
+      } catch (err) {
+        if (err instanceof SessionExpiredError) {
+          // The app-wide re-login banner already prompts; don't pile on.
+          toast.dismiss?.(id);
+          return;
+        }
+        toast.error(`Failed to pull main into ${copyName}: ${String(err)}`, {
+          id,
+          duration: 8000,
+        });
+      }
+    },
+    [handleTab],
+  );
+
   const bp = useMemo(
     () => allBps.find((b) => b.id === bpId) ?? null,
     [allBps, bpId],
@@ -248,6 +301,7 @@ function Shell() {
         copy={copy}
         copies={copies}
         onSelectCopy={setCopy}
+        onPullCopy={handlePullCopy}
         tab={tab}
         onTab={handleTab}
         role={role}

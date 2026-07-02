@@ -329,9 +329,11 @@ export class GitopsClient {
   async copyCommitDiff(
     name: string,
     sha: string,
+    bp?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const qs = bp ? `?bp=${encodeURIComponent(bp)}` : '';
     const r = await fetch(
-      `${this.baseUrl}/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff`,
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff${qs}`,
       { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
@@ -386,12 +388,45 @@ export class GitopsClient {
     });
   }
 
-  /** `GET /copies/{name}/history` — copy + main commit logs with deploy tags. */
+  /** `POST /copies/{name}/rebase` — pull main's new commits INTO the copy
+   *  (rebase the whole copy onto main). Opposite direction from syncCopy. */
+  async rebaseCopy(
+    name: string,
+    deployer?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(`/copies/${encodeURIComponent(name)}/rebase`, {
+      deployer: deployer ?? null,
+    });
+  }
+
+  /** `GET /copies/{name}/history` — copy + main commit logs with deploy
+   *  tags. With `bp` (the normal, BP-scoped view) the logs come from that
+   *  BP's own repo. */
   async copyHistory(
+    name: string,
+    bp?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const qs = bp ? `?bp=${encodeURIComponent(bp)}` : '';
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/history${qs}`,
+      { headers: { ...this.authHeaders() } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET /copies/{name}/divergence-all` — per-BP ahead/behind for the whole
+   *  copy in one fetch (only diverging BPs are returned). */
+  async copyDivergenceAll(
     name: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
-      `${this.baseUrl}/copies/${encodeURIComponent(name)}/history`,
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/divergence-all`,
       { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
@@ -423,7 +458,7 @@ export class GitopsClient {
   /**
    * `POST /automations/start-deploy` — workspace-bind-mount deploy. Body is
    * `{ relative_path, stage, copy? }`. Gitops resolves the source under
-   * `/workspace-repo`, merges `bitswan_lib`, computes the checksum, and
+   * `/workspace-repo`, computes the checksum, and
    * spawns the deploy in the background.
    */
   async startDeploy(input: {

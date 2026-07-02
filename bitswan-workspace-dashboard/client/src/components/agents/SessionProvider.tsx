@@ -71,10 +71,11 @@ interface SessionsContextValue {
    */
   startSession(copy: string, bp: string, kind?: BpSessionKind): string;
   /**
-   * Start a copy-level git-sync session. No BP — the auto-cmd cd's to the copy
-   * root and runs the git rebase/conflict-resolution flow (SYNC_PROMPT).
+   * Start a git-sync session for one business process. Each BP is its own
+   * repo, so the auto-cmd cd's into the BP's clone and runs the git
+   * rebase/conflict-resolution flow (SYNC_PROMPT) there.
    */
-  startSyncSession(copy: string): string;
+  startSyncSession(copy: string, bp: string): string;
   /**
    * Start a focused session against a single requirement. The server reads
    * the requirement's description from the BP's testable-requirements.toml
@@ -215,28 +216,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const startSyncSession = useCallback(
-    (copy: string) => {
+    (copy: string, bp: string) => {
       const id = newSessionId();
       setSessions((prev) => [
         ...prev,
         {
           id,
           copy,
-          bp: null,
+          bp,
           kind: 'sync',
           startedAt: Date.now(),
           exited: false,
           resume: false,
         },
       ]);
-      // Sync sessions show up in every BP's Agents tab inside the copy;
-      // we don't select them per-scope automatically — the user will click
-      // the sync row when they want to look at it. (If they were just
-      // navigated to a fresh copy without a BP, there's nothing to
-      // select against either way.)
+      setSelectedFor({ copy, bp }, id);
       return id;
     },
-    [],
+    [setSelectedFor],
   );
 
   const startRequirementSession = useCallback(
@@ -442,13 +439,15 @@ function SessionsLayer({
         .filter((s) => !s.exited)
         .map((s) => {
           // A session is "in scope" for the currently-viewed AgentsTab if
-          // (a) it's a BP-scoped claude session matching this exact (copy, bp), or
-          // (b) it's a copy-level sync session whose copy matches —
-          //     those surface in any BP's Agents tab inside the same copy.
+          // (a) it matches this exact (copy, bp) — sync sessions included,
+          //     they're BP-scoped now that each BP is its own repo — or
+          // (b) it's a LEGACY copy-level sync session (bp === null, recorded
+          //     before per-BP repos): those still surface in any BP's Agents
+          //     tab inside the same copy so old rows stay reachable.
           const inScope =
             !!currentScope &&
             currentScope.copy === s.copy &&
-            (s.kind === 'sync' || currentScope.bp === s.bp);
+            (currentScope.bp === s.bp || (s.kind === 'sync' && s.bp === null));
           // Selection is per (copy, bp) so switching BPs preserves what
           // the user had selected in each. We always look up against the
           // *current* scope (not the session's intrinsic scope) — that lets

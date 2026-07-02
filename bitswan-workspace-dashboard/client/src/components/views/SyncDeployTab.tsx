@@ -47,7 +47,7 @@ export function SyncDeployTab({
   onManageDeployments,
 }: SyncDeployTabProps) {
   const { changed } = useCopyStatus(wt.name);
-  const { startSyncSession, setSelectedFor, agentStatus, ensureAgent } =
+  const { startSyncSession, agentStatus, ensureAgent } =
     useSessions();
   const [busy, setBusy] = useState(false);
   const [view, setView] = useUrlEnum('view', ['diff', 'history', 'checks'] as const, 'diff');
@@ -107,16 +107,14 @@ export function SyncDeployTab({
         // surfaces via agentStatus; the session will still attempt to spawn
       }
     }
-    const id = startSyncSession(wt.name);
-    // Pre-select for this BP scope so flipping to the Coding Agent tab lands on
-    // the rebase terminal without an extra click.
-    setSelectedFor({ copy: wt.name, bp: bp.name }, id);
+    // BP-scoped: the agent lands inside this BP's own clone and rebases just
+    // this business process (startSyncSession pre-selects it for this scope).
+    startSyncSession(wt.name, bp.name);
     onShowAgents();
   }, [
     agentStatus,
     ensureAgent,
     startSyncSession,
-    setSelectedFor,
     wt.name,
     bp.name,
     onShowAgents,
@@ -290,7 +288,7 @@ export function SyncDeployTab({
         {view === 'diff' ? (
           <DiffTab copy={wt.name} pathPrefix={bp.name} />
         ) : view === 'history' ? (
-          <CopyHistoryView copy={wt.name} />
+          <CopyHistoryView copy={wt.name} bp={bp.name} />
         ) : (
           <div className="min-h-0 flex-1 overflow-auto px-7 py-5">
             <SupplyChainPanel

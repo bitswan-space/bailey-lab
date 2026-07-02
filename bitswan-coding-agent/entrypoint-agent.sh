@@ -18,9 +18,10 @@ su - agent -c 'git config --global user.email "agent@bitswan.local"'
 su - agent -c 'git config --global --add safe.directory "*"'
 
 # Configure git credentials so plain `git push/pull` to the workspace git
-# server authenticates with the agent secret. git's "store" helper matches by
-# host, so a single host-only line in ~/.git-credentials covers every repo path
-# served from that host.
+# server authenticates with the agent secret. BITSWAN_GIT_REMOTE is the BASE
+# URL of the per-BP repos (each clone's origin is <base>/<bp>.git); git's
+# "store" helper matches by host, so a single host-only line in
+# ~/.git-credentials covers every per-BP repo served from that host.
 if [ -n "$BITSWAN_GIT_REMOTE" ] && [ -n "$BITSWAN_GITOPS_AGENT_SECRET" ]; then
     su - agent -c 'git config --global credential.helper store'
     # Strip scheme (http:// or https://) and any path, leaving just HOST[:port].

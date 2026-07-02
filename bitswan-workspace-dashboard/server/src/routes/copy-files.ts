@@ -321,7 +321,7 @@ export function registerCopyFilesRoutes(
     }
   });
 
-  app.get<{ Params: { name: string; sha: string } }>(
+  app.get<{ Params: { name: string; sha: string }; Querystring: { bp?: string } }>(
     '/api/copies/:name/commit/:sha/diff',
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
@@ -335,7 +335,11 @@ export function registerCopyFilesRoutes(
         return reply.code(503).send({ error: 'gitops not configured' });
       }
       try {
-        const r = await gitops.copyCommitDiff(req.params.name, req.params.sha);
+        const r = await gitops.copyCommitDiff(
+          req.params.name,
+          req.params.sha,
+          req.query.bp,
+        );
         if (!r.ok) {
           return reply
             .code(r.status >= 400 && r.status < 500 ? r.status : 502)

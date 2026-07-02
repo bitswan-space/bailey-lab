@@ -83,7 +83,10 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
   const active = useMemo(
     () =>
       allSessions.filter(
-        (s) => !s.exited && s.copy === copy && (s.kind === 'sync' || s.bp === bp),
+        (s) =>
+          !s.exited &&
+          s.copy === copy &&
+          (s.bp === bp || (s.kind === 'sync' && s.bp === null)),
       ),
     [allSessions, copy, bp],
   );
@@ -230,7 +233,14 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
       {/* Files pane — mounted alongside so toggling back to Chat doesn't
           remount (and re-fetch) the tree. */}
       <div className={cn('min-h-0 flex-1 overflow-hidden', sub !== 'files' && 'hidden')}>
-        {showDiff ? <DiffTab copy={copy} /> : <FilesTab copy={copy} bp={bp} />}
+        {/* Scope the diff to this BP — the whole tab is per-BP, and with
+            per-BP repos "the copy's diff" is an aggregate that would mix in
+            unrelated business processes. */}
+        {showDiff ? (
+          <DiffTab copy={copy} pathPrefix={bp} />
+        ) : (
+          <FilesTab copy={copy} bp={bp} />
+        )}
       </div>
 
       {/* Containers pane — mounted only when active; its LogsPane opens an

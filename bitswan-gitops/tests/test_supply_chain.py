@@ -175,17 +175,28 @@ def test_supply_chain_not_deployed_when_no_images(tmp_path, monkeypatch):
 
 
 def test_waivers_live_in_the_source_tree_and_commit(tmp_path, monkeypatch):
-    """Out-of-scope markings are stored in the copy's source tree
-    (`<copy>/<bp>/cve-waivers.yaml`), committed — not in bitswan.yaml."""
-    from app.services import cve_waivers
+    """Out-of-scope markings are stored in the BP's source tree
+    (`<copy>/<bp>/cve-waivers.yaml`), committed in the BP's own clone (and,
+    for the main scope, published to its repo's main) — not in bitswan.yaml."""
+    from app.services import bp_git, cve_waivers, git_server
 
+    monkeypatch.setattr(git_server, "GIT_REPOS_DIR", str(tmp_path / "git"))
+    monkeypatch.setattr(
+        git_server, "HOOKS_SRC_DIR", str(tmp_path / "nonexistent-hooks")
+    )
     copies = tmp_path / "copies"
     monkeypatch.setenv("BITSWAN_COPIES_DIR", str(copies))
+    monkeypatch.delenv("BITSWAN_GIT_REMOTE", raising=False)
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "ci")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "ci@x")
+    (copies / "main").mkdir(parents=True)
+    asyncio.run(git_server.ensure_bp_bare_repo("shop"))
+    asyncio.run(
+        bp_git.clone_bp_into_copy(
+            str(copies / "main"), "main", "shop", allow_empty=True
+        )
+    )
     main = copies / "main"
-    (main / "shop").mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=main, check=True)
-    subprocess.run(["git", "config", "user.email", "ci@x"], cwd=main, check=True)
-    subprocess.run(["git", "config", "user.name", "ci"], cwd=main, check=True)
 
     out = asyncio.run(
         cve_waivers.set_waiver(
@@ -207,9 +218,26 @@ def test_waivers_live_in_the_source_tree_and_commit(tmp_path, monkeypatch):
     waiver_file = main / "shop" / "cve-waivers.yaml"
     assert waiver_file.is_file()
     log = subprocess.run(
-        ["git", "log", "--oneline"], cwd=main, capture_output=True, text=True
+        ["git", "log", "--oneline"],
+        cwd=main / "shop",
+        capture_output=True,
+        text=True,
     ).stdout
     assert "CVE-2023-5678" in log
+    # Main-scope marking also reached the BP repo's deploy-only main.
+    bare_names = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path / "git" / "shop.git"),
+            "ls-tree",
+            "--name-only",
+            "main",
+        ],
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "cve-waivers.yaml" in bare_names
     assert cve_waivers.read_waivers("shop", None) == {
         "openssl|CVE-2023-5678": {
             "package": "openssl",

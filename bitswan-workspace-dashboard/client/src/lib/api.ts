@@ -499,6 +499,16 @@ export interface SyncCopyResult {
   deploy_task_id?: string | null;
 }
 
+/** Gitops `POST /copies/{name}/rebase` response — pulling main into a copy. */
+export interface RebaseCopyResult {
+  status: 'success' | 'needs_rebase' | 'noop';
+  message: string;
+  /** BPs whose image dir changed in the pull and were redeployed. */
+  redeployed_bps?: string[];
+  /** Task ids of the live-dev redeploys spawned for those BPs. */
+  deploy_task_ids?: string[];
+}
+
 /** Gitops `GET /copies/{name}/divergence?bp=` — commit counts vs main, split
  *  into the viewed business process vs all other business processes. */
 export interface BpDivergence {
@@ -848,15 +858,22 @@ export const api = {
       getJson<BpDivergence>(
         `/api/copies/${encodeURIComponent(name)}/divergence?bp=${encodeURIComponent(bp)}`,
       ),
+    /** Per-BP ahead/behind for the whole copy in one call (only diverging BPs
+     *  are present). Lets the switcher show ↑/↓ on each BP at a glance. */
+    divergenceAll: (name: string) =>
+      getJson<Record<string, { ahead: number; behind: number }>>(
+        `/api/copies/${encodeURIComponent(name)}/divergence-all`,
+      ),
     diff: (name: string, p?: string) =>
       getJson<{ diff: string }>(
         `/api/copies/${encodeURIComponent(name)}/diff${p ? `?path=${encodeURIComponent(p)}` : ''}`,
       ),
     /** Unified diff introduced by a single commit (`git show`), for the
-     *  clickable rows in the History view. */
-    commitDiff: (name: string, sha: string) =>
+     *  clickable rows in the History view. `bp` names the business-process
+     *  repo the commit lives in (each BP is its own repo). */
+    commitDiff: (name: string, sha: string, bp?: string) =>
       getJson<{ diff: string }>(
-        `/api/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff`,
+        `/api/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff${bp ? `?bp=${encodeURIComponent(bp)}` : ''}`,
       ),
     /**
      * Sync the copy into main. Commits WIP and, when the copy is a pure
@@ -869,8 +886,23 @@ export const api = {
         `/api/copies/${encodeURIComponent(name)}/sync`,
         bp ? { bp } : {},
       ),
-    history: (name: string) =>
-      getJson<CopyHistory>(`/api/copies/${encodeURIComponent(name)}/history`),
+    /**
+     * Pull main's new commits INTO the copy (rebase the whole copy onto main).
+     * The opposite direction from `sync`. A clean rebase advances the copy and
+     * redeploys live-dev only for BPs whose image dir changed; `needs_rebase`
+     * means a conflict that the coding agent must resolve.
+     */
+    rebase: (name: string) =>
+      postJson<RebaseCopyResult>(
+        `/api/copies/${encodeURIComponent(name)}/rebase`,
+        {},
+      ),
+    /** Copy-branch + main commit logs with deploy tags, scoped to one
+     *  business process's repo. */
+    history: (name: string, bp: string) =>
+      getJson<CopyHistory>(
+        `/api/copies/${encodeURIComponent(name)}/history?bp=${encodeURIComponent(bp)}`,
+      ),
   },
 
   snapshots: {

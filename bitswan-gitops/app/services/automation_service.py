@@ -35,6 +35,8 @@ from app.services.image_service import ImageService
 from app.services import bp_secrets
 from app.services import supply_chain_service
 from app.services import firewall_service
+from app.services.bp_git import fetch_main
+from app.services.git_server import validate_bp_name
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
@@ -970,7 +972,7 @@ class AutomationService:
             deployment_id format stays canonical),
           * build the per-automation runtime image if it ships an
             `image/Dockerfile` (`_ensure_automation_image`),
-          * compute the merged-tree checksum (with `bitswan_lib`) and
+          * compute the source-tree checksum and
             materialize `<gitops_dir>/<checksum>/` (skipped for live-dev).
 
         Returns: {deployment_id, checksum, stage, relative_path,
@@ -999,7 +1001,6 @@ class AutomationService:
 
         deployment_id = self.deployment_id_for(source, stage)
 
-        # Resolve source dir + optional bitswan_lib for the merge.
         source_dir = os.path.realpath(
             os.path.join(self.workspace_repo_dir, relative_path)
         )
@@ -1008,10 +1009,7 @@ class AutomationService:
             source_dir == ws_root_real or source_dir.startswith(ws_root_real + os.sep)
         ):
             raise HTTPException(status_code=400, detail="Source escapes workspace")
-        bitswan_lib_dir = os.path.join(self.workspace_repo_dir, "bitswan_lib")
         dirs_to_merge = [source_dir]
-        if os.path.isdir(bitswan_lib_dir):
-            dirs_to_merge.append(bitswan_lib_dir)
 
         # Build the per-automation runtime image if the source ships a
         # Dockerfile under `image/`. This MUST run before the
@@ -1081,8 +1079,8 @@ class AutomationService:
         """Deploy a single automation directly from the bind-mounted workspace.
 
         Thin wrapper over `prep_deploy_source` that additionally reserves the
-        deploy task. Discovers the source, merges `bitswan_lib`, materializes
-        the merged tree under `<gitops_dir>/<checksum>/`, and returns the
+        deploy task. Discovers the source, materializes
+        the source tree under `<gitops_dir>/<checksum>/`, and returns the
         kwargs the deploy pipeline (`deploy_automation`) consumes.
 
         `stage="live-dev"` skips materialization and uses the literal
@@ -1551,17 +1549,21 @@ class AutomationService:
 
     async def bp_diff(self, bp: str, from_sha: str, to_sha: str) -> dict:
         """Unified diff of a BP's source between two commits (the history view's
-        "diff vs current"). Scoped to the BP's directory, computed in copies/main
-        where the canonical source lives."""
-        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
+        "diff vs current"). Each BP is its OWN git repo, so this runs inside the
+        BP's clone in copies/main — copies/main itself is no longer a repo. The
+        two commits are deploy source_commits that live on the BP repo's main,
+        reachable only after a fetch (as in copies.get_commit_diff)."""
+        validate_bp_name(bp)
+        clone = os.path.join(_copies_dir(), "main", bp)
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            return {"diff": "", "from": from_sha, "to": to_sha}
+        await fetch_main(clone, bp)
         out, _, rc = await call_git_command_with_output(
             "git",
             "diff",
             "--no-color",
             f"{from_sha}..{to_sha}",
-            "--",
-            f"{bp}/",
-            cwd=main,
+            cwd=clone,
         )
         return {"diff": out if rc == 0 else "", "from": from_sha, "to": to_sha}
 
@@ -2252,10 +2254,7 @@ class AutomationService:
             source_dir == ws_root_real or source_dir.startswith(ws_root_real + os.sep)
         ):
             raise HTTPException(status_code=400, detail="Source escapes workspace")
-        bitswan_lib_dir = os.path.join(self.workspace_repo_dir, "bitswan_lib")
         dirs_to_merge = [source_dir]
-        if os.path.isdir(bitswan_lib_dir):
-            dirs_to_merge.append(bitswan_lib_dir)
         base_tag = await self._ensure_automation_image(source_dir)
         auto_conf = read_automation_config(source_dir)
         base_image = base_tag or auto_conf.image
@@ -2654,18 +2653,19 @@ class AutomationService:
         Files), as nested FileTreeNode entries with BP-relative paths."""
         if not re.fullmatch(r"[0-9a-fA-F]{4,64}", commit or ""):
             raise HTTPException(status_code=400, detail="invalid commit")
-        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
+        validate_bp_name(bp)
+        # Each BP is its own repo; run inside its clone (copies/main is not a
+        # repo). Paths are already BP-relative, so no bp/ prefix to strip.
+        clone = os.path.join(_copies_dir(), "main", bp)
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            raise HTTPException(status_code=404, detail=f"not found: {bp}@{commit}")
+        await fetch_main(clone, bp)
         out, _, rc = await call_git_command_with_output(
-            "git", "ls-tree", "-r", "--name-only", commit, "--", f"{bp}/", cwd=main
+            "git", "ls-tree", "-r", "--name-only", commit, cwd=clone
         )
         if rc != 0:
             raise HTTPException(status_code=404, detail=f"not found: {bp}@{commit}")
-        prefix = bp + "/"
-        rels = [
-            line[len(prefix) :] if line.startswith(prefix) else line
-            for line in out.splitlines()
-            if line.strip()
-        ]
+        rels = [line for line in out.splitlines() if line.strip()]
         return {"entries": self._nest_tree(rels)}
 
     async def bp_file_content(self, bp: str, commit: str, path: str) -> dict:
@@ -2675,15 +2675,19 @@ class AutomationService:
             raise HTTPException(status_code=400, detail="invalid commit")
         if not path or path.startswith("/") or ".." in path.split("/"):
             raise HTTPException(status_code=400, detail="invalid path")
-        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
-        rel = f"{bp}/{path}"
+        validate_bp_name(bp)
+        # BP-own repo; paths are BP-relative within the clone (no bp/ prefix).
+        clone = os.path.join(_copies_dir(), "main", bp)
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            raise HTTPException(status_code=404, detail=f"not a file: {path}")
+        await fetch_main(clone, bp)
         typ, _, trc = await call_git_command_with_output(
-            "git", "cat-file", "-t", f"{commit}:{rel}", cwd=main
+            "git", "cat-file", "-t", f"{commit}:{path}", cwd=clone
         )
         if trc != 0 or typ.strip() != "blob":
             raise HTTPException(status_code=404, detail=f"not a file: {path}")
         out, _, _ = await call_git_command_with_output(
-            "git", "show", f"{commit}:{rel}", cwd=main
+            "git", "show", f"{commit}:{path}", cwd=clone
         )
         cap = 1_000_000
         return {"path": path, "content": out[:cap], "truncated": len(out) > cap}

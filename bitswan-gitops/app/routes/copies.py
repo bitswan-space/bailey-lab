@@ -1,65 +1,60 @@
 """Copy management.
 
-A "copy" is an independent ``git clone`` of the workspace's canonical bare repo
-(``repo.git``), checked out on its own branch, living at
-``${BITSWAN_COPIES_DIR}/<name>``. The ``main`` copy is the default-branch
-scope; other copies are per-agent / per-task checkouts.
-Each copy's ``origin`` points at the embedded smart-HTTP git server so agents
-push/pull with normal git (fast-forward only).
+A "copy" is a user's working environment: a plain directory at
+``${BITSWAN_COPIES_DIR}/<name>`` whose business-process subdirectories are each
+an independent ``git clone`` of that BP's own canonical bare repo
+(``<bp>.git`` — see ``app.services.git_server``), checked out on branch
+``<name>``. The ``main`` copy is the default-branch scope: each of its BP dirs
+is a checkout of that repo's ``main``.
 
-This replaces the old shared-``.git`` worktree model. The router is served under
-``/copies``.
+Because every BP has its own repo, syncing one BP is a plain push +
+fast-forward of that repo's main — it can never entangle another BP's
+changes. Copy-level endpoints aggregate over the copy's BP clones so the API
+shapes are unchanged from the single-repo era.
+
+Each clone's ``origin`` points at the embedded smart-HTTP git server so agents
+push/pull with normal git (fast-forward only; main is deploy-only).
+The router is served under ``/copies``.
 """
 
 import datetime
 import logging
 import os
 import re
-import shutil
-import tempfile
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.deploy_runner import spawn_set_deploy
 from app.services.automation_service import scan_workspace_sources
-from app.services.git_server import bare_repo_path
-from app.utils import call_git_command, call_git_command_with_output
+from app.services.bp_git import (
+    copies_dir as _copies_dir,
+)
+from app.services.bp_git import (
+    clone_bp_into_copy as _clone_bp_into_copy,
+)
+from app.services.bp_git import (
+    fetch_main,
+    ff_main_to_ref,
+    list_bp_clones,
+    refresh_main_bp_checkout,
+)
+from app.services.git_server import (
+    bp_bare_repo_path,
+    bp_main_has_content,
+    list_bp_repos,
+)
+from app.utils import (
+    call_git_command,
+    call_git_command_with_output,
+    read_bitswan_yaml,
+)
 
 
 logger = logging.getLogger(__name__)
 
 # No prefix here — main.py includes this router under /copies.
 router = APIRouter(tags=["copies"])
-
-
-def _copies_dir() -> str:
-    """Base directory holding the per-copy checkouts."""
-    return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
-
-
-def _git_remote_url() -> str:
-    """The smart-HTTP URL agents use as ``origin`` for a copy."""
-    url = os.environ.get("BITSWAN_GIT_REMOTE")
-    if url:
-        return url
-    ws = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace")
-    return f"http://{ws}-gitops:8079/git/repo.git"
-
-
-def _get_postgres_secrets(stage: str = "dev") -> dict | None:
-    """Read Postgres connection info from the secrets file for the given stage."""
-    from app.services.bp_databases import get_service_secrets
-
-    info = get_service_secrets("postgres", stage)
-    if (
-        info
-        and info.get("POSTGRES_USER")
-        and info.get("POSTGRES_PASSWORD")
-        and info.get("POSTGRES_HOST")
-    ):
-        return info
-    return None
 
 
 # Copy names are filesystem path segments AND git branch names AND positional
@@ -98,13 +93,18 @@ def _validate_ref_name(name: str) -> None:
 
 
 def _resolve_copy_path(name: str) -> str:
-    """Validate `name` and return the realpath to the copy checkout."""
+    """Validate `name` and return the realpath to the copy directory."""
     _validate_copy_name(name)
     base = os.path.realpath(_copies_dir())
     candidate = os.path.realpath(os.path.join(base, name))
     if candidate != base and not candidate.startswith(base + os.sep):
         raise HTTPException(status_code=400, detail="Invalid copy name")
     return candidate
+
+
+def _validate_bp_dir(bp: str) -> None:
+    if bp in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", bp or ""):
+        raise HTTPException(status_code=400, detail="invalid business process name")
 
 
 class CreateCopyRequest(BaseModel):
@@ -114,8 +114,12 @@ class CreateCopyRequest(BaseModel):
 
 @router.post("/create")
 async def create_copy(body: CreateCopyRequest):
-    """Create a new copy: an independent clone of the canonical repo on its own
-    branch, with origin set to the smart-HTTP git server."""
+    """Create a new copy: a directory of per-BP clones, each on a new branch
+    named after the copy, with origins set to the smart-HTTP git server.
+
+    Eagerly clones every BP whose main has content (matching the old
+    "a new copy starts from main" semantics); BPs that exist only in other
+    copies appear here after they are synced into main (or via a pull)."""
     _validate_copy_name(body.branch_name)
 
     name = body.branch_name
@@ -128,43 +132,15 @@ async def create_copy(body: CreateCopyRequest):
         _validate_ref_name(body.base_branch)
         base = body.base_branch
 
-    os.makedirs(_copies_dir(), exist_ok=True)
-    bare = bare_repo_path()
+    os.makedirs(copy_path, exist_ok=True)
 
-    # Clone from the local bare repo (fast, direct disk access), branch off the
-    # base, publish the new branch back to the bare (the pre-receive hook allows
-    # new branches), then repoint origin at the smart-HTTP URL that the agent
-    # containers use at runtime.
-    if not await call_git_command("git", "clone", bare, copy_path):
-        raise HTTPException(status_code=500, detail="Failed to clone canonical repo")
-
-    ok = await call_git_command(
-        "git", "checkout", "-b", name, f"origin/{base}", cwd=copy_path
-    )
-    if not ok:
+    try:
+        for bp in list_bp_repos():
+            await _clone_bp_into_copy(copy_path, name, bp, base)
+    except HTTPException:
         await _rm_rf_as_root_in_container(copy_path)
-        raise HTTPException(
-            status_code=500, detail=f"Failed to create branch '{name}' from '{base}'"
-        )
+        raise
 
-    pub_out, pub_err, pub_rc = await call_git_command_with_output(
-        "git", "push", "origin", name, cwd=copy_path
-    )
-    if pub_rc != 0:
-        await _rm_rf_as_root_in_container(copy_path)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to publish branch '{name}': {(pub_err or pub_out).strip()}",
-        )
-
-    await call_git_command(
-        "git", "remote", "set-url", "origin", _git_remote_url(), cwd=copy_path
-    )
-
-    # No per-copy database at copy-create. Each BP's live-dev backend in this
-    # copy gets its OWN per-(copy, BP) database (copy_<copy>_bp_<slug>), created
-    # at deploy by the driver's ensure guard and seeded from that BP's dev DB —
-    # so there is nothing to clone here.
     result = {"name": name, "path": copy_path}
 
     # Auto-start live-dev for every automation in the new copy (best-effort).
@@ -192,60 +168,79 @@ async def create_copy(body: CreateCopyRequest):
 _copies_cache: list[dict] | None = None
 
 
-async def _git_state(copy_path: str, name: str) -> dict:
-    """Read a copy's git state from its own .git (independent clone)."""
-    branch = name
-    br_out, _, br_rc = await call_git_command_with_output(
-        "git", "rev-parse", "--abbrev-ref", "HEAD", cwd=copy_path
-    )
-    if br_rc == 0 and br_out.strip():
-        branch = br_out.strip()
-
+async def _bp_clone_state(clone_path: str, bp: str) -> dict:
+    """Git state of one BP clone: last commit, dirtiness, ahead/behind vs the
+    BP repo's main."""
     commit_hash = ""
     commit_message = ""
+    commit_ts = 0
     log_out, _, log_rc = await call_git_command_with_output(
-        "git", "log", "-1", "--format=%H %s", cwd=copy_path
+        "git", "log", "-1", "--format=%H%x1f%ct%x1f%s", cwd=clone_path
     )
     if log_rc == 0 and log_out.strip():
-        parts = log_out.strip().split(" ", 1)
-        commit_hash = parts[0] if parts else ""
-        commit_message = parts[1] if len(parts) > 1 else ""
-
-    has_requirements = os.path.exists(os.path.join(copy_path, ".requirements.json"))
+        f = log_out.strip().split("\x1f")
+        if len(f) == 3:
+            commit_hash = f[0]
+            commit_ts = int(f[1]) if f[1].isdigit() else 0
+            commit_message = f[2]
 
     status_out, _, _ = await call_git_command_with_output(
-        "git", "status", "--porcelain", cwd=copy_path
+        "git", "status", "--porcelain", cwd=clone_path
     )
     has_changes = bool(status_out and status_out.strip())
 
-    # Ahead/behind vs the canonical main. Refresh our view of main from the
-    # LOCAL bare repo (filesystem, no network, no credentials — gitops can't
-    # authenticate to its own smart-HTTP `origin`); FETCH_HEAD then points at
-    # the current main. "ahead" = commits on the copy not yet on main;
-    # "behind" = commits on main the copy hasn't picked up. behind == 0 means a
-    # fast-forward of main to this copy needs no rebase.
     ahead = behind = 0
-    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
-    ahead_out, _, ahead_cnt_rc = await call_git_command_with_output(
-        "git", "rev-list", "--count", "FETCH_HEAD..HEAD", cwd=copy_path
+    await fetch_main(clone_path, bp)
+    ahead_out, _, ahead_rc = await call_git_command_with_output(
+        "git", "rev-list", "--count", "FETCH_HEAD..HEAD", cwd=clone_path
     )
-    if ahead_cnt_rc == 0 and ahead_out.strip().isdigit():
+    if ahead_rc == 0 and ahead_out.strip().isdigit():
         ahead = int(ahead_out.strip())
-    behind_out, _, behind_cnt_rc = await call_git_command_with_output(
-        "git", "rev-list", "--count", "HEAD..FETCH_HEAD", cwd=copy_path
+    behind_out, _, behind_rc = await call_git_command_with_output(
+        "git", "rev-list", "--count", "HEAD..FETCH_HEAD", cwd=clone_path
     )
-    if behind_cnt_rc == 0 and behind_out.strip().isdigit():
+    if behind_rc == 0 and behind_out.strip().isdigit():
         behind = int(behind_out.strip())
 
-    synced = not has_changes and ahead == 0 and behind == 0
+    return {
+        "bp": bp,
+        "commit_hash": commit_hash,
+        "commit_message": commit_message,
+        "commit_ts": commit_ts,
+        "has_changes": has_changes,
+        "ahead": ahead,
+        "behind": behind,
+    }
+
+
+async def _git_state(copy_path: str, name: str) -> dict:
+    """Aggregate git state of a copy across its per-BP clones.
+
+    ahead/behind are sums, has_changes is any, synced is all — the wire shape
+    matches the single-repo era so the dashboard needs no change. The commit
+    shown is the newest across the copy's clones.
+    """
+    states = []
+    for bp in list_bp_clones(copy_path):
+        try:
+            states.append(await _bp_clone_state(os.path.join(copy_path, bp), bp))
+        except Exception as e:
+            logger.warning("Failed to read state of %s/%s: %s", name, bp, e)
+
+    newest = max(states, key=lambda s: s["commit_ts"], default=None)
+    ahead = sum(s["ahead"] for s in states)
+    behind = sum(s["behind"] for s in states)
+    has_changes = any(s["has_changes"] for s in states)
+
+    has_requirements = os.path.exists(os.path.join(copy_path, ".requirements.json"))
 
     return {
         "name": name,
-        "branch": branch,
-        "commit_hash": commit_hash,
-        "commit_message": commit_message,
+        "branch": name,
+        "commit_hash": newest["commit_hash"] if newest else "",
+        "commit_message": newest["commit_message"] if newest else "",
         "has_requirements": has_requirements,
-        "synced": synced,
+        "synced": not has_changes and ahead == 0 and behind == 0,
         "ahead": ahead,
         "behind": behind,
         "has_changes": has_changes,
@@ -255,9 +250,9 @@ async def _git_state(copy_path: str, name: str) -> dict:
 async def _compute_copies() -> list[dict]:
     """Enumerate the copies directory and assemble the listing.
 
-    Each copy is an independent clone with its own .git, so state is read
-    per-copy. The `main` copy is excluded from the list (it's the
-    default scope, not a user-managed copy).
+    A copy is any non-hidden directory except `main` (the default scope, not a
+    user-managed copy). The copy root is a plain directory — its git state
+    lives in the per-BP clones inside it.
     """
     copies_base = _copies_dir()
     if not os.path.isdir(copies_base):
@@ -268,7 +263,7 @@ async def _compute_copies() -> list[dict]:
         if entry.startswith(".") or entry == "main":
             continue
         copy_path = os.path.join(copies_base, entry)
-        if not os.path.isdir(os.path.join(copy_path, ".git")):
+        if not os.path.isdir(copy_path):
             continue
         try:
             result.append(await _git_state(copy_path, entry))
@@ -292,89 +287,6 @@ async def refresh_copies() -> list[dict]:
     return _copies_cache
 
 
-async def _fast_forward_main_to_branch(name: str) -> dict:
-    """Fast-forward `main` to the copy's branch tip in the canonical (bare)
-    repo. Append-only: succeeds only when `main` is an ancestor of the branch
-    (a true fast-forward); raises 409 otherwise. The branch must already be
-    pushed to the bare repo."""
-    bare = bare_repo_path()
-
-    _, _, exists_rc = await call_git_command_with_output(
-        "git", "-C", bare, "rev-parse", "--verify", f"refs/heads/{name}"
-    )
-    if exists_rc != 0:
-        raise HTTPException(status_code=404, detail=f"Copy branch '{name}' not found")
-
-    _, _, ff_rc = await call_git_command_with_output(
-        "git",
-        "-C",
-        bare,
-        "merge-base",
-        "--is-ancestor",
-        "refs/heads/main",
-        f"refs/heads/{name}",
-    )
-    if ff_rc != 0:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"'{name}' is not a fast-forward of main. Rebase the copy onto "
-                "the latest main and push, then merge."
-            ),
-        )
-
-    out, err, rc = await call_git_command_with_output(
-        "git", "-C", bare, "update-ref", "refs/heads/main", f"refs/heads/{name}"
-    )
-    if rc != 0:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fast-forward main: {(err or out).strip()}",
-        )
-    # The bare repo's `main` ref now points at the new tip, but the scanners
-    # (in_main, main-branch live-dev) read the `copies/main` WORKING TREE — so
-    # advance that checkout too, or the synced BP never shows up in main.
-    await _refresh_main_copy_checkout()
-    return {"status": "success", "message": f"main fast-forwarded to '{name}'"}
-
-
-async def _refresh_main_copy_checkout() -> None:
-    """Fast-forward the gitops-maintained `copies/main` working tree to the
-    canonical repo's `main` tip.
-
-    `main` is deploy-only: it advances solely through this code path, never a
-    human edit, so the checkout is always a clean fast-forward of the bare ref.
-    This is the checkout the process/automation scanners walk for the main
-    scope, so without this step a synced BP advances `refs/heads/main` but
-    stays invisible in main (`in_main` false, no main-branch live-dev)."""
-    main_copy = os.path.join(_copies_dir(), "main")
-    if not os.path.isdir(os.path.join(main_copy, ".git")):
-        # The main copy is provisioned at workspace init; if it isn't here yet
-        # there is nothing to advance (and the bare ref is already current).
-        return
-    bare = bare_repo_path()
-    # Fetch from the local bare path (gitops can't authenticate to its own
-    # smart-HTTP `origin`); FETCH_HEAD then points at the new main tip.
-    await call_git_command("git", "fetch", bare, "main", cwd=main_copy)
-    # `main` is deploy-only and the bare ref is authoritative, so force the
-    # checkout to match it exactly (`reset --hard`) rather than `merge --ff-only`.
-    # ff-only is fragile: if the checkout ever diverges (a stray commit, an
-    # interrupted sync), every subsequent sync would 500 forever. reset --hard
-    # leaves untracked/ignored build artifacts in place and just realigns the
-    # tracked tree with the canonical main.
-    out, err, rc = await call_git_command_with_output(
-        "git", "reset", "--hard", "FETCH_HEAD", cwd=main_copy
-    )
-    if rc != 0:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "main advanced in the canonical repo, but the main checkout "
-                f"could not be realigned: {(err or out).strip()}"
-            ),
-        )
-
-
 class SyncCopyResponse(BaseModel):
     status: str  # "success" | "needs_rebase"
     method: str | None = None  # "fast-forward" when synced server-side
@@ -383,20 +295,17 @@ class SyncCopyResponse(BaseModel):
     # deployed dev stage tracks main (matches live-dev). None when nothing was
     # deployed (no change, or no deployable members).
     deploy_task_id: str | None = None
+    # Per-BP outcomes (additive; one entry per BP the sync touched):
+    # [{bp, status, method, deploy_task_id, message}]
+    bp_results: list[dict] = []
 
 
 class SyncCopyRequest(BaseModel):
     # Email of the user who pressed Sync & Deploy, recorded on the deploy tag.
     deployer: str | None = None
-    # When set, sync ONLY the commits that touched this business process's
-    # directory into main (auto-rebasing the copy's other commits), so an
-    # unrelated BP's work-in-progress isn't dragged into the deploy.
+    # When set, sync/rebase ONLY this business process. Each BP is its own
+    # repo, so the operation is naturally scoped — other BPs are untouched.
     bp: str | None = None
-
-
-def _validate_bp_dir(bp: str) -> None:
-    if bp in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", bp or ""):
-        raise HTTPException(status_code=400, detail="invalid business process name")
 
 
 def _ident_args(deployer: str | None) -> list[str]:
@@ -406,17 +315,17 @@ def _ident_args(deployer: str | None) -> list[str]:
 
 
 async def _wip_commit(
-    copy_path: str, deployer: str | None, add_args: list[str], message: str
+    clone_path: str, deployer: str | None, add_args: list[str], message: str
 ) -> None:
     """Stage ``add_args`` and commit if anything was staged (no-op otherwise)."""
-    await call_git_command("git", "add", *add_args, cwd=copy_path)
+    await call_git_command("git", "add", *add_args, cwd=clone_path)
     _, _, clean_rc = await call_git_command_with_output(
-        "git", "diff", "--cached", "--quiet", cwd=copy_path
+        "git", "diff", "--cached", "--quiet", cwd=clone_path
     )
     if clean_rc == 0:
         return  # nothing staged
     _, c_err, c_rc = await call_git_command_with_output(
-        "git", *_ident_args(deployer), "commit", "-m", message, cwd=copy_path
+        "git", *_ident_args(deployer), "commit", "-m", message, cwd=clone_path
     )
     if c_rc != 0:
         raise HTTPException(
@@ -424,220 +333,18 @@ async def _wip_commit(
         )
 
 
-async def _sync_copy_per_bp(
-    name: str, copy_path: str, bp: str, deployer: str | None
-) -> "SyncCopyResponse":
-    """Sync ONLY the commits that touched business process ``bp`` into main, then
-    rebase the copy onto the new main (dropping the now-merged commits).
-
-    Cherry-picks the BP's commits onto a temp branch off main; if that or the
-    follow-up copy rebase hits a conflict, NOTHING is touched and we return
-    ``needs_rebase`` so the coding agent resolves it. main and the copy's branch
-    ref are advanced server-side with ``update-ref`` — the copy rebase rewrites
-    history, which the ff-only pre-receive hook would otherwise reject.
-
-    Assumes the caller already committed WIP and fetched main (FETCH_HEAD)."""
-    _validate_bp_dir(bp)
-    bare = bare_repo_path()
-    ident = _ident_args(deployer)
-
-    # Copy HEAD before we touch anything, so a mid-rebuild conflict can restore
-    # the copy exactly as it was (then hand off to the agent).
-    oh_out, _, _ = await call_git_command_with_output(
-        "git", "rev-parse", "HEAD", cwd=copy_path
-    )
-    orig_head = oh_out.strip()
-
-    # Commits on the copy not yet in main (oldest-first), and the subset that
-    # touched this BP's directory.
-    all_out, _, _ = await call_git_command_with_output(
-        "git", "rev-list", "--reverse", "FETCH_HEAD..HEAD", cwd=copy_path
-    )
-    bp_out, _, _ = await call_git_command_with_output(
-        "git",
-        "rev-list",
-        "--reverse",
-        "FETCH_HEAD..HEAD",
-        "--",
-        f"{bp}/",
-        cwd=copy_path,
-    )
-    all_commits = all_out.split()
-    bp_commits = bp_out.split()
-
-    if not bp_commits:
-        # Nothing to merge — but the deployed dev stage can still be behind main
-        # (e.g. it was synced before the auto-deploy existed). "Sync & Deploy"
-        # should still bring dev up to main, so deploy when it's stale.
-        task_id = await _spawn_dev_deploy(bp, deployer)
-        return SyncCopyResponse(
-            status="success",
-            method="noop",
-            message=f"No changes to '{bp}' to sync into main.",
-            deploy_task_id=task_id,
-        )
-
-    # Fast path: the copy's only un-merged commits are this BP's and they sit
-    # directly on main — a plain fast-forward, no history rewrite needed.
-    _, _, ff_rc = await call_git_command_with_output(
-        "git", "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD", cwd=copy_path
-    )
-    if ff_rc == 0 and set(all_commits) == set(bp_commits):
-        p_out, p_err, p_rc = await call_git_command_with_output(
-            "git", "push", bare, f"HEAD:refs/heads/{name}", cwd=copy_path
-        )
-        if p_rc != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to push copy '{name}': {(p_err or p_out).strip()}",
-            )
-        await _fast_forward_main_to_branch(name)
-        await _tag_deploy(name, deployer)
-        task_id = await _spawn_dev_deploy(bp, deployer)
-        return SyncCopyResponse(
-            status="success",
-            method="fast-forward",
-            message=f"Synced '{bp}' into main (fast-forward).",
-            deploy_task_id=task_id,
-        )
-
-    # General path: cherry-pick only the BP commits onto a temp branch off main.
-    # The temp dir is "."-prefixed so the copy watchers ignore it.
-    tmpdir = tempfile.mkdtemp(prefix=f".syncbp-{name}-", dir=_copies_dir())
-    os.rmdir(tmpdir)  # git worktree add needs to create the dir itself
-    try:
-        _, w_err, w_rc = await call_git_command_with_output(
-            "git",
-            "worktree",
-            "add",
-            "--detach",
-            tmpdir,
-            "FETCH_HEAD",
-            cwd=copy_path,
-        )
-        if w_rc != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to set up temp worktree: {w_err.strip()}",
-            )
-        try:
-            for c in bp_commits:
-                _, cp_err, cp_rc = await call_git_command_with_output(
-                    "git", *ident, "cherry-pick", "--allow-empty", c, cwd=tmpdir
-                )
-                if cp_rc != 0:
-                    await call_git_command("git", "cherry-pick", "--abort", cwd=tmpdir)
-                    return SyncCopyResponse(
-                        status="needs_rebase",
-                        message=(
-                            f"Applying '{bp}' commits onto main hit a conflict — "
-                            "hand off to the coding agent to rebase and resolve."
-                        ),
-                    )
-            tip_out, _, _ = await call_git_command_with_output(
-                "git", "rev-parse", "HEAD", cwd=tmpdir
-            )
-            temp_tip = tip_out.strip()
-        finally:
-            await call_git_command(
-                "git", "worktree", "remove", "--force", tmpdir, cwd=copy_path
-            )
-
-        # Rebuild the copy as: new main (temp_tip) + its NON-BP commits replayed
-        # in order. Explicit (reset + cherry-pick the non-BP commits) rather than
-        # `git rebase`, whose already-applied detection is version-dependent —
-        # the BP commits are simply not replayed since they're already in main.
-        bp_set = set(bp_commits)
-        non_bp = [c for c in all_commits if c not in bp_set]
-        await call_git_command_with_output(
-            "git", "reset", "--hard", temp_tip, cwd=copy_path
-        )
-        for c in non_bp:
-            _, rc_err, rc_rc = await call_git_command_with_output(
-                "git", *ident, "cherry-pick", "--allow-empty", c, cwd=copy_path
-            )
-            if rc_rc != 0:
-                await call_git_command("git", "cherry-pick", "--abort", cwd=copy_path)
-                # Restore the copy exactly as it was; main is still untouched.
-                await call_git_command_with_output(
-                    "git", "reset", "--hard", orig_head, cwd=copy_path
-                )
-                return SyncCopyResponse(
-                    status="needs_rebase",
-                    message=(
-                        "Replaying the copy's other commits onto the new main hit "
-                        "a conflict — hand off to the coding agent to rebase."
-                    ),
-                )
-        new_tip_out, _, _ = await call_git_command_with_output(
-            "git", "rev-parse", "HEAD", cwd=copy_path
-        )
-        new_copy_tip = new_tip_out.strip()
-
-        # Transfer the new objects to the bare via a NEW temp ref (allowed by the
-        # ff-only hook), then advance main + the copy branch with server-side
-        # update-ref (bypasses the hook for the rebased copy history).
-        tmp_ref = f"refs/sync-tmp/{name}"
-        _, tp_err, tp_rc = await call_git_command_with_output(
-            "git", "push", bare, f"HEAD:{tmp_ref}", cwd=copy_path
-        )
-        if tp_rc != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to publish synced objects: {tp_err.strip()}",
-            )
-        # Only advance main if temp_tip is a true fast-forward of it.
-        _, _, anc_rc = await call_git_command_with_output(
-            "git",
-            "-C",
-            bare,
-            "merge-base",
-            "--is-ancestor",
-            "refs/heads/main",
-            temp_tip,
-        )
-        if anc_rc != 0:
-            await call_git_command_with_output(
-                "git", "-C", bare, "update-ref", "-d", tmp_ref
-            )
-            return SyncCopyResponse(
-                status="needs_rebase",
-                message="main moved during sync — retry, or let the agent rebase.",
-            )
-        await call_git_command_with_output(
-            "git", "-C", bare, "update-ref", "refs/heads/main", temp_tip
-        )
-        await call_git_command_with_output(
-            "git", "-C", bare, "update-ref", f"refs/heads/{name}", new_copy_tip
-        )
-        await call_git_command_with_output(
-            "git", "-C", bare, "update-ref", "-d", tmp_ref
-        )
-
-        await _refresh_main_copy_checkout()
-        await _tag_deploy(name, deployer)
-        task_id = await _spawn_dev_deploy(bp, deployer)
-        return SyncCopyResponse(
-            status="success",
-            method="cherry-pick",
-            message=f"Synced '{bp}' into main; rebased the copy onto the new main.",
-            deploy_task_id=task_id,
-        )
-    finally:
-        if os.path.isdir(tmpdir):
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-
 async def _bp_dev_stage_stale(bp: str, service) -> bool:
-    """True when the BP's dev stage needs (re)deploying to match main: never
-    deployed, or this BP's source differs between the commit dev is deployed at
-    and main's HEAD. Returns False only when dev already reflects main for this
-    BP — so "Sync & Deploy" is a genuine no-op only when there's truly nothing
-    to do (and doesn't spam the deploy history with identical redeploys)."""
+    """True when the BP's dev stage needs (re)deploying to match its repo's
+    main: never deployed, the recorded commit is unknown (e.g. it predates the
+    per-BP-repo migration), or the source differs between the deployed commit
+    and main's HEAD. Returns False only when dev already reflects main — so
+    "Sync & Deploy" is a genuine no-op only when there's truly nothing to do."""
     dev_commit = service.bp_stage_commit(bp, "dev")
     if not dev_commit:
         return True  # never deployed to dev
-    main_dir = os.path.join(_copies_dir(), "main")
+    main_dir = os.path.join(_copies_dir(), "main", bp)
+    if not os.path.isdir(os.path.join(main_dir, ".git")):
+        return True  # no main checkout to compare against → let the deploy run
     head_out, _, hrc = await call_git_command_with_output(
         "git", "rev-parse", "HEAD", cwd=main_dir
     )
@@ -646,16 +353,15 @@ async def _bp_dev_stage_stale(bp: str, service) -> bool:
     main_head = head_out.strip()
     if dev_commit == main_head:
         return False
-    # Compare only THIS BP's tree between the deployed commit and main, so an
-    # unrelated BP advancing main doesn't trigger a needless redeploy here.
+    # A commit recorded before the per-BP-repo migration doesn't exist in this
+    # repo — treat as stale so the first deploy re-records a real commit.
+    _, _, known_rc = await call_git_command_with_output(
+        "git", "cat-file", "-e", f"{dev_commit}^{{commit}}", cwd=main_dir
+    )
+    if known_rc != 0:
+        return True
     _, _, drc = await call_git_command_with_output(
-        "git",
-        "diff",
-        "--quiet",
-        f"{dev_commit}..{main_head}",
-        "--",
-        f"{bp}/",
-        cwd=main_dir,
+        "git", "diff", "--quiet", f"{dev_commit}..{main_head}", cwd=main_dir
     )
     return drc != 0  # non-zero exit = there are differences = stale
 
@@ -700,11 +406,11 @@ async def _spawn_dev_deploy(bp: str, deployer: str | None) -> str | None:
         return None
 
 
-async def _tag_deploy(name: str, deployer: str | None) -> None:
-    """Tag the new main tip to record a deploy: an annotated tag whose subject
-    is "<email> deployed <date> <time> UTC". These tags are what the history
-    view shows as deploy markers on main."""
-    bare = bare_repo_path()
+async def _tag_deploy(bp: str, deployer: str | None) -> None:
+    """Tag the BP repo's new main tip to record a deploy: an annotated tag
+    whose subject is "<email> deployed <date> <time> UTC". These tags are what
+    the history view shows as deploy markers on main."""
+    bare = bp_bare_repo_path(bp)
     # Annotated tags need a tagger identity; set a mechanical one on the bare
     # repo (idempotent). The human + time live in the tag subject.
     await call_git_command_with_output(
@@ -722,18 +428,108 @@ async def _tag_deploy(name: str, deployer: str | None) -> None:
     )
 
 
+async def _sync_one_bp(
+    name: str, copy_path: str, bp: str, deployer: str | None
+) -> dict:
+    """Sync one BP of a copy into that BP repo's main.
+
+    Commits WIP in the clone (only this BP's files — it's this BP's repo),
+    then, IF the clone is a pure fast-forward of main, pushes the branch and
+    fast-forwards main server-side. When main HAS advanced, nothing is touched
+    and the result is ``needs_rebase`` (the coding agent rebases just this BP).
+    Returns {bp, status, method, deploy_task_id, message}.
+    """
+    clone = os.path.join(copy_path, bp)
+    if not os.path.isdir(os.path.join(clone, ".git")):
+        raise HTTPException(
+            status_code=404, detail=f"'{bp}' is not checked out in copy '{name}'"
+        )
+
+    await _wip_commit(clone, deployer, ["-A"], f"Sync: commit work in progress ({bp})")
+    await fetch_main(clone, bp)
+
+    ahead_out, _, _ = await call_git_command_with_output(
+        "git", "rev-list", "--count", "FETCH_HEAD..HEAD", cwd=clone
+    )
+    if ahead_out.strip() == "0":
+        # Nothing to merge — but the deployed dev stage can still be behind
+        # main (e.g. synced from another copy). Bring dev up when it's stale.
+        task_id = await _spawn_dev_deploy(bp, deployer)
+        return {
+            "bp": bp,
+            "status": "success",
+            "method": "noop",
+            "deploy_task_id": task_id,
+            "message": f"No changes to '{bp}' to sync into main.",
+        }
+
+    _, _, ff_rc = await call_git_command_with_output(
+        "git", "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD", cwd=clone
+    )
+    if ff_rc != 0:
+        return {
+            "bp": bp,
+            "status": "needs_rebase",
+            "method": None,
+            "deploy_task_id": None,
+            "message": (
+                f"'{bp}' has advanced on main since this copy branched; a "
+                "rebase is required. Hand off to the coding agent."
+            ),
+        }
+
+    # Push directly to the local bare repo path (not the smart-HTTP `origin`):
+    # gitops has no git credentials for its own HTTP server, and a local push
+    # still runs the pre-receive hook (this is a copy branch, so a fast-forward
+    # is allowed). This transfers the new commit objects; ff_main_to_ref then
+    # advances main with a compare-and-swap update-ref.
+    p_out, p_err, p_rc = await call_git_command_with_output(
+        "git", "push", bp_bare_repo_path(bp), f"HEAD:refs/heads/{name}", cwd=clone
+    )
+    if p_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to push '{bp}' branch '{name}': "
+            f"{(p_err or p_out).strip()}",
+        )
+
+    try:
+        await ff_main_to_ref(bp, f"refs/heads/{name}")
+    except HTTPException as e:
+        if e.status_code == 409:
+            # main moved between our fetch and the ref update — same handoff
+            # as an ordinary divergence: rebase and retry.
+            return {
+                "bp": bp,
+                "status": "needs_rebase",
+                "method": None,
+                "deploy_task_id": None,
+                "message": f"'{bp}': {e.detail}",
+            }
+        raise
+
+    await _tag_deploy(bp, deployer)
+    await refresh_main_bp_checkout(bp)
+    task_id = await _spawn_dev_deploy(bp, deployer)
+    return {
+        "bp": bp,
+        "status": "success",
+        "method": "fast-forward",
+        "deploy_task_id": task_id,
+        "message": f"Synced '{bp}' into main (fast-forward).",
+    }
+
+
 @router.post("/{name}/sync")
 async def sync_copy(name: str, body: SyncCopyRequest | None = None):
-    """Sync a copy into main the cheap way when possible.
+    """Sync a copy into main, per business process.
 
-    Commits any work in progress, then — IF the copy is a pure fast-forward of
-    main (main hasn't advanced since the copy branched, so no rebase is needed)
-    — pushes the branch and fast-forwards `main` to it, entirely server-side
-    with plain git. No coding agent involved.
-
-    When main HAS advanced (a rebase would be required to resolve the
-    divergence), we do NOT touch anything and return ``needs_rebase`` so the
-    caller can hand off to the coding agent, which rebases + resolves conflicts.
+    Every BP is its own repo, so a sync is a plain push + server-side
+    fast-forward of that repo's main — never a cherry-pick, never entangled
+    with other BPs' changes. With ``bp`` set, exactly that BP syncs; without,
+    every BP checked out in the copy syncs independently and the response
+    aggregates the outcomes (any ``needs_rebase`` surfaces as the overall
+    status, naming the BPs that need the coding agent).
     """
     _validate_copy_name(name)
     if name == "main":
@@ -744,90 +540,290 @@ async def sync_copy(name: str, body: SyncCopyRequest | None = None):
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
 
-    # 1) Commit work in progress so it's part of what we sync. For a per-BP
-    #    sync, stage ONLY that BP's changes as the syncable commit, then commit
-    #    any remaining (other-BP) changes separately so they ride on the copy
-    #    but never reach main. For a whole-copy sync, stage everything.
     deployer = body.deployer if body else None
     bp = body.bp if body else None
+
     if bp:
         _validate_bp_dir(bp)
-        await _wip_commit(
-            copy_path,
-            deployer,
-            ["--", f"{bp}/"],
-            f"Sync: commit work in progress ({bp})",
-        )
-        await _wip_commit(
-            copy_path,
-            deployer,
-            ["-A"],
-            "wip: changes outside the synced business process",
-        )
+        results = [await _sync_one_bp(name, copy_path, bp, deployer)]
     else:
-        await _wip_commit(copy_path, deployer, ["-A"], "Sync: commit work in progress")
+        clones = list_bp_clones(copy_path)
+        if not clones:
+            return SyncCopyResponse(
+                status="success",
+                method="noop",
+                message="This copy has no business processes to sync.",
+            )
+        results = [await _sync_one_bp(name, copy_path, b, deployer) for b in clones]
 
-    # 2) Refresh our view of main from the LOCAL bare repo (filesystem — gitops
-    #    can't authenticate to its own smart-HTTP `origin`). FETCH_HEAD now
-    #    points at the current main and its objects are in the copy.
-    bare = bare_repo_path()
-    await call_git_command("git", "fetch", bare, "main", cwd=copy_path)
-
-    # 2b) Per-BP sync: when a business process is named, only its commits go to
-    #     main and the copy is auto-rebased — keeps unrelated BPs out of the
-    #     deploy. Falls through to the whole-copy fast-forward below when no BP.
-    if bp:
-        return await _sync_copy_per_bp(name, copy_path, bp, deployer)
-
-    # 3) Fast-forward only when main (FETCH_HEAD) is an ancestor of the copy's
-    #    HEAD — i.e. the copy is purely ahead and no rebase is required.
-    _, _, ff_possible_rc = await call_git_command_with_output(
-        "git", "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD", cwd=copy_path
+    needs = [r for r in results if r["status"] == "needs_rebase"]
+    synced = [r for r in results if r["method"] == "fast-forward"]
+    first_task = next(
+        (r["deploy_task_id"] for r in results if r["deploy_task_id"]), None
     )
-    if ff_possible_rc != 0:
+
+    if needs:
+        parts = []
+        if synced:
+            parts.append(f"synced: {', '.join(r['bp'] for r in synced)}")
+        parts.append(f"needs rebase: {', '.join(r['bp'] for r in needs)}")
         return SyncCopyResponse(
             status="needs_rebase",
             message=(
-                "main has advanced since this copy branched; a rebase is "
-                "required. Hand off to the coding agent to rebase and resolve."
+                f"{'; '.join(parts)}. Hand off to the coding agent to rebase "
+                "and resolve."
             ),
+            deploy_task_id=first_task,
+            bp_results=results,
         )
-
-    # 4) Publish the branch to the canonical repo and fast-forward main.
-    # Push directly to the local bare repo path (not the smart-HTTP `origin`):
-    # gitops has no git credentials for its own HTTP server, and a local push
-    # still runs the pre-receive hook (this is a copy branch, so a fast-forward
-    # is allowed). This transfers the new commit objects; the update-ref below
-    # then advances main.
-    p_out, p_err, p_rc = await call_git_command_with_output(
-        "git", "push", bare, f"HEAD:refs/heads/{name}", cwd=copy_path
-    )
-    if p_rc != 0:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to push copy '{name}': {(p_err or p_out).strip()}",
-        )
-
-    await _fast_forward_main_to_branch(name)
-    await _tag_deploy(name, body.deployer if body else None)
-    # Redeploy the dev stage of every BP whose source changed in this sync, so
-    # the deployed dev stage tracks main (FETCH_HEAD is the pre-sync main).
-    diff_out, _, _ = await call_git_command_with_output(
-        "git", "diff", "--name-only", "FETCH_HEAD..HEAD", cwd=copy_path
-    )
-    changed_bps = sorted(
-        {line.split("/")[0] for line in diff_out.splitlines() if "/" in line}
-    )
-    first_task: str | None = None
-    for changed_bp in changed_bps:
-        tid = await _spawn_dev_deploy(changed_bp, deployer)
-        if tid and first_task is None:
-            first_task = tid
     return SyncCopyResponse(
         status="success",
-        method="fast-forward",
-        message=f"Synced '{name}' into main (fast-forward).",
+        method="fast-forward" if synced else "noop",
+        message=(
+            f"Synced {', '.join(r['bp'] for r in synced)} into main (fast-forward)."
+            if synced
+            else "Nothing to sync — already up to date with main."
+        ),
         deploy_task_id=first_task,
+        bp_results=results,
+    )
+
+
+class RebaseCopyResponse(BaseModel):
+    status: str  # "success" | "needs_rebase" | "noop"
+    message: str
+    # BPs whose image dir changed in the pull and were therefore redeployed.
+    redeployed_bps: list[str] = []
+    # Task ids of the live-dev redeploys spawned for those BPs.
+    deploy_task_ids: list[str] = []
+
+
+async def _spawn_live_dev_deploy(
+    members: list[dict], bp: str, copy: str, deployer: str | None
+) -> str | None:
+    """(Re)deploy the given already-running live-dev members of a BP in a copy
+    after a pull changed its image dir. ``members`` is the caller's pre-filtered
+    set (only members with an existing live-dev deployment entry). Best-effort,
+    non-blocking, never raises — a pull must not fail because the follow-up
+    deploy couldn't start."""
+    try:
+        from app.dependencies import get_automation_service
+
+        service = get_automation_service()
+        res = await spawn_set_deploy(
+            label=f"pull-redeploy:{copy}:{bp}",
+            members=members,
+            stage="live-dev",
+            commit_subject=(
+                f"{deployer} pulled main into {copy}" if deployer else None
+            ),
+            service=service,
+            deployed_by=deployer,
+        )
+        deploy = res.get("deploy")
+        if res.get("error"):
+            logger.warning(
+                "Live-dev redeploy after pull failed for '%s' in '%s': %s",
+                bp,
+                copy,
+                res["error"],
+            )
+        return deploy["task_id"] if deploy else None
+    except Exception as e:
+        logger.warning(
+            "Live-dev redeploy after pull errored for '%s' in '%s': %s", bp, copy, e
+        )
+        return None
+
+
+def _image_changed_bps(changed_paths: list[str]) -> list[str]:
+    """Business processes whose *image dir* changed, from copy-root-relative
+    changed paths. An automation's image is built from ``<bp>/<automation>/image/``
+    (automation_service checksums exactly that dir), so a pulled change forces a
+    rebuild only when it lands inside an ``image/`` directory. Returns the
+    top-level BP dirs of such paths. This mirrors the builder's on-disk layout —
+    not a guess from names."""
+    bps: set[str] = set()
+    for p in changed_paths:
+        segs = p.split("/")
+        # Need <bp>/…/image/<file>: an "image" segment that is neither the first
+        # (the BP dir) nor the last (the changed file) component.
+        if "image" in segs[1:-1]:
+            bps.add(segs[0])
+    return sorted(bps)
+
+
+async def _rebase_one_bp(
+    name: str, copy_path: str, bp: str, deployer: str | None
+) -> dict:
+    """Pull the BP repo's main INTO this copy's clone (rebase the copy branch
+    onto main). Clean rebase → the branch is advanced server-side (the rebase
+    rewrites history, which the ff-only push hook rejects, so objects travel
+    via a temp ref + update-ref). A conflict touches NOTHING and returns
+    ``needs_rebase``. Returns {bp, status, pulled, changed_paths} where
+    changed_paths are copy-root-relative (``<bp>/…``)."""
+    clone = os.path.join(copy_path, bp)
+    bare = bp_bare_repo_path(bp)
+
+    await _wip_commit(
+        clone,
+        deployer,
+        ["-A"],
+        f"Pull: commit work in progress before rebasing {bp} onto main",
+    )
+    await fetch_main(clone, bp)
+
+    orig_out, _, _ = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=clone
+    )
+    orig_head = orig_out.strip()
+
+    behind_out, _, _ = await call_git_command_with_output(
+        "git", "rev-list", "--count", "HEAD..FETCH_HEAD", cwd=clone
+    )
+    behind = int(behind_out.strip()) if behind_out.strip().isdigit() else 0
+    if behind == 0:
+        return {"bp": bp, "status": "noop", "pulled": 0, "changed_paths": []}
+
+    _, _rb_err, rb_rc = await call_git_command_with_output(
+        "git", *_ident_args(deployer), "rebase", "FETCH_HEAD", cwd=clone
+    )
+    if rb_rc != 0:
+        await call_git_command("git", "rebase", "--abort", cwd=clone)
+        await call_git_command_with_output(
+            "git", "reset", "--hard", orig_head, cwd=clone
+        )
+        return {"bp": bp, "status": "needs_rebase", "pulled": 0, "changed_paths": []}
+
+    new_out, _, _ = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=clone
+    )
+    new_tip = new_out.strip()
+
+    tmp_ref = f"refs/pull-tmp/{name}"
+    _, tp_err, tp_rc = await call_git_command_with_output(
+        "git", "push", bare, f"HEAD:{tmp_ref}", cwd=clone
+    )
+    if tp_rc != 0:
+        await call_git_command_with_output(
+            "git", "reset", "--hard", orig_head, cwd=clone
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to publish rebased '{bp}': {tp_err.strip()}",
+        )
+    await call_git_command_with_output(
+        "git", "-C", bare, "update-ref", f"refs/heads/{name}", new_tip
+    )
+    await call_git_command_with_output("git", "-C", bare, "update-ref", "-d", tmp_ref)
+
+    diff_out, _, _ = await call_git_command_with_output(
+        "git", "diff", "--name-only", f"{orig_head}..{new_tip}", cwd=clone
+    )
+    changed_paths = [f"{bp}/{p}" for p in diff_out.splitlines() if p.strip()]
+    return {
+        "bp": bp,
+        "status": "success",
+        "pulled": behind,
+        "changed_paths": changed_paths,
+    }
+
+
+@router.post("/{name}/rebase")
+async def rebase_copy(name: str, body: SyncCopyRequest | None = None):
+    """Pull main's new commits INTO a copy — per business process. This is the
+    opposite direction from ``/sync`` (which publishes the copy's commits TO
+    main).
+
+    With ``bp`` set only that BP is pulled; without, every BP is pulled — and
+    main-carrying BPs the copy doesn't have yet are materialized as fresh
+    clones (that's how a copy gains a BP another copy created). Any business
+    process whose *image dir* changed in the pull gets its live-dev stage
+    redeployed (a config-only change needs no rebuild). A conflict in a BP
+    touches nothing in that BP and reports ``needs_rebase`` so the caller hands
+    off to the coding agent."""
+    _validate_copy_name(name)
+    if name == "main":
+        raise HTTPException(
+            status_code=400, detail="the main copy has nothing to pull into"
+        )
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    deployer = body.deployer if body else None
+    only_bp = body.bp if body else None
+
+    if only_bp:
+        _validate_bp_dir(only_bp)
+        if not os.path.isdir(os.path.join(copy_path, only_bp, ".git")):
+            if not await _clone_bp_into_copy(copy_path, name, only_bp):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"'{only_bp}' has no repo content to pull",
+                )
+        bps = [only_bp]
+    else:
+        existing = set(list_bp_clones(copy_path))
+        for candidate in list_bp_repos():
+            if candidate not in existing and await bp_main_has_content(candidate):
+                await _clone_bp_into_copy(copy_path, name, candidate)
+        bps = list_bp_clones(copy_path)
+
+    results = [await _rebase_one_bp(name, copy_path, b, deployer) for b in bps]
+
+    conflicts = [r["bp"] for r in results if r["status"] == "needs_rebase"]
+    pulled_total = sum(r["pulled"] for r in results)
+    changed_paths = [p for r in results for p in r["changed_paths"]]
+
+    # Redeploy live-dev ONLY for BPs whose image dir changed in the pull AND
+    # that already run live-dev in THIS copy. We never spin up a new
+    # deployment — we only refresh members that already have a live-dev
+    # deployment entry (matched by deployment_id against bitswan.yaml).
+    changed_bps = _image_changed_bps(changed_paths)
+    from app.dependencies import get_automation_service
+
+    service = get_automation_service()
+    bs = read_bitswan_yaml(service.gitops_dir) or {}
+    deployed_ids = set((bs.get("deployments") or {}).keys())
+    redeployed: list[str] = []
+    task_ids: list[str] = []
+    for bp in changed_bps:
+        members = [
+            m
+            for m in service.members_for_bp(bp, copy=name, stage="live-dev")
+            if m.get("deployment_id") in deployed_ids
+        ]
+        if not members:
+            continue  # this BP isn't running live-dev in the copy — nothing to do
+        tid = await _spawn_live_dev_deploy(members, bp, name, deployer)
+        redeployed.append(bp)
+        if tid:
+            task_ids.append(tid)
+
+    if conflicts:
+        return RebaseCopyResponse(
+            status="needs_rebase",
+            message=(
+                f"Main couldn't be pulled in automatically for: "
+                f"{', '.join(conflicts)} (conflict) — hand off to the coding "
+                "agent to rebase and resolve."
+            ),
+            redeployed_bps=redeployed,
+            deploy_task_ids=task_ids,
+        )
+    if pulled_total == 0:
+        return RebaseCopyResponse(
+            status="noop", message="Already up to date with main."
+        )
+    msg = f"Pulled {pulled_total} change(s) from main into '{name}'."
+    if redeployed:
+        msg += f" Redeploying live-dev for: {', '.join(redeployed)}."
+    return RebaseCopyResponse(
+        status="success",
+        message=msg,
+        redeployed_bps=redeployed,
+        deploy_task_ids=task_ids,
     )
 
 
@@ -921,23 +917,6 @@ def _is_safe_relative_path(p: str) -> bool:
     return not any(seg in ("", "..") for seg in parts)
 
 
-def _porcelain_to_kind(code: str) -> str | None:
-    if not code:
-        return None
-    x, y = code[0], code[1] if len(code) > 1 else " "
-    if x == "?" and y == "?":
-        return "A"
-    if x == "D" or y == "D":
-        return "D"
-    if x == "A" or y == "A":
-        return "A"
-    if x == "R" or y == "R":
-        return "M"
-    if x == "M" or y == "M" or x == "T" or y == "T" or x == "C" or y == "C":
-        return "M"
-    return None
-
-
 _NAME_STATUS_KIND = {
     "A": "added",
     "M": "modified",
@@ -948,105 +927,176 @@ _NAME_STATUS_KIND = {
 }
 
 
-@router.get("/{name}/status")
-async def get_copy_status(name: str):
-    """Per-file change list for a copy: everything that pressing Sync & Deploy
-    will make the new main — commits ahead of main, plus uncommitted edits,
-    plus new untracked files. The working tree (not just HEAD) is compared
-    against main, so changes show whether or not they've been committed yet."""
-    copy_path = _resolve_copy_path(name)
-    if not os.path.exists(copy_path):
-        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
-
-    # Refresh main from the local bare repo (filesystem, no credentials);
-    # FETCH_HEAD then points at the current main.
-    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
-
-    by_path: dict[str, dict] = {}
+async def _clone_status(clone_path: str, bp: str, by_path: dict) -> None:
+    """Collect one BP clone's change list into `by_path`, with paths prefixed
+    ``<bp>/…`` so they stay copy-root-relative (the wire shape of the
+    single-repo era)."""
+    await fetch_main(clone_path, bp)
 
     # Tracked delta vs main (commits ahead of main + staged/unstaged edits).
     # --no-renames so paths stay real (a rename becomes delete + add) — the UI
     # uses each path to fetch its per-file diff.
     num_out, _, _ = await call_git_command_with_output(
-        "git", "diff", "--no-renames", "--numstat", "FETCH_HEAD", cwd=copy_path
+        "git", "diff", "--no-renames", "--numstat", "FETCH_HEAD", cwd=clone_path
     )
     for line in num_out.splitlines():
         parts = line.split("\t", 2)
         if len(parts) != 3:
             continue
         adds_str, dels_str, p = parts
-        by_path[p] = {
-            "path": p,
+        full = f"{bp}/{p}"
+        by_path[full] = {
+            "path": full,
             "kind": "modified",
             "adds": int(adds_str) if adds_str.isdigit() else 0,
             "dels": int(dels_str) if dels_str.isdigit() else 0,
         }
     ns_out, _, _ = await call_git_command_with_output(
-        "git", "diff", "--no-renames", "--name-status", "FETCH_HEAD", cwd=copy_path
+        "git", "diff", "--no-renames", "--name-status", "FETCH_HEAD", cwd=clone_path
     )
     for line in ns_out.splitlines():
         cols = line.split("\t")
         if len(cols) < 2:
             continue
         kind = _NAME_STATUS_KIND.get(cols[0][:1], "modified")
-        p = cols[-1]  # for renames, the new path
-        if p in by_path:
-            by_path[p]["kind"] = kind
+        full = f"{bp}/{cols[-1]}"  # for renames, the new path
+        if full in by_path:
+            by_path[full]["kind"] = kind
         else:
-            by_path[p] = {"path": p, "kind": kind, "adds": 0, "dels": 0}
+            by_path[full] = {"path": full, "kind": kind, "adds": 0, "dels": 0}
 
     # New untracked files (not in main and not yet committed) — the whole file
     # becomes main, so surface it as added.
     others_out, _, _ = await call_git_command_with_output(
-        "git", "ls-files", "--others", "--exclude-standard", cwd=copy_path
+        "git", "ls-files", "--others", "--exclude-standard", cwd=clone_path
     )
     for p in others_out.splitlines():
         p = p.strip()
-        if p and p not in by_path:
-            by_path[p] = {"path": p, "kind": "added", "adds": 0, "dels": 0}
+        if not p:
+            continue
+        full = f"{bp}/{p}"
+        if full not in by_path:
+            by_path[full] = {"path": full, "kind": "added", "adds": 0, "dels": 0}
 
+
+@router.get("/{name}/status")
+async def get_copy_status(name: str, bp: str | None = None):
+    """Per-file change list for a copy: everything that pressing Sync & Deploy
+    will make the new main — commits ahead of main, plus uncommitted edits,
+    plus new untracked files. Paths are copy-root-relative (``<bp>/…``).
+    Optional ``?bp=`` scopes the list to one business process."""
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    if bp:
+        _validate_bp_dir(bp)
+        if not os.path.isdir(os.path.join(copy_path, bp, ".git")):
+            return {"changed": []}
+        bps = [bp]
+    else:
+        bps = list_bp_clones(copy_path)
+
+    by_path: dict[str, dict] = {}
+    for b in bps:
+        await _clone_status(os.path.join(copy_path, b), b, by_path)
     return {"changed": list(by_path.values())}
+
+
+async def _clone_divergence(clone_path: str, bp: str) -> tuple[int, int]:
+    """(ahead, behind) of one BP clone vs its repo's main."""
+    await fetch_main(clone_path, bp)
+
+    async def _count(rng: str) -> int:
+        out, _, rc = await call_git_command_with_output(
+            "git", "rev-list", "--count", rng, cwd=clone_path
+        )
+        return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
+
+    return await _count("FETCH_HEAD..HEAD"), await _count("HEAD..FETCH_HEAD")
+
+
+async def _missing_clone_behind(bp: str) -> int:
+    """How far behind a copy is on a BP it hasn't checked out at all: every
+    commit on that repo's main (including the seed) — a nonzero signal that a
+    pull will materialize the BP."""
+    out, _, rc = await call_git_command_with_output(
+        "git", "-C", bp_bare_repo_path(bp), "rev-list", "--count", "main"
+    )
+    return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
 
 
 @router.get("/{name}/divergence")
 async def get_bp_divergence(name: str, bp: str = Query(...)):
-    """Split a copy's divergence from main into commits that touch THIS business
-    process vs every OTHER business process.
+    """Divergence from main for THIS business process vs every OTHER business
+    process in the copy.
 
-    A per-BP Sync & Deploy only ever syncs/deploys the BP being viewed, so the
-    whole-copy ahead/behind counts are misleading there: a copy can be far ahead
-    of main purely because of work on *other* BPs, while the viewed BP is itself
-    identical to main. This lets the UI show "this business process" and "other
-    business processes" separately, so "up to date" reflects the BP you're on."""
+    Each BP is its own repo, so "this BP" is simply its clone's ahead/behind;
+    the ``_other`` fields sum the remaining clones so the Sync & Deploy screen
+    can say "other business processes have unsynced work" without mixing it
+    into this BP's counts."""
     _validate_bp_dir(bp)
     copy_path = _resolve_copy_path(name)
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
 
-    # Refresh our view of main from the local bare repo; FETCH_HEAD = current main.
-    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
+    clones = list_bp_clones(copy_path)
 
-    async def _count(rng: str, path: str | None = None) -> int:
-        args = ["git", "rev-list", "--count", rng]
-        if path:
-            args += ["--", path]
-        out, _, rc = await call_git_command_with_output(*args, cwd=copy_path)
-        return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
+    if bp in clones:
+        ahead_bp, behind_bp = await _clone_divergence(os.path.join(copy_path, bp), bp)
+    elif await bp_main_has_content(bp):
+        ahead_bp, behind_bp = 0, await _missing_clone_behind(bp)
+    else:
+        ahead_bp = behind_bp = 0
 
-    ahead_total = await _count("FETCH_HEAD..HEAD")
-    ahead_bp = await _count("FETCH_HEAD..HEAD", f"{bp}/")
-    behind_total = await _count("HEAD..FETCH_HEAD")
-    behind_bp = await _count("HEAD..FETCH_HEAD", f"{bp}/")
+    ahead_other = behind_other = 0
+    for other in clones:
+        if other == bp:
+            continue
+        a, b = await _clone_divergence(os.path.join(copy_path, other), other)
+        ahead_other += a
+        behind_other += b
+
     return {
         "bp": bp,
         "ahead_bp": ahead_bp,
-        "ahead_other": max(0, ahead_total - ahead_bp),
+        "ahead_other": ahead_other,
         "behind_bp": behind_bp,
-        "behind_other": max(0, behind_total - behind_bp),
+        "behind_other": behind_other,
     }
 
 
-async def _git_log(ref: str, copy_path: str, limit: int = 50) -> list[dict]:
+@router.get("/{name}/divergence-all")
+async def get_all_bp_divergence(name: str):
+    """Per-business-process ahead/behind counts vs main for a WHOLE copy — so
+    the switcher can show ↑/↓ on each BP at a glance.
+
+    Each BP clone is compared against its own repo's main; a main-carrying BP
+    the copy hasn't checked out reports behind-only (a pull materializes it).
+    Only BPs that actually diverge appear in the result; the caller treats a
+    missing BP as "in step with main"."""
+    _validate_copy_name(name)
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    result: dict[str, dict] = {}
+    clones = list_bp_clones(copy_path)
+    for bp in clones:
+        ahead, behind = await _clone_divergence(os.path.join(copy_path, bp), bp)
+        if ahead or behind:
+            result[bp] = {"ahead": ahead, "behind": behind}
+    for bp in list_bp_repos():
+        if bp in clones:
+            continue
+        if await bp_main_has_content(bp):
+            behind = await _missing_clone_behind(bp)
+            if behind:
+                result[bp] = {"ahead": 0, "behind": behind}
+    return result
+
+
+async def _git_log(ref: str, cwd: str, limit: int = 50) -> list[dict]:
     """Recent commits on `ref` as structured rows. Fields are unit-separated so
     subjects with tabs/spaces survive intact."""
     out, _, rc = await call_git_command_with_output(
@@ -1055,7 +1105,7 @@ async def _git_log(ref: str, copy_path: str, limit: int = 50) -> list[dict]:
         f"-{limit}",
         "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%aI%x1f%s",
         ref,
-        cwd=copy_path,
+        cwd=cwd,
     )
     commits: list[dict] = []
     if rc == 0:
@@ -1075,59 +1125,83 @@ async def _git_log(ref: str, copy_path: str, limit: int = 50) -> list[dict]:
     return commits
 
 
-@router.get("/{name}/history")
-async def get_copy_history(name: str):
-    """Commit history for the Sync & Deploy history view: this copy's commits
-    and main's commits, with deploy markers (`<email> deployed <date>`) attached
-    to the main commits each Sync & Deploy left at main's tip."""
-    copy_path = _resolve_copy_path(name)
-    if not os.path.exists(copy_path):
-        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
-
-    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
-    copy_commits = await _git_log("HEAD", copy_path)
-    main_commits = await _git_log("FETCH_HEAD", copy_path)
-
-    # Map main commit -> deploy-tag subjects. Annotated tags expose the tagged
-    # commit via %(*objectname); fall back to %(objectname) just in case.
-    # NB: for-each-ref does NOT interpret git-log's %x1f escape, so use a plain
-    # separator. The two object ids are hex (no "|"); the subject is last, so
-    # maxsplit=2 keeps a subject containing "|" intact.
+async def _deploy_tags(bp: str) -> dict[str, list[str]]:
+    """Map main-commit sha → deploy-tag subjects for one BP repo. Annotated
+    tags expose the tagged commit via %(*objectname); fall back to
+    %(objectname) just in case. NB: for-each-ref does NOT interpret git-log's
+    %x1f escape, so use a plain separator; the two object ids are hex (no "|")
+    and the subject is last, so maxsplit=2 keeps a subject containing "|"
+    intact."""
     deploys: dict[str, list[str]] = {}
     tags_out, _, _ = await call_git_command_with_output(
         "git",
+        "-C",
+        bp_bare_repo_path(bp),
         "for-each-ref",
         "refs/tags/deploy",
         "--format=%(*objectname)|%(objectname)|%(contents:subject)",
-        cwd=bare_repo_path(),
     )
     for line in tags_out.splitlines():
         f = line.split("|", 2)
         if len(f) == 3:
             commit_sha = f[0] or f[1]
             deploys.setdefault(commit_sha, []).append(f[2])
+    return deploys
+
+
+@router.get("/{name}/history")
+async def get_copy_history(name: str, bp: str | None = None):
+    """Commit history for the Sync & Deploy history view: the copy's commits
+    and main's commits, with deploy markers (`<email> deployed <date>`)
+    attached to the main commits each Sync & Deploy tagged.
+
+    With ``?bp=`` (the normal, BP-scoped view) the logs come from that BP's
+    repo alone. Without it, logs are merged across every BP clone (newest
+    first) — an aggregate view kept for API compatibility."""
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    if bp:
+        _validate_bp_dir(bp)
+        if not os.path.isdir(os.path.join(copy_path, bp, ".git")):
+            raise HTTPException(
+                status_code=404, detail=f"'{bp}' is not checked out in '{name}'"
+            )
+        bps = [bp]
+    else:
+        bps = list_bp_clones(copy_path)
+
+    copy_commits: list[dict] = []
+    main_commits: list[dict] = []
+    deploys: dict[str, list[str]] = {}
+    for b in bps:
+        clone = os.path.join(copy_path, b)
+        await fetch_main(clone, b)
+        copy_commits.extend(await _git_log("HEAD", clone))
+        main_commits.extend(await _git_log("FETCH_HEAD", clone))
+        deploys.update(await _deploy_tags(b))
+
+    if len(bps) > 1:
+        copy_commits.sort(key=lambda c: c["date"], reverse=True)
+        main_commits.sort(key=lambda c: c["date"], reverse=True)
+        copy_commits = copy_commits[:50]
+        main_commits = main_commits[:50]
+
     for c in main_commits:
         c["deploys"] = deploys.get(c["sha"], [])
 
     return {"copy": copy_commits, "main": main_commits}
 
 
-@router.get("/{name}/diff")
-async def get_copy_diff(name: str, path: str | None = Query(None)):
-    """Unified diff of the copy against main — what will become the new main on
-    Sync & Deploy, committed or not. Optional `?path=` filter."""
-    copy_path = _resolve_copy_path(name)
-    if not os.path.exists(copy_path):
-        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
-    if path is not None and not _is_safe_relative_path(path):
-        raise HTTPException(status_code=400, detail="invalid path")
+async def _clone_diff(clone_path: str, bp: str, rel_path: str | None) -> str:
+    """Unified diff of one BP clone vs its main, with `a/<bp>/…` patch headers
+    so paths stay copy-root-relative."""
+    prefix_args = [f"--src-prefix=a/{bp}/", f"--dst-prefix=b/{bp}/"]
+    git_args = ["git", "diff", *prefix_args, "FETCH_HEAD", "--"]
+    git_args.append(rel_path if rel_path else ".")
 
-    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
-
-    git_args: list[str] = ["git", "diff", "FETCH_HEAD"]
-    git_args += ["--", path] if path is not None else ["--", "."]
-
-    stdout, stderr, rc = await call_git_command_with_output(*git_args, cwd=copy_path)
+    stdout, stderr, rc = await call_git_command_with_output(*git_args, cwd=clone_path)
     if rc != 0:
         raise HTTPException(
             status_code=500, detail=f"Failed to get diff: {stderr.strip()}"
@@ -1136,34 +1210,87 @@ async def get_copy_diff(name: str, path: str | None = Query(None)):
     # Untracked new files don't appear in `git diff` against a ref — show the
     # whole file as added (`--no-index` exits 1 when it finds a diff; that's
     # expected, not an error, so we ignore the return code and use the output).
-    if path is not None and not stdout.strip():
+    if rel_path is not None and not stdout.strip():
         no_index_out, _, _ = await call_git_command_with_output(
-            "git", "diff", "--no-index", "--", "/dev/null", path, cwd=copy_path
+            "git",
+            "diff",
+            "--no-index",
+            *prefix_args,
+            "--",
+            "/dev/null",
+            rel_path,
+            cwd=clone_path,
         )
         if no_index_out.strip():
             stdout = no_index_out
+    return stdout
 
-    return {"diff": stdout}
+
+@router.get("/{name}/diff")
+async def get_copy_diff(name: str, path: str | None = None):
+    """Unified diff of the copy against main — what will become the new main on
+    Sync & Deploy, committed or not. Optional `?path=<bp>/rest` filter routes
+    to that BP's clone; without a path, per-BP diffs are concatenated. Patch
+    headers stay copy-root-relative (`a/<bp>/…`)."""
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+    if path is not None and not _is_safe_relative_path(path):
+        raise HTTPException(status_code=400, detail="invalid path")
+
+    if path is not None:
+        bp, _, rest = path.partition("/")
+        _validate_bp_dir(bp)
+        clone = os.path.join(copy_path, bp)
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            raise HTTPException(
+                status_code=404, detail=f"'{bp}' is not checked out in '{name}'"
+            )
+        await fetch_main(clone, bp)
+        return {"diff": await _clone_diff(clone, bp, rest or None)}
+
+    parts: list[str] = []
+    for bp in list_bp_clones(copy_path):
+        clone = os.path.join(copy_path, bp)
+        await fetch_main(clone, bp)
+        d = await _clone_diff(clone, bp, None)
+        if d.strip():
+            parts.append(d)
+    return {"diff": "".join(parts)}
 
 
 @router.get("/{name}/commit/{sha}/diff")
-async def get_commit_diff(name: str, sha: str):
+async def get_commit_diff(name: str, sha: str, bp: str | None = None):
     """Unified diff introduced by a single commit (`git show`), for the history
-    view's clickable rows. Resolves commits from both this copy (HEAD) and main:
-    main's objects are fetched below, so either side of the graph is viewable."""
+    view's clickable rows. Each BP has its own repo, so the commit is looked up
+    in the named BP's clone — or, without ``?bp=``, in whichever clone knows
+    the sha (shas are unique across repos in practice)."""
     copy_path = _resolve_copy_path(name)
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
     if not re.fullmatch(r"[0-9a-fA-F]{4,64}", sha or ""):
         raise HTTPException(status_code=400, detail="invalid commit")
 
-    # main commits are reachable only via FETCH_HEAD's objects — fetch first.
-    await call_git_command("git", "fetch", bare_repo_path(), "main", cwd=copy_path)
-    stdout, stderr, rc = await call_git_command_with_output(
-        "git", "show", "--no-color", "--format=medium", sha, cwd=copy_path
-    )
-    if rc != 0:
-        raise HTTPException(
-            status_code=404, detail=f"commit not found: {(stderr or stdout).strip()}"
+    if bp:
+        _validate_bp_dir(bp)
+        bps = [bp]
+    else:
+        bps = list_bp_clones(copy_path)
+
+    for b in bps:
+        clone = os.path.join(copy_path, b)
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            continue
+        # main commits are reachable only via FETCH_HEAD's objects — fetch first.
+        await fetch_main(clone, b)
+        _, _, known_rc = await call_git_command_with_output(
+            "git", "cat-file", "-e", f"{sha}^{{commit}}", cwd=clone
         )
-    return {"diff": stdout}
+        if known_rc != 0:
+            continue
+        stdout, stderr, rc = await call_git_command_with_output(
+            "git", "show", "--no-color", "--format=medium", sha, cwd=clone
+        )
+        if rc == 0:
+            return {"diff": stdout}
+    raise HTTPException(status_code=404, detail="commit not found")
