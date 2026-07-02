@@ -15,6 +15,13 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 )
 
+// bpPostgresConnLimit is the per-BP-role Postgres CONNECTION LIMIT. It bounds
+// how many connections any single BP backend can hold, server-side, so a
+// runaway or misconfigured backend pool cannot exhaust the shared postgres
+// server and starve other BPs. Headroom above the example backend's pool
+// (SetMaxOpenConns(5)) to allow a couple of replicas; the superuser bypasses it.
+const bpPostgresConnLimit = 10
+
 // Port of gitops bp_databases.py's deploy-time provisioning, run after
 // compose-up (gitops's _provision_bp_databases). gitops loses docker.sock, so
 // the per-BP Postgres DBs / MinIO buckets the backends need are created here, by
@@ -262,9 +269,15 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 		return err
 	}
 	// Create the LOGIN role or sync its password — one idempotent statement.
+	// CONNECTION LIMIT is a server-side cap: a BP backend's pool cannot exceed
+	// this many connections no matter what its (arbitrary, user-controlled) code
+	// requests, so one misbehaving backend can never exhaust the shared
+	// postgres server's connection slots and starve every other BP. The
+	// superuser bypasses this, so admin/provisioning is unaffected. Applied to
+	// existing roles too (the ALTER branch), so a redeploy caps legacy roles.
 	createOrAlter := fmt.Sprintf(
-		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %q LOGIN PASSWORD '%s'; ELSE ALTER ROLE %q WITH LOGIN PASSWORD '%s'; END IF; END $$;",
-		role, role, pass, role, pass)
+		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %q LOGIN CONNECTION LIMIT %d PASSWORD '%s'; ELSE ALTER ROLE %q WITH LOGIN CONNECTION LIMIT %d PASSWORD '%s'; END IF; END $$;",
+		role, role, bpPostgresConnLimit, pass, role, bpPostgresConnLimit, pass)
 	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", createOrAlter); rc != 0 {
 		return fmt.Errorf("ensure role %s: %s", role, strings.TrimSpace(stderr))
 	}
