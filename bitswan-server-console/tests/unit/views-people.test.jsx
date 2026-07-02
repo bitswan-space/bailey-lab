@@ -25,8 +25,8 @@ describe('UsersView', () => {
     render(<Host View={UsersView} data={makeData({ people })} extra={s} />);
     expect(screen.getByText('People & roles')).toBeTruthy();
     expect(screen.getByText('Invited')).toBeTruthy();
-    // No invite button.
-    expect(screen.queryByText('Invite person')).toBeNull();
+    // The invite entry point (dialog opens from here).
+    expect(screen.getByText('Invite person')).toBeTruthy();
     // Open the drawer; it loads the person's REAL devices (no seed).
     fireEvent.click(screen.getByTitle('Manage devices'));
     expect(screen.getByText("Tomas's devices")).toBeTruthy();
@@ -159,6 +159,99 @@ describe('UsersView — device approvals', () => {
     render(<Host View={UsersView} data={withPending()} extra={s} />);
     fireEvent.click(screen.getByText('Dismiss'));
     expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Dismissed request'), 'info');
+  });
+});
+
+// Invites: the dialog lists AOC org users and creates a 48h invite; the
+// pending strip manages outstanding invites (revoke / re-send). The email-
+// delivery-failed paths surface the copyable invite_link fallback.
+describe('UsersView — invites', () => {
+  const ORG_USERS = { users: [
+    { email: 'grace@h', username: 'Grace', verified: true, in_roster: false, invited: false },
+    { email: 'tomas@h', username: 'Tomas', verified: true, in_roster: true, invited: false },
+    { email: 'iva@h', username: 'Iva', verified: false, in_roster: false, invited: true },
+  ] };
+  const in47h = new Date(Date.now() + 47 * 3600 * 1000).toISOString();
+  const INVITES = { invites: [
+    { email: 'iva@h', role: 'member', created_by: 'tomas@h', created_at: 'x', expires_at: in47h, email_sent: true, expired: false },
+    { email: 'old@h', role: 'admin', created_by: 'tomas@h', created_at: 'x', expires_at: '2020-01-01T00:00:00Z', email_sent: false, expired: true },
+  ] };
+
+  it('invite dialog: lists org users, disables in-roster rows, sends an invite', async () => {
+    const s = spies();
+    installFetch({
+      '/bailey/api/people/invites': { json: { invites: [] } },
+      '/bailey/api/people/org-users': { json: ORG_USERS },
+      '/bailey/api/people/invite': { json: { ok: true, email_sent: true, invite_link: 'https://bailey-onboard.h/?invite=t' } },
+    });
+    render(<Host View={UsersView} data={makeData({ people })} extra={s} />);
+    fireEvent.click(screen.getByText('Invite person'));
+    await waitFor(() => expect(screen.getByText('grace@h')).toBeTruthy());
+    // tomas is already in the roster → row disabled with a pill.
+    expect(screen.getByText('Has access')).toBeTruthy();
+    // iva has a live invite → flagged.
+    expect(screen.getAllByText('Invited').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByText('grace@h'));
+    fireEvent.click(screen.getByText('Send invite'));
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Invite sent to grace@h'), 'success'));
+    expect(s.refresh).toHaveBeenCalledWith('people');
+  });
+
+  it('invite dialog: email failure keeps it open and shows the copyable link', async () => {
+    installFetch({
+      '/bailey/api/people/invites': { json: { invites: [] } },
+      '/bailey/api/people/org-users': { json: ORG_USERS },
+      '/bailey/api/people/invite': { json: { ok: true, email_sent: false, email_error: 'SMTP is not configured', invite_link: 'https://bailey-onboard.h/?invite=tok' } },
+    });
+    render(<Host View={UsersView} data={makeData({ people })} />);
+    fireEvent.click(screen.getByText('Invite person'));
+    await waitFor(() => expect(screen.getByText('grace@h')).toBeTruthy());
+    fireEvent.click(screen.getByText('grace@h'));
+    fireEvent.click(screen.getByText('Send invite'));
+    await waitFor(() => expect(screen.getByText(/SMTP is not configured/)).toBeTruthy());
+    expect(screen.getByText('Copy invite link')).toBeTruthy();
+  });
+
+  it('invite dialog: AOC unreachable surfaces the error banner', async () => {
+    installFetch({
+      '/bailey/api/people/invites': { json: { invites: [] } },
+      '/bailey/api/people/org-users': { status: 502, json: { error: 'AOC not configured' } },
+    });
+    render(<Host View={UsersView} data={makeData({ people })} />);
+    fireEvent.click(screen.getByText('Invite person'));
+    await waitFor(() => expect(screen.getByText(/AOC not configured/)).toBeTruthy());
+    expect(screen.getByText('Retry')).toBeTruthy();
+  });
+
+  it('pending strip: expiry, delivery hint, revoke and re-send', async () => {
+    const s = spies();
+    installFetch({
+      '/bailey/api/people/invites': { json: INVITES },
+      '/bailey/api/people/invites/revoke': { json: { ok: true } },
+      '/bailey/api/people/invites/resend': { json: { ok: true, email_sent: true, invite_link: 'x' } },
+    });
+    render(<Host View={UsersView} data={makeData({ people })} extra={s} />);
+    await waitFor(() => expect(screen.getByText('Pending invites')).toBeTruthy());
+    expect(screen.getByText('iva@h')).toBeTruthy();
+    expect(screen.getByText('expires in 46h')).toBeTruthy();
+    expect(screen.getByText('expired')).toBeTruthy();
+    expect(screen.getByText('email not delivered')).toBeTruthy();
+    fireEvent.click(screen.getAllByText('Re-send')[0]);
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('re-sent'), 'success'));
+    fireEvent.click(screen.getAllByText('Revoke')[0]);
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('revoked'), 'danger'));
+  });
+
+  it('pending strip: failed re-send delivery shows the fresh copyable link inline', async () => {
+    installFetch({
+      '/bailey/api/people/invites': { json: INVITES },
+      '/bailey/api/people/invites/resend': { json: { ok: true, email_sent: false, email_error: 'send failed', invite_link: 'https://bailey-onboard.h/?invite=new' } },
+    });
+    render(<Host View={UsersView} data={makeData({ people })} />);
+    await waitFor(() => expect(screen.getByText('Pending invites')).toBeTruthy());
+    fireEvent.click(screen.getAllByText('Re-send')[0]);
+    await waitFor(() => expect(screen.getByText(/send failed/)).toBeTruthy());
+    expect(screen.getByText('Copy invite link')).toBeTruthy();
   });
 });
 

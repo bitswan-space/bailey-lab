@@ -69,6 +69,8 @@ func (s *Server) handleGateAPI(w http.ResponseWriter, r *http.Request, email str
 		guardPost(w, r, func() { handleGateTOTPVerify(w, r, email) })
 	case "/bailey/api/backup-codes/regenerate":
 		guardPost(w, r, func() { handleGateBackupCodesRegenerate(w, r, email) })
+	case "/bailey/api/invite/redeem":
+		guardPost(w, r, func() { handleGateInviteRedeem(w, r, email) })
 	default:
 		return false
 	}
@@ -121,6 +123,7 @@ type gateState struct {
 	BackupCodes      bool   `json:"backup_codes"`       // this user has unused single-use backup codes
 	CanClaim         bool   `json:"can_claim"`          // unclaimed AND this caller may run the one-time bootstrap
 	HasTrustedDevice bool   `json:"has_trusted_device"` // this user ALREADY has ≥1 trusted device (can self-approve a new one)
+	InvitePending    bool   `json:"invite_pending"`     // a live (unconsumed, unexpired) invite exists for this user
 }
 
 func handleGateState(w http.ResponseWriter, r *http.Request, email string, groups []string) {
@@ -135,6 +138,12 @@ func handleGateState(w http.ResponseWriter, r *http.Request, email string, group
 			hasTrustedDevice = true
 		}
 	}
+	invitePending := false
+	if email != "" {
+		if inv, err := dbLoadInviteByEmail(email); err == nil && inv != nil && inv.live(time.Now()) {
+			invitePending = true
+		}
+	}
 	writeJSON(w, gateState{
 		Email:            email,
 		IsAdmin:          callerIsAdmin(email),
@@ -144,6 +153,7 @@ func handleGateState(w http.ResponseWriter, r *http.Request, email string, group
 		BackupCodes:      email != "" && dbBackupCodesExist(email),
 		CanClaim:         !claimed && eligibleToClaim(email, groups),
 		HasTrustedDevice: hasTrustedDevice,
+		InvitePending:    invitePending,
 	})
 }
 
@@ -450,6 +460,7 @@ type gateBody struct {
 	TOTP   string `json:"totp"`
 	Backup string `json:"backup"`
 	Code   string `json:"code"`
+	Token  string `json:"token"` // invite token (invite/redeem)
 }
 
 // decodeGateBody parses a JSON body, falling back to form values so the

@@ -223,9 +223,29 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleBaileyPeople(w, r)
 			return
 		}
+	case "/bailey/api/people/org-users":
+		if r.Method == http.MethodGet {
+			handleBaileyOrgUsers(w, r)
+			return
+		}
 	case "/bailey/api/people/invite":
 		if r.Method == http.MethodPost {
-			handleBaileyPeopleInvite(w, r)
+			handleBaileyPeopleInvite(w, r, email)
+			return
+		}
+	case "/bailey/api/people/invites":
+		if r.Method == http.MethodGet {
+			handleBaileyInvitesList(w, r)
+			return
+		}
+	case "/bailey/api/people/invites/revoke":
+		if r.Method == http.MethodPost {
+			handleBaileyInviteRevoke(w, r, email)
+			return
+		}
+	case "/bailey/api/people/invites/resend":
+		if r.Method == http.MethodPost {
+			handleBaileyInviteResend(w, r, email)
 			return
 		}
 	case "/bailey/api/people/role":

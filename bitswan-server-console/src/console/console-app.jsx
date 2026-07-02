@@ -6,7 +6,7 @@ const { Avatar: AAvatar, Toast: AToast } = window.SC_UI;
 const { OverviewView, WorkspacesView } = window.SC_WORKSPACES;
 const { UsersView, EndpointAccessView } = window.SC_PEOPLE;
 const { DevicesView, SecurityView } = window.SC_DEVICES;
-const { BootstrapScene, ApprovalScene, RecoveryScene } = window.SC_SCENES;
+const { BootstrapScene, ApprovalScene, RecoveryScene, InviteScene } = window.SC_SCENES;
 const { Api } = window.SC_API;
 const { useState: useA, useEffect: useAE, useRef: useAR } = React;
 
@@ -191,6 +191,12 @@ const ACTIVITY_KINDS = {
   'server.claim':     { icon: 'flag',         tone: 'primary', verb: 'claimed this server' },
   'workspace.create': { icon: 'folder-plus',  tone: 'primary', verb: 'created workspace' },
   'workspace.trash':  { icon: 'trash-2',      tone: 'danger',  verb: 'trashed workspace' },
+  // Invite lifecycle (target = invitee email; for redeem the ACTOR is the
+  // invitee and the target is who invited them — see the daemon's audit calls).
+  'invite.create':    { icon: 'mail-plus',    tone: 'primary', verb: 'invited' },
+  'invite.resend':    { icon: 'mail',         tone: 'neutral', verb: 're-sent an invite to' },
+  'invite.revoke':    { icon: 'mail-x',       tone: 'danger',  verb: 'revoked the invite for' },
+  'invite.redeem':    { icon: 'mail-check',   tone: 'success', verb: 'accepted an invite from' },
 };
 function adaptActivity(a) {
   const k = ACTIVITY_KINDS[a.action] || { icon: 'activity', tone: 'neutral', verb: a.action || 'did something' };
@@ -387,16 +393,22 @@ function Console({ data, setData, toast, refresh }) {
 
 // pickScene maps a /bailey/api/gate-state response to the scene the SPA should
 // render, per the backend's scene-selection rule. `recoverIntent` is true when
-// the URL carries an explicit recovery entry (?recover). Evaluated in order:
+// the URL carries an explicit recovery entry (?recover); `inviteToken` is the
+// stashed emailed-invite token (see getInviteToken). Evaluated in order:
 //   1. recovery intent      → 'recovery'
 //   2. trusted              → 'console' (gate cleared — render the app)
-//   3. unclaimed & can_claim → 'bootstrap' (first-admin claim)
-//   4. unclaimed & !can_claim → 'waiting' (claimed by someone else / not eligible)
-//   5. claimed but untrusted → 'approval'
-function pickScene(gs, recoverIntent) {
+//   3. invite token + claimed but untrusted → 'invite' (redeem the invite)
+//   4. unclaimed & can_claim → 'bootstrap' (first-admin claim)
+//   5. unclaimed & !can_claim → 'waiting' (claimed by someone else / not eligible)
+//   6. claimed but untrusted → 'approval'
+// An invite on an UNCLAIMED server deliberately falls through to bootstrap/
+// waiting (the backend refuses redemption pre-claim — an invite must never
+// mint the bootstrap device).
+function pickScene(gs, recoverIntent, inviteToken) {
   if (recoverIntent) return 'recovery';
   if (!gs) return 'console';
   if (gs.trusted) return 'console';
+  if (inviteToken && gs.claimed) return 'invite';
   if (!gs.claimed) return gs.can_claim ? 'bootstrap' : 'waiting';
   return 'approval';
 }
@@ -406,6 +418,48 @@ function hasRecoverIntent() {
     const p = new URLSearchParams(window.location.search);
     return p.has('recover') || p.get('return') === 'recover' || window.location.pathname.replace(/\/+$/, '') === '/recover';
   } catch (e) { return false; }
+}
+
+// ── Invite-token intent ──────────────────────────────────────────────────────
+// The emailed invite link is https://bailey-onboard.<domain>/?invite=<token>.
+// An old link opened against the console host instead survives the device-
+// trust bounce embedded in the onboarding URL's ?return=<original-url> param,
+// so we recover invite= from there too. The token is a secret: it's stashed in
+// sessionStorage (so it survives a reload after the OIDC round-trip) and
+// stripped from the address bar via replaceState (keeps it out of history,
+// referrers and copied URLs).
+const INVITE_TOKEN_KEY = 'bailey_invite_token';
+
+function getInviteToken() {
+  let token = '';
+  try {
+    const p = new URLSearchParams(window.location.search);
+    token = p.get('invite') || '';
+    if (!token) {
+      const ret = p.get('return') || '';
+      if (ret && ret.indexOf('invite=') !== -1) {
+        try { token = new URL(ret, window.location.origin).searchParams.get('invite') || ''; } catch (e) { /* not a URL */ }
+      }
+    }
+    if (token) {
+      try { sessionStorage.setItem(INVITE_TOKEN_KEY, token); } catch (e) { /* storage unavailable */ }
+      // Strip the token from BOTH the top-level ?invite= and the ?return=
+      // bounce URL that may embed it — otherwise the secret persists in the
+      // address bar, history and any copied URL, defeating the point of the
+      // stash. If return= carried the invite, drop the whole param (its only
+      // job was to bounce us here).
+      p.delete('invite');
+      const ret = p.get('return') || '';
+      if (ret && ret.indexOf('invite=') !== -1) { p.delete('return'); }
+      const qs = p.toString();
+      try { window.history.replaceState({}, '', window.location.pathname + (qs ? '?' + qs : '')); } catch (e) { /* noop */ }
+    }
+  } catch (e) { /* fall through to the stash */ }
+  try { return sessionStorage.getItem(INVITE_TOKEN_KEY) || token; } catch (e) { return token; }
+}
+
+function clearInviteToken() {
+  try { sessionStorage.removeItem(INVITE_TOKEN_KEY); } catch (e) { /* noop */ }
 }
 
 // Neutral full-screen spinner shown while gate-state is in flight, so the SPA
@@ -603,9 +657,19 @@ function App() {
   useAE(() => { loadGate.current(); }, []);
 
   // The scene is driven SOLELY by the real gate-state (plus an explicit
-  // ?recover URL intent) — there is no preview/override path.
+  // ?recover URL intent and a stashed emailed-invite token) — there is no
+  // preview/override path.
   const recoverIntent = hasRecoverIntent();
-  const scene = pickScene(gate.state, recoverIntent);
+  const [inviteToken, setInviteToken] = useA(getInviteToken);
+  const dropInviteToken = () => { clearInviteToken(); setInviteToken(''); };
+  const scene = pickScene(gate.state, recoverIntent, inviteToken);
+
+  // A trusted user with a stale invite token (e.g. clicked the link again
+  // after the device was already trusted) just lands in the console — drop
+  // the stash so it can't resurface on a later untrusted visit.
+  useAE(() => {
+    if (gate.status === 'ok' && gate.state && gate.state.trusted && inviteToken) dropInviteToken();
+  }, [gate.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Only load the console data lists once the gate is cleared (trusted) — the
   // console APIs are gated, so calling them while untrusted would error.
@@ -694,6 +758,11 @@ function App() {
         gateState={gate.state}
         onRecovered={() => { showToast('Recovered — this device is now trusted', 'success'); reloadGate(); }}
         goConsole={reloadGate} />}
+      {scene === 'invite' && <InviteScene
+        token={inviteToken}
+        gateState={gate.state}
+        clearToken={clearInviteToken}
+        onFallback={dropInviteToken} />}
       <AToast toast={toast} />
     </div>
   );
@@ -702,4 +771,4 @@ function App() {
 // main.jsx owns mounting (so window.lucide is configured before first render).
 window.SC_APP = App;
 // Published for the views (real server host, not a seeded label) + tests.
-window.SC_HELPERS = { serverHost, pickScene, initialData };
+window.SC_HELPERS = { serverHost, pickScene, initialData, getInviteToken, clearInviteToken };
