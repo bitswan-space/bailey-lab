@@ -55,6 +55,35 @@ export function registerCopyRoutes(
     },
   );
 
+  app.post<{ Params: { name: string } }>(
+    '/api/copies/:name/rebase',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      const { name } = req.params;
+      if (!name) {
+        return reply.code(400).send({ error: 'name is required' });
+      }
+      // The deployer recorded on any follow-up redeploy is the validated token
+      // email, never a client-supplied value — it can't be spoofed.
+      const deployer = await emailFromRequest(req, app.log);
+      try {
+        const r = await gitops.rebaseCopy(name, deployer ?? undefined);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name }, 'copy rebase failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   app.get<{ Params: { name: string } }>(
     '/api/copies/:name/history',
     async (req, reply) => {
@@ -72,6 +101,31 @@ export function registerCopyRoutes(
         return r.body;
       } catch (err) {
         app.log.warn({ err, name: req.params.name }, 'copy history failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  app.get<{ Params: { name: string } }>(
+    '/api/copies/:name/divergence-all',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      try {
+        const r = await gitops.copyDivergenceAll(req.params.name);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn(
+          { err, name: req.params.name },
+          'copy divergence-all failed',
+        );
         return reply.code(502).send({ error: 'gitops unreachable' });
       }
     },

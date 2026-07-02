@@ -24,7 +24,11 @@ from pydantic import BaseModel
 from app.deploy_runner import spawn_set_deploy
 from app.services.automation_service import scan_workspace_sources
 from app.services.git_server import bare_repo_path
-from app.utils import call_git_command, call_git_command_with_output
+from app.utils import (
+    call_git_command,
+    call_git_command_with_output,
+    read_bitswan_yaml,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -831,6 +835,205 @@ async def sync_copy(name: str, body: SyncCopyRequest | None = None):
     )
 
 
+class RebaseCopyResponse(BaseModel):
+    status: str  # "success" | "needs_rebase" | "noop"
+    message: str
+    # BPs whose image dir changed in the pull and were therefore redeployed.
+    redeployed_bps: list[str] = []
+    # Task ids of the live-dev redeploys spawned for those BPs.
+    deploy_task_ids: list[str] = []
+
+
+async def _spawn_live_dev_deploy(
+    members: list[dict], bp: str, copy: str, deployer: str | None
+) -> str | None:
+    """(Re)deploy the given already-running live-dev members of a BP in a copy
+    after a pull changed its image dir. ``members`` is the caller's pre-filtered
+    set (only members with an existing live-dev deployment entry). Best-effort,
+    non-blocking, never raises — a pull must not fail because the follow-up
+    deploy couldn't start."""
+    try:
+        from app.dependencies import get_automation_service
+
+        service = get_automation_service()
+        res = await spawn_set_deploy(
+            label=f"pull-redeploy:{copy}:{bp}",
+            members=members,
+            stage="live-dev",
+            commit_subject=(
+                f"{deployer} pulled main into {copy}" if deployer else None
+            ),
+            service=service,
+            deployed_by=deployer,
+        )
+        deploy = res.get("deploy")
+        if res.get("error"):
+            logger.warning(
+                "Live-dev redeploy after pull failed for '%s' in '%s': %s",
+                bp,
+                copy,
+                res["error"],
+            )
+        return deploy["task_id"] if deploy else None
+    except Exception as e:
+        logger.warning(
+            "Live-dev redeploy after pull errored for '%s' in '%s': %s", bp, copy, e
+        )
+        return None
+
+
+def _image_changed_bps(changed_paths: list[str]) -> list[str]:
+    """Business processes whose *image dir* changed, from copy-root-relative
+    changed paths. An automation's image is built from ``<bp>/<automation>/image/``
+    (automation_service checksums exactly that dir), so a pulled change forces a
+    rebuild only when it lands inside an ``image/`` directory. Returns the
+    top-level BP dirs of such paths. This mirrors the builder's on-disk layout —
+    not a guess from names."""
+    bps: set[str] = set()
+    for p in changed_paths:
+        segs = p.split("/")
+        # Need <bp>/…/image/<file>: an "image" segment that is neither the first
+        # (the BP dir) nor the last (the changed file) component.
+        if "image" in segs[1:-1]:
+            bps.add(segs[0])
+    return sorted(bps)
+
+
+@router.post("/{name}/rebase")
+async def rebase_copy(name: str, body: SyncCopyRequest | None = None):
+    """Pull main's new commits INTO a copy: rebase the whole copy onto the
+    current main. This is the opposite direction from ``/sync`` (which publishes
+    the copy's commits TO main).
+
+    Clean rebase → the copy branch is advanced server-side. The rebase rewrites
+    history (not a fast-forward of the old copy ref), which the ff-only push hook
+    rejects, so objects are transferred via a temp ref and the copy branch is
+    moved with ``update-ref`` — the same trick ``/sync`` uses. Only the copy
+    branch moves; main is never touched. Any business process whose *image dir*
+    changed in the pull gets its live-dev stage redeployed (a config-only change
+    needs no rebuild and is left for the next explicit deploy). A conflict
+    touches NOTHING and returns ``needs_rebase`` so the caller hands off to the
+    coding agent (copy-scoped)."""
+    _validate_copy_name(name)
+    if name == "main":
+        raise HTTPException(
+            status_code=400, detail="the main copy has nothing to pull into"
+        )
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    deployer = body.deployer if body else None
+
+    # 1) Commit work in progress so a dirty tree doesn't block the rebase (same
+    #    as Sync & Deploy), then refresh our view of main from the local bare.
+    await _wip_commit(
+        copy_path,
+        deployer,
+        ["-A"],
+        "Pull: commit work in progress before rebasing onto main",
+    )
+    bare = bare_repo_path()
+    await call_git_command("git", "fetch", bare, "main", cwd=copy_path)
+
+    orig_out, _, _ = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=copy_path
+    )
+    orig_head = orig_out.strip()
+
+    # 2) Nothing on main we don't already have → noop.
+    behind_out, _, _ = await call_git_command_with_output(
+        "git", "rev-list", "--count", "HEAD..FETCH_HEAD", cwd=copy_path
+    )
+    if behind_out.strip() == "0":
+        return RebaseCopyResponse(
+            status="noop", message="Already up to date with main."
+        )
+
+    # 3) Rebase the copy's own commits onto the new main. Any failure (merge
+    #    conflict, or a checkout the worktree can't apply) aborts and restores
+    #    the copy exactly as it was; main is never touched here regardless.
+    _, _rb_err, rb_rc = await call_git_command_with_output(
+        "git", *_ident_args(deployer), "rebase", "FETCH_HEAD", cwd=copy_path
+    )
+    if rb_rc != 0:
+        await call_git_command("git", "rebase", "--abort", cwd=copy_path)
+        await call_git_command_with_output(
+            "git", "reset", "--hard", orig_head, cwd=copy_path
+        )
+        return RebaseCopyResponse(
+            status="needs_rebase",
+            message=(
+                "Main couldn't be pulled in automatically (conflict) — hand off "
+                "to the coding agent to rebase and resolve."
+            ),
+        )
+
+    new_out, _, _ = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=copy_path
+    )
+    new_tip = new_out.strip()
+
+    # 4) Publish the rewritten copy history: transfer objects via a temp ref
+    #    (allowed by the ff-only hook), then advance the copy branch server-side.
+    tmp_ref = f"refs/pull-tmp/{name}"
+    _, tp_err, tp_rc = await call_git_command_with_output(
+        "git", "push", bare, f"HEAD:{tmp_ref}", cwd=copy_path
+    )
+    if tp_rc != 0:
+        await call_git_command_with_output(
+            "git", "reset", "--hard", orig_head, cwd=copy_path
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to publish rebased copy '{name}': {tp_err.strip()}",
+        )
+    await call_git_command_with_output(
+        "git", "-C", bare, "update-ref", f"refs/heads/{name}", new_tip
+    )
+    await call_git_command_with_output("git", "-C", bare, "update-ref", "-d", tmp_ref)
+
+    # 5) Redeploy live-dev ONLY for BPs whose image dir changed in the pull AND
+    #    that already run live-dev in THIS copy. The copy can pull in source for
+    #    BPs it doesn't run (every copy branches off main), so we never spin up a
+    #    new deployment — we only refresh members that already have a live-dev
+    #    deployment entry. Membership is matched by deployment_id (the scanner's
+    #    id for a member vs the ids present in bitswan.yaml), not by parsing names.
+    diff_out, _, _ = await call_git_command_with_output(
+        "git", "diff", "--name-only", f"{orig_head}..{new_tip}", cwd=copy_path
+    )
+    changed_bps = _image_changed_bps(diff_out.splitlines())
+    from app.dependencies import get_automation_service
+
+    service = get_automation_service()
+    bs = read_bitswan_yaml(service.gitops_dir) or {}
+    deployed_ids = set((bs.get("deployments") or {}).keys())
+    redeployed: list[str] = []
+    task_ids: list[str] = []
+    for bp in changed_bps:
+        members = [
+            m
+            for m in service.members_for_bp(bp, copy=name, stage="live-dev")
+            if m.get("deployment_id") in deployed_ids
+        ]
+        if not members:
+            continue  # this BP isn't running live-dev in the copy — nothing to do
+        tid = await _spawn_live_dev_deploy(members, bp, name, deployer)
+        redeployed.append(bp)
+        if tid:
+            task_ids.append(tid)
+
+    msg = f"Pulled {behind_out.strip()} change(s) from main into '{name}'."
+    if redeployed:
+        msg += f" Redeploying live-dev for: {', '.join(redeployed)}."
+    return RebaseCopyResponse(
+        status="success",
+        message=msg,
+        redeployed_bps=redeployed,
+        deploy_task_ids=task_ids,
+    )
+
+
 def _own_container_id_from_proc() -> str | None:
     cgroup_re = re.compile(r"docker[-/]([0-9a-f]{64})")
     try:
@@ -1044,6 +1247,51 @@ async def get_bp_divergence(name: str, bp: str = Query(...)):
         "behind_bp": behind_bp,
         "behind_other": max(0, behind_total - behind_bp),
     }
+
+
+@router.get("/{name}/divergence-all")
+async def get_all_bp_divergence(name: str):
+    """Per-business-process ahead/behind counts vs main for a WHOLE copy, in one
+    git fetch — so the switcher can show ↑/↓ on each BP at a glance without N
+    round trips (each of which would otherwise re-fetch main).
+
+    Only BPs that actually diverge appear in the result; the caller treats a
+    missing BP as "in step with main". Counts are commits touching that BP's
+    directory: ahead = on the copy not yet in main, behind = on main not yet in
+    the copy."""
+    _validate_copy_name(name)
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    bare = bare_repo_path()
+    await call_git_command("git", "fetch", bare, "main", cwd=copy_path)
+
+    # Candidate BP dirs: top-level directories that differ between main and the
+    # copy in EITHER direction (a BP identical to main has nothing to show).
+    diff_out, _, _ = await call_git_command_with_output(
+        "git", "diff", "--name-only", "FETCH_HEAD", "HEAD", cwd=copy_path
+    )
+    bp_dirs = {
+        segs[0]
+        for line in diff_out.splitlines()
+        for segs in [line.split("/")]
+        if len(segs) > 1 and re.fullmatch(r"[A-Za-z0-9._-]+", segs[0])
+    }
+
+    async def _count(rng: str, path: str) -> int:
+        out, _, rc = await call_git_command_with_output(
+            "git", "rev-list", "--count", rng, "--", path, cwd=copy_path
+        )
+        return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
+
+    result: dict[str, dict] = {}
+    for bp in sorted(bp_dirs):
+        ahead = await _count("FETCH_HEAD..HEAD", f"{bp}/")
+        behind = await _count("HEAD..FETCH_HEAD", f"{bp}/")
+        if ahead or behind:
+            result[bp] = {"ahead": ahead, "behind": behind}
+    return result
 
 
 async def _git_log(ref: str, copy_path: str, limit: int = 50) -> list[dict]:

@@ -386,12 +386,41 @@ export class GitopsClient {
     });
   }
 
+  /** `POST /copies/{name}/rebase` — pull main's new commits INTO the copy
+   *  (rebase the whole copy onto main). Opposite direction from syncCopy. */
+  async rebaseCopy(
+    name: string,
+    deployer?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(`/copies/${encodeURIComponent(name)}/rebase`, {
+      deployer: deployer ?? null,
+    });
+  }
+
   /** `GET /copies/{name}/history` — copy + main commit logs with deploy tags. */
   async copyHistory(
     name: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/copies/${encodeURIComponent(name)}/history`,
+      { headers: { ...this.authHeaders() } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET /copies/{name}/divergence-all` — per-BP ahead/behind for the whole
+   *  copy in one fetch (only diverging BPs are returned). */
+  async copyDivergenceAll(
+    name: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/divergence-all`,
       { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
