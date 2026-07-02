@@ -122,10 +122,13 @@ func TestPeople_RosterIncludesRootAndDeviceOwners(t *testing.T) {
 	}
 }
 
-func TestPeople_InviteNotImplemented(t *testing.T) {
+func TestPeople_InviteRejectsEmptyBody(t *testing.T) {
+	// The invite endpoint is implemented (bailey_people_invites.go; full
+	// coverage in bailey_invites_test.go) — a bodyless POST is a 400, not
+	// the old 501 stub.
 	w := dispatchSrv(baileyReq(http.MethodPost, "/bailey/api/people/invite", "boss@example.com", adminGrp))
-	if w.Code != http.StatusNotImplemented {
-		t.Errorf("invite = %d, want 501", w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("invite with no body = %d, want 400", w.Code)
 	}
 }
 

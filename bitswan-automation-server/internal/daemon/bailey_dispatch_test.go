@@ -84,6 +84,7 @@ func ensureTrustedDeviceForReq(r *http.Request) {
 		p == "/bailey/api/self-trust",
 		p == "/bailey/api/recover",
 		p == "/bailey/api/backup-codes/regenerate",
+		p == "/bailey/api/invite/redeem",
 		strings.HasPrefix(p, "/bailey/api/pending-pair"),
 		strings.HasPrefix(p, "/bailey/api/totp/"):
 		return

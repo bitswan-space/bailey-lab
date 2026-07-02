@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	httplocalhost "github.com/bitswan-space/bitswan-workspaces/internal/http"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	httplocalhost "github.com/bitswan-space/bitswan-workspaces/internal/http"
 	"github.com/bitswan-space/bitswan-workspaces/internal/oauth"
 )
 
@@ -54,25 +54,25 @@ type WorkspacePostResponse struct {
 
 // WorkspaceListResponse represents the response from workspace listing
 type WorkspaceListResponse struct {
-	Count    int                    `json:"count"`
-	Next     *string                `json:"next"`
-	Previous *string                `json:"previous"`
+	Count    int                     `json:"count"`
+	Next     *string                 `json:"next"`
+	Previous *string                 `json:"previous"`
 	Results  []WorkspacePostResponse `json:"results"`
 }
 
 // BackupBucketResponse contains S3 credentials and bucket name for workspace backups
 type BackupBucketResponse struct {
-	BucketName  string `json:"bucket_name"`
-	S3Endpoint  string `json:"s3_endpoint"`
-	AccessKey   string `json:"access_key"`
-	SecretKey   string `json:"secret_key"`
-	Region      string `json:"region"`
+	BucketName string `json:"bucket_name"`
+	S3Endpoint string `json:"s3_endpoint"`
+	AccessKey  string `json:"access_key"`
+	SecretKey  string `json:"secret_key"`
+	Region     string `json:"region"`
 }
 
 // AOCClient handles AOC API interactions
 type AOCClient struct {
-	config *config.AutomationServerConfig
-	settings      *config.AutomationOperationsCenterSettings
+	config   *config.AutomationServerConfig
+	settings *config.AutomationOperationsCenterSettings
 }
 
 // NewAOCClient creates a new AOC client from the automation server config
@@ -91,8 +91,8 @@ func NewAOCClient() (*AOCClient, error) {
 	}
 
 	return &AOCClient{
-		config: cfg,
-		settings:      settings,
+		config:   cfg,
+		settings: settings,
 	}, nil
 }
 
@@ -107,8 +107,8 @@ func NewAOCClientWithOTP(aocUrl, otp, automationServerId string) (*AOCClient, er
 	}
 
 	client := &AOCClient{
-		config: cfg,
-		settings:      tempSettings,
+		config:   cfg,
+		settings: tempSettings,
 	}
 
 	// Exchange OTP for access token
@@ -436,6 +436,99 @@ func (c *AOCClient) GetOrCreateOAuthClient(serviceName, redirectURI string) (*OA
 		return nil, fmt.Errorf("failed to parse OAuth client response: %w", err)
 	}
 	return &result, nil
+}
+
+// OrgUser is one member of the AOC organization this automation server
+// belongs to, as returned by the AOC's org-users endpoint. The org is
+// resolved server-side from the bearer token — there is no org id to
+// send.
+type OrgUser struct {
+	ID       string `json:"id"`
+	Email    string `json:"email"`
+	Username string `json:"username"`
+	Verified bool   `json:"verified"`
+}
+
+// ListOrgUsers returns the members of this automation server's AOC
+// organization. Used by the Server Console's People view to show who
+// can be invited.
+func (c *AOCClient) ListOrgUsers() ([]OrgUser, error) {
+	url := fmt.Sprintf("%s/api/automation_server/org-users", c.settings.AOCUrl)
+	resp, err := c.sendRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request to %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to list org users from %s: %s - %s", url, resp.Status, string(body))
+	}
+
+	var response struct {
+		Users []OrgUser `json:"users"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("error decoding JSON: %w", err)
+	}
+	return response.Users, nil
+}
+
+// InviteEmailRequest is the payload for SendInviteEmail. InviteURL is
+// the full invite link (the AOC validates its host against this
+// server's registered domain before mailing it); InvitedBy, Role and
+// ExpiresAt only shape the email copy.
+type InviteEmailRequest struct {
+	Email     string `json:"email"`
+	InviteURL string `json:"invite_url"`
+	InvitedBy string `json:"invited_by"`
+	Role      string `json:"role,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
+// InviteEmailError is a structured failure from the AOC's
+// send-invite-email endpoint. Code carries the AOC's machine-readable
+// reason (e.g. "smtp_not_configured", "send_failed", "not_in_org") so
+// callers can branch — the daemon keeps the invite and hands the admin
+// a copyable link when only delivery failed.
+type InviteEmailError struct {
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *InviteEmailError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("AOC invite email failed (%d %s): %s", e.StatusCode, e.Code, e.Message)
+	}
+	return fmt.Sprintf("AOC invite email failed (%d): %s", e.StatusCode, e.Message)
+}
+
+// SendInviteEmail asks the AOC to email an invite link to an org
+// member using the SMTP service configured there. Returns nil on
+// success; a *InviteEmailError when the AOC rejected or couldn't
+// deliver; any other error means the AOC wasn't reachable at all.
+func (c *AOCClient) SendInviteEmail(req InviteEmailRequest) error {
+	jsonBytes, _ := json.Marshal(req)
+	url := fmt.Sprintf("%s/api/automation_server/send-invite-email", c.settings.AOCUrl)
+	resp, err := c.sendRequest("POST", url, jsonBytes)
+	if err != nil {
+		return fmt.Errorf("error sending request to %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	var aocErr struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &aocErr); err == nil && (aocErr.Code != "" || aocErr.Error != "") {
+		return &InviteEmailError{StatusCode: resp.StatusCode, Code: aocErr.Code, Message: aocErr.Error}
+	}
+	return &InviteEmailError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("%s - %s", resp.Status, string(body))}
 }
 
 func generateCookieSecret() (string, error) {

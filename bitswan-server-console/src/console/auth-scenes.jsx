@@ -400,4 +400,134 @@ function RecoveryScene({ onRecovered, goConsole, gateState }) {
   );
 }
 
-window.SC_SCENES = { BootstrapScene, ApprovalScene, RecoveryScene };
+// ─── 4. INVITE REDEMPTION ───────────────────────────────────────────────────
+// The user arrived through an emailed invite link (?invite=<token>, stashed by
+// console-app before the query was stripped). POST /bailey/api/invite/redeem
+// trusts THIS browser when the token is valid, unconsumed, unexpired, matches
+// the signed-in account, and this is the user's FIRST device. Every failure
+// offers the normal approval flow as a fallback — the invite is a shortcut,
+// never a wall.
+function InviteScene({ token, gateState, clearToken, onFallback }) {
+  const email = (gateState && gateState.email) || '';
+  const [phase, setPhase] = useSc('redeeming'); // 'redeeming' | 'error'
+  const [err, setErr] = useSc(null);            // { code, status, message }
+
+  const redeem = async () => {
+    setPhase('redeeming'); setErr(null);
+    try {
+      const r = await SApi.redeemInvite(token);
+      // Trusted — the device cookie is set. Drop the (now consumed) token so
+      // it can't loop, then follow the backend's redirect into the console.
+      clearToken && clearToken();
+      followRedirect(r && r.redirect_path);
+    } catch (e) {
+      const code = (e && e.code) || '';
+      if (code === 'already_trusted') {
+        // Another browser/tab already holds this user's trust — a reload
+        // re-reads gate-state, which now offers self-approval by code.
+        clearToken && clearToken();
+        window.location.reload();
+        return;
+      }
+      setErr({ code, status: (e && e.status) || 0, message: (e && e.message) || 'Could not redeem this invite.' });
+      setPhase('error');
+    }
+  };
+  useScE(() => { redeem(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Per-failure copy. Codes come from the redeem endpoint; anything else
+  // (network hiccup, 500) gets the raw message + a retry.
+  const FAILS = {
+    expired: {
+      icon: 'clock', title: 'This invite has expired',
+      text: 'Invite links are valid for 48 hours. Ask an admin to re-send it — or continue below and have your device approved the standard way.',
+    },
+    consumed: {
+      icon: 'mail-x', title: 'This invite was already used',
+      text: 'The link may have been opened on another device. If that wasn’t you, tell your admin. You can still get in through the standard device approval.',
+    },
+    invalid: {
+      icon: 'mail-x', title: 'This invite link isn’t valid',
+      text: 'It may have been revoked or replaced by a newer email. Check you opened the latest link, or continue with the standard device approval.',
+    },
+    wrong_account: {
+      icon: 'user-x', title: 'This invite was sent to a different account',
+      text: email
+        ? `You’re signed in as ${email}. Sign out and sign back in with the account the invite was emailed to.`
+        : 'Sign out and sign back in with the account the invite was emailed to.',
+    },
+    unclaimed: {
+      icon: 'clock', title: 'This server isn’t set up yet',
+      text: 'Invites can be used once the server has been claimed by its first admin. Try again in a bit, or continue below.',
+    },
+  };
+  const fail = err ? (FAILS[err.code] || {
+    icon: 'shield-alert', title: 'Couldn’t redeem the invite',
+    text: err.message,
+  }) : null;
+  const canRetry = err && !FAILS[err.code]; // only transient/unknown failures
+
+  return (
+    <SceneShell badge={<SPill tone="info" size="xs">Invited</SPill>}
+      footerNote={phase === 'error' && err && err.code === 'wrong_account'
+        ? undefined
+        : <>Wrong account? <button onClick={() => window.location.assign('/bailey/signout')} style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Sign out</button></>}>
+      <div style={{ padding: '28px 30px 24px' }}>
+        {/* signed-in identity card (same chrome as ApprovalScene) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '10px 12px', background: SC.surface, borderRadius: 10, marginBottom: 20 }}>
+          <SAvatar user={{ name: email || 'Signed-in user', color: '#2a9d90' }} size={32} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: SC.fg }}>Signed in</div>
+            <div style={{ fontSize: 11.5, color: SC.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{email || '—'}</div>
+          </div>
+          <SIcon name="badge-check" size={17} color="#16a34a" />
+        </div>
+
+        {phase === 'redeeming' ? (
+          <div style={{ textAlign: 'center', padding: '6px 0 10px' }}>
+            <div style={{ width: 52, height: 52, borderRadius: 13, background: SC.primarySoft, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+              <SIcon name="mail-check" size={24} color={SC.primary} />
+            </div>
+            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: SC.fg, letterSpacing: '-0.3px' }}>Accepting your invite</h1>
+            <p style={{ margin: '8px auto 16px', fontSize: 13, color: SC.muted, lineHeight: '19px', maxWidth: 340 }}>
+              Checking the invite and trusting this device…
+            </p>
+            <SIcon name="loader" size={20} color={SC.primary} />
+          </div>
+        ) : (
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ width: 52, height: 52, borderRadius: 13, background: SC.surface2, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+              <SIcon name={fail.icon} size={24} color={SC.red} />
+            </div>
+            <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: SC.fg, letterSpacing: '-0.3px' }}>{fail.title}</h1>
+            <p style={{ margin: '8px auto 18px', fontSize: 13, color: SC.muted, lineHeight: '19px', maxWidth: 350 }}>{fail.text}</p>
+            {err.code === 'wrong_account' ? (
+              <SBtn variant="primary" leftIcon="log-out" onClick={() => window.location.assign('/bailey/signout')} style={{ width: '100%' }}>
+                Sign out
+              </SBtn>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {canRetry && (
+                  <SBtn variant="primary" leftIcon="refresh-cw" onClick={redeem} style={{ width: '100%' }}>Try again</SBtn>
+                )}
+                <SBtn variant={canRetry ? 'default' : 'primary'} leftIcon="user-check" onClick={onFallback} style={{ width: '100%' }}>
+                  Continue to device approval
+                </SBtn>
+              </div>
+            )}
+          </div>
+        )}
+        <div style={{ textAlign: 'center', marginTop: 18 }}><WhyComplicatedLink /></div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, padding: '14px 22px', background: SC.surface, borderTop: `1px solid ${SC.border}` }}>
+        <SIcon name="shield" size={15} color={SC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
+        <span style={{ fontSize: 11.5, color: SC.muted, lineHeight: '16px' }}>
+          An invite trusts only your first device. Later sign-ins from new devices go through the standard approval, like everyone else.
+        </span>
+      </div>
+    </SceneShell>
+  );
+}
+
+window.SC_SCENES = { BootstrapScene, ApprovalScene, RecoveryScene, InviteScene };
