@@ -46,7 +46,7 @@ RUN apt-get update && apt-get install -y asciinema && rm -rf /var/lib/apt/lists/
 # Changing this value also busts the Docker layer cache, so the new version is
 # actually reinstalled on the next build. CI may override it with
 # `--build-arg CLAUDE_CODE_VERSION=...`.
-ARG CLAUDE_CODE_VERSION=2.1.197
+ARG CLAUDE_CODE_VERSION=2.1.198
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Copy bitswan-coding-agent binary from builder
