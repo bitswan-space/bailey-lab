@@ -281,8 +281,8 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", createOrAlter); rc != 0 {
 		return fmt.Errorf("ensure role %s: %s", role, strings.TrimSpace(stderr))
 	}
-	// Use (not own) the public schema + its existing objects, and stay usable for
-	// objects admin creates later. Connected to the BP's own database.
+	// Full use of the public schema + its existing objects, and default privileges
+	// for objects admin creates later. Connected to the BP's own database.
 	grants := strings.Join([]string{
 		fmt.Sprintf("GRANT ALL ON SCHEMA public TO %q;", role),
 		fmt.Sprintf("GRANT ALL ON ALL TABLES IN SCHEMA public TO %q;", role),
@@ -292,6 +292,29 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 	}, " ")
 	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", grants); rc != 0 {
 		return fmt.Errorf("grant on %s to %s: %s", dbName, role, strings.TrimSpace(stderr))
+	}
+	// Make the role OWN its tables/sequences/views. Backends run arbitrary
+	// migrations (ALTER TABLE, CREATE INDEX, DROP CONSTRAINT), and Postgres
+	// requires *ownership* — not mere privileges — for DDL, so GRANT ALL alone
+	// makes any migration fail with "must be owner of table …". Existing objects
+	// may be owned by admin (legacy databases created before scoped roles) or by
+	// a different role (a live-dev DB cloned WITH TEMPLATE inherits the source
+	// role's ownership), so reassign every public-schema object to this role.
+	// The database and schema stay admin-owned, so the role still cannot drop
+	// them. Idempotent (objects the backend itself created are already owned by
+	// the role); runs each deploy so it also repairs pre-existing databases.
+	reassign := fmt.Sprintf(
+		"DO $$ DECLARE r record; BEGIN "+
+			"FOR r IN SELECT tablename FROM pg_tables WHERE schemaname='public' LOOP "+
+			"EXECUTE format('ALTER TABLE public.%%I OWNER TO %q', r.tablename); END LOOP; "+
+			"FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname='public' LOOP "+
+			"EXECUTE format('ALTER SEQUENCE public.%%I OWNER TO %q', r.sequencename); END LOOP; "+
+			"FOR r IN SELECT table_name FROM information_schema.views WHERE table_schema='public' LOOP "+
+			"EXECUTE format('ALTER VIEW public.%%I OWNER TO %q', r.table_name); END LOOP; "+
+			"END $$;",
+		role, role, role)
+	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", reassign); rc != 0 {
+		return fmt.Errorf("reassign ownership in %s to %s: %s", dbName, role, strings.TrimSpace(stderr))
 	}
 	// Lock CONNECT to this role so no other BP role can reach this database.
 	lock := fmt.Sprintf("REVOKE CONNECT ON DATABASE %q FROM PUBLIC; GRANT CONNECT ON DATABASE %q TO %q;", dbName, dbName, role)
