@@ -70,7 +70,7 @@ async def create_process(
         raise HTTPException(status_code=400, detail="Invalid copy name")
 
     try:
-        entry = process_service.create_business_process(name=name, copy=body.copy)
+        entry = await process_service.create_business_process(name=name, copy=body.copy)
     except FileExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except (FileNotFoundError, ValueError) as e:

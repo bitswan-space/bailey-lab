@@ -380,19 +380,28 @@ class ProcessService:
             pass
         return False
 
-    def create_business_process(
+    async def create_business_process(
         self,
         name: str,
         copy: Optional[str] = None,
         process_id: Optional[str] = None,
     ) -> dict:
-        """Create a new business-process directory with a `process.toml` +
-        `README.md` template inside the main repo or a specific copy.
+        """Create a new business process: its OWN git repo, a clone of it in
+        the target scope, and the `process.toml` + `README.md` scaffold,
+        committed and (for the main scope) published to the repo's main.
 
         Returns the entry as it appears in `get_all_processes()`.
         """
+        from app.services.bp_git import (
+            clone_bp_into_copy,
+            commit_in_bp_clone,
+            publish_bp_clone,
+        )
+        from app.services.git_server import ensure_bp_bare_repo
+
         # Strip + basename to defend against path traversal. The HTTP route
-        # additionally validates the input against a regex.
+        # additionally validates the input against a regex; the repo layer
+        # (`ensure_bp_bare_repo`) validates again.
         clean = os.path.basename((name or "").strip())
         if not clean:
             raise ValueError("process name is empty or invalid")
@@ -403,6 +412,7 @@ class ProcessService:
                 raise FileNotFoundError(f"copy '{copy}' does not exist")
         else:
             scope_root = os.path.join(_copies_dir(), "main")
+            os.makedirs(scope_root, exist_ok=True)
 
         process_dir = os.path.join(scope_root, clean)
         if os.path.exists(process_dir):
@@ -411,13 +421,25 @@ class ProcessService:
                 f"{'copy ' + copy if copy else 'main'}"
             )
 
+        # The BP's own repo (idempotent: an existing repo — e.g. the same BP
+        # created earlier in another copy — is reused; branches keep the
+        # copies apart). allow_empty: a brand-new repo has only the empty
+        # seed commit — the scaffold is the first real content, so the first
+        # sync fast-forwards main from the seed.
+        await ensure_bp_bare_repo(clean)
+        await clone_bp_into_copy(scope_root, copy or "main", clean, allow_empty=True)
+
         pid = process_id or str(uuid.uuid4())
 
-        os.makedirs(process_dir)
         with open(os.path.join(process_dir, "process.toml"), "w") as f:
             f.write(f'process-id = "{pid}"\n')
         with open(os.path.join(process_dir, "README.md"), "w") as f:
             f.write(f"# {clean}\n")
+
+        await commit_in_bp_clone(process_dir, f"Create business process {clean}")
+        # Main-scope creation advances the repo's deploy-only main server-side;
+        # copy-scope creation rides the copy until Sync & Deploy.
+        await publish_bp_clone(process_dir, clean, copy)
 
         # Refresh just the affected scope so the next discovery call sees
         # the new BP. The HTTP route is expected to broadcast the snapshot

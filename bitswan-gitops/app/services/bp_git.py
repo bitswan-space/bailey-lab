@@ -191,6 +191,87 @@ async def publish_main_from_clone(clone_path: str, bp: str) -> None:
     await refresh_main_bp_checkout(bp)
 
 
+async def publish_bp_clone(clone_path: str, bp: str, copy: str | None) -> None:
+    """Publish a service-made commit (scaffold / rename / waiver).
+
+    Main-scope commits must advance the deploy-only ``main`` server-side —
+    before per-BP repos they were committed into the main checkout but never
+    reached the bare, so the next main realign silently WIPED them. Copy-scope
+    commits stay local and ride the copy until Sync & Deploy, exactly like the
+    user's own edits."""
+    if copy:
+        return
+    await publish_main_from_clone(clone_path, bp)
+
+
+async def clone_bp_into_copy(
+    copy_path: str, name: str, bp: str, base: str = "main", allow_empty: bool = False
+) -> bool:
+    """Materialize BP `bp` inside copy `name` as a clone of its bare repo on
+    branch `name` (branch ``main`` itself when materializing the main copy).
+
+    Start-point priority: the copy's own branch if the bare already has it
+    (re-materializing a deleted clone dir), else `base` (another copy's
+    branch), else main WHEN it has real content. Returns False when there is
+    nothing to clone from (the BP exists only as an empty seed) — unless
+    `allow_empty` is set (BP creation: the scaffold lands in this fresh clone,
+    branched off the seed commit so the first sync is a plain fast-forward).
+    The new branch is pushed back to the bare so it exists server-side, and
+    origin is repointed at the smart-HTTP URL agents use.
+    """
+    bare = bp_bare_repo_path(bp)
+    clone = os.path.join(copy_path, bp)
+
+    async def _branch_exists(ref: str) -> bool:
+        _, _, rc = await call_git_command_with_output(
+            "git", "-C", bare, "rev-parse", "--verify", f"refs/heads/{ref}"
+        )
+        return rc == 0
+
+    if await _branch_exists(name):
+        start = name
+    elif base != "main" and await _branch_exists(base):
+        start = base
+    elif allow_empty or await bp_main_has_content(bp):
+        start = "main"
+    else:
+        return False
+
+    if not await call_git_command("git", "clone", bare, clone):
+        raise HTTPException(status_code=500, detail=f"Failed to clone {bp}.git")
+
+    if start == name:
+        ok = await call_git_command("git", "checkout", name, cwd=clone)
+    else:
+        ok = await call_git_command(
+            "git", "checkout", "-b", name, f"origin/{start}", cwd=clone
+        )
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create branch '{name}' in {bp}",
+        )
+
+    if start != name:
+        # Publish the new branch (the pre-receive hook allows new branches).
+        pub_out, pub_err, pub_rc = await call_git_command_with_output(
+            "git", "push", "origin", name, cwd=clone
+        )
+        if pub_rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Failed to publish branch '{name}' for {bp}: "
+                    f"{(pub_err or pub_out).strip()}"
+                ),
+            )
+
+    await call_git_command(
+        "git", "remote", "set-url", "origin", git_remote_url(bp), cwd=clone
+    )
+    return True
+
+
 async def refresh_main_bp_checkout(bp: str) -> None:
     """Align ``copies/main/<bp>`` with the BP repo's ``main`` tip.
 

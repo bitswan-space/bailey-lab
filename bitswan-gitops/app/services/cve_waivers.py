@@ -18,6 +18,7 @@ import os
 import yaml
 
 from app.services.bp_databases import validate_bp_slug
+from app.services.bp_git import publish_bp_clone
 from app.services.template_service import _commit, _copies_dir
 
 WAIVER_FILENAME = "cve-waivers.yaml"
@@ -53,9 +54,12 @@ async def _write(bp: str, copy: str | None, waivers: dict, message: str) -> None
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         yaml.safe_dump({"waivers": waivers}, f, sort_keys=True)
-    # Commit in the copy's checkout so the marking is versioned and rides the
-    # BP-scoped sync to main alongside the code it concerns.
-    await _commit(os.path.join(_copies_dir(), copy or "main"), message)
+    # Commit in the BP's own clone so the marking is versioned and rides the
+    # BP-scoped sync to main alongside the code it concerns. A main-scope
+    # marking must also advance the repo's deploy-only main server-side.
+    clone = os.path.join(_copies_dir(), copy or "main", bp)
+    await _commit(clone, message)
+    await publish_bp_clone(clone, bp, copy)
 
 
 async def set_waiver(

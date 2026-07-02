@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+from app.services.bp_git import publish_bp_clone
 from app.utils import (
     GitLockContext,
     call_git_command,
@@ -355,9 +356,12 @@ async def rename_automation(
         )
     os.rename(src, dest)
 
-    commit_cwd = os.path.join(_copies_dir(), copy or "main")
+    # Commit in the BP's own clone; a main-scope rename must also advance the
+    # repo's deploy-only main (the checkout would otherwise be realigned over).
+    commit_cwd = os.path.join(_copies_dir(), copy or "main", bp)
     try:
         await _commit(commit_cwd, f"Rename automation {old_san} → {new_san}")
+        await publish_bp_clone(commit_cwd, bp, copy)
     except Exception as e:  # noqa: BLE001 — surface but don't undo the rename
         logger.warning("rename commit failed: %s", e)
 
@@ -448,12 +452,13 @@ async def create_automation_from_template(
         names = ", ".join(c["name"] for c in created)
         message = f"Add automations: {names}"
 
-    # Commit in the copy's checkout (main copy when copy is None). `git` finds
-    # the right repo from the cwd, so commits land on the right branch
-    # automatically.
-    commit_cwd = os.path.join(_copies_dir(), copy or "main")
+    # Commit in the BP's own clone (each BP is its own repo; `git` finds it
+    # from the cwd, so the commit lands on the scope's branch automatically).
+    # A main-scope scaffold must also advance the repo's deploy-only main.
+    commit_cwd = os.path.join(_copies_dir(), copy or "main", bp)
     try:
         await _commit(commit_cwd, message)
+        await publish_bp_clone(commit_cwd, bp, copy)
     except Exception as e:  # noqa: BLE001 — surface commit failures but don't undo the copy
         logger.warning("template commit failed: %s", e)
 
