@@ -24,14 +24,30 @@ import (
 // CONTENT, not history. The old repo.git is archived on the volume (renamed,
 // never served) for forensics.
 
-// gitRunner runs a shell command in a directory. Production uses user1000 via
-// `su` (the repos/copies are owned by uid 1000 and git refuses cross-owner
-// repos); tests inject a plain runner.
+// gitRunner runs a shell command in a directory. Production prefers user1000
+// via `su` (the repos/copies are owned by uid 1000 and git refuses cross-owner
+// repos); on hosts without a user1000 account it falls back to running
+// directly (the daemon is root) with git's dubious-ownership check waived —
+// the final chown restores uid-1000 ownership either way. Tests inject a
+// plain runner.
 type gitRunner func(dir, cmd string) (string, error)
 
 func user1000Runner(verbose bool) gitRunner {
+	useSu := exec.Command("id", "user1000").Run() == nil
+	directEnv := append(os.Environ(),
+		"GIT_AUTHOR_NAME=Bailey", "GIT_AUTHOR_EMAIL=bailey@bitswan",
+		"GIT_COMMITTER_NAME=Bailey", "GIT_COMMITTER_EMAIL=bailey@bitswan",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=*",
+	)
 	return func(dir, cmd string) (string, error) {
-		c := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", cmd) //nolint:gosec
+		var c *exec.Cmd
+		if useSu {
+			c = exec.Command("su", "-s", "/bin/sh", "user1000", "-c", cmd) //nolint:gosec
+		} else {
+			c = exec.Command("sh", "-c", cmd) //nolint:gosec
+			c.Env = directEnv
+		}
 		c.Dir = dir
 		out, err := c.CombinedOutput()
 		if verbose || err != nil {

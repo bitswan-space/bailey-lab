@@ -216,3 +216,21 @@ func TestMigrateToPerBPRepos_Idempotent(t *testing.T) {
 		t.Fatalf("expected 1 archive after re-runs, got %v", archives)
 	}
 }
+
+// TestMigrateToPerBPRepos_RehearsalDir runs the real migration (with the
+// production runner) against an operator-provided workspace directory — a
+// dry-run harness for rehearsing on a COPY of live data before a cutover.
+// Skipped unless BITSWAN_PER_BP_MIGRATE_REHEARSAL_DIR is set.
+func TestMigrateToPerBPRepos_RehearsalDir(t *testing.T) {
+	dir := os.Getenv("BITSWAN_PER_BP_MIGRATE_REHEARSAL_DIR")
+	if dir == "" {
+		t.Skip("set BITSWAN_PER_BP_MIGRATE_REHEARSAL_DIR to a workspace dir copy to run")
+	}
+	ws := os.Getenv("BITSWAN_PER_BP_MIGRATE_REHEARSAL_WS")
+	if ws == "" {
+		ws = "rehearsal"
+	}
+	if err := migrateToPerBPRepos(ws, dir, user1000Runner(true)); err != nil {
+		t.Fatalf("rehearsal migration failed: %v", err)
+	}
+}
