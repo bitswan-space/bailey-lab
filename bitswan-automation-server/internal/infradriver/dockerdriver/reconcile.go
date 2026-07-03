@@ -19,6 +19,17 @@ import (
 // reconcile brings the generated compose project up and applies the post-up
 // container mutations (CA certs). Port of
 // automation_service.apply_compose_for_deployments' operational tail.
+// stateDir is where this apply's generated docker-compose.yaml (and, in a per-BP
+// deploy repo, the materialized bitswan.yaml) live. Per-BP applies (wctx.BP set)
+// write under gitops/bp/<bp>/ so concurrent BP applies never clobber each other's
+// compose file; the legacy whole-workspace apply uses the gitops root.
+func stateDir(wctx infradriver.WorkspaceContext) string {
+	if wctx.BP != "" {
+		return filepath.Join(wctx.GitopsDir, "bp", wctx.BP)
+	}
+	return wctx.GitopsDir
+}
+
 func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, composeYAML string, routes []infradriver.Route, report func(step, msg string)) error {
 	// 1. Ensure the per-(workspace, stage) networks the compose references as
 	//    external exist (automation_service._ensure_stage_networks).
@@ -45,7 +56,10 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	//    desired-config hash label, then write the compose. docker compose
 	//    recreates those netns-sharing workers on every `up` (its own config-hash
 	//    for them is unstable), so we reconcile them ourselves below.
-	composePath := filepath.Join(wctx.GitopsDir, "docker-compose.yaml")
+	composePath := filepath.Join(stateDir(wctx), "docker-compose.yaml")
+	if err := os.MkdirAll(filepath.Dir(composePath), 0o755); err != nil {
+		return fmt.Errorf("mkdir state dir: %w", err)
+	}
 	finalYAML, workers, allServices, perr := prepareComposeForEgress(composeYAML)
 	if perr != nil {
 		// Couldn't analyze the compose — fall back to writing it as-is and a
@@ -114,7 +128,7 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	//    Fail loudly: a route the deploy implies but the ingress lacks means the
 	//    endpoint 404s, which must surface, not be swallowed.
 	report("ingress", "Reconciling ingress routes...")
-	if err := reconcileIngress(ctx, wctx.WorkspaceName, routes); err != nil {
+	if err := reconcileIngress(ctx, wctx.WorkspaceName, wctx.BP, routes); err != nil {
 		return err
 	}
 
@@ -174,6 +188,16 @@ func retireOrphanedContainers(ctx context.Context, wctx infradriver.WorkspaceCon
 	for _, c := range infos {
 		if c.labels["com.docker.compose.project"] != wctx.WorkspaceName {
 			continue // only the app deployment project, never site/dashboard
+		}
+		// Per-BP apply: only ever retire THIS BP's own containers. App services
+		// carry gitops.context=<bp>; egress gw/proxy carry gitops.bp=<bp>. A
+		// container with neither label matching (a sibling BP, or an unlabelled
+		// infra singleton) is off-limits — a one-BP deploy must never reap another
+		// BP's or the shared infra's containers.
+		if wctx.BP != "" {
+			if c.labels["gitops.context"] != wctx.BP && c.labels["gitops.bp"] != wctx.BP {
+				continue
+			}
 		}
 		svc := c.labels["com.docker.compose.service"]
 		if svc == "" || desired[svc] {

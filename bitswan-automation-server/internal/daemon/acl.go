@@ -421,12 +421,25 @@ func listAllEndpoints() ([]endpointRecord, error) {
 // used by the ingress reconcile to mark a route 'gitops' (declarative, prunable)
 // after registering it. No-op if the endpoint row doesn't exist yet.
 func setEndpointSource(hostname, source string) error {
+	return setEndpointSourceBP(hostname, source, "")
+}
+
+// setEndpointSourceBP also records the business process a gitops route belongs
+// to, so a per-BP ingress reconcile prunes only its own bp's routes. A non-empty
+// bp always overwrites (backfills an untagged route on its next upsert); an empty
+// bp leaves any existing tag intact (legacy whole-workspace reconcile).
+func setEndpointSourceBP(hostname, source, bp string) error {
 	db, err := openBaileyDB()
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE endpoints SET source = ? WHERE hostname = ? COLLATE NOCASE`,
-		source, strings.TrimSpace(hostname))
+	if bp != "" {
+		_, err = db.Exec(`UPDATE endpoints SET source = ?, source_bp = ? WHERE hostname = ? COLLATE NOCASE`,
+			source, bp, strings.TrimSpace(hostname))
+	} else {
+		_, err = db.Exec(`UPDATE endpoints SET source = ? WHERE hostname = ? COLLATE NOCASE`,
+			source, strings.TrimSpace(hostname))
+	}
 	return err
 }
 
@@ -435,14 +448,23 @@ func setEndpointSource(hostname, source string) error {
 // "<workspace>-"). The ingress reconcile uses this to find which managed
 // routes to prune — those no longer in the desired set. Manual routes are
 // never returned, so reconcile can never remove a human-added route.
-func listGitopsManagedHosts(workspaceName string) ([]string, error) {
+//
+// When bp is non-empty (a per-BP deploy), only routes tagged with that bp are
+// returned — so a per-BP reconcile prunes only its own routes and can never
+// remove a sibling BP's route, nor an untagged (legacy) route. bp="" is the
+// legacy whole-workspace reconcile (every gitops route is prunable).
+func listGitopsManagedHosts(workspaceName, bp string) ([]string, error) {
 	db, err := openBaileyDB()
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(
-		`SELECT hostname FROM endpoints WHERE source = 'gitops' AND hostname LIKE ? COLLATE NOCASE`,
-		workspaceName+"-%")
+	query := `SELECT hostname FROM endpoints WHERE source = 'gitops' AND hostname LIKE ? COLLATE NOCASE`
+	args := []any{workspaceName + "-%"}
+	if bp != "" {
+		query += ` AND source_bp = ?`
+		args = append(args, bp)
+	}
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

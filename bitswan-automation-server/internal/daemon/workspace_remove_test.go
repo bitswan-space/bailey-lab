@@ -31,7 +31,7 @@ func TestWorkspaceRemove_RouteCleanupEnumeration(t *testing.T) {
 	}
 
 	// Enumeration must return exactly this workspace's gitops endpoints.
-	hosts, err := listGitopsManagedHosts(ws)
+	hosts, err := listGitopsManagedHosts(ws, "")
 	if err != nil {
 		t.Fatalf("listGitopsManagedHosts: %v", err)
 	}

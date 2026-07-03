@@ -22,10 +22,14 @@ import (
 // trusted UNIX socket (access is gated by socket perms, so no token), falling
 // back to BITSWAN_INGRESS_URL for socket-less environments. The driver sidecar
 // mounts /var/run/bitswan to reach it.
-func reconcileIngress(ctx context.Context, workspaceName string, routes []infradriver.Route) error {
+// bp scopes the reconcile to one business process (per-BP deploy repos): the
+// daemon then prunes only THIS bp's gitops-managed routes, never a sibling's.
+// Empty bp = legacy whole-workspace convergence (prune all gitops routes).
+func reconcileIngress(ctx context.Context, workspaceName, bp string, routes []infradriver.Route) error {
 	body, err := json.Marshal(ingressReconcileRequest{
-		WorkspaceName: workspaceName,
-		Routes:        toIngressRoutes(workspaceName, routes),
+		WorkspaceName:   workspaceName,
+		BusinessProcess: bp,
+		Routes:          toIngressRoutes(workspaceName, routes),
 	})
 	if err != nil {
 		return err
@@ -74,8 +78,9 @@ func ingressClientAndBase() (*http.Client, string) {
 
 // ingressReconcileRequest mirrors daemon.IngressReconcileRequest.
 type ingressReconcileRequest struct {
-	WorkspaceName string         `json:"workspace_name"`
-	Routes        []ingressRoute `json:"routes"`
+	WorkspaceName   string         `json:"workspace_name"`
+	BusinessProcess string         `json:"business_process,omitempty"`
+	Routes          []ingressRoute `json:"routes"`
 }
 
 // ingressRoute mirrors the subset of daemon.IngressAddRouteRequest the compiler
