@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Bot, Loader2, Pencil, Play, Plus, Trash2 } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Requirement } from '@/lib/api';
 import { StatusBadge, nextStatus } from './StatusBadge';
 
@@ -137,18 +138,37 @@ export function RequirementRow({
         <IconButton title="Add child requirement" onClick={onAddChild}>
           <Plus className="size-3.5" />
         </IconButton>
-        <IconButton
-          title={running ? 'Running test…' : 'Run this requirement’s test'}
-          onClick={onRunTest}
-          disabled={running}
-          className="hover:text-foreground"
-        >
-          {running ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <Play className="size-3.5" />
-          )}
-        </IconButton>
+        {/* Radix tooltip (not `title`) because the no-test state must explain
+            itself on hover, and native tooltips don't show on disabled
+            controls. aria-disabled + click guard keeps hover events alive —
+            same trick as SpecEditorToolbar. */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-disabled={running || !req.hasTest}
+              onClick={running || !req.hasTest ? undefined : onRunTest}
+              className={`${ICON_BTN_CLASS} ${
+                running || !req.hasTest
+                  ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground'
+                  : 'hover:text-foreground'
+              }`}
+            >
+              {running ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Play className="size-3.5" />
+              )}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            {running
+              ? 'Running test…'
+              : req.hasTest
+                ? 'Run this requirement’s test'
+                : 'No test written for this requirement yet — write one first (the “Write tests” agent can do it)'}
+          </TooltipContent>
+        </Tooltip>
         <IconButton title="Run agent on this requirement" onClick={onRunAgent}>
           <Bot className="size-3.5" />
         </IconButton>
@@ -163,6 +183,9 @@ export function RequirementRow({
     </div>
   );
 }
+
+const ICON_BTN_CLASS =
+  'inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted';
 
 function IconButton({
   title,
@@ -183,7 +206,7 @@ function IconButton({
       title={title}
       onClick={onClick}
       disabled={disabled}
-      className={`inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent ${className}`}
+      className={`${ICON_BTN_CLASS} hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent ${className}`}
     >
       {children}
     </button>

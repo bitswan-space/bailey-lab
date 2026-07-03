@@ -71,7 +71,11 @@ export function useRequirements(copy: string, bp: string): Result {
   const update = useCallback(
     async (id: string, patch: UpdateRequirementRequest) => {
       const next = await api.requirements.update(bp, copy, id, patch);
-      setRequirements((prev) => prev.map((r) => (r.id === id ? next : r)));
+      // PATCH responses aren't hasTest-annotated (only list/run-tests scan
+      // the BP for tests) — keep the flag we already have for the row.
+      setRequirements((prev) =>
+        prev.map((r) => (r.id === id ? { ...next, hasTest: r.hasTest } : r)),
+      );
       return next;
     },
     [bp, copy],

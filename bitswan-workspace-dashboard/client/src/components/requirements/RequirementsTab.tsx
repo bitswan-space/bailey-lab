@@ -12,6 +12,12 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { useRequirements } from '@/hooks/useRequirements';
 import { useSessions, type BpSessionKind } from '@/components/agents/SessionProvider';
 import { nextStatus } from './StatusBadge';
@@ -86,6 +92,13 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     null,
   );
   const anyRunning = runningAll || runningIds.size > 0;
+
+  // Run-all only makes sense once at least one testable (non-proposed)
+  // requirement actually has a test written for it.
+  const hasAnyTest = useMemo(
+    () => requirements.some((r) => r.status !== 'proposed' && r.hasTest),
+    [requirements],
+  );
 
   const counts = useMemo(() => {
     const c = { total: 0, pass: 0, fail: 0, pending: 0, retest: 0, proposed: 0 };
@@ -165,7 +178,9 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   // server, which drives `bitswan-coding-agent requirements test`. The hook
   // adopts the canonical statuses the CLI wrote, so badges flip on resolve.
   const onRunTest = async (r: Requirement) => {
-    if (anyRunning) return;
+    // The row's button is disabled without a test, but guard anyway — running
+    // a test that doesn't exist can only record a bogus verdict.
+    if (anyRunning || !r.hasTest) return;
     setRunningIds(new Set([r.id]));
     try {
       const res = await runTests(r.id);
@@ -221,6 +236,7 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   };
 
   return (
+    <TooltipProvider delayDuration={300}>
     <div className="flex h-full flex-col overflow-hidden bg-background">
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-6 py-3">
         {/* Search */}
@@ -276,20 +292,32 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
         </div>
 
         <div className="ml-auto flex items-center gap-2">
-          <Button
-            onClick={() => void onRunAll()}
-            size="sm"
-            variant="outline"
-            disabled={anyRunning}
-            title="Run every requirement's test in the live-dev container and record pass/fail"
-          >
-            {runningAll ? (
-              <Loader2 className="size-3.5 animate-spin" aria-hidden />
-            ) : (
-              <Play className="size-3.5" aria-hidden />
-            )}
-            Run tests
-          </Button>
+          {/* The disabled Button has pointer-events: none, so the span
+              wrapper is what keeps the tooltip hoverable in that state. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <Button
+                  onClick={() => void onRunAll()}
+                  size="sm"
+                  variant="outline"
+                  disabled={anyRunning || !hasAnyTest}
+                >
+                  {runningAll ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Play className="size-3.5" aria-hidden />
+                  )}
+                  Run tests
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {hasAnyTest
+                ? "Run every requirement's test in the live-dev container and record pass/fail"
+                : 'No tests written yet — write them first (the “Write tests” agent can do it)'}
+            </TooltipContent>
+          </Tooltip>
           <Button
             onClick={() => void onStartCanned('write-tests')}
             size="sm"
@@ -383,5 +411,6 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
         </AlertDialogContent>
       </AlertDialog>
     </div>
+    </TooltipProvider>
   );
 }

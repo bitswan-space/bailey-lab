@@ -1027,6 +1027,13 @@ export interface Requirement {
   description: string;
   status: ReqStatus;
   parent: string;
+  /**
+   * True when a test file in the BP mentions this requirement's underscore
+   * token (REQ-003 → REQ_003) — the same convention the test runner matches
+   * on. Absent on add/update responses (only list/run-tests annotate); the
+   * hook preserves the previous value across those.
+   */
+  hasTest?: boolean;
 }
 
 export interface AddRequirementRequest {

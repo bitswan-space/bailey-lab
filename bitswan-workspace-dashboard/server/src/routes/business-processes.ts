@@ -6,6 +6,7 @@ import {
 } from '../services/workspace.js';
 import {
   addRequirement,
+  annotateHasTest,
   isReqStatus,
   listRequirements,
   removeRequirement,
@@ -106,11 +107,9 @@ export function registerBusinessProcessRoutes(
     const err = validateBpCopy(req.params.id, req.query.copy);
     if (err) return reply.code(400).send({ error: err });
     try {
-      return await listRequirements({
-        workspaceRoot,
-        copy: req.query.copy!,
-        bp: req.params.id,
-      });
+      const scope = { workspaceRoot, copy: req.query.copy!, bp: req.params.id };
+      // hasTest drives the UI's per-row Run button — no test yet, no run.
+      return await annotateHasTest(scope, await listRequirements(scope));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       app.log.warn({ err: e, id: req.params.id }, 'requirements list failed');
@@ -148,7 +147,8 @@ export function registerBusinessProcessRoutes(
       });
       // The CLI wrote the verdicts into the TOML; hand back the canonical list
       // alongside the run output so the client doesn't need a second fetch.
-      const requirements = await listRequirements({ workspaceRoot, copy: copy!, bp });
+      const scope = { workspaceRoot, copy: copy!, bp };
+      const requirements = await annotateHasTest(scope, await listRequirements(scope));
       return {
         ok: result.exitCode === 0,
         exitCode: result.exitCode,
