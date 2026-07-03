@@ -329,7 +329,32 @@ def dump_bitswan_yaml(bs_yaml: dict, f) -> None:
     yaml.dump(out, f)
 
 
-def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
+# ── per-BP deploy state ────────────────────────────────────────────────────
+# Deploy state is split into one bitswan.yaml PER business process, each in its
+# own git repo, at <gitops_dir>/bp/<bp>/bitswan.yaml (so the driver compiles +
+# `docker compose`s one BP at a time — see the per-BP-deploy-state plan). A
+# whole-workspace read AGGREGATES every per-BP file back into the single dict
+# shape all readers already expect (union of business_processes / firewall /
+# backups / secrets, then hydrate the flat `deployments` view). A per-BP read
+# targets one bp dir directly. Pre-split (legacy) workspaces have a single
+# top-level bitswan.yaml and no bp/ dir — handled transparently.
+
+_BP_KEY = "business_processes"
+_WS_MERGE_KEYS = (_BP_KEY, "firewall", "backups", "secrets")
+
+
+def bp_state_dir(gitops_dir: str) -> str:
+    """The dir holding per-BP deploy repos/state: <gitops_dir>/bp."""
+    return os.path.join(gitops_dir, "bp")
+
+
+def bp_state_path(gitops_dir: str, bp: str) -> str:
+    """The per-BP working tree for one business process: <gitops_dir>/bp/<bp>."""
+    return os.path.join(bp_state_dir(gitops_dir), bp)
+
+
+def _read_single_bitswan(bitswan_dir: str) -> dict[str, Any] | None:
+    """Read + hydrate ONE bitswan.yaml file at <bitswan_dir>/bitswan.yaml."""
     bitswan_yaml_path = os.path.join(bitswan_dir, "bitswan.yaml")
     try:
         if os.path.exists(bitswan_yaml_path):
@@ -337,11 +362,103 @@ def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
                 bs_yaml: dict = yaml.load(f, Loader=_SAFE_LOADER)
             # Hydrate the flat `deployments` view from the tree so all readers
             # work unchanged. (Legacy flat-only files are returned as-is.)
-            if isinstance(bs_yaml, dict) and bs_yaml.get("business_processes"):
+            if isinstance(bs_yaml, dict) and bs_yaml.get(_BP_KEY):
                 bs_yaml["deployments"] = _tree_to_flat(bs_yaml)
             return bs_yaml
     except Exception:
         return None
+
+
+def read_workspace_bitswan(gitops_dir: str) -> dict[str, Any] | None:
+    """Aggregate every per-BP bitswan.yaml under <gitops_dir>/bp/* into the one
+    whole-workspace dict shape readers expect. Falls back to the legacy single
+    file when no bp/ dir exists (pre-split workspace)."""
+    bp_dir = bp_state_dir(gitops_dir)
+    if not os.path.isdir(bp_dir):
+        return _read_single_bitswan(gitops_dir)
+    merged: dict[str, Any] = {k: {} for k in _WS_MERGE_KEYS}
+    for bp in sorted(os.listdir(bp_dir)):
+        sub = os.path.join(bp_dir, bp)
+        if not os.path.isdir(sub):
+            continue
+        y = _read_single_bitswan(sub)
+        if not isinstance(y, dict):
+            continue
+        for k in _WS_MERGE_KEYS:
+            for name, val in (y.get(k) or {}).items():
+                merged[k][name] = val
+    # Drop empty top-level maps to keep the dict shape identical to the legacy
+    # file (which omits keys it never wrote), then hydrate the flat view.
+    merged = {k: v for k, v in merged.items() if v}
+    merged["deployments"] = _tree_to_flat(merged) if merged.get(_BP_KEY) else {}
+    return merged
+
+
+def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
+    """Read deploy state from a gitops dir. When the per-BP layout is present
+    (<bitswan_dir>/bp/*) this aggregates every BP; otherwise it reads the single
+    file. Per-BP callers that want ONE BP pass that BP's dir (which has a
+    bitswan.yaml and no bp/ subdir) — they get just that BP."""
+    if os.path.isdir(bp_state_dir(bitswan_dir)):
+        return read_workspace_bitswan(bitswan_dir)
+    return _read_single_bitswan(bitswan_dir)
+
+
+def bp_slice(bs_yaml: dict, bp: str) -> dict:
+    """Extract ONE business process's deploy state from a whole-workspace dict:
+    its business_processes[bp] subtree (regrouped from the flat map) plus its
+    firewall/backups/secrets entries. This is exactly what a per-BP bitswan.yaml
+    holds; aggregating every BP's slice round-trips back to the whole dict."""
+    tree = _flat_to_tree(bs_yaml)
+    out: dict[str, Any] = {}
+    if bp in tree:
+        out[_BP_KEY] = {bp: tree[bp]}
+    for k in ("firewall", "backups", "secrets"):
+        m = bs_yaml.get(k) or {}
+        if bp in m:
+            out[k] = {bp: m[bp]}
+    return out
+
+
+def dump_bp_bitswan(bs_yaml: dict, bp: str, f) -> None:
+    """Persist ONE BP's slice of a whole-workspace dict to its own bitswan.yaml."""
+    yaml.dump(bp_slice(bs_yaml, bp), f)
+
+
+def write_bp_bitswan(gitops_dir: str, bp: str, bs_yaml: dict) -> str:
+    """Write bp's slice to <gitops_dir>/bp/<bp>/bitswan.yaml (creating the dir),
+    returning the per-BP working-tree path. The dir is committed + pushed to the
+    BP's own deploy repo by update_bp_git."""
+    bp_dir = bp_state_path(gitops_dir, bp)
+    os.makedirs(bp_dir, exist_ok=True)
+    with open(os.path.join(bp_dir, "bitswan.yaml"), "w") as f:
+        dump_bp_bitswan(bs_yaml, bp, f)
+    return bp_dir
+
+
+async def update_bp_git(
+    gitops_home: str,
+    gitops_home_host: str,
+    bp: str,
+    deployment_id: str,
+    action: str,
+    deployed_by: str | None = None,
+    message: str | None = None,
+    extra_paths: list[str] | None = None,
+):
+    """Commit + push ONE BP's bitswan.yaml in its own repo (<gitops>/bp/<bp>),
+    so the BP's git history is its deploy history and the push reaches that BP's
+    deploy repo — the driver then applies only this BP. Thin per-BP wrapper over
+    update_git operating in the BP's working tree."""
+    await update_git(
+        bp_state_path(gitops_home, bp),
+        bp_state_path(gitops_home_host, bp),
+        deployment_id,
+        action,
+        deployed_by=deployed_by,
+        message=message,
+        extra_paths=extra_paths,
+    )
 
 
 def calculate_uptime(created_at: str) -> str:
