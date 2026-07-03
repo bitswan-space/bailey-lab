@@ -52,6 +52,11 @@ TYPICAL WORKFLOW
      Omit --id to run every requirement. The default runner is pytest
      (pytest -k REQ_003 -v); for other frameworks pass a template with {id}, e.g.
        bitswan-coding-agent requirements test --runner "go test -run {id} ./..."
+     If the BP has MORE THAN ONE automation, declare which one runs the tests
+     (and optionally pin the per-BP runner) in the BP's process.toml:
+       [testing]
+       automation = "backend"
+       runner = "pytest -k {id} -v"
 
   7. For anything that genuinely cannot be tested mechanically, set the status by
      hand instead:

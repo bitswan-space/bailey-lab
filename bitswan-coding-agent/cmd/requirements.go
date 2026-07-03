@@ -444,12 +444,44 @@ func liveDevSuffix(copy, bp string) string {
 	return fmt.Sprintf("-copy-%s-%s-live-dev", copy, bp)
 }
 
+// testingConfig is the optional [testing] section of a BP's process.toml.
+// It lives there (not in testable-requirements.toml) because the requirements
+// serializer rewrites that file wholesale and would drop foreign sections.
+type testingConfig struct {
+	// Automation names which automation's live-dev container runs the tests —
+	// required for BPs with more than one automation, where the deployment
+	// can't be auto-detected from the BP name alone.
+	Automation string
+	// Runner overrides the default test-runner template ("pytest -k {id} -v")
+	// for this BP; the --runner flag still wins over it.
+	Runner string
+}
+
+// readTestingConfig parses the [testing] section of process.toml in dir.
+// A missing file or section yields the zero value.
+func readTestingConfig(dir string) testingConfig {
+	data, err := os.ReadFile(filepath.Join(dir, "process.toml"))
+	if err != nil {
+		return testingConfig{}
+	}
+	return parseTestingConfig(string(data))
+}
+
+func parseTestingConfig(content string) testingConfig {
+	m := regexp.MustCompile(`(?ms)^\[testing\][ \t]*$(.*?)(?:^\[|\z)`).FindStringSubmatch(content)
+	if m == nil {
+		return testingConfig{}
+	}
+	return testingConfig{
+		Automation: extractTomlString(m[1], "automation"),
+		Runner:     extractTomlString(m[1], "runner"),
+	}
+}
+
 // resolveLiveDevDeployment finds the live-dev deployment to exec the tests in.
 // An explicit --deployment wins (this is what the dashboard "Run" button passes).
-// Otherwise it lists the copy's deployments and picks the single one belonging to
-// this BP; if that is ambiguous (0 or >1, e.g. a BP with several automations) it
-// errors and prints the candidates so the caller can pass --deployment.
-func resolveLiveDevDeployment(deploymentFlag, bpDir string) (string, error) {
+// Otherwise it lists the copy's deployments and picks via pickLiveDevDeployment.
+func resolveLiveDevDeployment(deploymentFlag, bpDir string, cfg testingConfig) (string, error) {
 	if deploymentFlag != "" {
 		return deploymentFlag, nil
 	}
@@ -461,25 +493,43 @@ func resolveLiveDevDeployment(deploymentFlag, bpDir string) (string, error) {
 	if err := agentRequestJSON("GET", fmt.Sprintf("/deployments?copy=%s", copy), nil, &deployments); err != nil {
 		return "", err
 	}
-	bp := filepath.Base(bpDir)
-	var matches []string
+	var ids []string
 	for _, d := range deployments {
-		if strings.HasSuffix(d.DeploymentID, liveDevSuffix(copy, bp)) {
-			matches = append(matches, d.DeploymentID)
+		ids = append(ids, d.DeploymentID)
+	}
+	return pickLiveDevDeployment(ids, copy, filepath.Base(bpDir), cfg.Automation)
+}
+
+// pickLiveDevDeployment selects the BP's live-dev deployment from ids. With an
+// automation name (from process.toml [testing]) the choice is exact; without
+// one, a single suffix match wins and anything ambiguous (0 or >1, e.g. a BP
+// with several automations) errors with the candidates so the caller can either
+// set [testing] automation or pass --deployment.
+func pickLiveDevDeployment(ids []string, copy, bp, automation string) (string, error) {
+	if automation != "" {
+		want := fmt.Sprintf("%s-copy-%s-%s-live-dev", automation, copy, bp)
+		for _, id := range ids {
+			if id == want {
+				return id, nil
+			}
+		}
+		return "", fmt.Errorf("process.toml [testing] sets automation = %q, but no live-dev deployment %q exists. Available: %s",
+			automation, want, strings.Join(ids, ", "))
+	}
+	var matches []string
+	for _, id := range ids {
+		if strings.HasSuffix(id, liveDevSuffix(copy, bp)) {
+			matches = append(matches, id)
 		}
 	}
 	if len(matches) == 1 {
 		return matches[0], nil
 	}
-	var all []string
-	for _, d := range deployments {
-		all = append(all, d.DeploymentID)
-	}
 	if len(matches) == 0 {
 		return "", fmt.Errorf("could not auto-detect a live-dev deployment for BP %q in copy %q; pass --deployment <id>. Available: %s",
-			bp, copy, strings.Join(all, ", "))
+			bp, copy, strings.Join(ids, ", "))
 	}
-	return "", fmt.Errorf("multiple live-dev deployments match BP %q; pass --deployment <id>. Candidates: %s",
+	return "", fmt.Errorf("multiple live-dev deployments match BP %q; set automation = \"<name>\" under [testing] in process.toml, or pass --deployment <id>. Candidates: %s",
 		bp, strings.Join(matches, ", "))
 }
 
@@ -520,6 +570,16 @@ CONVENTION
   token. The default runner is pytest: ` + "`pytest -k <ID_TOKEN> -v`" + `. Override
   per-BP with --runner using a {id} placeholder, e.g.
     --runner "go test -run {id} ./..."
+
+CONFIG (process.toml)
+  A BP with more than one automation must say which automation's live-dev
+  container runs the tests — add a [testing] section to the BP's process.toml:
+
+    [testing]
+    automation = "backend"            # required for multi-automation BPs
+    runner = "pytest -k {id} -v"      # optional per-BP runner default
+
+  --deployment and --runner flags override the config when both are given.
 
 EXAMPLES
   bitswan-coding-agent requirements test                 # run every requirement
@@ -563,12 +623,16 @@ EXAMPLES
 			}
 		}
 
-		deploymentID, err := resolveLiveDevDeployment(reqTestDeployment, dir)
+		cfg := readTestingConfig(dir)
+		deploymentID, err := resolveLiveDevDeployment(reqTestDeployment, dir, cfg)
 		if err != nil {
 			return err
 		}
 
 		runner := reqTestRunner
+		if runner == "" {
+			runner = cfg.Runner
+		}
 		if runner == "" {
 			runner = "pytest -k {id} -v"
 		}
