@@ -55,6 +55,42 @@ def test_bp_slice_extracts_one_bp():
     assert "invoices" not in s["business_processes"]
 
 
+def test_bp_slice_groups_copies_under_raw_bp():
+    """A copy deployment (context copy-<copy>-<bp>, relative_path
+    copies/<copy>/<bp>/...) belongs to the RAW bp — its context lands in that
+    bp's slice, so one deploy repo per bp holds main + all copies."""
+    ws = {
+        "deployments": {
+            # main issues
+            "backend-issues-live-dev": {
+                "context": "issues",
+                "stage": "live-dev",
+                "relative_path": "copies/main/issues/backend",
+            },
+            # a copy of issues — different context, same raw bp
+            "backend-copy-alice-issues-live-dev": {
+                "context": "copy-alice-issues",
+                "stage": "live-dev",
+                "relative_path": "copies/alice/issues/backend",
+            },
+            # an unrelated bp
+            "backend-invoices-live-dev": {
+                "context": "invoices",
+                "stage": "live-dev",
+                "relative_path": "copies/main/invoices/backend",
+            },
+        },
+        "firewall": {"issues": {"dev": {"posture": "deny", "rules": {}}}},
+    }
+    s = bp_slice(ws, "issues")
+    # Both the main and the copy context are in issues' slice; invoices is not.
+    assert set(s["business_processes"].keys()) == {"issues", "copy-alice-issues"}
+    assert "issues" in s["firewall"]
+
+    inv = bp_slice(ws, "invoices")
+    assert set(inv["business_processes"].keys()) == {"invoices"}
+
+
 def test_write_then_aggregate_roundtrips(tmp_path):
     gitops = str(tmp_path)
     ws = _whole_ws()

@@ -81,7 +81,7 @@ async def test_deploy_streams_progress_and_parses_routes(tmp_path):
     (work / "bitswan.yaml").write_text("deployments: {}\n")
 
     client = InfraDriverClient(
-        base_url="http://unused", token="t", deploy_remote=str(bare)
+        base_url="http://unused", token="t", deploy_remote_base=str(bare)
     )
 
     seen: list[tuple[str, str]] = []
@@ -89,7 +89,9 @@ async def test_deploy_streams_progress_and_parses_routes(tmp_path):
     async def progress(step, message, current=None):
         seen.append((step, message))
 
-    routes = await client.deploy(str(work), "deploy acme", progress_callback=progress)
+    routes = await client.deploy(
+        str(work), "deploy acme", deploy_remote=str(bare), progress_callback=progress
+    )
 
     assert routes == [Route("acme.example.com", "acme-svc:8080", "dev")]
     assert ("compile", "Compiling bitswan.yaml...") in seen
@@ -104,10 +106,12 @@ async def test_deploy_raises_on_push_failure(tmp_path):
     client = InfraDriverClient(
         base_url="http://unused",
         token="t",
-        deploy_remote=str(tmp_path / "does-not-exist.git"),
+        deploy_remote_base=str(tmp_path),
     )
     with pytest.raises(InfraDriverError):
-        await client.deploy(str(work), "deploy")
+        await client.deploy(
+            str(work), "deploy", deploy_remote=str(tmp_path / "does-not-exist.git")
+        )
 
 
 @pytest.fixture
@@ -253,7 +257,7 @@ async def test_container_list(driver_server):
     client = InfraDriverClient(
         base_url=str(driver_server.make_url("")),
         token="s3cret",
-        deploy_remote="x",
+        deploy_remote_base="x",
     )
     containers = await client.container_list(WCTX, labels={"gitops.stage": "dev"})
     assert containers == [
@@ -263,14 +267,14 @@ async def test_container_list(driver_server):
 
 async def test_container_stop_ok(driver_server):
     client = InfraDriverClient(
-        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote_base="x"
     )
     await client.container_stop(WCTX, "acme-svc")  # no raise == ok
 
 
 async def test_token_enforced(driver_server):
     client = InfraDriverClient(
-        base_url=str(driver_server.make_url("")), token="wrong", deploy_remote="x"
+        base_url=str(driver_server.make_url("")), token="wrong", deploy_remote_base="x"
     )
     with pytest.raises(InfraDriverError):
         await client.container_list(WCTX)
@@ -278,7 +282,7 @@ async def test_token_enforced(driver_server):
 
 async def test_build_image_streams_log_then_image(driver_server):
     client = InfraDriverClient(
-        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote_base="x"
     )
     logs: list[str] = []
 
@@ -303,7 +307,7 @@ async def test_sse_error_frame_raises(driver_server):
     # against the error endpoint (build_image/container_logs both route the
     # `error` event to InfraDriverError the same way).
     client = InfraDriverClient(
-        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote_base="x"
     )
 
     async def on_frame(event, data):
@@ -316,7 +320,7 @@ async def test_sse_error_frame_raises(driver_server):
 
 async def test_exec_streams_stdin_stdout_and_exit(driver_server):
     client = InfraDriverClient(
-        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote_base="x"
     )
     out, err = bytearray(), bytearray()
 
@@ -341,7 +345,7 @@ async def test_exec_streams_stdin_stdout_and_exit(driver_server):
 
 async def test_exec_propagates_nonzero_exit(driver_server):
     client = InfraDriverClient(
-        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote_base="x"
     )
     code = await client.exec(WCTX, ExecSpec(container="boom", cmd=["false"]))
     assert code == 7
@@ -363,7 +367,7 @@ async def test_exec_error_frame_raises(driver_server):
 
 async def test_copy_out_streams_tar(driver_server):
     client = InfraDriverClient(
-        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote_base="x"
     )
     got = bytearray()
 
@@ -377,7 +381,7 @@ async def test_copy_out_streams_tar(driver_server):
 
 async def test_copy_in_streams_tar_and_metadata(driver_server):
     client = InfraDriverClient(
-        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote="x"
+        base_url=str(driver_server.make_url("")), token="s3cret", deploy_remote_base="x"
     )
 
     async def chunks():
@@ -394,7 +398,7 @@ async def test_copy_in_streams_tar_and_metadata(driver_server):
 
 async def test_copy_out_token_enforced(driver_server):
     client = InfraDriverClient(
-        base_url=str(driver_server.make_url("")), token="wrong", deploy_remote="x"
+        base_url=str(driver_server.make_url("")), token="wrong", deploy_remote_base="x"
     )
     with pytest.raises(InfraDriverError):
         await client.copy_out(WCTX, "acme-minio", "/x", lambda _c: None)
@@ -403,4 +407,4 @@ async def test_copy_out_token_enforced(driver_server):
 def test_require_env_fails_loudly(monkeypatch):
     monkeypatch.delenv("BITSWAN_INFRA_DRIVER_URL", raising=False)
     with pytest.raises(InfraDriverError):
-        InfraDriverClient(token="t", deploy_remote="x")
+        InfraDriverClient(token="t", deploy_remote_base="x")

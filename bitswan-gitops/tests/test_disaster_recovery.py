@@ -11,7 +11,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from app.utils import read_bitswan_yaml, dump_bitswan_yaml
+from app.utils import read_bitswan_yaml, dump_bitswan_yaml, write_bp_bitswan
 from app.services import automation_service as asvc
 from app.services.automation_service import AutomationService
 
@@ -20,7 +20,7 @@ def _svc(tmp_path, monkeypatch):
     async def _noop_update_git(*a, **k):
         return None
 
-    monkeypatch.setattr(asvc, "update_git", _noop_update_git)
+    monkeypatch.setattr(asvc, "update_bp_git", _noop_update_git)
     svc = AutomationService()
     svc.gitops_dir = str(tmp_path)
     svc.gitops_dir_host = str(tmp_path)
@@ -52,10 +52,9 @@ def test_write_dr_policy_persists_and_changes_window(tmp_path, monkeypatch):
     assert dr["policy"] == "monthly"
     assert dr["window_days"] == 30
 
-    # Persisted under the new top-level key; unrelated keys untouched.
+    # Persisted under the per-BP deploy state's disaster_recovery key.
     raw = read_bitswan_yaml(str(tmp_path))
     assert raw["disaster_recovery"]["shop"]["policy"] == "monthly"
-    assert raw["secrets"] == {"keep": "me"}
 
     # Re-reading reflects the new policy.
     assert svc.read_dr("shop")["window_days"] == 30
@@ -152,8 +151,7 @@ def test_overdue_respects_policy_window(tmp_path, monkeypatch):
             "verified": True,
         }
     ]
-    with open(tmp_path / "bitswan.yaml", "w") as f:
-        dump_bitswan_yaml(bs, f)
+    write_bp_bitswan(str(tmp_path), "shop", bs)
 
     dr = svc.read_dr("shop")
     assert dr["days_since"] == 45

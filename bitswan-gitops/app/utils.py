@@ -340,7 +340,9 @@ def dump_bitswan_yaml(bs_yaml: dict, f) -> None:
 # top-level bitswan.yaml and no bp/ dir — handled transparently.
 
 _BP_KEY = "business_processes"
-_WS_MERGE_KEYS = (_BP_KEY, "firewall", "backups", "secrets")
+# Every top-level bitswan.yaml map that is keyed by business process. A per-BP
+# file holds only its BP's entry in each; a whole-workspace read unions them.
+_WS_MERGE_KEYS = (_BP_KEY, "firewall", "backups", "secrets", "disaster_recovery")
 
 
 def bp_state_dir(gitops_dir: str) -> str:
@@ -404,16 +406,71 @@ def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
     return _read_single_bitswan(bitswan_dir)
 
 
-def bp_slice(bs_yaml: dict, bp: str) -> dict:
-    """Extract ONE business process's deploy state from a whole-workspace dict:
-    its business_processes[bp] subtree (regrouped from the flat map) plus its
-    firewall/backups/secrets entries. This is exactly what a per-BP bitswan.yaml
-    holds; aggregating every BP's slice round-trips back to the whole dict."""
+def bp_from_relative_path(rel: str | None) -> str:
+    """The RAW business process of a deployment, from its relative_path
+    (copies/<copy>/<bp>/<automation>). Structured path parsing — the same rule as
+    bp_databases.derive_bp_and_copy — NOT a name heuristic. Empty when the path
+    has no bp segment. Inlined here (not imported) to avoid a utils↔bp_databases
+    cycle."""
+    if not rel:
+        return ""
+    parts = rel.replace("\\", "/").split("/")
+    if len(parts) >= 2 and parts[0] == "copies":
+        parts = parts[2:]  # drop copies/<copy>
+    if len(parts) >= 2:  # <bp>/<automation>...
+        return sanitize_automation_name(parts[0])
+    return ""
+
+
+def deployment_bp(conf: dict, context_fallback: str = "") -> str:
+    """Raw bp of a deployment conf: from relative_path, falling back to the
+    deployment context (a top-level automation with no bp path segment)."""
+    return bp_from_relative_path((conf or {}).get("relative_path")) or context_fallback
+
+
+def _context_to_bp(bs_yaml: dict) -> dict[str, str]:
+    """Map each business_processes CONTEXT key (bp for main, copy-<copy>-<bp> for
+    copies) to its RAW bp, using the deployments' relative_path. Per-BP deploy
+    repos are keyed by raw bp, so a bp's file holds all its contexts."""
+    out: dict[str, str] = {}
     tree = _flat_to_tree(bs_yaml)
-    out: dict[str, Any] = {}
-    if bp in tree:
-        out[_BP_KEY] = {bp: tree[bp]}
+    for ctx, stages in tree.items():
+        raw = ""
+        for _stage, node in (stages or {}).items():
+            for _dep_id, conf in ((node or {}).get("deployments") or {}).items():
+                raw = deployment_bp(conf, ctx)
+                if raw:
+                    break
+            if raw:
+                break
+        out[ctx] = raw or ctx
+    return out
+
+
+def bps_in(bs_yaml: dict) -> set[str]:
+    """The set of raw bps present in a whole-workspace dict (across deployments,
+    firewall, backups, secrets)."""
+    bps = set(_context_to_bp(bs_yaml).values())
     for k in ("firewall", "backups", "secrets"):
+        bps.update((bs_yaml.get(k) or {}).keys())
+    return {b for b in bps if b}
+
+
+def bp_slice(bs_yaml: dict, bp: str) -> dict:
+    """Extract ONE raw business process's deploy state from a whole-workspace
+    dict: every business_processes CONTEXT belonging to this bp (main + copies)
+    plus its firewall/backups/secrets entries. This is exactly what a per-BP
+    bitswan.yaml holds; aggregating every bp's slice round-trips to the whole
+    dict."""
+    tree = _flat_to_tree(bs_yaml)
+    ctx_bp = _context_to_bp(bs_yaml)
+    out: dict[str, Any] = {}
+    bp_tree = {ctx: node for ctx, node in tree.items() if ctx_bp.get(ctx, ctx) == bp}
+    if bp_tree:
+        out[_BP_KEY] = bp_tree
+    for k in _WS_MERGE_KEYS:
+        if k == _BP_KEY:
+            continue
         m = bs_yaml.get(k) or {}
         if bp in m:
             out[k] = {bp: m[bp]}
@@ -436,6 +493,18 @@ def write_bp_bitswan(gitops_dir: str, bp: str, bs_yaml: dict) -> str:
     return bp_dir
 
 
+async def ensure_bp_state_repo(gitops_home: str, bp: str) -> None:
+    """Make sure the BP's state working tree (<gitops>/bp/<bp>) is a git repo.
+    LOCAL only — no remote: the BP's git history IS its deploy history (read by
+    bp_history), and the deploy PUSH is done separately by the infra-driver
+    client to the BP's deploy repo. Idempotent. A new BP (created after the
+    daemon migration) is initialized here on its first write."""
+    bp_dir = bp_state_path(gitops_home, bp)
+    os.makedirs(bp_dir, exist_ok=True)
+    if not os.path.isdir(os.path.join(bp_dir, ".git")):
+        await call_git_command("git", "init", "-b", "main", cwd=bp_dir)
+
+
 async def update_bp_git(
     gitops_home: str,
     gitops_home_host: str,
@@ -446,10 +515,11 @@ async def update_bp_git(
     message: str | None = None,
     extra_paths: list[str] | None = None,
 ):
-    """Commit + push ONE BP's bitswan.yaml in its own repo (<gitops>/bp/<bp>),
-    so the BP's git history is its deploy history and the push reaches that BP's
-    deploy repo — the driver then applies only this BP. Thin per-BP wrapper over
-    update_git operating in the BP's working tree."""
+    """Commit ONE BP's bitswan.yaml in its own local repo (<gitops>/bp/<bp>), so
+    the BP's git history is its deploy history. Auto-inits the repo on first
+    write. No push here — the driver client pushes this working tree to the BP's
+    deploy repo separately (see apply_compose_for_deployments)."""
+    await ensure_bp_state_repo(gitops_home, bp)
     await update_git(
         bp_state_path(gitops_home, bp),
         bp_state_path(gitops_home_host, bp),

@@ -114,7 +114,7 @@ def _svc(tmp_path, monkeypatch):
     async def _noop_update_git(*a, **k):
         return None
 
-    monkeypatch.setattr(asvc, "update_git", _noop_update_git)
+    monkeypatch.setattr(asvc, "update_bp_git", _noop_update_git)
     d = str(tmp_path / "sc")
     monkeypatch.setattr(scs, "supply_chain_dir", lambda: d)
     svc = AutomationService()

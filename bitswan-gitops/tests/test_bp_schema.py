@@ -129,7 +129,7 @@ def test_write_bp_deploy_sets_only_commit_no_history(tmp_path, monkeypatch):
     async def _noop_update_git(*a, **k):
         return None
 
-    monkeypatch.setattr(asvc, "update_git", _noop_update_git)
+    monkeypatch.setattr(asvc, "update_bp_git", _noop_update_git)
     svc = AutomationService()
     svc.gitops_dir = str(tmp_path)
     svc.gitops_dir_host = str(tmp_path)
@@ -159,7 +159,10 @@ def test_bp_history_from_git_log(tmp_path):
     import os as _os
 
     _os.environ.pop("BITSWAN_COPIES_DIR", None)
-    repo = tmp_path
+    # bp_history reads the BP's OWN deploy repo at <gitops>/bp/<bp>, so build the
+    # history there (one bitswan.yaml per BP).
+    repo = tmp_path / "bp" / "shop"
+    repo.mkdir(parents=True)
     _git("init", "-q", cwd=str(repo))
     _git("config", "user.email", "t@t", cwd=str(repo))
     _git("config", "user.name", "t", cwd=str(repo))
@@ -203,8 +206,8 @@ def test_bp_history_from_git_log(tmp_path):
     commit_state("aaaaaaaa", "rollback shop → dev @ aaaaaaaa")
 
     svc = AutomationService()
-    svc.gitops_dir = str(repo)
-    svc.gitops_dir_host = str(repo)
+    svc.gitops_dir = str(tmp_path)
+    svc.gitops_dir_host = str(tmp_path)
 
     h = asyncio.run(svc.bp_history("shop", "dev"))
     srcs = [e["source_commit"] for e in h["history"]]

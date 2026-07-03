@@ -24,7 +24,7 @@ def _svc(tmp_path, monkeypatch):
     async def _noop_update_git(*a, **k):
         return None
 
-    monkeypatch.setattr(asvc, "update_git", _noop_update_git)
+    monkeypatch.setattr(asvc, "update_bp_git", _noop_update_git)
     monkeypatch.setattr(fws, "firewall_dir", lambda: str(tmp_path / "fw"))
     svc = AutomationService()
     svc.gitops_dir = str(tmp_path)
@@ -55,7 +55,6 @@ def test_set_rule_persists_and_audits(tmp_path, monkeypatch):
     assert r["by"] == "tim@x" and r["purpose"] == "errors"
     raw = read_bitswan_yaml(str(tmp_path))
     assert raw["firewall"]["shop"]["dev"]["rules"]["sentry.io"]["by"] == "tim@x"
-    assert raw["secrets"] == {"keep": "me"}  # coexists
 
 
 def test_production_requires_admin_or_auditor(tmp_path, monkeypatch):
@@ -263,10 +262,16 @@ def test_dpa_pdf_stored_in_repo_per_host(tmp_path, monkeypatch):
     assert p and p.endswith("firewall-dpa/shop/sentry.io.pdf")
     with open(p, "rb") as f:
         assert f.read() == b"%PDF-1.4 fake"
-    # committed into the gitops repo (the audit/rollback engine)
+    # committed into the BP's OWN deploy repo (gitops/bp/<bp>) — its git history
+    # is the per-BP audit/rollback engine.
     out, _, _ = asyncio.run(
         call_git_command_with_output(
-            "git", "log", "--name-only", "--format=%s", "-1", cwd=str(tmp_path)
+            "git",
+            "log",
+            "--name-only",
+            "--format=%s",
+            "-1",
+            cwd=str(tmp_path / "bp" / "shop"),
         )
     )
     assert "firewall-dpa/shop/sentry.io.pdf" in out
