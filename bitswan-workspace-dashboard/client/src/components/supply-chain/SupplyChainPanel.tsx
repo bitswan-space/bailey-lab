@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, ExternalLink, EyeOff, Loader2, ShieldOff, Undo2 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { api, type CveSeverity, type SupplyChainReport } from '@/lib/api';
+import { useSupplyChainTick } from '@/components/workspace/WorkspaceProvider';
 import { cn } from '@/lib/utils';
 
 /**
@@ -73,18 +74,75 @@ export function SupplyChainPanel({
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(() => {
-    let alive = true;
-    setLoading(true);
-    (fetcher ? fetcher() : api.supplyChain(bp, stage))
-      .then((r) => alive && setReport(r))
-      .catch(() => alive && setReport(null))
-      .finally(() => alive && setLoading(false));
+  const fetchReport = useCallback(
+    () => (fetcher ? fetcher() : api.supplyChain(bp, stage)),
+    [bp, stage, fetcher],
+  );
+
+  // Live mirror of the current status + in-flight bookkeeping, so the scan-done
+  // handler reasons about the LATEST state (not a stale effect closure).
+  const statusRef = useRef<SupplyChainReport['status'] | undefined>(undefined);
+  statusRef.current = report?.status;
+  const fetchingRef = useRef(false);
+  const queuedRef = useRef(false); // a scan finished while a fetch was in flight
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      alive = false;
+      mountedRef.current = false;
     };
-  }, [bp, stage, fetcher]);
-  useEffect(() => load(), [load]);
+  }, []);
+
+  // Single fetch path. `showLoading` drives the big "Loading…" state for the
+  // initial/target load; scan-driven refetches are quiet (they keep the
+  // "Scanning…" view until results land). If a scan completes mid-fetch and
+  // we're still pending afterwards, fetch once more — so the final result is
+  // never missed. Event-driven; the bake is serialized server-side so repeats
+  // are safe cache hits.
+  const runFetch = useCallback(
+    (showLoading: boolean) => {
+      if (fetchingRef.current) {
+        queuedRef.current = true;
+        return;
+      }
+      fetchingRef.current = true;
+      queuedRef.current = false;
+      if (showLoading) setLoading(true);
+      fetchReport()
+        .then((r) => {
+          if (!mountedRef.current) return;
+          statusRef.current = r?.status;
+          setReport(r);
+        })
+        .catch(() => {
+          if (mountedRef.current && showLoading) setReport(null);
+        })
+        .finally(() => {
+          fetchingRef.current = false;
+          if (mountedRef.current && showLoading) setLoading(false);
+          // A scan finished while we were fetching and we're still waiting —
+          // pick up its result now (no fixed-interval polling).
+          if (queuedRef.current && statusRef.current === 'pending') {
+            runFetch(false);
+          }
+        });
+    },
+    [fetchReport],
+  );
+
+  // Initial load + reload when the scan target changes.
+  useEffect(() => runFetch(true), [runFetch]);
+
+  // A supply-chain scan finished somewhere (SSE `supply_chain` event). If we're
+  // still waiting on ours — or our initial load hasn't resolved yet and may
+  // have raced the scan — refetch quietly so "Scanning…" resolves on its own.
+  const scanTick = useSupplyChainTick();
+  useEffect(() => {
+    const s = statusRef.current;
+    if (s === undefined || s === 'pending') runFetch(false);
+    // Only react to scanTick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanTick]);
 
   const waivedKeys = useMemo(
     () => new Set((report?.waivers ?? []).map((w) => `${w.package}|${w.cve}`)),
@@ -148,7 +206,13 @@ export function SupplyChainPanel({
     );
   }
   if (report.status === 'pending') {
-    return <Notice icon={Loader2} text="Scan pending — the SBOM/CVE scan runs in the background after an image is built. Check back shortly." />;
+    return (
+      <Notice
+        icon={Loader2}
+        spinning
+        text="Scanning the image for vulnerabilities… results appear here automatically when it finishes."
+      />
+    );
   }
   if (report.status === 'unavailable') {
     return <Notice icon={AlertTriangle} text="Vulnerability scan unavailable (syft/grype or the vuln DB couldn't run on this image)." />;
@@ -404,10 +468,21 @@ export function SupplyChainPanel({
   );
 }
 
-function Notice({ icon: Icon, text }: { icon: typeof ShieldOff; text: string }) {
+function Notice({
+  icon: Icon,
+  text,
+  spinning = false,
+}: {
+  icon: typeof ShieldOff;
+  text: string;
+  spinning?: boolean;
+}) {
   return (
     <div className="flex flex-col items-center gap-2 px-3 py-12 text-center">
-      <Icon className="size-7 text-muted-foreground" aria-hidden />
+      <Icon
+        className={cn('size-7 text-muted-foreground', spinning && 'animate-spin')}
+        aria-hidden
+      />
       <div className="max-w-md text-[13px] text-muted-foreground">{text}</div>
     </div>
   );
