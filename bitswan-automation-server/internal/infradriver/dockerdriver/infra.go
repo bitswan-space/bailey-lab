@@ -145,6 +145,17 @@ func postgresCompose(secretsDir string, n infraNames) map[string]interface{} {
 		"restart":        "unless-stopped",
 		"image":          "dpage/pgadmin4:latest",
 		"env_file":       []interface{}{n.secretsPath},
+		// Run pgAdmin in single-user desktop mode so it presents NO login of its
+		// own: the endpoint is already gated by bitswan-protected-proxy + the
+		// Bailey device-trust gate, which is the sole auth. SERVER_MODE=False
+		// drops the email/password login; MASTER_PASSWORD_REQUIRED=False drops
+		// the follow-up master-password prompt that would otherwise still block
+		// the UI. (PGADMIN_DEFAULT_EMAIL/PASSWORD in the env_file are ignored in
+		// desktop mode.)
+		"environment": map[string]interface{}{
+			"PGADMIN_CONFIG_SERVER_MODE":              "False",
+			"PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED": "False",
+		},
 		"volumes": []interface{}{
 			filepath.Join(secretsDir, "pgadmin-servers.json") + ":/pgadmin4/servers.json:ro",
 		},
