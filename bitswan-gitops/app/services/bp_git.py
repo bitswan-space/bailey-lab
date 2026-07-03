@@ -83,15 +83,19 @@ async def commit_in_bp_clone(
     """Stage everything in the BP clone and commit if anything changed.
 
     Returns True when a commit was created. `author` (an email) is recorded as
-    the commit identity when given; otherwise a mechanical identity.
+    the commit identity when given; otherwise the request's gate-verified
+    identity (X-Forwarded-Email, carried in the `current_requester` contextvar),
+    otherwise a mechanical identity for genuinely server-initiated commits.
     """
+    from app.task_queue import current_requester
+
     await call_git_command("git", "add", "-A", cwd=clone_path)
     _, _, clean_rc = await call_git_command_with_output(
         "git", "diff", "--cached", "--quiet", cwd=clone_path
     )
     if clean_rc == 0:
         return False
-    who = (author or "").strip()
+    who = (author or "").strip() or (current_requester.get() or "").strip()
     ident = (
         ["-c", f"user.name={who}", "-c", f"user.email={who}"]
         if who

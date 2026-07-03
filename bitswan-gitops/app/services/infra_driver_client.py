@@ -29,6 +29,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Awaitable, Callable, Optional
 
@@ -275,20 +276,36 @@ class InfraDriverClient:
         refs/heads/main (the driver rejects non-fast-forward)."""
         remote = deploy_remote
         await self._git(work_tree, "add", "-A", error="stage resolved tree for deploy")
-        # Identity is set inline so the deploy never depends on ambient git
-        # config; the operator (when known) is the author, gitops the committer.
+        # Attribute the deploy to the operator who triggered it, as BOTH author
+        # and committer, so the deploy-history actor is the acting user — never a
+        # mechanical identity. Prefer the explicit `author` ("email <email>");
+        # otherwise the request's gate-verified identity (X-Forwarded-Email in
+        # the current_requester contextvar); otherwise the gitops service.
+        # Identity is set inline so the deploy never depends on ambient config.
+        from app.task_queue import current_requester
+
+        actor = author
+        if not actor:
+            req = (current_requester.get() or "").strip()
+            if req:
+                actor = f"{req} <{req}>"
+        committer_name, committer_email = "bitswan-gitops", "gitops@bitswan.local"
+        if actor:
+            m = re.search(r"<([^>]+)>", actor)
+            email = (m.group(1) if m else actor).strip()
+            committer_name = committer_email = email
         commit_args = [
             "-c",
-            "user.name=bitswan-gitops",
+            f"user.name={committer_name}",
             "-c",
-            "user.email=gitops@bitswan.local",
+            f"user.email={committer_email}",
             "commit",
             "--allow-empty",
             "-m",
             commit_message,
         ]
-        if author:
-            commit_args += ["--author", author]
+        if actor:
+            commit_args += ["--author", actor]
         # An empty commit still triggers a push + re-apply (idempotent reconcile).
         await self._git(work_tree, *commit_args, error="commit resolved tree")
 

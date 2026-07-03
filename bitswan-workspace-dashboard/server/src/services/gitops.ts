@@ -631,6 +631,30 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  async bpSecretsSnapshot(
+    bp: string,
+    commit: string,
+    stage: string,
+    by?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    // Inspect → Secrets snapshot: the decrypted secrets at a revision. `by` is
+    // the gate-verified caller email; gitops redacts production for non-admin/
+    // auditor callers, same as bpSecrets.
+    const params = new URLSearchParams({ commit, stage });
+    if (by) params.set('by', by);
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets-snapshot?${params.toString()}`,
+      { headers: { ...this.authHeaders() } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   async bpSetSecrets(
     bp: string,
     values: Record<string, Record<string, string>>,

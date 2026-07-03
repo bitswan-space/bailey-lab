@@ -85,3 +85,28 @@ func TestSecretEnvFileScopedToBackendWorker(t *testing.T) {
 		t.Fatal("no acme backend service found in the compiled compose")
 	}
 }
+
+// The secret-content hash is what forces `docker compose up` to recreate a
+// backend when a secret changes (compose ignores env_file content changes). It
+// must be empty when there is nothing to apply (so secret-less services never
+// churn), stable for identical content regardless of map order, and different
+// when any value changes.
+func TestSecretsContentHash(t *testing.T) {
+	if secretsContentHash(nil) != "" {
+		t.Error("nil values must hash to empty (no label, no churn)")
+	}
+	if secretsContentHash(map[string]string{"K": "", "J": "  "}) != "" {
+		t.Error("all-blank values must hash to empty")
+	}
+	a := secretsContentHash(map[string]string{"K": "v1"})
+	if a == "" || a != secretsContentHash(map[string]string{"K": "v1"}) {
+		t.Errorf("identical content must be a stable non-empty hash, got %q", a)
+	}
+	if secretsContentHash(map[string]string{"K": "v2"}) == a {
+		t.Error("a changed value must change the hash (else no recreate)")
+	}
+	if secretsContentHash(map[string]string{"A": "1", "B": "2"}) !=
+		secretsContentHash(map[string]string{"B": "2", "A": "1"}) {
+		t.Error("map iteration order must not affect the hash")
+	}
+}

@@ -354,6 +354,17 @@ export type StageSecrets = Record<string, string>;
  *  stage, so this is the full per-stage map. */
 export type BpSecrets = Record<string, StageSecrets>;
 
+/** Inspect → Secrets snapshot: a BP stage's decrypted secrets as they were at a
+ *  bitswan.yaml revision. `values` is empty for production unless the caller is
+ *  admin/auditor (redacted server-side). */
+export interface BpSecretsSnapshot {
+  bp: string;
+  commit: string;
+  stage: string;
+  realm: string;
+  values: StageSecrets;
+}
+
 /** Disaster-recovery cadence policy: how often a manual recovery test is
  *  expected. Maps to a window in days (monthly 30, quarterly 91,
  *  semi-annually 182, annually 365). */
@@ -639,7 +650,7 @@ export const api = {
     bp: string,
     stage: string,
     gitCommit: string,
-    kind: 'deploy' | 'firewall' | 'secret' = 'deploy',
+    kind: 'deploy' | 'firewall' = 'deploy',
   ) =>
     postJson<{ message: string }>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/rollback`,
@@ -660,6 +671,13 @@ export const api = {
   bpSecrets: (bp: string) =>
     getJson<BpSecrets>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
+    ),
+  /** Inspect → Secrets snapshot: a BP stage's decrypted secrets at a commit.
+   *  Production values are redacted server-side unless the caller is
+   *  admin/auditor (the BFF supplies the verified identity, same as bpSecrets). */
+  bpSecretsSnapshot: (bp: string, commit: string, stage: string) =>
+    getJson<BpSecretsSnapshot>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/secrets-snapshot?commit=${encodeURIComponent(commit)}&stage=${encodeURIComponent(stage)}`,
     ),
   /** Apply a BP's secrets (all stages) — encrypts + versions them in
    *  bitswan.yaml as one commit. Names are shared; values are per stage. */

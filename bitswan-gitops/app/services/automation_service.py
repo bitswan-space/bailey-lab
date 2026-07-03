@@ -1560,26 +1560,36 @@ class AutomationService:
             # never the secret itself. Applies to the backend on its next deploy.
             sec_key = _parse_revision_secret_blob(bp_dir, sha, bp, realm)
             if sec_key != prev_sec_key and (sec_key or prev_sec_key) and not emitted_deploy:
+                # A secret change is applied on top of — and redeploys — the
+                # source currently deployed at this revision, so it carries that
+                # source_commit + members: it is a first-class deployment (it can
+                # be the current one, diffed, scaled), just labelled "secret".
                 entries.append(
                     {
                         "commit": sha,
-                        "source_commit": None,
+                        "source_commit": src,
                         "deployed_at": date,
                         "deployed_by": author,
                         "status": "secret",
                         "source": "secret",
-                        "members": {},
+                        "members": members,
                         "secret": {"realm": realm, "summary": subject},
                     }
                 )
             prev_sec_key = sec_key
         entries.reverse()  # newest-first
+        # The current deployment is the newest APPLIED state. On dev/staging a
+        # secret change applies immediately (it redeploys the single-slot
+        # members), so it counts. On PRODUCTION a secret change is PENDING — it
+        # applies zero-downtime on the next promote, not in place — so it must
+        # NOT claim "current"; the live production deploy stays current until a
+        # promote. Firewall/backup entries are audit records, never the
+        # deployment itself.
+        non_current = ("firewall", "backup")
+        if stage_key == "production":
+            non_current = non_current + ("secret",)
         current = next(
-            (
-                e["commit"]
-                for e in entries
-                if e["source"] not in ("firewall", "backup", "secret")
-            ),
+            (e["commit"] for e in entries if e["source"] not in non_current),
             None,
         )
         return {
@@ -1597,11 +1607,13 @@ class AutomationService:
         deployed_by: str | None = None,
         progress_callback: Callable[..., Any] | None = None,
     ) -> dict:
-        """Roll a BP stage back to a prior deployment. `git_commit` is the history
-        entry's id — the bitswan.yaml commit sha. We read that revision, re-point
-        ALL the BP's member deployments to the images it recorded (as a group),
-        and redeploy. The redeploy's own git commit becomes the new history
-        entry (subject "rollback …")."""
+        """Roll a BP back to a prior commit by restoring its ENTIRE bitswan.yaml
+        (the BP's own deploy repo) to that revision, then redeploying. bitswan.yaml
+        holds everything — deployment images, secrets, firewall, backups — so this
+        one flow restores all of it; there is no per-kind rollback. `git_commit`
+        is the history entry's commit sha; the restore's own commit ("rollback …")
+        becomes the new history entry, and the driver re-applies (recreating
+        containers, re-deriving the backend's secret env, reloading firewall)."""
         stage_key = "production" if stage in ("", "production") else stage
         bp_dir = bp_state_path(self.gitops_dir, bp)
         content, _, rc = await call_git_command_with_output(
@@ -1615,40 +1627,31 @@ class AutomationService:
             y = yaml.safe_load(content) or {}
         except Exception:
             raise HTTPException(status_code=500, detail="Could not parse that revision")
-        node = ((y.get("business_processes") or {}).get(bp, {}) or {}).get(stage_key)
-        target = (node or {}).get("deployments") or {}
-        if not target:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No deployment for {bp}/{stage_key} at {git_commit[:8]}",
-            )
-        target_src = (node or {}).get("git_commit")
 
-        # Re-point the (flat, hydrated) deployment entries to the historical
-        # images; dump regroups them into the tree.
-        bs = read_bitswan_yaml(self.gitops_dir) or {}
-        deployments = bs.setdefault("deployments", {})
-        for dep_id, mi in target.items():
-            dep = deployments.get(dep_id)
-            if dep is None:
-                continue
-            dep["image"] = (mi or {}).get("image")
-            dep["image_id"] = (mi or {}).get("image_id")
-            dep["source_commit"] = target_src
-        tree = bs.setdefault("business_processes", {})
-        tree.setdefault(bp, {}).setdefault(stage_key, {})["git_commit"] = target_src
-        await self._persist_bp_state(
-            bs,
-            {bp},
+        # Restore the BP's bitswan.yaml exactly as it was at git_commit — the whole
+        # file (every context + secrets + firewall + backups), not just images.
+        with open(os.path.join(bp_dir, "bitswan.yaml"), "w") as f:
+            yaml.dump(y, f)
+        await update_bp_git(
+            self.gitops_dir,
+            self.gitops_dir_host,
+            bp,
             bp,
             "deploy",
             deployed_by=deployed_by,
-            message=f"rollback {bp} → {stage_key} @ {(target_src or '')[:8]}",
+            message=f"rollback {bp} @ {git_commit[:8]}",
         )
-        deployment_ids = list(target.keys())
+        # Redeploy every deployment the restored file declares so the driver
+        # re-applies the restored state (images, secret env, firewall).
+        restored = read_bitswan_yaml(bp_dir) or {}
+        deployment_ids = list((restored.get("deployments") or {}).keys())
         result = await self.apply_compose_for_deployments(
             deployment_ids, deployed_by=deployed_by, report=progress_callback
         )
+        target_src = None
+        node = ((y.get("business_processes") or {}).get(bp, {}) or {}).get(stage_key)
+        if node:
+            target_src = node.get("git_commit")
         return {
             "message": "Rolled back",
             "bp": bp,
@@ -1717,6 +1720,41 @@ class AutomationService:
             out["production"] = {}
         return out
 
+    async def read_bp_secrets_at(
+        self, bp: str, commit: str, stage: str, by: str | None = None
+    ) -> dict:
+        """A BP stage's decrypted secrets AS THEY WERE at a bitswan.yaml revision
+        (Inspect → Secrets snapshot). Reads the per-BP bitswan.yaml at `commit`
+        from git — the encrypted blob at that point in history is the source of
+        truth — so the snapshot is exactly what a rollback to that commit would
+        restore. Production values stay admin/auditor-only (same fail-closed
+        redaction as read_bp_secrets)."""
+        validate_bp_name(bp)
+        realm = bp_secrets.realm_for_stage(stage)
+        bp_dir = bp_state_path(self.gitops_dir, bp)
+        content, _, rc = await call_git_command_with_output(
+            "git", "show", f"{commit}:bitswan.yaml", cwd=bp_dir
+        )
+        if rc != 0:
+            raise HTTPException(
+                status_code=404, detail=f"No such revision {commit[:8]}"
+            )
+        try:
+            y = yaml.safe_load(content) or {}
+        except Exception:
+            raise HTTPException(status_code=500, detail="Could not parse that revision")
+        blob = ((y.get("secrets") or {}).get(bp) or {}).get(realm)
+        values = bp_secrets.decrypt_secrets(self.secrets_dir, blob) if blob else {}
+        if realm == "production" and not self._is_production_role(by):
+            values = {}
+        return {
+            "bp": bp,
+            "commit": commit,
+            "stage": stage,
+            "realm": realm,
+            "values": values,
+        }
+
     def _is_production_role(self, by: str | None) -> bool:
         """Whether `by` (an email a trusted shim has verified) is allowed to see
         production secrets — i.e. resolves to admin/auditor in the daemon's
@@ -1736,21 +1774,42 @@ class AutomationService:
         values_by_realm: dict,
         deployed_by: str | None = None,
     ) -> dict:
-        """Encrypt + version a BP's secrets in bitswan.yaml as ONE commit.
+        """Encrypt + version a BP's secrets in bitswan.yaml as ONE commit, then
+        APPLY the change (a secret change is a deployment).
 
         Secret *names* are shared across stages; *values* are per stage, so the
         caller sends every realm's {KEY: value} map and we persist them together
         — one rollback point captures the whole secret state. Each realm gets its
         own AES blob (per-stage storage), and we re-derive each realm's plaintext
-        env file. Values apply on the next deploy of that stage."""
+        env file.
+
+        We only re-encrypt the realms whose *plaintext* actually changed (AES
+        re-encryption alone would produce a new ciphertext and therefore a
+        spurious history entry / cross-stage noise). A changed realm's already-
+        deployed members are then redeployed so the new value reaches the
+        backend container immediately and the change becomes the CURRENT
+        deployment, not a pending edit."""
         cleaned = {
             realm: bp_secrets.normalise_values(values_by_realm.get(realm) or {})
             for realm in bp_secrets.REALMS
         }
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         enc = bs.setdefault("secrets", {}).setdefault(bp, {})
-        for realm, clean in cleaned.items():
-            enc[realm] = bp_secrets.encrypt_secrets(self.secrets_dir, clean)
+        # Diff plaintext (not ciphertext) to find realms that really changed.
+        changed_realms = set()
+        for realm in bp_secrets.REALMS:
+            old_blob = enc.get(realm)
+            old_vals = (
+                bp_secrets.decrypt_secrets(self.secrets_dir, old_blob)
+                if old_blob
+                else {}
+            )
+            if cleaned[realm] != old_vals:
+                changed_realms.add(realm)
+        if not changed_realms:
+            return self.read_bp_secrets(bp)
+        for realm in changed_realms:
+            enc[realm] = bp_secrets.encrypt_secrets(self.secrets_dir, cleaned[realm])
         await self._persist_bp_state(
             bs,
             {bp},
@@ -1759,8 +1818,29 @@ class AutomationService:
             deployed_by=deployed_by,
             message=f"secrets {bp}",
         )
-        for realm, clean in cleaned.items():
-            bp_secrets.materialize_env(self.secrets_dir, bp, realm, clean)
+        for realm in changed_realms:
+            bp_secrets.materialize_env(self.secrets_dir, bp, realm, cleaned[realm])
+        # Apply: redeploy the changed realms' currently-deployed members so the
+        # secret takes effect now and this is the current deployment.
+        #
+        # PRODUCTION IS EXCLUDED. Production runs blue-green (a live + an idle
+        # slot); an in-place redeploy would recreate the LIVE slot's backend =
+        # downtime. A production secret is instead a PENDING change: it is
+        # versioned + materialized now, and applied with zero downtime on the
+        # next promote (which brings the idle slot up fresh — it reads the
+        # current env file — then flips ingress). dev/staging are single-slot, so
+        # a brief recreate is acceptable and they apply immediately.
+        apply_realms = changed_realms - {"production"}
+        flat = bs.get("deployments") or {}
+        to_deploy = [
+            dep_id
+            for dep_id, conf in flat.items()
+            if deployment_bp(conf or {}) == bp
+            and bp_secrets.realm_for_stage((conf or {}).get("stage") or "production")
+            in apply_realms
+        ]
+        if to_deploy:
+            await self.apply_compose_for_deployments(to_deploy, deployed_by=deployed_by)
         return self.read_bp_secrets(bp)
 
     # -- disaster-recovery test log ---------------------------------------------
@@ -2611,57 +2691,6 @@ class AutomationService:
         if members:
             await self.apply_compose_for_deployments(list(members), deployed_by=by)
         return self.read_firewall(bp, stage)
-
-    async def rollback_secrets(
-        self,
-        bp: str,
-        stage: str,
-        git_commit: str,
-        by: str | None = None,
-    ) -> dict:
-        """Roll a BP realm's secrets back to a prior commit. Secrets are
-        versioned in bitswan.yaml (bp_history surfaces every secret change), so a
-        rollback restores the encrypted `secrets[bp][realm]` blob exactly as it
-        was at `git_commit`, records the restore as its own versioned commit,
-        re-derives the plaintext env file, and redeploys the stage's members so
-        the restored values reach the backend container. Mirrors rollback_firewall."""
-        realm = bp_secrets.realm_for_stage(stage)
-        bp_dir = bp_state_path(self.gitops_dir, bp)
-        # Fail loudly if the revision does not exist.
-        _, _, rc = await call_git_command_with_output(
-            "git", "cat-file", "-e", f"{git_commit}^{{commit}}", cwd=bp_dir
-        )
-        if rc != 0:
-            raise HTTPException(
-                status_code=404, detail=f"No such revision {git_commit[:8]}"
-            )
-        blob = _parse_revision_secret_blob(bp_dir, git_commit, bp, realm)
-        bs = read_bitswan_yaml(self.gitops_dir) or {}
-        enc = bs.setdefault("secrets", {}).setdefault(bp, {})
-        if blob:
-            enc[realm] = blob
-        else:
-            # The target predates any secret for this realm — restore that empty
-            # state (drop the realm entry).
-            enc.pop(realm, None)
-        await self._persist_bp_state(
-            bs,
-            {bp},
-            bp,
-            "secrets",
-            deployed_by=by,
-            message=f"rollback secrets {bp}/{realm} @ {git_commit[:8]}",
-        )
-        # Re-derive the plaintext env file the backend mounts so the restored
-        # values take effect on (re)deploy.
-        values = bp_secrets.decrypt_secrets(self.secrets_dir, blob) if blob else {}
-        bp_secrets.materialize_env(self.secrets_dir, bp, realm, values)
-        # Redeploy the stage's members so the backend picks up the restored env
-        # (no-op when nothing is deployed for the stage yet).
-        members = self._bp_stage_members(bp, stage)
-        if members:
-            await self.apply_compose_for_deployments(list(members), deployed_by=by)
-        return self.read_bp_secrets(bp)
 
     async def _save_and_commit_firewall(
         self, bs: dict, bp: str, by: str | None, message: str

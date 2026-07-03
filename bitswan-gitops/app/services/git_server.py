@@ -121,8 +121,12 @@ def _install_pre_receive_hook(repo_path: str) -> None:
 
 def _ident_for(author: str | None) -> list[str]:
     """`-c user.name/email` git args attributing a commit to `author` (an email)
-    when given, else the mechanical Bailey identity."""
-    who = (author or "").strip()
+    when given, else the request's gate-verified identity (X-Forwarded-Email,
+    carried in the `current_requester` contextvar), else the mechanical Bailey
+    identity for genuinely server-initiated commits."""
+    from app.task_queue import current_requester
+
+    who = (author or "").strip() or (current_requester.get() or "").strip()
     if who:
         return ["-c", f"user.name={who}", "-c", f"user.email={who}"]
     return list(_GIT_IDENT)

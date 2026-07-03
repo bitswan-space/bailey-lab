@@ -11,6 +11,8 @@ import {
   Download,
   HardDrive,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileText,
   FlaskConical,
   Folder,
@@ -598,6 +600,18 @@ function InspectModal({
     null,
   );
   const [contentLoading, setContentLoading] = useState(false);
+  // Secrets snapshot — the decrypted secrets as they were at THIS revision.
+  // Keyed on the bitswan.yaml commit (entry.commit), not source_commit: a
+  // secret-change event has no source commit, and the secrets live in
+  // bitswan.yaml regardless. eslint-disable-next-line no-restricted-syntax
+  const [secretsSnap, setSecretsSnap] = useState<
+    import('@/lib/api').BpSecretsSnapshot | null
+    // eslint-disable-next-line no-restricted-syntax -- null = not loaded
+  >(null);
+  const [secretsLoading, setSecretsLoading] = useState(false);
+  // eslint-disable-next-line no-restricted-syntax -- null = no error
+  const [secretsError, setSecretsError] = useState<string | null>(null);
+  const [revealSecrets, setRevealSecrets] = useState(false);
 
   useEffect(() => {
     if (panel !== 'diff' || !current?.source_commit || !entry.source_commit) return;
@@ -644,6 +658,23 @@ function InspectModal({
       alive = false;
     };
   }, [bp, commit, openFile]);
+
+  // Load the secrets snapshot when the Secrets tab opens.
+  useEffect(() => {
+    if (panel !== 'secrets' || !entry.commit) return;
+    let alive = true;
+    setSecretsLoading(true);
+    setSecretsError(null);
+    setSecretsSnap(null);
+    api
+      .bpSecretsSnapshot(bp, entry.commit, stage)
+      .then((r) => alive && setSecretsSnap(r))
+      .catch((e) => alive && setSecretsError(String(e)))
+      .finally(() => alive && setSecretsLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [panel, bp, entry.commit, stage]);
 
   const applyScale = useCallback(async () => {
     setScaling(true);
@@ -882,10 +913,71 @@ function InspectModal({
                 </div>
               </div>
             ) : (
-              <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center text-sm text-muted-foreground">
-                <Lock className="size-6" aria-hidden />
-                <div className="font-medium text-foreground">Secrets snapshot</div>
-                <div className="max-w-xs">Not implemented yet — coming in a later release.</div>
+              <div className="flex h-full flex-col">
+                <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2 text-xs">
+                  <KeyRound className="size-3.5 text-muted-foreground" aria-hidden />
+                  <span className="min-w-0 flex-1 truncate text-foreground">
+                    Secret values at{' '}
+                    <span className="font-mono">{short(entry.commit, 8)}</span>
+                    {secretsSnap && (
+                      <span className="text-muted-foreground"> · {secretsSnap.realm}</span>
+                    )}
+                  </span>
+                  {secretsSnap && Object.keys(secretsSnap.values).length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setRevealSecrets((v) => !v)}
+                      className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                    >
+                      {revealSecrets ? (
+                        <>
+                          <EyeOff className="size-3" aria-hidden /> Hide
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="size-3" aria-hidden /> Reveal
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+                <div className="min-h-0 flex-1 overflow-auto p-4">
+                  {secretsLoading ? (
+                    <div className="flex items-center justify-center gap-2 p-8 text-sm text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin" aria-hidden /> Loading…
+                    </div>
+                  ) : secretsError ? (
+                    <div className="flex h-full items-center justify-center text-sm text-destructive">
+                      Failed to load secrets: {secretsError}
+                    </div>
+                  ) : secretsSnap && Object.keys(secretsSnap.values).length > 0 ? (
+                    <table className="w-full border-collapse text-[13px]">
+                      <tbody>
+                        {Object.entries(secretsSnap.values).map(([k, v]) => (
+                          <tr key={k} className="border-b border-border/60 align-top">
+                            <td className="py-1.5 pr-4 font-mono font-medium text-foreground">
+                              {k}
+                            </td>
+                            <td className="py-1.5 font-mono text-muted-foreground break-all">
+                              {revealSecrets ? v : '••••••••'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
+                      <Lock className="size-6" aria-hidden />
+                      {secretsSnap?.realm === 'production' ? (
+                        <div className="max-w-xs">
+                          Production secrets are visible to admins and auditors only.
+                        </div>
+                      ) : (
+                        <div className="max-w-xs">No secrets set at this revision.</div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -914,7 +1006,6 @@ function DeploymentCard({
   const tone = entryTone(entry, isCurrent);
   const isFw = entry.source === 'firewall';
   const isBackup = entry.source === 'backup';
-  const isSecret = entry.source === 'secret';
   const ver = entry.source_commit ?? entry.commit;
   const members = Object.entries(entry.members ?? {});
   const firstImg = members.find(([, m]) => m.image_id)?.[1]?.image_id;
@@ -933,24 +1024,9 @@ function DeploymentCard({
         </span>
         <span className="ml-auto text-[11px] text-muted-foreground">{entry.deployed_at}</span>
         <div className="flex items-center gap-1.5">
-          {isBackup ? (
-            // Backup-domain audit record — read-only here (swaps/restores are
-            // driven from the Backups + Disaster Recovery panels).
-            null
-          ) : isFw ? (
-            // Firewall audit-log entry: restore the rule set to this commit.
-            <Button variant="outline" size="sm" disabled={busy} onClick={onRollback}>
-              <Undo2 className="size-3.5" aria-hidden />
-              Restore rules
-            </Button>
-          ) : isSecret ? (
-            // Secret audit-log entry: restore the stage's secret values to this
-            // commit (redeploys so the backend picks up the restored env).
-            <Button variant="outline" size="sm" disabled={busy} onClick={onRollback}>
-              <Undo2 className="size-3.5" aria-hidden />
-              Restore secrets
-            </Button>
-          ) : isCurrent ? (
+          {isCurrent ? (
+            // The newest entry is the current state — you are already here, so
+            // there is nothing to roll back TO. Manage the running deployment.
             <>
               <Button variant="outline" size="sm" onClick={onInspect}>
                 <Scaling className="size-3.5" aria-hidden />
@@ -961,6 +1037,16 @@ function DeploymentCard({
                 Inspect
               </Button>
             </>
+          ) : isBackup ? (
+            // Backup-domain audit record — read-only here (swaps/restores are
+            // driven from the Backups + Disaster Recovery panels).
+            null
+          ) : isFw ? (
+            // Firewall audit-log entry: restore the rule set to this commit.
+            <Button variant="outline" size="sm" disabled={busy} onClick={onRollback}>
+              <Undo2 className="size-3.5" aria-hidden />
+              Restore rules
+            </Button>
           ) : (
             <>
               <Button variant="outline" size="sm" disabled={busy} onClick={onRollback}>
@@ -1186,15 +1272,16 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   const runRollback = useCallback(
     async (entry: BpHistoryEntry) => {
       const isFw = entry.source === 'firewall';
-      const isSecret = entry.source === 'secret';
       const ver = short(entry.source_commit ?? entry.commit, 8);
-      const what = isFw ? 'firewall rules' : isSecret ? 'secrets' : bp.name;
+      // Rollback restores the whole bitswan.yaml at this commit (deploy, secret,
+      // etc. all restore the same way); only the role-gated firewall path differs.
+      const what = isFw ? 'firewall rules' : bp.name;
       setBusy(true);
       const work = api.bpRollback(
         bp.name,
         activeStage,
         entry.commit,
-        isFw ? 'firewall' : isSecret ? 'secret' : 'deploy',
+        isFw ? 'firewall' : 'deploy',
       );
       toast.promise(work, {
         loading: `Rolling ${what} back to ${ver}…`,

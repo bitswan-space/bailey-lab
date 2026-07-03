@@ -1075,15 +1075,22 @@ async def update_git(
             )
 
         # Attribute the commit to the operator who triggered the deploy/promote.
-        # `deployed_by` is their email; use it for BOTH the author and the
-        # committer so `git log --format='%an <%ae>|%cn <%ce>'` shows the
-        # operator, not the gitops service identity. We set the committer via
-        # `-c user.name/user.email` (which survive the nsenter/host path that
-        # GIT_COMMITTER_* env vars would not) and the author via --author.
-        if deployed_by:
-            author = f"{deployed_by} <{deployed_by}>"
-            ident_name = deployed_by
-            ident_email = deployed_by
+        # Prefer the explicit `deployed_by`; otherwise fall back to the request's
+        # gate-verified identity (X-Forwarded-Email, carried in the
+        # `current_requester` contextvar — set for synchronous requests and
+        # copied into background deploy tasks) so the actor is the acting user,
+        # not the gitops service identity. Use it for BOTH author and committer
+        # so `git log --format='%an <%ae>|%cn <%ce>'` shows the operator. We set
+        # the committer via `-c user.name/user.email` (which survive the
+        # nsenter/host path that GIT_COMMITTER_* env vars would not) and the
+        # author via --author.
+        from app.task_queue import current_requester
+
+        actor = deployed_by or current_requester.get()
+        if actor:
+            author = f"{actor} <{actor}>"
+            ident_name = actor
+            ident_email = actor
         else:
             author = "gitops <info@bitswan.space>"
             ident_name = "gitops"

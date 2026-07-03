@@ -390,6 +390,24 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 			return nil, "", nil, false, err
 		}
 		appendEnvFile(entry, envFile)
+		// `docker compose up` recreates a container only when its SERVICE CONFIG
+		// changes, not when an env_file's CONTENTS change. A secret-only change
+		// keeps the same image + env_file path, so without this the backend would
+		// never be recreated and the new secret would never take effect. Fold a
+		// digest of the secret content into a label so a changed secret changes
+		// the config and forces the recreate.
+		//
+		// SLOTTED (production) backends are EXCLUDED: they run blue-green, so an
+		// in-place recreate of the LIVE slot would cause downtime. A production
+		// secret is applied with zero downtime on the next promote instead — the
+		// idle slot is brought up fresh and reads the current env file — so the
+		// live slot must never be force-recreated here. Only single-slot
+		// (dev/staging) backends get the hash.
+		if slot == "" {
+			if h := secretsContentHash(values); h != "" {
+				labels["gitops.secrets_hash"] = h
+			}
+		}
 	}
 
 	// ---- scoped per-BP database / bucket credentials ----
