@@ -168,19 +168,41 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await nameInput.fill(WORKSPACE.name);
       await capture(page, 'workspace-create');
       await page.getByRole('button', { name: /^Create workspace$/i }).click();
-      // Resolve on whichever the modal surfaces: the 'Creating…' state clearing,
-      // OR the idempotent "already initialized" notice (a prior run created it).
+
+      // Creating a workspace cold-starts its whole container stack (image pulls +
+      // compose up), which legitimately runs longer than the short-interaction
+      // SLA. But the UI must NEVER go dark — the modal streams a LIVE progress log
+      // — so this is held to the PROGRESS rule, exactly like a deploy: it may take
+      // as long as it needs AS LONG AS the log keeps moving. A >PROGRESS freeze of
+      // that log is the failure (a dark UI is the bug, not merely slowness), and
+      // so is the workspace never appearing.
+      const created = page.getByText(new RegExp(`^${WORKSPACE.name}$`)).first();
       const already = page.getByText(/already initialized/i).first();
-      await Promise.race([
-        page.getByRole('button', { name: /Creating/i }).waitFor({ state: 'hidden', timeout: SLA }).catch(() => {}),
-        already.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
-      ]);
-      // If the name was already taken, close the modal — the workspace exists.
-      if (await already.isVisible().catch(() => false)) {
-        await page.getByRole('button', { name: /^Cancel$/ }).first().click().catch(() => {});
+      const logBox = page.getByTestId('ws-create-log');
+      let lastLog = '';
+      let lastChange = Date.now();
+      const deadline = Date.now() + 8 * 60_000;
+      let shotProgress = false;
+      for (;;) {
+        if (await created.isVisible().catch(() => false)) break; // created
+        if (await already.isVisible().catch(() => false)) {
+          // Idempotent: a prior run already made it — dismiss and use the existing.
+          await page.getByRole('button', { name: /^Cancel$/ }).first().click().catch(() => {});
+          break;
+        }
+        const now = Date.now();
+        const text = (await logBox.textContent().catch(() => '')) || '';
+        if (text !== lastLog) {
+          lastLog = text;
+          lastChange = now;
+          if (!shotProgress && text.trim()) { await capture(page, 'workspace-creating'); shotProgress = true; }
+        } else if (now - lastChange > PROGRESS) {
+          throw new Error(`workspace creation UI went dark: no progress for >${PROGRESS / 1000}s`);
+        }
+        if (now > deadline) throw new Error('workspace creation did not finish within 8m');
+        await page.waitForTimeout(1000);
       }
-      await nameInput.waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
-      await expect(page.getByText(new RegExp(`^${WORKSPACE.name}$`)).first()).toBeVisible({ timeout: SLA });
+      await expect(created).toBeVisible({ timeout: SLA });
     }
   });
 

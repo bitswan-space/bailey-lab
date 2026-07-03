@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 )
@@ -188,6 +189,7 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	writeMu := sync.Mutex{}
+	lastEmit := time.Now() // guarded by writeMu; drives the idle heartbeat below
 	writeEvent := func(payload map[string]any) {
 		writeMu.Lock()
 		defer writeMu.Unlock()
@@ -199,6 +201,12 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 		if flusher != nil {
 			flusher.Flush()
 		}
+		lastEmit = time.Now()
+	}
+	idleSince := func() time.Duration {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return time.Since(lastEmit)
 	}
 	writeEvent(map[string]any{"event": "start", "message": "Starting workspace creation: " + name})
 
@@ -294,7 +302,35 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 	go relay(rOut, "stdout")
 	go relay(rErr, "stderr")
 
+	// Heartbeat: workspace init runs long, mostly-silent steps on a cold host —
+	// pulling the gitops/dashboard/coding-agent images and bringing the compose
+	// project up. If nothing is emitted for a while the create modal's live log
+	// looks frozen, and a dark UI is a bug (never "just slow"). Emit a progress
+	// tick whenever the stream has been idle so the user always sees it is still
+	// working. Stops the moment init returns.
+	hbStop := make(chan struct{})
+	hbDone := make(chan struct{})
+	go func() {
+		defer close(hbDone)
+		start := time.Now()
+		t := time.NewTicker(3 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-hbStop:
+				return
+			case <-t.C:
+				if idleSince() >= 5*time.Second {
+					writeEvent(map[string]any{"event": "log", "stream": "stdout",
+						"message": fmt.Sprintf("… still setting up (%ds)", int(time.Since(start).Seconds()))})
+				}
+			}
+		}
+	}()
+
 	initErr := s.runWorkspaceInit(args[2:], confirmCh)
+	close(hbStop)
+	<-hbDone
 	// Close writer ends so the relay goroutines see EOF and exit.
 	wOut.Close()
 	wErr.Close()
