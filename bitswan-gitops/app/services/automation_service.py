@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 import yaml
 import requests
@@ -163,13 +164,14 @@ _SCAN_SKIP_DIRS = {"templates", ".git"}
 _MEMBER_BUILD_CONCURRENCY = 4
 
 # Per-image-tag build locks. Members of a deploy are prepped concurrently
-# (see _MEMBER_BUILD_CONCURRENCY), and two members can share one image
-# (identical `image/` tree → same content-addressed tag) — e.g. two BPs with the
-# same frontend. They'd otherwise race the SAME `.builds/img-<checksum>` context
-# dir (concurrent rmtree+copytree → mkdir EEXIST → "File exists" deploy failure),
-# and double-build the same tag. Serialize per tag so same-image members build
-# once; different images still prep in parallel. asyncio is single-threaded, so
-# the get-or-create below needs no extra mutex.
+# (see _MEMBER_BUILD_CONCURRENCY), so two preps of the SAME tag (a redeploy of
+# one automation, or the same source seen twice) are serialized here to build
+# once instead of racing two identical driver builds. Different tags still prep
+# in parallel — even when they share a content-addressed `.builds/` context dir
+# (e.g. every BP's backend is scaffolded from one template, so their `image/`
+# trees are identical → one ctx dir, different tags): the shared dir is
+# materialized safely by `_atomic_publish`, not guarded by this lock. asyncio is
+# single-threaded, so the get-or-create below needs no extra mutex.
 _build_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -836,10 +838,50 @@ class AutomationService:
         return full_tag
 
     @staticmethod
+    def _atomic_publish(dst: str, populate: Callable[[str], None]) -> None:
+        """Idempotently materialize the content-addressed build-context dir `dst`.
+
+        `dst` is named by its content's hash, so if it already exists it is
+        already exactly what `populate` would produce — reuse it (a cache hit)
+        instead of racing a rmtree+repopulate against a concurrent build that
+        shares the same context. The race is real: these run in a thread pool
+        (`asyncio.to_thread`), and two automations with an identical source tree
+        map to ONE `dst` but take DIFFERENT per-tag build locks, so they run in
+        parallel — a plain `rmtree(dst)+copytree(src, dst)` then throws
+        `FileExists` (one thread's rmtree races the other's mkdir) and fails the
+        deploy. Instead: populate a private temp dir and atomically rename it
+        into place. Whoever wins the rename publishes `dst`; the loser sees it
+        already there (identical content) and discards its copy. We never rmtree
+        `dst`, so a leftover from a crashed build is reused rather than deleted
+        out from under a concurrent reader.
+        """
+        if os.path.isdir(dst):
+            return
+        parent = os.path.dirname(dst)
+        os.makedirs(parent, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix=os.path.basename(dst) + ".tmp.", dir=parent)
+        try:
+            populate(tmp)
+            try:
+                os.rename(tmp, dst)
+            except OSError:
+                # A concurrent build already published `dst` first. It's
+                # content-addressed, so its contents are identical to ours —
+                # drop our temp copy. Anything else is a real error.
+                if not os.path.isdir(dst):
+                    raise
+                shutil.rmtree(tmp, ignore_errors=True)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+
+    @staticmethod
     def _copy_tree(src: str, dst: str) -> None:
-        """Materialize a single source dir into a fresh build-context dir."""
-        shutil.rmtree(dst, ignore_errors=True)
-        shutil.copytree(src, dst, symlinks=True)
+        """Materialize a single source dir into the content-addressed context."""
+        AutomationService._atomic_publish(
+            dst,
+            lambda tmp: shutil.copytree(src, tmp, symlinks=True, dirs_exist_ok=True),
+        )
 
     async def _bake_source_image(
         self,
@@ -925,18 +967,23 @@ class AutomationService:
 
     @staticmethod
     def _materialize_build_context(ctx: str, dirs_to_merge: list[str]) -> None:
-        # Rebuild fresh, then merge the source dirs (later-wins). symlinks=True
-        # PRESERVES symlinks (e.g. go.mod → /deps/go.mod, an absolute path the
-        # runtime base provides) — `COPY . <mp>` keeps them as symlinks in the
-        # image, resolving at runtime. Following them here would fail (the target
-        # only exists inside the running container).
-        shutil.rmtree(ctx, ignore_errors=True)
-        os.makedirs(ctx, exist_ok=True)
-        for d in dirs_to_merge:
-            if os.path.isdir(d):
-                shutil.copytree(d, ctx, dirs_exist_ok=True, symlinks=True)
-        with open(os.path.join(ctx, ".dockerignore"), "w") as f:
-            f.write("image/\nDockerfile\n.dockerignore\n")
+        # `ctx` is content-addressed by the merged-tree hash, so materialize it
+        # idempotently + atomically (see _atomic_publish): concurrent bakes that
+        # share the same merged source — deploy + Checks preview, or two members
+        # with an identical tree — would otherwise race rmtree+copytree on the
+        # shared dir. Merge the source dirs (later-wins). symlinks=True PRESERVES
+        # symlinks (e.g. go.mod → /deps/go.mod, an absolute path the runtime base
+        # provides) — `COPY . <mp>` keeps them as symlinks in the image, resolving
+        # at runtime. Following them here would fail (the target only exists
+        # inside the running container).
+        def _populate(tmp: str) -> None:
+            for d in dirs_to_merge:
+                if os.path.isdir(d):
+                    shutil.copytree(d, tmp, dirs_exist_ok=True, symlinks=True)
+            with open(os.path.join(tmp, ".dockerignore"), "w") as f:
+                f.write("image/\nDockerfile\n.dockerignore\n")
+
+        AutomationService._atomic_publish(ctx, _populate)
 
     async def _source_commit(self, source_dir: str) -> str | None:
         """Git commit of the source tree being deployed (the copy/main HEAD), so a
