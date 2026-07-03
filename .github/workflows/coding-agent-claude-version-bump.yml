@@ -1,0 +1,62 @@
+name: coding-agent Bump Claude Code Version
+
+# Keeps the CLAUDE_CODE_VERSION pin in bitswan-coding-agent/Dockerfile current.
+# Runs daily (and on demand): checks the latest @anthropic-ai/claude-code on npm
+# and, if the pin is behind, opens a PR bumping it. Merging that PR triggers
+# coding-agent-docker-publish.yml to build and push the new image.
+
+on:
+  schedule:
+    # Daily at 06:00 UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+    - name: Check out the repo
+      uses: actions/checkout@v4
+
+    - name: Determine current and latest versions
+      id: versions
+      run: |
+        DOCKERFILE=bitswan-coding-agent/Dockerfile
+        CURRENT=$(grep -oP 'ARG CLAUDE_CODE_VERSION=\K[0-9][0-9A-Za-z.\-]*' "$DOCKERFILE")
+        LATEST=$(npm view @anthropic-ai/claude-code version)
+        echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+        echo "latest=$LATEST"   >> "$GITHUB_OUTPUT"
+        echo "Current pin: $CURRENT | Latest on npm: $LATEST"
+        if [ "$CURRENT" = "$LATEST" ]; then
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Update the pin
+      if: steps.versions.outputs.changed == 'true'
+      run: |
+        sed -i "s/^ARG CLAUDE_CODE_VERSION=.*/ARG CLAUDE_CODE_VERSION=${{ steps.versions.outputs.latest }}/" \
+          bitswan-coding-agent/Dockerfile
+
+    - name: Open pull request
+      if: steps.versions.outputs.changed == 'true'
+      uses: peter-evans/create-pull-request@v6
+      with:
+        branch: chore/bump-claude-code-version
+        commit-message: "coding-agent: bump Claude Code to ${{ steps.versions.outputs.latest }}"
+        title: "coding-agent: bump Claude Code to ${{ steps.versions.outputs.latest }}"
+        body: |
+          Automated bump of the bundled Claude Code CLI.
+
+          - Current pin: `${{ steps.versions.outputs.current }}`
+          - Latest on npm: `${{ steps.versions.outputs.latest }}`
+
+          Merging this rebuilds and pushes the coding-agent image via
+          `coding-agent-docker-publish.yml`. Existing containers pick up the new
+          version once recreated.
+        delete-branch: true

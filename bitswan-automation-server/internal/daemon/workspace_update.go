@@ -14,7 +14,44 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/services"
 	"github.com/bitswan-space/bitswan-workspaces/internal/workspace"
+	"gopkg.in/yaml.v3"
 )
+
+// currentGitopsImage returns the gitops image recorded in the workspace's
+// existing deployment docker-compose.yml, or "" if it can't be determined
+// (no deployment yet, unreadable/malformed file, or no image set).
+//
+// The AUTOMATIC regeneration paths (volume migration, AOC connect/disconnect)
+// use this to carry a workspace's current image forward. Without it those paths
+// call UpdateWorkspaceDeployment with an empty image, which resolves the latest
+// PRODUCTION gitops (ResolveGitopsImage(false)) — silently downgrading a
+// workspace pinned to a staging or otherwise-newer gitops, since the staging
+// track isn't persisted in metadata.yaml. When production lags a breaking change
+// (e.g. the infra-driver docker-driver cut-over) that downgrade pairs a
+// pre-cut-over image with a post-cut-over compose and breaks deploys/worktrees.
+// The user-facing `bitswan workspace update` is unaffected: it passes its own
+// args and still resolves the latest image per --staging / --gitops-image.
+func currentGitopsImage(workspaceName string) string {
+	composePath := filepath.Join(
+		os.Getenv("HOME"), ".config", "bitswan", "workspaces", workspaceName,
+		"deployment", "docker-compose.yml",
+	)
+	data, err := os.ReadFile(composePath)
+	if err != nil {
+		return ""
+	}
+	var compose struct {
+		Services struct {
+			Gitops struct {
+				Image string `yaml:"image"`
+			} `yaml:"bitswan-gitops"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		return ""
+	}
+	return compose.Services.Gitops.Image
+}
 
 // runWorkspaceUpdate runs the workspace update logic with stdout already redirected
 func (s *Server) runWorkspaceUpdate(args []string) error {
@@ -96,6 +133,16 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 			return fmt.Errorf("failed to save workspace metadata: %w", err)
 		}
 	}
+
+	// Ensure the full set of workspace volume subpaths exists before we
+	// regenerate the deployment. Volume-subpath mounts are strict (Docker refuses
+	// to start a container if the subpath is missing), and the set grows over
+	// time — e.g. the infra-driver's bare `deploy.git` was added after the
+	// bind→volume migration, so workspaces migrated before it would otherwise be
+	// missing it and the driver sidecar would fail to start. The one-time
+	// migration only ensures these for not-yet-migrated workspaces; doing it here
+	// too makes every update self-heal an already-migrated workspace.
+	ensureWorkspaceVolumeDirs(workspaceName)
 
 	// Update Docker images and docker-compose file
 	fmt.Println("Updating Docker images and docker-compose file...")

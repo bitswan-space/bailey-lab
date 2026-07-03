@@ -17,6 +17,10 @@ const (
 	auditWorkspaceTrash  = "workspace.trash"  // a workspace was moved to trash
 	auditServerClaim     = "server.claim"     // the one-time root-admin bootstrap ran
 	auditTOTPEnrol       = "totp.enrol"       // a user enrolled an authenticator secret
+	auditInviteCreate    = "invite.create"    // an admin invited an AOC-org member
+	auditInviteResend    = "invite.resend"    // an admin re-sent an invite (fresh token + expiry)
+	auditInviteRevoke    = "invite.revoke"    // an admin revoked an outstanding invite
+	auditInviteRedeem    = "invite.redeem"    // an invitee redeemed their invite (first device trusted)
 )
 
 // eventRecord is one audit row, JSON-shaped for the overview feed.

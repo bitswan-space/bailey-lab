@@ -13,7 +13,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import { api, type FirewallReport, type FirewallRule, type GdprRecord } from '@/lib/api';
 import { cn } from '@/lib/utils';
 

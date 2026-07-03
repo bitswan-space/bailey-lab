@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { Download, Loader2, Paperclip, Trash2, Upload } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import {
   AlertDialog,
   AlertDialogAction,

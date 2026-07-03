@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
@@ -51,13 +50,10 @@ func newPostgresEnableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			options := make(map[string]interface{})
@@ -99,13 +95,10 @@ func newPostgresDisableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.DisableService("postgres", workspace, stage)
@@ -141,13 +134,10 @@ func newPostgresStatusCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.GetServiceStatus("postgres", workspace, stage, showPasswords)
@@ -199,13 +189,10 @@ func newPostgresStartCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.StartService("postgres", workspace, stage)
@@ -240,13 +227,10 @@ func newPostgresStopCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.StopService("postgres", workspace, stage)
@@ -282,13 +266,10 @@ func newPostgresUpdateCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			options := make(map[string]interface{})
@@ -346,13 +327,10 @@ func newPostgresBackupCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			result, err := client.BackupPostgres(workspace, stage, absBackupPath)
@@ -405,13 +383,10 @@ func newPostgresRestoreCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			// Use interactive job API for restore to handle prompts
@@ -449,13 +424,10 @@ func newPostgresClearCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if workspace == "" {
-				cfg := config.NewAutomationServerConfig()
-				workspace, err = cfg.GetActiveWorkspace()
-				if err != nil || workspace == "" {
-					fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
-					os.Exit(1)
-				}
+			workspace, err = client.ResolveWorkspace(workspace)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'\n")
+				os.Exit(1)
 			}
 
 			fmt.Println("WARNING: This will permanently delete ALL data from PostgreSQL.")

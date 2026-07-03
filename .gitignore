@@ -1,0 +1,5 @@
+
+# Local agent/session + e2e browser-profile artifacts (never commit)
+.claude/
+SECURITY_REPORT.md
+e2e/*-profile/

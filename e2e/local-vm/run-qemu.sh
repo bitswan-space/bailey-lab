@@ -33,10 +33,24 @@ BRIDGE="${E2E_VM_BRIDGE:-virbr0}"
 VM_IP="${E2E_VM_IP:-192.168.122.50}"
 VM_GW="${E2E_VM_GW:-192.168.122.1}"
 VM_MAC="52:54:00:e2:e0:01"
-KEEP=0; [ "${1:-}" = "--keep" ] && KEEP=1
+KEEP="${KEEP:-0}"; [ "${1:-}" = "--keep" ] && KEEP=1
 
 [ -e /dev/kvm ] || { echo "ERROR: /dev/kvm not present — enable virtualization."; exit 1; }
 ip link show "$BRIDGE" >/dev/null 2>&1 || { echo "ERROR: bridge $BRIDGE missing (start libvirt 'default' net)."; exit 1; }
+
+# Ensure libvirt's NAT/forward rules for the guest subnet are present. Docker
+# rewrites iptables when it (re)configures bridges and routinely flushes
+# libvirt's MASQUERADE rule for 192.168.122.0/24 out from under it — the guest
+# then boots fine but has NO outbound internet, so apt/docker pulls fail with
+# "Temporary failure resolving …" and provisioning dies. Re-assert the default
+# network so its rules are reinstalled (idempotent; no-op if already correct).
+if [ "$BRIDGE" = "virbr0" ] && command -v virsh >/dev/null 2>&1; then
+  if ! sudo iptables -t nat -S 2>/dev/null | grep -q '192.168.122.0/24.*MASQUERADE'; then
+    echo "--- libvirt NAT for guest subnet missing; restarting 'default' network ---"
+    sudo virsh net-destroy default >/dev/null 2>&1 || true
+    sudo virsh net-start default  >/dev/null 2>&1 || true
+  fi
+fi
 
 # Step profiler for the HOST-side phases (boot / rsync / provision / run / copy).
 # The guest keeps its own timeline (build steps, test, manual gen); both are
@@ -103,7 +117,12 @@ ethernets:
       - to: default
         via: $VM_GW
     nameservers:
-      addresses: [8.8.8.8, 1.1.1.1]
+      # libvirt dnsmasq on the bridge gateway — reachable from the guest and
+      # forwards to the host's upstream (public resolvers may be blocked for the
+      # guest on some clouds). A static resolv.conf override is also applied
+      # post-boot (see "fix guest DNS" below) since systemd-resolved's stub can
+      # fail to forward.
+      addresses: [$VM_GW]
 EOF
 cloud-localds --network-config "$WORK/network-config" "$WORK/seed.iso" "$WORK/user-data" "$WORK/meta-data"
 
@@ -126,6 +145,75 @@ for i in $(seq 1 90); do $SSH "$VM" true 2>/dev/null && break; sleep 4; \
   [ "$i" = 90 ] && { echo "ERROR: guest SSH never came up"; tail -40 "$WORK/serial.log" 2>/dev/null; exit 1; }; done
 mark "host: boot guest + wait for SSH"
 
+# Connectivity probe: provisioning fails at apt with "Temporary failure
+# resolving" even when host NAT is present, so capture from INSIDE the guest
+# exactly where egress breaks (default route / gateway reach / internet / DNS).
+echo "=== guest connectivity probe ==="
+$SSH "$VM" 'echo "[route]"; ip -4 route; echo "[resolv]"; cat /etc/resolv.conf 2>/dev/null; \
+  echo "[gw]"; ping -c1 -W2 192.168.122.1 >/dev/null 2>&1 && echo gw-OK || echo gw-FAIL; \
+  echo "[inet]"; ping -c1 -W2 8.8.8.8 >/dev/null 2>&1 && echo inet-OK || echo inet-FAIL; \
+  echo "[dns]"; getent hosts archive.ubuntu.com >/dev/null 2>&1 && echo dns-OK || echo dns-FAIL' 2>&1 || true
+
+# Cloud-init renders our static nameservers through systemd-resolved, whose
+# 127.0.0.53 stub fails to forward in this guest — apt then dies with "Temporary
+# failure resolving 'archive.ubuntu.com'". Point resolv.conf at the libvirt
+# dnsmasq on the bridge gateway (192.168.122.1): it is always reachable from the
+# guest (on-link, no internet egress needed for the query itself) and forwards
+# to whatever upstream the HOST uses — which works even on clouds (e.g. Hetzner)
+# that block the guest from reaching public resolvers like 8.8.8.8/1.1.1.1
+# directly. Stop resolved from reclaiming the file. NB: this only fixes name
+# resolution — if the HOST has no internet egress at all (cloud firewall down),
+# the subsequent package fetch still fails; that is an environment outage, not
+# something this script can repair.
+echo "=== fix guest DNS (point at libvirt dnsmasq on $VM_GW) ==="
+$SSH "$VM" "sudo systemctl stop systemd-resolved 2>/dev/null; sudo systemctl mask systemd-resolved 2>/dev/null; \
+  sudo rm -f /etc/resolv.conf; printf 'nameserver $VM_GW\noptions edns0\n' | sudo tee /etc/resolv.conf >/dev/null; \
+  getent hosts archive.ubuntu.com >/dev/null 2>&1 && echo dns-FIXED-OK || echo dns-STILL-FAIL" 2>&1 || true
+mark "host: fix guest DNS"
+
+# Egress bridge: on clouds that firewall the guest's (and host's) outbound to
+# the internet, route ALL guest egress through an HTTP/CONNECT proxy reachable
+# at $E2E_EGRESS_PROXY (typically a reverse-tunnelled forward proxy on a machine
+# that DOES have internet, exposed on the bridge gateway). With the proxy set,
+# name resolution + fetches happen AT the proxy, so the guest needs no egress or
+# DNS of its own — only to reach the proxy. no_proxy keeps the local test stack
+# (*.localhost, loopback, RFC1918, the bridge gw) off the proxy.
+NO_PROXY_LIST="localhost,127.0.0.1,::1,.localhost,$VM_GW,192.168.0.0/16,172.16.0.0/12,10.0.0.0/8,.local,.internal"
+PROXY_ENV=""
+if [ -n "${E2E_EGRESS_PROXY:-}" ]; then
+  PROXY_ENV="http_proxy=$E2E_EGRESS_PROXY https_proxy=$E2E_EGRESS_PROXY HTTP_PROXY=$E2E_EGRESS_PROXY HTTPS_PROXY=$E2E_EGRESS_PROXY no_proxy=$NO_PROXY_LIST NO_PROXY=$NO_PROXY_LIST"
+  echo "=== configure guest egress proxy ($E2E_EGRESS_PROXY) ==="
+  $SSH "$VM" "sudo bash -s" <<EOF
+set -e
+cat > /etc/environment <<ENV
+http_proxy=$E2E_EGRESS_PROXY
+https_proxy=$E2E_EGRESS_PROXY
+HTTP_PROXY=$E2E_EGRESS_PROXY
+HTTPS_PROXY=$E2E_EGRESS_PROXY
+no_proxy=$NO_PROXY_LIST
+NO_PROXY=$NO_PROXY_LIST
+ENV
+cat > /etc/apt/apt.conf.d/99proxy <<PROXYCONF
+Acquire::http::Proxy "$E2E_EGRESS_PROXY";
+Acquire::https::Proxy "$E2E_EGRESS_PROXY";
+Acquire::Retries "6";
+PROXYCONF
+# archive.ubuntu.com load-balances across many mirrors; via a proxy a single bad
+# mirror persistently 403s noble-updates' InRelease, which apt treats as a hard
+# (non-retryable HTTP) failure and aborts the whole update — killing the run.
+# Repoint apt at a single reliable mirror (kernel.org's, which the proxy reaches
+# fine) for ALL suites. Keeping noble-updates/-security avoids the version skew
+# you get pinning to base-noble only (the cloud image already has -updates pkgs
+# installed). Covers deb822 (ubuntu.sources) + legacy sources.list, both
+# archive.ubuntu.com and security.ubuntu.com.
+for f in /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+  [ -f "\$f" ] && sed -i -E 's#https?://(archive\.ubuntu\.com|security\.ubuntu\.com)/ubuntu#http://mirrors.edge.kernel.org/ubuntu#g' "\$f"
+done
+EOF
+  $SSH "$VM" "env $PROXY_ENV curl -sS -m 12 -o /dev/null -w 'proxy-egress archive=%{http_code}\n' http://archive.ubuntu.com/ubuntu/dists/noble/InRelease" 2>&1 || true
+  mark "host: configure guest egress proxy"
+fi
+
 echo "=== sync repo into guest ==="
 $SSH "$VM" 'sudo mkdir -p /repo && sudo chown ubuntu /repo'
 rsync -a -e "$SSH" --exclude node_modules --exclude .git --exclude 'dist/' \
@@ -133,8 +221,38 @@ rsync -a -e "$SSH" --exclude node_modules --exclude .git --exclude 'dist/' \
 mark "host: rsync repo into guest"
 
 echo "=== provision + run E2E in guest ==="
-$SSH "$VM" 'sudo bash /repo/e2e/local-vm/provision.sh'
+# `sudo env ...` so the proxy reaches provision.sh's curl calls (go.dev,
+# nodesource, docker gpg, mkcert); apt already picks it up from 99proxy.
+$SSH "$VM" "sudo env $PROXY_ENV bash /repo/e2e/local-vm/provision.sh"
 mark "guest: provision (apt deps)"
+
+# Now that docker is installed, point the daemon (image pulls) AND the build
+# client (RUN apt/npm/pip/go inside Dockerfiles — BuildKit auto-injects these as
+# build args) at the egress proxy, then restart the daemon to apply.
+if [ -n "${E2E_EGRESS_PROXY:-}" ]; then
+  echo "=== configure guest docker for egress proxy ==="
+  $SSH "$VM" "sudo bash -s" <<EOF
+set -e
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/http-proxy.conf <<DROP
+[Service]
+Environment="HTTP_PROXY=$E2E_EGRESS_PROXY"
+Environment="HTTPS_PROXY=$E2E_EGRESS_PROXY"
+Environment="NO_PROXY=$NO_PROXY_LIST"
+DROP
+for home in /root /home/ubuntu; do
+  mkdir -p \$home/.docker
+  cat > \$home/.docker/config.json <<CFG
+{ "proxies": { "default": { "httpProxy": "$E2E_EGRESS_PROXY", "httpsProxy": "$E2E_EGRESS_PROXY", "noProxy": "$NO_PROXY_LIST" } } }
+CFG
+done
+chown -R ubuntu:ubuntu /home/ubuntu/.docker
+systemctl daemon-reload
+systemctl restart docker
+EOF
+  $SSH "$VM" "sudo docker pull hello-world >/dev/null 2>&1 && echo docker-pull-via-proxy-OK || echo docker-pull-via-proxy-FAIL" 2>&1 || true
+  mark "guest: configure docker egress proxy"
+fi
 
 # Seed the guest's docker with the base images the bringup builds FROM, if a
 # host-side seed tarball exists. The guest is a fresh VM whose anonymous Docker
@@ -151,7 +269,7 @@ if [ -f "$WORK/base-images.tar" ]; then
   mark "guest: seed base images"
 fi
 
-$SSH "$VM" 'bash /repo/e2e/local-vm/run-e2e.sh' || RC=$? || true
+$SSH "$VM" "env $PROXY_ENV bash /repo/e2e/local-vm/run-e2e.sh" || RC=$? || true
 # NB: no aggregate mark here — run-e2e's time is captured in full, step by step,
 # in the guest timeline (bringup builds + npm ci + playwright + walkthrough +
 # manual). Marking it again would double-count it in the merged total below.

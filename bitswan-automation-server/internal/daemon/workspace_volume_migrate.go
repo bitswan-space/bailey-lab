@@ -19,6 +19,7 @@ import (
 var workspaceVolumeSubdirs = []string{
 	"workspace",   // legacy shared working tree (kept for the gitops state worktree)
 	"gitops",      // promoted-deployment materialization/state
+	"deploy.git",  // infra-driver bare deploy repo (git init --bare on serve; the subpath must exist before the sidecar mounts it)
 	"repo.git",    // canonical bare repo (real content created by init/migration)
 	"copies",      // per-copy checkouts base
 	"copies/main", // the main copy (editor working tree / main live-dev source)
@@ -94,7 +95,15 @@ func (s *Server) migrateWorkspaceDeploymentsToVolumes() {
 				continue
 			}
 		}
-		if err := s.runWorkspaceUpdate([]string{ws.Name}); err != nil {
+		// Carry the workspace's current gitops image forward — this is a
+		// mechanical data-layout regeneration, not an image upgrade. Passing no
+		// image would resolve the latest PRODUCTION gitops and silently downgrade
+		// a staging/newer-pinned workspace (see currentGitopsImage).
+		updateArgs := []string{ws.Name}
+		if img := currentGitopsImage(ws.Name); img != "" {
+			updateArgs = append(updateArgs, "--gitops-image", img)
+		}
+		if err := s.runWorkspaceUpdate(updateArgs); err != nil {
 			fmt.Printf("Warning: failed to migrate workspace %q to volume mounts (will retry on next start): %v\n", ws.Name, err)
 			continue
 		}

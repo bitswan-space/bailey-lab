@@ -39,7 +39,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 RUN apt-get update && apt-get install -y asciinema && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
+#
+# The version is pinned via the CLAUDE_CODE_VERSION build arg so builds are
+# reproducible and the installed version is visible in one place. To upgrade,
+# bump the default below (find the latest with `npm view @anthropic-ai/claude-code version`).
+# Changing this value also busts the Docker layer cache, so the new version is
+# actually reinstalled on the next build. CI may override it with
+# `--build-arg CLAUDE_CODE_VERSION=...`.
+ARG CLAUDE_CODE_VERSION=2.1.197
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
 # Copy bitswan-coding-agent binary from builder
 COPY --from=builder /bitswan-coding-agent /usr/local/bin/bitswan-coding-agent

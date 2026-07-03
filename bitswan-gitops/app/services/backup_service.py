@@ -251,28 +251,52 @@ async def run_backup(config: dict) -> dict:
     return results
 
 
-async def _backup_postgres(config: dict, workspace_name: str) -> dict:
-    """Backup Postgres production database."""
-    from app.async_docker import get_async_docker_client
+def _driver_and_ctx(workspace_name: str):
+    """An infra-driver client + WorkspaceContext for module-level backup helpers
+    (these aren't AutomationService methods, so they build their own)."""
+    from app.services.infra_driver_client import InfraDriverClient, WorkspaceContext
 
-    docker_client = get_async_docker_client()
+    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+    return InfraDriverClient(), WorkspaceContext(
+        workspace_name=workspace_name,
+        domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+        gitops_dir=os.path.join(gitops_root, "gitops"),
+        secrets_dir=os.path.join(gitops_root, "secrets"),
+    )
+
+
+async def _container_running(client, ctx, name: str) -> bool:
+    conts = await client.container_list(ctx)
+    return any(c.name == name and c.state == "running" for c in conts)
+
+
+async def _backup_postgres(config: dict, workspace_name: str) -> dict:
+    """Backup Postgres production database (pg_dumpall via the driver's exec)."""
+    from app.services.infra_driver_client import ExecSpec, InfraDriverError
+
+    client, ctx = _driver_and_ctx(workspace_name)
     container_name = f"{workspace_name}__postgres"
 
     try:
-        containers = await docker_client.list_containers(
-            all=False, filters={"name": [container_name]}
-        )
-        if not containers:
+        if not await _container_running(client, ctx, container_name):
             return {"success": True, "output": "No Postgres container running, skipped"}
 
-        cid = containers[0]["Id"]
+        chunks: list[bytes] = []
 
-        # pg_dumpall inside the container
-        exec_id = await docker_client.exec_create(
-            cid,
-            ["pg_dumpall", "-U", "admin"],
-        )
-        dump = await docker_client.exec_start(exec_id)
+        async def on_stdout(data: bytes):
+            chunks.append(data)
+
+        try:
+            code = await client.exec(
+                ctx,
+                ExecSpec(container=container_name, cmd=["pg_dumpall", "-U", "admin"]),
+                on_stdout=on_stdout,
+            )
+        except InfraDriverError as e:
+            return {"success": False, "output": str(e)}
+        if code != 0:
+            return {"success": False, "output": f"pg_dumpall exit {code}"}
+        dump = b"".join(chunks).decode("utf-8", "replace")
 
         if not dump:
             return {"success": False, "output": "Empty dump"}
@@ -432,7 +456,7 @@ async def restore_postgres(
     config: dict, snapshot_id: str, stage: str = "production"
 ) -> tuple[bool, str]:
     """Restore a Postgres snapshot to a given stage."""
-    from app.async_docker import get_async_docker_client
+    from app.services.infra_driver_client import ExecSpec, InfraDriverError
 
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
 
@@ -457,31 +481,39 @@ async def restore_postgres(
             return False, "No SQL dump found in snapshot"
 
         # Read the dump
-        with open(sql_file) as f:
+        with open(sql_file, "rb") as f:
             dump_content = f.read()
 
-        # Execute in the target Postgres container
+        # Execute in the target Postgres container (psql, dump piped to stdin).
         suffix = f"-{stage}" if stage != "production" else ""
         container_name = f"{workspace_name}__postgres{suffix}"
 
-        docker_client = get_async_docker_client()
-        containers = await docker_client.list_containers(
-            all=False, filters={"name": [container_name]}
-        )
-        if not containers:
+        client, ctx = _driver_and_ctx(workspace_name)
+        if not await _container_running(client, ctx, container_name):
             return False, f"Postgres container '{container_name}' not running"
 
-        cid = containers[0]["Id"]
-        exec_id = await docker_client.exec_create(
-            cid,
-            ["psql", "-U", "admin", "-d", "postgres"],
-            stdin=True,
-        )
-        output = await docker_client.exec_start(exec_id, data=dump_content)
-        info = await docker_client.exec_inspect(exec_id)
+        err_chunks: list[bytes] = []
 
-        if info.get("ExitCode", 1) != 0:
-            return False, f"psql restore failed: {output}"
+        async def on_stderr(data: bytes):
+            err_chunks.append(data)
+
+        try:
+            code = await client.exec(
+                ctx,
+                ExecSpec(
+                    container=container_name,
+                    cmd=["psql", "-U", "admin", "-d", "postgres"],
+                ),
+                stdin=dump_content,
+                on_stderr=on_stderr,
+            )
+        except InfraDriverError as e:
+            return False, f"psql restore failed: {e}"
+        if code != 0:
+            return (
+                False,
+                f"psql restore failed: {b''.join(err_chunks).decode('utf-8', 'replace')}",
+            )
 
         return True, f"Postgres restored to {stage} stage"
     finally:

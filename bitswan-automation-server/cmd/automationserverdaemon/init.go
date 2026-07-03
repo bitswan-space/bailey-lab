@@ -300,12 +300,17 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		"-e", "BITSWAN_CADDY_HOST=caddy:2019",
 		"-e", "BITSWAN_TRAEFIK_HOST=traefik:8080",
 		"-e", fmt.Sprintf("HOST_HOME=%s", homeDir),
+		// The daemon mounts the bitswan binary at a container path; it cannot
+		// learn its own HOST path via os.Executable(). Forward it so the daemon
+		// can bind-mount the same binary into the per-workspace infra-driver
+		// sidecar it provisions.
+		"-e", fmt.Sprintf("BITSWAN_HOST_BINARY=%s", binaryPath),
 	}
 	// Forward any pinned component-image overrides into the daemon so workspaces
 	// it creates (incl. via the Server Console UI) use them instead of the Docker
 	// Hub "latest". Lets operators run a private registry — and CI test images
 	// built from this checkout.
-	for _, key := range []string{"BITSWAN_GITOPS_IMAGE", "BITSWAN_DASHBOARD_IMAGE", "BITSWAN_CODING_AGENT_IMAGE"} {
+	for _, key := range []string{"BITSWAN_GITOPS_IMAGE", "BITSWAN_DASHBOARD_IMAGE", "BITSWAN_CODING_AGENT_IMAGE", "BITSWAN_INFRA_DRIVER_IMAGE"} {
 		if v := os.Getenv(key); v != "" {
 			runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%s", key, v))
 		}

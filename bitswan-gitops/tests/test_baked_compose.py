@@ -1,13 +1,12 @@
-"""Image-baked deployments carry their source INSIDE the image, so
-`generate_docker_compose` must NOT require the legacy materialized
-`<gitops_dir>/<checksum>/` tree on disk for them. (Regression: a fresh
-baked dev deploy used to 500 with "Deployment directory ... does not
-exist", which also broke the auto-redeploy-on-sync path.)"""
+"""Image-baked deployments carry their source INSIDE the image, so a baked
+promoted deployment has no legacy `<gitops_dir>/<checksum>/` tree on disk.
+Its config (expose/port) must therefore resolve from the workspace source —
+otherwise a frontend silently loses `expose` (no ingress URL → "Not deployed").
+(The compose compilation itself now lives in the Go infra-driver.)"""
 
 import os
 
 import pytest
-import yaml
 
 
 @pytest.fixture
@@ -25,59 +24,9 @@ def svc(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     import app.services.automation_service as asvc
 
-    # generate_docker_compose is pure (collects routes; no daemon call), so no
-    # ingress stub is needed.
     s = asvc.AutomationService()
     os.makedirs(s.gitops_dir, exist_ok=True)
     return s
-
-
-def _baked_bp(image_tag):
-    return {
-        "deployments": {
-            "backend-bp-dev": {
-                "stage": "dev",
-                # A checksum whose <gitops_dir>/<checksum>/ dir is deliberately
-                # absent — exactly the state a fresh image-baked deploy leaves.
-                "checksum": "0" * 40,
-                "image": image_tag,
-                "image_id": "sha256:deadbeef",
-                "relative_path": "BP/backend",
-                "automation_name": "backend",
-                "context": "bp",
-            },
-        }
-    }
-
-
-def test_baked_deploy_does_not_require_materialized_dir(svc):
-    image_tag = "internal/ws-test-bp-backend-app:sha0000"
-    # Previously raised HTTPException 500 ("Deployment directory ... does not
-    # exist"); now it composes fine and uses the baked image.
-    dc_yaml, _, _ = svc.generate_docker_compose(_baked_bp(image_tag))
-    services = yaml.safe_load(dc_yaml)["services"]
-    assert any(e.get("image") == image_tag for e in services.values())
-
-
-def test_unbaked_deploy_still_requires_materialized_dir(svc):
-    """The relaxation is scoped to baked images — a legacy (image-less) dev
-    deployment whose tree is missing must still fail loudly, not silently run
-    the wrong thing."""
-    import fastapi
-
-    bs = {
-        "deployments": {
-            "backend-bp-dev": {
-                "stage": "dev",
-                "checksum": "f" * 40,  # no dir, and no baked image
-                "relative_path": "BP/backend",
-                "automation_name": "backend",
-                "context": "bp",
-            },
-        }
-    }
-    with pytest.raises(fastapi.HTTPException):
-        svc.generate_docker_compose(bs)
 
 
 def test_resolve_config_falls_back_to_workspace_for_baked(svc, tmp_path):

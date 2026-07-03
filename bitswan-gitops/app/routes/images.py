@@ -14,16 +14,6 @@ async def get_images(
     return await image_service.get_images()
 
 
-@router.get("/{image_tag}/logs")
-async def get_image_logs(
-    image_tag: str,
-    lines: int = 100,
-    image_service: ImageService = Depends(get_image_service),
-):
-    # File I/O is fast enough to not need thread pool
-    return image_service.get_image_logs(image_tag, lines)
-
-
 @router.get("/builds/{checksum}/stream")
 async def stream_image_build_logs(
     checksum: str,
@@ -47,11 +37,3 @@ async def create_image(
         raise HTTPException(
             status_code=400, detail="File must be a .zip or .tar.gz archive"
         )
-
-
-@router.delete("/{image_tag}")
-async def delete_image(
-    image_tag: str,
-    image_service: ImageService = Depends(get_image_service),
-):
-    return await image_service.delete_image(image_tag)

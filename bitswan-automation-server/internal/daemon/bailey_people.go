@@ -5,10 +5,11 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 // GET  /bailey/api/people          — admin-only roster + per-person stats
-// POST /bailey/api/people/invite   — admin-only; 501 (Keycloak invite not wired)
+// POST /bailey/api/people/invite   — admin-only; see bailey_people_invites.go
 //
 // SOURCE OF PEOPLE — investigation result
 // ----------------------------------------
@@ -45,11 +46,12 @@ import (
 // device. There is no per-user request log to do better without the
 // audit feed, and that only covers mutating actions.
 //
-// INVITED-STATE — the daemon has no invite store and no Keycloak invite
-// path wired, so we cannot represent a truly-invited-but-never-seen user.
-// Everyone in the roster has transacted with the server, so invited is
-// reported false. (A real invited state needs the Keycloak invite TODO
-// below.)
+// INVITED-STATE — outstanding invites live in the local invites store
+// (bailey_people_invites.go): an invited-but-never-seen user appears in
+// the roster as a synthetic InvitedOnly row until they redeem (which
+// gives them a device) or the invite is revoked. Inviting doesn't need
+// a Keycloak admin client — the AOC lists the org's members and sends
+// the email; the daemon only pre-authorises the first device.
 
 type personDTO struct {
 	Name        string `json:"name"`
@@ -58,7 +60,7 @@ type personDTO struct {
 	Workspaces  int    `json:"workspace_count"`
 	Devices     int    `json:"device_count"`
 	LastActive  string `json:"last_active,omitempty"` // RFC3339 ("" if unknown)
-	InvitedOnly bool   `json:"invited"`               // true = invited but never seen (not representable today)
+	InvitedOnly bool   `json:"invited"`               // true = live invite, user never seen on this server
 }
 
 const (
@@ -285,22 +287,59 @@ func gatherPeople(r *http.Request) ([]personDTO, error) {
 		noteErr(tErr)
 	}
 
+	// (5) Live invites → synthetic invited-but-never-seen rows. Someone
+	// already in the roster from a real source above is NOT re-marked as
+	// invited (they've transacted with the server; the invite pill would
+	// lie). Their pending invite still shows in the invites strip.
+	invitedRole := map[string]string{}
+	if invites, iErr := dbListUnconsumedInvites(); iErr == nil {
+		now := time.Now()
+		for i := range invites {
+			inv := &invites[i]
+			if !inv.live(now) {
+				continue
+			}
+			if _, seen := byEmail[strings.ToLower(inv.Email)]; seen {
+				continue
+			}
+			get(inv.Email)
+			// The role they'll receive on redemption — effectiveRole would
+			// report the default until they actually join.
+			invitedRole[strings.ToLower(inv.Email)] = inv.Role
+		}
+	} else {
+		noteErr(iErr)
+	}
+
 	out := make([]personDTO, 0, len(byEmail))
-	for _, a := range byEmail {
+	for key, a := range byEmail {
+		// Role is the locally-stored, authoritative role (effectiveRole),
+		// not an SSO-derived one; for an invited-but-never-seen row it is
+		// the role the invite will grant.
+		role := effectiveRole(a.email)
+		invited := false
+		if r, ok := invitedRole[key]; ok {
+			invited = true
+			// Show the invite's role only when no explicit user_roles entry
+			// exists — an admin who set a role via the roster's role pill
+			// must see it stick, and redemption preserves that explicit role
+			// (dbGetUserRole != "" guard) rather than applying the invite's.
+			if explicit, _ := dbGetUserRole(a.email); explicit == "" {
+				role = r
+			}
+		}
 		out = append(out, personDTO{
 			// No real display-name source without the Keycloak profile
 			// query (TODO), and we don't infer a name from the email
 			// local-part — name is reported as the email until a real
 			// profile source is wired.
-			Name:  a.email,
-			Email: a.email,
-			// Role is the locally-stored, authoritative role (effectiveRole),
-			// not an SSO-derived one.
-			Role:        effectiveRole(a.email),
+			Name:        a.email,
+			Email:       a.email,
+			Role:        role,
 			Workspaces:  a.workspaces,
 			Devices:     a.devices,
 			LastActive:  a.lastActive,
-			InvitedOnly: false,
+			InvitedOnly: invited,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -319,20 +358,4 @@ func handleBaileyPeople(w http.ResponseWriter, r *http.Request) {
 		resp["error"] = err.Error()
 	}
 	_ = json.NewEncoder(w).Encode(resp)
-}
-
-// handleBaileyPeopleInvite is the admin-only invite endpoint. Inviting a
-// user means creating them in (or sending a Keycloak invite via) the AOC
-// realm — which requires a Keycloak admin-API client this build does not
-// have (see the source note above). Rather than fake an invite that does
-// nothing, we return 501 and mark it TODO. When a realm admin client is
-// wired, this should POST the invite and record an audit event.
-func handleBaileyPeopleInvite(w http.ResponseWriter, r *http.Request) {
-	// TODO(keycloak-invite): wire a Keycloak realm admin client (the AOC
-	// realm) and POST a user invite here, then recordEvent(actor,
-	// "people.invite", invitedEmail). Until then this is genuinely not
-	// implemented — see bailey_people.go source note.
-	writeJSONError(w,
-		"inviting people is not available on this server: it requires a Keycloak realm admin client that is not configured. Invite users directly in Keycloak / the AOC for now.",
-		http.StatusNotImplemented)
 }

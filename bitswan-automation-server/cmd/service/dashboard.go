@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/bitswan-space/bitswan-workspaces/internal/oauth"
 	"github.com/spf13/cobra"
@@ -33,13 +32,9 @@ func NewDashboardCmd() *cobra.Command {
 	return cmd
 }
 
-func resolveDashboardWorkspace(workspace *string) error {
-	if *workspace != "" {
-		return nil
-	}
-	cfg := config.NewAutomationServerConfig()
-	ws, err := cfg.GetActiveWorkspace()
-	if err != nil || ws == "" {
+func resolveDashboardWorkspace(client *daemon.Client, workspace *string) error {
+	ws, err := client.ResolveWorkspace(*workspace)
+	if err != nil {
 		return fmt.Errorf("no active workspace configured. Use --workspace flag or run 'bitswan workspace select <workspace>'")
 	}
 	*workspace = ws
@@ -63,7 +58,7 @@ func newDashboardEnableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if err := resolveDashboardWorkspace(&workspace); err != nil {
+			if err := resolveDashboardWorkspace(client, &workspace); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -120,7 +115,7 @@ func newDashboardDisableCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "Run 'bitswan automation-server-daemon init' to start it.")
 				os.Exit(1)
 			}
-			if err := resolveDashboardWorkspace(&workspace); err != nil {
+			if err := resolveDashboardWorkspace(client, &workspace); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -149,7 +144,7 @@ func newDashboardStatusCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "Run 'bitswan automation-server-daemon init' to start it.")
 				os.Exit(1)
 			}
-			if err := resolveDashboardWorkspace(&workspace); err != nil {
+			if err := resolveDashboardWorkspace(client, &workspace); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -181,7 +176,7 @@ func newDashboardStartCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "Run 'bitswan automation-server-daemon init' to start it.")
 				os.Exit(1)
 			}
-			if err := resolveDashboardWorkspace(&workspace); err != nil {
+			if err := resolveDashboardWorkspace(client, &workspace); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -210,7 +205,7 @@ func newDashboardStopCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "Run 'bitswan automation-server-daemon init' to start it.")
 				os.Exit(1)
 			}
-			if err := resolveDashboardWorkspace(&workspace); err != nil {
+			if err := resolveDashboardWorkspace(client, &workspace); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -241,7 +236,7 @@ func newDashboardUpdateCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "Run 'bitswan automation-server-daemon init' to start it.")
 				os.Exit(1)
 			}
-			if err := resolveDashboardWorkspace(&workspace); err != nil {
+			if err := resolveDashboardWorkspace(client, &workspace); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

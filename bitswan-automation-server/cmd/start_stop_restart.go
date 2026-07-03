@@ -4,17 +4,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
 
-func resolveWorkspaceName(args []string) (string, error) {
+func resolveWorkspaceName(client *daemon.Client, args []string) (string, error) {
 	if len(args) > 0 {
 		return args[0], nil
 	}
-	cfg := config.NewAutomationServerConfig()
-	ws, err := cfg.GetActiveWorkspace()
+	ws, err := client.ActiveWorkspace()
 	if err != nil {
 		return "", fmt.Errorf("no workspace specified and no active workspace set: %w", err)
 	}
@@ -31,16 +29,16 @@ func newStartCmd() *cobra.Command {
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			workspaceName, err := resolveWorkspaceName(args)
-			if err != nil {
-				return err
-			}
-
 			client, err := daemon.NewClient()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				fmt.Fprintln(os.Stderr, "Run 'bitswan automation-server-daemon init' to start it.")
 				os.Exit(1)
+			}
+
+			workspaceName, err := resolveWorkspaceName(client, args)
+			if err != nil {
+				return err
 			}
 
 			if err := client.WorkspaceStart(workspaceName, automationsOnly); err != nil {
@@ -66,16 +64,16 @@ func newStopCmd() *cobra.Command {
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			workspaceName, err := resolveWorkspaceName(args)
-			if err != nil {
-				return err
-			}
-
 			client, err := daemon.NewClient()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				fmt.Fprintln(os.Stderr, "Run 'bitswan automation-server-daemon init' to start it.")
 				os.Exit(1)
+			}
+
+			workspaceName, err := resolveWorkspaceName(client, args)
+			if err != nil {
+				return err
 			}
 
 			if err := client.WorkspaceStop(workspaceName, automationsOnly); err != nil {
@@ -101,16 +99,16 @@ func newRestartCmd() *cobra.Command {
 		Args:         cobra.MaximumNArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			workspaceName, err := resolveWorkspaceName(args)
-			if err != nil {
-				return err
-			}
-
 			client, err := daemon.NewClient()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				fmt.Fprintln(os.Stderr, "Run 'bitswan automation-server-daemon init' to start it.")
 				os.Exit(1)
+			}
+
+			workspaceName, err := resolveWorkspaceName(client, args)
+			if err != nil {
+				return err
 			}
 
 			if err := client.WorkspaceRestart(workspaceName, automationsOnly); err != nil {

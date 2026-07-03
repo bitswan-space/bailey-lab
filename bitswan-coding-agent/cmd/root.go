@@ -18,7 +18,7 @@ copies. git is installed and ` + "`origin`" + ` is already configured to the wor
 git server.
 
 COMMANDS
-  requirements  — Manage testable requirements for a business process
+  requirements  — Manage & run testable requirements (list, add, test, update)
   deployments   — Manage live-dev deployments (list, start, exec, logs)
 
 Run any subcommand with --help for full usage details.
@@ -43,10 +43,18 @@ TYPICAL WORKFLOW
   5. Check deployments and their public URLs:
        bitswan-coding-agent deployments list
 
-  6. Test changes using the selenium testing container:
-       bitswan-coding-agent deployments exec TESTING_DEPLOYMENT_ID -- pytest /app/tests/ -v
+  6. Write a deterministic test for each requirement and run it. Name the test
+     after the requirement's ID with hyphens turned into underscores, so a test
+     for REQ-003 matches the token REQ_003 (e.g. def test_REQ_003_...). Then:
+       bitswan-coding-agent requirements test --id REQ-003
+     This execs the test INSIDE the BP's live-dev container and records pass or
+     fail back into testable-requirements.toml for you — no manual update needed.
+     Omit --id to run every requirement. The default runner is pytest
+     (pytest -k REQ_003 -v); for other frameworks pass a template with {id}, e.g.
+       bitswan-coding-agent requirements test --runner "go test -run {id} ./..."
 
-  7. Update requirement statuses as you verify them:
+  7. For anything that genuinely cannot be tested mechanically, set the status by
+     hand instead:
        bitswan-coding-agent requirements update --id REQ-ID --status pass
 
      Statuses:

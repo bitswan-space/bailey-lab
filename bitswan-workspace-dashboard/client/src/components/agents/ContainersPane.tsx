@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Cog, Globe, Hammer, Loader2, Play, RotateCcw, Square } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import { api } from '@/lib/api';
 import { deployBpWithToast } from '@/lib/deployBp';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';

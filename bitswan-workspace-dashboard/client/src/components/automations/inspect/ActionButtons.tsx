@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import { Play, RotateCw, Square } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api';

@@ -11,7 +11,6 @@ This replaces the old shared-``.git`` worktree model. The router is served under
 ``/copies``.
 """
 
-import asyncio
 import datetime
 import logging
 import os
@@ -22,7 +21,6 @@ import tempfile
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from app.async_docker import get_async_docker_client, DockerError
 from app.deploy_runner import spawn_set_deploy
 from app.services.automation_service import scan_workspace_sources
 from app.services.git_server import bare_repo_path
@@ -62,79 +60,6 @@ def _get_postgres_secrets(stage: str = "dev") -> dict | None:
     ):
         return info
     return None
-
-
-def _copy_db_name(copy_name: str) -> str:
-    """Generate a Postgres database name for a copy.
-
-    Thin wrapper over the canonical name helper so copy-create, the deploy-time
-    ensure guard, and the POSTGRES_DB env injection all agree.
-    """
-    from app.services.bp_databases import copy_db_name
-
-    return copy_db_name(copy_name)
-
-
-async def _clone_postgres_db(copy_name: str) -> str | None:
-    """Ensure a copy's live-dev Postgres database (``postgres_copy_<copy>``)
-    exists. Returns its name, or None when Postgres isn't enabled in this
-    workspace.
-
-    A workspace with no Postgres yet (a fresh one where a user's personal copy
-    is created before any business process) simply has nothing to clone, so this
-    returns None — the per-copy DB is then provisioned at deploy by the
-    ensure-Postgres guard (`bp_databases.ensure_live_postgres_dbs`). Delegates to
-    the shared, readiness-aware `bp_databases.clone_postgres_db`, so copy-create
-    and deploy create the database by the exact same code path.
-    """
-    from app.services.bp_databases import clone_postgres_db
-
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-    return await clone_postgres_db(workspace_name, copy_name)
-
-
-async def _drop_postgres_db(copy_name: str) -> None:
-    """Drop the copy's Postgres database."""
-    secrets = _get_postgres_secrets("dev")
-    if not secrets:
-        return
-
-    user = secrets["POSTGRES_USER"]
-    password = secrets["POSTGRES_PASSWORD"]
-    new_db = _copy_db_name(copy_name)
-
-    docker_client = get_async_docker_client()
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-    container_name = f"{workspace_name}__postgres-dev"
-
-    try:
-        containers = await docker_client.list_containers(
-            all=False,
-            filters={"name": [f"^/{container_name}$"]},
-        )
-        if not containers:
-            return
-
-        cid = containers[0]["Id"]
-
-        terminate_sql = (
-            f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            f"WHERE datname = '{new_db}' AND pid <> pg_backend_pid();"
-        )
-        for sql in [terminate_sql, f'DROP DATABASE IF EXISTS "{new_db}";']:
-            exec_id = await docker_client.exec_create(
-                cid,
-                [
-                    "sh",
-                    "-c",
-                    f"PGPASSWORD='{password}' psql -U {user} -d postgres -c \"{sql}\"",
-                ],
-            )
-            await docker_client.exec_start(exec_id)
-
-        logger.info(f"Dropped Postgres DB '{new_db}' for copy '{copy_name}'")
-    except Exception as e:
-        logger.warning(f"Failed to drop Postgres DB for copy '{copy_name}': {e}")
 
 
 # Copy names are filesystem path segments AND git branch names AND positional
@@ -236,14 +161,11 @@ async def create_copy(body: CreateCopyRequest):
         "git", "remote", "set-url", "origin", _git_remote_url(), cwd=copy_path
     )
 
-    # Clone the Postgres dev database for this copy — the copy's live-dev
-    # backends connect to it, so a failure aborts creation.
-    try:
-        cloned_db = await _clone_postgres_db(name)
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    result = {"name": name, "path": copy_path, "postgres_db": cloned_db}
+    # No per-copy database at copy-create. Each BP's live-dev backend in this
+    # copy gets its OWN per-(copy, BP) database (copy_<copy>_bp_<slug>), created
+    # at deploy by the driver's ensure guard and seeded from that BP's dev DB —
+    # so there is nothing to clone here.
+    result = {"name": name, "path": copy_path}
 
     # Auto-start live-dev for every automation in the new copy (best-effort).
     try:
@@ -370,16 +292,6 @@ async def refresh_copies() -> list[dict]:
     return _copies_cache
 
 
-@router.get("/")
-async def list_copies():
-    return await get_cached_copies()
-
-
-class MergeCopyResponse(BaseModel):
-    status: str
-    message: str
-
-
 async def _fast_forward_main_to_branch(name: str) -> dict:
     """Fast-forward `main` to the copy's branch tip in the canonical (bare)
     repo. Append-only: succeeds only when `main` is an ancestor of the branch
@@ -461,13 +373,6 @@ async def _refresh_main_copy_checkout() -> None:
                 f"could not be realigned: {(err or out).strip()}"
             ),
         )
-
-
-@router.post("/{name}/merge")
-async def merge_copy(name: str):
-    """Fast-forward `main` to the copy's branch tip in the canonical repo."""
-    _validate_copy_name(name)
-    return await _fast_forward_main_to_branch(name)
 
 
 class SyncCopyResponse(BaseModel):
@@ -947,146 +852,64 @@ def _own_container_id_from_proc() -> str | None:
     return None
 
 
-async def _own_container_id_from_api() -> str | None:
-    hostname = os.uname().nodename
-    if not hostname:
-        return None
-    try:
-        client = get_async_docker_client()
-        containers = await client.list_containers(filters={"status": ["running"]})
-        for c in containers:
-            cid = c.get("Id")
-            if not cid:
-                continue
-            try:
-                info = await client.get_container(cid)
-                if info.get("Config", {}).get("Hostname") == hostname:
-                    return cid
-            except DockerError:
-                continue
-    except Exception as e:
-        logger.debug("Docker API container lookup failed: %s", e)
-    return None
-
-
 async def _own_container_id() -> str | None:
-    return _own_container_id_from_proc() or await _own_container_id_from_api()
+    # /proc-based id works without Docker (reads our own cgroup) — gitops has no
+    # docker.sock after the cut-over, so there is no API fallback.
+    return _own_container_id_from_proc()
 
 
 async def _rm_rf_as_root_in_container(path: str) -> bool:
-    """Wipe `path` as root via docker exec into our own container.
-
-    A copy's working tree contains files created by other containers
-    (live-dev automations, build outputs) that uid 1000 often can't unlink. We
-    have the Docker socket, so re-enter our own container as root to remove it.
+    """Wipe `path` as root by re-entering our own container via the driver's
+    exec (--user 0). A copy's working tree contains files created by other
+    containers (live-dev automations, build outputs) that uid 1000 often can't
+    unlink. The driver holds docker.sock and permits this because the gitops
+    container is labelled with this workspace.
     """
     container_id = await _own_container_id()
     if not container_id:
         logger.warning(
-            "rm -rf %s: could not determine own container ID; cannot docker exec as root",
+            "rm -rf %s: could not determine own container ID; cannot exec as root",
             path,
         )
         return False
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "docker",
-            "exec",
-            "--user",
-            "0",
-            container_id,
-            "rm",
-            "-rf",
-            path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            logger.warning(
-                "rm -rf %s via docker exec failed (%s): %s",
-                path,
-                proc.returncode,
-                stderr.decode(errors="replace").strip(),
-            )
-            return False
-        return True
-    except Exception as e:
-        logger.warning("rm -rf %s via docker exec raised: %s", path, e)
-        return False
-
-
-class CommitRequest(BaseModel):
-    message: str
-    copy: str | None = None  # None = the main copy
-    paths: list[str] | None = None  # None/empty = stage all changes (-A)
-
-
-@router.post("/commit")
-async def commit_changes(body: CommitRequest):
-    """Stage and commit changes in a copy (or the main copy when copy is
-    None). Used by the dashboard UI to record filesystem changes it just made."""
-    copy = body.copy or "main"
-    repo_path = _resolve_copy_path(copy)
-    if not os.path.exists(repo_path):
-        raise HTTPException(status_code=404, detail=f"Copy '{copy}' not found")
-
-    safe_paths: list[str] | None = None
-    if body.paths:
-        for p in body.paths:
-            if os.path.isabs(p) or any(part == ".." for part in p.split(os.sep)):
-                raise HTTPException(status_code=400, detail=f"Invalid path: {p}")
-        safe_paths = body.paths
-
-    if safe_paths:
-        success = await call_git_command("git", "add", "--", *safe_paths, cwd=repo_path)
-    else:
-        success = await call_git_command("git", "add", "-A", cwd=repo_path)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to stage changes")
-
-    stdout, stderr, rc = await call_git_command_with_output(
-        "git", "commit", "-m", body.message, cwd=repo_path
+    from app.services.infra_driver_client import (
+        ExecSpec,
+        InfraDriverClient,
+        InfraDriverError,
+        WorkspaceContext,
     )
+
+    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+    client = InfraDriverClient()
+    ctx = WorkspaceContext(
+        workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local"),
+        domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+        gitops_dir=os.path.join(gitops_root, "gitops"),
+        secrets_dir=os.path.join(gitops_root, "secrets"),
+    )
+    err: list[bytes] = []
+
+    async def on_stderr(d: bytes):
+        err.append(d)
+
+    try:
+        rc = await client.exec(
+            ctx,
+            ExecSpec(container=container_id, cmd=["rm", "-rf", path], user="0"),
+            on_stderr=on_stderr,
+        )
+    except InfraDriverError as e:
+        logger.warning("rm -rf %s via driver exec raised: %s", path, e)
+        return False
     if rc != 0:
-        combined = (stdout or "") + (stderr or "")
-        if "nothing to commit" in combined:
-            return {"status": "noop", "message": "Nothing to commit"}
-        raise HTTPException(
-            status_code=500, detail=f"Failed to commit: {(stderr or stdout).strip()}"
+        logger.warning(
+            "rm -rf %s via driver exec failed (%s): %s",
+            path,
+            rc,
+            b"".join(err).decode(errors="replace").strip(),
         )
-
-    hash_stdout, _, hash_rc = await call_git_command_with_output(
-        "git", "rev-parse", "HEAD", cwd=repo_path
-    )
-    return {
-        "status": "success",
-        "commit_hash": hash_stdout.strip() if hash_rc == 0 else "unknown",
-    }
-
-
-@router.delete("/{name}")
-async def delete_copy(name: str):
-    """Delete a copy: remove its checkout and drop its Postgres database. The
-    published branch in the canonical repo is left intact (append-only)."""
-    copy_path = _resolve_copy_path(name)
-    if not os.path.exists(copy_path):
-        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
-
-    await _drop_postgres_db(name)
-
-    # uid 1000 often can't unlink files created by other containers — try a
-    # plain rmtree, then fall back to a privileged docker-exec rm.
-    import shutil
-
-    try:
-        shutil.rmtree(copy_path)
-    except Exception:
-        if not await _rm_rf_as_root_in_container(copy_path):
-            raise HTTPException(
-                status_code=500, detail=f"Failed to remove copy '{name}'"
-            )
-
-    return {"status": "success", "message": f"Copy '{name}' deleted"}
+        return False
+    return True
 
 
 def _is_safe_relative_path(p: str) -> bool:

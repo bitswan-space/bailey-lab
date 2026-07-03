@@ -35,9 +35,13 @@ export const WRITE_TESTS_PROMPT =
   'Write automated tests for this BP\'s testable requirements. ' +
   'Run `bitswan-coding-agent requirements list` to see the requirements, and read the ' +
   'BP\'s README.md, process.toml, and existing source/tests first to follow the conventions. ' +
-  'Create or extend tests so each requirement can be verified mechanically, run them, and ' +
-  'update each tested requirement with `bitswan-coding-agent requirements update --id <id> --status <pass|fail>`. ' +
-  'Do not change requirement descriptions.';
+  'For each requirement write a deterministic test whose name carries the requirement ID with ' +
+  'hyphens turned into underscores, so REQ-003 maps to the token REQ_003 (e.g. def test_REQ_003_...). ' +
+  'This naming lets a test be triggered by ID. Then run and record each one with ' +
+  '`bitswan-coding-agent requirements test --id <id>`, which execs the test inside the BP\'s ' +
+  'live-dev container and writes pass/fail back to the requirement automatically (run without ' +
+  '--id to test all of them; default runner is pytest, pass --runner with a {id} placeholder for ' +
+  'other frameworks). Do not change requirement descriptions.';
 
 /**
  * "Build automation" button in the Description tab. The agent implements

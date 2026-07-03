@@ -7,7 +7,7 @@ import {
   RotateCcw,
   Trash2,
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import {
   CloneDialog,
   CreateSnapshotDialog,

@@ -1,10 +1,11 @@
 import React from 'react';
-// views-people.jsx — Users & roles + New user approvals (admin types the code)
+// views-people.jsx — Users & roles: roster, device approvals (admin types the
+// code), org-user invites (48h emailed link) + pending-invite management.
 
 const { C: PC, Icon: PIcon, Btn: PBtn, Pill: PPill } = window.WD_SHELL;
 const {
   Avatar: PAvatar, Card: PCard, PageHeader: PPageHeader, Field: PField, TextInput: PTextInput,
-  Modal: PModal, EmptyState: PEmpty, Drawer: PDrawer,
+  Modal: PModal, EmptyState: PEmpty, Drawer: PDrawer, CopyChip: PCopyChip,
   SegmentedCode: PSeg, DeviceIcon: PDeviceIcon, ProtoHint: PProtoHint, LiveState: PLiveState,
 } = window.SC_UI;
 const { Api: PApi, ApiError: PApiError } = window.SC_API;
@@ -12,8 +13,9 @@ const { useState: useP, useEffect: usePE, useRef: usePR } = React;
 
 // RoleSelect — a styled role picker: a pill-shaped trigger showing the current
 // role, opening a menu of roles with their descriptions. onPick(roleId) fires
-// when a (different) role is chosen.
-function RoleSelect({ role, onPick }) {
+// when a (different) role is chosen. `roles` narrows the menu (the invite
+// dialog offers member/admin only).
+function RoleSelect({ role, onPick, roles = P_ROLES }) {
   const [open, setOpen] = useP(false);
   const ref = usePR(null);
   usePE(() => {
@@ -22,7 +24,7 @@ function RoleSelect({ role, onPick }) {
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, [open]);
-  const meta = P_ROLES.find(r => r.id === role) || { id: role, label: role || '—', tone: 'neutral' };
+  const meta = roles.find(r => r.id === role) || { id: role, label: role || '—', tone: 'neutral' };
   return (
     <div ref={ref} style={{ position: 'relative', width: 'fit-content' }}>
       <button onClick={() => setOpen(o => !o)} title="Change role" style={{
@@ -38,7 +40,7 @@ function RoleSelect({ role, onPick }) {
         <div style={{ position: 'absolute', top: 36, left: 0, zIndex: 30, width: 264,
           background: '#fff', border: `1px solid ${PC.border}`, borderRadius: 11,
           boxShadow: '0 10px 30px rgba(0,0,0,0.12)', padding: 6 }}>
-          {P_ROLES.map(r => {
+          {roles.map(r => {
             const on = r.id === role;
             return (
               <button key={r.id} onClick={() => { setOpen(false); if (!on) onPick(r.id); }} style={{
@@ -157,6 +159,254 @@ function PendingApprovalBar({ req, person, ctx }) {
   );
 }
 
+// The invite dialog offers exactly the roles an invite may carry (the backend
+// rejects anything else).
+const P_INVITE_ROLES = P_ROLES.filter(r => r.id === 'admin' || r.id === 'member');
+
+// inviteExpiryLabel — human countdown for an invite's 48h window. The backend
+// flags `expired` authoritatively; the countdown is display-only.
+function inviteExpiryLabel(inv) {
+  if (inv.expired) return 'expired';
+  const ms = new Date(inv.expires_at).getTime() - Date.now();
+  if (isNaN(ms)) return '';
+  if (ms <= 0) return 'expired';
+  const h = Math.floor(ms / 3600000);
+  if (h >= 1) return `expires in ${h}h`;
+  return `expires in ${Math.max(1, Math.floor(ms / 60000))}m`;
+}
+
+// ─── INVITE DIALOG ──────────────────────────────────────────────────────────
+// Lists the AOC organization's users (GET /bailey/api/people/org-users) — the
+// only people who may be invited — and sends the invite (POST .../invite).
+// Three outcomes:
+//   • email_sent:true  → toast + close (the invite email is on its way);
+//   • email_sent:false → the invite EXISTS but the email didn't go out (SMTP
+//     not configured / send failed) — stay open and surface the invite_link
+//     to copy and share manually;
+//   • error            → inline banner (e.g. 502 when the AOC is unreachable —
+//     nothing was created).
+function InviteDialog({ open, onClose, ctx, onChanged }) {
+  const { toast } = ctx;
+  const [users, setUsers] = useP(null);   // null = loading
+  const [loadErr, setLoadErr] = useP('');
+  const [query, setQuery] = useP('');
+  const [selected, setSelected] = useP('');
+  const [role, setRole] = useP('member');
+  const [busy, setBusy] = useP(false);
+  const [submitErr, setSubmitErr] = useP('');
+  const [fallback, setFallback] = useP(null); // { link, error } — email failed
+
+  const load = async () => {
+    setLoadErr(''); setUsers(null);
+    try {
+      const r = await PApi.orgUsers();
+      setUsers(r.users || []);
+    } catch (e) {
+      setLoadErr(e.message || 'Could not load organization users.');
+      setUsers([]);
+    }
+  };
+  usePE(() => {
+    if (!open) return;
+    setQuery(''); setSelected(''); setRole('member');
+    setSubmitErr(''); setFallback(null);
+    load();
+  }, [open]);
+
+  const send = async () => {
+    if (!selected) return;
+    setBusy(true); setSubmitErr(''); setFallback(null);
+    try {
+      const r = await PApi.invite(selected, role);
+      onChanged && onChanged();
+      if (r && r.email_sent) {
+        toast(`Invite sent to ${selected}`, 'success');
+        onClose();
+      } else {
+        // Invite created but the email didn't go out — hand the admin the link.
+        setFallback({ link: (r && r.invite_link) || '', error: (r && r.email_error) || 'The invite email could not be sent.' });
+      }
+    } catch (e) {
+      setSubmitErr(e.message || 'Could not send the invite.');
+    } finally { setBusy(false); }
+  };
+
+  const list = (users || []).filter(u =>
+    (u.email || '').toLowerCase().includes(query.toLowerCase())
+    || (u.username || '').toLowerCase().includes(query.toLowerCase()));
+
+  return (
+    <PModal open={open} onClose={onClose} title="Invite someone" icon="user-plus" width={560}
+      subtitle="Only members of this server's organization can be invited. They get a 48-hour link by email; their first device is trusted automatically."
+      footer={
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
+          <span style={{ flex: 1 }} />
+          <PBtn variant="default" onClick={onClose}>Close</PBtn>
+          <PBtn variant="primary" leftIcon="mail-plus" disabled={!selected || busy} onClick={send}>
+            {busy ? 'Sending…' : 'Send invite'}
+          </PBtn>
+        </div>
+      }>
+      {/* who */}
+      {users === null && !loadErr && (
+        <div style={{ fontSize: 13, color: PC.muted, padding: '6px 2px' }}>Loading organization users…</div>
+      )}
+      {loadErr && (
+        <div style={{ display: 'flex', gap: 10, padding: 13, background: PC.surface, borderRadius: 10, border: `1px solid ${PC.border}`, marginBottom: 12 }}>
+          <PIcon name="shield-alert" size={15} color={PC.red} style={{ marginTop: 1, flex: '0 0 auto' }} />
+          <span style={{ fontSize: 12.5, color: PC.fg, lineHeight: '17px' }}>
+            {loadErr}{' '}
+            <button onClick={load} style={{ border: 0, background: 'transparent', color: PC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Retry</button>
+          </span>
+        </div>
+      )}
+      {users !== null && !loadErr && (
+        <>
+          <div style={{ position: 'relative', marginBottom: 10 }}>
+            <PIcon name="search" size={14} color={PC.mutedFg} style={{ position: 'absolute', left: 11, top: 11 }} />
+            <PTextInput value={query} onChange={setQuery} placeholder="Search organization users…" style={{ paddingLeft: 32 }} autoFocus />
+          </div>
+          {list.length === 0 ? (
+            <PEmpty icon="users" title={query ? 'No users match' : 'No organization users'}
+              text={query ? 'Try a different search term.' : 'No users were returned for this organization.'} />
+          ) : (
+            <div style={{ maxHeight: 260, overflow: 'auto', border: `1px solid ${PC.border}`, borderRadius: 10 }}>
+              {list.map(u => {
+                const disabled = !!u.in_roster;
+                const on = selected === u.email;
+                return (
+                  <button key={u.email} disabled={disabled}
+                    title={disabled ? 'Already has access to this server' : ''}
+                    onClick={() => { setSelected(on ? '' : u.email); setSubmitErr(''); setFallback(null); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '9px 12px',
+                      border: 0, borderBottom: `1px solid ${PC.surface2}`, textAlign: 'left', fontFamily: 'inherit',
+                      background: on ? PC.primarySoft : '#fff', cursor: disabled ? 'default' : 'pointer',
+                      opacity: disabled ? 0.55 : 1 }}>
+                    <PAvatar user={{ name: u.username || u.email, email: u.email }} size={28} />
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: PC.fg, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.username || u.email}</span>
+                      <span style={{ display: 'block', fontSize: 11.5, color: PC.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.email}</span>
+                    </span>
+                    {disabled && <PPill tone="neutral" size="xs">Has access</PPill>}
+                    {!disabled && u.invited && <PPill tone="warning" size="xs">Invited</PPill>}
+                    {on && <PIcon name="check" size={15} color={PC.primary} style={{ flex: '0 0 auto' }} />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {/* role */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 14 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 600, color: PC.fg }}>Invite as</span>
+            <RoleSelect role={role} onPick={setRole} roles={P_INVITE_ROLES} />
+            <span style={{ fontSize: 11.5, color: PC.muted }}>Applied when they accept the invite.</span>
+          </div>
+        </>
+      )}
+
+      {submitErr && (
+        <div style={{ display: 'flex', gap: 10, padding: '11px 13px', marginTop: 14, background: PC.redSoft, borderRadius: 10, border: `1px solid ${PC.red}44` }}>
+          <PIcon name="x-circle" size={15} color={PC.red} style={{ marginTop: 1, flex: '0 0 auto' }} />
+          <span style={{ fontSize: 12.5, color: PC.fg, lineHeight: '17px' }}>{submitErr}</span>
+        </div>
+      )}
+      {fallback && (
+        <div style={{ padding: '11px 13px', marginTop: 14, background: '#fffbeb', borderRadius: 10, border: `1px solid ${PC.amber}55` }}>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <PIcon name="alert-triangle" size={15} color="#b45309" style={{ marginTop: 1, flex: '0 0 auto' }} />
+            <span style={{ fontSize: 12.5, color: '#92400e', lineHeight: '17px' }}>
+              The invite was created, but the email couldn't be sent: {fallback.error}. Share the link yourself — it works for {selected} for 48 hours.
+            </span>
+          </div>
+          {fallback.link && <div style={{ marginTop: 8, paddingLeft: 25 }}><PCopyChip text={fallback.link} label="Copy invite link" /></div>}
+        </div>
+      )}
+    </PModal>
+  );
+}
+
+// ─── PENDING INVITES ────────────────────────────────────────────────────────
+// Outstanding (unconsumed) invites with expiry + delivery state and the
+// revoke / re-send actions. Re-sending regenerates the token and the 48h
+// window — the previously emailed link stops working.
+function PendingInvites({ invites, ctx, onChanged }) {
+  const { toast } = ctx;
+  const [busy, setBusy] = useP('');           // email being acted on
+  const [linkFor, setLinkFor] = useP(null);   // { email, link, error } after a failed re-send delivery
+
+  const revoke = async (email) => {
+    setBusy(email);
+    try {
+      await PApi.revokeInvite(email);
+      toast(`Invite for ${email} revoked`, 'danger');
+      setLinkFor(l => (l && l.email === email ? null : l));
+      onChanged && onChanged();
+    } catch (e) {
+      toast(`Couldn't revoke invite: ${e.message}`, 'danger');
+    } finally { setBusy(''); }
+  };
+  const resend = async (email) => {
+    setBusy(email); setLinkFor(null);
+    try {
+      const r = await PApi.resendInvite(email);
+      if (r && r.email_sent) {
+        toast(`Invite re-sent to ${email}`, 'success');
+      } else {
+        setLinkFor({ email, link: (r && r.invite_link) || '', error: (r && r.email_error) || 'The invite email could not be sent.' });
+      }
+      onChanged && onChanged();
+    } catch (e) {
+      toast(`Couldn't re-send invite: ${e.message}`, 'danger');
+    } finally { setBusy(''); }
+  };
+
+  if (!invites || invites.length === 0) return null;
+  return (
+    <PCard pad={0} style={{ marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '11px 18px', borderBottom: `1px solid ${PC.border}`, background: PC.surface,
+        fontSize: 11, fontWeight: 600, color: PC.muted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+        <PIcon name="mail" size={13} color={PC.mutedFg} /> Pending invites
+      </div>
+      {invites.map(inv => {
+        const expiry = inviteExpiryLabel(inv);
+        const expired = inv.expired || expiry === 'expired';
+        return (
+          <div key={inv.email} style={{ borderBottom: `1px solid ${PC.surface2}` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 18px', flexWrap: 'wrap' }}>
+              <PIcon name="mail" size={15} color={PC.mutedFg} />
+              <span style={{ fontSize: 12.5, color: PC.fg, fontFamily: 'Geist Mono, monospace' }}>{inv.email}</span>
+              <PPill tone={P_ROLE_TONE[inv.role] || 'neutral'} size="xs">{inv.role}</PPill>
+              <PPill tone={expired ? 'danger' : 'warning'} size="xs">{expiry || '48h link'}</PPill>
+              {inv.email_sent === false && (
+                <span title="The invite exists but the email could not be delivered — re-send it or share the link manually."
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, color: '#b45309', fontWeight: 600 }}>
+                  <PIcon name="alert-triangle" size={13} color="#b45309" /> email not delivered
+                </span>
+              )}
+              <span style={{ flex: 1 }} />
+              <span style={{ fontSize: 11.5, color: PC.muted }}>invited by {inv.created_by}</span>
+              <PBtn variant="default" size="sm" leftIcon="send" disabled={busy === inv.email} onClick={() => resend(inv.email)}>
+                {busy === inv.email ? 'Working…' : 'Re-send'}
+              </PBtn>
+              <PBtn variant="default" size="sm" leftIcon="x" disabled={busy === inv.email}
+                style={{ color: PC.red, borderColor: PC.red }} onClick={() => revoke(inv.email)}>Revoke</PBtn>
+            </div>
+            {linkFor && linkFor.email === inv.email && (
+              <div style={{ padding: '0 18px 12px 43px' }}>
+                <div style={{ fontSize: 11.5, color: '#92400e', marginBottom: 6 }}>
+                  Email couldn't be sent: {linkFor.error}. Share the fresh link manually:
+                </div>
+                {linkFor.link && <PCopyChip text={linkFor.link} label="Copy invite link" />}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </PCard>
+  );
+}
+
 // ─── USERS & ROLES ──────────────────────────────────────────────────────────
 // Wired to GET /bailey/api/people (admin-only): the roster, per-person role,
 // workspace/device counts, last-active and invited flag all come from
@@ -164,20 +414,35 @@ function PendingApprovalBar({ req, person, ctx }) {
 // roster shows the empty state, and /people's partial-enumeration `error`
 // (200 + error) shows a non-fatal warning above the still-rendered roster.
 //
-// Controls the backend doesn't expose yet are disabled (not faked):
-//   • Role change & suspend — no role-write / suspend route exists, so the
-//     role pill is read-only and the suspend control is omitted.
-// (There is no Invite button: there's no Keycloak admin client to create
-// users, and people appear here as they sign in / get access anyway.)
-// The per-user device drawer still uses seed device data (the admin devices
-// API isn't keyed by these identities yet) and is only reachable when the
-// backend reports a device count.
+// Inviting: the Invite button lists the AOC organization's users (the daemon
+// proxies the AOC's org roster) and creates a 48h single-use invite whose
+// link the AOC emails; see InviteDialog / PendingInvites above. People still
+// also appear here organically as they sign in / get access.
 function UsersView({ ctx }) {
   const { data, toast, go, navigate, routeParam, refresh } = ctx;
   const [query, setQuery] = useP('');
   // The person whose devices are open lives in the URL (/users/:email) so the
   // drawer survives refresh and is shareable.
   const devicesUserId = routeParam;
+
+  // Outstanding invites — view-local fetch (admin-only endpoint), refetched
+  // after every invite mutation. A failed fetch degrades to a compact warning;
+  // the roster itself is unaffected.
+  const [invites, setInvites] = useP(null);   // null = loading
+  const [invitesErr, setInvitesErr] = useP('');
+  const [inviteOpen, setInviteOpen] = useP(false);
+  const loadInvites = async () => {
+    try {
+      const r = await PApi.invites();
+      setInvites(r.invites || []); setInvitesErr('');
+    } catch (e) {
+      setInvites([]); setInvitesErr(e.message || 'Could not load pending invites.');
+    }
+  };
+  usePE(() => { loadInvites(); }, []);
+  // After any invite mutation: refresh the strip AND the roster (invited-only
+  // rows appear/disappear there).
+  const invitesChanged = () => { loadInvites(); refresh && refresh('people'); };
 
   // Assign a role (admin-only, stored locally) and refresh the roster.
   const changeRole = async (email, role) => {
@@ -274,9 +539,25 @@ function UsersView({ ctx }) {
       )}
 
       {loaded && (<>
-      <div style={{ position: 'relative', maxWidth: 320, marginBottom: 14 }}>
-        <PIcon name="search" size={14} color={PC.mutedFg} style={{ position: 'absolute', left: 11, top: 11 }} />
-        <PTextInput value={query} onChange={setQuery} placeholder="Search people…" style={{ paddingLeft: 32 }} />
+      {invitesErr && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', marginBottom: 14,
+          border: `1px solid ${PC.amber}55`, background: '#fffbeb', borderRadius: 10 }}>
+          <PIcon name="alert-triangle" size={15} color="#b45309" style={{ flex: '0 0 auto' }} />
+          <span style={{ flex: 1, fontSize: 12.5, color: '#92400e', lineHeight: '17px' }}>
+            Couldn't load pending invites: {invitesErr}
+          </span>
+          <button onClick={loadInvites} style={{ border: 0, background: 'transparent', color: PC.primary, cursor: 'pointer', font: 'inherit', fontSize: 12.5, fontWeight: 600 }}>Retry</button>
+        </div>
+      )}
+      <PendingInvites invites={invites || []} ctx={ctx} onChanged={invitesChanged} />
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+        <div style={{ position: 'relative', maxWidth: 320, flex: '1 1 240px' }}>
+          <PIcon name="search" size={14} color={PC.mutedFg} style={{ position: 'absolute', left: 11, top: 11 }} />
+          <PTextInput value={query} onChange={setQuery} placeholder="Search people…" style={{ paddingLeft: 32 }} />
+        </div>
+        <span style={{ flex: 1 }} />
+        <PBtn variant="primary" leftIcon="user-plus" onClick={() => setInviteOpen(true)}>Invite person</PBtn>
       </div>
 
       {list.length === 0 ? (
@@ -332,6 +613,7 @@ function UsersView({ ctx }) {
       )}
       </>)}
 
+      <InviteDialog open={inviteOpen} onClose={() => setInviteOpen(false)} ctx={ctx} onChanged={invitesChanged} />
       <UserDevicesDrawer userId={devicesUserId} onClose={() => navigate('users')} ctx={ctx} />
     </div>
   );

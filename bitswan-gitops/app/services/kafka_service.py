@@ -17,28 +17,6 @@ from app.services.infra_service import (
 
 logger = logging.getLogger(__name__)
 
-# Entrypoint script that builds the JAAS config from KAFKA_ADMIN_PASSWORD
-# env var, then execs the original confluent entrypoint.
-# NOTE: $$ is docker-compose escaping — becomes $ in the actual shell command.
-KAFKA_ENTRYPOINT_SCRIPT = """\
-cat > /etc/kafka/kafka_server_jaas.conf <<JAASEOF
-KafkaServer {
-   org.apache.kafka.common.security.plain.PlainLoginModule required
-   username="admin"
-   password="$$KAFKA_ADMIN_PASSWORD"
-   user_admin="$$KAFKA_ADMIN_PASSWORD";
-};
-
-Client {
-   org.apache.kafka.common.security.plain.PlainLoginModule required
-   username="admin"
-   password="$$KAFKA_ADMIN_PASSWORD"
-   user_admin="$$KAFKA_ADMIN_PASSWORD";
-};
-JAASEOF
-exec /etc/confluent/docker/run
-"""
-
 
 def generate_cluster_id() -> str:
     """Generate a random Kafka cluster ID (URL-safe base64-encoded 16 random bytes)."""
@@ -103,87 +81,6 @@ class KafkaService(InfraService):
         except Exception as e:
             logger.warning(f"Failed to stop Kafka UI container: {e}")
         return result
-
-    def _read_cluster_id(self) -> str:
-        """Read the persisted Kafka cluster ID from the secrets file.
-
-        Falls back to generating a new ID (and appending it to the secrets
-        file) for backwards compatibility with deployments that predate
-        cluster ID persistence.
-        """
-        if os.path.exists(self.secrets_file_path):
-            with open(self.secrets_file_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("KAFKA_CLUSTER_ID="):
-                        return line.split("=", 1)[1]
-
-        # Backwards compat: generate once and persist
-        cluster_id = generate_cluster_id()
-        if os.path.exists(self.secrets_file_path):
-            with open(self.secrets_file_path, "a") as f:
-                f.write(f"KAFKA_CLUSTER_ID={cluster_id}\n")
-            logger.info(f"Persisted new Kafka cluster ID to {self.secrets_file_path}")
-        return cluster_id
-
-    def _generate_compose_dict(self) -> dict:
-        cluster_id = self._read_cluster_id()
-
-        return {
-            "version": "3",
-            "services": {
-                f"kafka{self.service_suffix}-ui": {
-                    "container_name": self.ui_container_name,
-                    "restart": "always",
-                    "image": self.ui_image,
-                    "environment": {
-                        "DYNAMIC_CONFIG_ENABLED": "true",
-                        "AUTH_TYPE": "LOGIN_FORM",
-                        "SPRING_SECURITY_USER_NAME": "admin",
-                        "SERVER_SERVLET_CONTEXTPATH": "/kafka",
-                        "KAFKA_CLUSTERS_0_NAME": "local-cluster",
-                        "KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS": f"{self.container_name}:9092",
-                        "KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL": "SASL_PLAINTEXT",
-                        "KAFKA_CLUSTERS_0_PROPERTIES_SASL_MECHANISM": "PLAIN",
-                    },
-                    "env_file": [self.secrets_file_path],
-                    "networks": ["bitswan_network"],
-                },
-                f"kafka{self.service_suffix}": {
-                    "image": self.kafka_image,
-                    "container_name": self.container_name,
-                    "entrypoint": ["/bin/bash", "-c", KAFKA_ENTRYPOINT_SCRIPT],
-                    "environment": {
-                        "KAFKA_NODE_ID": 1,
-                        "KAFKA_PROCESS_ROLES": "broker,controller",
-                        "KAFKA_CONTROLLER_QUORUM_VOTERS": f"1@{self.container_name}:9094",
-                        "KAFKA_CONTROLLER_LISTENER_NAMES": "CONTROLLER",
-                        "KAFKA_LISTENERS": "SASL_PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9094",
-                        "KAFKA_ADVERTISED_LISTENERS": f"SASL_PLAINTEXT://{self.container_name}:9092",
-                        "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP": "CONTROLLER:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT",
-                        "KAFKA_INTER_BROKER_LISTENER_NAME": "SASL_PLAINTEXT",
-                        "KAFKA_SASL_ENABLED_MECHANISMS": "PLAIN",
-                        "KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL": "PLAIN",
-                        "KAFKA_OPTS": "-Djava.security.auth.login.config=/etc/kafka/kafka_server_jaas.conf",
-                        "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR": 1,
-                        "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR": 1,
-                        "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR": 1,
-                        "KAFKA_AUTO_CREATE_TOPICS_ENABLE": "true",
-                        "CLUSTER_ID": cluster_id,
-                    },
-                    "volumes": [
-                        f"{self.volume_name}:/var/lib/kafka/data",
-                    ],
-                    "env_file": [self.secrets_file_path],
-                    "restart": "unless-stopped",
-                    "networks": ["bitswan_network"],
-                },
-            },
-            "volumes": {self.volume_name: None},
-            "networks": {
-                "bitswan_network": {"external": True},
-            },
-        }
 
     def _get_caddy_upstream(self) -> str:
         # Kafka UI is the web-accessible service

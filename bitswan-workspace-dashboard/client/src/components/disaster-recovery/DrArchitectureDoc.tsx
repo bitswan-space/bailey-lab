@@ -202,7 +202,7 @@ function LiveState({ bp }: { bp: string }) {
         Which app slot each role points at right now — the tags move as you swap or promote.
       </p>
       <DiagramBox>
-        {(['a', 'b', 'c'] as const).map((slot) => {
+        {(['blue', 'green', 'purple'] as const).map((slot) => {
           const role = roleOf(slot);
           const tag = ROLE_TAG[role];
           const db = state.slots?.[slot]?.db ?? null;

@@ -87,10 +87,20 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		gitopsSecretToken = uniuri.NewLen(64)
 	}
 
+	// The infra-driver gets its OWN token, distinct from the gitops API secret.
+	// gitops and its driver are a pair (generated together, so it need not be
+	// persisted), but keeping it separate means a leak of the gitops secret does
+	// not grant driver (push + exec = docker.sock) access, and vice versa.
+	driverToken := uniuri.NewLen(64)
+
 	gitopsService := map[string]interface{}{
 		"image":    config.GitopsImage,
 		"restart":  "always",
 		"hostname": config.WorkspaceName + "-gitops",
+		// Labelled with the workspace so the driver permits gitops's scoped
+		// self-exec (root cleanup of copy trees) — the driver refuses any
+		// container not carrying this workspace label.
+		"labels":   map[string]string{"gitops.workspace": config.WorkspaceName},
 		"networks": []string{"bitswan_network"},
 		"volumes": []interface{}{
 			wsVolume("gitops", "/gitops/gitops"),
@@ -108,7 +118,10 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 			// layer while the gateways write the volume, and the feed stays empty.
 			wsVolume("firewall", "/gitops/firewall"),
 			wsVolume("ssh", "/home/user1000/.ssh"),
-			"/var/run/docker.sock:/var/run/docker.sock",
+			// NO docker.sock: after the infra-driver cut-over gitops never
+			// touches Docker — it pushes bitswan.yaml to the driver and calls
+			// the driver's scoped primitives. The driver sidecar is the only
+			// container with the socket.
 			"/var/run/bitswan:/var/run/bitswan",
 		},
 		"environment": []string{
@@ -190,11 +203,26 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		)
 	}
 
+	// The infra-driver sidecar: the only container that touches docker.sock
+	// after the cut-over. gitops `git push`es the resolved bitswan.yaml to the
+	// driver's deploy repo (smart-HTTP, hook compiles + applies) and calls its
+	// /v1 primitives — so gitops itself needs no Docker access. The driver runs
+	// the same daemon runtime image (docker CLI + compose + git-http-backend),
+	// with the bitswan binary bind-mounted exactly as the daemon mounts its own.
+	gitopsService["environment"] = append(gitopsService["environment"].([]string),
+		"BITSWAN_INFRA_DRIVER_URL=http://"+config.WorkspaceName+"-infra-driver:9090",
+		"BITSWAN_INFRA_DRIVER_TOKEN="+driverToken,
+		"BITSWAN_DEPLOY_REMOTE=http://x:"+driverToken+"@"+config.WorkspaceName+"-infra-driver:9090/deploy.git",
+	)
+
+	driverService := config.buildDriverService(driverToken, wsVolume, homeDir)
+
 	// Construct the docker-compose data structure
 	dockerCompose := map[string]interface{}{
 		"version": "3.8",
 		"services": map[string]interface{}{
-			"bitswan-gitops": gitopsService,
+			"bitswan-gitops":                       gitopsService,
+			config.WorkspaceName + "-infra-driver": driverService,
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
@@ -220,6 +248,91 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	return buf.String(), gitopsSecretToken, nil
 }
 
+// buildDriverService builds the infra-driver sidecar: the same daemon runtime
+// image (docker CLI + compose + git-http-backend), the bitswan binary
+// bind-mounted as the daemon mounts its own, docker.sock, and the workspace
+// volume subpaths the compiler reads/writes. It serves the deploy repo over
+// git smart-HTTP + the /v1 primitives, guarded by the shared token.
+func (config *DockerComposeConfig) buildDriverService(token string, wsVolume func(string, string) map[string]interface{}, homeDir string) map[string]interface{} {
+	driverImage := os.Getenv("BITSWAN_INFRA_DRIVER_IMAGE")
+	if driverImage == "" {
+		driverImage = "bitswan/automation-server-runtime:latest"
+	}
+	// The host path of the bitswan binary to bind-mount. The daemon forwards its
+	// own host binary path as BITSWAN_HOST_BINARY (it cannot use os.Executable()
+	// from inside its container); a host-CLI `workspace init` falls back to its
+	// own executable.
+	driverBinary := os.Getenv("BITSWAN_HOST_BINARY")
+	if driverBinary == "" {
+		if exe, err := os.Executable(); err == nil {
+			driverBinary = exe
+		} else {
+			driverBinary = "/usr/local/bin/bitswan"
+		}
+	}
+
+	env := []string{
+		"BITSWAN_INFRA_DRIVER_TOKEN=" + token,
+		"BITSWAN_VOLUME_NAME=bitswan",
+		"BITSWAN_GITOPS_DIR_HOST=" + config.GitopsPath,
+		"BITSWAN_CERTS_DIR=" + homeDir + "/.config/bitswan/certauthorities",
+		"BITSWAN_WORKSPACE_NAME=" + config.WorkspaceName,
+	}
+	if config.KeycloakURL != "" {
+		env = append(env, "KEYCLOAK_URL="+config.KeycloakURL)
+	}
+	// The compiler reads the same AOC/OAuth env gitops used (org group path,
+	// oauth2-proxy config it materializes per BP, etc.).
+	env = append(env, config.AocEnvVars...)
+	env = append(env, config.OAuthEnvVars...)
+
+	volumes := []interface{}{
+		driverBinary + ":/usr/local/bin/bitswan:ro",
+		"/var/run/docker.sock:/var/run/docker.sock",
+		// The daemon ingress socket — the driver configures ingress itself
+		// (converges routes via /ingress/reconcile) after bringing the project up.
+		"/var/run/bitswan:/var/run/bitswan",
+		wsVolume("deploy.git", "/git/deploy.git"),
+		// The deployed tree the generated compose's bind-mounts reference
+		// (workspaces/<ws>/gitops/<source>); apply materializes the push here.
+		wsVolume("gitops", "/gitops/gitops"),
+		// The per-copy workspace checkouts (same mount gitops uses). The
+		// compiler resolves each deployment's automation.toml (expose/port/
+		// services) from here when the source is baked into the image and so
+		// has no <checksum>/ tree on the gitops volume — a deployment's
+		// relative_path is always "copies/<copy>/<rel>". Without this the
+		// compiler falls back to defaults (expose=false) and never emits the
+		// frontend's ingress route, so the endpoint 404s.
+		wsVolume("copies", "/workspace-repo/copies"),
+		wsVolume("secrets", "/gitops/secrets"),
+		wsVolume("snapshots", "/gitops/snapshots"),
+		wsVolume("firewall", "/gitops/firewall"),
+	}
+	caVolumes, caEnvVars := certauthority.GetCACertMountConfig(config.TrustCA)
+	for _, v := range caVolumes {
+		volumes = append(volumes, v)
+	}
+	env = append(env, caEnvVars...)
+
+	return map[string]interface{}{
+		"image":       driverImage,
+		"restart":     "always",
+		"hostname":    config.WorkspaceName + "-infra-driver",
+		"networks":    []string{"bitswan_network"},
+		"volumes":     volumes,
+		"environment": env,
+		"command": []string{
+			"/usr/local/bin/bitswan", "infra-driver", "serve",
+			"--listen", ":9090",
+			"--git-dir", "/git/deploy.git",
+			"--gitops-dir", "/gitops/gitops",
+			"--secrets-dir", "/gitops/secrets",
+			"--workspace", config.WorkspaceName,
+			"--domain", config.Domain,
+		},
+	}
+}
+
 func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
 	caddyVolumes := []string{
 		caddyPath + "/Caddyfile:/etc/caddy/Caddyfile:z",
@@ -236,10 +349,14 @@ func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
 				"image":          "caddy:2.9",
 				"restart":        "always",
 				"container_name": "caddy",
-				"ports":          []string{"80:80", "443:443", "2019:2019"},
-				"networks":       []string{"bitswan_network"},
-				"volumes":        caddyVolumes,
-				"entrypoint":     []string{"caddy", "run", "--resume", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"},
+				// Only the public web entrypoints are published. Caddy's admin API
+				// (:2019) allows FULL reconfiguration (load arbitrary config) and must
+				// never be reachable from outside the host; the daemon reaches it
+				// in-network (caddy:2019 on bitswan_network), so it is not published.
+				"ports":      []string{"80:80", "443:443"},
+				"networks":   []string{"bitswan_network"},
+				"volumes":    caddyVolumes,
+				"entrypoint": []string{"caddy", "run", "--resume", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"},
 			},
 		},
 		"networks": map[string]interface{}{
@@ -309,9 +426,15 @@ func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, n
 		"image":          "traefik:v3.6",
 		"restart":        "always",
 		"container_name": "traefik",
-		"ports":          []string{"80:80", "443:443", "9080:8080"},
-		"networks":       traefikNetworks,
-		"volumes":        traefikVolumes,
+		// Only the public web entrypoints are published. Traefik's API/dashboard
+		// (:8080, api.insecure — unauthenticated; leaks the full routing topology)
+		// is NOT published to the host: the daemon and workspace components reach it
+		// in-network via BITSWAN_TRAEFIK_HOST=traefik:8080 on bitswan_network (which
+		// automations are not attached to), so there is no reason to expose it on
+		// the host at all.
+		"ports":    []string{"80:80", "443:443"},
+		"networks": traefikNetworks,
+		"volumes":  traefikVolumes,
 	}
 	if len(env) > 0 {
 		// Sorted for deterministic output — the daemon compares the rendered
@@ -422,6 +545,17 @@ func CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikPath, domain,
 			"target": "/etc/traefik/traefik.yml",
 			"volume": map[string]interface{}{
 				"subpath": "workspaces/" + workspaceName + "/traefik/traefik.yml",
+			},
+		},
+		// The file-provider dynamic config (routes), shared with the daemon via
+		// the same volume subpath. Traefik reloads it on change and on its own
+		// restart, so workspace routes survive a sub-traefik restart.
+		map[string]interface{}{
+			"type":   "volume",
+			"source": "bitswan",
+			"target": "/etc/traefik/dynamic.yml",
+			"volume": map[string]interface{}{
+				"subpath": "workspaces/" + workspaceName + "/traefik/dynamic.yml",
 			},
 		},
 	}

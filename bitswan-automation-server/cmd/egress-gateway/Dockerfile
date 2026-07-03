@@ -9,7 +9,10 @@ COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -o /egress-gateway ./cmd/egress-gateway
 
 FROM alpine:3.20
-RUN apk add --no-cache iptables su-exec ca-certificates \
+# iptables: install the egress rules (owner role). bind-tools (`host`) + iproute2
+# (`ip`): the owner resolves the proxy IP for the DNAT target and reads its own
+# stage subnet. su-exec: drop to the unprivileged proxy uid.
+RUN apk add --no-cache iptables su-exec bind-tools iproute2 ca-certificates \
  && adduser -D -u 8765 bswgw
 COPY --from=build /egress-gateway /usr/local/bin/egress-gateway
 COPY cmd/egress-gateway/entrypoint.sh /entrypoint.sh

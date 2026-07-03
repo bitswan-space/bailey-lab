@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Terminal } from '@/components/terminal/Terminal';
+import { api } from '@/lib/api';
 import { getAccessToken } from '@/lib/auth-token';
 
 interface Props {
@@ -62,10 +63,36 @@ export function SessionTerminal({
     return `/ws/coding-agent?${params.toString()}`;
   }, [copy, bp, kind, requirementId, sessionId, resume, token]);
 
+  // Pasted/dropped images land in `.agent-uploads/` under the session's cwd
+  // — the BP dir for claude/requirement sessions, the copy root for sync
+  // (mirrors the cd logic in server/src/routes/coding-agent.ts) — so the
+  // path we hand back resolves relative to where Claude is running. Files
+  // are timestamp-renamed because every clipboard paste arrives as
+  // "image.png" and the upload endpoint overwrites on name collision.
+  const onUploadImages = useCallback(
+    async (files: File[]) => {
+      const dir = bp ? `${bp}/.agent-uploads` : '.agent-uploads';
+      const stamped = files.map((f, i) => {
+        const ext = /\.[A-Za-z0-9]+$/.exec(f.name)?.[0] ?? '.png';
+        return new File([f], `paste-${Date.now()}-${i}${ext}`, { type: f.type });
+      });
+      // Ship a self-ignoring .gitignore with every batch so pasted images
+      // never show up in the copy's git status or ride along with a
+      // Sync & Deploy. Re-sent each time (2 bytes) rather than tracked,
+      // since the cleanup sweeper may remove the whole directory.
+      const gitignore = new File(['*\n'], '.gitignore', { type: 'text/plain' });
+      const r = await api.copyFiles.upload(copy, dir, [gitignore, ...stamped]);
+      return r.written
+        .filter((w) => w.name !== '.gitignore')
+        .map((w) => `.agent-uploads/${w.name}`);
+    },
+    [copy, bp],
+  );
+
   return (
     <div className="h-full w-full" style={{ display: hidden ? 'none' : 'block' }}>
       {wsUrl ? (
-        <Terminal wsUrl={wsUrl} onExit={onExit} />
+        <Terminal wsUrl={wsUrl} onExit={onExit} onUploadImages={onUploadImages} />
       ) : (
         <div className="grid h-full place-items-center text-sm text-muted-foreground">
           Connecting…

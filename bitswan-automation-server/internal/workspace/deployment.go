@@ -83,10 +83,17 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, s
 	// It needs container path for file operations, but will convert to host path for volume mounts
 	// Create docker-compose configuration
 	config := &dockercompose.DockerComposeConfig{
-		GitopsPath:         workspacePath,
-		WorkspaceName:      workspaceName,
-		GitopsImage:        gitopsImage,
-		Domain:             metadata.Domain,
+		GitopsPath:    workspacePath,
+		WorkspaceName: workspaceName,
+		GitopsImage:   gitopsImage,
+		Domain:        metadata.Domain,
+		// Carry the coding-agent secret into gitops's env so it can verify agent
+		// requests. Post-cut-over gitops has no docker.sock to discover it by
+		// inspecting the coding-agent container, so it relies SOLELY on this env;
+		// omitting it (as this update path used to) makes every coding-agent call
+		// 401 "Invalid agent token" after a `workspace update`. The init path
+		// already sets this — the update path must too, or it strips it.
+		CodingAgentSecret:  metadata.CodingAgentSecret,
 		AocEnvVars:         aocEnvVars,
 		OAuthEnvVars:       oauthEnvVars,
 		GitopsDevSourceDir: gitopsDevSourceDir,

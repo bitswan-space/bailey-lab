@@ -37,17 +37,6 @@ class CreateProcessRequest(BaseModel):
     copy: str | None = None
 
 
-@router.get("/")
-async def get_processes() -> list[dict]:
-    """Return all business processes across main repo and every copy.
-
-    Each entry is deduplicated by directory name; the `copies` list says
-    which copies the same BP also lives in (empty when only in main).
-    A BP that exists *only* in a copy comes back with `in_main: false`.
-    """
-    return process_service.get_all_processes()
-
-
 @router.post("/")
 async def create_process(
     body: CreateProcessRequest,

@@ -456,6 +456,10 @@ function WorkspacesView({ ctx }) {
   const [createOpen, setCreateOpen] = useWS(false);
   const [emptyOpen, setEmptyOpen] = useWS(false);
   const [emptyBusy, setEmptyBusy] = useWS(false);
+  // Workspace pending delete-confirmation, and the id currently being restored.
+  const [trashTarget, setTrashTarget] = useWS(null);
+  const [trashBusy, setTrashBusy] = useWS(false);
+  const [restoreBusy, setRestoreBusy] = useWS('');
 
   // The managed workspace lives in the URL (/workspaces/:name) so the drawer
   // survives refresh and is shareable.
@@ -491,6 +495,37 @@ function WorkspacesView({ ctx }) {
     } catch (e) {
       toast(`Couldn't empty trash: ${e.message}`, 'danger');
     } finally { setEmptyBusy(false); }
+  };
+
+  // Live: POST /bailey/api/workspaces/{name}/trash (owner-only; 202 — the
+  // daemon marks it trashed synchronously and tears the containers down in the
+  // background, so the next refresh shows it in the archived/trash state).
+  // Permanent removal is the existing "Empty trash" flow.
+  const doTrash = async () => {
+    if (!trashTarget) return;
+    const name = trashTarget.name;
+    setTrashBusy(true);
+    try {
+      await WApi.trashWorkspace(name);
+      toast(`${name} moved to trash`, 'success');
+      setTrashTarget(null);
+      await refresh('workspaces');
+    } catch (e) {
+      toast(`Couldn't delete ${name}: ${e.message}`, 'danger');
+    } finally { setTrashBusy(false); }
+  };
+
+  // Live: POST /bailey/api/workspaces/{name}/restore (owner-only; clears the
+  // trash marker and brings the containers back up before returning).
+  const doRestore = async (w) => {
+    setRestoreBusy(w.id);
+    try {
+      await WApi.restoreWorkspace(w.name);
+      toast(`${w.name} restored`, 'success');
+      await refresh('workspaces');
+    } catch (e) {
+      toast(`Couldn't restore ${w.name}: ${e.message}`, 'danger');
+    } finally { setRestoreBusy(''); }
   };
 
   const matchesQuery = w =>
@@ -574,11 +609,26 @@ function WorkspacesView({ ctx }) {
                     {!archived && (
                       <WBtn variant="primary" size="sm" leftIcon="external-link" onClick={() => openUrl(w.dashboard || w.gitopsUrl, `${w.name} dashboard`)}>Open</WBtn>
                     )}
+                    {/* Trashed workspaces: owner can bring it back (existing restore flow). */}
+                    {archived && isOwner && (
+                      <WBtn variant="default" size="sm" leftIcon="rotate-ccw" disabled={restoreBusy === w.id} onClick={() => doRestore(w)}>
+                        {restoreBusy === w.id ? 'Restoring…' : 'Restore'}
+                      </WBtn>
+                    )}
                     <button onClick={() => navigate('workspaces', w.id)} title="Manage workspace" style={{ width: 32, height: 32, border: `1px solid ${WC.border}`, background: '#fff', borderRadius: 8, cursor: 'pointer', color: WC.muted, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                       onMouseEnter={e => { e.currentTarget.style.background = WC.surface2; e.currentTarget.style.color = WC.fg; }}
                       onMouseLeave={e => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.color = WC.muted; }}>
                       <WIcon name="settings-2" size={15} />
                     </button>
+                    {/* Delete (trash) — owner-only, active workspaces. Opens a
+                        confirm; the actual deletion reuses the trash flow. */}
+                    {!archived && isOwner && (
+                      <button onClick={() => setTrashTarget(w)} title="Delete workspace" style={{ width: 32, height: 32, border: `1px solid ${WC.border}`, background: '#fff', borderRadius: 8, cursor: 'pointer', color: WC.muted, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                        onMouseEnter={e => { e.currentTarget.style.background = WC.redSoft; e.currentTarget.style.color = WC.red; e.currentTarget.style.borderColor = WC.red; }}
+                        onMouseLeave={e => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.color = WC.muted; e.currentTarget.style.borderColor = WC.border; }}>
+                        <WIcon name="trash-2" size={15} />
+                      </button>
+                    )}
                   </div>
                 </div>
                 {/* apps */}
@@ -631,6 +681,16 @@ function WorkspacesView({ ctx }) {
 
       <CreateWorkspaceModal open={createOpen} onClose={() => setCreateOpen(false)} data={data} setData={setData} toast={toast} currentUser={currentUser} refresh={refresh} />
       <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} />
+
+      <WModal open={!!trashTarget} onClose={trashBusy ? () => {} : () => setTrashTarget(null)} icon="trash-2"
+        title={trashTarget ? `Delete “${trashTarget.name}”?` : 'Delete workspace?'}
+        subtitle="The workspace moves to trash and its containers stop. You can restore it, or remove it permanently with Empty trash."
+        footer={<>
+          <WBtn variant="default" disabled={trashBusy} onClick={() => setTrashTarget(null)}>Cancel</WBtn>
+          <WBtn variant="primary" disabled={trashBusy} style={{ background: WC.red, borderColor: WC.red }} onClick={doTrash}>
+            {trashBusy ? 'Deleting…' : 'Delete workspace'}
+          </WBtn>
+        </>} />
 
       <WModal open={emptyOpen} onClose={emptyBusy ? () => {} : () => setEmptyOpen(false)} icon="trash-2" title="Empty trash?"
         subtitle="This permanently deletes every trashed workspace you own — containers and data. This can't be undone."

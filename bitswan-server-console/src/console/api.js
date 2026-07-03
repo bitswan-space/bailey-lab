@@ -122,19 +122,23 @@ export async function postNDJSON(path, body, onEvent) {
 
 // ApiError carries the HTTP status + path so callers can branch (e.g.
 // treat 403 on an admin endpoint as "not an admin" rather than a crash).
+// `code` is the machine-readable code from structured {"error","code"}
+// bodies ('' when the backend didn't send one) — branch on it instead of
+// string-matching the human message.
 export class ApiError extends Error {
-  constructor(message, status, path) {
+  constructor(message, status, path, code) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.path = path;
+    this.code = code || '';
   }
 }
 
 async function parseJSONResponse(res, path) {
   const text = await res.text().catch(() => '');
   if (!res.ok) {
-    throw new ApiError(extractErrorText(text) || `${res.status} ${res.statusText}`, res.status, path);
+    throw new ApiError(extractErrorText(text) || `${res.status} ${res.statusText}`, res.status, path, extractErrorCode(text));
   }
   if (!text) return null;
   try {
@@ -158,6 +162,18 @@ function extractErrorText(text) {
   }
   if (t.startsWith('<')) return '';
   return t.length > 200 ? t.slice(0, 200) : t;
+}
+
+// extractErrorCode pulls the `code` field out of a structured error body
+// ('' when absent or not JSON).
+function extractErrorCode(text) {
+  if (!text) return '';
+  const t = text.trim();
+  if (!t.startsWith('{')) return '';
+  try {
+    const o = JSON.parse(t);
+    return o && typeof o.code === 'string' ? o.code : '';
+  } catch (e) { return ''; }
 }
 
 // ─── Endpoint wrappers (one place per backend route) ────────────────────────
@@ -221,10 +237,26 @@ export const Api = {
   // device counts. Degrades to a 200 with an `error` field on partial
   // enumeration failure (the view surfaces it without dropping the roster).
   people: () => getJSON('/bailey/api/people'),
-  // Invite is stubbed 501 on the backend (no Keycloak admin client yet), so
-  // the People view keeps its control disabled rather than calling this.
-  // Wired here for when the backend lands; throws ApiError(501) until then.
+  // ── Invites (admin-only, except redeemInvite) ──
+  // AOC org roster — who can be invited. Rows carry {email, username,
+  // verified, in_roster, invited}. 502 when the daemon isn't registered
+  // with an AOC (or the AOC is unreachable).
+  orgUsers: () => getJSON('/bailey/api/people/org-users'),
+  // Invite an org user: creates a 48h single-use invite on the daemon and
+  // asks the AOC to email the link. The response ALWAYS carries invite_link
+  // so the admin can share it manually when email delivery fails
+  // (email_sent:false + email_error).
   invite: (email, role) => postJSON('/bailey/api/people/invite', { email, role }),
+  // Outstanding (unconsumed) invites, expired ones included (flagged).
+  invites: () => getJSON('/bailey/api/people/invites'),
+  revokeInvite: (email) => postJSON('/bailey/api/people/invites/revoke', { email }),
+  // Re-sending regenerates the token + expiry (the old link stops working).
+  resendInvite: (email) => postJSON('/bailey/api/people/invites/resend', { email }),
+  // Redeem an emailed invite token — a GATE api, callable from an untrusted
+  // device. Success trusts THIS browser (sets the device cookie) and returns
+  // a redirect_path; failures carry a code (invalid|expired|consumed|
+  // wrong_account|already_trusted|unclaimed) the invite scene branches on.
+  redeemInvite: (token) => postJSON('/bailey/api/invite/redeem', { token }),
   // Assign a user's role (admin-only). Stored locally in the daemon DB —
   // authoritative, not pulled from SSO.
   setUserRole: (email, role) => postJSON('/bailey/api/people/role', { email, role }),

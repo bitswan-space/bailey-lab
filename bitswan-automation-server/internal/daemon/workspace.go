@@ -421,6 +421,13 @@ func (s *Server) handleWorkspaceRemove(w http.ResponseWriter, r *http.Request) {
 
 	// Run remove logic
 	err = RunWorkspaceRemove(req.Workspace, wPipe)
+	if err == nil {
+		// Reconcile the workspace list to the AOC so the removed workspace is
+		// dropped there too. Best-effort — never fail the remove on this.
+		if serr := syncWorkspaceListToAOC(); serr != nil {
+			fmt.Fprintf(wPipe, "Warning: failed to sync workspace list to AOC: %v\n", serr)
+		}
+	}
 	wPipe.Close()
 	wg.Wait()
 

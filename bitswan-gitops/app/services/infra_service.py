@@ -6,18 +6,16 @@ Manages infrastructure services (CouchDB, Kafka) as Docker Compose deployments.
 """
 
 import asyncio
+import io
 import logging
 import os
 import secrets
 import string
+import tarfile
 from abc import ABC, abstractmethod
 
 import requests
 
-from app.services.oauth2_helpers import (
-    copy_oauth2_proxy_to_container,
-    is_oauth2_proxy_running,
-)
 from app.utils import SERVICE_REALMS
 
 logger = logging.getLogger(__name__)
@@ -37,18 +35,162 @@ def generate_password(length: int = 32) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+def _driver_client_ctx():
+    """An infra-driver client + WorkspaceContext for these module-level helpers."""
+    from app.services.infra_driver_client import InfraDriverClient, WorkspaceContext
+
+    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+    return InfraDriverClient(), WorkspaceContext(
+        workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local"),
+        domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+        gitops_dir=os.path.join(gitops_root, "gitops"),
+        secrets_dir=os.path.join(gitops_root, "secrets"),
+    )
+
+
 async def run_docker_command(
     *args: str, cwd: str | None = None
 ) -> tuple[str, str, int]:
-    """Run a docker command asynchronously, return (stdout, stderr, returncode)."""
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
+    """Proxy a constrained docker verb through the infra-driver (gitops has no
+    docker.sock). Dispatches the closed verb set the service modules use to the
+    driver's workspace-scoped primitives. Returns (stdout, stderr, returncode).
+
+    - `docker exec <container> <cmd...>`  -> driver exec
+    - `docker stop <container>`           -> driver container_stop
+    - `docker cp <c>:<src> <host>`        -> driver copy_out (+ extract)
+    - `docker cp <host> <c>:<dst>`        -> driver copy_in (+ tar build)
+    """
+    from app.services.infra_driver_client import (
+        ExecSpec,
+        InfraDriverError,
     )
-    stdout, stderr = await proc.communicate()
-    return stdout.decode(), stderr.decode(), proc.returncode
+
+    if len(args) < 2 or args[0] != "docker":
+        raise ValueError(f"run_docker_command: unsupported invocation {args!r}")
+    verb = args[1]
+    client, ctx = _driver_client_ctx()
+
+    if verb == "exec":
+        if len(args) < 3:
+            raise ValueError("docker exec requires a container")
+        out: list[bytes] = []
+        err: list[bytes] = []
+
+        async def on_stdout(d: bytes):
+            out.append(d)
+
+        async def on_stderr(d: bytes):
+            err.append(d)
+
+        try:
+            rc = await client.exec(
+                ctx,
+                ExecSpec(container=args[2], cmd=list(args[3:])),
+                on_stdout=on_stdout,
+                on_stderr=on_stderr,
+            )
+        except InfraDriverError as e:
+            return "", str(e), 1
+        return (
+            b"".join(out).decode(errors="replace"),
+            b"".join(err).decode(errors="replace"),
+            rc,
+        )
+
+    if verb == "stop":
+        if len(args) < 3:
+            raise ValueError("docker stop requires a container")
+        try:
+            await client.container_stop(ctx, args[2])
+        except InfraDriverError as e:
+            return "", str(e), 1
+        return "", "", 0
+
+    if verb == "cp":
+        # `docker cp` is proxied through the driver's archive primitives (the
+        # infra images — minio UBI-micro — ship no tar/shell, so the daemon does
+        # the archiving). Exactly one operand is a `container:path` ref; the
+        # other is a host path. We translate Docker's host<->container semantics
+        # to the driver's pure-TAR copy_out/copy_in:
+        #   docker cp <c>:<src> <host>  -> copy_out a TAR, extract it to <host>
+        #   docker cp <host>  <c>:<dst> -> build a TAR of <host>, copy_in to <dst>
+        if len(args) != 4:
+            raise ValueError(f"docker cp expects two operands, got {args!r}")
+        src, dst = args[2], args[3]
+        src_is_ref, dst_is_ref = ":" in src, ":" in dst
+        if src_is_ref == dst_is_ref:
+            raise ValueError(
+                f"docker cp: exactly one operand must be container:path, got {args!r}"
+            )
+        try:
+            if src_is_ref:
+                container, path = _split_cp_ref(src)
+                await _cp_out_to_host(client, ctx, container, path, dst)
+            else:
+                container, path = _split_cp_ref(dst)
+                await _cp_in_from_host(client, ctx, container, path, src)
+        except InfraDriverError as e:
+            return "", str(e), 1
+        return "", "", 0
+
+    raise NotImplementedError(
+        f"docker '{verb}' is not yet proxied by the infra-driver "
+        "(supported: exec, stop, cp)."
+    )
+
+
+def _split_cp_ref(operand: str) -> tuple[str, str]:
+    """Split a `docker cp` ``container:path`` operand into (container, path).
+    Fails loudly on a malformed ref (the other operand is a host path)."""
+    container, sep, path = operand.partition(":")
+    if not sep or not container or not path:
+        raise ValueError(f"docker cp: expected container:path, got {operand!r}")
+    return container, path
+
+
+async def _cp_out_to_host(client, ctx, container: str, src_path: str, host_path: str):
+    """`docker cp <container>:<src_path> <host_path>`: copy_out yields a TAR of
+    src_path; extract it to host_path with Docker's semantics — when host_path
+    is an existing directory the archive's members land under it, otherwise the
+    single archived file is written AS host_path."""
+    buf = io.BytesIO()
+
+    async def on_chunk(d: bytes):
+        buf.write(d)
+
+    await client.copy_out(ctx, container, src_path, on_chunk)
+    buf.seek(0)
+    with tarfile.open(fileobj=buf, mode="r:*") as tar:
+        members = [m for m in tar.getmembers() if m.isreg()]
+        if os.path.isdir(host_path):
+            tar.extractall(host_path, filter="data")
+            return
+        # host_path is a target file name: extract the single regular member to it.
+        if len(members) != 1:
+            raise ValueError(
+                f"docker cp {container}:{src_path}: archive has {len(members)} files, "
+                f"cannot copy to single path {host_path!r}"
+            )
+        extracted = tar.extractfile(members[0])
+        if extracted is None:
+            raise ValueError(f"docker cp {container}:{src_path}: empty archive member")
+        with open(host_path, "wb") as f:
+            while True:
+                chunk = extracted.read(1 << 16)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+
+async def _cp_in_from_host(client, ctx, container: str, dst_path: str, host_path: str):
+    """`docker cp <host_path> <container>:<dst_path>`: build a TAR of host_path
+    (rooted at its basename, matching `docker cp`) and copy_in to dst_path."""
+    if not os.path.exists(host_path):
+        raise ValueError(f"docker cp: source {host_path!r} does not exist")
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        tar.add(host_path, arcname=os.path.basename(host_path.rstrip("/")))
+    await client.copy_in(ctx, container, dst_path, buf.getvalue())
 
 
 class InfraService(ABC):
@@ -123,42 +265,17 @@ class InfraService(ABC):
         """Check if OAuth2 proxy is configured in the environment."""
         return any(k.startswith("OAUTH2") for k in os.environ)
 
-    def _get_oauth2_env_vars(self, upstream: str) -> dict:
-        """Build OAuth2 proxy environment variables for a container.
-
-        Args:
-            upstream: The upstream URL oauth2-proxy forwards to (e.g. http://127.0.0.1:80).
-        """
-        oauth2_envs = {k: v for k, v in os.environ.items() if k.startswith("OAUTH2")}
-        oauth2_envs["OAUTH_ENABLED"] = "true"
-        oauth2_envs["OAUTH2_PROXY_UPSTREAMS"] = upstream
-        oauth2_envs["OAUTH2_PROXY_HTTP_ADDRESS"] = "0.0.0.0:9999"
-
-        if "OAUTH2_PROXY_MQTT_ALLOWED_GROUPS_TOPIC" not in oauth2_envs:
-            oauth2_envs["OAUTH2_PROXY_MQTT_ALLOWED_GROUPS_TOPIC"] = "/groups"
-
-        if self.gitops_domain:
-            endpoint = f"https://{self.caddy_hostname()}"
-            oauth2_envs["OAUTH2_PROXY_REDIRECT_URL"] = f"{endpoint}/oauth2/callback"
-            oauth2_envs["BITSWAN_AUTOMATION_URL"] = endpoint
-
-        return oauth2_envs
-
     def is_enabled(self) -> bool:
         """Check if the service is enabled (secrets file exists)."""
         return os.path.exists(self.secrets_file_path)
 
     async def is_running(self) -> bool:
-        """Check if the service container is running."""
-        stdout, _, rc = await run_docker_command(
-            "docker",
-            "ps",
-            "--filter",
-            f"name=^/{self.container_name}$",
-            "--format",
-            "{{.Names}}",
+        """Check if the service container is running (via the driver's list)."""
+        client, ctx = _driver_client_ctx()
+        conts = await client.container_list(ctx)
+        return any(
+            c.name == self.container_name and c.state == "running" for c in conts
         )
-        return rc == 0 and stdout.strip() != ""
 
     def _save_secrets(self, content: str) -> None:
         """Save secrets env file."""
@@ -171,14 +288,6 @@ class InfraService(ABC):
     @abstractmethod
     def _generate_secrets_content(self) -> str:
         """Generate secrets file content. Returns the content string."""
-
-    @abstractmethod
-    def _generate_compose_dict(self) -> dict:
-        """Generate docker-compose dict structure.
-
-        Called by AutomationService.generate_docker_compose() to merge this
-        service's entries into the main docker-compose.
-        """
 
     @abstractmethod
     def _get_caddy_upstream(self) -> str:
@@ -366,100 +475,33 @@ class InfraService(ABC):
         """Hook for extra cleanup during disable. Override in subclasses."""
         pass
 
-    async def _start_oauth2_proxy_in_container(self, container_name: str) -> bool:
-        """Start oauth2-proxy inside a container via docker exec.
+    async def _apply_workspace(self) -> None:
+        """Push the current bitswan.yaml so the driver reconciles infra services
+        (bring-up + CA certs + oauth2). Infra services are part of the compose
+        the driver generates, so an apply with no narrowing reconciles them all."""
+        from app.services.automation_service import AutomationService
 
-        Copies the oauth2-proxy binary from the gitops container into the target
-        container, then starts it in the background. Same pattern as
-        AutomationService.start_oauth2_proxy_in_container.
-        """
-        from app.async_docker import get_async_docker_client
-
-        docker_client = get_async_docker_client()
-
-        try:
-            # Find the container by name
-            containers = await docker_client.list_containers(
-                filters={"name": [f"^/{container_name}$"]}
-            )
-            if not containers:
-                logger.warning(f"Container {container_name} not found")
-                return False
-
-            container = containers[0]
-            container_id = container.get("Id")
-            labels = container.get("Labels", {})
-
-            if labels.get("gitops.oauth2.enabled") != "true":
-                logger.debug(f"oauth2 not enabled for {container_name}")
-                return True
-
-            state = container.get("State", "")
-            if state != "running":
-                logger.warning(
-                    f"Container {container_name} is not running (state: {state})"
-                )
-                return False
-
-            upstream_url = labels.get("gitops.oauth2.upstream")
-            if not upstream_url:
-                logger.warning(f"No oauth2 upstream URL label on {container_name}")
-                return False
-
-            if await is_oauth2_proxy_running(docker_client, container_id):
-                logger.info(f"oauth2-proxy already running in {container_name}")
-                return True
-
-            if not await copy_oauth2_proxy_to_container(container_id, container_name):
-                return False
-
-            # Start oauth2-proxy in background
-            logger.info(
-                f"Starting oauth2-proxy in {container_name} (upstream: {upstream_url})"
-            )
-            cmd = [
-                "sh",
-                "-c",
-                f"oauth2-proxy --upstream={upstream_url} > /tmp/oauth2-proxy.log 2>&1 &",
-            ]
-            exec_id = await docker_client.exec_create(container_id, cmd)
-            await docker_client.exec_start(exec_id)
-            exec_info = await docker_client.exec_inspect(exec_id)
-
-            if exec_info.get("ExitCode", 0) == 0:
-                logger.info(f"oauth2-proxy started in {container_name}")
-                return True
-            else:
-                logger.error(f"Failed to start oauth2-proxy in {container_name}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Exception starting oauth2-proxy in {container_name}: {e}")
-            return False
+        await AutomationService().apply_compose_for_deployments([])
 
     async def start(self) -> dict:
-        """Start the service container via docker start."""
-        logger.info(
-            f"Starting {self.display_name} container '{self.container_name}'..."
-        )
-        stdout, stderr, rc = await run_docker_command(
-            "docker", "start", self.container_name
-        )
-        if rc != 0:
-            raise RuntimeError(f"Failed to start {self.display_name}: {stderr}")
+        """Bring the service up via the driver. Infra services live in the
+        compose the driver generates, so an apply creates/starts the container
+        and runs reconcile (CA certs + oauth2) — gitops has no `docker start`."""
+        logger.info(f"Starting {self.display_name} (apply) ...")
+        await self._apply_workspace()
         logger.info(f"{self.display_name} started successfully!")
         return {"status": "started", "service": self.service_type}
 
     async def stop(self) -> dict:
-        """Stop the service container via docker stop."""
+        """Stop the service container via the driver's stop primitive."""
         logger.info(
             f"Stopping {self.display_name} container '{self.container_name}'..."
         )
-        stdout, stderr, rc = await run_docker_command(
-            "docker", "stop", self.container_name
-        )
-        if rc != 0:
-            raise RuntimeError(f"Failed to stop {self.display_name}: {stderr}")
+        client, ctx = _driver_client_ctx()
+        try:
+            await client.container_stop(ctx, self.container_name)
+        except Exception as e:
+            raise RuntimeError(f"Failed to stop {self.display_name}: {e}")
         logger.info(f"{self.display_name} stopped successfully!")
         return {"status": "stopped", "service": self.service_type}
 

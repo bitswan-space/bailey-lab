@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Rocket, Trash2 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/lib/notify';
 import { Button } from '@/components/ui/button';
 import { api, isTransientNetworkError } from '@/lib/api';
 import type { InspectStage } from '../InspectModal';

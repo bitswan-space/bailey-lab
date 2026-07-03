@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
-	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 	"github.com/dchest/uniuri"
 )
 
@@ -336,25 +335,25 @@ func (s *Server) Run() error {
 		}
 	}()
 
-	// Reconcile-drop self-heal: on EVERY startup re-push the saved Traefik
-	// dynamic config (rest-state.json) to Traefik. The daemon's
-	// protected_routes table + the REST state file are the source of truth,
-	// but Traefik's REST provider holds its config in memory — so a daemon
-	// recreate (or a Traefik restart) can leave Traefik missing every
-	// workspace route while the records still say "in sync" (the ingress
-	// reconcile compares the recorded upstream, not Traefik, so it skips
-	// re-applying). InitTraefik (a no-op modifyState) re-pushes the full
-	// saved state, so any restart/recreate self-heals instead of silently
-	// dropping all routes. Best-effort with retry — Traefik may not be
-	// reachable the instant the daemon boots.
+	// Ensure the global Traefik is on the CURRENT config on startup — not just a
+	// dynamic.yml re-render. Re-rendering routes (InitTraefik) is not enough when
+	// the daemon UPGRADE changed Traefik's STATIC config: e.g. adding the file
+	// provider's `watch: true`. A Traefik created by an older daemon keeps its
+	// old static config across restarts (the init used to only run on first
+	// setup), so without `watch` it loads dynamic.yml once and never reloads —
+	// every route added afterwards (a fresh live-dev frontend) lands in the file
+	// but never reaches Traefik, and the public URL 404s. initTraefikIngress is a
+	// no-op when the static config already matches and recreates Traefik only on
+	// drift, after which it re-renders the dynamic routes itself. Best-effort
+	// with retry.
 	go func() {
 		time.Sleep(2 * time.Second)
 		for i := 0; i < 6; i++ {
-			if err := traefikapi.InitTraefik(); err == nil {
-				fmt.Println("Re-pushed saved Traefik dynamic config on startup")
+			if _, err := initTraefikIngress(false); err == nil {
+				fmt.Println("Ensured Traefik is on the current static config + routes on startup")
 				break
 			} else if i == 5 {
-				fmt.Printf("Warning: failed to re-push Traefik state on startup: %v\n", err)
+				fmt.Printf("Warning: failed to ensure Traefik config on startup: %v\n", err)
 			} else {
 				time.Sleep(2 * time.Second)
 			}

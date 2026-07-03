@@ -149,29 +149,59 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	}
 	fmt.Fprintln(writer, "Image removal process completed.")
 
-	// 5. Remove ingress records (before removing workspace folder so metadata is available)
-	// Run in background - don't wait for it to complete since it's not critical
-	fmt.Fprintln(writer, "Removing ingress records (running in background)...")
-	go func() {
-		ingressType := DetectIngressType()
-		switch ingressType {
-		case IngressCaddy:
-			caddyapi.DeleteCaddyRecordsWithWriter(workspaceName, writer)
-		case IngressTraefik:
-			traefikapi.DeleteTraefikRecordsWithWriter(workspaceName, writer)
-			// Also stop workspace sub-traefik if it exists
-			containerName := fmt.Sprintf("%s__traefik", workspaceName)
-			traefikProjectName := fmt.Sprintf("bitswan-%s-traefik", workspaceName)
-			stopCmd := exec.Command("docker", "compose", "-p", traefikProjectName, "down")
-			stopCmd.Stdout = writer
-			stopCmd.Stderr = writer
-			if err := stopCmd.Run(); err != nil {
-				// Try force remove
-				exec.Command("docker", "rm", "-f", containerName).Run()
+	// 5. Remove ingress records. Done SYNCHRONOUSLY (before the workspace dir +
+	// its metadata are removed below) and sourced from the daemon's OWN Bailey
+	// DB, so cleanup never depends on gitops being reachable.
+	fmt.Fprintln(writer, "Removing ingress records...")
+
+	// (a) Every per-endpoint route this workspace registered, straight from the
+	// Bailey DB (source='gitops', hostname '<ws>-%'). removeRouteFromIngress
+	// drops the outer+inner Traefik/Caddy routers AND the Bailey endpoint +
+	// protected_route rows; an unreachable ingress is treated as success. This
+	// is the fix for the routes that leaked when gitops was unreachable.
+	if hosts, herr := listGitopsManagedHosts(workspaceName); herr != nil {
+		fmt.Fprintf(writer, "Warning: could not list managed routes for %s: %v\n", workspaceName, herr)
+	} else {
+		for _, h := range hosts {
+			if rerr := removeRouteFromIngress(h); rerr != nil {
+				fmt.Fprintf(writer, "Warning: failed to remove route %s: %v\n", h, rerr)
+			} else {
+				fmt.Fprintf(writer, "Removed route %s\n", h)
 			}
 		}
-	}()
-	// Continue immediately - don't wait for ingress cleanup
+	}
+
+	// (b) The platform service routes, in case they weren't recorded as
+	// gitops-managed above. Idempotent; needs the domain from metadata, which is
+	// still on disk at this point.
+	if md, merr := config.GetWorkspaceMetadata(workspaceName); merr == nil && md.Domain != "" {
+		for _, svc := range []string{"gitops", "dashboard"} {
+			host := fmt.Sprintf("%s-%s.%s", workspaceName, svc, md.Domain)
+			if rerr := removeRouteFromIngress(host); rerr != nil {
+				fmt.Fprintf(writer, "Warning: failed to remove route %s: %v\n", host, rerr)
+			}
+		}
+	}
+
+	// (c) Sweep residual workspace routes + per-workspace TLS cert entries from
+	// the ingress state, and tear down the workspace's own sub-traefik.
+	switch DetectIngressType() {
+	case IngressCaddy:
+		caddyapi.DeleteCaddyRecordsWithWriter(workspaceName, writer)
+	case IngressTraefik:
+		traefikapi.DeleteTraefikRecordsWithWriter(workspaceName, writer)
+		// Also stop workspace sub-traefik if it exists
+		containerName := fmt.Sprintf("%s__traefik", workspaceName)
+		traefikProjectName := fmt.Sprintf("bitswan-%s-traefik", workspaceName)
+		stopCmd := exec.Command("docker", "compose", "-p", traefikProjectName, "down")
+		stopCmd.Stdout = writer
+		stopCmd.Stderr = writer
+		if err := stopCmd.Run(); err != nil {
+			// Try force remove
+			exec.Command("docker", "rm", "-f", containerName).Run()
+		}
+	}
+	fmt.Fprintln(writer, "Ingress records removed.")
 
 	// 6. Remove the gitops folder
 	workspaceDir := filepath.Join(workspacesFolder, workspaceName)
@@ -187,6 +217,30 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 			fmt.Fprintf(writer, "Warning: Failed to remove gitops folder: %v\n", err)
 		} else {
 			fmt.Fprintln(writer, "GitOps folder removed successfully.")
+		}
+	}
+
+	// 6b. If the active workspace pointed at the one we just removed, repoint it
+	// (to a remaining workspace, else clear) so later CLI defaults don't resolve
+	// to a deleted workspace. The removed dir is already gone, so GetWorkspaceList
+	// won't return it.
+	cfg := config.NewAutomationServerConfig()
+	if active, aerr := cfg.GetActiveWorkspace(); aerr == nil && active == workspaceName {
+		next := ""
+		if list, lerr := GetWorkspaceList(false, false); lerr == nil {
+			for _, ws := range list.Workspaces {
+				if ws.Name != workspaceName {
+					next = ws.Name
+					break
+				}
+			}
+		}
+		if serr := cfg.SetActiveWorkspace(next); serr != nil {
+			fmt.Fprintf(writer, "Warning: failed to update active workspace: %v\n", serr)
+		} else if next == "" {
+			fmt.Fprintln(writer, "Cleared active workspace (it was the removed one).")
+		} else {
+			fmt.Fprintf(writer, "Active workspace was removed; switched to %s.\n", next)
 		}
 	}
 
