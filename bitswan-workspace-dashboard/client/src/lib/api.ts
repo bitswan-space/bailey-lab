@@ -42,8 +42,34 @@ async function getJson<T>(url: string): Promise<T> {
     notifySessionExpired();
     throw new SessionExpiredError();
   }
-  if (!r.ok) throw new Error(`${url} returned ${r.status}`);
+  if (!r.ok) await throwHttpError(url, r);
   return (await r.json()) as T;
+}
+
+// Turn a non-2xx response into an Error that carries the server's own message
+// (the dashboard proxy forwards gitops errors as `{error, status, body:{detail}}`;
+// gitops itself uses `{detail}`), so callers can surface the REAL failure — e.g.
+// a Docker build error from the supply-chain preview — instead of a generic
+// "returned 502". Never swallow the reason.
+async function throwHttpError(url: string, r: Response): Promise<never> {
+  let detail = '';
+  try {
+    const ct = r.headers.get('content-type') ?? '';
+    if (ct.includes('application/json')) {
+      const j = (await r.json()) as Record<string, unknown>;
+      const nested = j.body as Record<string, unknown> | undefined;
+      detail =
+        (typeof nested?.detail === 'string' && nested.detail) ||
+        (typeof j.detail === 'string' && j.detail) ||
+        (typeof j.error === 'string' && j.error) ||
+        '';
+    } else {
+      detail = (await r.text()).trim().slice(0, 800);
+    }
+  } catch {
+    // Body unreadable — fall back to the status-only message below.
+  }
+  throw new Error(detail || `${url} returned ${r.status}`);
 }
 
 // Retry once on transient network errors. Container-state actions trigger a
