@@ -159,6 +159,27 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{1,32}$`)
 // front of this would otherwise time out before the daemon writes
 // its first byte. Emitting a heartbeat line every step keeps the
 // connection alive AND gives the operator useful feedback.
+// streamHeartbeat emits a progress tick — via emit, passed the elapsed time
+// since it started — whenever the stream has been idle for at least threshold
+// (idleFn reports the idle duration), checked once per tick, until stop is
+// closed. It keeps a long, mostly-silent operation's live log moving so the UI
+// never looks frozen. Runs in the caller's goroutine.
+func streamHeartbeat(stop <-chan struct{}, tick, threshold time.Duration, idleFn func() time.Duration, emit func(elapsed time.Duration)) {
+	start := time.Now()
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			if idleFn() >= threshold {
+				emit(time.Since(start))
+			}
+		}
+	}
+}
+
 func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *http.Request, email string) {
 	var req createWorkspaceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -312,20 +333,10 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 	hbDone := make(chan struct{})
 	go func() {
 		defer close(hbDone)
-		start := time.Now()
-		t := time.NewTicker(3 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-hbStop:
-				return
-			case <-t.C:
-				if idleSince() >= 5*time.Second {
-					writeEvent(map[string]any{"event": "log", "stream": "stdout",
-						"message": fmt.Sprintf("… still setting up (%ds)", int(time.Since(start).Seconds()))})
-				}
-			}
-		}
+		streamHeartbeat(hbStop, 3*time.Second, 5*time.Second, idleSince, func(elapsed time.Duration) {
+			writeEvent(map[string]any{"event": "log", "stream": "stdout",
+				"message": fmt.Sprintf("… still setting up (%ds)", int(elapsed.Seconds()))})
+		})
 	}()
 
 	initErr := s.runWorkspaceInit(args[2:], confirmCh)
