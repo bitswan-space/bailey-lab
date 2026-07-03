@@ -99,7 +99,6 @@ services:
     ws3-frontend-822b-staging:
         container_name: ws3-frontend-822b-staging
         env_file:
-            - __ROOT__/secrets/bp/acme/staging
             - __ROOT__/secrets/postgres-staging
             - __ROOT__/secrets/minio-staging
         environment:

@@ -368,7 +368,12 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	}
 
 	// ---- per-(BP, stage) secrets env file ----
-	if bpSanitized != "" {
+	// User-defined secrets go ONLY to the BP's non-exposed workers (the
+	// backend that runs the code), never to the exposed, public-facing frontend
+	// — a secret must not land in a container reachable from the browser. The
+	// env file is per-(BP, realm), so it also never crosses to another BP's
+	// containers. (`cfg.Expose` marks the frontend; workers have Expose=false.)
+	if bpSanitized != "" && !cfg.Expose {
 		realm := realmForStage(stage)
 		blob := ""
 		if c.bs.Secrets != nil {

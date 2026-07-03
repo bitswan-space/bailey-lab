@@ -92,6 +92,18 @@ def _parse_revision_backups(gitops_dir: str, sha: str, bp: str) -> dict:
     return (bk.get(bp) or {}) if isinstance(bk, dict) else {}
 
 
+def _parse_revision_secret_blob(gitops_dir: str, sha: str, bp: str, realm: str) -> str:
+    """The encrypted `secrets[bp][realm]` blob at a git commit, or "". Secrets are
+    versioned in bitswan.yaml like deployments/firewall, so each distinct blob
+    across commits is one audit-log / rollback point (the value is opaque
+    ciphertext — history shows THAT it changed + when/who, never the value)."""
+    sec = _parse_revision_bitswan(gitops_dir, sha).get("secrets") or {}
+    if not isinstance(sec, dict):
+        return ""
+    val = (sec.get(bp) or {}).get(realm)
+    return val if isinstance(val, str) else ""
+
+
 def _short_hash(context: str) -> str:
     """Deterministic 4-char hash for a context string."""
     return hashlib.sha256(context.encode()).hexdigest()[:4]
@@ -1421,6 +1433,7 @@ class AutomationService:
         prev_dep_key = None
         prev_fw_key: tuple | None = None
         prev_bk_key: str | None = None
+        prev_sec_key: str | None = None
         for line in (out or "").splitlines():
             parts = line.split("\x1f")
             if len(parts) != 4:
@@ -1539,9 +1552,34 @@ class AutomationService:
                     }
                 )
             prev_bk_key = bk_key
+
+            # ── secret event: a changed encrypted blob for this realm ───────────
+            # Secrets are versioned in bitswan.yaml like firewall rules; each
+            # distinct blob is an audit-log entry + rollback point. The value is
+            # opaque ciphertext — we surface only THAT it changed (who/when),
+            # never the secret itself. Applies to the backend on its next deploy.
+            sec_key = _parse_revision_secret_blob(bp_dir, sha, bp, realm)
+            if sec_key != prev_sec_key and (sec_key or prev_sec_key) and not emitted_deploy:
+                entries.append(
+                    {
+                        "commit": sha,
+                        "source_commit": None,
+                        "deployed_at": date,
+                        "deployed_by": author,
+                        "status": "secret",
+                        "source": "secret",
+                        "members": {},
+                        "secret": {"realm": realm, "summary": subject},
+                    }
+                )
+            prev_sec_key = sec_key
         entries.reverse()  # newest-first
         current = next(
-            (e["commit"] for e in entries if e["source"] not in ("firewall", "backup")),
+            (
+                e["commit"]
+                for e in entries
+                if e["source"] not in ("firewall", "backup", "secret")
+            ),
             None,
         )
         return {
@@ -2573,6 +2611,57 @@ class AutomationService:
         if members:
             await self.apply_compose_for_deployments(list(members), deployed_by=by)
         return self.read_firewall(bp, stage)
+
+    async def rollback_secrets(
+        self,
+        bp: str,
+        stage: str,
+        git_commit: str,
+        by: str | None = None,
+    ) -> dict:
+        """Roll a BP realm's secrets back to a prior commit. Secrets are
+        versioned in bitswan.yaml (bp_history surfaces every secret change), so a
+        rollback restores the encrypted `secrets[bp][realm]` blob exactly as it
+        was at `git_commit`, records the restore as its own versioned commit,
+        re-derives the plaintext env file, and redeploys the stage's members so
+        the restored values reach the backend container. Mirrors rollback_firewall."""
+        realm = bp_secrets.realm_for_stage(stage)
+        bp_dir = bp_state_path(self.gitops_dir, bp)
+        # Fail loudly if the revision does not exist.
+        _, _, rc = await call_git_command_with_output(
+            "git", "cat-file", "-e", f"{git_commit}^{{commit}}", cwd=bp_dir
+        )
+        if rc != 0:
+            raise HTTPException(
+                status_code=404, detail=f"No such revision {git_commit[:8]}"
+            )
+        blob = _parse_revision_secret_blob(bp_dir, git_commit, bp, realm)
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        enc = bs.setdefault("secrets", {}).setdefault(bp, {})
+        if blob:
+            enc[realm] = blob
+        else:
+            # The target predates any secret for this realm — restore that empty
+            # state (drop the realm entry).
+            enc.pop(realm, None)
+        await self._persist_bp_state(
+            bs,
+            {bp},
+            bp,
+            "secrets",
+            deployed_by=by,
+            message=f"rollback secrets {bp}/{realm} @ {git_commit[:8]}",
+        )
+        # Re-derive the plaintext env file the backend mounts so the restored
+        # values take effect on (re)deploy.
+        values = bp_secrets.decrypt_secrets(self.secrets_dir, blob) if blob else {}
+        bp_secrets.materialize_env(self.secrets_dir, bp, realm, values)
+        # Redeploy the stage's members so the backend picks up the restored env
+        # (no-op when nothing is deployed for the stage yet).
+        members = self._bp_stage_members(bp, stage)
+        if members:
+            await self.apply_compose_for_deployments(list(members), deployed_by=by)
+        return self.read_bp_secrets(bp)
 
     async def _save_and_commit_firewall(
         self, bs: dict, bp: str, by: str | None, message: str

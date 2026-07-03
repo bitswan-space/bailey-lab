@@ -542,6 +542,8 @@ function entryTone(e: BpHistoryEntry, isCurrent: boolean) {
       label: BACKUP_EVENT_LABEL[e.backup?.action ?? ''] ?? 'Backup',
       cls: 'bg-sky-100 text-sky-700',
     };
+  if (e.source === 'secret')
+    return { dot: 'bg-teal-500', label: 'Secret change', cls: 'bg-teal-100 text-teal-700' };
   if (e.status === 'rolled-back')
     return { dot: 'bg-amber-500', label: 'Rolled back', cls: 'bg-amber-100 text-amber-700' };
   if (e.status === 'failed')
@@ -912,6 +914,7 @@ function DeploymentCard({
   const tone = entryTone(entry, isCurrent);
   const isFw = entry.source === 'firewall';
   const isBackup = entry.source === 'backup';
+  const isSecret = entry.source === 'secret';
   const ver = entry.source_commit ?? entry.commit;
   const members = Object.entries(entry.members ?? {});
   const firstImg = members.find(([, m]) => m.image_id)?.[1]?.image_id;
@@ -939,6 +942,13 @@ function DeploymentCard({
             <Button variant="outline" size="sm" disabled={busy} onClick={onRollback}>
               <Undo2 className="size-3.5" aria-hidden />
               Restore rules
+            </Button>
+          ) : isSecret ? (
+            // Secret audit-log entry: restore the stage's secret values to this
+            // commit (redeploys so the backend picks up the restored env).
+            <Button variant="outline" size="sm" disabled={busy} onClick={onRollback}>
+              <Undo2 className="size-3.5" aria-hidden />
+              Restore secrets
             </Button>
           ) : isCurrent ? (
             <>
@@ -1176,14 +1186,15 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   const runRollback = useCallback(
     async (entry: BpHistoryEntry) => {
       const isFw = entry.source === 'firewall';
+      const isSecret = entry.source === 'secret';
       const ver = short(entry.source_commit ?? entry.commit, 8);
-      const what = isFw ? 'firewall rules' : bp.name;
+      const what = isFw ? 'firewall rules' : isSecret ? 'secrets' : bp.name;
       setBusy(true);
       const work = api.bpRollback(
         bp.name,
         activeStage,
         entry.commit,
-        isFw ? 'firewall' : 'deploy',
+        isFw ? 'firewall' : isSecret ? 'secret' : 'deploy',
       );
       toast.promise(work, {
         loading: `Rolling ${what} back to ${ver}…`,

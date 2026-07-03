@@ -310,9 +310,15 @@ export interface BpHistoryEntry {
   deployed_at: string;
   // eslint-disable-next-line no-restricted-syntax -- nullable wire field
   deployed_by: string | null;
-  status: string; // "deployed" | "rolled-back" | "firewall" | "backup"
-  source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall" | "backup"
+  status: string; // "deployed" | "rolled-back" | "firewall" | "backup" | "secret"
+  source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall" | "backup" | "secret"
   members: Record<string, BpHistoryMember>;
+  /** Present on secret-change events: the realm + a one-line summary. The value
+   *  itself is never sent — only that it changed (this is a rollback point). */
+  secret?: {
+    realm: string;
+    summary: string;
+  };
   /** Present on firewall-change events: the realm + a one-line summary of the
    *  change and the resulting allowed/denied counts (for the audit-log row). */
   firewall?: {
@@ -629,7 +635,12 @@ export const api = {
   /** Roll a BP stage back to a prior state. `kind=deploy` (default) re-points the
    *  member deployments; `kind=firewall` restores the egress allow-list to that
    *  commit (production needs admin/auditor — gated server-side). */
-  bpRollback: (bp: string, stage: string, gitCommit: string, kind: 'deploy' | 'firewall' = 'deploy') =>
+  bpRollback: (
+    bp: string,
+    stage: string,
+    gitCommit: string,
+    kind: 'deploy' | 'firewall' | 'secret' = 'deploy',
+  ) =>
     postJson<{ message: string }>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/rollback`,
       { stage, git_commit: gitCommit, kind },

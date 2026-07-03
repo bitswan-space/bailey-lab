@@ -472,8 +472,9 @@ async def rollback_bp(
 ):
     """Roll a BP stage back to a prior state. `kind=deploy` (default) re-points
     the member deployments to a prior version; `kind=firewall` restores the
-    stage's egress allow-list to a prior commit (production needs admin/auditor).
-    Both come from the same git-derived history timeline."""
+    stage's egress allow-list; `kind=secret` restores the stage's secret values
+    to a prior commit and redeploys so the backend picks them up. All come from
+    the same git-derived history timeline (production firewall needs admin/auditor)."""
     if body.kind == "firewall":
         return await automation_service.rollback_firewall(
             bp=bp,
@@ -481,6 +482,13 @@ async def rollback_bp(
             git_commit=body.git_commit,
             by=body.deployed_by,
             role=body.role,
+        )
+    if body.kind == "secret":
+        return await automation_service.rollback_secrets(
+            bp=bp,
+            stage=body.stage,
+            git_commit=body.git_commit,
+            by=body.deployed_by,
         )
     return await automation_service.rollback_business_process(
         bp=bp,

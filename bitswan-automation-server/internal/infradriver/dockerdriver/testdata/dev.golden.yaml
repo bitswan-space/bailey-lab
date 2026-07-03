@@ -105,7 +105,6 @@ services:
     ws1-frontend-822b-dev:
         container_name: ws1-frontend-822b-dev
         env_file:
-            - __ROOT__/secrets/bp/acme/dev
             - __ROOT__/secrets/postgres-dev
             - __ROOT__/secrets/minio-dev
         environment:

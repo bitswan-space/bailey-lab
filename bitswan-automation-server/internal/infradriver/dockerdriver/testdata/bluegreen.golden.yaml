@@ -72,8 +72,6 @@ services:
         volumes: []
     ws2-frontend-8d90-production-blue:
         container_name: ws2-frontend-8d90-production-blue
-        env_file:
-            - __ROOT__/secrets/bp/shop/production
         environment:
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-production.example.com
@@ -109,8 +107,6 @@ services:
         volumes: []
     ws2-frontend-8d90-production-green:
         container_name: ws2-frontend-8d90-production-green
-        env_file:
-            - __ROOT__/secrets/bp/shop/production
         environment:
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-dr.example.com

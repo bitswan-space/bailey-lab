@@ -51,7 +51,6 @@ services:
     ws4-frontend-4337-live-dev:
         container_name: ws4-frontend-4337-live-dev
         env_file:
-            - __ROOT__/secrets/bp/acme/dev
             - __ROOT__/secrets/dbcreds/dev/copy_bar_bp_acme
             - __ROOT__/secrets/miniocreds/dev/copy-bar-bp-acme
         environment:
