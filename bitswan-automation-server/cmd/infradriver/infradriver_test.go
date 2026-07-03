@@ -8,6 +8,15 @@ import (
 	"testing"
 )
 
+// isolateSystemGitConfig points `git config --system` (used by
+// ensureDeployRepoAt for safe.directory) at a throwaway file, so the tests pass
+// as a non-root CI user that can't write /etc/gitconfig. In production the
+// driver runs as root and writes the real system config.
+func isolateSystemGitConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_SYSTEM", filepath.Join(t.TempDir(), "gitconfig"))
+}
+
 func gitCfg(t *testing.T, gitDir, key string) string {
 	t.Helper()
 	out, err := exec.Command("git", "--git-dir", gitDir, "config", "--get", key).Output()
@@ -21,6 +30,7 @@ func gitCfg(t *testing.T, gitDir, key string) string {
 // bitswan.bp (so the hook applies only that BP) alongside the workspace context,
 // with the post-receive apply hook installed. Idempotent.
 func TestEnsureDeployRepoAt_PerBP(t *testing.T) {
+	isolateSystemGitConfig(t)
 	reposDir := t.TempDir()
 	cf := ctxFlags{workspace: "ws1", domain: "d.example", secretsDir: "/s", gitopsDir: "/gitops/gitops"}
 	gitDir := deployRepoDirFor(reposDir, "issues")
@@ -61,6 +71,7 @@ func TestEnsureDeployRepoAt_PerBP(t *testing.T) {
 // The legacy whole-workspace repo carries NO bitswan.bp (so apply stays
 // whole-workspace).
 func TestEnsureBareRepo_LegacyHasNoBP(t *testing.T) {
+	isolateSystemGitConfig(t)
 	gitDir := filepath.Join(t.TempDir(), "deploy.git")
 	if err := ensureBareRepo(gitDir, ctxFlags{workspace: "ws1"}); err != nil {
 		t.Fatalf("ensureBareRepo: %v", err)
@@ -73,6 +84,7 @@ func TestEnsureBareRepo_LegacyHasNoBP(t *testing.T) {
 // serve startup provisions every existing <bp>.deploy.git and skips non-repo
 // entries.
 func TestEnsureAllDeployRepos(t *testing.T) {
+	isolateSystemGitConfig(t)
 	reposDir := t.TempDir()
 	for _, bp := range []string{"issues", "invoices"} {
 		if err := os.MkdirAll(deployRepoDirFor(reposDir, bp), 0o755); err != nil {
