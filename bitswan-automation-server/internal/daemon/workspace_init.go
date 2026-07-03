@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v3"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
 	"github.com/bitswan-space/bitswan-workspaces/internal/caddyapi"
@@ -18,7 +17,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
-	"github.com/bitswan-space/bitswan-workspaces/internal/oauth"
 	"github.com/bitswan-space/bitswan-workspaces/internal/services"
 	"github.com/bitswan-space/bitswan-workspaces/internal/ssh"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
@@ -46,8 +44,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	gitopsDevSourceDir := fs.String("gitops-dev-source-dir", "", "")
 	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
 	codingAgentDevSourceDir := fs.String("coding-agent-dev-source-dir", "", "")
-	oauthConfigFile := fs.String("oauth-config", "", "")
-	noOauth := fs.Bool("no-oauth", false, "")
 	sshPort := fs.String("ssh-port", "", "")
 	staging := fs.Bool("staging", false, "")
 	// Email of the user creating the workspace. Passed through to
@@ -90,15 +86,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 
 	// Init bitswan network
 	docker.EnsureDockerNetwork("bitswan_network", *verbose)
-
-	var oauthConfig *oauth.Config
-	if *oauthConfigFile != "" {
-		oauthConfig, err = oauth.GetInitOauthConfig(*oauthConfigFile)
-		if err != nil {
-			return fmt.Errorf("failed to get OAuth config: %w", err)
-		}
-		fmt.Println("OAuth config read successfully!")
-	}
 
 	// Ensure the global ingress proxy is running.
 	// initIngress is idempotent: it detects Caddy or Traefik and returns early if already running.
@@ -542,17 +529,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		return fmt.Errorf("failed to create secrets directory: %w", err)
 	}
 
-	if oauthConfig != nil {
-		oauthConfigFile := gitopsConfig + "/oauth-config.yaml"
-		oauthConfigYaml, err := yaml.Marshal(oauthConfig)
-		if err != nil {
-			return fmt.Errorf("failed to marshal OAuth config: %w", err)
-		}
-		if err := os.WriteFile(oauthConfigFile, oauthConfigYaml, 0600); err != nil {
-			return fmt.Errorf("failed to write oauth config file: %w", err)
-		}
-	}
-
 	// Generate SSH key pair for the workspace (if not already generated for remote repo)
 	if *remoteRepo == "" {
 		fmt.Println("Generating SSH key pair for workspace...")
@@ -678,32 +654,8 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			}
 			fmt.Println("Workspace registered successfully!")
 
-			// Automatically fetch OAuth configuration when AOC is configured
-			if !*noOauth {
-				fmt.Println("Fetching OAuth configuration from AOC...")
-				oauthConfig, err = aocClient.GetOAuthConfig(workspaceId)
-				if err != nil {
-					return fmt.Errorf("failed to get OAuth config from AOC: %w", err)
-				}
-				fmt.Println("OAuth configuration fetched successfully!")
-
-				// Save OAuth config to disk
-				if err := oauth.SaveOauthConfig(workspaceName, oauthConfig); err != nil {
-					return fmt.Errorf("failed to save OAuth config: %w", err)
-				}
-			} else {
-				fmt.Println("OAuth disabled, using password authentication")
-			}
-
 			aocEnvVars = aocClient.GetAOCEnvironmentVariables(workspaceId, automationServerToken)
 		}
-	}
-
-	var oauthEnvVars []string
-	var keycloakURL string
-	if oauthConfig != nil {
-		oauthEnvVars = oauth.CreateOAuthEnvVars(oauthConfig, "gitops", workspaceName, *domain)
-		keycloakURL = oauthConfig.IssuerUrl
 	}
 
 	// Log local remote info for debugging
@@ -717,12 +669,10 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		GitopsImage:        imgopsImage,
 		Domain:             *domain,
 		AocEnvVars:         aocEnvVars,
-		OAuthEnvVars:       oauthEnvVars,
 		GitopsDevSourceDir: *gitopsDevSourceDir,
 		TrustCA:            true,
 		LocalRemotePath:    localRemotePath,
 		LocalRemoteName:    localRemoteName,
-		KeycloakURL:        keycloakURL,
 		CodingAgentSecret:  codingAgentSecret,
 	}
 	compose, token, err := config.CreateDockerComposeFile()
@@ -833,10 +783,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	fmt.Printf("GitOps ID: %s\n", workspaceName)
 	fmt.Printf("GitOps URL: https://%s-gitops.%s\n", workspaceName, *domain)
 	fmt.Printf("GitOps Secret: %s\n", token)
-
-	if oauthConfig != nil {
-		fmt.Printf("OAuth is enabled for the Editor.\n")
-	}
 
 	return nil
 }

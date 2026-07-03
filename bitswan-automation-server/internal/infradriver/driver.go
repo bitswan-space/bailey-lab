@@ -31,7 +31,7 @@ import (
 type Driver interface {
 	// Apply compiles ctx+bitswanYAML into desired backend state and reconciles
 	// to it: ensure networks, generate and bring up the compose project, install
-	// CA certs + oauth2 sidecars, CONFIGURE INGRESS (converge the daemon's routes
+	// CA certs, CONFIGURE INGRESS (converge the daemon's routes
 	// to the desired set — the applier owns the Ingress, k8s-style), and realize
 	// the data state the declaration implies (blue-green DB seeding, restores). It
 	// NEVER builds images — it deploys the already-built, tagged images

@@ -27,23 +27,22 @@ var stderrMutex sync.Mutex
 
 // ServiceEnableRequest represents the request to enable a service
 type ServiceEnableRequest struct {
-	ServiceType      string                 `json:"service_type"` // "kafka", "couchdb", "postgres", "minio"
-	Workspace        string                 `json:"workspace"`
-	Stage            string                 `json:"stage,omitempty"`
-	DashboardImage   string                 `json:"dashboard_image,omitempty"`
-	OAuthConfig      map[string]interface{} `json:"oauth_config,omitempty"` // OAuth config as JSON object
-	TrustCA          bool                   `json:"trust_ca,omitempty"`
-	KafkaImage       string                 `json:"kafka_image,omitempty"`
-	UIImage          string                 `json:"ui_image,omitempty"`
-	ZookeeperImage   string                 `json:"zookeeper_image,omitempty"`
-	CouchDBImage     string                 `json:"couchdb_image,omitempty"`
-	PostgresImage    string                 `json:"postgres_image,omitempty"`
-	PgAdminImage     string                 `json:"pgadmin_image,omitempty"`
-	MinioImage       string                 `json:"minio_image,omitempty"`
-	CodingAgentImage string                 `json:"coding_agent_image,omitempty"`
-	Staging          bool                   `json:"staging,omitempty"`
-	DevMode          bool                   `json:"dev_mode,omitempty"`
-	SourceDir        string                 `json:"source_dir,omitempty"`
+	ServiceType      string `json:"service_type"` // "kafka", "couchdb", "postgres", "minio"
+	Workspace        string `json:"workspace"`
+	Stage            string `json:"stage,omitempty"`
+	DashboardImage   string `json:"dashboard_image,omitempty"`
+	TrustCA          bool   `json:"trust_ca,omitempty"`
+	KafkaImage       string `json:"kafka_image,omitempty"`
+	UIImage          string `json:"ui_image,omitempty"`
+	ZookeeperImage   string `json:"zookeeper_image,omitempty"`
+	CouchDBImage     string `json:"couchdb_image,omitempty"`
+	PostgresImage    string `json:"postgres_image,omitempty"`
+	PgAdminImage     string `json:"pgadmin_image,omitempty"`
+	MinioImage       string `json:"minio_image,omitempty"`
+	CodingAgentImage string `json:"coding_agent_image,omitempty"`
+	Staging          bool   `json:"staging,omitempty"`
+	DevMode          bool   `json:"dev_mode,omitempty"`
+	SourceDir        string `json:"source_dir,omitempty"`
 }
 
 // ServiceDisableRequest represents the request to disable a service
@@ -990,8 +989,7 @@ func (s *Server) enableDashboardService(req ServiceEnableRequest) error {
 	}
 
 	// The dashboard runs no oauth2-proxy of its own — it's authenticated by the
-	// platform protected-proxy inside the Bailey iframe — so req.OAuthConfig is
-	// intentionally not consumed here.
+	// platform protected-proxy inside the Bailey iframe.
 	if err := dashboardService.Enable(gitopsSecretToken, bitswanDashboardImage, req.TrustCA); err != nil {
 		return err
 	}

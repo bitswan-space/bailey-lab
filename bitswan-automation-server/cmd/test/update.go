@@ -85,7 +85,6 @@ func runTestUpdate(noRemove bool, customGitopsImage string) error {
 	initArgs := []string{
 		"workspace", "init",
 		"--local",
-		"--no-oauth",
 		"--gitops-image", initGitopsImage,
 	}
 	initArgs = append(initArgs, workspaceName)

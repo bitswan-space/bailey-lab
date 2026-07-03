@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
-	"github.com/bitswan-space/bitswan-workspaces/internal/oauth"
 	"github.com/spf13/cobra"
 )
 
@@ -43,7 +42,6 @@ func resolveDashboardWorkspace(client *daemon.Client, workspace *string) error {
 
 func newDashboardEnableCmd() *cobra.Command {
 	var dashboardImage string
-	var oauthConfigFile string
 	var trustCA bool
 	var workspace string
 
@@ -71,18 +69,6 @@ func newDashboardEnableCmd() *cobra.Command {
 				options["trust_ca"] = true
 			}
 
-			if oauthConfigFile != "" {
-				oauthConfig, err := oauth.GetInitOauthConfig(oauthConfigFile)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: failed to read OAuth config: %v\n", err)
-					os.Exit(1)
-				}
-				oauthJSON, _ := json.Marshal(oauthConfig)
-				var oauthMap map[string]interface{}
-				_ = json.Unmarshal(oauthJSON, &oauthMap)
-				options["oauth_config"] = oauthMap
-			}
-
 			result, err := client.EnableService("dashboard", workspace, options)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -96,7 +82,6 @@ func newDashboardEnableCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&dashboardImage, "dashboard-image", "", "Custom image for the workspace-dashboard")
-	cmd.Flags().StringVar(&oauthConfigFile, "oauth-config", "", "OAuth config file")
 	cmd.Flags().BoolVar(&trustCA, "trust-ca", false, "Install custom certificates from the default CA certificates directory.")
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Workspace name (uses active workspace if not specified)")
 

@@ -27,12 +27,10 @@ type DockerComposeConfig struct {
 	GitopsImage        string
 	Domain             string
 	AocEnvVars         []string
-	OAuthEnvVars       []string
 	GitopsDevSourceDir string
 	TrustCA            bool
 	LocalRemotePath    string // Host path to local repository (if using local remote)
 	LocalRemoteName    string // Mount name for local repository (used for mount point path)
-	KeycloakURL        string // Keycloak base URL for authentication
 	CodingAgentSecret  string // Bearer token gitops uses to verify coding-agent requests
 }
 
@@ -160,19 +158,9 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		)
 	}
 
-	// Add Keycloak URL if configured
-	if config.KeycloakURL != "" {
-		gitopsService["environment"] = append(gitopsService["environment"].([]string), "KEYCLOAK_URL="+config.KeycloakURL)
-	}
-
 	// Append AOC env variables when workspace is registered as an automation server
 	if len(config.AocEnvVars) > 0 {
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), config.AocEnvVars...)
-	}
-
-	// Append OAuth env variables when OAuth is configured
-	if len(config.OAuthEnvVars) > 0 {
-		gitopsService["environment"] = append(gitopsService["environment"].([]string), config.OAuthEnvVars...)
 	}
 
 	// Add dev source directory volume mount and DEBUG env var if provided
@@ -278,13 +266,8 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		"BITSWAN_CERTS_DIR=" + homeDir + "/.config/bitswan/certauthorities",
 		"BITSWAN_WORKSPACE_NAME=" + config.WorkspaceName,
 	}
-	if config.KeycloakURL != "" {
-		env = append(env, "KEYCLOAK_URL="+config.KeycloakURL)
-	}
-	// The compiler reads the same AOC/OAuth env gitops used (org group path,
-	// oauth2-proxy config it materializes per BP, etc.).
+	// The compiler reads the same AOC env gitops used (org group path, etc.).
 	env = append(env, config.AocEnvVars...)
-	env = append(env, config.OAuthEnvVars...)
 
 	volumes := []interface{}{
 		driverBinary + ":/usr/local/bin/bitswan:ro",

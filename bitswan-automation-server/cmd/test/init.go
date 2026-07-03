@@ -113,12 +113,11 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
 		return fmt.Errorf("failed to create daemon client: %w", err)
 	}
 
-	// Use local flags for workspace init (no dashboard, no oauth for faster initialization)
+	// Use local flags for workspace init (no dashboard for faster initialization)
 	initArgs := []string{
 		"workspace", "init",
 		"--local",
 		"--no-dashboard",
-		"--no-oauth",
 	}
 	if gitopsImage != "" {
 		initArgs = append(initArgs, "--gitops-image", gitopsImage)

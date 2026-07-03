@@ -80,7 +80,6 @@ func runTestPullAndDeploy(gitopsImage string) error {
 	initArgs1 := []string{
 		"workspace", "init",
 		"--local",
-		"--no-oauth",
 	}
 	if gitopsImage != "" {
 		initArgs1 = append(initArgs1, "--gitops-image", gitopsImage)
@@ -236,7 +235,6 @@ func runTestPullAndDeploy(gitopsImage string) error {
 	initArgs2 := []string{
 		"workspace", "init",
 		"--local",
-		"--no-oauth",
 		"--remote", containerRepoPath,
 		"--branch", branchName,
 	}

@@ -22,8 +22,6 @@ type initOptions struct {
 	dashboardImage     string
 	gitopsDevSourceDir    string
 	dashboardDevSourceDir string
-	oauthConfigFile    string
-	noOauth            bool
 	sshPort            string
 	staging            bool
 }
@@ -69,8 +67,6 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.dashboardImage, "dashboard-image", "", "Custom image for the workspace-dashboard")
 	cmd.Flags().StringVar(&o.gitopsDevSourceDir, "gitops-dev-source-dir", "", "Directory to mount as /src/app in gitops container for development")
 	cmd.Flags().StringVar(&o.dashboardDevSourceDir, "dashboard-dev-source-dir", "", "Directory to mount as /workspace/dashboard-src in the workspace-dashboard container for hot-reload development")
-	cmd.Flags().StringVar(&o.oauthConfigFile, "oauth-config", "", "OAuth config file")
-	cmd.Flags().BoolVar(&o.noOauth, "no-oauth", false, "Disable automatically fetching OAuth configuration from AOC")
 	cmd.Flags().StringVar(&o.sshPort, "ssh-port", "", "Use SSH over a custom port with custom SSH config for repositories behind firewalls (e.g., 443, 22)")
 	cmd.Flags().BoolVar(&o.staging, "staging", false, "Use staging images for gitops")
 	cmd.Flags().String("owner", "", "Email of the user who owns the workspace's endpoints in the Bailey ACL (enables access control + sharing for them)")

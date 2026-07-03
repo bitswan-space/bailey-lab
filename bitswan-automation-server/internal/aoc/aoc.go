@@ -2,7 +2,6 @@ package aoc
 
 import (
 	"bytes"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	httplocalhost "github.com/bitswan-space/bitswan-workspaces/internal/http"
-	"github.com/bitswan-space/bitswan-workspaces/internal/oauth"
 )
 
 // OTPExchangeRequest represents the OTP exchange request
@@ -529,50 +527,6 @@ func (c *AOCClient) SendInviteEmail(req InviteEmailRequest) error {
 		return &InviteEmailError{StatusCode: resp.StatusCode, Code: aocErr.Code, Message: aocErr.Error}
 	}
 	return &InviteEmailError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("%s - %s", resp.Status, string(body))}
-}
-
-func generateCookieSecret() (string, error) {
-	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 32)
-	random := make([]byte, 32)
-	if _, err := rand.Read(random); err != nil {
-		return "", fmt.Errorf("failed to generate random secret: %w", err)
-	}
-	for i := range b {
-		b[i] = alphabet[int(random[i])%len(alphabet)]
-	}
-	return string(b), nil
-}
-
-func (c *AOCClient) GetOAuthConfig(workspaceId string) (*oauth.Config, error) {
-	keycloakInfo, err := c.GetKeycloakClientSecret(workspaceId)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get Keycloak client secret: %w", err)
-	}
-
-	cookieSecret, err := generateCookieSecret()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate cookie secret: %w", err)
-	}
-
-	provider := "keycloak-oidc"
-	httpAddr := "0.0.0.0:9999"
-	scope := "openid email profile"
-	groupsClaim := "group_membership"
-
-	oauthConfig := &oauth.Config{
-		ClientId:      keycloakInfo.ClientID,
-		ClientSecret:  keycloakInfo.ClientSecret,
-		IssuerUrl:     keycloakInfo.IssuerURL,
-		Provider:      &provider,
-		HttpAddress:   &httpAddr,
-		Scope:         &scope,
-		GroupsClaim:   &groupsClaim,
-		EmailDomains:  []string{"*"},
-		AllowedGroups: []string{},
-		CookieSecret:  cookieSecret,
-	}
-	return oauthConfig, nil
 }
 
 // GetAOCEnvironmentVariables creates AOC environment variables

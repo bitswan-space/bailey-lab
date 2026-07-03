@@ -48,9 +48,6 @@ class MinioService(InfraService):
         )
 
     def _get_caddy_upstream(self) -> str:
-        # When oauth2-proxy is active, route through it (port 9999)
-        if self.oauth2_enabled:
-            return f"{self.container_name}:9999"
         # MinIO Console runs on port 9001
         return f"{self.container_name}:9001"
 

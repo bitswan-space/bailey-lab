@@ -62,9 +62,6 @@ class PostgresService(InfraService):
         )
 
     def _get_caddy_upstream(self) -> str:
-        # When oauth2-proxy is active, route through it (port 9999)
-        if self.oauth2_enabled:
-            return f"{self.pgadmin_container_name}:9999"
         return f"{self.pgadmin_container_name}:80"
 
     def _get_connection_info(self) -> dict:
@@ -119,9 +116,8 @@ class PostgresService(InfraService):
 
     async def start(self) -> dict:
         """Bring PostgreSQL + pgAdmin up via the driver apply. The apply
-        reconciles both infra containers and, for pgAdmin (labelled
-        gitops.oauth2.enabled), the driver sets up its oauth2-proxy — gitops has
-        no oauth code or docker access of its own."""
+        reconciles both infra containers — gitops has no docker access of its
+        own."""
         return await super().start()
 
     async def stop(self) -> dict:

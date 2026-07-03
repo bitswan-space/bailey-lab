@@ -1108,9 +1108,6 @@ func (c *Client) EnableService(serviceType, workspace string, options map[string
 	if dashboardImage, ok := options["dashboard_image"].(string); ok {
 		reqBody.DashboardImage = dashboardImage
 	}
-	if oauthConfig, ok := options["oauth_config"].(map[string]interface{}); ok {
-		reqBody.OAuthConfig = oauthConfig
-	}
 	if trustCA, ok := options["trust_ca"].(bool); ok {
 		reqBody.TrustCA = trustCA
 	}

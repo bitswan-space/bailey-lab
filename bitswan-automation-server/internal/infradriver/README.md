@@ -28,7 +28,7 @@ gitops (editing + per-user copies, Sync & Deploy → resolves main)
       ▼
 driver git remote ── post-receive ──▶ compile bitswan.yaml + reconcile backend
       ▲                                 (build images, networks, compose,
-      │ HTTP over private UNIX socket    cert/oauth2 sidecars, blue-green data)
+      │ HTTP over private UNIX socket    cert install, blue-green data)
       └── container primitives: list / logs / stop / restart
 ```
 
@@ -88,7 +88,7 @@ Ported into the Docker driver's `Apply` (Python → Go):
   `_stage_network`, blue-green slot generation, egress-gateway wiring,
   `BITSWAN_WORKER_HOSTS`; infra services' `_generate_compose_dict`;
 - `utils.docker_compose_up`, `utils.ensure_docker_network`;
-- cert install + oauth2-proxy sidecar start;
+- cert install;
 - `_bake_source_image` (image build folds into `Apply`);
 - snapshot/backup data ops — re-expressed as `bitswan.yaml` backup state the
   compiler realizes (blue-green DB seed/restore), not a driver command.
@@ -106,13 +106,13 @@ primitives + a `git push` to deploy, and **no longer mounts `docker.sock`**.
    the internal network, guarded by a shared bearer token.
 3. **`bitswan infra-driver apply`** — the compiler + reconciler: port
    `generate_docker_compose` + reconcile to Go (`internal/dockercompose` reuse,
-   golden-tested), bring the project up, install certs + oauth2, provision per-BP
+   golden-tested), bring the project up, install certs, provision per-BP
    DBs/buckets, and **configure ingress itself** (`/ingress/reconcile` on the
    daemon — the applier owns the Ingress, k8s-style).
 4. **Cut gitops over** — replace its Docker code with: resolve+`git push` to the
    driver for apply, and the HTTP client for list/logs/stop/restart, exec, and
    build-image. Delete `async_docker.py`, the compose-generation,
-   `docker_compose_up`/`ensure_docker_network`, cert/oauth2/baking Docker code,
+   `docker_compose_up`/`ensure_docker_network`, cert/baking Docker code,
    and the deploy-path ingress registration (the driver does it). Remove the
    `docker.sock` mount. Validate the integration test + bp-lifecycle e2e green
    running through the driver.
