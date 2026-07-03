@@ -1309,7 +1309,9 @@ class AutomationService:
             del deployments[k]
 
         changed = {
-            deployment_bp((bs_yaml.get("deployments") or {}).get(m["deployment_id"], {}))
+            deployment_bp(
+                (bs_yaml.get("deployments") or {}).get(m["deployment_id"], {})
+            )
             for m in members
         }
         await self._persist_bp_state(
