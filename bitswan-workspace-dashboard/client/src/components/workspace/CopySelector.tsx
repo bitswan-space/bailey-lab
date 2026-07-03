@@ -116,6 +116,8 @@ export function CopySelector({
   const [query, setQuery] = useState('');
   // eslint-disable-next-line no-restricted-syntax -- null = no pull in flight
   const [pulling, setPulling] = useState<string | null>(null);
+  // eslint-disable-next-line no-restricted-syntax -- null = no materialize in flight
+  const [materializing, setMaterializing] = useState<string | null>(null);
   const [newCopyOpen, setNewCopyOpen] = useState(false);
   // Per-(BP, copy) ahead/behind, keyed by copy then BP dir. A copy key present
   // means it's been fetched (value may be {} = nothing diverges).
@@ -127,12 +129,17 @@ export function CopySelector({
   const activeCopy = copies.find((c) => c.name === copy) ?? null;
   const bpName = selectedBp?.name;
 
-  // Copies that carry the selected BP.
+  // The copies that ALREADY carry the selected BP. The rest can still be
+  // picked — selecting one clones the BP into it from main (see handleSelect).
+  const bpCopyNames = useMemo(
+    () => new Set(selectedBp?.copies ?? []),
+    [selectedBp],
+  );
+  // EVERY copy is offered for the BP, not just the ones that already have it —
+  // a copy is a user's working environment and must be reachable for any BP.
   const bpCopies = useMemo(() => {
     if (!selectedBp) return [];
-    return copies
-      .filter((c) => selectedBp.copies.includes(c.name))
-      .sort((a, b) => a.name.localeCompare(b.name));
+    return [...copies].sort((a, b) => a.name.localeCompare(b.name));
   }, [copies, selectedBp]);
 
   const q = query.trim().toLowerCase();
@@ -150,6 +157,7 @@ export function CopySelector({
   useEffect(() => {
     if (!open) return;
     for (const c of bpCopies) {
+      if (!bpCopyNames.has(c.name)) continue; // no BP clone here yet — nothing to diverge
       if (divergence[c.name] !== undefined) continue;
       if (pendingDivergence.current.has(c.name)) continue;
       pendingDivergence.current.add(c.name);
@@ -172,6 +180,32 @@ export function CopySelector({
         return next;
       });
     });
+  };
+
+  // Switch to a copy. If it doesn't carry the BP yet, clone the BP into it from
+  // main first (materialize) so the switch lands on a real working tree.
+  const handleSelect = (name: string) => {
+    if (materializing) return;
+    if (bpName && !bpCopyNames.has(name)) {
+      setMaterializing(name);
+      void api.copyFiles
+        .ensureBp(name, bpName)
+        .then(() => {
+          onSelect(name);
+          // The copy now carries the BP — nudge the parent to refresh its copy
+          // data so the switcher reflects it (same hook a fresh copy uses).
+          onCreatedCopy(name);
+          setOpen(false);
+        })
+        .catch(() => {
+          // Leave the selector open on failure rather than switching to a copy
+          // whose BP tree isn't there.
+        })
+        .finally(() => setMaterializing(null));
+      return;
+    }
+    onSelect(name);
+    setOpen(false);
   };
 
   // Always-available copy-level behind hint on the trigger (from the SSE
@@ -235,7 +269,7 @@ export function CopySelector({
               </div>
             ) : bpCopies.length === 0 ? (
               <div className="px-2.5 py-2 text-xs text-muted-foreground">
-                This business process isn’t in any copy yet
+                No copies yet — create one below
               </div>
             ) : visible.length === 0 ? (
               <div className="px-2.5 py-2 text-xs text-muted-foreground">
@@ -245,6 +279,8 @@ export function CopySelector({
               visible.map((c) => {
                 const active = c.name === copy;
                 const fetched = divergence[c.name] !== undefined;
+                const hasBp = bpCopyNames.has(c.name);
+                const isMaterializing = materializing === c.name;
                 return (
                   <div
                     key={c.name}
@@ -255,11 +291,9 @@ export function CopySelector({
                   >
                     <button
                       type="button"
-                      onClick={() => {
-                        onSelect(c.name);
-                        setOpen(false);
-                      }}
-                      className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2.5 text-left"
+                      disabled={materializing !== null}
+                      onClick={() => handleSelect(c.name)}
+                      className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2.5 text-left disabled:opacity-60"
                     >
                       <GitBranch
                         className={cn(
@@ -276,12 +310,23 @@ export function CopySelector({
                         is a valid standalone button; reserved check slot keeps
                         the chips aligned. */}
                     <div className="flex shrink-0 items-center gap-1.5 pr-2.5 pl-1">
-                      <CopyDelta
-                        d={bpName ? divergence[c.name]?.[bpName] : undefined}
-                        fetched={fetched}
-                        pulling={pulling === c.name}
-                        onPull={() => handlePull(c.name)}
-                      />
+                      {isMaterializing ? (
+                        <span className="text-[10px] text-muted-foreground">adding…</span>
+                      ) : !hasBp ? (
+                        <span
+                          title={`This process isn't in “${c.name}” yet — selecting it clones the process from main`}
+                          className="text-[10px] font-medium text-muted-foreground"
+                        >
+                          + from main
+                        </span>
+                      ) : (
+                        <CopyDelta
+                          d={bpName ? divergence[c.name]?.[bpName] : undefined}
+                          fetched={fetched}
+                          pulling={pulling === c.name}
+                          onPull={() => handlePull(c.name)}
+                        />
+                      )}
                       <span className="flex size-3.5 items-center justify-center">
                         {active && (
                           <Check className="size-3.5 text-primary" aria-hidden />

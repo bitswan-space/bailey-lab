@@ -16,6 +16,7 @@ import pytest
 from app.routes import copies
 from app.routes.copies import (
     SyncCopyRequest,
+    ensure_bp_in_copy,
     get_all_bp_divergence,
     get_bp_divergence,
     get_commit_diff,
@@ -312,6 +313,45 @@ def test_rebase_materializes_missing_bp_clone(env):
     assert branch == "u1"
     with open(os.path.join(clone, "process.toml")) as f:
         assert "c" in f.read()
+
+
+def test_ensure_bp_in_copy_materializes_from_main(env):
+    """Selecting a copy that lacks a BP clones the BP into it from main — that's
+    how the switcher can offer EVERY copy for a BP. Idempotent, and 404s only
+    when there's no main content to clone."""
+    import pytest
+    from fastapi import HTTPException
+
+    u1 = env["make_copy"]("u1")  # created BEFORE bpc exists
+    # bpc is born in u2 and synced to main.
+    u2 = env["make_copy"]("u2")
+    asyncio.run(git_server.ensure_bp_bare_repo("bpc"))
+    asyncio.run(copies._clone_bp_into_copy(u2, "u2", "bpc", allow_empty=True))
+    _commit(os.path.join(u2, "bpc"), "process.toml", "id='c'\n", "scaffold bpc")
+    assert (
+        asyncio.run(sync_copy("u2", SyncCopyRequest(deployer="d@x", bp="bpc"))).status
+        == "success"
+    )
+
+    # u1 lacks bpc → ensure clones it from main on u1's branch.
+    assert not os.path.isdir(os.path.join(u1, "bpc"))
+    res = asyncio.run(ensure_bp_in_copy("u1", "bpc"))
+    assert res["ok"] is True and res["already"] is False
+    clone = os.path.join(u1, "bpc")
+    assert os.path.isdir(os.path.join(clone, ".git"))
+    assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=clone).stdout.strip() == "u1"
+    with open(os.path.join(clone, "process.toml")) as f:
+        assert "c" in f.read()
+
+    # Idempotent — a second call is a no-op.
+    res2 = asyncio.run(ensure_bp_in_copy("u1", "bpc"))
+    assert res2["ok"] is True and res2["already"] is True
+
+    # A BP whose main has no content (only the empty seed) → 404, nothing to clone.
+    asyncio.run(git_server.ensure_bp_bare_repo("emptybp"))
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(ensure_bp_in_copy("u1", "emptybp"))
+    assert ei.value.status_code == 404
 
 
 def test_divergence_all_reports_missing_bp_as_behind(env):

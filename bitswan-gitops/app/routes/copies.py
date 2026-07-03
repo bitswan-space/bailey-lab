@@ -729,6 +729,30 @@ async def _rebase_one_bp(
     }
 
 
+@router.post("/{name}/bp/{bp}/ensure")
+async def ensure_bp_in_copy(name: str, bp: str):
+    """Make business process `bp` exist in copy `name`, cloning it fresh from the
+    BP repo's main when the copy doesn't carry it yet. Idempotent — a no-op
+    (``already: True``) when the clone is already there. This is what lets the
+    copy switcher offer EVERY copy for a BP: selecting a copy that lacks the BP
+    materializes it here instead of the copy being hidden. 404 only when the BP
+    has no repo content on main to clone from."""
+    _validate_copy_name(name)
+    _validate_bp_dir(bp)
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+    if os.path.isdir(os.path.join(copy_path, bp, ".git")):
+        return {"ok": True, "already": True, "copy": name, "bp": bp}
+    if not await _clone_bp_into_copy(copy_path, name, bp):
+        raise HTTPException(
+            status_code=404,
+            detail=f"'{bp}' has no repo content on main to clone into '{name}'",
+        )
+    await refresh_copies()  # the copy now carries the BP — refresh the cache
+    return {"ok": True, "already": False, "copy": name, "bp": bp}
+
+
 @router.post("/{name}/rebase")
 async def rebase_copy(name: str, body: SyncCopyRequest | None = None):
     """Pull main's new commits INTO a copy — per business process. This is the

@@ -399,6 +399,19 @@ export class GitopsClient {
     });
   }
 
+  /** `POST /copies/{name}/bp/{bp}/ensure` — make a BP exist in a copy, cloning
+   *  it fresh from main when the copy doesn't carry it yet (idempotent). Lets
+   *  the copy switcher offer every copy for a BP. */
+  async ensureBpInCopy(
+    name: string,
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(
+      `/copies/${encodeURIComponent(name)}/bp/${encodeURIComponent(bp)}/ensure`,
+      {},
+    );
+  }
+
   /** `GET /copies/{name}/history` — copy + main commit logs with deploy
    *  tags. With `bp` (the normal, BP-scoped view) the logs come from that
    *  BP's own repo. */

@@ -864,6 +864,14 @@ export const api = {
       getJson<Record<string, { ahead: number; behind: number }>>(
         `/api/copies/${encodeURIComponent(name)}/divergence-all`,
       ),
+    /** Make a BP exist in a copy, cloning it fresh from main if the copy lacks
+     *  it (idempotent). Lets the switcher offer EVERY copy for a BP — selecting
+     *  a copy that doesn't carry the BP materializes it here. */
+    ensureBp: (name: string, bp: string) =>
+      postJson<{ ok: boolean; already: boolean; copy: string; bp: string }>(
+        `/api/copies/${encodeURIComponent(name)}/bp/${encodeURIComponent(bp)}/ensure`,
+        {},
+      ),
     diff: (name: string, p?: string) =>
       getJson<{ diff: string }>(
         `/api/copies/${encodeURIComponent(name)}/diff${p ? `?path=${encodeURIComponent(p)}` : ''}`,

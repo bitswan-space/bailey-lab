@@ -84,6 +84,32 @@ export function registerCopyRoutes(
     },
   );
 
+  app.post<{ Params: { name: string; bp: string } }>(
+    '/api/copies/:name/bp/:bp/ensure',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      const { name, bp } = req.params;
+      if (!name || !bp) {
+        return reply.code(400).send({ error: 'name and bp are required' });
+      }
+      try {
+        const r = await gitops.ensureBpInCopy(name, bp);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name, bp }, 'ensure bp in copy failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   app.get<{ Params: { name: string }; Querystring: { bp?: string } }>(
     '/api/copies/:name/history',
     async (req, reply) => {
