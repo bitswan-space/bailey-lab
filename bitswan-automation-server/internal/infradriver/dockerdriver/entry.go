@@ -234,11 +234,21 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	if conf.ReplicasOrOne() <= 1 {
 		entry["container_name"] = serviceName
 	}
+	// gitops.bp is the RAW business process (from relative_path copies/<copy>/<bp>),
+	// stable across every copy of a BP — unlike gitops.context which is copy-scoped
+	// (copy-<copy>-<bp>). Per-BP deploy repos are keyed by raw bp, so BP-scoped
+	// orphan retirement matches all of a bp's containers (main + copies) via this
+	// label. Falls back to the context for a top-level automation with no bp segment.
+	bpLabel, _ := deriveBPAndCopy(rel)
+	if bpLabel == "" {
+		bpLabel = depCtx
+	}
 	labels := map[string]interface{}{
 		"gitops.deployment_id":    effectiveDepID,
 		"gitops.workspace":        c.workspaceName,
 		"gitops.automation_name":  depAutomationName,
 		"gitops.context":          depCtx,
+		"gitops.bp":               bpLabel,
 		"gitops.stage":            depStage,
 		"gitops.slot":             slot,
 		"gitops.intended_exposed": "false",

@@ -22,6 +22,7 @@ services:
         image: internal/ws2-shop-backend:shabsum
         labels:
             gitops.automation_name: backend
+            gitops.bp: shop
             gitops.context: shop
             gitops.deployment_id: backend-shop
             gitops.intended_exposed: "false"
@@ -54,6 +55,7 @@ services:
         image: internal/ws2-shop-backend:shabsum
         labels:
             gitops.automation_name: backend
+            gitops.bp: shop
             gitops.context: shop
             gitops.deployment_id: backend-shop@green
             gitops.intended_exposed: "false"
@@ -88,6 +90,7 @@ services:
         image: internal/ws2-shop-frontend:shafsum
         labels:
             gitops.automation_name: frontend
+            gitops.bp: shop
             gitops.context: shop
             gitops.deployment_id: frontend-shop
             gitops.intended_exposed: "true"
@@ -124,6 +127,7 @@ services:
         image: internal/ws2-shop-frontend:shafsum
         labels:
             gitops.automation_name: frontend
+            gitops.bp: shop
             gitops.context: shop
             gitops.deployment_id: frontend-shop@green
             gitops.intended_exposed: "true"

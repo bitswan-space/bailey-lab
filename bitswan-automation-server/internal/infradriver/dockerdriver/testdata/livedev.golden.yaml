@@ -33,6 +33,7 @@ services:
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: backend
+            gitops.bp: acme
             gitops.context: copy-bar-acme
             gitops.deployment_id: backend-copy-bar-acme-live-dev
             gitops.intended_exposed: "false"
@@ -72,6 +73,7 @@ services:
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: frontend
+            gitops.bp: acme
             gitops.context: copy-bar-acme
             gitops.deployment_id: frontend-copy-bar-acme-live-dev
             gitops.intended_exposed: "true"

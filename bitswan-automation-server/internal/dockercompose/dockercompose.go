@@ -214,7 +214,8 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	gitopsService["environment"] = append(gitopsService["environment"].([]string),
 		"BITSWAN_INFRA_DRIVER_URL=http://"+config.WorkspaceName+"-infra-driver:9090",
 		"BITSWAN_INFRA_DRIVER_TOKEN="+driverToken,
-		"BITSWAN_DEPLOY_REMOTE=http://x:"+driverToken+"@"+config.WorkspaceName+"-infra-driver:9090/deploy.git",
+		// Per-BP deploy repos: each BP pushes to <base>/<bp>.deploy.git.
+		"BITSWAN_DEPLOY_REMOTE_BASE=http://x:"+driverToken+"@"+config.WorkspaceName+"-infra-driver:9090/deploy-repos",
 	)
 
 	driverService := config.buildDriverService(driverToken, wsVolume, homeDir)
@@ -304,7 +305,7 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		// The daemon ingress socket — the driver configures ingress itself
 		// (converges routes via /ingress/reconcile) after bringing the project up.
 		"/var/run/bitswan:/var/run/bitswan",
-		wsVolume("deploy.git", "/git/deploy.git"),
+		wsVolume("deploy-repos", "/git/deploy-repos"),
 		// The deployed tree the generated compose's bind-mounts reference
 		// (workspaces/<ws>/gitops/<source>); apply materializes the push here.
 		wsVolume("gitops", "/gitops/gitops"),
@@ -336,7 +337,7 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		"command": []string{
 			"/usr/local/bin/bitswan", "infra-driver", "serve",
 			"--listen", ":9090",
-			"--git-dir", "/git/deploy.git",
+			"--deploy-repos-dir", "/git/deploy-repos",
 			"--gitops-dir", "/gitops/gitops",
 			"--secrets-dir", "/gitops/secrets",
 			"--workspace", config.WorkspaceName,

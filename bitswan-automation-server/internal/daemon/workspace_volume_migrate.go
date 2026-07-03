@@ -21,8 +21,9 @@ import (
 var workspaceVolumeSubdirs = []string{
 	"workspace",   // legacy shared working tree (kept for the gitops state worktree)
 	"gitops",      // promoted-deployment materialization/state
-	"deploy.git",  // infra-driver bare deploy repo (git init --bare on serve; the subpath must exist before the sidecar mounts it)
-	"git-repos",   // per-BP canonical bare repos (<bp>.git, created by gitops at BP creation / by migration)
+	"deploy.git",   // legacy single infra-driver bare deploy repo (superseded by deploy-repos/<bp>.deploy.git; kept one release for stale-compose mountability)
+	"deploy-repos", // per-BP infra-driver bare deploy repos (<bp>.deploy.git; the subpath must exist before the driver sidecar mounts it)
+	"git-repos",    // per-BP canonical bare repos (<bp>.git, created by gitops at BP creation / by migration)
 	"repo.git",    // legacy single canonical repo (archived by the per-BP migration; kept one release so stale composes can still mount the subpath)
 	"copies",      // per-copy checkouts base
 	"copies/main", // the main copy (per-BP checkouts of each repo's main)
@@ -106,6 +107,15 @@ func (s *Server) migrateWorkspaceDeploymentsToVolumes() {
 		if !perBPDone {
 			if err := migrateToPerBPRepos(ws.Name, wsDir, user1000Runner(false)); err != nil {
 				fmt.Printf("Warning: per-BP repo migration failed for %q (will retry on next start): %v\n", ws.Name, err)
+				continue
+			}
+		}
+		// Split the single deploy-state file into one bitswan.yaml + local repo
+		// per BP (deploy repos are created on demand at first deploy). Idempotent
+		// + marker-guarded.
+		if _, err := os.Stat(filepath.Join(wsDir, deploySplitMarker)); err != nil {
+			if err := migrateToPerBPDeployState(ws.Name, wsDir, user1000Runner(false)); err != nil {
+				fmt.Printf("Warning: per-BP deploy-state split failed for %q (will retry on next start): %v\n", ws.Name, err)
 				continue
 			}
 		}

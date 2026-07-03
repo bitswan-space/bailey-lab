@@ -87,6 +87,7 @@ services:
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: backend
+            gitops.bp: acme
             gitops.context: acme
             gitops.deployment_id: backend-acme-dev
             gitops.intended_exposed: "false"
@@ -123,6 +124,7 @@ services:
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: frontend
+            gitops.bp: acme
             gitops.context: acme
             gitops.deployment_id: frontend-acme-dev
             gitops.intended_exposed: "true"
