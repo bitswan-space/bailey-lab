@@ -300,18 +300,24 @@ def _bp_destination(
 
 
 async def _commit(
-    cwd: str, message: str, author_email: str = "gitops@bitswan.local"
+    cwd: str, message: str, author_email: Optional[str] = None
 ) -> Optional[str]:
     """Stage everything under `cwd` and commit. Returns commit hash or None
-    if there was nothing to commit. Raises on hard failures."""
+    if there was nothing to commit. Raises on hard failures.
+
+    `author_email` (the acting user) is set as BOTH the author AND the committer
+    — via `-c user.name/email`, not just `--author`, so history shows the real
+    user and not the mechanical gitops identity. Falls back to gitops@bitswan.local
+    when no user is known."""
+    email = (author_email or "").strip() or "gitops@bitswan.local"
+    ident = ["-c", f"user.name={email}", "-c", f"user.email={email}"]
     async with GitLockContext(timeout=15.0, kind="apply template"):
         ok = await call_git_command("git", "add", "-A", cwd=cwd)
         if not ok:
             raise RuntimeError("git add -A failed")
 
-        author = f"{author_email} <{author_email}>"
         stdout, stderr, rc = await call_git_command_with_output(
-            "git", "commit", "-m", message, "--author", author, cwd=cwd
+            "git", *ident, "commit", "-m", message, cwd=cwd
         )
         if rc != 0:
             if "nothing to commit" in stdout or "nothing to commit" in stderr:
@@ -376,6 +382,7 @@ async def create_automation_from_template(
     group_id: Optional[str] = None,
     name: Optional[str] = None,
     copy: Optional[str] = None,
+    created_by: Optional[str] = None,
 ) -> dict:
     """Copy a template (or every automation in a group) into the BP directory
     and commit. Returns `{ "created": [ { "name", "relative_path" } ] }`.
@@ -457,7 +464,7 @@ async def create_automation_from_template(
     # A main-scope scaffold must also advance the repo's deploy-only main.
     commit_cwd = os.path.join(_copies_dir(), copy or "main", bp)
     try:
-        await _commit(commit_cwd, message)
+        await _commit(commit_cwd, message, author_email=created_by)
         await publish_bp_clone(commit_cwd, bp, copy)
     except Exception as e:  # noqa: BLE001 — surface commit failures but don't undo the copy
         logger.warning("template commit failed: %s", e)

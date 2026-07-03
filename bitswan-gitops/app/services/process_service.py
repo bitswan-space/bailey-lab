@@ -385,6 +385,7 @@ class ProcessService:
         name: str,
         copy: Optional[str] = None,
         process_id: Optional[str] = None,
+        created_by: Optional[str] = None,
     ) -> dict:
         """Create a new business process: its OWN git repo, a clone of it in
         the target scope, and the `process.toml` + `README.md` scaffold,
@@ -426,7 +427,7 @@ class ProcessService:
         # copies apart). allow_empty: a brand-new repo has only the empty
         # seed commit — the scaffold is the first real content, so the first
         # sync fast-forwards main from the seed.
-        await ensure_bp_bare_repo(clean)
+        await ensure_bp_bare_repo(clean, author=created_by)
         await clone_bp_into_copy(scope_root, copy or "main", clean, allow_empty=True)
 
         pid = process_id or str(uuid.uuid4())
@@ -436,7 +437,9 @@ class ProcessService:
         with open(os.path.join(process_dir, "README.md"), "w") as f:
             f.write(f"# {clean}\n")
 
-        await commit_in_bp_clone(process_dir, f"Create business process {clean}")
+        await commit_in_bp_clone(
+            process_dir, f"Create business process {clean}", author=created_by
+        )
         # Main-scope creation advances the repo's deploy-only main server-side;
         # copy-scope creation rides the copy until Sync & Deploy.
         await publish_bp_clone(process_dir, clean, copy)

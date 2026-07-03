@@ -119,11 +119,22 @@ def _install_pre_receive_hook(repo_path: str) -> None:
     os.chmod(dst, 0o755)
 
 
-async def _seed_empty_main(repo_path: str, bp: str) -> None:
+def _ident_for(author: str | None) -> list[str]:
+    """`-c user.name/email` git args attributing a commit to `author` (an email)
+    when given, else the mechanical Bailey identity."""
+    who = (author or "").strip()
+    if who:
+        return ["-c", f"user.name={who}", "-c", f"user.email={who}"]
+    return list(_GIT_IDENT)
+
+
+async def _seed_empty_main(repo_path: str, bp: str, author: str | None = None) -> None:
     """Point refs/heads/main at an empty root commit (idempotent).
 
     The empty seed makes every downstream flow uniform: copy branches fork
-    from origin/main, and the first real sync is a plain fast-forward.
+    from origin/main, and the first real sync is a plain fast-forward. `author`
+    (an email) is recorded as the seed commit's identity — the creating user —
+    when given.
     """
     _, _, rc = await call_git_command_with_output(
         "git", "-C", repo_path, "rev-parse", "--verify", "refs/heads/main"
@@ -139,7 +150,7 @@ async def _seed_empty_main(repo_path: str, bp: str) -> None:
         "git",
         "-C",
         repo_path,
-        *_GIT_IDENT,
+        *_ident_for(author),
         "commit-tree",
         tree_out.strip(),
         "-m",
@@ -152,7 +163,7 @@ async def _seed_empty_main(repo_path: str, bp: str) -> None:
     )
 
 
-async def ensure_bp_bare_repo(bp: str) -> str:
+async def ensure_bp_bare_repo(bp: str, author: str | None = None) -> str:
     """Ensure a BP's canonical bare repo exists and is fast-forward-only.
 
     Idempotent: safe to call on every startup and on every BP create.
@@ -182,7 +193,7 @@ async def ensure_bp_bare_repo(bp: str) -> str:
     )
 
     _install_pre_receive_hook(repo_path)
-    await _seed_empty_main(repo_path, bp)
+    await _seed_empty_main(repo_path, bp, author)
     return repo_path
 
 

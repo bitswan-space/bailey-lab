@@ -153,6 +153,7 @@ export class GitopsClient {
   async createProcess(input: {
     name: string;
     copy?: string;
+    created_by?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/processes/`, {
       method: 'POST',

@@ -13,6 +13,7 @@ import {
   type ReqStatus,
 } from '../services/requirements.js';
 import type { GitopsClient } from '../services/gitops.js';
+import { emailFromRequest } from '../lib/user.js';
 
 export interface BusinessProcessRoutesOptions {
   workspaceRoot: string;
@@ -46,10 +47,14 @@ export function registerBusinessProcessRoutes(
     if (!name || typeof name !== 'string') {
       return reply.code(400).send({ error: 'name is required' });
     }
+    // The creator recorded on the BP's git commits is the validated token email,
+    // never a client-supplied value — so history shows who made the BP.
+    const createdBy = await emailFromRequest(req, app.log);
     try {
       const r = await gitops.createProcess({
         name,
         ...(copy ? { copy } : {}),
+        ...(createdBy ? { created_by: createdBy } : {}),
       });
       if (!r.ok) {
         return reply
