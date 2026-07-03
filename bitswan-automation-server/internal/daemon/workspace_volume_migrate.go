@@ -82,7 +82,11 @@ func (s *Server) migrateWorkspaceDeploymentsToVolumes() {
 		if _, err := os.Stat(filepath.Join(wsDir, perBPMigratedMarker)); err == nil {
 			perBPDone = true
 		}
-		if volumeDone && perBPDone {
+		deploySplitDone := false
+		if _, err := os.Stat(filepath.Join(wsDir, deploySplitMarker)); err == nil {
+			deploySplitDone = true
+		}
+		if volumeDone && perBPDone && deploySplitDone {
 			continue // fully migrated
 		}
 		// Skip anything that isn't a fully-deployed workspace.
@@ -132,14 +136,19 @@ func (s *Server) migrateWorkspaceDeploymentsToVolumes() {
 			continue
 		}
 
-		// runWorkspaceUpdate regenerates the gitops/editor/dashboard/coding-agent
-		// containers onto the volume, but the deployed block-processor containers
-		// keep binding the old host directory until gitops redeploys them off the
-		// freshly-regenerated compose. Trigger that deploy now so no container is
-		// left writing to the (backup) host path.
-		if err := redeployWorkspaceAutomations(ws.Name); err != nil {
-			fmt.Printf("Warning: failed to redeploy automations for workspace %q onto volume mounts (will retry on next start): %v\n", ws.Name, err)
-			continue
+		// The host→volume move needs a redeploy so the block-processor containers
+		// stop binding the old host directory. But a workspace that is ALREADY on
+		// volumes (only being reprocessed to split repos / deploy state) has its
+		// containers in the right place already — force-redeploying every BP there
+		// is pointless AND harmful: deploy-all is synchronous per BP and the first
+		// deploy of each BP waits on its DB/bucket provisioning, so a large
+		// workspace stalls for many minutes and leaves BPs half-reprovisioned. Skip
+		// it — each BP redeploys per-BP on its next user-triggered deploy.
+		if !volumeDone {
+			if err := redeployWorkspaceAutomations(ws.Name); err != nil {
+				fmt.Printf("Warning: failed to redeploy automations for workspace %q onto volume mounts (will retry on next start): %v\n", ws.Name, err)
+				continue
+			}
 		}
 
 		_ = os.WriteFile(volumeMarker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
