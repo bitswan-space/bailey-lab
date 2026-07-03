@@ -37,8 +37,8 @@ type Driver interface {
 	// NEVER builds images — it deploys the already-built, tagged images
 	// bitswan.yaml references (built via BuildImage first). Idempotent — a no-op
 	// when the running state already matches. prog receives streamed progress; the
-	// returned routes are informational (already reconciled). onlyDeploymentIDs
-	// (optional) narrows the set.
+	// returned routes are informational (already reconciled). When Ctx.BP is set
+	// the request is scoped to one business process (per-BP deploy repos).
 	Apply(ctx context.Context, req ApplyRequest, prog func(Progress)) ([]Route, error)
 
 	// BuildImage bakes a source tree into an image, content-addressed by
@@ -132,15 +132,20 @@ type ExecSpec struct {
 type WorkspaceContext struct {
 	WorkspaceName string `json:"workspace_name"`
 	Domain        string `json:"domain"`
-	GitopsDir     string `json:"gitops_dir"`  // shared volume: bitswan.yaml + copies/ + repo
+	GitopsDir     string `json:"gitops_dir"`  // shared volume: source/checksum trees + copies (UNCHANGED per-BP)
 	SecretsDir    string `json:"secrets_dir"` // shared volume: decrypted secret material
 	WrapAvailable bool   `json:"wrap_available"`
+	// BP is the single business process this apply is scoped to (per-BP deploy
+	// repos). Empty = legacy whole-workspace apply. When set, the pushed
+	// bitswan.yaml already contains only this BP, and reconcile scopes the two
+	// subtractive convergers (orphan retirement, ingress prune) to this BP so a
+	// per-BP apply never touches a sibling BP's containers or routes.
+	BP string `json:"bp,omitempty"`
 }
 
 type ApplyRequest struct {
-	Ctx               WorkspaceContext `json:"ctx"`
-	BitswanYAML       string           `json:"bitswan_yaml"`
-	OnlyDeploymentIDs []string         `json:"only_deployment_ids,omitempty"`
+	Ctx         WorkspaceContext `json:"ctx"`
+	BitswanYAML string           `json:"bitswan_yaml"`
 }
 
 // BuildRequest bakes a source tree (on the shared volume) into an image. Two

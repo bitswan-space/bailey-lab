@@ -25,6 +25,11 @@ type Server struct {
 	// Token is the shared secret guarding every endpoint; empty disables the
 	// guard (single-host dev/test only).
 	Token string
+	// EnsureDeployRepo provisions a per-BP bare deploy repo (init + config +
+	// hook). Set by the serve command in per-BP mode; nil disables the endpoint
+	// (legacy single-repo mode / tests). Wired here rather than in this package to
+	// avoid importing the cmd layer's git-provisioning.
+	EnsureDeployRepo func(bp string) error
 }
 
 func NewServer(d Driver) *Server { return &Server{driver: d} }
@@ -46,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(PathImagesList, s.handleImageList)
 	mux.HandleFunc(PathImagesRemove, s.handleImageRemove)
 	mux.HandleFunc(PathImagesSBOM, s.handleImageSBOM)
+	mux.HandleFunc(PathDeployRepoEnsure, s.handleEnsureDeployRepo)
 	if s.GitProjectRoot != "" {
 		// git smart-HTTP lives at the root; /v1/* above takes precedence because
 		// ServeMux longest-prefix matches the explicit primitive paths first.
@@ -285,6 +291,28 @@ func (s *Server) handleCopyIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.driver.ContainerCopyIn(r.Context(), body.Ctx, body.Container, body.Path, r.Body); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, OKResult{OK: true})
+}
+
+// handleEnsureDeployRepo provisions a BP's bare deploy repo so gitops can push
+// to it. Idempotent. 501 when the driver is in legacy single-repo mode.
+func (s *Server) handleEnsureDeployRepo(w http.ResponseWriter, r *http.Request) {
+	var body EnsureDeployRepoBody
+	if !decode(w, r, &body) {
+		return
+	}
+	if body.BP == "" {
+		http.Error(w, "bp is required", http.StatusBadRequest)
+		return
+	}
+	if s.EnsureDeployRepo == nil {
+		http.Error(w, "per-BP deploy repos not enabled on this driver", http.StatusNotImplemented)
+		return
+	}
+	if err := s.EnsureDeployRepo(body.BP); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
