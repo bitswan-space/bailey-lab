@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -12,6 +13,7 @@ type deployment struct {
 	DeploymentID   string `json:"deployment_id"`
 	State          string `json:"state"`
 	AutomationName string `json:"automation_name"`
+	RelativePath   string `json:"relative_path"`
 	URL            string `json:"url"`
 }
 
@@ -63,11 +65,33 @@ var deploymentsStartCmd = &cobra.Command{
 			return fmt.Errorf("cannot detect copy: %w", err)
 		}
 
-		body := map[string]string{"deployment_id": deploymentID}
-		path := fmt.Sprintf("/deployments/start?copy=%s", copy)
+		// The start endpoint identifies the automation by its source path, not
+		// its deployment ID (the ID only exists once deployed) — resolve the
+		// given ID to a relative_path via the deployments listing.
+		var deployments []deployment
+		if err := agentRequestJSON("GET", fmt.Sprintf("/deployments?copy=%s", copy), nil, &deployments); err != nil {
+			return err
+		}
+		var relPath string
+		for _, d := range deployments {
+			if d.DeploymentID == deploymentID {
+				relPath = d.RelativePath
+				break
+			}
+		}
+		if relPath == "" {
+			var all []string
+			for _, d := range deployments {
+				all = append(all, d.DeploymentID)
+			}
+			return fmt.Errorf("deployment %q not found in copy %q. Available: %s",
+				deploymentID, copy, strings.Join(all, ", "))
+		}
+
+		body := map[string]string{"relative_path": relPath, "copy": copy}
 
 		var result map[string]interface{}
-		if err := agentRequestJSON("POST", path, body, &result); err != nil {
+		if err := agentRequestJSON("POST", "/deployments/start", body, &result); err != nil {
 			return err
 		}
 
