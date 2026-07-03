@@ -1559,7 +1559,11 @@ class AutomationService:
             # opaque ciphertext — we surface only THAT it changed (who/when),
             # never the secret itself. Applies to the backend on its next deploy.
             sec_key = _parse_revision_secret_blob(bp_dir, sha, bp, realm)
-            if sec_key != prev_sec_key and (sec_key or prev_sec_key) and not emitted_deploy:
+            if (
+                sec_key != prev_sec_key
+                and (sec_key or prev_sec_key)
+                and not emitted_deploy
+            ):
                 # A secret change is applied on top of — and redeploys — the
                 # source currently deployed at this revision, so it carries that
                 # source_commit + members: it is a first-class deployment (it can

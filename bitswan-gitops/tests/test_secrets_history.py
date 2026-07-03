@@ -81,9 +81,7 @@ def test_secret_write_materializes_history_and_rollback(tmp_path, monkeypatch):
     prod_commit = [e for e in prod_hist["history"] if e["source"] == "secret"][0][
         "commit"
     ]
-    redacted = asyncio.run(
-        svc.read_bp_secrets_at("shop", prod_commit, "production")
-    )
+    redacted = asyncio.run(svc.read_bp_secrets_at("shop", prod_commit, "production"))
     assert redacted["realm"] == "production"
     assert redacted["values"] == {}
 
