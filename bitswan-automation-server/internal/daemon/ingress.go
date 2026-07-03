@@ -670,6 +670,8 @@ func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, err
 	traefikStaticConfig := `entryPoints:
   web:
     address: ":80"
+    forwardedHeaders:
+      insecure: true
 api:
   insecure: true
 providers:
