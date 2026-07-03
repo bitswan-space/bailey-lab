@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { SC_SCENES, installFetch } from './harness.js';
 
-const { BootstrapScene, ApprovalScene, RecoveryScene } = SC_SCENES;
+const { BootstrapScene, ApprovalScene, RecoveryScene, InviteScene } = SC_SCENES;
 
 // followRedirect calls window.location.reload / assign — stub both so live
 // success paths don't blow up jsdom (navigation is not implemented).
@@ -171,5 +171,66 @@ describe('RecoveryScene', () => {
     render(<RecoveryScene gateState={{ totp_enrolled: true }} onRecovered={vi.fn()} goConsole={goConsole} />);
     fireEvent.click(screen.getByText('Back to sign in'));
     expect(goConsole).toHaveBeenCalled();
+  });
+});
+
+// InviteScene — redeems the emailed invite token on mount and branches on the
+// backend's failure codes; every failure path offers a way forward.
+describe('InviteScene', () => {
+  const gs = { email: 'grace@h', claimed: true, trusted: false };
+
+  it('successful redeem clears the token and follows redirect_path', async () => {
+    installFetch({ '/bailey/api/invite/redeem': { json: { ok: true, redirect_path: '/' } } });
+    const clearToken = vi.fn();
+    render(<InviteScene token="tok" gateState={gs} clearToken={clearToken} onFallback={vi.fn()} />);
+    await waitFor(() => expect(clearToken).toHaveBeenCalled());
+    expect(window.location.assign).toHaveBeenCalledWith('/');
+  });
+
+  it('expired invite explains and falls back to device approval', async () => {
+    installFetch({ '/bailey/api/invite/redeem': { status: 410, json: { error: 'invite expired', code: 'expired' } } });
+    const onFallback = vi.fn();
+    render(<InviteScene token="tok" gateState={gs} clearToken={vi.fn()} onFallback={onFallback} />);
+    await waitFor(() => expect(screen.getByText('This invite has expired')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: /Continue to device approval/ }));
+    expect(onFallback).toHaveBeenCalled();
+  });
+
+  it('consumed invite gets its own message', async () => {
+    installFetch({ '/bailey/api/invite/redeem': { status: 410, json: { error: 'already used', code: 'consumed' } } });
+    render(<InviteScene token="tok" gateState={gs} clearToken={vi.fn()} onFallback={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText('This invite was already used')).toBeTruthy());
+  });
+
+  it('wrong account offers sign-out (and no approval fallback)', async () => {
+    installFetch({ '/bailey/api/invite/redeem': { status: 403, json: { error: 'different account', code: 'wrong_account' } } });
+    render(<InviteScene token="tok" gateState={gs} clearToken={vi.fn()} onFallback={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText('This invite was sent to a different account')).toBeTruthy());
+    expect(screen.getByText(/signed in as grace@h/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Continue to device approval/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Sign out/ }));
+    expect(window.location.assign).toHaveBeenCalledWith('/bailey/signout');
+  });
+
+  it('already_trusted clears the token and reloads into gate-state', async () => {
+    installFetch({ '/bailey/api/invite/redeem': { status: 409, json: { error: 'has a device', code: 'already_trusted' } } });
+    const clearToken = vi.fn();
+    render(<InviteScene token="tok" gateState={gs} clearToken={clearToken} onFallback={vi.fn()} />);
+    await waitFor(() => expect(clearToken).toHaveBeenCalled());
+    expect(window.location.reload).toHaveBeenCalled();
+  });
+
+  it('transient failure offers Try again and retries the redeem', async () => {
+    let calls = 0;
+    installFetch({ '/bailey/api/invite/redeem': () => {
+      calls += 1;
+      return calls === 1
+        ? { status: 500, json: { error: 'boom' } }
+        : { json: { ok: true, redirect_path: '/after' } };
+    } });
+    render(<InviteScene token="tok" gateState={gs} clearToken={vi.fn()} onFallback={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText(/boom/)).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: /Try again/ }));
+    await waitFor(() => expect(window.location.assign).toHaveBeenCalledWith('/after'));
   });
 });

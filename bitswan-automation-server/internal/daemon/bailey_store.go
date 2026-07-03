@@ -188,6 +188,26 @@ CREATE TABLE IF NOT EXISTS events (
   target TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_ts_idx ON events(ts);
+
+-- Pending Bailey invites. An admin invites an AOC-org member by email;
+-- the emailed link carries a single-use token whose SHA-256 hex digest
+-- is stored here (the raw token is never at rest — a leaked/backed-up
+-- bailey.db can't be replayed into working invite links). One row per
+-- email: re-inviting replaces the outstanding invite. Redeeming the
+-- token trusts the user's FIRST device (see the invite-redeem gate
+-- API); consumed_at marks the row burned. role is applied on
+-- redemption. email_sent records whether the AOC delivered the invite
+-- email (0 = the admin got a copyable link instead).
+CREATE TABLE IF NOT EXISTS invites (
+  email       TEXT PRIMARY KEY COLLATE NOCASE,
+  token_hash  TEXT NOT NULL UNIQUE,
+  role        TEXT NOT NULL,
+  created_by  TEXT NOT NULL COLLATE NOCASE,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  consumed_at TEXT,
+  email_sent  INTEGER NOT NULL DEFAULT 0
+);
 `
 
 // baileyDBPath returns the absolute on-disk location of the daemon's

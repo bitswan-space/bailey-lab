@@ -96,6 +96,12 @@ func serveServerConsole(w http.ResponseWriter, r *http.Request) {
 			"img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "+
 			"frame-ancestors 'self' https://"+outer)
 	w.Header().Del("X-Frame-Options")
+	// The onboarding host can land with an invite token in the query
+	// (?invite=…). The SPA strips it via replaceState immediately, but
+	// never let it leak through a Referer header in the meantime.
+	if isServerConsoleOnboardHost(requestEndpointHost(r)) {
+		w.Header().Set("Referrer-Policy", "no-referrer")
+	}
 
 	// The SPA shell (serve == "/") is what every top-level navigation and
 	// client-side route resolves to. Inject the nav-sync script so the SPA's

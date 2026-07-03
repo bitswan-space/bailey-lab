@@ -174,3 +174,71 @@ describe('No design-preview scene menu (removed)', () => {
     expect(screen.queryByText('Account recovery')).toBeNull();
   });
 });
+
+// Invite intent: pickScene's invite rule + the token stash/strip helpers
+// (exposed via window.SC_HELPERS, like serverHost/pickScene already are).
+describe('invite intent', () => {
+  const { pickScene, getInviteToken, clearInviteToken } = window.SC_HELPERS;
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    vi.spyOn(window.history, 'replaceState').mockImplementation(() => {});
+  });
+
+  it('pickScene: token + claimed + untrusted → invite; trusted and recovery win', () => {
+    expect(pickScene({ claimed: true, trusted: false }, false, 'tok')).toBe('invite');
+    expect(pickScene({ claimed: true, trusted: true }, false, 'tok')).toBe('console');
+    expect(pickScene({ claimed: true, trusted: false }, true, 'tok')).toBe('recovery');
+    // Unclaimed: falls through to bootstrap/waiting — never invite.
+    expect(pickScene({ claimed: false, can_claim: true }, false, 'tok')).toBe('bootstrap');
+    expect(pickScene({ claimed: false, can_claim: false }, false, 'tok')).toBe('waiting');
+    expect(pickScene({ claimed: true, trusted: false }, false, '')).toBe('approval');
+  });
+
+  it('getInviteToken parses ?invite=, stashes it, and strips the URL', () => {
+    setLocation({ search: '?invite=tok123', pathname: '/' });
+    expect(getInviteToken()).toBe('tok123');
+    expect(sessionStorage.getItem('bailey_invite_token')).toBe('tok123');
+    expect(window.history.replaceState).toHaveBeenCalledWith({}, '', '/');
+    // Subsequent calls (URL already stripped) read the stash.
+    setLocation({ search: '', pathname: '/' });
+    expect(getInviteToken()).toBe('tok123');
+    clearInviteToken();
+    expect(getInviteToken()).toBe('');
+  });
+
+  it('getInviteToken recovers a token embedded in ?return= (old console-host links)', () => {
+    setLocation({ search: '?return=' + encodeURIComponent('https://bailey.example.test/?invite=embedded1'), pathname: '/' });
+    expect(getInviteToken()).toBe('embedded1');
+    expect(sessionStorage.getItem('bailey_invite_token')).toBe('embedded1');
+  });
+
+  it('a trusted gate-state with a stale stashed token lands in the console and drops the stash', async () => {
+    sessionStorage.setItem('bailey_invite_token', 'stale');
+    setLocation({ search: '', pathname: '/' });
+    installFetch(fullRoutes());
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('Server overview')).toBeTruthy());
+    await waitFor(() => expect(sessionStorage.getItem('bailey_invite_token')).toBeNull());
+  });
+
+  it('untrusted + stashed token renders the invite scene (redeem in flight)', async () => {
+    sessionStorage.setItem('bailey_invite_token', 'tok');
+    setLocation({ search: '', pathname: '/' });
+    installFetch({
+      '/bailey/api/gate-state': { json: { trusted: false, claimed: true, email: 'grace@h' } },
+      '/bailey/api/invite/redeem': { status: 410, json: { error: 'gone', code: 'expired' } },
+    });
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('This invite has expired')).toBeTruthy());
+    // The fallback drops into the standard approval flow.
+    installFetch({
+      '/bailey/api/gate-state': { json: { trusted: false, claimed: true, email: 'grace@h' } },
+      '/bailey/api/pending-pair': { json: { code: '111222' } },
+      '/bailey/api/pending-pair/poll': { json: {} },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Continue to device approval/ }));
+    await waitFor(() => expect(screen.getByText('Trust this device')).toBeTruthy());
+    expect(sessionStorage.getItem('bailey_invite_token')).toBeNull();
+  });
+});

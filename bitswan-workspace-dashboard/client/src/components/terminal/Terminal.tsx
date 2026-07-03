@@ -1,6 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+
+type UploadStatus = 'uploading' | 'done' | 'failed';
 
 export interface TerminalProps {
   /**
@@ -12,14 +14,34 @@ export interface TerminalProps {
   wsUrl: string;
   /** Fires once when the underlying WebSocket reports close. */
   onExit?: () => void;
+  /**
+   * Uploads image files somewhere the process on the far end of the PTY can
+   * read them, and resolves to the paths (relative to that process's cwd) to
+   * inject into the terminal as text. The PTY transport is UTF-8 only —
+   * binary frames are flattened server-side — so a file path is the only
+   * form in which an image can cross this socket.
+   */
+  onUploadImages?: (files: File[]) => Promise<string[]>;
 }
 
-export function Terminal({ wsUrl, onExit }: TerminalProps) {
+export function Terminal({ wsUrl, onExit, onUploadImages }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Pin the latest onExit in a ref so the effect doesn't tear down + rebuild
   // the xterm/WebSocket pair every time the parent passes a new closure.
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
+  const onUploadImagesRef = useRef(onUploadImages);
+  onUploadImagesRef.current = onUploadImages;
+
+  // Upload feedback pill. Written from inside the effect closure (setState
+  // identity is stable), rendered as an overlay so nothing touches the PTY
+  // byte stream — anything we `term.write` locally would be overdrawn by
+  // the remote TUI's next repaint anyway. The refs arbitrate concurrent
+  // uploads (show 'done' only when the last in-flight one settles) and
+  // invalidate stale hide-timers when a new upload starts under one.
+  const [uploadStatus, setUploadStatus] = useState<UploadStatus | undefined>();
+  const uploadsInFlightRef = useRef(0);
+  const uploadEpochRef = useRef(0);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -184,6 +206,66 @@ export function Terminal({ wsUrl, onExit }: TerminalProps) {
       }
     });
 
+    // Image paste / drag-drop. Claude Code accepts images only by file path
+    // in this setup (browser xterm can't do native-terminal image paste), so
+    // the parent-provided uploader puts the file on the agent's filesystem
+    // and we type the resulting path into the PTY on the user's behalf.
+    const settleUpload = (status: 'done' | 'failed') => {
+      uploadsInFlightRef.current -= 1;
+      if (uploadsInFlightRef.current > 0) return; // another one still running
+      const epoch = ++uploadEpochRef.current;
+      setUploadStatus(status);
+      setTimeout(
+        () => {
+          if (uploadEpochRef.current === epoch) setUploadStatus(undefined);
+        },
+        status === 'failed' ? 4000 : 2000,
+      );
+    };
+    const handleImageFiles = (files: File[]) => {
+      const upload = onUploadImagesRef.current;
+      if (!upload || files.length === 0) return;
+      uploadsInFlightRef.current += 1;
+      uploadEpochRef.current += 1;
+      setUploadStatus('uploading');
+      void upload(files)
+        .then((paths) => {
+          if (paths.length > 0 && ws.readyState === WebSocket.OPEN) {
+            ws.send(encoder.encode(paths.join(' ') + ' '));
+          }
+          settleUpload('done');
+        })
+        .catch(() => settleUpload('failed'));
+    };
+    // Capture phase so an image paste never reaches xterm's own textarea
+    // paste handler (which would insert the useless "image.png" text). Text
+    // pastes fall through untouched.
+    const onPaste = (e: ClipboardEvent) => {
+      const images = Array.from(e.clipboardData?.items ?? [])
+        .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+        .map((it) => it.getAsFile())
+        .filter((f): f is File => f !== null);
+      if (images.length === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      handleImageFiles(images);
+    };
+    const onDragOver = (e: DragEvent) => {
+      if (onUploadImagesRef.current) e.preventDefault();
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!onUploadImagesRef.current) return;
+      e.preventDefault();
+      handleImageFiles(
+        Array.from(e.dataTransfer?.files ?? []).filter((f) =>
+          f.type.startsWith('image/'),
+        ),
+      );
+    };
+    host.addEventListener('paste', onPaste, true);
+    host.addEventListener('dragover', onDragOver);
+    host.addEventListener('drop', onDrop);
+
     const observer = new ResizeObserver((entries) => {
       // When the host gets `display: none` (e.g. user switches dashboard
       // tabs or selects another session), the observer fires with a 0×0
@@ -205,6 +287,9 @@ export function Terminal({ wsUrl, onExit }: TerminalProps) {
 
       return () => {
         if (redrawNudge) clearTimeout(redrawNudge);
+        host.removeEventListener('paste', onPaste, true);
+        host.removeEventListener('dragover', onDragOver);
+        host.removeEventListener('drop', onDrop);
         observer.disconnect();
         dataDisposable.dispose();
         ws.close();
@@ -213,5 +298,26 @@ export function Terminal({ wsUrl, onExit }: TerminalProps) {
     }
   }, [wsUrl]);
 
-  return <div ref={hostRef} className="h-full w-full bg-zinc-50" />;
+  return (
+    <div className="relative h-full w-full">
+      <div ref={hostRef} className="h-full w-full bg-zinc-50" />
+      {uploadStatus && (
+        <div
+          className={`pointer-events-none absolute right-3 top-2 z-10 rounded-full px-3 py-1 text-xs font-medium text-white shadow-md ${
+            uploadStatus === 'uploading'
+              ? 'bg-zinc-800/90'
+              : uploadStatus === 'done'
+                ? 'bg-emerald-600/90'
+                : 'bg-red-600/90'
+          }`}
+        >
+          {uploadStatus === 'uploading'
+            ? 'Uploading image…'
+            : uploadStatus === 'done'
+              ? 'Image attached'
+              : 'Image upload failed'}
+        </div>
+      )}
+    </div>
+  );
 }
