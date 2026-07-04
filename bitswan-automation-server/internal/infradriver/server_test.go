@@ -21,6 +21,7 @@ type fakeDriver struct {
 	eventsErr    error
 	stopped      string
 	restarted    string
+	removed      string
 	restartErr   error
 	applyCalled  bool
 	buildLogs    []string
@@ -86,6 +87,11 @@ func (f *fakeDriver) ContainerStop(_ context.Context, _ WorkspaceContext, contai
 func (f *fakeDriver) ContainerRestart(_ context.Context, _ WorkspaceContext, container string) error {
 	f.restarted = container
 	return f.restartErr
+}
+
+func (f *fakeDriver) ContainerRemove(_ context.Context, _ WorkspaceContext, container string) error {
+	f.removed = container
+	return nil
 }
 
 func (f *fakeDriver) ImageList(_ context.Context, _ WorkspaceContext) ([]Image, error) {

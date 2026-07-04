@@ -70,6 +70,10 @@ type Driver interface {
 	// bitswan.yaml mutation + Apply).
 	ContainerStop(ctx context.Context, req WorkspaceContext, container string) error
 	ContainerRestart(ctx context.Context, req WorkspaceContext, container string) error
+	// ContainerRemove force-removes a container so an inactive (LRU-evicted /
+	// stopped) deployment costs nothing. The caller marks the deployment
+	// active:false first, so no reconcile recreates it.
+	ContainerRemove(ctx context.Context, req WorkspaceContext, container string) error
 
 	// ImageList returns the workspace's built images (those tagged
 	// internal/<workspace>-…). Host image ops belong to the driver (it owns

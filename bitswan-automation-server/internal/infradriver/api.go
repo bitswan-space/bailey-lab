@@ -55,6 +55,7 @@ const (
 	PathContainersLogs    = "/v1/containers/logs"
 	PathContainersStop    = "/v1/containers/stop"
 	PathContainersRestart = "/v1/containers/restart"
+	PathContainersRemove  = "/v1/containers/remove"
 	PathContainersExec    = "/v1/containers/exec"
 	PathContainersCopyOut = "/v1/containers/copy-out"
 	PathContainersCopyIn  = "/v1/containers/copy-in"

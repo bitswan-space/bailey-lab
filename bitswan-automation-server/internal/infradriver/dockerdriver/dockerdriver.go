@@ -355,6 +355,30 @@ func (d *DockerDriver) ContainerStop(ctx context.Context, _ infradriver.Workspac
 	return nil
 }
 
+// ContainerRemove force-removes a container (docker rm -f). Used to make an
+// LRU-evicted / stopped deployment cost nothing — the deployment is marked
+// active:false first, so the compiler excludes it and no reconcile recreates it.
+func (d *DockerDriver) ContainerRemove(ctx context.Context, _ infradriver.WorkspaceContext, container string) error {
+	if err := d.assertInWorkspace(ctx, container); err != nil {
+		// Already gone (a concurrent remove won the race) is success, not an
+		// error — removal is idempotent.
+		if strings.Contains(strings.ToLower(err.Error()), "no such") {
+			return nil
+		}
+		return err
+	}
+	if out, err := exec.CommandContext(ctx, "docker", "rm", "-f", container).CombinedOutput(); err != nil {
+		msg := strings.ToLower(string(out))
+		// Idempotent: another enforce pass (the deploy hook + the periodic sweep
+		// can overlap) may already be removing / have removed it.
+		if strings.Contains(msg, "already in progress") || strings.Contains(msg, "no such container") {
+			return nil
+		}
+		return fmt.Errorf("docker rm -f %s: %w: %s", container, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // ContainerRestart restarts a container.
 func (d *DockerDriver) ContainerRestart(ctx context.Context, _ infradriver.WorkspaceContext, container string) error {
 	if err := d.assertInWorkspace(ctx, container); err != nil {

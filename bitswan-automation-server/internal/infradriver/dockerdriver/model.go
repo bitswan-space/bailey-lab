@@ -42,7 +42,13 @@ type bpNode struct {
 // ignored. The slice/map extras keep their YAML shape so they pass through
 // untouched into the generated compose (Python's `passthroughs`).
 type Deployment struct {
-	Enabled        *bool                  `yaml:"enabled"`
+	Enabled *bool `yaml:"enabled"`
+	// Active=false means the deployment is intentionally OFF (a live-dev instance
+	// evicted by the LRU cap, or a manually-stopped automation): it is EXCLUDED
+	// from the compiled compose so a reconcile neither creates nor restarts it,
+	// and its container can be removed to cost nothing until it is woken (which
+	// flips this back to true and redeploys). Absent (nil) = active, the default.
+	Active         *bool                  `yaml:"active"`
 	AutomationName string                 `yaml:"automation_name"`
 	Context        string                 `yaml:"context"`
 	Stage          string                 `yaml:"stage"`

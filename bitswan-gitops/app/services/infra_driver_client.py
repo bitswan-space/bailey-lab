@@ -43,6 +43,7 @@ PATH_CONTAINERS_INSPECT = "/v1/containers/inspect"
 PATH_CONTAINERS_LOGS = "/v1/containers/logs"
 PATH_CONTAINERS_STOP = "/v1/containers/stop"
 PATH_CONTAINERS_RESTART = "/v1/containers/restart"
+PATH_CONTAINERS_REMOVE = "/v1/containers/remove"
 PATH_CONTAINERS_EXEC = "/v1/containers/exec"
 PATH_CONTAINERS_COPY_OUT = "/v1/containers/copy-out"
 PATH_CONTAINERS_COPY_IN = "/v1/containers/copy-in"
@@ -440,6 +441,14 @@ class InfraDriverClient:
     async def container_restart(self, ctx: WorkspaceContext, container: str) -> None:
         await self._post_json(
             PATH_CONTAINERS_RESTART, {"ctx": ctx.to_json(), "container": container}
+        )
+
+    async def container_remove(self, ctx: WorkspaceContext, container: str) -> None:
+        """Force-remove a container (docker rm -f), so an evicted/inactive
+        deployment costs nothing. The caller marks it active:false first, so the
+        driver's compiler excludes it and no reconcile recreates it."""
+        await self._post_json(
+            PATH_CONTAINERS_REMOVE, {"ctx": ctx.to_json(), "container": container}
         )
 
     async def container_logs(

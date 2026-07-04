@@ -45,6 +45,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc(PathContainersLogs, s.handleLogs)
 	mux.HandleFunc(PathContainersStop, s.handleStop)
 	mux.HandleFunc(PathContainersRestart, s.handleRestart)
+	mux.HandleFunc(PathContainersRemove, s.handleRemove)
 	mux.HandleFunc(PathContainersExec, s.handleExec)
 	mux.HandleFunc(PathContainersCopyOut, s.handleCopyOut)
 	mux.HandleFunc(PathContainersCopyIn, s.handleCopyIn)
@@ -190,6 +191,12 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	s.containerAction(w, r, func(ctx WorkspaceContext, name string) error {
 		return s.driver.ContainerRestart(r.Context(), ctx, name)
+	})
+}
+
+func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
+	s.containerAction(w, r, func(ctx WorkspaceContext, name string) error {
+		return s.driver.ContainerRemove(r.Context(), ctx, name)
 	})
 }
 
