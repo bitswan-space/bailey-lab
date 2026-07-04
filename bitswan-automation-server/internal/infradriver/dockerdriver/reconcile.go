@@ -31,6 +31,14 @@ func stateDir(wctx infradriver.WorkspaceContext) string {
 }
 
 func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, composeYAML string, routes []infradriver.Route, report func(step, msg string)) error {
+	// Per-phase profiling: attribute the wall-clock between consecutive progress
+	// steps to the step that just finished, and write a summary line at the end
+	// (perf-reconcile.log). Zero per-phase edits — every report() below is a
+	// phase boundary.
+	pt := newPhaseTimer(report)
+	report = pt.report
+	defer pt.finish(wctx.GitopsDir, wctx.BP)
+
 	// 1. Ensure the per-(workspace, stage) networks the compose references as
 	//    external exist (automation_service._ensure_stage_networks).
 	report("networks", "Ensuring stage networks...")
@@ -275,25 +283,23 @@ type containerInfo struct {
 // listWorkspaceContainers returns the workspace's containers with their state
 // and labels (gitops get_container, but scoped to the whole workspace).
 func listWorkspaceContainers(ctx context.Context, wctx infradriver.WorkspaceContext) ([]containerInfo, error) {
-	out, err := exec.CommandContext(ctx, "docker", "ps", "--all", "--no-trunc", "--quiet",
+	// A single `docker ps --format` (no per-container `docker inspect`) — this
+	// helper backs the pre-snapshot, cert scoping, orphan retirement AND live-DB
+	// provisioning, so it runs several times per apply. `docker inspect <all
+	// ids>` costs ~0.3s/container on a busy shared daemon (tens of seconds each
+	// call); id/state/labels all come straight from `docker ps`.
+	out, err := exec.CommandContext(ctx, "docker", "ps", "--all", "--no-trunc",
+		"--format", psFormat,
 		"--filter", "label=gitops.workspace="+wctx.WorkspaceName).Output()
 	if err != nil {
 		return nil, fmt.Errorf("docker ps: %w", err)
 	}
-	ids := strings.Fields(string(out))
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	raw, err := exec.CommandContext(ctx, "docker", append([]string{"inspect"}, ids...)...).Output()
-	if err != nil {
-		return nil, fmt.Errorf("docker inspect: %w", err)
-	}
-	inspected, err := parseInspect(raw)
+	listed, err := parsePS(out)
 	if err != nil {
 		return nil, err
 	}
-	infos := make([]containerInfo, 0, len(inspected))
-	for _, c := range inspected {
+	infos := make([]containerInfo, 0, len(listed))
+	for _, c := range listed {
 		infos = append(infos, containerInfo{id: c.ID, state: c.State, labels: c.Labels})
 	}
 	return infos, nil
