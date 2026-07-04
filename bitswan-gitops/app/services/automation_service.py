@@ -976,16 +976,19 @@ class AutomationService:
         return img.full_tag, img.image_id
 
     def _ensure_builds_gitignored(self) -> None:
-        """Keep the transient `.builds/` build-context dir out of the deploy push."""
+        """Keep transient local-only dirs (the `.builds/` build context, the
+        `.live-dev-access/` LRU markers) out of any deploy push."""
         gi = os.path.join(self.gitops_dir, ".gitignore")
         existing = ""
         if os.path.isfile(gi):
             with open(gi) as f:
                 existing = f.read()
-        if ".builds/" not in existing.split():
+        entries = existing.split()
+        missing = [e for e in (".builds/", ".live-dev-access/") if e not in entries]
+        if missing:
             sep = "" if (not existing or existing.endswith("\n")) else "\n"
             with open(gi, "a") as f:
-                f.write(f"{sep}.builds/\n")
+                f.write(sep + "".join(e + "\n" for e in missing))
 
     @staticmethod
     def _materialize_build_context(ctx: str, dirs_to_merge: list[str]) -> None:
@@ -3088,6 +3091,19 @@ class AutomationService:
             time.monotonic() - _t_apply,
         )
 
+        # Live-dev pool bookkeeping: stamp this instance's activity and keep the
+        # running pool under the cap (this deploy may be the one that overflows
+        # it). Best-effort — a cap-sweep hiccup must never fail the deploy.
+        if stage == self.LIVE_DEV_STAGE:
+            try:
+                for ctx in {p.get("context") for p in prepped if p.get("context")}:
+                    self.touch_live_dev_access(ctx)
+                await self.enforce_live_dev_cap()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "live-dev cap enforcement after deploy failed", exc_info=True
+                )
+
         return {
             "message": "Deployed successfully",
             "label": label,
@@ -3939,6 +3955,200 @@ class AutomationService:
             if config.get("active", False):
                 active_deployments[deployment_id] = config
         return active_deployments
+
+    # ── live-dev instance pool (bounded, LRU-evicted, lazily rehydrated) ───────
+    # A "live-dev instance" is one (copy, BP) deployed to the live-dev stage: its
+    # WORKER containers (backend/frontend) carry gitops.context=copy-<copy>-<bp>
+    # + gitops.stage=live-dev. We keep at most BITSWAN_MAX_LIVE_DEV of them
+    # RUNNING; the rest are stopped (workers only — the per-BP egress gateway is
+    # shared across a BP's copies+dev and must never be stopped here) with their
+    # deploy entry + live-dev DB + ingress route intact, so a later access
+    # rehydrates them cheaply. Eviction is oldest-first by last activity
+    # (deploy or access), tracked via a marker file since `docker restart`
+    # doesn't refresh a container's Created time.
+    LIVE_DEV_STAGE = "live-dev"
+
+    def _max_live_dev(self) -> int:
+        try:
+            return max(1, int(os.environ.get("BITSWAN_MAX_LIVE_DEV", "15")))
+        except (ValueError, TypeError):
+            return 15
+
+    def _live_dev_access_dir(self) -> str:
+        return os.path.join(self.gitops_dir, ".live-dev-access")
+
+    def touch_live_dev_access(self, context: str) -> None:
+        """Stamp an instance's last-activity (deploy or wake) so the LRU sweep
+        keeps recently-used instances hot. Best-effort — never fails a deploy."""
+        if not context:
+            return
+        try:
+            d = self._live_dev_access_dir()
+            os.makedirs(d, exist_ok=True)
+            open(os.path.join(d, sanitize_automation_name(context)), "w").close()
+        except OSError:
+            logger.debug("touch live-dev access failed for %s", context, exc_info=True)
+
+    def _live_dev_last_activity(self, context: str, created: int) -> float:
+        """Last-activity epoch for ordering: the access marker's mtime if present
+        (set on every deploy/wake), else the container's Created (first deploy)."""
+        try:
+            p = os.path.join(
+                self._live_dev_access_dir(), sanitize_automation_name(context)
+            )
+            return max(float(created or 0), os.path.getmtime(p))
+        except OSError:
+            return float(created or 0)
+
+    async def _live_dev_instances(self) -> dict[str, dict]:
+        """Map context → {context, created, running, deployment_ids} for every
+        live-dev worker (running or stopped), grouped into instances."""
+        containers = await self.infra_driver.container_list(
+            self._workspace_ctx(),
+            labels={
+                "gitops.workspace": self.workspace_name,
+                "gitops.stage": self.LIVE_DEV_STAGE,
+            },
+        )
+        instances: dict[str, dict] = {}
+        for c in containers:
+            ctx = (c.labels or {}).get("gitops.context")
+            dep = (c.labels or {}).get("gitops.deployment_id")
+            if not ctx or not dep:
+                continue
+            inst = instances.setdefault(
+                ctx,
+                {
+                    "context": ctx,
+                    "created": 0,
+                    "running": False,
+                    "hydrating": False,
+                    "deployment_ids": set(),
+                },
+            )
+            inst["created"] = max(inst["created"], c.created or 0)
+            inst["deployment_ids"].add(dep)
+            if c.state == "running":
+                inst["running"] = True
+            # "hydrating" = up OR mid-startup (a wake in flight): a repeated wake
+            # (the loading page refreshes every few seconds) must not re-recreate
+            # a container that is already coming up, or it flaps forever.
+            if c.state in ("running", "created", "restarting"):
+                inst["hydrating"] = True
+        return instances
+
+    async def enforce_live_dev_cap(self) -> dict:
+        """Keep at most BITSWAN_MAX_LIVE_DEV live-dev instances RUNNING; stop the
+        oldest (least-recently-active) overflow. Evicted instances keep their
+        entry/DB/route, so a wake is cheap. Never touches the shared egress
+        gateway/proxy. Idempotent + best-effort per instance."""
+        cap = self._max_live_dev()
+        instances = await self._live_dev_instances()
+        running = [i for i in instances.values() if i["running"]]
+        if len(running) <= cap:
+            return {"running": len(running), "cap": cap, "evicted": []}
+        running.sort(
+            key=lambda i: self._live_dev_last_activity(i["context"], i["created"])
+        )
+        to_evict = running[: len(running) - cap]
+        evicted: list[str] = []
+        for inst in to_evict:
+            ok = False
+            for dep in sorted(inst["deployment_ids"]):
+                try:
+                    await self.stop_automation(dep)
+                    ok = True
+                except Exception as e:  # noqa: BLE001 — one instance must not abort the sweep
+                    logger.warning("live-dev evict of %s failed: %s", dep, e)
+            if ok:
+                evicted.append(inst["context"])
+        if evicted:
+            logger.info(
+                "live-dev cap %d: %d running → evicted %d: %s",
+                cap,
+                len(running),
+                len(evicted),
+                ", ".join(evicted),
+            )
+        return {"running": len(running), "cap": cap, "evicted": evicted}
+
+    async def wake_live_dev(self, context: str) -> dict:
+        """Rehydrate an evicted live-dev instance (called on BP-load and on first
+        HTTP access via the gate) AND refresh its LRU recency.
+
+        ALWAYS stamps last-activity (so opening a BP keeps it hot / makes this a
+        true-LRU touch). If the instance is already running it is a no-op beyond
+        that touch — we must never restart a healthy instance (the dashboard
+        fires this on every load). Only when it's stopped/cold do we start its
+        workers (or redeploy if the containers were cold-GC'd), then re-enforce
+        the cap. Returns the started deployment_ids so a caller can poll health."""
+        self.touch_live_dev_access(context)
+        instances = await self._live_dev_instances()
+        inst = instances.get(context)
+        # Already up OR mid-startup (a wake in flight) → touch-only. This makes
+        # repeated wakes (the loading page polls every few seconds, and the
+        # dashboard fires on every BP-load) cheap no-ops and prevents flapping.
+        if inst and inst["hydrating"]:
+            return {"context": context, "deployment_ids": [], "already_running": True}
+
+        ctx = self._workspace_ctx()
+        started: list[str] = []
+        if inst and inst["deployment_ids"]:
+            # Warm path: the workers exist but are stopped — just start them
+            # (docker restart). No compose recreate: the containers kept their
+            # config/certs/env, so restarting is fast and non-churny.
+            for dep in sorted(inst["deployment_ids"]):
+                try:
+                    for c in await self.get_container(dep):
+                        await self.infra_driver.container_restart(ctx, c.get("Id"))
+                    await self.mark_as_active(dep)
+                    started.append(dep)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("live-dev wake (restart) of %s failed: %s", dep, e)
+        else:
+            # Cold path: no containers (cold-GC'd) — recover members from the
+            # deploy entries and redeploy to recreate them.
+            bs = read_bitswan_yaml(self.gitops_dir) or {}
+            deps = [
+                did
+                for did, conf in (bs.get("deployments") or {}).items()
+                if (conf or {}).get("context") == context
+                and (conf or {}).get("stage") == self.LIVE_DEV_STAGE
+            ]
+            for dep in deps:
+                try:
+                    await self.start_automation(dep)
+                    started.append(dep)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("live-dev wake (redeploy) of %s failed: %s", dep, e)
+        # Waking pushes the pool to +1 — evict the new oldest to stay at the cap
+        # (never this instance: it was just touched).
+        await self.enforce_live_dev_cap()
+        return {"context": context, "deployment_ids": started}
+
+    async def wake_by_host(self, host: str) -> dict:
+        """Resolve a request hostname to its live-dev instance and rehydrate it —
+        the daemon gate's scale-from-zero hook calls this when a request hits a
+        dehydrated live-dev host. Matches the host's DNS label against each
+        live-dev deployment's COMPUTED hostname (make_hostname_label), so no
+        reverse-hashing is needed. Returns the woken context (or None if the host
+        isn't a known live-dev instance)."""
+        label = (host or "").split(".", 1)[0].lower().replace("--inner", "")
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        for conf in (bs.get("deployments") or {}).values():
+            conf = conf or {}
+            if conf.get("stage") != self.LIVE_DEV_STAGE:
+                continue
+            auto = conf.get("automation_name") or ""
+            context = conf.get("context") or ""
+            if not auto:
+                continue
+            h = make_hostname_label(
+                self.workspace_name, auto, context, self.LIVE_DEV_STAGE
+            )
+            if h.lower() == label:
+                return await self.wake_live_dev(context)
+        return {"context": None, "deployment_ids": []}
 
     async def stop_automation(self, deployment_id: str):
         """Stop all containers for a deployment using async Docker client."""

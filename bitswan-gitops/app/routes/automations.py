@@ -625,6 +625,45 @@ async def deploy_bp(
     )
 
 
+class WakeLiveDevRequest(BaseModel):
+    # The copy whose live-dev instance to rehydrate (None/"main" = the main copy).
+    copy: str | None = None
+
+
+@router.post("/business-processes/{bp}/wake-live-dev")
+async def wake_live_dev_route(
+    bp: str,
+    body: WakeLiveDevRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Rehydrate an evicted live-dev instance — called when a user opens the BP
+    in a copy (dashboard) or first hits its URL (the daemon gate). Starts the
+    instance's stopped workers (or redeploys if cold-GC'd), stamps last-activity,
+    and re-enforces the pool cap. Idempotent: a running instance is a no-op
+    (well, a cheap restart). Returns the deployment_ids so the caller can poll
+    health / show a loading screen."""
+    copy = body.copy
+    context = f"copy-{copy}-{bp}" if copy and copy != "main" else bp
+    return await automation_service.wake_live_dev(context)
+
+
+class WakeByHostRequest(BaseModel):
+    host: str
+
+
+@router.post("/wake-by-host")
+async def wake_by_host_route(
+    body: WakeByHostRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Rehydrate the live-dev instance serving `host` — called by the daemon gate
+    when a request hits a dehydrated live-dev URL (scale-from-zero). Resolves the
+    host to its instance and starts it; the gate meanwhile serves a loading page
+    that retries until the container is healthy. No-op for unknown/non-live-dev
+    hosts."""
+    return await automation_service.wake_by_host(body.host)
+
+
 @router.post("/promote-bp")
 async def promote_bp(
     body: PromoteBPRequest,
