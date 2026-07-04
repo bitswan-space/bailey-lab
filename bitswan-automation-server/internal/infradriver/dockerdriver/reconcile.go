@@ -96,6 +96,12 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		}
 	}
 
+	// ONE post-up container snapshot, shared by the live-DB, cert and orphan
+	// steps below — none of them create or remove containers, so re-listing per
+	// step just repeats an expensive `docker ps`. (Best-effort: on error the
+	// steps that need it treat it as empty, same as their old per-call failure.)
+	postInfos, _ := listWorkspaceContainers(ctx, wctx)
+
 	// 3b. Fail-fast: ensure the live Postgres DB exists for each backend THIS
 	//     apply (re)created, before it settles into a connect-retry loop
 	//     (bp_databases.ensure_live_postgres_dbs). Scoped to fresh containers via
@@ -103,7 +109,7 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	//     running has a working DB, so there's nothing to fail-fast on. Raises if
 	//     Postgres is enabled but a needed DB can't be created.
 	report("provision", "Ensuring live databases for (re)created backends...")
-	if err := ensureLivePostgresDBs(ctx, wctx, bs, preExistingIDs, report); err != nil {
+	if err := ensureLivePostgresDBs(ctx, wctx, bs, preExistingIDs, postInfos, report); err != nil {
 		return fmt.Errorf("ensure live postgres dbs: %w", err)
 	}
 
@@ -113,7 +119,7 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	//    (No per-container oauth2-proxy: oauth2 is deprecated — Bailey's
 	//    protected-ingress handles auth at the edge.)
 	report("certs", "Installing CA certificates in (re)created containers...")
-	if err := installCertificatesInContainers(ctx, wctx, preExistingIDs, report); err != nil {
+	if err := installCertificatesInContainers(ctx, wctx, postInfos, preExistingIDs, report); err != nil {
 		return err
 	}
 
@@ -144,7 +150,7 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	//     the ingress flip, so nothing routes to a container we remove. Targeted
 	//     removal scoped to the app project — not a `compose up --remove-orphans`,
 	//     which would re-evaluate and spuriously recreate the egress workers.
-	retireOrphanedContainers(ctx, wctx, composePath, report)
+	retireOrphanedContainers(ctx, wctx, composePath, postInfos, report)
 	return nil
 }
 
@@ -184,14 +190,10 @@ func waitProductionUpstreamsHealthy(ctx context.Context, routes []infradriver.Ro
 // promote replaced). Done after the ingress cutover so a removed container is
 // never one a route still points at. Scoped to wctx.WorkspaceName's project, so
 // it never touches the site/dashboard/driver containers.
-func retireOrphanedContainers(ctx context.Context, wctx infradriver.WorkspaceContext, composePath string, report func(step, msg string)) {
+func retireOrphanedContainers(ctx context.Context, wctx infradriver.WorkspaceContext, composePath string, infos []containerInfo, report func(step, msg string)) {
 	desired := composeServiceNames(composePath)
 	if desired == nil {
 		return // couldn't parse the compose — don't remove anything
-	}
-	infos, err := listWorkspaceContainers(ctx, wctx)
-	if err != nil {
-		return
 	}
 	for _, c := range infos {
 		if c.labels["com.docker.compose.project"] != wctx.WorkspaceName {
@@ -321,11 +323,7 @@ fi`
 // installCertificatesInContainers ports install_certificates_in_container: for
 // every running container labelled gitops.certs.enabled=true, exec the cert
 // install script.
-func installCertificatesInContainers(ctx context.Context, wctx infradriver.WorkspaceContext, preExistingIDs map[string]bool, report func(step, msg string)) error {
-	infos, err := listWorkspaceContainers(ctx, wctx)
-	if err != nil {
-		return err
-	}
+func installCertificatesInContainers(ctx context.Context, wctx infradriver.WorkspaceContext, infos []containerInfo, preExistingIDs map[string]bool, report func(step, msg string)) error {
 	// Install into the freshly-(re)created cert-enabled containers concurrently —
 	// each exec is independent, so a serial loop just sums their latencies. A
 	// container whose id was already present before this apply kept its CA trust
