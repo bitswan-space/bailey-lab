@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 import yaml
 import requests
@@ -3049,23 +3050,42 @@ class AutomationService:
                 )
             return prep
 
+        _t_prep = time.monotonic()
         prepped: list[dict] = list(
             await asyncio.gather(*(_prep_one(src) for src in members))
+        )
+        logger.info(
+            "PERF deploy_source_set %s: prep(build/cache)=%.2fs (%d members)",
+            label,
+            time.monotonic() - _t_prep,
+            total,
         )
 
         await _report(
             "updating_config", "Updating deployment configuration...", current=total
         )
+        _t_cfg = time.monotonic()
         await self.write_deployment_entries(
             prepped,
             deployed_by=deployed_by,
             commit_subject=commit_subject or f"deploy {label}",
             report=_report,
         )
+        logger.info(
+            "PERF deploy_source_set %s: write_entries=%.2fs",
+            label,
+            time.monotonic() - _t_cfg,
+        )
 
         deployment_ids = [p["deployment_id"] for p in prepped]
+        _t_apply = time.monotonic()
         result = await self.apply_compose_for_deployments(
             deployment_ids, deployed_by=deployed_by, report=_report
+        )
+        logger.info(
+            "PERF deploy_source_set %s: apply(push+driver)=%.2fs",
+            label,
+            time.monotonic() - _t_apply,
         )
 
         return {
