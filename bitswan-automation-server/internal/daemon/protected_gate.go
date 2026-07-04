@@ -228,12 +228,13 @@ func startProtectedGate() error {
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		resp.Header.Del("X-Frame-Options")
 		host := requestEndpointHost(resp.Request)
-		// Scale-from-zero: a dehydrated live-dev instance has no live upstream, so
-		// the sub-traefik answers 5xx. Rehydrate it and show a self-refreshing
-		// loading page (never for production — its hosts aren't live-dev). Only
-		// GET/HEAD navigations get the loading page; other methods just pass the
-		// error through (retrying a mutating request under the hood is unsafe).
-		if resp.StatusCode >= 500 && isDehydratableLiveDevHost(host) {
+		// Scale-from-zero: a dehydrated ephemeral (dev/live-dev) instance has no
+		// live upstream, so the sub-traefik answers 5xx. Rehydrate it and show a
+		// self-refreshing loading page. NEVER for staging/production — their hosts
+		// aren't dehydratable, so they stay hard errors. Only GET/HEAD navigations
+		// get the loading page; other methods pass the error through (retrying a
+		// mutating request under the hood is unsafe).
+		if resp.StatusCode >= 500 && isDehydratableHost(host) {
 			triggerLiveDevWake(host)
 			if m := resp.Request.Method; m == http.MethodGet || m == http.MethodHead {
 				return serveLiveDevLoadingResponse(resp)

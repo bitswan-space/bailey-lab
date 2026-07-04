@@ -23,18 +23,17 @@ import (
 // the request resolves normally once the container is healthy. Production is
 // never dehydrated, so its hosts never take this path.
 
-const liveDevHostMarker = "-live-dev"
-
-// isDehydratableLiveDevHost reports whether host is a live-dev app host — the
-// only stage the cap evicts. dev/staging/production labels lack the marker, so
-// prod (and everything else) is never woken here.
-func isDehydratableLiveDevHost(host string) bool {
+// isDehydratableHost reports whether host is an EPHEMERAL app host — dev or
+// live-dev, the stages the cap evicts. Both end in "-dev" (`…-dev` /
+// `…-live-dev`); staging (`…-staging`) and production (`…-production[-slot]`) do
+// NOT, so they are protected and never woken here.
+func isDehydratableHost(host string) bool {
 	label := strings.ToLower(host)
 	if i := strings.IndexByte(label, '.'); i >= 0 {
 		label = label[:i]
 	}
 	label = strings.Replace(label, innerHostSuffix, "", 1) // drop the --inner segment
-	return strings.HasSuffix(label, liveDevHostMarker)
+	return strings.HasSuffix(label, "-dev")
 }
 
 var liveDevWakeDebounce sync.Map // outer host -> time.Time of last wake POST

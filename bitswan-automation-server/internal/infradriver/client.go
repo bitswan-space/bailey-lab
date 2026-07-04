@@ -64,6 +64,11 @@ func (c *Client) ContainerRestart(ctx context.Context, wctx WorkspaceContext, co
 	return c.postJSON(ctx, PathContainersRestart, ContainerBody{Ctx: wctx, Container: container}, &OKResult{})
 }
 
+// ContainerRemove force-removes a container (docker rm -f).
+func (c *Client) ContainerRemove(ctx context.Context, wctx WorkspaceContext, container string) error {
+	return c.postJSON(ctx, PathContainersRemove, ContainerBody{Ctx: wctx, Container: container}, &OKResult{})
+}
+
 // BuildImage builds a source image, streaming build log lines to prog, and
 // returns the resulting image ref.
 func (c *Client) BuildImage(ctx context.Context, req BuildRequest, prog func(string)) (ImageRef, error) {
