@@ -119,6 +119,16 @@ func waitForHealthy(ctx context.Context, container string, timeout time.Duration
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Fast path: already healthy (the common warm-service case) → skip the
+	// `docker events` subscription entirely. Forking + connecting a `docker
+	// events` stream is real overhead on a busy daemon, and provisioning waits
+	// on already-running Postgres/MinIO several times per deploy. If NOT yet
+	// healthy we fall through to the race-safe subscribe-first-then-inspect path
+	// below (an event could fire between this check and the subscription).
+	if containerHealth(ctx, container) == "healthy" {
+		return nil
+	}
+
 	ev := exec.CommandContext(ctx, "docker", "events",
 		"--filter", "type=container",
 		"--filter", "container="+container,
@@ -398,12 +408,8 @@ func productionDBNumbers(bs *Bitswan, bpSlug string) []int {
 // (re)created in this apply (its id wasn't in preExistingIDs), keyed by the
 // gitops.deployment_id label. Returns nil — meaning "couldn't scope, treat all
 // as fresh" — when there's no pre-snapshot or the container list can't be read.
-func freshDeploymentIDs(ctx context.Context, wctx infradriver.WorkspaceContext, preExistingIDs map[string]bool) map[string]bool {
+func freshDeploymentIDs(preExistingIDs map[string]bool, infos []containerInfo) map[string]bool {
 	if len(preExistingIDs) == 0 {
-		return nil
-	}
-	infos, err := listWorkspaceContainers(ctx, wctx)
-	if err != nil {
 		return nil
 	}
 	fresh := map[string]bool{}
@@ -418,14 +424,14 @@ func freshDeploymentIDs(ctx context.Context, wctx infradriver.WorkspaceContext, 
 	return fresh
 }
 
-func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, preExistingIDs map[string]bool, report func(step, msg string)) error {
+func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, preExistingIDs map[string]bool, infos []containerInfo, report func(step, msg string)) error {
 	// Only the backends THIS apply (re)created can have a not-yet-existing live
 	// DB — one that's been running already proved its DB exists. Match a
 	// deployment to its container by the gitops.deployment_id label; a container
 	// whose id wasn't present before this apply is fresh. fresh==nil means we
 	// couldn't scope (no pre-snapshot, or the container list failed) → process
 	// every deployment, the old whole-workspace behavior (safe).
-	fresh := freshDeploymentIDs(ctx, wctx, preExistingIDs)
+	fresh := freshDeploymentIDs(preExistingIDs, infos)
 
 	reg := loadRegistry(wctx.SecretsDir)
 	seen := map[string]bool{}
