@@ -636,6 +636,14 @@ export const api = {
     postJson<DeployResponse>('/api/automations/deploy', body),
   deployBusinessProcess: (body: DeployBPRequest) =>
     postJson<DeployBPResponse>('/api/automations/deploy-bp', body),
+  /** Rehydrate + LRU-touch a copy's live-dev instance when its BP is opened.
+   *  Idempotent: a running instance is only marked recently-used (kept hot); an
+   *  evicted one is restarted. Fire-and-forget from the UI. */
+  wakeLiveDev: (bp: string, copy: string | null) =>
+    postJson<{ context: string | null; deployment_ids: string[] }>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/wake-live-dev`,
+      { copy: copy ?? undefined },
+    ),
   promoteBusinessProcess: (body: PromoteBPRequest) =>
     postJson<DeployBPResponse>('/api/automations/promote-bp', body),
   /** Per-stage deployment history for a business process (newest-first). */

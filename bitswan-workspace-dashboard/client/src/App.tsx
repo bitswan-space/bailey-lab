@@ -197,6 +197,15 @@ function Shell() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
+  // Wake-on-load: opening a BP in a copy rehydrates its (possibly evicted)
+  // live-dev instance and marks it recently-used, so the preview is warm by the
+  // time the user opens it and stays out of the LRU eviction set while in view.
+  // Fire-and-forget; the server no-ops a running instance (just a touch).
+  useEffect(() => {
+    if (!bpId) return;
+    api.wakeLiveDev(bpId, copy).catch(() => {});
+  }, [bpId, copy]);
+
   // Switching tabs drops the previous page's scoped params so the URL stays
   // a clean, faithful description of what's on screen.
   const handleTab = useCallback((next: FlowTab) => {
