@@ -699,18 +699,27 @@ func workspaceDomainSuffix() string {
 // evictViaGitops asks a workspace's gitops to evict the given on-demand
 // deployments (mark inactive + remove) and returns their ingress hosts. Mirrors
 // the daemon→gitops call in triggerLiveDevWake (internal address + gitops secret).
-func evictViaGitops(ctx context.Context, ws string, deploymentIDs []string) ([]string, error) {
+// gitopsEvictURL + gitopsSecretForWorkspace are package vars so tests can point
+// them at an httptest server + a stub secret.
+var gitopsEvictURL = func(ws string) string {
+	return fmt.Sprintf("http://%s-gitops:8079/automations/evict-ephemeral", ws)
+}
+
+var gitopsSecretForWorkspace = func(ws string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	secret, err := getGitOpsSecret(ws, filepath.Join(home, ".config", "bitswan", "workspaces"))
+	return getGitOpsSecret(ws, filepath.Join(home, ".config", "bitswan", "workspaces"))
+}
+
+func evictViaGitops(ctx context.Context, ws string, deploymentIDs []string) ([]string, error) {
+	secret, err := gitopsSecretForWorkspace(ws)
 	if err != nil || secret == "" {
 		return nil, fmt.Errorf("gitops secret for %q: %v", ws, err)
 	}
 	body, _ := json.Marshal(map[string][]string{"deployment_ids": deploymentIDs})
-	url := fmt.Sprintf("http://%s-gitops:8079/automations/evict-ephemeral", ws)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gitopsEvictURL(ws), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

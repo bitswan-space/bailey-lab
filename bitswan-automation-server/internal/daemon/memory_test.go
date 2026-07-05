@@ -96,14 +96,28 @@ func TestParseMemInventory(t *testing.T) {
 		"aaa" + sep + "running" + sep + "2026-07-04 08:28:27 +0000 UTC" + sep + "wraptest-frontend-x-staging" + sep +
 			"gitops.workspace=wraptest,gitops.bp=shop,gitops.stage=staging,gitops.deployment_id=frontend-shop-staging,gitops.mem_policy=always-on,gitops.mem_reservation_mb=256\n" +
 			// non-gitops container → skipped
-			"bbb" + sep + "running" + sep + "2026-07-04 08:28:27 +0000 UTC" + sep + "some-random" + sep + "foo=bar\n",
+			"bbb" + sep + "running" + sep + "2026-07-04 08:28:27 +0000 UTC" + sep + "some-random" + sep + "foo=bar\n" +
+			// malformed (wrong field count) → skipped
+			"ccc" + sep + "running\n" +
+			// bad CreatedAt → kept, created stays 0
+			"ddd" + sep + "running" + sep + "not-a-date" + sep + "x" + sep + "gitops.workspace=w2,gitops.deployment_id=d\n",
 	)
 	conts := parseMemInventory(raw)
-	if len(conts) != 1 {
-		t.Fatalf("want 1 bitswan container, got %d", len(conts))
+	// Two valid gitops containers kept (shop + the bad-date one); the non-gitops
+	// and malformed-field lines are skipped.
+	if len(conts) != 2 {
+		t.Fatalf("want 2 bitswan containers, got %d", len(conts))
 	}
-	c := conts[0]
-	if c.Workspace != "wraptest" || c.BP != "shop" || c.Stage != "staging" {
+	var c *memContainer
+	for i := range conts {
+		if conts[i].Workspace == "wraptest" {
+			c = &conts[i]
+		}
+	}
+	if c == nil {
+		t.Fatalf("wraptest container not found: %+v", conts)
+	}
+	if c.BP != "shop" || c.Stage != "staging" {
 		t.Errorf("labels not parsed: %+v", c)
 	}
 	if c.Policy != "always-on" || c.ReservationMB != 256 {
@@ -137,6 +151,15 @@ func TestAdmitMemory(t *testing.T) {
 	r := admitMemory(b, onDemand, cfg, admitRequest{Kind: "promote", AlwaysOnAddMB: 4000})
 	if r.OK || r.ShortfallMB != 8864-8192 {
 		t.Errorf("always-on promote of 4000 should be rejected with shortfall 672: %+v", r)
+	}
+	// Unknown kind → permissive default (OK).
+	if r := admitMemory(b, onDemand, cfg, admitRequest{Kind: "other"}); !r.OK {
+		t.Errorf("unknown kind should default OK: %+v", r)
+	}
+	// Workspace on a tiny host that can't fit the infra reserve → rejected.
+	tiny := memBudget{HostTotalBytes: int64(1024) * mib, ReservedMB: 900}
+	if r := admitMemory(tiny, nil, cfg, admitRequest{Kind: "workspace"}); r.OK || r.ShortfallMB <= 0 {
+		t.Errorf("workspace on a full host should be rejected with shortfall: %+v", r)
 	}
 	// A HUGE on-demand promote grows the pool past capacity → rejected.
 	// new pool = max(1024, sum top4 of [512,128,7000]) = 7640; delta = 6616;
@@ -216,8 +239,14 @@ func TestIsHostDehydrated(t *testing.T) {
 }
 
 func TestMemConfigDefaults(t *testing.T) {
-	// With no env/DB override, defaults apply. (dbGetSetting returns "" without a
-	// configured DB in the test env; env is unset.)
+	// memConfigInt prefers a DB setting over env — clear any persisted overrides
+	// (e.g. from a config-POST test) so this is deterministic.
+	for _, k := range []string{
+		settingMemSystemReserveMB, settingMemWorkspaceReserveMB,
+		settingMemDefaultContainerMB, settingMemOnDemandFloorMB, settingMemOnDemandTopN,
+	} {
+		_ = dbDeleteSetting(k)
+	}
 	for _, k := range []string{
 		"BITSWAN_MEM_SYSTEM_RESERVE_MB", "BITSWAN_MEM_WORKSPACE_RESERVE_MB",
 		"BITSWAN_MEM_DEFAULT_CONTAINER_MB", "BITSWAN_MEM_ONDEMAND_POOL_MIN_MB",
@@ -238,7 +267,7 @@ func TestMemConfigDefaults(t *testing.T) {
 }
 
 func TestParseStatsUsage(t *testing.T) {
-	raw := []byte("aaaa\x1f200MiB / 2GiB\nbbbb\x1f50MiB / 2GiB\n\n")
+	raw := []byte("aaaa\x1f200MiB / 2GiB\nbbbb\x1f50MiB / 2GiB\nno-separator-line\n\n")
 	u := parseStatsUsage(raw)
 	if u["aaaa"] != 200*1024*1024 || u["bbbb"] != 50*1024*1024 {
 		t.Errorf("parseStatsUsage = %v", u)
@@ -259,6 +288,7 @@ func TestParseMemBytes(t *testing.T) {
 		"1TiB / 2TiB":   1024 * 1024 * 1024 * 1024,
 		"5TB / 10TB":    5 * 1000 * 1000 * 1000 * 1000,
 		"100B / 1GiB":   100,
+		"1.2.3MiB":      0, // unparseable number → 0
 		"-- / --":       0,
 		"":              0,
 	}

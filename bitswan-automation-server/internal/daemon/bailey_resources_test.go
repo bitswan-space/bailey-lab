@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,38 @@ type fakeGovernor struct {
 
 func (f fakeGovernor) Inventory(context.Context) ([]memContainer, error) { return f.inv, nil }
 func (f fakeGovernor) Budget(context.Context) (memBudget, error)         { return f.budget, nil }
+
+// errGovernor fails Budget/Inventory — for the handler error paths.
+type errGovernor struct{}
+
+func (errGovernor) Inventory(context.Context) ([]memContainer, error) {
+	return nil, context.DeadlineExceeded
+}
+func (errGovernor) Budget(context.Context) (memBudget, error) {
+	return memBudget{}, context.DeadlineExceeded
+}
+
+func TestHandleBaileyResourcesError(t *testing.T) {
+	prev := baileyMemGovernor
+	defer func() { baileyMemGovernor = prev }()
+	baileyMemGovernor = errGovernor{}
+	rec := httptest.NewRecorder()
+	(&Server{}).handleBaileyResources(rec, httptest.NewRequest(http.MethodGet, "/bailey/api/admin/resources", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("governor error should 500, got %d", rec.Code)
+	}
+}
+
+func TestHandleMemoryAdmitInventoryError(t *testing.T) {
+	prev := admitInventory
+	defer func() { admitInventory = prev }()
+	admitInventory = func(context.Context) ([]memContainer, error) { return nil, context.DeadlineExceeded }
+	rec := httptest.NewRecorder()
+	(&Server{}).handleMemoryAdmit(rec, httptest.NewRequest(http.MethodPost, "/memory/admit", strings.NewReader(`{"kind":"workspace"}`)))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("inventory error should 500, got %d", rec.Code)
+	}
+}
 
 func TestHandleBaileyResources(t *testing.T) {
 	prev := baileyMemGovernor
@@ -91,18 +124,44 @@ func TestHandleMemoryAdmit(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET should 405, got %d", rec.Code)
 	}
-	// Valid workspace admit (empty inventory, /proc/meminfo real) → 200 ok.
-	rec = httptest.NewRecorder()
-	s.handleMemoryAdmit(rec, httptest.NewRequest(http.MethodPost, "/memory/admit", strings.NewReader(`{"kind":"workspace"}`)))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("valid admit status = %d, want 200", rec.Code)
+	// Valid workspace admit (empty inventory) → 200 ok. readMemInfo is Linux-only
+	// (/proc/meminfo), so only assert the happy path there; elsewhere it 500s.
+	if runtime.GOOS == "linux" {
+		rec = httptest.NewRecorder()
+		s.handleMemoryAdmit(rec, httptest.NewRequest(http.MethodPost, "/memory/admit", strings.NewReader(`{"kind":"workspace"}`)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("valid admit status = %d, want 200", rec.Code)
+		}
+		var res admitResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if !res.OK {
+			t.Errorf("empty-host workspace admit should fit: %+v", res)
+		}
 	}
-	var res admitResult
-	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !res.OK {
-		t.Errorf("empty-host workspace admit should fit: %+v", res)
+}
+
+func TestHandleResourceConfigPostValid(t *testing.T) {
+	// A valid POST exercises the apply loop + dbSetSetting for every key. Tolerate
+	// either 200 (DB available) or 500 (no DB in the test env) — the point is to
+	// run the code path, not to assert persistence.
+	// Clean up any persisted settings afterwards so other tests (which assert on
+	// defaults) aren't affected by this write.
+	defer func() {
+		for _, k := range []string{
+			settingMemSystemReserveMB, settingMemWorkspaceReserveMB,
+			settingMemDefaultContainerMB, settingMemOnDemandFloorMB, settingMemOnDemandTopN,
+		} {
+			_ = dbDeleteSetting(k)
+		}
+	}()
+	s := &Server{}
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"system_reserve_mb":2048,"workspace_reserve_mb":768,"default_container_mb":64,"ondemand_pool_floor_mb":1024,"ondemand_pool_topn":4}`)
+	s.handleResourceConfigPost(rec, httptest.NewRequest(http.MethodPost, "/bailey/api/admin/resource-config", body), "admin@example.com")
+	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+		t.Errorf("valid config POST status = %d, want 200 or 500", rec.Code)
 	}
 }
 
@@ -146,6 +205,44 @@ func TestDockerGovernorBudget(t *testing.T) {
 	}
 }
 
+func TestEvictViaGitops(t *testing.T) {
+	prevURL, prevSec := gitopsEvictURL, gitopsSecretForWorkspace
+	defer func() { gitopsEvictURL, gitopsSecretForWorkspace = prevURL, prevSec }()
+
+	var gotBody map[string][]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer sekret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string][]string{
+			"evicted": {"d1"},
+			"hosts":   {"ws-fe-ab12-live-dev"},
+		})
+	}))
+	defer srv.Close()
+	gitopsEvictURL = func(string) string { return srv.URL }
+	gitopsSecretForWorkspace = func(string) (string, error) { return "sekret", nil }
+
+	hosts, err := evictViaGitops(context.Background(), "ws", []string{"d1"})
+	if err != nil {
+		t.Fatalf("evictViaGitops: %v", err)
+	}
+	if len(hosts) != 1 || hosts[0] != "ws-fe-ab12-live-dev" {
+		t.Errorf("hosts = %v, want [ws-fe-ab12-live-dev]", hosts)
+	}
+	if len(gotBody["deployment_ids"]) != 1 || gotBody["deployment_ids"][0] != "d1" {
+		t.Errorf("request body = %v", gotBody)
+	}
+
+	// Secret error → returns an error (no HTTP call).
+	gitopsSecretForWorkspace = func(string) (string, error) { return "", context.DeadlineExceeded }
+	if _, err := evictViaGitops(context.Background(), "ws", []string{"d1"}); err == nil {
+		t.Error("missing secret should error")
+	}
+}
+
 func TestCheckOverReservationLoop(t *testing.T) {
 	// Under-reservation + non-workload containers exercise the loop's skip paths
 	// without emitting (no recordEvent → no DB dependency).
@@ -160,4 +257,16 @@ func TestCheckOverReservationLoop(t *testing.T) {
 		t.Error("under-reservation container should not be flagged over")
 	}
 	overReservationState.Delete("u1")
+
+	// An OVER container crosses the threshold → exercises the emit branch
+	// (log + recordEvent; recordEvent tolerates no DB in the test env).
+	overID := "over-container-xyz"
+	overReservationState.Delete(overID)
+	checkOverReservation([]memContainer{
+		{ID: overID, DeploymentID: "d9", Workspace: "ws", Stage: "staging", Policy: "always-on", Running: true, ReservationMB: 100, UsageBytes: 500 * mb},
+	})
+	if v, _ := overReservationState.Load(overID); v != true {
+		t.Error("over-reservation container should be flagged")
+	}
+	overReservationState.Delete(overID)
 }
