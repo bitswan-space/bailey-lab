@@ -196,7 +196,9 @@ func TestEnforceMemoryBudget(t *testing.T) {
 		{Workspace: "ws", Context: "a", Stage: "live-dev", DeploymentID: "d1", Policy: "on-demand", Running: true, ReservationMB: 1, UsageBytes: 500 * mb, Created: 100},
 	}}
 	(&Server{}).enforceMemoryBudget(context.Background())
-	if !isHostDehydrated("ws-fe-9-live-dev") {
+	// The sweep reads /proc/meminfo before evicting, so it only completes on Linux;
+	// elsewhere it bails early (no eviction) and the host isn't recorded.
+	if runtime.GOOS == "linux" && !isHostDehydrated("ws-fe-9-live-dev") {
 		t.Error("swept host should be recorded as dehydrated")
 	}
 }
