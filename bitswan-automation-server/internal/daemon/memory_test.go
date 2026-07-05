@@ -110,6 +110,39 @@ func TestParseMemInventory(t *testing.T) {
 	}
 }
 
+func TestAdmitMemory(t *testing.T) {
+	mib := int64(1024 * 1024)
+	cfg := memConfig{SystemReserveMB: 2048, WorkspaceReserveMB: 768, DefaultContainerMB: 50, OnDemandFloorMB: 1024, OnDemandTopN: 4}
+	// Host 8 GiB, currently reserved 4864 MB (from the TestComputeBudget scenario).
+	b := memBudget{HostTotalBytes: int64(8*1024) * mib, ReservedMB: 4864, OnDemandPoolMB: 1024, AlwaysOnMB: 256}
+	onDemand := []int{512, 128}
+
+	// Workspace fits (4864 + 768 = 5632 <= 8192).
+	if r := admitMemory(b, onDemand, cfg, admitRequest{Kind: "workspace"}); !r.OK {
+		t.Errorf("workspace should fit: %+v", r)
+	}
+	// A small on-demand promote never grows the pool → always allowed.
+	if r := admitMemory(b, onDemand, cfg, admitRequest{Kind: "promote", OnDemandAddMB: []int{64}}); !r.OK {
+		t.Errorf("small on-demand promote should be allowed: %+v", r)
+	}
+	// An always-on promote that fits.
+	if r := admitMemory(b, onDemand, cfg, admitRequest{Kind: "promote", AlwaysOnAddMB: 1000}); !r.OK {
+		t.Errorf("always-on promote of 1000 should fit (4864+1000<=8192): %+v", r)
+	}
+	// An always-on promote that does NOT fit (4864 + 4000 = 8864 > 8192).
+	r := admitMemory(b, onDemand, cfg, admitRequest{Kind: "promote", AlwaysOnAddMB: 4000})
+	if r.OK || r.ShortfallMB != 8864-8192 {
+		t.Errorf("always-on promote of 4000 should be rejected with shortfall 672: %+v", r)
+	}
+	// A HUGE on-demand promote grows the pool past capacity → rejected.
+	// new pool = max(1024, sum top4 of [512,128,7000]) = 7640; delta = 6616;
+	// 4864 + 6616 = 11480 > 8192.
+	r2 := admitMemory(b, onDemand, cfg, admitRequest{Kind: "promote", OnDemandAddMB: []int{7000}})
+	if r2.OK {
+		t.Errorf("huge on-demand promote should be rejected (pool grows past host): %+v", r2)
+	}
+}
+
 func TestParseMemBytes(t *testing.T) {
 	cases := map[string]int64{
 		"200MiB / 2GiB": 200 * 1024 * 1024,

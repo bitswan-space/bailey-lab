@@ -19,6 +19,7 @@ from app.models import DeployedAutomation
 from app.utils import (
     AutomationConfig,
     calculate_git_tree_hash,
+    daemon_admit_memory,
     daemon_user_role,
     generate_workspace_url,
     read_bitswan_yaml,
@@ -3322,6 +3323,55 @@ class AutomationService:
             raise HTTPException(
                 status_code=404,
                 detail=(f"No {source_stage} deployments to promote under BP '{bp}'"),
+            )
+
+        # Memory governance: memory-reservation is MANDATORY for staging/production
+        # promotes, and the promotion must fit the reserved budget — an always-on
+        # member grows the always-on pool; a large on-demand member grows the
+        # on-demand pool. Resolve each member's reservation + policy from its
+        # automation.toml (the promoted checksum tree).
+        missing: list[str] = []
+        always_on_add = 0
+        ondemand_add: list[int] = []
+        for m in members:
+            conf = self.resolve_automation_config(m)
+            if conf.memory_reservation is None:
+                missing.append(m.get("display_name") or m["deployment_id"])
+                res_mb = _default_mem_reservation_mb()
+            else:
+                res_mb = int(conf.memory_reservation)
+            if conf.memory_reservation_policy == "always-on":
+                always_on_add += res_mb
+            else:
+                ondemand_add.append(res_mb)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "memory-reservation is required in automation.toml before "
+                    f"promoting to {target_stage}: " + ", ".join(sorted(missing))
+                ),
+            )
+        try:
+            verdict = daemon_admit_memory(
+                "promote",
+                always_on_add_mb=always_on_add,
+                ondemand_add_mb=ondemand_add,
+            )
+        except Exception as e:
+            # Daemon unreachable → fail OPEN: a memory-subsystem hiccup must not
+            # block all promotes. A computed not-ok verdict below is a hard block.
+            logger.warning("memory admission check failed, allowing promote: %s", e)
+            verdict = {"ok": True}
+        if not verdict.get("ok", True):
+            raise HTTPException(
+                status_code=409,
+                detail="Not enough reserved memory to promote to "
+                f"{target_stage}: "
+                + (
+                    verdict.get("detail")
+                    or f"short by {verdict.get('shortfall_mb', 0)} MB"
+                ),
             )
 
         await _report(

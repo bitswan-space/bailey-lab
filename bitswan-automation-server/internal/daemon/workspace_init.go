@@ -1,13 +1,16 @@
 package daemon
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -69,6 +72,22 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	workspaceName := fs.Args()[0]
+
+	// Memory admission: refuse a new workspace when its always-on infra reserve
+	// won't fit the host budget. Fail-open on a measurement error (never block
+	// all creation because the memory subsystem hiccuped); fail-closed only on a
+	// real "no room" verdict.
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		res, aerr := s.admitMemoryRequest(ctx, admitRequest{Kind: "workspace"})
+		cancel()
+		if aerr != nil {
+			log.Printf("workspace-init %q: memory admission check failed, allowing: %v", workspaceName, aerr)
+		} else if !res.OK {
+			return fmt.Errorf("not enough memory to create a workspace: %s", res.Detail)
+		}
+	}
+
 	bitswanConfig := os.Getenv("HOME") + "/.config/bitswan/"
 	var err error
 

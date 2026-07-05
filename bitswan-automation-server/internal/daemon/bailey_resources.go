@@ -6,11 +6,56 @@ package daemon
 // heuristic knobs (persisted in server_settings, same store as default-images).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 )
+
+// admitMemoryRequest gathers the live budget + current on-demand reservations and
+// runs the pure admit check. Used by the workspace-create gate (in-process) and
+// the /memory/admit endpoint (gitops promote gate).
+func (s *Server) admitMemoryRequest(ctx context.Context, req admitRequest) (admitResult, error) {
+	inv, err := baileyMemGovernor.Inventory(ctx)
+	if err != nil {
+		return admitResult{}, err
+	}
+	total, avail, err := readMemInfo()
+	if err != nil {
+		return admitResult{}, err
+	}
+	cfg := loadMemConfig()
+	b := computeBudget(inv, total, avail, countWorkspacesForBudget(), cfg)
+	var onDemand []int
+	for _, c := range inv {
+		if c.IsWorkload() && c.Policy != "always-on" {
+			onDemand = append(onDemand, c.ReservationMB)
+		}
+	}
+	return admitMemory(b, onDemand, cfg, req), nil
+}
+
+// handleMemoryAdmit is the internal (trusted, socket-auth) endpoint gitops calls
+// to gate a promote against the reserved budget. POST admitRequest → admitResult.
+func (s *Server) handleMemoryAdmit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req admitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	res, err := s.admitMemoryRequest(r.Context(), req)
+	if err != nil {
+		writeJSONError(w, fmt.Sprintf("admit: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(res)
+}
 
 // baileyMemGovernor is the daemon's memory backend. A package var (not a Server
 // field) so it can be swapped in tests; defaults to the docker implementation.

@@ -731,6 +731,34 @@ def daemon_user_role(email: str) -> str:
         client.close()
 
 
+def daemon_admit_memory(
+    kind: str,
+    always_on_add_mb: int = 0,
+    ondemand_add_mb: list[int] | None = None,
+) -> dict:
+    """Ask the daemon (the single memory accountant) whether an action fits the
+    reserved budget. `kind` is "promote" or "workspace". Returns
+    {"ok": bool, "shortfall_mb": int, "detail": str}.
+
+    Raises on transport failure so the caller can decide (promote fails OPEN on a
+    daemon hiccup — a memory-subsystem outage must not block all deploys — while a
+    computed not-ok verdict is a hard block)."""
+    client, base = _ingress_client_and_base()
+    try:
+        resp = client.post(
+            f"{base}/memory/admit",
+            json={
+                "kind": kind,
+                "always_on_add_mb": always_on_add_mb,
+                "ondemand_add_mb": ondemand_add_mb or [],
+            },
+        )
+        resp.raise_for_status()
+        return resp.json() or {"ok": True}
+    finally:
+        client.close()
+
+
 def add_route_to_ingress(
     hostname: str,
     upstream: str,

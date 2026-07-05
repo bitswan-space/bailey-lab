@@ -385,6 +385,57 @@ func computeBudget(inv []memContainer, hostTotal, hostAvail uint64, workspaces i
 	return b
 }
 
+// --- admission (pure) ---
+
+// admitRequest asks whether an action fits the reserved budget. For a promote,
+// AlwaysOnAddMB is the summed reservation of always-on members (grows Σa) and
+// OnDemandAddMB lists each on-demand member's reservation (may grow the pool).
+type admitRequest struct {
+	Kind          string `json:"kind"` // "workspace" | "promote"
+	AlwaysOnAddMB int    `json:"always_on_add_mb,omitempty"`
+	OnDemandAddMB []int  `json:"ondemand_add_mb,omitempty"`
+}
+
+type admitResult struct {
+	OK          bool   `json:"ok"`
+	ShortfallMB int    `json:"shortfall_mb,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+}
+
+// admitMemory decides whether the action fits within host memory. Only actions
+// that add ALWAYS-ON reserved memory (a workspace's infra, an always-on promote)
+// or GROW the on-demand pool (a large on-demand promote) can be rejected —
+// small on-demand promotes never grow the pool, so unlimited rarely-used BPs are
+// always allowed. Pure (no docker/I/O) for unit-testing.
+func admitMemory(b memBudget, currentOnDemand []int, cfg memConfig, req admitRequest) admitResult {
+	totalMB := int(b.HostTotalBytes / (1024 * 1024))
+	freeMB := totalMB - b.ReservedMB
+	switch req.Kind {
+	case "workspace":
+		if b.ReservedMB+cfg.WorkspaceReserveMB > totalMB {
+			return admitResult{ShortfallMB: b.ReservedMB + cfg.WorkspaceReserveMB - totalMB,
+				Detail: fmt.Sprintf("a new workspace reserves %d MB of always-on memory but only %d MB is unreserved",
+					cfg.WorkspaceReserveMB, freeMB)}
+		}
+		return admitResult{OK: true}
+	case "promote":
+		newPool := onDemandPoolMB(append(append([]int{}, currentOnDemand...), req.OnDemandAddMB...),
+			cfg.OnDemandFloorMB, cfg.OnDemandTopN)
+		poolDelta := newPool - b.OnDemandPoolMB
+		if poolDelta < 0 {
+			poolDelta = 0
+		}
+		addMB := req.AlwaysOnAddMB + poolDelta
+		if b.ReservedMB+addMB > totalMB {
+			return admitResult{ShortfallMB: b.ReservedMB + addMB - totalMB,
+				Detail: fmt.Sprintf("this promotion needs %d MB more reserved memory but only %d MB is unreserved",
+					addMB, freeMB)}
+		}
+		return admitResult{OK: true}
+	}
+	return admitResult{OK: true}
+}
+
 // --- governor interface (the k8s-swap seam) ---
 
 // MemoryGovernor is the memory backend. The docker implementation reads
