@@ -40,6 +40,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(PathBuildImage, s.handleBuildImage)
 	mux.HandleFunc(PathContainersList, s.handleList)
+	mux.HandleFunc(PathContainersStats, s.handleStats)
 	mux.HandleFunc(PathContainersEvents, s.handleEvents)
 	mux.HandleFunc(PathContainersInspect, s.handleInspect)
 	mux.HandleFunc(PathContainersLogs, s.handleLogs)
@@ -90,6 +91,19 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, ContainerListResult{Containers: containers})
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	var body ListBody // reuses {ctx, filter}
+	if !decode(w, r, &body) {
+		return
+	}
+	stats, err := s.driver.ContainerStats(r.Context(), body.Ctx, body.Filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, ContainerStatsResult{Stats: stats})
 }
 
 func (s *Server) handleImageList(w http.ResponseWriter, r *http.Request) {

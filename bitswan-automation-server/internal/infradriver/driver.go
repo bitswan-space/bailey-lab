@@ -54,6 +54,13 @@ type Driver interface {
 	// replica count, blue-green slot are all read off the containers + labels.
 	ContainerList(ctx context.Context, req WorkspaceContext, filter ContainerFilter) ([]Container, error)
 
+	// ContainerStats returns live memory usage for the workspace's running
+	// containers (from `docker stats`). Separate from ContainerList because it
+	// is a distinct, slower Docker call (a per-container sample) — gitops overlays
+	// it onto the automation listing for the Containers tab. Always scoped to the
+	// driver's workspace.
+	ContainerStats(ctx context.Context, req WorkspaceContext, filter ContainerFilter) ([]ContainerStat, error)
+
 	// ContainerLogs streams a container's logs to sink until ctx is done
 	// (follow) or EOF.
 	ContainerLogs(ctx context.Context, req WorkspaceContext, container string, tail int, follow bool, sink func(LogLine)) error
@@ -199,6 +206,17 @@ type Container struct {
 	Image   string            `json:"image"`
 	Created int64             `json:"created"` // unix seconds (gitops overlays created_at from this)
 	Labels  map[string]string `json:"labels,omitempty"`
+}
+
+// ContainerStat is one container's live memory usage (from `docker stats`). Only
+// running containers report; stopped ones are absent (≈0). Labels carry the
+// gitops.* grouping keys + gitops.mem_reservation_mb so the caller can compare
+// actual vs reserved without a second lookup.
+type ContainerStat struct {
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	MemUsageBytes int64             `json:"mem_usage_bytes"`
+	Labels        map[string]string `json:"labels,omitempty"`
 }
 
 // Progress is one step of an Apply. Step is a stable machine key; Message is the

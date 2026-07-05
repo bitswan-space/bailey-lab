@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -108,6 +109,115 @@ func (d *DockerDriver) ContainerList(ctx context.Context, _ infradriver.Workspac
 		return nil, fmt.Errorf("docker ps: %w", err)
 	}
 	return parsePS(out)
+}
+
+// ContainerStats returns live memory usage for the workspace's RUNNING
+// containers. `docker stats` has no label filter, so we scope by listing the
+// workspace's containers first (ContainerList forces the workspace label) and
+// sampling only those IDs; name/labels come from the listing, memory from stats.
+func (d *DockerDriver) ContainerStats(ctx context.Context, wctx infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.ContainerStat, error) {
+	containers, err := d.ContainerList(ctx, wctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]infradriver.Container, len(containers))
+	ids := make([]string, 0, len(containers))
+	for _, c := range containers {
+		if c.State != "running" {
+			continue // docker stats only reports running containers; stopped ≈ 0
+		}
+		byID[c.ID] = c
+		ids = append(ids, c.ID)
+	}
+	if len(ids) == 0 {
+		return []infradriver.ContainerStat{}, nil
+	}
+	args := append([]string{"stats", "--no-stream", "--no-trunc", "--format", statsFormat}, ids...)
+	out, err := exec.CommandContext(ctx, "docker", args...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker stats: %w", err)
+	}
+	return parseStats(out, byID), nil
+}
+
+const statsFormat = "{{.ID}}" + psSep + "{{.MemUsage}}"
+
+// parseStats maps `docker stats --format <statsFormat>` output to ContainerStat,
+// joining memory usage onto the pre-fetched listing (byID, keyed by full id) for
+// name+labels. Split out for unit-testing without a daemon.
+func parseStats(raw []byte, byID map[string]infradriver.Container) []infradriver.ContainerStat {
+	stats := make([]infradriver.ContainerStat, 0, len(byID))
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		id, mem, ok := strings.Cut(line, psSep)
+		if !ok {
+			continue
+		}
+		c, ok := byID[id]
+		if !ok {
+			// stats IDs are full (--no-trunc) and taken from byID, so exact match
+			// is the norm; prefix-match as a defensive fallback.
+			for full, cc := range byID {
+				if strings.HasPrefix(full, id) {
+					c, ok = cc, true
+					break
+				}
+			}
+		}
+		if !ok {
+			continue
+		}
+		stats = append(stats, infradriver.ContainerStat{
+			ID:            c.ID,
+			Name:          c.Name,
+			MemUsageBytes: parseDockerMem(mem),
+			Labels:        c.Labels,
+		})
+	}
+	return stats
+}
+
+// parseDockerMem parses a docker stats MemUsage cell like "123.4MiB / 2GiB" (or a
+// bare "123.4MiB") into bytes, using the value before "/". 0 on parse failure.
+func parseDockerMem(s string) int64 {
+	usage := strings.TrimSpace(firstField(s, "/"))
+	i := 0
+	for i < len(usage) && (usage[i] >= '0' && usage[i] <= '9' || usage[i] == '.') {
+		i++
+	}
+	if i == 0 {
+		return 0
+	}
+	num, err := strconv.ParseFloat(usage[:i], 64)
+	if err != nil {
+		return 0
+	}
+	var mult float64
+	switch strings.TrimSpace(usage[i:]) {
+	case "B", "":
+		mult = 1
+	case "kB", "KB":
+		mult = 1e3
+	case "KiB":
+		mult = 1024
+	case "MB":
+		mult = 1e6
+	case "MiB":
+		mult = 1024 * 1024
+	case "GB":
+		mult = 1e9
+	case "GiB":
+		mult = 1024 * 1024 * 1024
+	case "TB":
+		mult = 1e12
+	case "TiB":
+		mult = 1024 * 1024 * 1024 * 1024
+	default:
+		mult = 1
+	}
+	return int64(num * mult)
 }
 
 // psSep is the field separator for the lean ps --format (unit-separator, never

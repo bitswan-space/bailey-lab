@@ -14,6 +14,7 @@ import (
 // fakeDriver is a programmable Driver for transport tests.
 type fakeDriver struct {
 	containers   []Container
+	stats        []ContainerStat
 	gotFilter    ContainerFilter
 	logLines     []LogLine
 	logsErr      error
@@ -63,6 +64,10 @@ func (f *fakeDriver) BuildImage(_ context.Context, _ BuildRequest, prog func(str
 func (f *fakeDriver) ContainerList(_ context.Context, _ WorkspaceContext, filter ContainerFilter) ([]Container, error) {
 	f.gotFilter = filter
 	return f.containers, nil
+}
+
+func (f *fakeDriver) ContainerStats(_ context.Context, _ WorkspaceContext, _ ContainerFilter) ([]ContainerStat, error) {
+	return f.stats, nil
 }
 
 func (f *fakeDriver) ContainerLogs(_ context.Context, _ WorkspaceContext, _ string, _ int, _ bool, sink func(LogLine)) error {

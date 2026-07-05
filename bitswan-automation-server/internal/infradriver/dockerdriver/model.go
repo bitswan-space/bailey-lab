@@ -60,6 +60,14 @@ type Deployment struct {
 	Replicas       *int                   `yaml:"replicas"`
 	DeploymentCtx  string                 `yaml:"deployment_context"`
 	Services       map[string]interface{} `yaml:"services"`
+	// MemoryReservation (MB) + MemPolicy ("on-demand" | "always-on") govern
+	// memory: gitops resolves them from automation.toml and persists them here so
+	// the compiler can stamp the gitops.mem_reservation_mb / gitops.mem_policy
+	// labels the daemon reads for its budget, over-reservation SIEM, and
+	// on-demand eviction. Absent → 50 MB / "on-demand" (see memReservationMB /
+	// memPolicy in entry.go).
+	MemoryReservation *int   `yaml:"memory_reservation"`
+	MemPolicy         string `yaml:"memory_reservation_policy"`
 	// NOTE: network_mode / networks / volumes / ports / devices / container_name
 	// are intentionally NOT fields here. The driver is a constraining compiler,
 	// not a compose passthrough — a deployment record must not be able to inject

@@ -110,6 +110,16 @@ def _short_hash(context: str) -> str:
     return hashlib.sha256(context.encode()).hexdigest()[:4]
 
 
+def _default_mem_reservation_mb() -> int:
+    """Memory (MB) budgeted for a container whose automation.toml declares no
+    memory-reservation (legacy / undeclared) — small on purpose so an unset field
+    isn't a big hammer. Mirrors the driver's defaultMemReservationMB."""
+    try:
+        return max(1, int(os.environ.get("BITSWAN_MEM_DEFAULT_CONTAINER_MB", "50")))
+    except (ValueError, TypeError):
+        return 50
+
+
 def update_automation_toml_image(toml_path: str, new_image_value: str) -> None:
     """Rewrite the `image` field under `[deployment]` in `automation.toml`,
     preserving the rest of the file's formatting. Creates the file (and the
@@ -1320,6 +1330,24 @@ class AutomationService:
                     }
             if svcs is not None:
                 dep["services"] = svcs
+            # Memory governance: persist the effective reservation (MB) + policy
+            # so the driver can stamp gitops.mem_reservation_mb / gitops.mem_policy
+            # labels the daemon budgets against (over-reservation SIEM, on-demand
+            # eviction, admission). Prefer an explicit member value, else resolve
+            # from automation.toml; an undeclared reservation defaults to
+            # DEFAULT_MEM_RESERVATION_MB (mandatory field is enforced at promote).
+            mem_res = m.get("memory_reservation")
+            mem_pol = m.get("memory_reservation_policy")
+            if mem_res is None or mem_pol is None:
+                mem_conf = self.resolve_automation_config(dep)
+                if mem_res is None:
+                    mem_res = mem_conf.memory_reservation
+                if mem_pol is None:
+                    mem_pol = mem_conf.memory_reservation_policy
+            dep["memory_reservation"] = (
+                int(mem_res) if mem_res else _default_mem_reservation_mb()
+            )
+            dep["memory_reservation_policy"] = mem_pol or "on-demand"
             if m.get("replicas") is not None:
                 dep["replicas"] = m["replicas"]
             # Image-baked deploys: the source lives inside the image. Record the

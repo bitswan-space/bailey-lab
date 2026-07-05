@@ -127,6 +127,13 @@ class AutomationConfig:
     services: dict[str, ServiceDependency] | None = None
     # Use host network for external access (Selenium testing)
     external_testing_network: bool = False
+    # Memory governance (see resource management). memory_reservation is the MB
+    # this container is budgeted; None = undeclared (defaults to
+    # DEFAULT_MEM_RESERVATION_MB at persist time — mandatory for staging/prod
+    # promotes). memory_reservation_policy is "on-demand" (evictable under memory
+    # pressure, woken on access) or "always-on" (never auto-shut-down).
+    memory_reservation: int | None = None
+    memory_reservation_policy: str = "on-demand"
 
 
 def parse_automation_toml(content: str) -> AutomationConfig | None:
@@ -159,6 +166,27 @@ def parse_automation_toml(content: str) -> AutomationConfig | None:
                 enabled=svc_conf.get("enabled", True),
             )
 
+    # Memory governance fields. Accept both hyphen and underscore spellings for
+    # the policy key (TOML style varies); the reservation is an int MB.
+    mem_reservation = deployment.get("memory-reservation")
+    if mem_reservation is None:
+        mem_reservation = deployment.get("memory_reservation")
+    try:
+        mem_reservation = int(mem_reservation) if mem_reservation is not None else None
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"deployment.memory-reservation must be an integer (MB): {mem_reservation!r}"
+        ) from e
+    mem_policy = (
+        deployment.get("memory_reservation_policy")
+        or deployment.get("memory-reservation-policy")
+        or "on-demand"
+    )
+    if mem_policy not in ("on-demand", "always-on"):
+        raise ValueError(
+            f"deployment.memory_reservation_policy must be 'on-demand' or 'always-on': {mem_policy!r}"
+        )
+
     return AutomationConfig(
         id=deployment.get("id"),
         auth=deployment.get("auth", False),
@@ -169,6 +197,8 @@ def parse_automation_toml(content: str) -> AutomationConfig | None:
         allowed_domains=allowed_domains,
         services=services,
         external_testing_network=deployment.get("external-testing-network", False),
+        memory_reservation=mem_reservation,
+        memory_reservation_policy=mem_policy,
     )
 
 
