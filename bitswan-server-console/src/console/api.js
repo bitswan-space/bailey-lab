@@ -267,6 +267,11 @@ export const Api = {
   adminACL: () => getJSON('/bailey/api/admin/acl'),
   adminDefaultImages: () => getJSON('/bailey/api/admin/default-images'),
   setAdminDefaultImages: (body) => postJSON('/bailey/api/admin/default-images', body),
+  // Resource management: live memory budget + per-BP breakdown, and the
+  // editable heuristic knobs (system / per-workspace / on-demand pool).
+  resources: () => getJSON('/bailey/api/admin/resources'),
+  resourceConfig: () => getJSON('/bailey/api/admin/resource-config'),
+  setResourceConfig: (body) => postJSON('/bailey/api/admin/resource-config', body),
 };
 
 // Expose on window for the non-ESM-import console modules (they read

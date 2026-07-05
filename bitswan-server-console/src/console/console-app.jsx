@@ -6,6 +6,7 @@ const { Avatar: AAvatar, Toast: AToast } = window.SC_UI;
 const { OverviewView, WorkspacesView } = window.SC_WORKSPACES;
 const { UsersView, EndpointAccessView } = window.SC_PEOPLE;
 const { DevicesView, SecurityView } = window.SC_DEVICES;
+const { ResourcesView } = window.SC_RESOURCES;
 const { BootstrapScene, ApprovalScene, RecoveryScene, InviteScene } = window.SC_SCENES;
 const { Api } = window.SC_API;
 const { useState: useA, useEffect: useAE, useRef: useAR } = React;
@@ -32,8 +33,9 @@ function initialData() {
     overview: null,      // { counts, identity, activity }
     people: null,        // [{ name,email,role,workspaceCount,deviceCount,lastActive,invited }]
     peopleWarning: null, // partial-enumeration `error` string from /people (200 + error)
-    load: { devices: 'idle', approvals: 'idle', workspaces: 'idle', whoami: 'idle', overview: 'idle', people: 'idle' },
-    error: {},           // { devices, approvals, workspaces, whoami, overview, people }
+    resources: null,     // GET /bailey/api/admin/resources (memory budget + per-BP)
+    load: { devices: 'idle', approvals: 'idle', workspaces: 'idle', whoami: 'idle', overview: 'idle', people: 'idle', resources: 'idle' },
+    error: {},           // { devices, approvals, workspaces, whoami, overview, people, resources }
   };
 }
 
@@ -242,6 +244,7 @@ const NAV = [
   ]},
   { group: 'Admin', items: [
     { id: 'overview',  label: 'Server overview',  icon: 'gauge' },
+    { id: 'resources', label: 'Resource management', icon: 'cpu' },
     // New-user device approvals are merged into People & roles (the pending
     // device shows as a highlighted bar under that person), so the badge lives
     // here now — there's no separate approvals page.
@@ -258,7 +261,7 @@ const NAV = [
 // routing works end-to-end. A second path segment carries a view's open
 // "drawer" (the workspace being managed, the person whose devices you're
 // viewing) — e.g. /workspaces/acme, /users/jane@x.
-const ROUTES = ['workspaces', 'handbook', 'overview', 'users', 'acl', 'devices', 'security'];
+const ROUTES = ['workspaces', 'handbook', 'overview', 'resources', 'users', 'acl', 'devices', 'security'];
 
 function parseLocation() {
   const segs = (window.location.pathname || '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
@@ -344,6 +347,7 @@ function Console({ data, setData, toast, refresh }) {
   const views = {
     workspaces: WorkspacesView, overview: OverviewView, users: UsersView,
     acl: EndpointAccessView, devices: DevicesView, security: SecurityView, handbook: HandbookView,
+    resources: ResourcesView,
   };
   const View = views[route] || WorkspacesView;
 
@@ -627,6 +631,17 @@ function App() {
     } catch (e) { if (!bg) { setLoad('overview', 'error'); setErr('overview', e.message); } }
   };
 
+  const loadResources = useAR();
+  loadResources.current = async (opts) => {
+    const bg = opts && opts.background;
+    if (!bg) setLoad('resources', 'loading');
+    try {
+      const r = await Api.resources();
+      setData(d => ({ ...d, resources: r }));
+      setLoad('resources', 'ok'); setErr('resources', null);
+    } catch (e) { if (!bg) { setLoad('resources', 'error'); setErr('resources', e.message); } }
+  };
+
   const loadPeople = useAR();
   loadPeople.current = async () => {
     setLoad('people', 'loading');
@@ -648,7 +663,7 @@ function App() {
   // so a view's mutation handler can sync after writing to the backend.
   const refresh = useAR();
   refresh.current = (which, opts) => {
-    const all = { devices: loadDevices, approvals: loadApprovals, workspaces: loadWorkspaces, whoami: loadWhoami, overview: loadOverview, people: loadPeople };
+    const all = { devices: loadDevices, approvals: loadApprovals, workspaces: loadWorkspaces, whoami: loadWhoami, overview: loadOverview, people: loadPeople, resources: loadResources };
     if (which && all[which]) return all[which].current(opts);
     return Promise.all(Object.values(all).map(r => r.current(opts)));
   };
@@ -692,6 +707,7 @@ function App() {
     // these views; if they did, the 403 surfaces as the view's error state.
     loadOverview.current();
     loadPeople.current();
+    loadResources.current();
   }, [gate.status, scene]);
 
   // Keep the volatile lists fresh without a manual reload. Device approvals
@@ -710,6 +726,7 @@ function App() {
       refresh.current('approvals', { background: true });
       refresh.current('devices', { background: true });
       refresh.current('overview', { background: true });
+      refresh.current('resources', { background: true });
     };
     const id = setInterval(syncVolatile, 20000);
     const onVisible = () => { if (document.visibilityState === 'visible') syncVolatile(); };

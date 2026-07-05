@@ -302,6 +302,23 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+	case "/bailey/api/admin/resources":
+		if r.Method == http.MethodGet {
+			s.handleBaileyResources(w, r)
+			return
+		}
+	case "/bailey/api/admin/resource-config":
+		switch r.Method {
+		case http.MethodGet:
+			s.handleResourceConfigGet(w, r)
+			return
+		case http.MethodPost:
+			s.handleResourceConfigPost(w, r, email)
+			return
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 	}
 
 	http.NotFound(w, r)
