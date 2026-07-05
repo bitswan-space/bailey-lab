@@ -90,6 +90,17 @@ func TestComputeBudgetOvercommit(t *testing.T) {
 	}
 }
 
+func TestComputeBudgetLowAvailPressure(t *testing.T) {
+	cfg := memConfig{SystemReserveMB: 512, WorkspaceReserveMB: 128, DefaultContainerMB: 50, OnDemandFloorMB: 1024, OnDemandTopN: 4}
+	mib := uint64(1024 * 1024)
+	// Reserved fits the host, but actual available memory has dropped below the
+	// on-demand pool → pressure via the availability branch.
+	b := computeBudget(nil, 8192*mib, 100*mib, 1, cfg)
+	if !b.Pressure {
+		t.Errorf("low available memory should raise pressure: avail=%d pool=%d", b.HostAvailBytes, b.OnDemandPoolMB)
+	}
+}
+
 func TestParseMemInventory(t *testing.T) {
 	sep := memInvSep
 	raw := []byte(

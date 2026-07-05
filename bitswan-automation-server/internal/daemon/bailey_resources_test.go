@@ -176,14 +176,29 @@ func TestEnforceMemoryBudget(t *testing.T) {
 	}}
 	(&Server{}).enforceMemoryBudget(context.Background())
 
-	// Over pool → planEvictions selects a victim; evictViaGitops runs (and fails to
-	// reach gitops in the test env, exercising its error path). Force a tiny pool.
+	// Governor error → early return (inventory-error branch).
+	baileyMemGovernor = errGovernor{}
+	(&Server{}).enforceMemoryBudget(context.Background())
+
+	// Over pool → planEvictions selects a victim, evictViaGitops succeeds (stubbed),
+	// and the sweep records the returned host as dehydrated. Force a tiny pool.
 	t.Setenv("BITSWAN_MEM_ONDEMAND_POOL_MIN_MB", "1")
 	t.Setenv("BITSWAN_MEM_ONDEMAND_POOL_TOPN", "1")
+	prevURL, prevSec := gitopsEvictURL, gitopsSecretForWorkspace
+	defer func() { gitopsEvictURL, gitopsSecretForWorkspace = prevURL, prevSec }()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string][]string{"evicted": {"d1"}, "hosts": {"ws-fe-9-live-dev"}})
+	}))
+	defer srv.Close()
+	gitopsEvictURL = func(string) string { return srv.URL }
+	gitopsSecretForWorkspace = func(string) (string, error) { return "s", nil }
 	baileyMemGovernor = fakeGovernor{inv: []memContainer{
 		{Workspace: "ws", Context: "a", Stage: "live-dev", DeploymentID: "d1", Policy: "on-demand", Running: true, ReservationMB: 1, UsageBytes: 500 * mb, Created: 100},
 	}}
-	(&Server{}).enforceMemoryBudget(context.Background()) // must not panic
+	(&Server{}).enforceMemoryBudget(context.Background())
+	if !isHostDehydrated("ws-fe-9-live-dev") {
+		t.Error("swept host should be recorded as dehydrated")
+	}
 }
 
 func TestDockerInventoryAndHelpers(t *testing.T) {
@@ -202,6 +217,32 @@ func TestDockerGovernorBudget(t *testing.T) {
 	// assert a particular budget.
 	if _, err := (dockerMemoryGovernor{}).Budget(context.Background()); err != nil {
 		t.Logf("governor budget unavailable in test env (expected without docker): %v", err)
+	}
+}
+
+func TestAdmitMemoryRequestWithInventory(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("admitMemoryRequest needs /proc/meminfo (Linux)")
+	}
+	prev := admitInventory
+	defer func() { admitInventory = prev }()
+	mb := int64(1024 * 1024)
+	// A mix of always-on + on-demand + infra so the gathering loop's branches run.
+	admitInventory = func(context.Context) ([]memContainer, error) {
+		return []memContainer{
+			{DeploymentID: "be1", Policy: "always-on", ReservationMB: 128, UsageBytes: 10 * mb},
+			{DeploymentID: "fe1", Policy: "on-demand", ReservationMB: 256, UsageBytes: 20 * mb},
+			{Policy: "", UsageBytes: 5 * mb}, // infra, skipped
+		}, nil
+	}
+	// A small on-demand promote is admitted (host has ample memory in CI).
+	res, err := (&Server{}).admitMemoryRequest(context.Background(),
+		admitRequest{Kind: "promote", OnDemandAddMB: []int{32}})
+	if err != nil {
+		t.Fatalf("admitMemoryRequest: %v", err)
+	}
+	if !res.OK {
+		t.Errorf("small on-demand promote should be admitted: %+v", res)
 	}
 }
 
