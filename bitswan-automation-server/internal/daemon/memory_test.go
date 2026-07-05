@@ -25,12 +25,12 @@ func TestComputeBudget(t *testing.T) {
 	cfg := memConfig{SystemReserveMB: 2048, WorkspaceReserveMB: 768, DefaultContainerMB: 50, OnDemandFloorMB: 1024, OnDemandTopN: 4}
 	inv := []memContainer{
 		// always-on backend using MORE than its reservation → over-reservation.
-		{Workspace: "ws", BP: "billing", Stage: "staging", Policy: "always-on", ReservationMB: 256, UsageBytes: 300 * mb, Running: true},
+		{Workspace: "ws", BP: "billing", Stage: "staging", DeploymentID: "be-billing-staging", Policy: "always-on", ReservationMB: 256, UsageBytes: 300 * mb, Running: true},
 		// on-demand staging
-		{Workspace: "ws", BP: "reports", Stage: "staging", Policy: "on-demand", ReservationMB: 512, UsageBytes: 100 * mb, Running: true},
+		{Workspace: "ws", BP: "reports", Stage: "staging", DeploymentID: "be-reports-staging", Policy: "on-demand", ReservationMB: 512, UsageBytes: 100 * mb, Running: true},
 		// live-dev (on-demand)
-		{Workspace: "ws", BP: "reports", Stage: "live-dev", Policy: "on-demand", ReservationMB: 128, UsageBytes: 40 * mb, Running: true},
-		// infra container (no policy) — excluded from Σa/pool, no per-BP row
+		{Workspace: "ws", BP: "reports", Stage: "live-dev", DeploymentID: "be-reports-livedev", Policy: "on-demand", ReservationMB: 128, UsageBytes: 40 * mb, Running: true},
+		// infra container (no deployment_id) — excluded from Σa/pool, no per-BP row
 		{Workspace: "ws", Policy: "", ReservationMB: 0, UsageBytes: 200 * mb, Running: true},
 	}
 	// host 16 GiB total, 8 GiB available, 2 workspaces

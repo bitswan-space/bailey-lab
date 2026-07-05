@@ -101,10 +101,12 @@ type memContainer struct {
 	Running       bool   `json:"running"`
 }
 
-// IsWorkload reports whether this is an automation deployment (carries a memory
-// policy) vs workspace infra (gitops/dashboard/driver/gateways, no policy — its
-// cost is covered by the per-workspace reserve W).
-func (c memContainer) IsWorkload() bool { return c.Policy != "" }
+// IsWorkload reports whether this is an automation deployment (carries a
+// gitops.deployment_id) vs workspace infra (gitops/dashboard/driver/gateways —
+// no deployment_id; covered by the per-workspace reserve W). Keyed on
+// deployment_id, NOT the policy label, so deployments that predate the label
+// still count (they default to on-demand — the model's default).
+func (c memContainer) IsWorkload() bool { return c.DeploymentID != "" }
 
 // memInvSep separates the lean docker-ps fields (unit separator).
 const memInvSep = "\x1f"
