@@ -3350,11 +3350,12 @@ class AutomationService:
                 detail=(f"No {source_stage} deployments to promote under BP '{bp}'"),
             )
 
-        # Memory governance: memory-reservation is MANDATORY for staging/production
-        # promotes, and the promotion must fit the reserved budget — an always-on
-        # member grows the always-on pool; a large on-demand member grows the
-        # on-demand pool. Resolve each member's reservation + policy from its
-        # automation.toml (the promoted checksum tree).
+        # Memory governance: sum the promotion's reservation and check it fits the
+        # reserved budget — an always-on member grows the always-on pool; a large
+        # on-demand member grows the on-demand pool. memory-reservation SHOULD be
+        # declared (templates scaffold it, the CLI documents it as required), but an
+        # undeclared/legacy automation defaults to DEFAULT_MEM_RESERVATION_MB rather
+        # than blocking the promote — we only warn so backward-compat holds.
         missing: list[str] = []
         always_on_add = 0
         ondemand_add: list[int] = []
@@ -3370,12 +3371,13 @@ class AutomationService:
             else:
                 ondemand_add.append(res_mb)
         if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "memory-reservation is required in automation.toml before "
-                    f"promoting to {target_stage}: " + ", ".join(sorted(missing))
-                ),
+            logger.warning(
+                "promote %s to %s: no memory-reservation declared for %s "
+                "(defaulting to %d MB each — declare it in automation.toml)",
+                bp,
+                target_stage,
+                ", ".join(sorted(missing)),
+                _default_mem_reservation_mb(),
             )
         try:
             verdict = daemon_admit_memory(

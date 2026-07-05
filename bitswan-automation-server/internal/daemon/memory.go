@@ -479,6 +479,22 @@ func admitMemory(b memBudget, currentOnDemand []int, cfg memConfig, req admitReq
 // redeploy is a new ID → re-evaluated).
 var overReservationState sync.Map
 
+// overReservationTransition records the new over/under state for a container and
+// returns true only when it just crossed INTO the over state (so the SIEM event
+// fires once per crossing, not every sweep). Pure state machine (unit-testable).
+func overReservationTransition(id string, over bool) bool {
+	prev, _ := overReservationState.Load(id)
+	wasOver, _ := prev.(bool)
+	if over && !wasOver {
+		overReservationState.Store(id, true)
+		return true
+	}
+	if !over && wasOver {
+		overReservationState.Store(id, false)
+	}
+	return false
+}
+
 // checkOverReservation emits a SIEM event + log the first time a running
 // container's actual memory crosses above its reservation. Cheap; runs each sweep.
 func checkOverReservation(inv []memContainer) {
@@ -487,16 +503,11 @@ func checkOverReservation(inv []memContainer) {
 			continue
 		}
 		over := c.UsageBytes > int64(c.ReservationMB)*1024*1024
-		prev, _ := overReservationState.Load(c.ID)
-		wasOver, _ := prev.(bool)
-		if over && !wasOver {
-			overReservationState.Store(c.ID, true)
+		if overReservationTransition(c.ID, over) {
 			detail := fmt.Sprintf("%s (%s/%s): %d MB used > %d MB reserved",
 				c.DeploymentID, c.Workspace, c.Stage, c.UsageBytes/(1024*1024), c.ReservationMB)
 			log.Printf("memory: container over reservation: %s", detail)
 			_ = recordEvent("", auditMemOverReservation, detail)
-		} else if !over && wasOver {
-			overReservationState.Store(c.ID, false)
 		}
 	}
 }
@@ -576,6 +587,67 @@ func isHostDehydrated(host string) bool {
 	return true
 }
 
+// planEvictions is the PURE eviction planner: given the inventory and the
+// on-demand pool size (bytes), it returns the deployment ids to evict grouped by
+// workspace, the victim-instance count, and the current on-demand usage. Nothing
+// is shed while running on-demand memory fits the pool. Victims are whole
+// instances (workspace, context, stage), oldest-first by earliest container
+// Created, until the projected usage fits. Unit-testable (no docker/I/O).
+func planEvictions(inv []memContainer, poolBytes int64) (map[string][]string, int, int64) {
+	var onDemandUsage int64
+	for _, c := range inv {
+		if c.IsWorkload() && c.Policy != "always-on" && c.Running {
+			onDemandUsage += c.UsageBytes
+		}
+	}
+	if onDemandUsage <= poolBytes {
+		return nil, 0, onDemandUsage
+	}
+	type instance struct {
+		ws      string
+		depIDs  []string
+		usage   int64
+		created int64
+	}
+	insts := map[string]*instance{}
+	order := []string{} // stable insertion order for deterministic ties
+	for _, c := range inv {
+		if !c.IsWorkload() || c.Policy == "always-on" || !c.Running {
+			continue
+		}
+		key := c.Workspace + "\x00" + c.Context + "\x00" + c.Stage
+		in := insts[key]
+		if in == nil {
+			in = &instance{ws: c.Workspace, created: c.Created}
+			insts[key] = in
+			order = append(order, key)
+		}
+		in.depIDs = append(in.depIDs, c.DeploymentID)
+		in.usage += c.UsageBytes
+		if c.Created > 0 && (in.created == 0 || c.Created < in.created) {
+			in.created = c.Created
+		}
+	}
+	ordered := make([]*instance, 0, len(insts))
+	for _, k := range order {
+		ordered = append(ordered, insts[k])
+	}
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].created < ordered[j].created })
+
+	projected := onDemandUsage
+	byWorkspace := map[string][]string{}
+	victims := 0
+	for _, in := range ordered {
+		if projected <= poolBytes {
+			break
+		}
+		byWorkspace[in.ws] = append(byWorkspace[in.ws], in.depIDs...)
+		projected -= in.usage
+		victims++
+	}
+	return byWorkspace, victims, onDemandUsage
+}
+
 // enforceMemoryBudget is the 5-minute sweep: keep the RUNNING on-demand set's
 // actual memory within the on-demand pool P, evicting the oldest on-demand
 // instances (globally, across workspaces) so always-on services keep their
@@ -597,61 +669,8 @@ func (s *Server) enforceMemoryBudget(ctx context.Context) {
 
 	checkOverReservation(inv)
 
-	// On-demand actual usage within the pool? Then nothing to shed.
 	poolBytes := int64(b.OnDemandPoolMB) * 1024 * 1024
-	var onDemandUsage int64
-	for _, c := range inv {
-		if c.IsWorkload() && c.Policy != "always-on" && c.Running {
-			onDemandUsage += c.UsageBytes
-		}
-	}
-	if onDemandUsage <= poolBytes {
-		return
-	}
-
-	// Group running on-demand containers into instances (workspace, context,
-	// stage); evict oldest-first (by earliest container Created) until the
-	// projected on-demand usage fits the pool.
-	type instance struct {
-		ws      string
-		depIDs  []string
-		usage   int64
-		created int64
-	}
-	insts := map[string]*instance{}
-	for _, c := range inv {
-		if !c.IsWorkload() || c.Policy == "always-on" || !c.Running {
-			continue
-		}
-		key := c.Workspace + "\x00" + c.Context + "\x00" + c.Stage
-		in := insts[key]
-		if in == nil {
-			in = &instance{ws: c.Workspace, created: c.Created}
-			insts[key] = in
-		}
-		in.depIDs = append(in.depIDs, c.DeploymentID)
-		in.usage += c.UsageBytes
-		if c.Created > 0 && (in.created == 0 || c.Created < in.created) {
-			in.created = c.Created
-		}
-	}
-	ordered := make([]*instance, 0, len(insts))
-	for _, in := range insts {
-		ordered = append(ordered, in)
-	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].created < ordered[j].created })
-
-	projected := onDemandUsage
-	byWorkspace := map[string][]string{}
-	victims := 0
-	for _, in := range ordered {
-		if projected <= poolBytes {
-			break
-		}
-		byWorkspace[in.ws] = append(byWorkspace[in.ws], in.depIDs...)
-		projected -= in.usage
-		victims++
-	}
+	byWorkspace, victims, onDemandUsage := planEvictions(inv, poolBytes)
 	if victims == 0 {
 		return
 	}

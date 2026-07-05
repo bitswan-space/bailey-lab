@@ -16,10 +16,16 @@ import (
 // admitMemoryRequest gathers the live budget + current on-demand reservations and
 // runs the pure admit check. Used by the workspace-create gate (in-process) and
 // the /memory/admit endpoint (gitops promote gate).
-func (s *Server) admitMemoryRequest(ctx context.Context, req admitRequest) (admitResult, error) {
+// admitInventory gathers the reservation-only inventory for admission. A package
+// var so tests can stub the docker dependency.
+var admitInventory = func(ctx context.Context) ([]memContainer, error) {
 	// Admission only needs RESERVATIONS (from labels via docker ps), never live
 	// usage — so skip the slow docker stats sample to keep the gate fast.
-	inv, err := dockerGlobalInventory(ctx, false)
+	return dockerGlobalInventory(ctx, false)
+}
+
+func (s *Server) admitMemoryRequest(ctx context.Context, req admitRequest) (admitResult, error) {
+	inv, err := admitInventory(ctx)
 	if err != nil {
 		return admitResult{}, err
 	}

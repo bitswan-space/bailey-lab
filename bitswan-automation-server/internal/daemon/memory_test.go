@@ -1,6 +1,10 @@
 package daemon
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestOnDemandPoolMB(t *testing.T) {
 	// Floor wins when services are small.
@@ -143,11 +147,118 @@ func TestAdmitMemory(t *testing.T) {
 	}
 }
 
+func TestPlanEvictions(t *testing.T) {
+	mb := int64(1024 * 1024)
+	// Pool = 200 MB. Running on-demand: instance A (old, 150MB) + B (new, 150MB) =
+	// 300MB > 200MB → evict the oldest (A) until projected (150) <= pool.
+	inv := []memContainer{
+		{Workspace: "ws", Context: "a", Stage: "live-dev", DeploymentID: "fe-a", Policy: "on-demand", Running: true, Created: 100, UsageBytes: 100 * mb},
+		{Workspace: "ws", Context: "a", Stage: "live-dev", DeploymentID: "be-a", Policy: "on-demand", Running: true, Created: 100, UsageBytes: 50 * mb},
+		{Workspace: "ws", Context: "b", Stage: "live-dev", DeploymentID: "fe-b", Policy: "on-demand", Running: true, Created: 200, UsageBytes: 150 * mb},
+		// always-on never evicted
+		{Workspace: "ws", Context: "c", Stage: "staging", DeploymentID: "be-c", Policy: "always-on", Running: true, Created: 1, UsageBytes: 400 * mb},
+	}
+	byWs, victims, usage := planEvictions(inv, 200*mb)
+	if usage != 300*mb {
+		t.Errorf("on-demand usage = %d, want %d", usage/mb, 300)
+	}
+	if victims != 1 {
+		t.Fatalf("victims = %d, want 1 (oldest instance A)", victims)
+	}
+	got := byWs["ws"]
+	if len(got) != 2 {
+		t.Fatalf("evicted deps = %v, want both of instance A", got)
+	}
+	// Must be instance A's deployments, never the always-on be-c.
+	for _, d := range got {
+		if d == "be-c" {
+			t.Errorf("evicted an always-on deployment: %v", got)
+		}
+	}
+	// Under pool → nothing evicted.
+	if _, v, _ := planEvictions(inv, 400*mb); v != 0 {
+		t.Errorf("under pool should evict nothing, got %d", v)
+	}
+}
+
+func TestOverReservationTransition(t *testing.T) {
+	id := "test-dep-xyz"
+	overReservationState.Delete(id)
+	if !overReservationTransition(id, true) {
+		t.Error("first crossing into over should fire")
+	}
+	if overReservationTransition(id, true) {
+		t.Error("staying over should NOT re-fire (debounce)")
+	}
+	if overReservationTransition(id, false) {
+		t.Error("dropping under should not fire")
+	}
+	if !overReservationTransition(id, true) {
+		t.Error("re-crossing into over should fire again")
+	}
+	overReservationState.Delete(id)
+}
+
+func TestIsHostDehydrated(t *testing.T) {
+	host := "wraptest-frontend-ab12-staging.example.com"
+	if isHostDehydrated(host) {
+		t.Error("unknown host should not be dehydrated")
+	}
+	dehydratedOnDemandHosts.Store(toOuterHost(strings.ToLower(host)), time.Now())
+	if !isHostDehydrated(host) {
+		t.Error("recorded host should be dehydrated")
+	}
+	// Expired entry is dropped.
+	dehydratedOnDemandHosts.Store(toOuterHost(strings.ToLower(host)), time.Now().Add(-2*dehydratedHostTTL))
+	if isHostDehydrated(host) {
+		t.Error("expired host should not be dehydrated")
+	}
+}
+
+func TestMemConfigDefaults(t *testing.T) {
+	// With no env/DB override, defaults apply. (dbGetSetting returns "" without a
+	// configured DB in the test env; env is unset.)
+	for _, k := range []string{
+		"BITSWAN_MEM_SYSTEM_RESERVE_MB", "BITSWAN_MEM_WORKSPACE_RESERVE_MB",
+		"BITSWAN_MEM_DEFAULT_CONTAINER_MB", "BITSWAN_MEM_ONDEMAND_POOL_MIN_MB",
+		"BITSWAN_MEM_ONDEMAND_POOL_TOPN",
+	} {
+		t.Setenv(k, "")
+	}
+	// Env override wins over the default.
+	t.Setenv("BITSWAN_MEM_DEFAULT_CONTAINER_MB", "128")
+	if got := memConfigInt(settingMemDefaultContainerMB, "BITSWAN_MEM_DEFAULT_CONTAINER_MB", 50); got != 128 {
+		t.Errorf("env override = %d, want 128", got)
+	}
+	// Invalid env falls back to default.
+	t.Setenv("BITSWAN_MEM_ONDEMAND_POOL_TOPN", "notanint")
+	if got := memConfigInt(settingMemOnDemandTopN, "BITSWAN_MEM_ONDEMAND_POOL_TOPN", 4); got != 4 {
+		t.Errorf("invalid env should fall back to 4, got %d", got)
+	}
+}
+
+func TestParseStatsUsage(t *testing.T) {
+	raw := []byte("aaaa\x1f200MiB / 2GiB\nbbbb\x1f50MiB / 2GiB\n\n")
+	u := parseStatsUsage(raw)
+	if u["aaaa"] != 200*1024*1024 || u["bbbb"] != 50*1024*1024 {
+		t.Errorf("parseStatsUsage = %v", u)
+	}
+	if len(u) != 2 {
+		t.Errorf("want 2 entries, got %d", len(u))
+	}
+}
+
 func TestParseMemBytes(t *testing.T) {
 	cases := map[string]int64{
 		"200MiB / 2GiB": 200 * 1024 * 1024,
 		"1GiB / 4GiB":   1024 * 1024 * 1024,
 		"512MiB":        512 * 1024 * 1024,
+		"2KiB / 1GiB":   2 * 1024,
+		"4KB / 1GB":     4 * 1000,
+		"3GB / 8GB":     3 * 1000 * 1000 * 1000,
+		"1TiB / 2TiB":   1024 * 1024 * 1024 * 1024,
+		"5TB / 10TB":    5 * 1000 * 1000 * 1000 * 1000,
+		"100B / 1GiB":   100,
 		"-- / --":       0,
 		"":              0,
 	}
