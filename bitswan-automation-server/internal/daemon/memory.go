@@ -112,10 +112,12 @@ func (c memContainer) IsWorkload() bool { return c.DeploymentID != "" }
 const memInvSep = "\x1f"
 
 // dockerGlobalInventory lists every bitswan-managed container across ALL
-// workspaces (the daemon is not tenant-scoped) with its labels, then joins live
-// memory from `docker stats`. Isolated here so business logic (computeBudget /
-// admit) stays docker-free and unit-testable.
-func dockerGlobalInventory(ctx context.Context) ([]memContainer, error) {
+// workspaces (the daemon is not tenant-scoped) with its labels. When withUsage is
+// set it also joins live memory from `docker stats` — which is SLOW at scale
+// (a per-container sample), so the admission gates skip it (they only need
+// reservations, read from labels). Isolated here so business logic (computeBudget
+// / admit) stays docker-free and unit-testable.
+func dockerGlobalInventory(ctx context.Context, withUsage bool) ([]memContainer, error) {
 	format := "{{.ID}}" + memInvSep + "{{.State}}" + memInvSep + "{{.CreatedAt}}" +
 		memInvSep + "{{.Names}}" + memInvSep + "{{.Labels}}"
 	out, err := exec.CommandContext(ctx, "docker", "ps", "--all", "--no-trunc", "--format", format).Output()
@@ -124,16 +126,41 @@ func dockerGlobalInventory(ctx context.Context) ([]memContainer, error) {
 	}
 	conts := parseMemInventory(out)
 
-	// Join live memory usage for running containers.
-	usage, err := dockerStatsUsage(ctx)
-	if err == nil {
-		for i := range conts {
-			if b, ok := usage[conts[i].ID]; ok {
-				conts[i].UsageBytes = b
+	if withUsage {
+		// Join live memory usage for running containers (best-effort).
+		if usage, uerr := dockerStatsUsage(ctx); uerr == nil {
+			for i := range conts {
+				if b, ok := usage[conts[i].ID]; ok {
+					conts[i].UsageBytes = b
+				}
 			}
 		}
 	}
 	return conts, nil
+}
+
+// cachedInventory memoizes the (slow) with-usage inventory for a short window so
+// the admin page and the eviction sweep don't each pay the docker stats cost.
+var (
+	invCacheMu   sync.Mutex
+	invCacheData []memContainer
+	invCacheAt   time.Time
+)
+
+const invCacheTTL = 30 * time.Second
+
+func cachedUsageInventory(ctx context.Context) ([]memContainer, error) {
+	invCacheMu.Lock()
+	defer invCacheMu.Unlock()
+	if invCacheData != nil && time.Since(invCacheAt) < invCacheTTL {
+		return invCacheData, nil
+	}
+	inv, err := dockerGlobalInventory(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	invCacheData, invCacheAt = inv, time.Now()
+	return inv, nil
 }
 
 // parseMemInventory maps the lean ps output into memContainer, keeping only
@@ -491,7 +518,9 @@ type dockerMemoryGovernor struct {
 }
 
 func (g dockerMemoryGovernor) Inventory(ctx context.Context) ([]memContainer, error) {
-	return dockerGlobalInventory(ctx)
+	// The page + sweep want live usage; served from a short-TTL cache so the
+	// slow docker stats cost is paid at most once per window.
+	return cachedUsageInventory(ctx)
 }
 
 func (g dockerMemoryGovernor) Budget(ctx context.Context) (memBudget, error) {

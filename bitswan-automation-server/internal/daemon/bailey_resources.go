@@ -17,7 +17,9 @@ import (
 // runs the pure admit check. Used by the workspace-create gate (in-process) and
 // the /memory/admit endpoint (gitops promote gate).
 func (s *Server) admitMemoryRequest(ctx context.Context, req admitRequest) (admitResult, error) {
-	inv, err := baileyMemGovernor.Inventory(ctx)
+	// Admission only needs RESERVATIONS (from labels via docker ps), never live
+	// usage — so skip the slow docker stats sample to keep the gate fast.
+	inv, err := dockerGlobalInventory(ctx, false)
 	if err != nil {
 		return admitResult{}, err
 	}
