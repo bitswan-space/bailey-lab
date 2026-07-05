@@ -26,6 +26,8 @@ services:
             gitops.context: shop
             gitops.deployment_id: backend-shop
             gitops.intended_exposed: "false"
+            gitops.mem_policy: on-demand
+            gitops.mem_reservation_mb: "50"
             gitops.slot: blue
             gitops.stage: production
             gitops.workspace: ws2
@@ -59,6 +61,8 @@ services:
             gitops.context: shop
             gitops.deployment_id: backend-shop@green
             gitops.intended_exposed: "false"
+            gitops.mem_policy: on-demand
+            gitops.mem_reservation_mb: "50"
             gitops.slot: green
             gitops.stage: production
             gitops.workspace: ws2
@@ -92,6 +96,8 @@ services:
             gitops.context: shop
             gitops.deployment_id: frontend-shop
             gitops.intended_exposed: "true"
+            gitops.mem_policy: on-demand
+            gitops.mem_reservation_mb: "50"
             gitops.slot: blue
             gitops.stage: production
             gitops.workspace: ws2
@@ -127,6 +133,8 @@ services:
             gitops.context: shop
             gitops.deployment_id: frontend-shop@green
             gitops.intended_exposed: "true"
+            gitops.mem_policy: on-demand
+            gitops.mem_reservation_mb: "50"
             gitops.slot: green
             gitops.stage: production
             gitops.workspace: ws2

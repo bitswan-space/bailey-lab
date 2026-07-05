@@ -37,6 +37,8 @@ services:
             gitops.context: copy-bar-acme
             gitops.deployment_id: backend-copy-bar-acme-live-dev
             gitops.intended_exposed: "false"
+            gitops.mem_policy: on-demand
+            gitops.mem_reservation_mb: "50"
             gitops.slot: ""
             gitops.stage: live-dev
             gitops.workspace: ws4
@@ -76,6 +78,8 @@ services:
             gitops.context: copy-bar-acme
             gitops.deployment_id: frontend-copy-bar-acme-live-dev
             gitops.intended_exposed: "true"
+            gitops.mem_policy: on-demand
+            gitops.mem_reservation_mb: "50"
             gitops.slot: ""
             gitops.stage: live-dev
             gitops.workspace: ws4
