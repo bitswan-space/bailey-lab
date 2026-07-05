@@ -4230,29 +4230,104 @@ class AutomationService:
         await self.enforce_live_dev_cap()
         return {"context": context, "deployment_ids": deps}
 
+    @staticmethod
+    def _is_on_demand(conf: dict) -> bool:
+        """A deployment is on-demand (evictable-under-pressure + wake-on-access)
+        unless it declares memory_reservation_policy=always-on. dev/live-dev are
+        always on-demand (they never set always-on)."""
+        return ((conf or {}).get("memory_reservation_policy") or "on-demand") != (
+            "always-on"
+        )
+
+    async def _wake_context_stage(self, context: str, stage: str) -> dict:
+        """Re-activate + redeploy every deployment sharing (context, stage) — the
+        on-demand wake for staging/production (dev/live-dev use the LRU-aware
+        wake_live_dev). stage is the persisted form ('' for production)."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        want = stage or ""
+        deps = [
+            did
+            for did, conf in (bs.get("deployments") or {}).items()
+            if (conf or {}).get("context") == context
+            and ((conf or {}).get("stage") or "") == want
+        ]
+        if not deps:
+            return {"context": context, "deployment_ids": []}
+        for dep in deps:
+            try:
+                await self.mark_as_active(dep)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("on-demand wake mark-active of %s failed: %s", dep, e)
+        try:
+            await self.apply_compose_for_deployments(deps, report=None)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("on-demand wake redeploy of %s failed: %s", context, e)
+        return {"context": context, "deployment_ids": deps}
+
     async def wake_by_host(self, host: str) -> dict:
-        """Resolve a request hostname to its ephemeral (dev/live-dev) instance and
+        """Resolve a request hostname to its ON-DEMAND deployment group and
         rehydrate it — the daemon gate's scale-from-zero hook calls this when a
         request hits a dehydrated host. Matches the host's DNS label against each
-        ephemeral deployment's COMPUTED hostname (make_hostname_label), so no
-        reverse-hashing is needed. Returns the woken context (or None)."""
+        deployment's COMPUTED hostname (make_hostname_label). Returns
+        {"on_demand": bool, ...}; an always-on or unknown host returns
+        on_demand=False so the gate passes the hard error through."""
         label = (host or "").split(".", 1)[0].lower().replace("--inner", "")
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         for conf in (bs.get("deployments") or {}).values():
             conf = conf or {}
-            stage = conf.get("stage")
-            if stage not in self.EPHEMERAL_STAGES:
-                continue
             auto = conf.get("automation_name") or ""
             context = conf.get("context") or ""
+            stage = conf.get("stage") or ""
             if not auto:
                 continue
             if (
                 make_hostname_label(self.workspace_name, auto, context, stage).lower()
-                == label
+                != label
             ):
-                return await self.wake_live_dev(context)
-        return {"context": None, "deployment_ids": []}
+                continue
+            if not self._is_on_demand(conf):
+                return {"on_demand": False, "context": context, "deployment_ids": []}
+            if stage in self.EPHEMERAL_STAGES:
+                res = await self.wake_live_dev(context)
+            else:
+                res = await self._wake_context_stage(context, stage)
+            return {"on_demand": True, **res}
+        return {"on_demand": False, "context": None, "deployment_ids": []}
+
+    async def evict_deployments(self, deployment_ids: list[str]) -> dict:
+        """Evict specific deployments (mark inactive + REMOVE containers) — driven
+        by the daemon's global memory sweep. Returns the evicted ids + their
+        computed ingress hosts, so the daemon can mark those hosts dehydrated (and
+        wake-able) for the gate. Best-effort per deployment."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        deployments = bs.get("deployments") or {}
+        evicted: list[str] = []
+        hosts: list[str] = []
+        for did in deployment_ids:
+            conf = deployments.get(did) or {}
+            try:
+                await self._evict_instance_deployment(did)
+                evicted.append(did)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("memory evict of %s failed: %s", did, e)
+                continue
+            auto = conf.get("automation_name") or ""
+            if auto:
+                hosts.append(
+                    make_hostname_label(
+                        self.workspace_name,
+                        auto,
+                        conf.get("context") or "",
+                        conf.get("stage") or "",
+                    )
+                )
+        if evicted:
+            logger.info(
+                "memory sweep evicted %d deployment(s): %s",
+                len(evicted),
+                ", ".join(evicted),
+            )
+        return {"evicted": evicted, "hosts": hosts}
 
     async def stop_automation(self, deployment_id: str):
         """Stop all containers for a deployment using async Docker client."""

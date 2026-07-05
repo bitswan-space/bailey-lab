@@ -33,7 +33,12 @@ func isDehydratableHost(host string) bool {
 		label = label[:i]
 	}
 	label = strings.Replace(label, innerHostSuffix, "", 1) // drop the --inner segment
-	return strings.HasSuffix(label, "-dev")
+	if strings.HasSuffix(label, "-dev") {
+		return true // dev / live-dev — always on-demand
+	}
+	// On-demand staging/production have no "-dev" suffix; the memory sweep records
+	// the hosts it shuts down so the gate can wake them on access too.
+	return isHostDehydrated(host) || isHostDehydrated(label)
 }
 
 var liveDevWakeDebounce sync.Map // outer host -> time.Time of last wake POST

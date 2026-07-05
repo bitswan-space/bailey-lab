@@ -19,13 +19,20 @@ package daemon
 //	U   = T - R               (elastic headroom; where on-demand runs)
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -436,6 +443,35 @@ func admitMemory(b memBudget, currentOnDemand []int, cfg memConfig, req admitReq
 	return admitResult{OK: true}
 }
 
+// --- over-reservation detection (SIEM + log) ---
+
+// overReservationState debounces the SIEM event per container so it fires once on
+// crossing INTO the exceeded state, not every sweep. Keyed by container ID (a
+// redeploy is a new ID → re-evaluated).
+var overReservationState sync.Map
+
+// checkOverReservation emits a SIEM event + log the first time a running
+// container's actual memory crosses above its reservation. Cheap; runs each sweep.
+func checkOverReservation(inv []memContainer) {
+	for _, c := range inv {
+		if !c.IsWorkload() || !c.Running || c.ReservationMB <= 0 || c.ID == "" {
+			continue
+		}
+		over := c.UsageBytes > int64(c.ReservationMB)*1024*1024
+		prev, _ := overReservationState.Load(c.ID)
+		wasOver, _ := prev.(bool)
+		if over && !wasOver {
+			overReservationState.Store(c.ID, true)
+			detail := fmt.Sprintf("%s (%s/%s): %d MB used > %d MB reserved",
+				c.DeploymentID, c.Workspace, c.Stage, c.UsageBytes/(1024*1024), c.ReservationMB)
+			log.Printf("memory: container over reservation: %s", detail)
+			_ = recordEvent("", auditMemOverReservation, detail)
+		} else if !over && wasOver {
+			overReservationState.Store(c.ID, false)
+		}
+	}
+}
+
 // --- governor interface (the k8s-swap seam) ---
 
 // MemoryGovernor is the memory backend. The docker implementation reads
@@ -481,4 +517,170 @@ func countWorkspacesForBudget() int {
 		return 0
 	}
 	return len(resp.Workspaces)
+}
+
+// --- active eviction sweep ---
+
+// dehydratedOnDemandHosts records on-demand ingress hosts the sweep has shut down
+// (host → time). The gate consults it (isDehydratableHost) so a request to such a
+// host shows the loading page + wakes, exactly like dev/live-dev. Entries expire
+// so a host that comes back doesn't linger as "dehydrated" forever.
+var dehydratedOnDemandHosts sync.Map
+
+const dehydratedHostTTL = 30 * time.Minute
+
+// isHostDehydrated reports whether host was shut down by the memory sweep (and
+// hasn't expired). Used to widen the gate's wake-on-access to on-demand
+// staging/production, which have no "-dev" suffix.
+func isHostDehydrated(host string) bool {
+	h := toOuterHost(strings.ToLower(host))
+	v, ok := dehydratedOnDemandHosts.Load(h)
+	if !ok {
+		return false
+	}
+	if time.Since(v.(time.Time)) > dehydratedHostTTL {
+		dehydratedOnDemandHosts.Delete(h)
+		return false
+	}
+	return true
+}
+
+// enforceMemoryBudget is the 5-minute sweep: keep the RUNNING on-demand set's
+// actual memory within the on-demand pool P, evicting the oldest on-demand
+// instances (globally, across workspaces) so always-on services keep their
+// reserved memory. Always-on + infra are never touched; evicted instances wake
+// on next access. Also emits over-reservation SIEM events (see checkOverReservation).
+func (s *Server) enforceMemoryBudget(ctx context.Context) {
+	inv, err := baileyMemGovernor.Inventory(ctx)
+	if err != nil {
+		log.Printf("memory sweep: inventory failed: %v", err)
+		return
+	}
+	total, avail, err := readMemInfo()
+	if err != nil {
+		log.Printf("memory sweep: readMemInfo failed: %v", err)
+		return
+	}
+	cfg := loadMemConfig()
+	b := computeBudget(inv, total, avail, countWorkspacesForBudget(), cfg)
+
+	checkOverReservation(inv)
+
+	// On-demand actual usage within the pool? Then nothing to shed.
+	poolBytes := int64(b.OnDemandPoolMB) * 1024 * 1024
+	var onDemandUsage int64
+	for _, c := range inv {
+		if c.IsWorkload() && c.Policy != "always-on" && c.Running {
+			onDemandUsage += c.UsageBytes
+		}
+	}
+	if onDemandUsage <= poolBytes {
+		return
+	}
+
+	// Group running on-demand containers into instances (workspace, context,
+	// stage); evict oldest-first (by earliest container Created) until the
+	// projected on-demand usage fits the pool.
+	type instance struct {
+		ws      string
+		depIDs  []string
+		usage   int64
+		created int64
+	}
+	insts := map[string]*instance{}
+	for _, c := range inv {
+		if !c.IsWorkload() || c.Policy == "always-on" || !c.Running {
+			continue
+		}
+		key := c.Workspace + "\x00" + c.Context + "\x00" + c.Stage
+		in := insts[key]
+		if in == nil {
+			in = &instance{ws: c.Workspace, created: c.Created}
+			insts[key] = in
+		}
+		in.depIDs = append(in.depIDs, c.DeploymentID)
+		in.usage += c.UsageBytes
+		if c.Created > 0 && (in.created == 0 || c.Created < in.created) {
+			in.created = c.Created
+		}
+	}
+	ordered := make([]*instance, 0, len(insts))
+	for _, in := range insts {
+		ordered = append(ordered, in)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].created < ordered[j].created })
+
+	projected := onDemandUsage
+	byWorkspace := map[string][]string{}
+	victims := 0
+	for _, in := range ordered {
+		if projected <= poolBytes {
+			break
+		}
+		byWorkspace[in.ws] = append(byWorkspace[in.ws], in.depIDs...)
+		projected -= in.usage
+		victims++
+	}
+	if victims == 0 {
+		return
+	}
+	log.Printf("memory sweep: on-demand usage %d MB > pool %d MB; evicting %d instance(s)",
+		onDemandUsage/(1024*1024), b.OnDemandPoolMB, victims)
+	for ws, ids := range byWorkspace {
+		hosts, err := evictViaGitops(ctx, ws, ids)
+		if err != nil {
+			log.Printf("memory sweep: evict in workspace %q failed: %v", ws, err)
+			continue
+		}
+		now := time.Now()
+		for _, h := range hosts {
+			dehydratedOnDemandHosts.Store(toOuterHost(strings.ToLower(h+"."+workspaceDomainSuffix())), now)
+			dehydratedOnDemandHosts.Store(strings.ToLower(h), now)
+		}
+	}
+}
+
+// workspaceDomainSuffix is a best-effort domain for building a full host key; the
+// sweep also stores the bare label, so an exact-suffix match isn't required.
+func workspaceDomainSuffix() string {
+	return strings.TrimSpace(os.Getenv("BITSWAN_DOMAIN"))
+}
+
+// evictViaGitops asks a workspace's gitops to evict the given on-demand
+// deployments (mark inactive + remove) and returns their ingress hosts. Mirrors
+// the daemon→gitops call in triggerLiveDevWake (internal address + gitops secret).
+func evictViaGitops(ctx context.Context, ws string, deploymentIDs []string) ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	secret, err := getGitOpsSecret(ws, filepath.Join(home, ".config", "bitswan", "workspaces"))
+	if err != nil || secret == "" {
+		return nil, fmt.Errorf("gitops secret for %q: %v", ws, err)
+	}
+	body, _ := json.Marshal(map[string][]string{"deployment_ids": deploymentIDs})
+	url := fmt.Sprintf("http://%s-gitops:8079/automations/evict-ephemeral", ws)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 120 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("gitops evict %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	var out struct {
+		Evicted []string `json:"evicted"`
+		Hosts   []string `json:"hosts"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Hosts, nil
 }

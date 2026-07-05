@@ -664,6 +664,21 @@ async def wake_by_host_route(
     return await automation_service.wake_by_host(body.host)
 
 
+class EvictDeploymentsRequest(BaseModel):
+    deployment_ids: list[str]
+
+
+@router.post("/evict-ephemeral")
+async def evict_ephemeral_route(
+    body: EvictDeploymentsRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Evict specific on-demand deployments (mark inactive + remove containers) —
+    called by the daemon's global memory sweep under pressure. Returns the evicted
+    ids + their ingress hosts so the daemon can mark them dehydrated for wake."""
+    return await automation_service.evict_deployments(body.deployment_ids)
+
+
 @router.post("/promote-bp")
 async def promote_bp(
     body: PromoteBPRequest,

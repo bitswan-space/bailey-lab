@@ -377,6 +377,19 @@ func (s *Server) Run() error {
 		setupBaileyRoutes()
 	}()
 
+	// Memory governance sweep: every 5 minutes shed the oldest on-demand
+	// instances that push the on-demand pool over budget, and emit over-reservation
+	// SIEM events. Always-on services are never touched; evicted ones wake on access.
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+			s.enforceMemoryBudget(ctx)
+			cancel()
+		}
+	}()
+
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
