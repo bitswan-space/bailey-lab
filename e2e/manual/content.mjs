@@ -496,6 +496,32 @@ export const MANUAL = {
         { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> Immediate device revocation contains a lost device or a departing insider.' },
       ],
     },
+    {
+      num: '25', eyebrow: 'Make a mess safely', title: 'Memory governance & the on-demand pool',
+      lede: 'Users spin up as many previews and processes as they like without starving the workloads that matter. Bailey reserves memory for the services that must stay up and lets everything else scale to zero under pressure — waking on demand the moment someone touches it.',
+      slots: [
+        { id: 'resource-management', label: 'Live capture', caption: 'Server Console · Resource management — the memory budget, reserved breakdown and per-business-process usage' },
+        { id: 'containers-memory', label: 'Live capture', caption: 'Workspace dashboard · a business process’s containers, each showing live memory against its reservation' },
+      ],
+      sell: [
+        'Every automation declares two things in <code>automation.toml</code>: a <strong>memory-reservation</strong> (how much it is budgeted, in MB) and a <strong>memory_reservation_policy</strong> — <em>always-on</em> for a backend that must never stop (it runs background work), or <em>on-demand</em> (the default) for everything that can be paused when idle and woken on access. The daemon reads these off the running containers and keeps a single, honest budget: host memory, minus a system reserve, minus a per-workspace infrastructure reserve, minus every always-on reservation, minus a sized <strong>on-demand pool</strong>.',
+        'That pool is the trick that lets users keep <em>unlimited</em> rarely-used business processes without cost. It is sized to run the largest few on-demand services at once and grows only when someone deploys a genuinely large one — so small, idle processes never consume reserved memory. When the running on-demand set exceeds the pool, Bailey shuts down the least-recently-used ones; the next time a person opens one, a loading screen appears and it is back in seconds. Promotions and new workspaces that would not fit the reserved budget are refused up front, with a message that says exactly how much is short. And any container that outgrows its reservation raises a SIEM event and is flagged, in red, right on its Containers tab.',
+      ],
+      steps: [
+        'Declare <b>memory-reservation</b> (and, for a background worker, <b>memory_reservation_policy = "always-on"</b>) in <code>automation.toml</code>.',
+        'Open <b>Resource management</b> in the Server Console to see the host budget, the reserved breakdown and per-process usage.',
+        'Promote or create a workspace — Bailey admits it only if it fits the reserved budget, else tells you the shortfall.',
+        'Leave idle previews alone: they are shut down under pressure and <b>wake automatically</b> when next accessed.',
+        'Watch for the red <b>over-reservation</b> flag on the Containers tab — it also lands in your SIEM feed.',
+      ],
+      callout: { kind: 'Reserve what matters; evict the rest', text: 'Always-on backends are guaranteed their memory; everything else lives in a bounded pool that scales to zero and wakes on demand. A busy workspace full of experiments can never starve production.' },
+      standards: [
+        { code: 'ISO/IEC 27001', clause: 'A.8.6', demand: '<b>Capacity management.</b> Memory is reserved, budgeted and admission-controlled from live host state; over-use is detected and alerted.' },
+        { code: 'SOC 2', clause: 'A1.1', demand: '<b>Availability.</b> Critical (always-on) workloads keep their reserved capacity; non-critical ones are shed under pressure without losing their state.' },
+        { code: 'NIS2', clause: 'Art. 21(2)(c)', demand: '<b>Business continuity & capacity.</b> Resource pressure is managed automatically so essential services stay available.' },
+        { code: 'DORA', clause: 'Art. 9', demand: '<b>Performance & capacity.</b> ICT resource limits are governed and monitored, with alerts when a workload exceeds its budget.' },
+      ],
+    },
   ],
 
   // ----------------------------------------------------------------------------

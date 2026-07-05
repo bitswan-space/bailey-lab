@@ -117,15 +117,29 @@ SECRETS
 
 MEMORY
 
-  Declare each automation's memory budget in automation.toml. memory-reservation
-  is REQUIRED before promoting to staging/production; memory_reservation_policy is
-  "on-demand" (default — shut down under memory pressure, woken automatically on
-  access) or "always-on" (never auto-shut-down; e.g. a backend with background
-  tasks). Keep reservations tight — an always-on service holds its reservation
-  permanently, and exceeding it raises a SIEM alert.
+  Declare each automation's memory budget in automation.toml so the platform can
+  reserve capacity and never let one process starve another.
     [deployment]
-    memory-reservation = 256              # MB
-    memory_reservation_policy = "on-demand"
+    memory-reservation = 256                 # MB budgeted for this container
+    memory_reservation_policy = "on-demand"  # "on-demand" (default) | "always-on"
+
+  memory-reservation (MB): set it just above the container's real peak. Declare it
+  before promoting to staging/production (undeclared defaults to 50 MB and warns).
+
+  memory_reservation_policy:
+    on-demand (default) — may be shut down under memory pressure and is woken
+      automatically the next time it is accessed. Use for request-serving
+      frontends/backends and anything idle-tolerant. On-demand services share a
+      bounded pool, so you can keep many rarely-used processes at no standing cost.
+    always-on — never auto-shut-down. Use ONLY for a backend that must keep
+      running with no inbound request to wake it: background schedulers, queue/
+      stream consumers, cron-like loops. It holds its full reservation permanently
+      and counts against the always-on budget, so keep these few and tight.
+
+  A container whose real usage exceeds its reservation raises a SIEM alert and is
+  flagged red on the dashboard Containers tab. Inspect a deployment's effective
+  values with:  bitswan-coding-agent deployments inspect DEPLOYMENT_ID
+  (see the gitops.mem_reservation_mb / gitops.mem_policy labels).
 
 CODING GUIDELINES
 
