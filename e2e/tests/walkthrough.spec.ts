@@ -210,6 +210,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   for (const [navLabel, slot, heading] of [
     [/People & roles/i, 'people-roles', /People & roles/i],
     [/Server overview/i, 'server-overview', /Server overview|Overview/i],
+    [/Resource management/i, 'resource-management', /Resource management/i],
     [/Endpoint access/i, 'endpoint-access', /Endpoint access/i],
     [/Your devices/i, 'devices', /devices/i],
   ] as const) {
@@ -1206,6 +1207,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     expect(healthy, healthy ? undefined : failMsg).toBe(true);
     await waitDeployDone();
     await capture(dashPage, 'deploy-dev');
+    // The healthy Development stage shows its Containers with live memory usage
+    // against each container's reservation — capture it for the memory-governance
+    // handbook chapter (best-effort; a missing shot just leaves the slot empty).
+    await capture(dashPage, 'containers-memory').catch(() => {});
   });
 
   // ---- Checks (real CVEs) — now that a built image for this BP exists, the
