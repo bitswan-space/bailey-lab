@@ -115,6 +115,18 @@ SECRETS
     staging = ["group1"]
     production = ["group1"]
 
+MEMORY
+
+  Declare each automation's memory budget in automation.toml. memory-reservation
+  is REQUIRED before promoting to staging/production; memory_reservation_policy is
+  "on-demand" (default — shut down under memory pressure, woken automatically on
+  access) or "always-on" (never auto-shut-down; e.g. a backend with background
+  tasks). Keep reservations tight — an always-on service holds its reservation
+  permanently, and exceeding it raises a SIEM alert.
+    [deployment]
+    memory-reservation = 256              # MB
+    memory_reservation_policy = "on-demand"
+
 CODING GUIDELINES
 
   - Do not use fallbacks. If tests fail, improve the design or error out.

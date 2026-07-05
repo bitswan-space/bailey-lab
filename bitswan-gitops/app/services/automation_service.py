@@ -644,6 +644,24 @@ class AutomationService:
             a.status = container.get("Status", "")
             a.automation_url = url
 
+            # Memory overlay for the Containers tab: reservation + policy from the
+            # container labels (stamped by the compiler); live usage from the
+            # stats map threaded via info["_mem"] (container id → bytes).
+            try:
+                a.mem_reservation_mb = (
+                    int(labels.get("gitops.mem_reservation_mb") or 0) or None
+                )
+            except (TypeError, ValueError):
+                a.mem_reservation_mb = None
+            a.mem_policy = labels.get("gitops.mem_policy") or None
+            usage = ((info or {}).get("_mem") or {}).get(container.get("Id"))
+            if usage is not None:
+                a.mem_usage_bytes = int(usage)
+                if a.mem_reservation_mb:
+                    a.mem_over_reservation = (
+                        a.mem_usage_bytes > a.mem_reservation_mb * 1024 * 1024
+                    )
+
     async def get_automations(self) -> list[DeployedAutomation]:
         """Return every automation across all scopes, with live Docker state.
 
@@ -667,7 +685,14 @@ class AutomationService:
                 result.append(a.model_copy() if hasattr(a, "model_copy") else a)
 
         containers = await self.get_containers()
-        self._apply_docker_overlay(result, containers, {}, bs_yaml)
+        # Live memory usage (best-effort — a stats hiccup must not drop the
+        # listing); threaded into the overlay as info["_mem"] (id → bytes).
+        mem: dict[str, int] = {}
+        try:
+            mem = await self.infra_driver.container_stats(self._workspace_ctx())
+        except Exception as e:  # noqa: BLE001
+            logger.debug("container_stats overlay skipped: %s", e)
+        self._apply_docker_overlay(result, containers, {"_mem": mem}, bs_yaml)
         return result
 
     async def materialize_merged_tree(self, dirs: list[str], checksum: str) -> str:

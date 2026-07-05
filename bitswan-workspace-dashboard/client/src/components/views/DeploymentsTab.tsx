@@ -22,6 +22,7 @@ import {
   History,
   KeyRound,
   Layers,
+  MemoryStick,
   LifeBuoy,
   Loader2,
   Lock,
@@ -334,6 +335,21 @@ function EmptyTab({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
 }
 
 // ── Containers tab ──────────────────────────────────────────────────────────
+
+// Human byte size (binary units — what `free -h` shows).
+function fmtBytes(n: number): string {
+  if (!n && n !== 0) return '—';
+  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  const s = v >= 100 || i === 0 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, '');
+  return `${s} ${u[i]}`;
+}
+
 interface Member {
   id: string;
   name: string;
@@ -343,6 +359,11 @@ interface Member {
   // eslint-disable-next-line no-restricted-syntax -- null = no URL
   url: string | null;
   expose: boolean;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
+  memUsageBytes: number | null;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
+  memReservationMB: number | null;
+  memOver: boolean;
 }
 
 const SERVICE_META: Record<ServiceType, { label: string; icon: LucideIcon }> = {
@@ -444,6 +465,22 @@ function ContainerCard({
           <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
             <Layers className="size-3" aria-hidden />
             {m.replicas}
+          </span>
+        )}
+        {m.memReservationMB != null && (
+          <span
+            className={cn(
+              'inline-flex items-center gap-1 text-[11px]',
+              m.memOver ? 'font-semibold text-red-600' : 'text-muted-foreground',
+            )}
+            title={
+              m.memOver
+                ? 'Memory usage exceeds this container’s reservation'
+                : 'Memory usage / reserved'
+            }
+          >
+            <MemoryStick className="size-3" aria-hidden />
+            {m.memUsageBytes != null ? fmtBytes(m.memUsageBytes) : '—'} / {m.memReservationMB} MB
           </span>
         )}
         {m.present && (
@@ -1263,6 +1300,9 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         replicas: a?.replicas ?? 0,
         url: a?.automation_url ?? null,
         expose: a?.expose ?? false,
+        memUsageBytes: a?.mem_usage_bytes ?? null,
+        memReservationMB: a?.mem_reservation_mb ?? null,
+        memOver: a?.mem_over_reservation ?? false,
       };
     });
   }, [currentEntry, automations, isDr, drSlot]);

@@ -24,6 +24,11 @@ export interface DeployedAutomation {
   // (private backends). Drives the Environment panel's Frontends vs Worker
   // containers split. Optional for back-compat with older gitops payloads.
   expose?: boolean;
+  // Memory governance (Containers tab): live usage vs the declared reservation.
+  mem_usage_bytes?: number | null;
+  mem_reservation_mb?: number | null;
+  mem_policy?: string | null;
+  mem_over_reservation?: boolean;
 }
 
 export type AutomationState =

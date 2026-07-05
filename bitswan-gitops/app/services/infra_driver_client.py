@@ -38,6 +38,7 @@ import httpx
 # /v1 paths (api.go).
 PATH_BUILD_IMAGE = "/v1/build-image"
 PATH_CONTAINERS_LIST = "/v1/containers/list"
+PATH_CONTAINERS_STATS = "/v1/containers/stats"
 PATH_CONTAINERS_EVENTS = "/v1/containers/events"
 PATH_CONTAINERS_INSPECT = "/v1/containers/inspect"
 PATH_CONTAINERS_LOGS = "/v1/containers/logs"
@@ -406,6 +407,20 @@ class InfraDriverClient:
         body = {"ctx": ctx.to_json(), "filter": {"labels": labels or {}}}
         out = await self._post_json(PATH_CONTAINERS_LIST, body)
         return [Container.from_json(c) for c in (out.get("containers") or [])]
+
+    async def container_stats(
+        self, ctx: WorkspaceContext, labels: Optional[dict] = None
+    ) -> dict[str, int]:
+        """Live memory usage (bytes) for the workspace's RUNNING containers,
+        keyed by container id. Used to overlay actual-vs-reserved on the
+        automation listing (the Containers tab)."""
+        body = {"ctx": ctx.to_json(), "filter": {"labels": labels or {}}}
+        out = await self._post_json(PATH_CONTAINERS_STATS, body)
+        return {
+            s.get("id"): int(s.get("mem_usage_bytes") or 0)
+            for s in (out.get("stats") or [])
+            if s.get("id")
+        }
 
     async def image_list(self, ctx: WorkspaceContext) -> list[dict]:
         """The workspace's built images (internal/<ws>-…): [{id, tag, created, size}]."""
