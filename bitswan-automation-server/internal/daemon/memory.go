@@ -36,15 +36,12 @@ import (
 	"time"
 )
 
-// --- configuration (admin-editable settings > env > default) ---
-
-const (
-	settingMemSystemReserveMB    = "mem.system_reserve_mb"
-	settingMemWorkspaceReserveMB = "mem.workspace_reserve_mb"
-	settingMemDefaultContainerMB = "mem.default_container_mb"
-	settingMemOnDemandFloorMB    = "mem.ondemand_pool_floor_mb"
-	settingMemOnDemandTopN       = "mem.ondemand_pool_topn"
-)
+// --- configuration (env override > built-in default) ---
+//
+// These are PLATFORM-tuning knobs, not user settings: they resolve from an env
+// var (for deployment tuning) or a built-in default. There is deliberately no
+// admin-editable / persisted layer — the product is tuned so it works, rather
+// than exposing memory policy for users to change.
 
 // memConfig is the resolved heuristic budget knobs.
 type memConfig struct {
@@ -55,14 +52,9 @@ type memConfig struct {
 	OnDemandTopN       int
 }
 
-// memConfigInt resolves one knob: the admin-set DB setting wins, else the env
-// var, else the built-in default. Invalid values fall through to the default.
-func memConfigInt(settingKey, envKey string, dflt int) int {
-	if v, err := dbGetSetting(settingKey); err == nil && strings.TrimSpace(v) != "" {
-		if n, perr := strconv.Atoi(strings.TrimSpace(v)); perr == nil && n >= 0 {
-			return n
-		}
-	}
+// memConfigInt resolves one knob: the env var if set (and valid), else the
+// built-in default. Invalid values fall through to the default.
+func memConfigInt(envKey string, dflt int) int {
 	if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
 		if n, perr := strconv.Atoi(v); perr == nil && n >= 0 {
 			return n
@@ -73,11 +65,11 @@ func memConfigInt(settingKey, envKey string, dflt int) int {
 
 func loadMemConfig() memConfig {
 	return memConfig{
-		SystemReserveMB:    memConfigInt(settingMemSystemReserveMB, "BITSWAN_MEM_SYSTEM_RESERVE_MB", 2048),
-		WorkspaceReserveMB: memConfigInt(settingMemWorkspaceReserveMB, "BITSWAN_MEM_WORKSPACE_RESERVE_MB", 768),
-		DefaultContainerMB: memConfigInt(settingMemDefaultContainerMB, "BITSWAN_MEM_DEFAULT_CONTAINER_MB", 50),
-		OnDemandFloorMB:    memConfigInt(settingMemOnDemandFloorMB, "BITSWAN_MEM_ONDEMAND_POOL_MIN_MB", 1024),
-		OnDemandTopN:       max(1, memConfigInt(settingMemOnDemandTopN, "BITSWAN_MEM_ONDEMAND_POOL_TOPN", 4)),
+		SystemReserveMB:    memConfigInt("BITSWAN_MEM_SYSTEM_RESERVE_MB", 2048),
+		WorkspaceReserveMB: memConfigInt("BITSWAN_MEM_WORKSPACE_RESERVE_MB", 768),
+		DefaultContainerMB: memConfigInt("BITSWAN_MEM_DEFAULT_CONTAINER_MB", 50),
+		OnDemandFloorMB:    memConfigInt("BITSWAN_MEM_ONDEMAND_POOL_MIN_MB", 1024),
+		OnDemandTopN:       max(1, memConfigInt("BITSWAN_MEM_ONDEMAND_POOL_TOPN", 4)),
 	}
 }
 
@@ -315,6 +307,11 @@ type memBudget struct {
 	SystemReserveMB    int `json:"system_reserve_mb"`
 	WorkspaceReserveMB int `json:"workspace_reserve_mb"`
 	Workspaces         int `json:"workspaces"`
+	// Read-only platform knobs, surfaced so the admin page can show the budget's
+	// inputs. Tuned via env / built-in defaults — NOT user-configurable.
+	DefaultContainerMB int `json:"default_container_mb"`
+	OnDemandFloorMB    int `json:"ondemand_pool_floor_mb"`
+	OnDemandTopN       int `json:"ondemand_pool_topn"`
 	AlwaysOnMB         int `json:"always_on_mb"`      // Σa
 	OnDemandPoolMB     int `json:"ondemand_pool_mb"`  // P
 	ReservedMB         int `json:"reserved_mb"`       // R
@@ -352,6 +349,9 @@ func computeBudget(inv []memContainer, hostTotal, hostAvail uint64, workspaces i
 		SystemReserveMB:    cfg.SystemReserveMB,
 		WorkspaceReserveMB: cfg.WorkspaceReserveMB,
 		Workspaces:         workspaces,
+		DefaultContainerMB: cfg.DefaultContainerMB,
+		OnDemandFloorMB:    cfg.OnDemandFloorMB,
+		OnDemandTopN:       cfg.OnDemandTopN,
 	}
 
 	var onDemandRes []int

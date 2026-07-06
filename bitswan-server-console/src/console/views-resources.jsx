@@ -1,15 +1,12 @@
 import React from 'react';
 // views-resources.jsx — admin Resource Management: host memory budget, the
 // reserved breakdown (system / per-workspace infra / always-on / on-demand pool),
-// per-BP actual-vs-reserved usage, and the editable heuristic knobs.
+// per-BP actual-vs-reserved usage, and the (read-only) platform reservation knobs.
 
-const { C: WC, Icon: WIcon, Btn: WBtn, Pill: WPill } = window.WD_SHELL;
+const { C: WC, Icon: WIcon, Pill: WPill } = window.WD_SHELL;
 const {
   Card: WCard, PageHeader: WPageHeader, Stat: WStat, LiveState: WLiveState,
-  Field: WField, TextInput: WTextInput,
 } = window.SC_UI;
-const { Api: WApi } = window.SC_API;
-const { useState, useEffect } = React;
 
 // Human byte size (binary units — what `free -h` shows).
 function fmtBytes(n) {
@@ -54,59 +51,31 @@ function kvRow(label, value, tone) {
   );
 }
 
-// Editable heuristic knobs (persisted server-side).
-function ConfigForm({ toast, onSaved }) {
-  const [cfg, setCfg] = useState(null);
-  const [err, setErr] = useState(null);
-  const [saving, setSaving] = useState(false);
-  useEffect(() => {
-    WApi.resourceConfig().then(setCfg).catch((e) => setErr(e.message));
-  }, []);
-  if (err) return <div style={{ fontSize: 12.5, color: WC.red, padding: '10px 0' }}>Couldn't load config: {err}</div>;
-  if (!cfg) return <div style={{ fontSize: 12.5, color: WC.muted, padding: '10px 0' }}>Loading…</div>;
-  const num = (k) => (
-    <WField label={LABELS[k]}>
-      <WTextInput type="number" value={String(cfg[k])} onChange={(e) => setCfg({ ...cfg, [k]: parseInt(e.target.value || '0', 10) })} />
-    </WField>
-  );
-  const save = async () => {
-    setSaving(true);
-    try {
-      const updated = await WApi.setResourceConfig(cfg);
-      setCfg(updated);
-      toast('Reserved-memory settings saved', 'success');
-      if (onSaved) onSaved();
-    } catch (e) { toast(e.message, 'error'); }
-    finally { setSaving(false); }
-  };
+// Read-only platform reservation knobs. These are tuned in the product (env /
+// built-in defaults), NOT user-configurable — surfaced here only so an admin can
+// see the budget's inputs.
+function PolicyKnobs({ b }) {
+  const rows = [
+    ['System reserve', fmtMB(b.system_reserve_mb)],
+    ['Per-workspace reserve', fmtMB(b.workspace_reserve_mb)],
+    ['Default per-container', fmtMB(b.default_container_mb)],
+    ['On-demand pool floor', fmtMB(b.ondemand_pool_floor_mb)],
+    ['On-demand pool top-N', b.ondemand_pool_topn != null ? String(b.ondemand_pool_topn) : '—'],
+  ];
   return (
     <div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        {num('system_reserve_mb')}
-        {num('workspace_reserve_mb')}
-        {num('default_container_mb')}
-        {num('ondemand_pool_floor_mb')}
-        {num('ondemand_pool_topn')}
-      </div>
-      <div style={{ marginTop: 12 }}>
-        <WBtn variant="primary" size="sm" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save settings'}</WBtn>
+      {rows.map(([label, value]) => kvRow(label, value))}
+      <div style={{ fontSize: 11.5, color: WC.muted, paddingTop: 10, lineHeight: '16px' }}>
+        These are platform defaults tuned for this deployment — not user-configurable.
       </div>
     </div>
   );
 }
 
-const LABELS = {
-  system_reserve_mb: 'System reserve (MB)',
-  workspace_reserve_mb: 'Per-workspace reserve (MB)',
-  default_container_mb: 'Default per-container (MB)',
-  ondemand_pool_floor_mb: 'On-demand pool floor (MB)',
-  ondemand_pool_topn: 'On-demand pool top-N',
-};
-
 const POLICY_TONE = { 'always-on': 'primary', 'on-demand': 'neutral' };
 
 function ResourcesView({ ctx }) {
-  const { data, refresh, toast } = ctx;
+  const { data, refresh } = ctx;
   const b = data.resources;
   const loaded = data.load.resources === 'ok' && b;
   const totalMB = loaded ? Math.round((b.host_total_bytes || 0) / (1024 * 1024)) : 0;
@@ -157,13 +126,13 @@ function ResourcesView({ ctx }) {
             </div>
           </WCard>
 
-          {/* Config */}
+          {/* Read-only platform knobs (tuned in the product, not user-editable) */}
           <WCard pad={0}>
             <div style={{ padding: '14px 20px', borderBottom: `1px solid ${WC.border}`, fontSize: 13, fontWeight: 600, color: WC.fg }}>
               Reservation policy
             </div>
-            <div style={{ padding: '14px 20px' }}>
-              <ConfigForm toast={toast} onSaved={() => refresh('resources')} />
+            <div style={{ padding: '4px 20px 14px' }}>
+              <PolicyKnobs b={b} />
             </div>
           </WCard>
         </div>

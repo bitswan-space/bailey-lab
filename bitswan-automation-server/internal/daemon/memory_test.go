@@ -250,30 +250,22 @@ func TestIsHostDehydrated(t *testing.T) {
 }
 
 func TestMemConfigDefaults(t *testing.T) {
-	// memConfigInt prefers a DB setting over env — clear any persisted overrides
-	// (e.g. from a config-POST test) so this is deterministic.
-	for _, k := range []string{
-		settingMemSystemReserveMB, settingMemWorkspaceReserveMB,
-		settingMemDefaultContainerMB, settingMemOnDemandFloorMB, settingMemOnDemandTopN,
-	} {
-		_ = dbDeleteSetting(k)
-	}
-	for _, k := range []string{
-		"BITSWAN_MEM_SYSTEM_RESERVE_MB", "BITSWAN_MEM_WORKSPACE_RESERVE_MB",
-		"BITSWAN_MEM_DEFAULT_CONTAINER_MB", "BITSWAN_MEM_ONDEMAND_POOL_MIN_MB",
-		"BITSWAN_MEM_ONDEMAND_POOL_TOPN",
-	} {
-		t.Setenv(k, "")
-	}
+	// Config resolves from env var, else built-in default — there is no
+	// DB-settable / user-configurable layer (these are platform-tuning knobs).
 	// Env override wins over the default.
 	t.Setenv("BITSWAN_MEM_DEFAULT_CONTAINER_MB", "128")
-	if got := memConfigInt(settingMemDefaultContainerMB, "BITSWAN_MEM_DEFAULT_CONTAINER_MB", 50); got != 128 {
+	if got := memConfigInt("BITSWAN_MEM_DEFAULT_CONTAINER_MB", 50); got != 128 {
 		t.Errorf("env override = %d, want 128", got)
 	}
 	// Invalid env falls back to default.
 	t.Setenv("BITSWAN_MEM_ONDEMAND_POOL_TOPN", "notanint")
-	if got := memConfigInt(settingMemOnDemandTopN, "BITSWAN_MEM_ONDEMAND_POOL_TOPN", 4); got != 4 {
+	if got := memConfigInt("BITSWAN_MEM_ONDEMAND_POOL_TOPN", 4); got != 4 {
 		t.Errorf("invalid env should fall back to 4, got %d", got)
+	}
+	// Unset env → default.
+	t.Setenv("BITSWAN_MEM_SYSTEM_RESERVE_MB", "")
+	if got := memConfigInt("BITSWAN_MEM_SYSTEM_RESERVE_MB", 2048); got != 2048 {
+		t.Errorf("unset env should use default 2048, got %d", got)
 	}
 }
 

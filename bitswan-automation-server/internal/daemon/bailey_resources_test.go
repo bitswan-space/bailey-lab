@@ -71,38 +71,13 @@ func TestHandleBaileyResources(t *testing.T) {
 	}
 }
 
-func TestHandleResourceConfigGet(t *testing.T) {
-	for _, k := range []string{
-		"BITSWAN_MEM_SYSTEM_RESERVE_MB", "BITSWAN_MEM_WORKSPACE_RESERVE_MB",
-		"BITSWAN_MEM_DEFAULT_CONTAINER_MB", "BITSWAN_MEM_ONDEMAND_POOL_MIN_MB",
-		"BITSWAN_MEM_ONDEMAND_POOL_TOPN",
-	} {
-		t.Setenv(k, "")
-	}
-	s := &Server{}
-	rec := httptest.NewRecorder()
-	s.handleResourceConfigGet(rec, httptest.NewRequest(http.MethodGet, "/bailey/api/admin/resource-config", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	var got resourceConfigResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	// Defaults (no DB/env override) — the config is served without a database.
-	if got.DefaultContainerMB != 50 || got.OnDemandTopN != 4 {
-		t.Errorf("defaults wrong: %+v", got)
-	}
-}
-
-func TestHandleResourceConfigPostValidation(t *testing.T) {
-	s := &Server{}
-	rec := httptest.NewRecorder()
-	body := strings.NewReader(`{"default_container_mb": -5}`)
-	req := httptest.NewRequest(http.MethodPost, "/bailey/api/admin/resource-config", body)
-	s.handleResourceConfigPost(rec, req, "admin@example.com")
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("negative value should 400, got %d", rec.Code)
+func TestBudgetSurfacesReadOnlyKnobs(t *testing.T) {
+	// The reservation knobs are surfaced read-only inside the budget DTO (no
+	// setter endpoint). computeBudget must copy them from the config.
+	cfg := memConfig{SystemReserveMB: 2048, WorkspaceReserveMB: 768, DefaultContainerMB: 50, OnDemandFloorMB: 1024, OnDemandTopN: 4}
+	b := computeBudget(nil, uint64(8192)*1024*1024, uint64(8192)*1024*1024, 1, cfg)
+	if b.DefaultContainerMB != 50 || b.OnDemandFloorMB != 1024 || b.OnDemandTopN != 4 {
+		t.Errorf("read-only knobs not surfaced in budget: %+v", b)
 	}
 }
 
@@ -139,29 +114,6 @@ func TestHandleMemoryAdmit(t *testing.T) {
 		if !res.OK {
 			t.Errorf("empty-host workspace admit should fit: %+v", res)
 		}
-	}
-}
-
-func TestHandleResourceConfigPostValid(t *testing.T) {
-	// A valid POST exercises the apply loop + dbSetSetting for every key. Tolerate
-	// either 200 (DB available) or 500 (no DB in the test env) — the point is to
-	// run the code path, not to assert persistence.
-	// Clean up any persisted settings afterwards so other tests (which assert on
-	// defaults) aren't affected by this write.
-	defer func() {
-		for _, k := range []string{
-			settingMemSystemReserveMB, settingMemWorkspaceReserveMB,
-			settingMemDefaultContainerMB, settingMemOnDemandFloorMB, settingMemOnDemandTopN,
-		} {
-			_ = dbDeleteSetting(k)
-		}
-	}()
-	s := &Server{}
-	rec := httptest.NewRecorder()
-	body := strings.NewReader(`{"system_reserve_mb":2048,"workspace_reserve_mb":768,"default_container_mb":64,"ondemand_pool_floor_mb":1024,"ondemand_pool_topn":4}`)
-	s.handleResourceConfigPost(rec, httptest.NewRequest(http.MethodPost, "/bailey/api/admin/resource-config", body), "admin@example.com")
-	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
-		t.Errorf("valid config POST status = %d, want 200 or 500", rec.Code)
 	}
 }
 
