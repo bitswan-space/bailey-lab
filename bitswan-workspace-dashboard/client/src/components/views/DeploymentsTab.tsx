@@ -562,9 +562,9 @@ function ContainersSection({
   // an asleep stage still has its records (present=true) but no running container.
   const isUp = (m: Member) =>
     m.display === 'running' ||
-    m.display === 'starting' ||
     m.display === 'restarting' ||
-    m.display === 'created';
+    m.display === 'building' ||
+    m.display === 'deployed';
   const anyRunning = members.some(isUp);
   const asleep = members.length > 0 && members.every((m) => !isUp(m));
   // Sleep/Wake apply to the promoted stages (their context is the raw BP); DR is
@@ -1453,9 +1453,9 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   const friendly = useMemo(() => {
     const isUp = (m: Member) =>
       m.display === 'running' ||
-      m.display === 'starting' ||
       m.display === 'restarting' ||
-      m.display === 'created';
+      m.display === 'building' ||
+      m.display === 'deployed';
     const failing = members.filter((m) => m.display === 'failed' || m.display === 'stopped').length;
     if (!currentEntry)
       return { label: 'Not deployed yet', color: 'text-muted-foreground', dot: 'bg-zinc-400', ring: 'ring-zinc-400/10' };
