@@ -35,19 +35,15 @@ BAILEY_URL="https://bailey.${DOMAIN}"
 ONBOARD_URL="https://bailey-onboard.${DOMAIN}"
 DAEMON_CTR="bitswan-automation-server-daemon"
 
-GITOPS_IMAGE="bitswan/gitops-local:latest"
-DASHBOARD_IMAGE="bitswan/workspace-dashboard-local:latest"
-CODING_AGENT_IMAGE="bitswan/coding-agent-local:latest"
-# The per-BP egress firewall gateway. gitops references it by this exact tag
-# (BITSWAN_EGRESS_GATEWAY_IMAGE default in automation_service), so a deployed
-# firewall can stand up the SNI/Host allow-list proxy that observes egress for
-# the dashboard's "needs review" feed. Without this image the gateway service
-# can't start and no egress is ever observed.
-EGRESS_GATEWAY_IMAGE="bitswan/egress-gateway:latest"
-# The per-workspace infra-driver sidecar. Pinned to the local :latest build below
-# and forwarded as an override so the daemon's resolver uses it instead of the
-# Docker Hub -staging version.
-INFRA_DRIVER_IMAGE="bitswan/infra-driver:latest"
+# The five workspace-service images, built locally by build-dev-images.sh as
+# bitswan/<svc>-dev:latest and forwarded to the daemon as BITSWAN_*_IMAGE
+# overrides (below). The Server-Console create path this script exercises forces
+# --staging, so overrides — not the --dev flag — are what pin these local images.
+GITOPS_IMAGE="bitswan/gitops-dev:latest"
+DASHBOARD_IMAGE="bitswan/workspace-dashboard-dev:latest"
+CODING_AGENT_IMAGE="bitswan/coding-agent-dev:latest"
+EGRESS_GATEWAY_IMAGE="bitswan/egress-gateway-dev:latest"
+INFRA_DRIVER_IMAGE="bitswan/infra-driver-dev:latest"
 
 # The SIEM target: a real, lightweight OpenTelemetry collector with an OTLP
 # receiver (gRPC :4317 + HTTP :4318) and a debug exporter. Bailey's SIEM
@@ -68,31 +64,18 @@ mark "[1/7] server-console: make console"
 ( cd bitswan-automation-server && go build -o bitswan ./main.go )
 mark "[1/7] bitswan CLI: go build"
 BITSWAN="$REPO_ROOT/bitswan-automation-server/bitswan"
-docker build -t "$GITOPS_IMAGE"       -f "$REPO_ROOT/bitswan-gitops/Dockerfile" "$REPO_ROOT"
-mark "[1/7] docker build: gitops image"
-docker build -t "$DASHBOARD_IMAGE"    -f "$REPO_ROOT/bitswan-workspace-dashboard/Dockerfile" "$REPO_ROOT/bitswan-workspace-dashboard"
-mark "[1/7] docker build: dashboard image"
-docker build -t "$CODING_AGENT_IMAGE" -f "$REPO_ROOT/bitswan-coding-agent/Dockerfile" "$REPO_ROOT/bitswan-coding-agent"
-mark "[1/7] docker build: coding-agent image"
-# The egress firewall gateway image (build context = the automation-server repo
-# root, per its Dockerfile). gitops deploys this per (bp,stage) when a firewall
-# is active, so it must exist locally or the gateway never starts.
-docker build -t "$EGRESS_GATEWAY_IMAGE" -f "$REPO_ROOT/bitswan-automation-server/cmd/egress-gateway/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
-mark "[1/7] docker build: egress-gateway image"
+# Build all five workspace-service images (gitops, workspace-dashboard,
+# coding-agent, egress-gateway, infra-driver) as bitswan/<svc>-dev:latest, in
+# parallel. On a sub-build failure the script prints that image's full log and
+# exits non-zero (which -e turns into a bringup failure).
+"$REPO_ROOT/build-dev-images.sh"
+mark "[1/7] docker build: workspace-service dev images"
 
-# The daemon runs this image (debian + docker CLI + git) with the bitswan binary
-# mounted at runtime. The daemon container references
-# bitswan/automation-server-runtime:latest, so build the tag here or it can't start.
+# The daemon's own runtime image (debian + docker CLI + git; the bitswan binary
+# is mounted at runtime). Not a workspace service, so it is not part of
+# build-dev-images.sh — the daemon container references this exact tag.
 docker build -t bitswan/automation-server-runtime:latest -f "$REPO_ROOT/bitswan-automation-server/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
 mark "[1/7] docker build: automation-server-runtime image"
-
-# The per-workspace infra-driver sidecar runs its own self-contained image
-# (docker CLI + compose + git + git-http-backend + syft, with the infra-driver
-# binary baked in). The workspace compose references bitswan/infra-driver:latest
-# and brings it up with --pull missing, so build the tag here or the sidecar (the
-# only container with docker.sock) can't start and the workspace never comes up.
-docker build -t "$INFRA_DRIVER_IMAGE" -f "$REPO_ROOT/bitswan-automation-server/cmd/infra-driver/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
-mark "[1/7] docker build: infra-driver image"
 
 echo "=== [2/7] Daemon + traefik ingress ==="
 # Pin the daemon to THIS checkout's images so workspaces it creates via the
