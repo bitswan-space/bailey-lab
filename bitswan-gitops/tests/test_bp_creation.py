@@ -1,10 +1,12 @@
 """Tests for business-process creation in the per-BP-repo world.
 
-Creation makes the BP its OWN git repo + a clone in the target scope, commits
-the scaffold, and — for the main scope — publishes it to the repo's
-deploy-only main (previously a main-scope scaffold was committed into the
-main checkout but never reached the bare, so the next realign silently wiped
-it). Copy-scope creation rides the copy until Sync & Deploy.
+Creation makes the BP its OWN git repo, scaffolds process.toml + README into
+the MAIN checkout, commits, and publishes to the repo's deploy-only main — a
+BP is born in main (in_main from birth). The route then materializes the
+requesting copy as a clone of main; every other copy can materialize it too,
+immediately. (Previously the scaffold rode only the creating copy's branch and
+main stayed an empty seed until Sync & Deploy, so a fresh BP was invisible to
+every other copy — the ordering bug these tests pin down.)
 """
 
 import asyncio
@@ -13,7 +15,6 @@ import subprocess
 
 import pytest
 
-from app.routes.copies import SyncCopyRequest, sync_copy
 from app.services import bp_git, git_server
 from app.services.process_service import ProcessService
 
@@ -66,26 +67,36 @@ def test_create_in_main_publishes_bare_main(env):
     assert _git("status", "--porcelain", cwd=clone).stdout.strip() == ""
 
 
-def test_create_in_copy_rides_until_sync(env):
+def test_new_bp_is_born_in_main_and_copy_switchable(env):
+    """A BP is created in main FIRST (in_main from birth), so it can be
+    materialized into any copy immediately — the fix for the ordering bug where a
+    fresh BP rode only the creating copy's branch and stayed invisible to every
+    other copy until Sync & Deploy."""
     svc = env["svc"]
+    entry = asyncio.run(svc.create_business_process("orders"))
+    assert entry["in_main"] is True
+    # Born in main: the scaffold reached the repo's deploy-only main immediately.
+    assert asyncio.run(git_server.bp_main_has_content("orders")) is True
+
+    # The create route materializes the requesting copy as a clone of main (after
+    # adding the template to main); model that here — the copy branches off main.
     copy_dir = os.path.join(env["copies_dir"], "u1")
     os.makedirs(copy_dir)
-
-    entry = asyncio.run(svc.create_business_process("orders", copy="u1"))
-    assert entry["in_main"] is False and entry["copies"] == ["u1"]
-
-    # Repo exists, but main is still the empty seed (nothing published yet).
-    assert asyncio.run(git_server.bp_main_has_content("orders")) is False
+    ok = asyncio.run(bp_git.clone_bp_into_copy(copy_dir, "u1", "orders", base="main"))
+    assert ok is True
     clone = os.path.join(copy_dir, "orders")
+    assert os.path.isfile(os.path.join(clone, "process.toml"))
     branch = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=clone).stdout.strip()
     assert branch == "u1"
 
-    # First sync fast-forwards main from the seed and materializes the main
-    # checkout (flips in_main in discovery).
-    res = asyncio.run(sync_copy("u1", SyncCopyRequest(deployer="d@x", bp="orders")))
-    assert res.status == "success"
-    assert asyncio.run(git_server.bp_main_has_content("orders")) is True
-    assert os.path.isdir(os.path.join(env["copies_dir"], "main", "orders", ".git"))
+    # THE FIX: a SECOND copy created afterwards also materializes the BP straight
+    # from main — the switch-copies case that was impossible before (the BP only
+    # existed on the first copy's branch, not main).
+    copy2 = os.path.join(env["copies_dir"], "u2")
+    os.makedirs(copy2)
+    ok2 = asyncio.run(bp_git.clone_bp_into_copy(copy2, "u2", "orders", base="main"))
+    assert ok2 is True
+    assert os.path.isfile(os.path.join(copy2, "orders", "process.toml"))
 
 
 def test_create_duplicate_rejected(env):

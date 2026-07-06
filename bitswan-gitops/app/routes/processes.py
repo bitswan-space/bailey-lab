@@ -85,9 +85,22 @@ async def create_process(
     if body.copy is not None and not _COPY_NAME_RE.match(body.copy):
         raise HTTPException(status_code=400, detail="Invalid copy name")
 
+    # A BP is born in MAIN (skeleton scaffold + published to the repo's main), so
+    # it is in_main and copy-switchable immediately; the requesting copy is
+    # materialized from main below, after the template automations are also added
+    # to main. (Historically it rode the copy's branch and main stayed empty until
+    # Sync & Deploy — leaving a fresh BP invisible to every other copy.)
+    if body.copy is not None:
+        copy_root = os.path.join(
+            os.environ.get("BITSWAN_COPIES_DIR", "/copies"), body.copy
+        )
+        if not os.path.isdir(copy_root):
+            raise HTTPException(
+                status_code=400, detail=f"copy '{body.copy}' does not exist"
+            )
     try:
         entry = await process_service.create_business_process(
-            name=name, copy=body.copy, created_by=body.created_by
+            name=name, created_by=body.created_by
         )
     except FileExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -122,14 +135,28 @@ async def create_process(
         # workers from the dashboard's Environment panel.
         group_id = os.environ.get("BITSWAN_DEFAULT_TEMPLATE_GROUP", "business-process")
         workspace_root = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
+        # Scaffold the template into MAIN (copy=None) so the whole BP skeleton —
+        # process.toml + frontend/backend — lands in the repo's main first.
         created = await template_service.create_automation_from_template(
             workspace_root=workspace_root,
             bp=slug,
             group_id=group_id,
-            copy=body.copy,
+            copy=None,
             created_by=body.created_by,
         )
         automations_created = [c["name"] for c in created.get("created", [])]
+
+        # Now that main carries the full skeleton, materialize the requesting copy
+        # as a clone of main (branch = copy). This is what makes the BP switchable
+        # into other copies immediately; the user's later edits ride this branch
+        # until Sync & Deploy, exactly as before.
+        if body.copy:
+            from app.services.bp_git import clone_bp_into_copy
+
+            await clone_bp_into_copy(copy_root, body.copy, name, base="main")
+            entry["copies"] = [body.copy]
+            entry["has_copies"] = True
+            entry["in_main"] = True
 
         # Inline cache refresh + broadcast (mirrors routes/templates.py) so
         # the new automation cards appear without waiting for the FS watcher.
