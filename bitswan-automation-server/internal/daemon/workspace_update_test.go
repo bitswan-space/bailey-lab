@@ -28,7 +28,7 @@ services:
     image: bitswan/gitops-staging:2026-28456985040-git-6088745
     hostname: ws-staging-gitops
   ws-staging-infra-driver:
-    image: bitswan/automation-server-runtime:latest
+    image: bitswan/infra-driver:latest
 `)
 	if got := currentGitopsImage("ws-staging"); got != "bitswan/gitops-staging:2026-28456985040-git-6088745" {
 		t.Fatalf("staging image: got %q", got)
