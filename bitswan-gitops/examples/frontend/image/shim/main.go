@@ -18,11 +18,14 @@ package main
 
 import (
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 func main() {
@@ -33,10 +36,27 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// Backend-readiness gate. This process is the only thing Bailey exposes, so
+	// the platform's scale-from-zero loading screen clears the moment WE answer
+	// 200 — even if the private backend is still starting, leaving the user on a
+	// live UI whose /api calls 503. So while the backend isn't yet reachable we
+	// answer the app shell with 503 too, keeping the loading screen up until the
+	// WHOLE app is ready (the backend loads before the frontend is served). A
+	// startup deadline is the escape hatch: if the backend never comes up we stop
+	// gating and serve anyway, so a crashed backend shows the app's own error
+	// rather than an eternal spinner. No backend worker → nothing to wait for.
+	var ready atomic.Bool
+	backend, hasBackend := workers[backendName]
+	if !hasBackend {
+		ready.Store(true)
+	} else {
+		go awaitBackend(backend, &ready)
+	}
+
 	// /api → the backend worker, with the /api prefix stripped. Absent worker
 	// → 503 (clearer than a vite 404), so a misconfigured BP is obvious.
-	if target, ok := workers[backendName]; ok {
-		proxy := httputil.NewSingleHostReverseProxy(target)
+	if hasBackend {
+		proxy := httputil.NewSingleHostReverseProxy(backend)
 		mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api")
 			if r.URL.Path == "" {
@@ -44,7 +64,7 @@ func main() {
 			}
 			proxy.ServeHTTP(w, r)
 		})
-		log.Printf("shim: /api/ → %s (worker %q)", target, backendName)
+		log.Printf("shim: /api/ → %s (worker %q)", backend, backendName)
 	} else {
 		mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "no backend worker configured", http.StatusServiceUnavailable)
@@ -54,13 +74,61 @@ func main() {
 	}
 
 	// Everything else → vite. ReverseProxy passes through the HMR websocket
-	// upgrade, so hot reload works behind the shim.
-	mux.Handle("/", httputil.NewSingleHostReverseProxy(viteURL))
+	// upgrade, so hot reload works behind the shim. Gated on backend readiness
+	// (above) so the app shell isn't served before its backend can answer.
+	vite := httputil.NewSingleHostReverseProxy(viteURL)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if !ready.Load() {
+			w.Header().Set("Retry-After", "3")
+			http.Error(w, "starting: waiting for the backend", http.StatusServiceUnavailable)
+			return
+		}
+		vite.ServeHTTP(w, r)
+	})
 
 	log.Printf("shim listening on :%s, UI → %s", port, viteURL)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatalf("shim: %v", err)
 	}
+}
+
+// awaitBackend flips ready once the backend accepts a TCP connection (it is
+// listening), or once a startup deadline passes (escape hatch: never hide the
+// app forever behind a dead backend). A plain TCP dial is image-agnostic — it
+// needs nothing installed in the backend container.
+func awaitBackend(backend *url.URL, ready *atomic.Bool) {
+	host := backend.Host
+	if host == "" {
+		ready.Store(true)
+		return
+	}
+	deadline := time.Now().Add(gateDeadline())
+	for {
+		conn, err := net.DialTimeout("tcp", host, 2*time.Second)
+		if err == nil {
+			_ = conn.Close()
+			ready.Store(true)
+			log.Printf("shim: backend %s is up — serving the app", host)
+			return
+		}
+		if time.Now().After(deadline) {
+			ready.Store(true)
+			log.Printf("shim: backend %s still down after startup window — serving anyway", host)
+			return
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+// gateDeadline is how long the shim keeps the loading screen up waiting for the
+// backend before giving up and serving anyway. Overridable for slow backends.
+func gateDeadline() time.Duration {
+	if v := os.Getenv("BITSWAN_BACKEND_WAIT_SECONDS"); v != "" {
+		if d, err := time.ParseDuration(v + "s"); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 150 * time.Second
 }
 
 // parseWorkerHosts parses BITSWAN_WORKER_HOSTS ("name=host:port,...") into a
