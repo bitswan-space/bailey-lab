@@ -15,6 +15,7 @@ type updateOptions struct {
 	zookeeperImage     string
 	couchdbImage       string
 	staging            bool
+	dev                bool
 	trustCA            bool
 	devMode            bool
 	disableDevMode     bool
@@ -52,6 +53,7 @@ func newUpdateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.zookeeperImage, "zookeeper-image", "", "Custom image for Zookeeper")
 	cmd.Flags().StringVar(&o.couchdbImage, "couchdb-image", "", "Custom image for CouchDB")
 	cmd.Flags().BoolVar(&o.staging, "staging", false, "Use staging images for gitops")
+	cmd.Flags().BoolVar(&o.dev, "dev", false, "Use locally-built bitswan/<svc>-dev:latest images (see build-dev-images.sh); takes precedence over --staging")
 	cmd.Flags().BoolVar(&o.trustCA, "trust-ca", false, "Install custom certificates from the default CA certificates directory.")
 	cmd.Flags().BoolVar(&o.devMode, "dev-mode", false, "Enable development mode with live-reloading for gitops")
 	cmd.Flags().BoolVar(&o.disableDevMode, "disable-dev-mode", false, "Disable development mode")

@@ -111,11 +111,11 @@ func (s *Server) handleAdminDefaultImagesGet(w http.ResponseWriter, r *http.Requ
 			// from Docker Hub: <tag>)" instead of just blank.
 			switch key {
 			case settingDefaultGitopsImage:
-				if img, err := dockerhub.ResolveGitopsImage(false); err == nil {
+				if img, err := dockerhub.ResolveGitopsImage(false, false); err == nil {
 					entry.Effective = img
 				}
 			case settingDefaultDashboardImage:
-				if img, err := dockerhub.ResolveDashboardImage(false); err == nil {
+				if img, err := dockerhub.ResolveDashboardImage(false, false); err == nil {
 					entry.Effective = img
 				}
 			}

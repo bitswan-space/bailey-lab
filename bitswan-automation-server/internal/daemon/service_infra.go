@@ -127,7 +127,7 @@ func (s *Server) updateInfraService(serviceType string, req ServiceUpdateRequest
 		img := req.InfraDriverImage
 		if img == "" {
 			var err error
-			if img, err = dockerhub.ResolveInfraDriverImage(req.Staging); err != nil {
+			if img, err = dockerhub.ResolveInfraDriverImage(req.Staging, false); err != nil {
 				return fmt.Errorf("failed to resolve infra-driver image: %w", err)
 			}
 		}
@@ -136,7 +136,7 @@ func (s *Server) updateInfraService(serviceType string, req ServiceUpdateRequest
 		img := req.EgressGatewayImage
 		if img == "" {
 			var err error
-			if img, err = dockerhub.ResolveEgressGatewayImage(req.Staging); err != nil {
+			if img, err = dockerhub.ResolveEgressGatewayImage(req.Staging, false); err != nil {
 				return fmt.Errorf("failed to resolve egress-gateway image: %w", err)
 			}
 		}
@@ -145,5 +145,5 @@ func (s *Server) updateInfraService(serviceType string, req ServiceUpdateRequest
 		return fmt.Errorf("unknown infra service: %s", serviceType)
 	}
 
-	return workspace.UpdateWorkspaceDeployment(ws, gitops, infra, egress, req.Staging, false)
+	return workspace.UpdateWorkspaceDeployment(ws, gitops, infra, egress, req.Staging, false, false)
 }

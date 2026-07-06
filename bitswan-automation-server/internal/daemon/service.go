@@ -820,7 +820,7 @@ func (s *Server) enableCodingAgentService(req ServiceEnableRequest) error {
 
 	image := req.CodingAgentImage
 	if image == "" {
-		resolved, err := dockerhub.ResolveCodingAgentImage(req.Staging)
+		resolved, err := dockerhub.ResolveCodingAgentImage(req.Staging, false)
 		if err != nil {
 			return fmt.Errorf("failed to resolve coding-agent image: %w", err)
 		}

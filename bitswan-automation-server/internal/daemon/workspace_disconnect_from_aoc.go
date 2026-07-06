@@ -55,7 +55,7 @@ func restartWorkspace(workspaceName string) error {
 	// must not downgrade a staging/newer-pinned workspace to the latest production
 	// gitops (an empty image resolves ResolveGitopsImage(false); see
 	// currentGitopsImage).
-	if err := workspace.UpdateWorkspaceDeployment(workspaceName, currentGitopsImage(workspaceName), "", "", false, false); err != nil {
+	if err := workspace.UpdateWorkspaceDeployment(workspaceName, currentGitopsImage(workspaceName), "", "", false, false, false); err != nil {
 		return fmt.Errorf("gitops: %w", err)
 	}
 

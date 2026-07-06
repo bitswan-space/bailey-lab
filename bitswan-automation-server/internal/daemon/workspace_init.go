@@ -47,6 +47,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
 	sshPort := fs.String("ssh-port", "", "")
 	staging := fs.Bool("staging", false, "")
+	dev := fs.Bool("dev", false, "")
 	// Email of the user creating the workspace. Passed through to
 	// route registration so the workspace's endpoints (gitops,
 	// dashboard) are recorded under this owner in the Bailey ACL.
@@ -551,7 +552,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	imgopsImage := *gitopsImage
 	if imgopsImage == "" {
 		var err error
-		imgopsImage, err = dockerhub.ResolveGitopsImage(*staging)
+		imgopsImage, err = dockerhub.ResolveGitopsImage(*staging, *dev)
 		if err != nil {
 			return fmt.Errorf("failed to get latest BitSwan GitOps image: %w", err)
 		}
@@ -565,7 +566,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		bitswanDashboardImage = *dashboardImage
 		if bitswanDashboardImage == "" {
 			var err error
-			bitswanDashboardImage, err = dockerhub.ResolveDashboardImage(*staging)
+			bitswanDashboardImage, err = dockerhub.ResolveDashboardImage(*staging, *dev)
 			if err != nil {
 				return fmt.Errorf("failed to get latest BitSwan workspace-dashboard image: %w", err)
 			}
@@ -577,7 +578,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		bitswanCodingAgentImage = *codingAgentImage
 		if bitswanCodingAgentImage == "" {
 			var err error
-			bitswanCodingAgentImage, err = dockerhub.ResolveCodingAgentImage(*staging)
+			bitswanCodingAgentImage, err = dockerhub.ResolveCodingAgentImage(*staging, *dev)
 			if err != nil {
 				return fmt.Errorf("failed to get latest BitSwan coding-agent image: %w", err)
 			}
@@ -591,7 +592,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	bitswanInfraDriverImage := *infraDriverImage
 	if bitswanInfraDriverImage == "" {
 		var err error
-		bitswanInfraDriverImage, err = dockerhub.ResolveInfraDriverImage(*staging)
+		bitswanInfraDriverImage, err = dockerhub.ResolveInfraDriverImage(*staging, *dev)
 		if err != nil {
 			return fmt.Errorf("failed to get latest BitSwan infra-driver image: %w", err)
 		}
@@ -599,7 +600,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	bitswanEgressGatewayImage := *egressGatewayImage
 	if bitswanEgressGatewayImage == "" {
 		var err error
-		bitswanEgressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(*staging)
+		bitswanEgressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(*staging, *dev)
 		if err != nil {
 			return fmt.Errorf("failed to get latest BitSwan egress-gateway image: %w", err)
 		}

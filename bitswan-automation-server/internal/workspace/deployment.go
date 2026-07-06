@@ -14,7 +14,7 @@ import (
 )
 
 // UpdateWorkspaceDeployment updates the workspace deployment with new AOC configuration
-func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, customInfraDriverImage string, customEgressGatewayImage string, staging bool, trustCA bool) error {
+func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, customInfraDriverImage string, customEgressGatewayImage string, staging bool, dev bool, trustCA bool) error {
 	// Use HOME for file operations (works inside container and outside)
 	// The workspace files are accessible via the container path
 	homeDir := os.Getenv("HOME")
@@ -52,10 +52,12 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, c
 		fmt.Printf("Using custom gitops image: %s\n", gitopsImage)
 	} else {
 		var err error
-		gitopsImage, err = dockerhub.ResolveGitopsImage(staging)
+		gitopsImage, err = dockerhub.ResolveGitopsImage(staging, dev)
 		if err != nil {
 			fmt.Printf("    ⚠️  Failed to get latest gitops image, using 'latest': %v\n", err)
-			if staging {
+			if dev {
+				gitopsImage = "bitswan/gitops-dev:latest"
+			} else if staging {
 				gitopsImage = "bitswan/gitops-staging:latest"
 			} else {
 				gitopsImage = "bitswan/gitops:latest"
@@ -69,10 +71,12 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, c
 	infraDriverImage := customInfraDriverImage
 	if infraDriverImage == "" {
 		var err error
-		infraDriverImage, err = dockerhub.ResolveInfraDriverImage(staging)
+		infraDriverImage, err = dockerhub.ResolveInfraDriverImage(staging, dev)
 		if err != nil {
 			fmt.Printf("    ⚠️  Failed to get latest infra-driver image, using 'latest': %v\n", err)
-			if staging {
+			if dev {
+				infraDriverImage = "bitswan/infra-driver-dev:latest"
+			} else if staging {
 				infraDriverImage = "bitswan/infra-driver-staging:latest"
 			} else {
 				infraDriverImage = "bitswan/infra-driver:latest"
@@ -82,10 +86,12 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, c
 	egressGatewayImage := customEgressGatewayImage
 	if egressGatewayImage == "" {
 		var err error
-		egressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(staging)
+		egressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(staging, dev)
 		if err != nil {
 			fmt.Printf("    ⚠️  Failed to get latest egress-gateway image, using 'latest': %v\n", err)
-			if staging {
+			if dev {
+				egressGatewayImage = "bitswan/egress-gateway-dev:latest"
+			} else if staging {
 				egressGatewayImage = "bitswan/egress-gateway-staging:latest"
 			} else {
 				egressGatewayImage = "bitswan/egress-gateway:latest"

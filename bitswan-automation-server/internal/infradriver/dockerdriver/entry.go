@@ -639,6 +639,18 @@ func (c *compileState) resolveServiceSecrets(cfg automationConfig, stage string)
 	return out
 }
 
+// gatewayPullPolicy decides the egress-gateway compose pull_policy. Registry tags
+// (staging/prod) use "always" so a host never keeps a stale floating image. A
+// locally-built dev image (bitswan/egress-gateway-dev:latest, from
+// build-dev-images.sh via `workspace init --dev`) is NOT in any registry, so
+// "always" would fail the pull — use "missing" to run it from the local daemon.
+func gatewayPullPolicy(image string) string {
+	if strings.HasSuffix(image, "-dev:latest") {
+		return "missing"
+	}
+	return "always"
+}
+
 // emitGateways ports the egress-gateway emission block. One gateway service per
 // active firewalled (ctx, stage, slot) group; workers share its netns.
 func (c *compileState) emitGateways(services map[string]interface{}, fwScope map[fwKey]*fwGroup) error {
@@ -713,7 +725,7 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 			// a host keeps a stale local image indefinitely (e.g. the pre-role-split
 			// proxy that crash-loops on iptables). Per-service so the local-only
 			// internal/* BP images are never pull-attempted.
-			"pull_policy":    "always",
+			"pull_policy":    gatewayPullPolicy(c.gatewayImage),
 			"container_name": proxy,
 			"restart":        "unless-stopped",
 			"environment": map[string]interface{}{
@@ -743,7 +755,7 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 		services[g.gw] = map[string]interface{}{
 			"image": c.gatewayImage,
 			// Always re-pull the floating gateway image (see the proxy above).
-			"pull_policy":    "always",
+			"pull_policy":    gatewayPullPolicy(c.gatewayImage),
 			"container_name": g.gw,
 			"restart":        "unless-stopped",
 			"cap_add":        []interface{}{"NET_ADMIN"},

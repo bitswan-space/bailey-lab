@@ -28,6 +28,7 @@ type initOptions struct {
 	dashboardDevSourceDir string
 	sshPort            string
 	staging            bool
+	dev                bool
 }
 
 func defaultInitOptions() *initOptions {
@@ -77,6 +78,7 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.dashboardDevSourceDir, "dashboard-dev-source-dir", "", "Directory to mount as /workspace/dashboard-src in the workspace-dashboard container for hot-reload development")
 	cmd.Flags().StringVar(&o.sshPort, "ssh-port", "", "Use SSH over a custom port with custom SSH config for repositories behind firewalls (e.g., 443, 22)")
 	cmd.Flags().BoolVar(&o.staging, "staging", false, "Use staging images for gitops")
+	cmd.Flags().BoolVar(&o.dev, "dev", false, "Use locally-built bitswan/<svc>-dev:latest images (see build-dev-images.sh); takes precedence over --staging")
 	cmd.Flags().String("owner", "", "Email of the user who owns the workspace's endpoints in the Bailey ACL (enables access control + sharing for them)")
 	return cmd
 }

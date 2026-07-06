@@ -63,6 +63,7 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 	zookeeperImage := fs.String("zookeeper-image", "", "")
 	couchdbImage := fs.String("couchdb-image", "", "")
 	staging := fs.Bool("staging", false, "")
+	dev := fs.Bool("dev", false, "")
 	trustCA := fs.Bool("trust-ca", false, "")
 	devMode := fs.Bool("dev-mode", false, "")
 	disableDevMode := fs.Bool("disable-dev-mode", false, "")
@@ -146,14 +147,14 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 
 	// Update Docker images and docker-compose file
 	fmt.Println("Updating Docker images and docker-compose file...")
-	if err := workspace.UpdateWorkspaceDeployment(workspaceName, *gitopsImage, "", "", *staging, *trustCA); err != nil {
+	if err := workspace.UpdateWorkspaceDeployment(workspaceName, *gitopsImage, "", "", *staging, *dev, *trustCA); err != nil {
 		return fmt.Errorf("failed to update workspace deployment: %w", err)
 	}
 	fmt.Println("Gitops service restarted!")
 
 	// 3. Update services if they are enabled
 	fmt.Println("Checking for enabled services to update...")
-	if err := updateServices(workspaceName, *dashboardImage, *kafkaImage, *zookeeperImage, *couchdbImage, *staging, *trustCA); err != nil {
+	if err := updateServices(workspaceName, *dashboardImage, *kafkaImage, *zookeeperImage, *couchdbImage, *staging, *dev, *trustCA); err != nil {
 		fmt.Printf("Warning: some services failed to update: %v\n", err)
 	}
 
@@ -162,10 +163,10 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 }
 
 // updateServices updates all enabled services for the workspace
-func updateServices(workspaceName, dashboardImage, kafkaImage, zookeeperImage, couchdbImage string, staging, trustCA bool) error {
+func updateServices(workspaceName, dashboardImage, kafkaImage, zookeeperImage, couchdbImage string, staging, dev, trustCA bool) error {
 	// Always try to update dashboard service if enabled
 	fmt.Println("Checking dashboard service...")
-	if err := updateDashboardService(workspaceName, dashboardImage, staging, trustCA); err != nil {
+	if err := updateDashboardService(workspaceName, dashboardImage, staging, dev, trustCA); err != nil {
 		fmt.Printf("Warning: failed to update dashboard service: %v\n", err)
 	} else {
 		fmt.Println("Dashboard service updated successfully!")
@@ -236,7 +237,7 @@ func updateCodingAgentService(workspaceName string) error {
 
 // updateDashboardService updates the workspace-dashboard service for a specific workspace.
 // Stop, regenerate compose, start.
-func updateDashboardService(workspaceName, dashboardImage string, staging bool, trustCA bool) error {
+func updateDashboardService(workspaceName, dashboardImage string, staging bool, dev bool, trustCA bool) error {
 	dashboardService, err := services.NewDashboardService(workspaceName)
 	if err != nil {
 		return fmt.Errorf("failed to create Dashboard service: %w", err)
@@ -253,7 +254,7 @@ func updateDashboardService(workspaceName, dashboardImage string, staging bool, 
 	}
 
 	fmt.Println("Regenerating dashboard docker-compose configuration...")
-	if err := dashboardService.RegenerateDockerCompose(dashboardImage, staging, trustCA); err != nil {
+	if err := dashboardService.RegenerateDockerCompose(dashboardImage, staging, dev, trustCA); err != nil {
 		return fmt.Errorf("failed to regenerate dashboard docker-compose file: %w", err)
 	}
 
