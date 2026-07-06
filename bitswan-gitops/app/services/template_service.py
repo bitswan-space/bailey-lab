@@ -285,6 +285,58 @@ def _ensure_automation_id(target_dir: str) -> None:
         f.write(newline.join(lines))
 
 
+def _ensure_memory_defaults(target_dir: str) -> None:
+    """Add the memory-governance fields to `[deployment]` if missing, so every
+    scaffolded automation carries them for the author to tune.
+
+    `memory-reservation` (MB) is required before promoting to staging/production;
+    `memory_reservation_policy` is "on-demand" (paused when idle, woken on access)
+    or "always-on" (never auto-shut-down — for background-loop workers). Targeted
+    string edit (not a TOML round-trip) so comments/blank lines survive, mirroring
+    _ensure_automation_id. Idempotent: leaves an existing value untouched.
+    """
+    toml_path = os.path.join(target_dir, "automation.toml")
+    default_block = [
+        "# Memory budget for this container. Tune memory-reservation to just above",
+        "# real peak; it is required before promoting to staging/production.",
+        "memory-reservation = 128                 # MB",
+        "# on-demand = paused when idle + woken on access (default); always-on =",
+        "# never auto-shut-down (use for background/scheduled workers).",
+        'memory_reservation_policy = "on-demand"',
+    ]
+    if not os.path.exists(toml_path):
+        with open(toml_path, "w", encoding="utf-8") as f:
+            f.write("[deployment]\n" + "\n".join(default_block) + "\n")
+        return
+    with open(toml_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    # Already declared (either spelling)? Leave it alone.
+    if re.search(
+        r"\[deployment\][\s\S]*?^\s*memory[-_]reservation\s*=", content, re.MULTILINE
+    ):
+        return
+
+    newline = "\r\n" if "\r\n" in content else "\n"
+    lines = content.split(newline)
+    deployment_idx = -1
+    for i, raw in enumerate(lines):
+        trimmed = raw.strip()
+        if trimmed.startswith("[") and trimmed.endswith("]"):
+            if trimmed.lower() == "[deployment]":
+                deployment_idx = i
+                break
+    if deployment_idx >= 0:
+        for offset, ln in enumerate(default_block):
+            lines.insert(deployment_idx + 1 + offset, ln)
+    else:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append("[deployment]")
+        lines.extend(default_block)
+    with open(toml_path, "w", encoding="utf-8") as f:
+        f.write(newline.join(lines))
+
+
 def _bp_destination(
     workspace_root: str, bp: str, copy: Optional[str]
 ) -> tuple[str, str]:
@@ -425,6 +477,7 @@ async def create_automation_from_template(
         # of the resulting automation.
         _copy_dir_recursive(tpl.source_dir, dest, skip={"template.toml"})
         _ensure_automation_id(dest)
+        _ensure_memory_defaults(dest)
         created.append(
             {"name": sanitized, "relative_path": os.path.join(bp_rel, sanitized)}
         )
@@ -452,6 +505,7 @@ async def create_automation_from_template(
             dest = os.path.join(bp_full, automation)
             _copy_dir_recursive(src, dest)
             _ensure_automation_id(dest)
+            _ensure_memory_defaults(dest)
             created.append(
                 {"name": automation, "relative_path": os.path.join(bp_rel, automation)}
             )

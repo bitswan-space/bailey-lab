@@ -3,6 +3,13 @@
 # Its postgres + minio dependencies are provisioned per business process.
 [deployment]
 expose = false
+# Memory budget for this container. Tune memory-reservation to just above real
+# peak; it is required before promoting to staging/production.
+memory-reservation = 128                 # MB
+# on-demand = paused when idle + woken on access with the frontend (default);
+# always-on = never auto-shut-down (use if this worker runs background/scheduled
+# work with no inbound request to wake it).
+memory_reservation_policy = "on-demand"
 
 [services.postgres]
 enabled = true
