@@ -710,19 +710,29 @@ func reconcileMinioBuckets(ctx context.Context, wctx infradriver.WorkspaceContex
 			return
 		}
 	}
+	// One `mc admin user list` (cheap) so we can skip a bucket only when it is
+	// FULLY provisioned. Gating the skip on bucket-existence alone was wrong: the
+	// bucket and its scoped user/policy are created in separate steps, so if
+	// ensureBPMinioUser failed AFTER the bucket was made (a transient mc hiccup),
+	// every later apply saw the bucket and skipped — leaving the backend's creds
+	// permanently "Access Denied". Skip only bucket-AND-user; else (re)provision.
+	// ensureBPMinioUser is idempotent, so re-running it to heal is safe.
+	existingUsers, _ := listMinioUsers(ctx, container, ak, sk)
 	for b := range want {
-		if existing[b] {
-			// Already provisioned (bucket + scoped user/policy) by an earlier apply.
-			// Re-running ensureBPMinioUser (several mc execs) for EVERY bucket on
-			// EVERY apply was a dominant deploy cost. Skip existing buckets.
+		if existing[b] && existingUsers[scopedMinioUser(b)] {
+			// Fully provisioned (bucket + scoped user) by an earlier apply — skip
+			// the several mc execs (a dominant deploy cost when re-run every time).
 			continue
 		}
-		if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+b); rc != 0 {
-			report("provision", fmt.Sprintf("create bucket %s deferred: %s", b, strings.TrimSpace(e)))
-			continue
+		if !existing[b] {
+			if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+b); rc != 0 {
+				report("provision", fmt.Sprintf("create bucket %s deferred: %s", b, strings.TrimSpace(e)))
+				continue
+			}
 		}
-		// Scope a per-bucket MinIO user+policy for the just-created bucket so the
-		// backend reaches only its own bucket.
+		// Scope (or heal) the per-bucket MinIO user+policy so the backend reaches
+		// only its own bucket. Runs when the user is missing even if the bucket
+		// already exists — the self-heal for the split-provision race above.
 		if err := ensureBPMinioUser(ctx, container, ak, sk, wctx.SecretsDir, realm, b); err != nil {
 			report("provision", fmt.Sprintf("scope minio user for %s deferred: %v", b, err))
 		}
@@ -744,6 +754,31 @@ func listMinioBuckets(ctx context.Context, container, accessKey, secretKey strin
 		// `mc ls local` rows end with the bucket name (with a trailing slash).
 		if f := strings.Fields(strings.TrimSpace(line)); len(f) > 0 {
 			set[strings.TrimRight(f[len(f)-1], "/")] = true
+		}
+	}
+	return set, nil
+}
+
+// listMinioUsers returns the set of existing MinIO access keys (usernames). Used
+// to detect a bucket whose scoped user was never created, so provisioning can
+// heal it. The alias is assumed already set (listMinioBuckets ran first); a probe
+// failure returns an empty set + error so the caller re-provisions rather than
+// wrongly skipping. `mc admin user list` rows are: STATUS  ACCESSKEY  [policy…].
+func listMinioUsers(ctx context.Context, container, accessKey, secretKey string) (map[string]bool, error) {
+	if _, e, rc := dockerExec(ctx, container, "mc", "alias", "set", "local", "http://localhost:9000", accessKey, secretKey); rc != 0 {
+		return map[string]bool{}, fmt.Errorf("mc alias set: %s", strings.TrimSpace(e))
+	}
+	stdout, e, rc := dockerExec(ctx, container, "mc", "admin", "user", "list", "local")
+	if rc != 0 {
+		return map[string]bool{}, fmt.Errorf("mc admin user list: %s", strings.TrimSpace(e))
+	}
+	set := map[string]bool{}
+	for _, line := range strings.Split(stdout, "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		// A user row is "<enabled|disabled> <accessKey> …"; the access key is the
+		// field after the status.
+		if len(f) >= 2 && (f[0] == "enabled" || f[0] == "disabled") {
+			set[f[1]] = true
 		}
 	}
 	return set, nil
