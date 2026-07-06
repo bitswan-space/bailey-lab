@@ -63,13 +63,8 @@ echo "=== [1/7] Build the Server Console SPA + the bitswan CLI + component image
 # internal/daemon/serverconsole_dist (not committed). Build it into the embed
 # dir BEFORE compiling the CLI, or the gate serves an empty console (a directory
 # listing) instead of the real onboarding/console UI.
-npm --prefix bitswan-server-console install --no-audit --no-fund
-mark "[1/7] server-console: npm install"
-npm --prefix bitswan-server-console run build
-mark "[1/7] server-console: vite build"
-rm -rf bitswan-automation-server/internal/daemon/serverconsole_dist
-mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
-cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
+make -C "$REPO_ROOT/bitswan-automation-server" console
+mark "[1/7] server-console: make console"
 ( cd bitswan-automation-server && go build -o bitswan ./main.go )
 mark "[1/7] bitswan CLI: go build"
 BITSWAN="$REPO_ROOT/bitswan-automation-server/bitswan"

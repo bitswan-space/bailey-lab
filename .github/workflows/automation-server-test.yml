@@ -46,12 +46,7 @@ jobs:
       # not committed. Build the SPA so `go test` exercises the real assets.
       - name: Build Server Console (embedded SPA)
         working-directory: ${{ github.workspace }}
-        run: |
-          npm --prefix bitswan-server-console install --no-audit --no-fund
-          npm --prefix bitswan-server-console run build
-          rm -rf bitswan-automation-server/internal/daemon/serverconsole_dist
-          mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
-          cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
+        run: make -C bitswan-automation-server console
 
       - name: go get
         run: go get ./...
