@@ -1,4 +1,4 @@
-package infradriver
+package main
 
 import (
 	"bufio"

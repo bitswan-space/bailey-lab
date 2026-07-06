@@ -32,13 +32,15 @@ driver git remote ── post-receive ──▶ compile bitswan.yaml + reconcile
       └── container primitives: list / logs / stop / restart
 ```
 
-- The driver is a subcommand of the existing daemon binary
-  (`bitswan infra-driver serve`) — **no new image**. One driver per gitops (and
-  one for the daemon).
+- The driver is its **own self-contained image** (`bitswan/infra-driver`,
+  built from `cmd/infra-driver/Dockerfile`: docker CLI + compose + git +
+  git-http-backend + syft, with the standalone `infra-driver` binary baked in —
+  NOT the bitswan CLI mounted from the host). It runs `infra-driver serve`. One
+  driver per gitops.
 - gitops keeps its own git server + copies model unchanged. On
   deploy/promote/swap/scale/rollback it resolves the deployed `bitswan.yaml`
   and `git push`es it (with the source needed to build) to the driver's remote.
-- **Apply = the post-receive hook.** It runs `bitswan infra-driver apply`,
+- **Apply = the post-receive hook.** It runs `infra-driver apply`,
   whose stdout (the compile/reconcile progress) is relayed back over git's
   sideband to the pushing client, which gitops forwards to the dashboard.
 
@@ -101,10 +103,10 @@ primitives + a `git push` to deploy, and **no longer mounts `docker.sock`**.
 
 1. **Contract** — `driver.go` + `api.go` + server/client for the five
    primitives (list/logs/stop/restart/exec) + build-image (round-trip tested).
-2. **`bitswan infra-driver serve`** — host the bare deploy git remote over git
+2. **`infra-driver serve`** — host the bare deploy git remote over git
    smart-HTTP (post-receive → `apply`) + serve the primitives, all over TCP on
    the internal network, guarded by a shared bearer token.
-3. **`bitswan infra-driver apply`** — the compiler + reconciler: port
+3. **`infra-driver apply`** — the compiler + reconciler: port
    `generate_docker_compose` + reconcile to Go (`internal/dockercompose` reuse,
    golden-tested), bring the project up, install certs, provision per-BP
    DBs/buckets, and **configure ingress itself** (`/ingress/reconcile` on the

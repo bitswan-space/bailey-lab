@@ -81,13 +81,19 @@ mark "[1/7] docker build: coding-agent image"
 docker build -t "$EGRESS_GATEWAY_IMAGE" -f "$REPO_ROOT/bitswan-automation-server/cmd/egress-gateway/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
 mark "[1/7] docker build: egress-gateway image"
 
-# The per-workspace infra-driver sidecar runs this image (debian + docker CLI +
-# git + git-http-backend) with the bitswan binary mounted at runtime. The
-# workspace compose references bitswan/automation-server-runtime:latest and
-# brings it up with --pull missing, so build the tag here or the sidecar (the
-# only container with docker.sock) can't start and the workspace never comes up.
+# The daemon runs this image (debian + docker CLI + git) with the bitswan binary
+# mounted at runtime. The daemon container references
+# bitswan/automation-server-runtime:latest, so build the tag here or it can't start.
 docker build -t bitswan/automation-server-runtime:latest -f "$REPO_ROOT/bitswan-automation-server/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
 mark "[1/7] docker build: automation-server-runtime image"
+
+# The per-workspace infra-driver sidecar runs its own self-contained image
+# (docker CLI + compose + git + git-http-backend + syft, with the infra-driver
+# binary baked in). The workspace compose references bitswan/infra-driver:latest
+# and brings it up with --pull missing, so build the tag here or the sidecar (the
+# only container with docker.sock) can't start and the workspace never comes up.
+docker build -t bitswan/infra-driver:latest -f "$REPO_ROOT/bitswan-automation-server/cmd/infra-driver/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
+mark "[1/7] docker build: infra-driver image"
 
 echo "=== [2/7] Daemon + traefik ingress ==="
 # Pin the daemon to THIS checkout's images so workspaces it creates via the

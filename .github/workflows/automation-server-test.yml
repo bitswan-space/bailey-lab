@@ -197,13 +197,21 @@ jobs:
 
       - name: Build automation-server-runtime image from source
         run: |
-          # The per-workspace infra-driver sidecar runs this image (debian +
-          # docker CLI + git + git-http-backend) with the bitswan binary mounted
-          # at runtime. The workspace compose references it as
-          # bitswan/automation-server-runtime:latest and brings it up with
-          # `--pull missing`, so build the tag here or the sidecar can't start
-          # and `docker compose up` fails.
+          # The daemon runs this image (debian + docker CLI + git) with the
+          # bitswan binary mounted at runtime. Build the tag here or the daemon
+          # container can't start.
           docker build -t bitswan/automation-server-runtime:latest -f "${{ github.workspace }}/bitswan-automation-server/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
+
+      - name: Build infra-driver image from source
+        run: |
+          # The per-workspace infra-driver sidecar runs its own self-contained
+          # image (docker CLI + compose + git + git-http-backend + syft, with the
+          # infra-driver binary baked in — no mounted bitswan binary). The
+          # workspace compose references bitswan/infra-driver:latest and brings it
+          # up with `--pull missing`, so build the tag here or the sidecar (the
+          # only container with docker.sock) can't start and the workspace never
+          # comes up.
+          docker build -t bitswan/infra-driver:latest -f "${{ github.workspace }}/bitswan-automation-server/cmd/infra-driver/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
 
       - name: "E2E: create a business process and reach its frontend"
         timeout-minutes: 15
