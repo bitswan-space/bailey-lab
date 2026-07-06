@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import uuid
 import yaml
 import requests
@@ -20,21 +21,23 @@ from app.utils import (
     daemon_user_role,
     generate_workspace_url,
     read_bitswan_yaml,
-    dump_bitswan_yaml,
     load_yaml,
     read_automation_config,
     sanitize_automation_name,
-    update_git,
-    call_git_command,
+    update_bp_git,
+    write_bp_bitswan,
+    bp_state_path,
+    deployment_bp,
     call_git_command_with_output,
     copy_worktree,
-    GitLockContext,
 )
 from app.deploy_manager import deploy_manager
 from app.services.image_service import ImageService
 from app.services import bp_secrets
 from app.services import supply_chain_service
 from app.services import firewall_service
+from app.services.bp_git import fetch_main
+from app.services.git_server import validate_bp_name
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
@@ -87,6 +90,18 @@ def _parse_revision_backups(gitops_dir: str, sha: str, bp: str) -> dict:
     state across commits is one audit-log entry in the deployment history."""
     bk = _parse_revision_bitswan(gitops_dir, sha).get("backups") or {}
     return (bk.get(bp) or {}) if isinstance(bk, dict) else {}
+
+
+def _parse_revision_secret_blob(gitops_dir: str, sha: str, bp: str, realm: str) -> str:
+    """The encrypted `secrets[bp][realm]` blob at a git commit, or "". Secrets are
+    versioned in bitswan.yaml like deployments/firewall, so each distinct blob
+    across commits is one audit-log / rollback point (the value is opaque
+    ciphertext — history shows THAT it changed + when/who, never the value)."""
+    sec = _parse_revision_bitswan(gitops_dir, sha).get("secrets") or {}
+    if not isinstance(sec, dict):
+        return ""
+    val = (sec.get(bp) or {}).get(realm)
+    return val if isinstance(val, str) else ""
 
 
 def _short_hash(context: str) -> str:
@@ -162,13 +177,16 @@ _MEMBER_BUILD_CONCURRENCY = 4
 
 # Per-image-tag build locks. Members of a deploy are prepped concurrently
 # (see _MEMBER_BUILD_CONCURRENCY), and two callers can ask to build/bake the
-# SAME image at once — two members sharing one image (identical `image/` tree →
-# same content-addressed tag), or a deploy and a Checks/supply-chain preview, or
-# repeated previews as a scan completes. They'd otherwise race the SAME
-# `.builds/<checksum>` context dir (concurrent rmtree+copytree → mkdir EEXIST →
-# "File exists" failure) and double-build the same tag. Serialize per tag so
-# same-image work runs once; different images still proceed in parallel. asyncio
-# is single-threaded, so the get-or-create below needs no extra mutex.
+# SAME tag at once — a redeploy of one automation, a deploy and a
+# Checks/supply-chain preview, or repeated previews as a scan completes.
+# Serialize per tag so same-image work runs once instead of racing two identical
+# driver builds. Different tags still proceed in parallel — even when they share
+# a content-addressed `.builds/` context dir (e.g. every BP's backend is
+# scaffolded from one template, so their `image/` trees are identical → one ctx
+# dir, different tags): the shared dir is materialized safely by
+# `_atomic_publish` (idempotent + atomic rename), not guarded by this lock, so a
+# concurrent prep can't hit the "File exists" rmtree+copytree race. asyncio is
+# single-threaded, so the get-or-create below needs no extra mutex.
 _build_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -669,22 +687,10 @@ class AutomationService:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
 
-        async with GitLockContext(timeout=10.0, kind="prepare deploy tree"):
-            await call_git_command("git", "add", f"{checksum}", cwd=self.gitops_dir)
-            await call_git_command(
-                "git",
-                "commit",
-                "-m",
-                f"Add asset {checksum} (workspace-mounted)",
-                cwd=self.gitops_dir,
-            )
-            # Push is best-effort — there may be no remote configured in dev.
-            try:
-                await call_git_command("git", "push", cwd=self.gitops_dir)
-            except Exception:
-                logger.warning(
-                    "git push failed after materialize_merged_tree; continuing"
-                )
+        # The checksum tree lives at gitops/<checksum>/ on the SHARED volume, which
+        # the driver mounts directly — with per-BP deploy repos it is read from the
+        # shared mount, not transported via a deploy push, so there is nothing to
+        # commit here (the gitops root is no longer a single state repo).
 
         return output_dir
 
@@ -835,10 +841,50 @@ class AutomationService:
         return full_tag
 
     @staticmethod
+    def _atomic_publish(dst: str, populate: Callable[[str], None]) -> None:
+        """Idempotently materialize the content-addressed build-context dir `dst`.
+
+        `dst` is named by its content's hash, so if it already exists it is
+        already exactly what `populate` would produce — reuse it (a cache hit)
+        instead of racing a rmtree+repopulate against a concurrent build that
+        shares the same context. The race is real: these run in a thread pool
+        (`asyncio.to_thread`), and two automations with an identical source tree
+        map to ONE `dst` but take DIFFERENT per-tag build locks, so they run in
+        parallel — a plain `rmtree(dst)+copytree(src, dst)` then throws
+        `FileExists` (one thread's rmtree races the other's mkdir) and fails the
+        deploy. Instead: populate a private temp dir and atomically rename it
+        into place. Whoever wins the rename publishes `dst`; the loser sees it
+        already there (identical content) and discards its copy. We never rmtree
+        `dst`, so a leftover from a crashed build is reused rather than deleted
+        out from under a concurrent reader.
+        """
+        if os.path.isdir(dst):
+            return
+        parent = os.path.dirname(dst)
+        os.makedirs(parent, exist_ok=True)
+        tmp = tempfile.mkdtemp(prefix=os.path.basename(dst) + ".tmp.", dir=parent)
+        try:
+            populate(tmp)
+            try:
+                os.rename(tmp, dst)
+            except OSError:
+                # A concurrent build already published `dst` first. It's
+                # content-addressed, so its contents are identical to ours —
+                # drop our temp copy. Anything else is a real error.
+                if not os.path.isdir(dst):
+                    raise
+                shutil.rmtree(tmp, ignore_errors=True)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+
+    @staticmethod
     def _copy_tree(src: str, dst: str) -> None:
-        """Materialize a single source dir into a fresh build-context dir."""
-        shutil.rmtree(dst, ignore_errors=True)
-        shutil.copytree(src, dst, symlinks=True)
+        """Materialize a single source dir into the content-addressed context."""
+        AutomationService._atomic_publish(
+            dst,
+            lambda tmp: shutil.copytree(src, tmp, symlinks=True, dirs_exist_ok=True),
+        )
 
     async def _bake_source_image(
         self,
@@ -931,18 +977,23 @@ class AutomationService:
 
     @staticmethod
     def _materialize_build_context(ctx: str, dirs_to_merge: list[str]) -> None:
-        # Rebuild fresh, then merge the source dirs (later-wins). symlinks=True
-        # PRESERVES symlinks (e.g. go.mod → /deps/go.mod, an absolute path the
-        # runtime base provides) — `COPY . <mp>` keeps them as symlinks in the
-        # image, resolving at runtime. Following them here would fail (the target
-        # only exists inside the running container).
-        shutil.rmtree(ctx, ignore_errors=True)
-        os.makedirs(ctx, exist_ok=True)
-        for d in dirs_to_merge:
-            if os.path.isdir(d):
-                shutil.copytree(d, ctx, dirs_exist_ok=True, symlinks=True)
-        with open(os.path.join(ctx, ".dockerignore"), "w") as f:
-            f.write("image/\nDockerfile\n.dockerignore\n")
+        # `ctx` is content-addressed by the merged-tree hash, so materialize it
+        # idempotently + atomically (see _atomic_publish): concurrent bakes that
+        # share the same merged source — deploy + Checks preview, or two members
+        # with an identical tree — would otherwise race rmtree+copytree on the
+        # shared dir. Merge the source dirs (later-wins). symlinks=True PRESERVES
+        # symlinks (e.g. go.mod → /deps/go.mod, an absolute path the runtime base
+        # provides) — `COPY . <mp>` keeps them as symlinks in the image, resolving
+        # at runtime. Following them here would fail (the target only exists
+        # inside the running container).
+        def _populate(tmp: str) -> None:
+            for d in dirs_to_merge:
+                if os.path.isdir(d):
+                    shutil.copytree(d, tmp, dirs_exist_ok=True, symlinks=True)
+            with open(os.path.join(tmp, ".dockerignore"), "w") as f:
+                f.write("image/\nDockerfile\n.dockerignore\n")
+
+        AutomationService._atomic_publish(ctx, _populate)
 
     async def _source_commit(self, source_dir: str) -> str | None:
         """Git commit of the source tree being deployed (the copy/main HEAD), so a
@@ -978,7 +1029,7 @@ class AutomationService:
             deployment_id format stays canonical),
           * build the per-automation runtime image if it ships an
             `image/Dockerfile` (`_ensure_automation_image`),
-          * compute the merged-tree checksum (with `bitswan_lib`) and
+          * compute the source-tree checksum and
             materialize `<gitops_dir>/<checksum>/` (skipped for live-dev).
 
         Returns: {deployment_id, checksum, stage, relative_path,
@@ -1007,7 +1058,6 @@ class AutomationService:
 
         deployment_id = self.deployment_id_for(source, stage)
 
-        # Resolve source dir + optional bitswan_lib for the merge.
         source_dir = os.path.realpath(
             os.path.join(self.workspace_repo_dir, relative_path)
         )
@@ -1016,10 +1066,7 @@ class AutomationService:
             source_dir == ws_root_real or source_dir.startswith(ws_root_real + os.sep)
         ):
             raise HTTPException(status_code=400, detail="Source escapes workspace")
-        bitswan_lib_dir = os.path.join(self.workspace_repo_dir, "bitswan_lib")
         dirs_to_merge = [source_dir]
-        if os.path.isdir(bitswan_lib_dir):
-            dirs_to_merge.append(bitswan_lib_dir)
 
         # Build the per-automation runtime image if the source ships a
         # Dockerfile under `image/`. This MUST run before the
@@ -1089,8 +1136,8 @@ class AutomationService:
         """Deploy a single automation directly from the bind-mounted workspace.
 
         Thin wrapper over `prep_deploy_source` that additionally reserves the
-        deploy task. Discovers the source, merges `bitswan_lib`, materializes
-        the merged tree under `<gitops_dir>/<checksum>/`, and returns the
+        deploy task. Discovers the source, materializes
+        the source tree under `<gitops_dir>/<checksum>/`, and returns the
         kwargs the deploy pipeline (`deploy_automation`) consumes.
 
         `stage="live-dev"` skips materialization and uses the literal
@@ -1145,6 +1192,34 @@ class AutomationService:
             if parts and sanitize_automation_name(parts[0]) == bp_key:
                 out.append(s)
         return out
+
+    async def _persist_bp_state(
+        self,
+        bs_yaml: dict,
+        bps: set[str],
+        deployment_id: str,
+        action: str,
+        deployed_by: str | None = None,
+        message: str | None = None,
+        extra_paths: list[str] | None = None,
+    ) -> None:
+        """Write + commit + push each affected business process's slice to its
+        OWN deploy repo (gitops/bp/<bp>). Deploy state is one bitswan.yaml per
+        BP, so a change touching N BPs produces N per-BP commits/pushes — the
+        driver then applies only those BPs. `extra_paths` are repo-relative paths
+        (per-BP) to stage in the same commit."""
+        for bp in sorted(bps):
+            write_bp_bitswan(self.gitops_dir, bp, bs_yaml)
+            await update_bp_git(
+                self.gitops_dir,
+                self.gitops_dir_host,
+                bp,
+                deployment_id,
+                action,
+                deployed_by=deployed_by,
+                message=message,
+                extra_paths=extra_paths,
+            )
 
     async def write_deployment_entries(
         self,
@@ -1255,13 +1330,15 @@ class AutomationService:
             logger.warning("Removing stale live-dev entry: %s", k)
             del deployments[k]
 
-        bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(bitswan_yaml_path, "w") as f:
-            dump_bitswan_yaml(bs_yaml, f)
-
-        await update_git(
-            self.gitops_dir,
-            self.gitops_dir_host,
+        changed = {
+            deployment_bp(
+                (bs_yaml.get("deployments") or {}).get(m["deployment_id"], {})
+            )
+            for m in members
+        }
+        await self._persist_bp_state(
+            bs_yaml,
+            {bp for bp in changed if bp},
             members[0]["deployment_id"] if members else "all",
             "deploy",
             deployed_by=deployed_by,
@@ -1315,12 +1392,9 @@ class AutomationService:
         tree = bs.setdefault("business_processes", {})
         node = tree.setdefault(bp, {}).setdefault(stage_key, {})
         node["git_commit"] = git_commit
-        bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(bitswan_yaml_path, "w") as f:
-            dump_bitswan_yaml(bs, f)
-        await update_git(
-            self.gitops_dir,
-            self.gitops_dir_host,
+        await self._persist_bp_state(
+            bs,
+            {bp},
             bp,
             "deploy",
             deployed_by=deployed_by,
@@ -1342,6 +1416,9 @@ class AutomationService:
         change which version is live)."""
         stage_key = "production" if stage in ("", "production") else stage
         realm = bp_secrets.realm_for_stage(stage_key)
+        # History is the git log of this BP's OWN deploy repo (one bitswan.yaml
+        # per BP), so it is naturally scoped to the BP — no cross-BP contamination.
+        bp_dir = bp_state_path(self.gitops_dir, bp)
         out, _, rc = await call_git_command_with_output(
             "git",
             "log",
@@ -1350,12 +1427,13 @@ class AutomationService:
             "--format=%H%x1f%aI%x1f%ae%x1f%s",
             "--",
             "bitswan.yaml",
-            cwd=self.gitops_dir,
+            cwd=bp_dir,
         )
         entries: list[dict] = []
         prev_dep_key = None
         prev_fw_key: tuple | None = None
         prev_bk_key: str | None = None
+        prev_sec_key: str | None = None
         for line in (out or "").splitlines():
             parts = line.split("\x1f")
             if len(parts) != 4:
@@ -1364,7 +1442,7 @@ class AutomationService:
             # Memoized git-show + parse, shared across stages and repeat loads
             # (a commit's bitswan.yaml is immutable). This is the hot path —
             # see _parse_revision_bitswan.
-            bps = _parse_revision_business_processes(self.gitops_dir, sha)
+            bps = _parse_revision_business_processes(bp_dir, sha)
             node = (bps.get(bp, {}) or {}).get(stage_key) or {}
             src = node.get("git_commit")
             members = {
@@ -1404,7 +1482,7 @@ class AutomationService:
                 prev_dep_key = dep_key
 
             # ── firewall event: a changed rule set for this realm ──────────────
-            fw_node = _parse_revision_firewall_realm(self.gitops_dir, sha, bp, realm)
+            fw_node = _parse_revision_firewall_realm(bp_dir, sha, bp, realm)
             fw_rules = fw_node.get("rules") or {}
             fw_key = tuple(
                 sorted((h, (r or {}).get("status")) for h, r in fw_rules.items())
@@ -1447,7 +1525,7 @@ class AutomationService:
             # swap, retention) surface on the production timeline; a `created`
             # snapshot surfaces on the stage it captured. Older entries with no
             # stage default to production (where the blue-green/DR UI lives).
-            bk_node = _parse_revision_backups(self.gitops_dir, sha, bp)
+            bk_node = _parse_revision_backups(bp_dir, sha, bp)
             bk_log = bk_node.get("log") or []
             bk_top = bk_log[0] if bk_log else None
             bk_key = (bk_top or {}).get("id")
@@ -1474,9 +1552,48 @@ class AutomationService:
                     }
                 )
             prev_bk_key = bk_key
+
+            # ── secret event: a changed encrypted blob for this realm ───────────
+            # Secrets are versioned in bitswan.yaml like firewall rules; each
+            # distinct blob is an audit-log entry + rollback point. The value is
+            # opaque ciphertext — we surface only THAT it changed (who/when),
+            # never the secret itself. Applies to the backend on its next deploy.
+            sec_key = _parse_revision_secret_blob(bp_dir, sha, bp, realm)
+            if (
+                sec_key != prev_sec_key
+                and (sec_key or prev_sec_key)
+                and not emitted_deploy
+            ):
+                # A secret change is applied on top of — and redeploys — the
+                # source currently deployed at this revision, so it carries that
+                # source_commit + members: it is a first-class deployment (it can
+                # be the current one, diffed, scaled), just labelled "secret".
+                entries.append(
+                    {
+                        "commit": sha,
+                        "source_commit": src,
+                        "deployed_at": date,
+                        "deployed_by": author,
+                        "status": "secret",
+                        "source": "secret",
+                        "members": members,
+                        "secret": {"realm": realm, "summary": subject},
+                    }
+                )
+            prev_sec_key = sec_key
         entries.reverse()  # newest-first
+        # The current deployment is the newest APPLIED state. On dev/staging a
+        # secret change applies immediately (it redeploys the single-slot
+        # members), so it counts. On PRODUCTION a secret change is PENDING — it
+        # applies zero-downtime on the next promote, not in place — so it must
+        # NOT claim "current"; the live production deploy stays current until a
+        # promote. Firewall/backup entries are audit records, never the
+        # deployment itself.
+        non_current = ("firewall", "backup")
+        if stage_key == "production":
+            non_current = non_current + ("secret",)
         current = next(
-            (e["commit"] for e in entries if e["source"] not in ("firewall", "backup")),
+            (e["commit"] for e in entries if e["source"] not in non_current),
             None,
         )
         return {
@@ -1494,14 +1611,17 @@ class AutomationService:
         deployed_by: str | None = None,
         progress_callback: Callable[..., Any] | None = None,
     ) -> dict:
-        """Roll a BP stage back to a prior deployment. `git_commit` is the history
-        entry's id — the bitswan.yaml commit sha. We read that revision, re-point
-        ALL the BP's member deployments to the images it recorded (as a group),
-        and redeploy. The redeploy's own git commit becomes the new history
-        entry (subject "rollback …")."""
+        """Roll a BP back to a prior commit by restoring its ENTIRE bitswan.yaml
+        (the BP's own deploy repo) to that revision, then redeploying. bitswan.yaml
+        holds everything — deployment images, secrets, firewall, backups — so this
+        one flow restores all of it; there is no per-kind rollback. `git_commit`
+        is the history entry's commit sha; the restore's own commit ("rollback …")
+        becomes the new history entry, and the driver re-applies (recreating
+        containers, re-deriving the backend's secret env, reloading firewall)."""
         stage_key = "production" if stage in ("", "production") else stage
+        bp_dir = bp_state_path(self.gitops_dir, bp)
         content, _, rc = await call_git_command_with_output(
-            "git", "show", f"{git_commit}:bitswan.yaml", cwd=self.gitops_dir
+            "git", "show", f"{git_commit}:bitswan.yaml", cwd=bp_dir
         )
         if rc != 0:
             raise HTTPException(
@@ -1511,43 +1631,31 @@ class AutomationService:
             y = yaml.safe_load(content) or {}
         except Exception:
             raise HTTPException(status_code=500, detail="Could not parse that revision")
-        node = ((y.get("business_processes") or {}).get(bp, {}) or {}).get(stage_key)
-        target = (node or {}).get("deployments") or {}
-        if not target:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No deployment for {bp}/{stage_key} at {git_commit[:8]}",
-            )
-        target_src = (node or {}).get("git_commit")
 
-        # Re-point the (flat, hydrated) deployment entries to the historical
-        # images; dump regroups them into the tree.
-        bs = read_bitswan_yaml(self.gitops_dir) or {}
-        deployments = bs.setdefault("deployments", {})
-        for dep_id, mi in target.items():
-            dep = deployments.get(dep_id)
-            if dep is None:
-                continue
-            dep["image"] = (mi or {}).get("image")
-            dep["image_id"] = (mi or {}).get("image_id")
-            dep["source_commit"] = target_src
-        tree = bs.setdefault("business_processes", {})
-        tree.setdefault(bp, {}).setdefault(stage_key, {})["git_commit"] = target_src
-        path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(path, "w") as f:
-            dump_bitswan_yaml(bs, f)
-        await update_git(
+        # Restore the BP's bitswan.yaml exactly as it was at git_commit — the whole
+        # file (every context + secrets + firewall + backups), not just images.
+        with open(os.path.join(bp_dir, "bitswan.yaml"), "w") as f:
+            yaml.dump(y, f)
+        await update_bp_git(
             self.gitops_dir,
             self.gitops_dir_host,
             bp,
+            bp,
             "deploy",
             deployed_by=deployed_by,
-            message=f"rollback {bp} → {stage_key} @ {(target_src or '')[:8]}",
+            message=f"rollback {bp} @ {git_commit[:8]}",
         )
-        deployment_ids = list(target.keys())
+        # Redeploy every deployment the restored file declares so the driver
+        # re-applies the restored state (images, secret env, firewall).
+        restored = read_bitswan_yaml(bp_dir) or {}
+        deployment_ids = list((restored.get("deployments") or {}).keys())
         result = await self.apply_compose_for_deployments(
             deployment_ids, deployed_by=deployed_by, report=progress_callback
         )
+        target_src = None
+        node = ((y.get("business_processes") or {}).get(bp, {}) or {}).get(stage_key)
+        if node:
+            target_src = node.get("git_commit")
         return {
             "message": "Rolled back",
             "bp": bp,
@@ -1559,17 +1667,21 @@ class AutomationService:
 
     async def bp_diff(self, bp: str, from_sha: str, to_sha: str) -> dict:
         """Unified diff of a BP's source between two commits (the history view's
-        "diff vs current"). Scoped to the BP's directory, computed in copies/main
-        where the canonical source lives."""
-        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
+        "diff vs current"). Each BP is its OWN git repo, so this runs inside the
+        BP's clone in copies/main — copies/main itself is no longer a repo. The
+        two commits are deploy source_commits that live on the BP repo's main,
+        reachable only after a fetch (as in copies.get_commit_diff)."""
+        validate_bp_name(bp)
+        clone = os.path.join(_copies_dir(), "main", bp)
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            return {"diff": "", "from": from_sha, "to": to_sha}
+        await fetch_main(clone, bp)
         out, _, rc = await call_git_command_with_output(
             "git",
             "diff",
             "--no-color",
             f"{from_sha}..{to_sha}",
-            "--",
-            f"{bp}/",
-            cwd=main,
+            cwd=clone,
         )
         return {"diff": out if rc == 0 else "", "from": from_sha, "to": to_sha}
 
@@ -1612,6 +1724,41 @@ class AutomationService:
             out["production"] = {}
         return out
 
+    async def read_bp_secrets_at(
+        self, bp: str, commit: str, stage: str, by: str | None = None
+    ) -> dict:
+        """A BP stage's decrypted secrets AS THEY WERE at a bitswan.yaml revision
+        (Inspect → Secrets snapshot). Reads the per-BP bitswan.yaml at `commit`
+        from git — the encrypted blob at that point in history is the source of
+        truth — so the snapshot is exactly what a rollback to that commit would
+        restore. Production values stay admin/auditor-only (same fail-closed
+        redaction as read_bp_secrets)."""
+        validate_bp_name(bp)
+        realm = bp_secrets.realm_for_stage(stage)
+        bp_dir = bp_state_path(self.gitops_dir, bp)
+        content, _, rc = await call_git_command_with_output(
+            "git", "show", f"{commit}:bitswan.yaml", cwd=bp_dir
+        )
+        if rc != 0:
+            raise HTTPException(
+                status_code=404, detail=f"No such revision {commit[:8]}"
+            )
+        try:
+            y = yaml.safe_load(content) or {}
+        except Exception:
+            raise HTTPException(status_code=500, detail="Could not parse that revision")
+        blob = ((y.get("secrets") or {}).get(bp) or {}).get(realm)
+        values = bp_secrets.decrypt_secrets(self.secrets_dir, blob) if blob else {}
+        if realm == "production" and not self._is_production_role(by):
+            values = {}
+        return {
+            "bp": bp,
+            "commit": commit,
+            "stage": stage,
+            "realm": realm,
+            "values": values,
+        }
+
     def _is_production_role(self, by: str | None) -> bool:
         """Whether `by` (an email a trusted shim has verified) is allowed to see
         production secrets — i.e. resolves to admin/auditor in the daemon's
@@ -1631,34 +1778,73 @@ class AutomationService:
         values_by_realm: dict,
         deployed_by: str | None = None,
     ) -> dict:
-        """Encrypt + version a BP's secrets in bitswan.yaml as ONE commit.
+        """Encrypt + version a BP's secrets in bitswan.yaml as ONE commit, then
+        APPLY the change (a secret change is a deployment).
 
         Secret *names* are shared across stages; *values* are per stage, so the
         caller sends every realm's {KEY: value} map and we persist them together
         — one rollback point captures the whole secret state. Each realm gets its
         own AES blob (per-stage storage), and we re-derive each realm's plaintext
-        env file. Values apply on the next deploy of that stage."""
+        env file.
+
+        We only re-encrypt the realms whose *plaintext* actually changed (AES
+        re-encryption alone would produce a new ciphertext and therefore a
+        spurious history entry / cross-stage noise). A changed realm's already-
+        deployed members are then redeployed so the new value reaches the
+        backend container immediately and the change becomes the CURRENT
+        deployment, not a pending edit."""
         cleaned = {
             realm: bp_secrets.normalise_values(values_by_realm.get(realm) or {})
             for realm in bp_secrets.REALMS
         }
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         enc = bs.setdefault("secrets", {}).setdefault(bp, {})
-        for realm, clean in cleaned.items():
-            enc[realm] = bp_secrets.encrypt_secrets(self.secrets_dir, clean)
-        path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(path, "w") as f:
-            dump_bitswan_yaml(bs, f)
-        await update_git(
-            self.gitops_dir,
-            self.gitops_dir_host,
+        # Diff plaintext (not ciphertext) to find realms that really changed.
+        changed_realms = set()
+        for realm in bp_secrets.REALMS:
+            old_blob = enc.get(realm)
+            old_vals = (
+                bp_secrets.decrypt_secrets(self.secrets_dir, old_blob)
+                if old_blob
+                else {}
+            )
+            if cleaned[realm] != old_vals:
+                changed_realms.add(realm)
+        if not changed_realms:
+            return self.read_bp_secrets(bp)
+        for realm in changed_realms:
+            enc[realm] = bp_secrets.encrypt_secrets(self.secrets_dir, cleaned[realm])
+        await self._persist_bp_state(
+            bs,
+            {bp},
             bp,
             "secrets",
             deployed_by=deployed_by,
             message=f"secrets {bp}",
         )
-        for realm, clean in cleaned.items():
-            bp_secrets.materialize_env(self.secrets_dir, bp, realm, clean)
+        for realm in changed_realms:
+            bp_secrets.materialize_env(self.secrets_dir, bp, realm, cleaned[realm])
+        # Apply: redeploy the changed realms' currently-deployed members so the
+        # secret takes effect now and this is the current deployment.
+        #
+        # PRODUCTION IS EXCLUDED. Production runs blue-green (a live + an idle
+        # slot); an in-place redeploy would recreate the LIVE slot's backend =
+        # downtime. A production secret is instead a PENDING change: it is
+        # versioned + materialized now, and applied with zero downtime on the
+        # next promote (which brings the idle slot up fresh — it reads the
+        # current env file — then flips ingress). dev/staging are single-slot, so
+        # a brief recreate is acceptable and they apply immediately.
+        apply_realms = changed_realms - {"production"}
+        flat = bs.get("deployments") or {}
+        to_deploy = [
+            dep_id
+            for dep_id, conf in flat.items()
+            if deployment_bp(conf or {}) == bp
+            and bp_secrets.realm_for_stage((conf or {}).get("stage") or "production")
+            in apply_realms
+        ]
+        if to_deploy:
+            await self.apply_compose_for_deployments(to_deploy, deployed_by=deployed_by)
         return self.read_bp_secrets(bp)
 
     # -- disaster-recovery test log ---------------------------------------------
@@ -1737,12 +1923,9 @@ class AutomationService:
             "at": today.strftime("%b %-d, %Y"),
             "date": today.isoformat(),
         }
-        path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(path, "w") as f:
-            dump_bitswan_yaml(bs, f)
-        await update_git(
-            self.gitops_dir,
-            self.gitops_dir_host,
+        await self._persist_bp_state(
+            bs,
+            {bp},
             bp,
             "dr",
             # Attribute to the operator: prefer an explicit deployer, else the
@@ -1765,12 +1948,9 @@ class AutomationService:
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         record = bs.setdefault("disaster_recovery", {}).setdefault(bp, {})
         record["policy"] = policy
-        path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(path, "w") as f:
-            dump_bitswan_yaml(bs, f)
-        await update_git(
-            self.gitops_dir,
-            self.gitops_dir_host,
+        await self._persist_bp_state(
+            bs,
+            {bp},
             bp,
             "dr",
             deployed_by=deployed_by,
@@ -1829,12 +2009,9 @@ class AutomationService:
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         record = bs.setdefault("disaster_recovery", {}).setdefault(bp, {})
         record.setdefault("tests", []).insert(0, test)
-        path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(path, "w") as f:
-            dump_bitswan_yaml(bs, f)
-        await update_git(
-            self.gitops_dir,
-            self.gitops_dir_host,
+        await self._persist_bp_state(
+            bs,
+            {bp},
             bp,
             "dr",
             deployed_by=deployed_by,
@@ -1952,12 +2129,9 @@ class AutomationService:
     async def _save_and_commit_backups(
         self, bs: dict, bp: str, by: str | None, message: str
     ) -> None:
-        path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(path, "w") as f:
-            dump_bitswan_yaml(bs, f)
-        await update_git(
-            self.gitops_dir,
-            self.gitops_dir_host,
+        await self._persist_bp_state(
+            bs,
+            {bp},
             bp,
             "backups",
             deployed_by=by,
@@ -2260,10 +2434,7 @@ class AutomationService:
             source_dir == ws_root_real or source_dir.startswith(ws_root_real + os.sep)
         ):
             raise HTTPException(status_code=400, detail="Source escapes workspace")
-        bitswan_lib_dir = os.path.join(self.workspace_repo_dir, "bitswan_lib")
         dirs_to_merge = [source_dir]
-        if os.path.isdir(bitswan_lib_dir):
-            dirs_to_merge.append(bitswan_lib_dir)
         base_tag = await self._ensure_automation_image(source_dir)
         auto_conf = read_automation_config(source_dir)
         base_image = base_tag or auto_conf.image
@@ -2497,14 +2668,15 @@ class AutomationService:
         realm = bp_secrets.realm_for_stage(stage)
         # Fail loudly if the revision does not exist (rather than silently
         # clearing the realm because git show returned nothing).
+        bp_dir = bp_state_path(self.gitops_dir, bp)
         _, _, rc = await call_git_command_with_output(
-            "git", "cat-file", "-e", f"{git_commit}^{{commit}}", cwd=self.gitops_dir
+            "git", "cat-file", "-e", f"{git_commit}^{{commit}}", cwd=bp_dir
         )
         if rc != 0:
             raise HTTPException(
                 status_code=404, detail=f"No such revision {git_commit[:8]}"
             )
-        target = _parse_revision_firewall_realm(self.gitops_dir, git_commit, bp, realm)
+        target = _parse_revision_firewall_realm(bp_dir, git_commit, bp, realm)
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         fw = bs.setdefault("firewall", {}).setdefault(bp, {})
         if target:
@@ -2527,12 +2699,9 @@ class AutomationService:
     async def _save_and_commit_firewall(
         self, bs: dict, bp: str, by: str | None, message: str
     ):
-        path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(path, "w") as f:
-            dump_bitswan_yaml(bs, f)
-        await update_git(
-            self.gitops_dir,
-            self.gitops_dir_host,
+        await self._persist_bp_state(
+            bs,
+            {bp},
             bp,
             "firewall",
             deployed_by=by,
@@ -2554,8 +2723,12 @@ class AutomationService:
         return os.path.join("firewall-dpa", bp, f"{safe_host}.pdf")
 
     def firewall_dpa_path(self, bp: str, host: str) -> str | None:
-        """Absolute path of the stored DPA PDF for a BP host, or None."""
-        p = os.path.join(self.gitops_dir, self._dpa_rel(bp, host.strip().lower()))
+        """Absolute path of the stored DPA PDF for a BP host, or None. Stored in
+        the BP's own deploy repo (gitops/bp/<bp>/firewall-dpa/), versioned with
+        its firewall rules."""
+        p = os.path.join(
+            bp_state_path(self.gitops_dir, bp), self._dpa_rel(bp, host.strip().lower())
+        )
         return p if os.path.isfile(p) else None
 
     async def store_firewall_dpa(
@@ -2578,13 +2751,17 @@ class AutomationService:
             raise HTTPException(status_code=400, detail="host is required")
         realm = bp_secrets.realm_for_stage(stage)
         rel = self._dpa_rel(bp, host)
-        abspath = os.path.join(self.gitops_dir, rel)
+        # Stored inside the BP's own deploy repo so it is versioned + pushed with
+        # that BP's firewall rules.
+        os.makedirs(bp_state_path(self.gitops_dir, bp), exist_ok=True)
+        abspath = os.path.join(bp_state_path(self.gitops_dir, bp), rel)
         os.makedirs(os.path.dirname(abspath), exist_ok=True)
         with open(abspath, "wb") as f:
             f.write(content)
-        await update_git(
+        await update_bp_git(
             self.gitops_dir,
             self.gitops_dir_host,
+            bp,
             bp,
             "firewall",
             deployed_by=by,
@@ -2662,18 +2839,19 @@ class AutomationService:
         Files), as nested FileTreeNode entries with BP-relative paths."""
         if not re.fullmatch(r"[0-9a-fA-F]{4,64}", commit or ""):
             raise HTTPException(status_code=400, detail="invalid commit")
-        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
+        validate_bp_name(bp)
+        # Each BP is its own repo; run inside its clone (copies/main is not a
+        # repo). Paths are already BP-relative, so no bp/ prefix to strip.
+        clone = os.path.join(_copies_dir(), "main", bp)
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            raise HTTPException(status_code=404, detail=f"not found: {bp}@{commit}")
+        await fetch_main(clone, bp)
         out, _, rc = await call_git_command_with_output(
-            "git", "ls-tree", "-r", "--name-only", commit, "--", f"{bp}/", cwd=main
+            "git", "ls-tree", "-r", "--name-only", commit, cwd=clone
         )
         if rc != 0:
             raise HTTPException(status_code=404, detail=f"not found: {bp}@{commit}")
-        prefix = bp + "/"
-        rels = [
-            line[len(prefix) :] if line.startswith(prefix) else line
-            for line in out.splitlines()
-            if line.strip()
-        ]
+        rels = [line for line in out.splitlines() if line.strip()]
         return {"entries": self._nest_tree(rels)}
 
     async def bp_file_content(self, bp: str, commit: str, path: str) -> dict:
@@ -2683,15 +2861,19 @@ class AutomationService:
             raise HTTPException(status_code=400, detail="invalid commit")
         if not path or path.startswith("/") or ".." in path.split("/"):
             raise HTTPException(status_code=400, detail="invalid path")
-        main = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), "main")
-        rel = f"{bp}/{path}"
+        validate_bp_name(bp)
+        # BP-own repo; paths are BP-relative within the clone (no bp/ prefix).
+        clone = os.path.join(_copies_dir(), "main", bp)
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            raise HTTPException(status_code=404, detail=f"not a file: {path}")
+        await fetch_main(clone, bp)
         typ, _, trc = await call_git_command_with_output(
-            "git", "cat-file", "-t", f"{commit}:{rel}", cwd=main
+            "git", "cat-file", "-t", f"{commit}:{path}", cwd=clone
         )
         if trc != 0 or typ.strip() != "blob":
             raise HTTPException(status_code=404, detail=f"not a file: {path}")
         out, _, _ = await call_git_command_with_output(
-            "git", "show", f"{commit}:{rel}", cwd=main
+            "git", "show", f"{commit}:{path}", cwd=clone
         )
         cap = 1_000_000
         return {"path": path, "content": out[:cap], "truncated": len(out) > cap}
@@ -2741,14 +2923,33 @@ class AutomationService:
             except asyncio.CancelledError:
                 return
 
+        author = f"{deployed_by} <{deployed_by}>" if deployed_by else None
         hb = asyncio.create_task(_heartbeat())
         try:
-            await self.infra_driver.deploy(
-                work_tree=self.gitops_dir,
-                commit_message=f"deploy {', '.join(deployment_ids) or 'all'}",
-                progress_callback=_report,
-                author=(f"{deployed_by} <{deployed_by}>" if deployed_by else None),
-            )
+            # Push ONE deploy repo per business process, so the driver compiles +
+            # `docker compose`s only that bp (main + its copies) instead of the
+            # whole workspace. Group members by raw bp (from each deployment's
+            # relative_path), ensure the bp's deploy repo exists, then push its
+            # own working tree.
+            bs = read_bitswan_yaml(self.gitops_dir) or {"deployments": {}}
+            flat = bs.get("deployments") or {}
+            by_bp: dict[str, list[str]] = {}
+            for dep_id in deployment_ids:
+                bp = deployment_bp(flat.get(dep_id) or {})
+                if not bp:
+                    raise RuntimeError(
+                        f"cannot determine business process for deployment {dep_id}"
+                    )
+                by_bp.setdefault(bp, []).append(dep_id)
+            for bp, ids in by_bp.items():
+                await self.infra_driver.ensure_deploy_repo(bp)
+                await self.infra_driver.deploy(
+                    work_tree=bp_state_path(self.gitops_dir, bp),
+                    commit_message=f"deploy {', '.join(ids)}",
+                    progress_callback=_report,
+                    author=author,
+                    deploy_remote=self.infra_driver.deploy_remote_for_bp(bp),
+                )
         finally:
             hb.cancel()
             try:
@@ -3278,9 +3479,10 @@ class AutomationService:
         # prunes the now-absent gitops route (it's no longer in the desired set).
         # No out-of-band remove-route — the route disappears because the file no
         # longer declares it.
+        # remove_automation_from_bitswan already persisted + pushed the BP's
+        # deploy repo, which reconciles ingress (prunes the now-absent route)
+        # server-side — no extra whole-workspace commit needed.
         await self.remove_automation_from_bitswan(deployment_id)
-        await update_git(self.gitops_dir, self.gitops_dir_host, deployment_id, "delete")
-        await self._apply_ingress()
 
         containers = await self.get_container(deployment_id)
         if containers:
@@ -3347,19 +3549,11 @@ class AutomationService:
         os.environ["COMPOSE_PROJECT_NAME"] = self.workspace_name
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
 
-        # Initialize bitswan.yaml if it doesn't exist
+        # Fresh workspace: start with an empty in-memory map. Per-BP deploy
+        # state files are created when this deployment's bp is first persisted
+        # below — there is no whole-workspace file to seed.
         if not bs_yaml:
             bs_yaml = {"deployments": {}}
-            bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
-            with open(bitswan_yaml_path, "w") as f:
-                dump_bitswan_yaml(bs_yaml, f)
-            await update_git(
-                self.gitops_dir,
-                self.gitops_dir_host,
-                deployment_id,
-                "initialize",
-                deployed_by=deployed_by,
-            )
 
         await _report("updating_config", "Updating deployment configuration...")
 
@@ -3455,13 +3649,10 @@ class AutomationService:
             if "active" not in deployment_config:
                 deployment_config["active"] = True
 
-            bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
-            with open(bitswan_yaml_path, "w") as f:
-                dump_bitswan_yaml(bs_yaml, f)
-
-            await update_git(
-                self.gitops_dir,
-                self.gitops_dir_host,
+            bp = deployment_bp(deployment_config)
+            await self._persist_bp_state(
+                bs_yaml,
+                {bp} if bp else set(),
                 deployment_id,
                 "deploy",
                 deployed_by=deployed_by,
@@ -3496,13 +3687,13 @@ class AutomationService:
             if (v or {}).get("stage") == "live-dev"
             and not (v or {}).get("relative_path")
         ]
-        if stale_live_devs:
-            for k in stale_live_devs:
-                logger.warning("Removing stale live-dev entry: %s", k)
-                del bs_yaml["deployments"][k]
-            bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
-            with open(bitswan_yaml_path, "w") as f:
-                dump_bitswan_yaml(bs_yaml, f)
+        # Drop malformed stale live-dev entries from the in-memory map so the
+        # apply below doesn't act on them. They carry no relative_path (hence no
+        # derivable bp), so there's nothing to persist per-BP — they simply won't
+        # be re-written into any bp's file.
+        for k in stale_live_devs:
+            logger.warning("Removing stale live-dev entry: %s", k)
+            del bs_yaml["deployments"][k]
 
         # Push the resolved tree to the driver — it compiles, brings up the
         # service + its infra, provisions DBs/buckets, installs certs/oauth2,
@@ -3521,13 +3712,10 @@ class AutomationService:
         os.environ["COMPOSE_PROJECT_NAME"] = self.workspace_name
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
 
-        # Initialize bitswan.yaml if it doesn't exist
+        # Fresh workspace: nothing to deploy yet (per-BP files are created on the
+        # first real deploy) — no whole-workspace file to seed.
         if not bs_yaml:
             bs_yaml = {"deployments": {}}
-            bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
-            with open(bitswan_yaml_path, "w") as f:
-                dump_bitswan_yaml(bs_yaml, f)
-            await update_git(self.gitops_dir, self.gitops_dir_host, "all", "initialize")
 
         active_deployments = self.get_active_automations()
 
@@ -3590,21 +3778,14 @@ class AutomationService:
 
         deployment_config["replicas"] = replicas
 
-        bitswan_yaml_path = os.path.join(self.gitops_dir, "bitswan.yaml")
-        with open(bitswan_yaml_path, "w") as f:
-            dump_bitswan_yaml(bs_yaml, f)
-
-        # Commit with a descriptive message using GitLockContext
-        async with GitLockContext(timeout=10.0, kind="scale automation"):
-            await call_git_command("git", "add", "bitswan.yaml", cwd=self.gitops_dir)
-            await call_git_command(
-                "git",
-                "commit",
-                "-m",
-                f"scale deployment {deployment_id} to {replicas} replicas",
-                cwd=self.gitops_dir,
-            )
-            await call_git_command("git", "push", cwd=self.gitops_dir)
+        bp = deployment_bp(deployment_config)
+        await self._persist_bp_state(
+            bs_yaml,
+            {bp} if bp else set(),
+            deployment_id,
+            "scale",
+            message=f"scale deployment {deployment_id} to {replicas} replicas",
+        )
 
         # Ensure infrastructure services are enabled/running
         deploy_services = deployment_config.get("services")
@@ -3682,10 +3863,9 @@ class AutomationService:
         """
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
         bs_yaml["deployments"][deployment_id]["active"] = False
-        with open(os.path.join(self.gitops_dir, "bitswan.yaml"), "w") as f:
-            dump_bitswan_yaml(bs_yaml, f)
-        await update_git(
-            self.gitops_dir, self.gitops_dir_host, deployment_id, "mark_as_inactive"
+        bp = deployment_bp(bs_yaml["deployments"][deployment_id])
+        await self._persist_bp_state(
+            bs_yaml, {bp} if bp else set(), deployment_id, "mark_as_inactive"
         )
 
     async def mark_as_active(self, deployment_id: str):
@@ -3695,10 +3875,9 @@ class AutomationService:
         """
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
         bs_yaml["deployments"][deployment_id]["active"] = True
-        with open(os.path.join(self.gitops_dir, "bitswan.yaml"), "w") as f:
-            dump_bitswan_yaml(bs_yaml, f)
-        await update_git(
-            self.gitops_dir, self.gitops_dir_host, deployment_id, "mark_as_active"
+        bp = deployment_bp(bs_yaml["deployments"][deployment_id])
+        await self._persist_bp_state(
+            bs_yaml, {bp} if bp else set(), deployment_id, "mark_as_active"
         )
 
     async def remove_automation_from_bitswan(self, deployment_id: str):
@@ -3711,10 +3890,12 @@ class AutomationService:
         if deployment_id not in bs_yaml["deployments"]:
             return
 
+        # Derive the bp BEFORE removing the entry (its relative_path is gone after).
+        bp = deployment_bp(bs_yaml["deployments"][deployment_id])
         bs_yaml["deployments"].pop(deployment_id)
-        with open(os.path.join(self.gitops_dir, "bitswan.yaml"), "w") as f:
-            dump_bitswan_yaml(bs_yaml, f)
-        await update_git(self.gitops_dir, self.gitops_dir_host, deployment_id, "remove")
+        await self._persist_bp_state(
+            bs_yaml, {bp} if bp else set(), deployment_id, "remove"
+        )
 
     # get active automations from bitswan.yaml
     def get_active_automations(self):

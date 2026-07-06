@@ -22,6 +22,7 @@ services:
         image: internal/ws2-shop-backend:shabsum
         labels:
             gitops.automation_name: backend
+            gitops.bp: shop
             gitops.context: shop
             gitops.deployment_id: backend-shop
             gitops.intended_exposed: "false"
@@ -54,6 +55,7 @@ services:
         image: internal/ws2-shop-backend:shabsum
         labels:
             gitops.automation_name: backend
+            gitops.bp: shop
             gitops.context: shop
             gitops.deployment_id: backend-shop@green
             gitops.intended_exposed: "false"
@@ -70,8 +72,6 @@ services:
         volumes: []
     ws2-frontend-8d90-production-blue:
         container_name: ws2-frontend-8d90-production-blue
-        env_file:
-            - __ROOT__/secrets/bp/shop/production
         environment:
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-production.example.com
@@ -88,6 +88,7 @@ services:
         image: internal/ws2-shop-frontend:shafsum
         labels:
             gitops.automation_name: frontend
+            gitops.bp: shop
             gitops.context: shop
             gitops.deployment_id: frontend-shop
             gitops.intended_exposed: "true"
@@ -106,8 +107,6 @@ services:
         volumes: []
     ws2-frontend-8d90-production-green:
         container_name: ws2-frontend-8d90-production-green
-        env_file:
-            - __ROOT__/secrets/bp/shop/production
         environment:
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-dr.example.com
@@ -124,6 +123,7 @@ services:
         image: internal/ws2-shop-frontend:shafsum
         labels:
             gitops.automation_name: frontend
+            gitops.bp: shop
             gitops.context: shop
             gitops.deployment_id: frontend-shop@green
             gitops.intended_exposed: "true"

@@ -756,7 +756,7 @@ function CreateWorkspaceModal({ open, onClose, data, setData, toast, currentUser
           </div>
         )}
         {log.length > 0 && (
-          <div style={{ maxHeight: 160, overflow: 'auto', padding: 10, borderRadius: 9, background: WC.surface,
+          <div data-testid="ws-create-log" style={{ maxHeight: 160, overflow: 'auto', padding: 10, borderRadius: 9, background: WC.surface,
             border: `1px solid ${WC.border}`, fontFamily: 'Geist Mono, monospace', fontSize: 11.5, color: WC.muted, whiteSpace: 'pre-wrap' }}>
             {log.map((l, i) => <div key={i}>{l}</div>)}
           </div>

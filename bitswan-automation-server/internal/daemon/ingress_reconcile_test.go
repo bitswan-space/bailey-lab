@@ -37,7 +37,7 @@ func TestListGitopsManagedHosts_OnlyManagedThisWorkspace(t *testing.T) {
 		t.Fatalf("setEndpointSource other: %v", err)
 	}
 
-	managed, err := listGitopsManagedHosts(ws)
+	managed, err := listGitopsManagedHosts(ws, "")
 	if err != nil {
 		t.Fatalf("listGitopsManagedHosts: %v", err)
 	}
@@ -59,6 +59,65 @@ func TestListGitopsManagedHosts_OnlyManagedThisWorkspace(t *testing.T) {
 	}
 	if has(otherHost) {
 		t.Errorf("managed set must NOT include another workspace's route %q: %v", otherHost, managed)
+	}
+}
+
+// With per-BP deploy repos, a reconcile scoped to one BP must prune ONLY that
+// BP's gitops routes — never a sibling BP's, and never an untagged (legacy)
+// gitops route. This is the highest-blast-radius guarantee of the split.
+func TestListGitopsManagedHosts_ScopedByBP(t *testing.T) {
+	ws := "bpws"
+	owner := "o@example.com"
+
+	aHost := ws + "-fe-issues-production.example.com"
+	bHost := ws + "-fe-invoices-production.example.com"
+	legacyHost := ws + "-fe-legacy-production.example.com" // gitops but untagged
+	for _, h := range []string{aHost, bHost, legacyHost} {
+		if _, err := registerEndpoint(h, owner, "FE", "", endpointKindFrontend, "production"); err != nil {
+			t.Fatalf("register %s: %v", h, err)
+		}
+	}
+	if err := setEndpointSourceBP(aHost, "gitops", "issues"); err != nil {
+		t.Fatal(err)
+	}
+	if err := setEndpointSourceBP(bHost, "gitops", "invoices"); err != nil {
+		t.Fatal(err)
+	}
+	if err := setEndpointSource(legacyHost, "gitops"); err != nil { // untagged
+		t.Fatal(err)
+	}
+
+	has := func(hosts []string, h string) bool {
+		for _, m := range hosts {
+			if strings.EqualFold(m, h) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Reconcile scoped to issues: only issues' route is prunable.
+	issues, err := listGitopsManagedHosts(ws, "issues")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(issues, aHost) {
+		t.Errorf("issues prune set missing its own route %q: %v", aHost, issues)
+	}
+	if has(issues, bHost) {
+		t.Errorf("issues prune set must NOT include sibling invoices route %q: %v", bHost, issues)
+	}
+	if has(issues, legacyHost) {
+		t.Errorf("issues prune set must NOT include untagged legacy route %q: %v", legacyHost, issues)
+	}
+
+	// Legacy whole-workspace reconcile (bp="") still sees every gitops route.
+	all, err := listGitopsManagedHosts(ws, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !has(all, aHost) || !has(all, bHost) || !has(all, legacyHost) {
+		t.Errorf("whole-workspace set should include all gitops routes: %v", all)
 	}
 }
 

@@ -35,6 +35,11 @@ _COPY_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
 class CreateProcessRequest(BaseModel):
     name: str
     copy: str | None = None
+    # The email of the user creating the BP (injected by the dashboard from the
+    # validated token). Recorded as the git author/committer of the seed +
+    # "Create business process" commits, so history shows who made the BP rather
+    # than a mechanical identity.
+    created_by: str | None = None
 
 
 @router.post("/")
@@ -70,7 +75,9 @@ async def create_process(
         raise HTTPException(status_code=400, detail="Invalid copy name")
 
     try:
-        entry = process_service.create_business_process(name=name, copy=body.copy)
+        entry = await process_service.create_business_process(
+            name=name, copy=body.copy, created_by=body.created_by
+        )
     except FileExistsError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except (FileNotFoundError, ValueError) as e:
@@ -106,6 +113,7 @@ async def create_process(
             bp=name,
             group_id=group_id,
             copy=body.copy,
+            created_by=body.created_by,
         )
         automations_created = [c["name"] for c in created.get("created", [])]
 

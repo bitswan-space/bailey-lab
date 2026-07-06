@@ -210,6 +210,12 @@ class TaskQueue:
                 task.started_at = _now()
                 self._running_id = task_id
                 self._broadcast(task)
+                # Run the task in the initiating user's identity so any git
+                # commits it makes are attributed to them, not the mechanical
+                # service identity. The worker is a single long-lived task, so
+                # its own context never carries a requester; we set it per task
+                # from the email captured at submit time.
+                ctx_token = current_requester.set(task.requester_email)
                 try:
                     await fn()
                     task.status = TaskStatus.COMPLETED
@@ -221,6 +227,7 @@ class TaskQueue:
                     task.error = str(e)
                     logger.exception("task %s (%s) failed", task_id, task.kind)
                 finally:
+                    current_requester.reset(ctx_token)
                     task.completed_at = _now()
                     self._running_id = None
                     self._broadcast(task)

@@ -12,14 +12,30 @@ export const DEFAULT_PROMPT =
   'making changes. Ask for clarification when the user\'s request is ambiguous.';
 
 /**
- * Copy-level sync flow. The copy is a normal git clone whose `origin` points at
- * the workspace git server (credentials are already configured), so the agent
+ * Per-BP sync flow. Every business process is its OWN git repo; the session's
+ * cwd is that BP's clone, whose `origin` points at the BP's repo on the
+ * workspace git server (credentials are already configured), so the agent
  * uses plain git. The server accepts fast-forward pushes only. This prompt is
  * the conflict-resolution path: the dashboard does a plain commit + ff-push
  * itself when no rebase is needed, and only hands off to the agent here when
- * the copy actually has to be rebased onto a moved main.
+ * the BP's branch actually has to be rebased onto a moved main.
  */
 export const SYNC_PROMPT =
+  'Sync this business process with main using git. You are inside the business ' +
+  "process's own git clone — each business process under this copy is a separate " +
+  'repository, so nothing you do here touches the other business processes. ' +
+  '1) Commit your work in progress: `git add -A && git commit -m "wip"` (skip if there is nothing to commit). ' +
+  '2) Rebase onto the latest main: `git pull --rebase origin main`. ' +
+  '3) If there are conflicts, resolve them, then `git add` the resolved files and `git rebase --continue`. ' +
+  '4) Publish your branch: `git push origin HEAD` (the server accepts fast-forward pushes only). ' +
+  'Do not run git in other business-process directories. Tell me when the sync is complete.';
+
+/**
+ * The pre-per-BP-repos sync prompt. Kept ONLY so title scanning of old
+ * session transcripts still recognises it as a bootstrap prompt (see
+ * `isBootstrapPrompt`); never sent to new sessions.
+ */
+const LEGACY_SYNC_PROMPT =
   'Sync this copy with main using git. ' +
   '1) Commit your work in progress: `git add -A && git commit -m "wip"` (skip if there is nothing to commit). ' +
   '2) Rebase onto the latest main: `git pull --rebase origin main`. ' +
@@ -60,6 +76,7 @@ export const BUILD_AUTOMATION_PROMPT =
 const BOOTSTRAP_PROMPTS = [
   DEFAULT_PROMPT,
   SYNC_PROMPT,
+  LEGACY_SYNC_PROMPT,
   WRITE_TESTS_PROMPT,
   BUILD_AUTOMATION_PROMPT,
 ];

@@ -4,7 +4,9 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -117,6 +119,41 @@ func materializeEnv(secretsDir, bp, stage string, values map[string]string) (str
 		return "", err
 	}
 	return path, nil
+}
+
+// secretsContentHash is a stable digest of the NON-EMPTY, sorted KEY=VALUE
+// content materialized into the env file — identical inputs → identical hash.
+// It is folded into a service label so a secret-only change (same image, same
+// env_file path) still changes the service config and `docker compose up`
+// recreates the container; without it compose keys recreation off the config
+// alone and never reloads changed env_file CONTENTS. Empty ⇒ "" (no label, so
+// secret-less services never churn).
+func secretsContentHash(values map[string]string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	any := false
+	for _, k := range keys {
+		v := values[k]
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		any = true
+		h.Write([]byte(k))
+		h.Write([]byte("="))
+		h.Write([]byte(v))
+		h.Write([]byte("\n"))
+	}
+	if !any {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 func stringify(v interface{}) string {

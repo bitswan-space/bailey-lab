@@ -33,6 +33,7 @@ services:
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: backend
+            gitops.bp: acme
             gitops.context: copy-bar-acme
             gitops.deployment_id: backend-copy-bar-acme-live-dev
             gitops.intended_exposed: "false"
@@ -50,7 +51,6 @@ services:
     ws4-frontend-4337-live-dev:
         container_name: ws4-frontend-4337-live-dev
         env_file:
-            - __ROOT__/secrets/bp/acme/dev
             - __ROOT__/secrets/dbcreds/dev/copy_bar_bp_acme
             - __ROOT__/secrets/miniocreds/dev/copy-bar-bp-acme
         environment:
@@ -72,6 +72,7 @@ services:
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: frontend
+            gitops.bp: acme
             gitops.context: copy-bar-acme
             gitops.deployment_id: frontend-copy-bar-acme-live-dev
             gitops.intended_exposed: "true"
@@ -118,7 +119,7 @@ services:
             ws4-dev:
                 aliases:
                     - ws4-fwgw-4337-live-dev
-        pull_policy: always
+        pull_policy: missing
         restart: unless-stopped
     ws4-fwgw-4337-live-dev-proxy:
         container_name: ws4-fwgw-4337-live-dev-proxy
@@ -145,7 +146,7 @@ services:
             ws4-dev:
                 aliases:
                     - ws4-fwgw-4337-live-dev-proxy
-        pull_policy: always
+        pull_policy: missing
         restart: unless-stopped
         volumes:
             - __ROOT__/firewall:/firewall

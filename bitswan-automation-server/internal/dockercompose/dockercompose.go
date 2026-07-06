@@ -135,17 +135,19 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 			// this (+ BITSWAN_WORKSPACE_NAME) to mount business-process containers
 			// off the volume via subpaths instead of host bind paths.
 			"BITSWAN_VOLUME_NAME=bitswan",
-			// Canonical bare repo (served over smart-HTTP, fast-forward only)
-			// and the per-copy checkouts under the workspace-repo dir. Keeping
-			// copies at <workspace-repo>/copies makes a deployment's
-			// workspace-root-relative path ("copies/<copy>/<rel>") resolve
-			// correctly both as a container-local path (join with
-			// BITSWAN_WORKSPACE_REPO_DIR) and as a volume subpath
-			// (workspaces/<ws>/<rel-path>). The `main` copy is the default scope.
+			// Per-BP canonical bare repos (<bp>.git, served over smart-HTTP,
+			// fast-forward only) and the per-copy checkouts under the
+			// workspace-repo dir. Keeping copies at <workspace-repo>/copies
+			// makes a deployment's workspace-root-relative path
+			// ("copies/<copy>/<rel>") resolve correctly both as a
+			// container-local path (join with BITSWAN_WORKSPACE_REPO_DIR) and
+			// as a volume subpath (workspaces/<ws>/<rel-path>). The `main`
+			// copy is the default scope. BITSWAN_GIT_REMOTE is the BASE URL:
+			// each BP clone's origin is <base>/<bp>.git.
 			"BITSWAN_GIT_REPOS_DIR=/git",
 			"BITSWAN_WORKSPACE_REPO_DIR=/workspace-repo",
 			"BITSWAN_COPIES_DIR=/workspace-repo/copies",
-			"BITSWAN_GIT_REMOTE=http://" + config.WorkspaceName + "-gitops:8079/git/repo.git",
+			"BITSWAN_GIT_REMOTE=http://" + config.WorkspaceName + "-gitops:8079/git",
 		},
 	}
 
@@ -190,11 +192,11 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), caEnvVars...)
 	}
 
-	// Mount the canonical bare repo (served over smart-HTTP) and the per-copy
-	// checkouts (the deploy unit). These replace the old shared workspace
-	// working-tree mount + gitops orphan-worktree gitdir rewrite.
+	// Mount the per-BP bare repos dir (each <bp>.git served over smart-HTTP)
+	// and the per-copy checkouts (the deploy unit). These replace the old
+	// shared workspace working-tree mount + single canonical repo.
 	gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
-		wsVolume("repo.git", "/git/repo.git"),
+		wsVolume("git-repos", "/git"),
 		wsVolume("copies", "/workspace-repo/copies"),
 	)
 	if hostOs == WindowsMac {
@@ -212,7 +214,8 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	gitopsService["environment"] = append(gitopsService["environment"].([]string),
 		"BITSWAN_INFRA_DRIVER_URL=http://"+config.WorkspaceName+"-infra-driver:9090",
 		"BITSWAN_INFRA_DRIVER_TOKEN="+driverToken,
-		"BITSWAN_DEPLOY_REMOTE=http://x:"+driverToken+"@"+config.WorkspaceName+"-infra-driver:9090/deploy.git",
+		// Per-BP deploy repos: each BP pushes to <base>/<bp>.deploy.git.
+		"BITSWAN_DEPLOY_REMOTE_BASE=http://x:"+driverToken+"@"+config.WorkspaceName+"-infra-driver:9090/deploy-repos",
 	)
 
 	driverService := config.buildDriverService(driverToken, wsVolume, homeDir)
@@ -281,6 +284,16 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 	if config.KeycloakURL != "" {
 		env = append(env, "KEYCLOAK_URL="+config.KeycloakURL)
 	}
+	// Pin the egress-gateway image the compiler stamps into every BP's firewall
+	// workers. Forward the daemon's pinned tag (set at release time, same as
+	// BITSWAN_GITOPS_IMAGE / BITSWAN_INFRA_DRIVER_IMAGE) so the compose
+	// references an IMMUTABLE tag. That lets the gateway services use
+	// pull_policy: missing — pulled once when the version changes, never
+	// re-pulled or churned — instead of the old pull_policy: always, which hit
+	// the registry for every worker on every deploy and recreated them all.
+	if gw := os.Getenv("BITSWAN_EGRESS_GATEWAY_IMAGE"); gw != "" {
+		env = append(env, "BITSWAN_EGRESS_GATEWAY_IMAGE="+gw)
+	}
 	// The compiler reads the same AOC/OAuth env gitops used (org group path,
 	// oauth2-proxy config it materializes per BP, etc.).
 	env = append(env, config.AocEnvVars...)
@@ -292,7 +305,7 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		// The daemon ingress socket — the driver configures ingress itself
 		// (converges routes via /ingress/reconcile) after bringing the project up.
 		"/var/run/bitswan:/var/run/bitswan",
-		wsVolume("deploy.git", "/git/deploy.git"),
+		wsVolume("deploy-repos", "/git/deploy-repos"),
 		// The deployed tree the generated compose's bind-mounts reference
 		// (workspaces/<ws>/gitops/<source>); apply materializes the push here.
 		wsVolume("gitops", "/gitops/gitops"),
@@ -324,7 +337,7 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		"command": []string{
 			"/usr/local/bin/bitswan", "infra-driver", "serve",
 			"--listen", ":9090",
-			"--git-dir", "/git/deploy.git",
+			"--deploy-repos-dir", "/git/deploy-repos",
 			"--gitops-dir", "/gitops/gitops",
 			"--secrets-dir", "/gitops/secrets",
 			"--workspace", config.WorkspaceName,

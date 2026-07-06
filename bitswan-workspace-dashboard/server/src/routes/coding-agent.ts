@@ -77,7 +77,9 @@ function defaultSessionName(opts: {
 }): string {
   switch (opts.kind) {
     case 'sync':
-      return `Sync · ${opts.copy}`;
+      return opts.bp
+        ? `Sync · ${opts.copy}/${opts.bp}`
+        : `Sync · ${opts.copy}`;
     case 'requirement': {
       const id = opts.requirement?.id ?? 'requirement';
       return opts.bp
@@ -108,12 +110,10 @@ function buildAutoCmd(opts: {
   /** Requirement to focus the agent on. Required when kind === 'requirement'. */
   requirement?: Requirement;
 }): string {
-  // Sync sessions cd to the copy root (no BP); regular claude and
-  // requirement sessions cd into the BP directory.
-  const cd =
-    opts.kind === 'sync'
-      ? `/workspace/copies/${opts.copy}`
-      : `/workspace/copies/${opts.copy}/${opts.bp}`;
+  // Every session — sync included — works inside a BP's own clone: the copy
+  // root is a plain directory (each BP under it is a separate git repo), so
+  // there is nothing to run git against up there.
+  const cd = `/workspace/copies/${opts.copy}/${opts.bp}`;
   let prompt: string;
   if (opts.kind === 'sync') prompt = SYNC_PROMPT;
   else if (opts.kind === 'requirement' && opts.requirement) {
@@ -247,14 +247,12 @@ export function registerCodingAgentRoutes(
       kindRaw === 'automation'
         ? kindRaw
         : 'claude';
-    // `bp` is required for regular claude sessions and requirement sessions;
-    // optional (and ignored) for copy-level sync sessions.
-    if (kind !== 'sync') {
-      if (!bp || !isValidBpId(bp)) {
-        socket.send(JSON.stringify({ type: 'error', message: 'invalid bp' }));
-        socket.close(1008, 'invalid bp');
-        return;
-      }
+    // `bp` is required for every session kind — sync sessions are BP-scoped
+    // too: each business process is its own repo, and the copy root isn't one.
+    if (!bp || !isValidBpId(bp)) {
+      socket.send(JSON.stringify({ type: 'error', message: 'invalid bp' }));
+      socket.close(1008, 'invalid bp');
+      return;
     }
     // For requirement sessions, look up the description in the TOML so we
     // can embed it in the prompt. Refuse to spawn if the id isn't there —
@@ -321,7 +319,7 @@ export function registerCodingAgentRoutes(
 
     const autoCmd = buildAutoCmd({
       copy,
-      ...(kind !== 'sync' && bp ? { bp } : {}),
+      ...(bp ? { bp } : {}),
       sessionId: claudeSessionId,
       resume: isResume,
       kind,
@@ -458,10 +456,9 @@ export function registerCodingAgentRoutes(
           SSH_USER_EMAIL: email,
           SSH_LOGGED: 'true',
           SSH_WORKTREE: copy,
-          // SSH_BP is only set for BP-scoped sessions. Empty/missing tells
-          // the wrapper to cd to the copy root (which is what we want
-          // for sync sessions).
-          ...(kind !== 'sync' && bp ? { SSH_BP: bp } : {}),
+          // Every session is BP-scoped (each BP is its own repo); the
+          // wrapper cds into the BP clone and records the bp in the meta.
+          ...(bp ? { SSH_BP: bp } : {}),
           SSH_CLAUDE_SESSION_ID: claudeSessionId,
           SSH_SESSION_KIND: kind,
           SSH_AUTO_CMD: autoCmd,

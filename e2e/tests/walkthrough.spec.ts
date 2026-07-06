@@ -168,19 +168,41 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await nameInput.fill(WORKSPACE.name);
       await capture(page, 'workspace-create');
       await page.getByRole('button', { name: /^Create workspace$/i }).click();
-      // Resolve on whichever the modal surfaces: the 'Creating…' state clearing,
-      // OR the idempotent "already initialized" notice (a prior run created it).
+
+      // Creating a workspace cold-starts its whole container stack (image pulls +
+      // compose up), which legitimately runs longer than the short-interaction
+      // SLA. But the UI must NEVER go dark — the modal streams a LIVE progress log
+      // — so this is held to the PROGRESS rule, exactly like a deploy: it may take
+      // as long as it needs AS LONG AS the log keeps moving. A >PROGRESS freeze of
+      // that log is the failure (a dark UI is the bug, not merely slowness), and
+      // so is the workspace never appearing.
+      const created = page.getByText(new RegExp(`^${WORKSPACE.name}$`)).first();
       const already = page.getByText(/already initialized/i).first();
-      await Promise.race([
-        page.getByRole('button', { name: /Creating/i }).waitFor({ state: 'hidden', timeout: SLA }).catch(() => {}),
-        already.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
-      ]);
-      // If the name was already taken, close the modal — the workspace exists.
-      if (await already.isVisible().catch(() => false)) {
-        await page.getByRole('button', { name: /^Cancel$/ }).first().click().catch(() => {});
+      const logBox = page.getByTestId('ws-create-log');
+      let lastLog = '';
+      let lastChange = Date.now();
+      const deadline = Date.now() + 8 * 60_000;
+      let shotProgress = false;
+      for (;;) {
+        if (await created.isVisible().catch(() => false)) break; // created
+        if (await already.isVisible().catch(() => false)) {
+          // Idempotent: a prior run already made it — dismiss and use the existing.
+          await page.getByRole('button', { name: /^Cancel$/ }).first().click().catch(() => {});
+          break;
+        }
+        const now = Date.now();
+        const text = (await logBox.textContent().catch(() => '')) || '';
+        if (text !== lastLog) {
+          lastLog = text;
+          lastChange = now;
+          if (!shotProgress && text.trim()) { await capture(page, 'workspace-creating'); shotProgress = true; }
+        } else if (now - lastChange > PROGRESS) {
+          throw new Error(`workspace creation UI went dark: no progress for >${PROGRESS / 1000}s`);
+        }
+        if (now > deadline) throw new Error('workspace creation did not finish within 8m');
+        await page.waitForTimeout(1000);
       }
-      await nameInput.waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
-      await expect(page.getByText(new RegExp(`^${WORKSPACE.name}$`)).first()).toBeVisible({ timeout: SLA });
+      await expect(created).toBeVisible({ timeout: SLA });
     }
   });
 
@@ -250,7 +272,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await page.getByRole('button', { name: /Workspaces/i }).first().click();
     await expect(page.getByRole('heading', { name: /Workspaces/i })).toBeVisible({ timeout: SLA });
     const open = page.getByRole('button', { name: /^Open$/ }).or(page.getByRole('link', { name: /^Open$/ })).first();
-    const bpSwitcher = () => d.getByRole('button', { name: /Business process/i }).first();
+    // BP selector trigger — its accessible name is "Process <bp>" in the
+    // redesigned top bar (a distinct, always-present shell element, so a good
+    // readiness signal). NB: /Business process/i would wrongly match the
+    // "New Business Process" action button instead of the selector trigger.
+    const bpSwitcher = () => d.getByRole('button', { name: /^Process\b/ }).first();
     // A FRESHLY created workspace cold-starts its own containers (gitops +
     // dashboard + db), so right after creation Open can land on a not-yet-ready
     // dashboard — or not spawn the tab at all. A real operator just clicks Open
@@ -446,9 +472,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // and presses Create again. We do the same: wait for the copy to settle,
     // then RETRY the Create until the BP actually appears (rather than assuming
     // the very first press lands).
-    await d.getByRole('button', { name: /Business process/i }).first().click();
+    await d.getByRole('button', { name: /^Process\b/ }).first().click();
     await capture(dashPage, 'bp-switcher');
-    const selected = d.getByRole('button', { name: new RegExp(`Business process.*${BP.slug}`) }).first();
+    // The BP selector trigger reads "Process <bp>" once a BP is selected.
+    const selected = d.getByRole('button', { name: new RegExp(`^Process\\b.*${BP.slug}`) }).first();
     const existing = d.getByRole('button', { name: new RegExp(`^${BP.slug}$`) }).first();
     if (await existing.isVisible().catch(() => false)) {
       await existing.click();
@@ -468,7 +495,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
           const newBtn = d.getByRole('button', { name: /New business process/i }).first();
           if (!(await newBtn.isVisible().catch(() => false))) {
             // Switcher closed after a prior attempt — re-open it.
-            await d.getByRole('button', { name: /Business process/i }).first().click().catch(() => {});
+            await d.getByRole('button', { name: /^Process\b/ }).first().click().catch(() => {});
             await newBtn.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
           }
           await newBtn.click().catch(() => {});

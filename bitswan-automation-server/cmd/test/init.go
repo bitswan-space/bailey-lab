@@ -3,6 +3,7 @@ package test
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
@@ -149,16 +150,6 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
 	}
 	fmt.Println("✓ Gitops service ready")
 
-	// Step 2.5: Verify the embedded fast-forward-only git server: clone the
-	// canonical repo, push a fast-forward (succeeds), and attempt a history
-	// rewrite / force-push (must be rejected by the pre-receive hook).
-	fmt.Println("\nVerifying fast-forward-only git server...")
-	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret); err != nil {
-		cleanupOnFailure()
-		return fmt.Errorf("git server verification failed: %w", err)
-	}
-	fmt.Println("✓ Git server: clone + fast-forward push OK; force-push rejected")
-
 	// Step 3: Create a business process. Gitops scaffolds the default template
 	// group (BITSWAN_DEFAULT_TEMPLATE_GROUP, "business-process": one frontend
 	// exposed through Bailey + one private backend worker) into <bp>/ and kicks
@@ -175,6 +166,7 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
 		cleanupOnFailure()
 		return fmt.Errorf("business process %q created but its auto-deploy did not start", bp)
 	}
+
 	fmt.Printf("✓ Business process %q created (automations: %s)\n", bp, strings.Join(automationsCreated, ", "))
 
 	// Step 4: Wait for the BP deploy pipeline to finish. This builds the
@@ -186,6 +178,24 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
 		return fmt.Errorf("business-process deploy did not complete: %w", err)
 	}
 	fmt.Println("✓ Business process deployed")
+
+	// Verify the embedded fast-forward-only git server against the BP's OWN
+	// repo (every business process has one): clone it, push a fast-forward on
+	// a branch (succeeds), push to main (rejected — deploy-only), and attempt
+	// a history rewrite / force-push (rejected by the pre-receive hook). Also
+	// probe that the legacy single-repo path is gone. Run this AFTER the deploy
+	// settles so the verification never races the background build the BP's
+	// creation kicks off.
+	fmt.Println("\nVerifying fast-forward-only per-BP git server...")
+	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret, "/git/"+bp+".git"); err != nil {
+		cleanupOnFailure()
+		return fmt.Errorf("git server verification failed: %w", err)
+	}
+	if err := verifyGitServer(metadata.GitopsURL, metadata.GitopsSecret, "/git/repo.git"); err == nil {
+		cleanupOnFailure()
+		return fmt.Errorf("legacy /git/repo.git is still being served — per-BP migration incomplete")
+	}
+	fmt.Println("✓ Git server: per-BP clone + ff push OK; main push + force-push rejected; legacy repo gone")
 
 	// Step 5: The frontend is the only part exposed through Bailey. Wait for it
 	// to be running and confirm it serves its app shell — that's "the frontend
@@ -1695,13 +1705,13 @@ func cleanupWorkspace(workspaceName string) error {
 // commit (must succeed), then rewrites history and force-pushes (must be
 // rejected by the pre-receive hook). Credentials are the gitops secret, which
 // the git server accepts via HTTP Basic.
-func verifyGitServer(gitopsURL, secret string) error {
+func verifyGitServer(gitopsURL, secret, repoPath string) error {
 	u, err := url.Parse(gitopsURL)
 	if err != nil {
 		return fmt.Errorf("parse gitops url: %w", err)
 	}
 	u.User = url.UserPassword("x", secret)
-	u.Path = "/git/repo.git"
+	u.Path = repoPath
 	gitURL := u.String()
 
 	tmp, err := os.MkdirTemp("", "gitsrv-")
@@ -1711,19 +1721,35 @@ func verifyGitServer(gitopsURL, secret string) error {
 	defer os.RemoveAll(tmp)
 	work := filepath.Join(tmp, "work")
 
+	// Each git op talks to an idle local git server, so it should complete in
+	// seconds. Bound every call so a server-side stall fails loudly with the
+	// offending command rather than hanging the whole job until its timeout.
 	runGit := func(args ...string) (string, error) {
-		cmd := exec.Command("git", args...)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", args...)
+		// git spawns children (git-remote-https) that hold the stdout/stderr
+		// pipes, so a plain context kill leaves CombinedOutput blocked on the
+		// pipes. WaitDelay forces them closed shortly after the deadline so the
+		// call actually returns and fails loudly instead of hanging.
+		cmd.WaitDelay = 10 * time.Second
 		cmd.Env = append(os.Environ(),
 			"GIT_TERMINAL_PROMPT=0",
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@bitswan.local",
 			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@bitswan.local",
 		)
 		out, err := cmd.CombinedOutput()
+		if ctx.Err() == context.DeadlineExceeded {
+			return string(out), fmt.Errorf("git %s timed out after 120s (server stalled): %s", strings.Join(args, " "), out)
+		}
 		return string(out), err
 	}
 
 	if out, err := runGit("clone", gitURL, work); err != nil {
 		return fmt.Errorf("clone failed: %w: %s", err, out)
+	}
+	if out, err := runGit("-C", work, "checkout", "-b", "git-server-test-branch"); err != nil {
+		return fmt.Errorf("branch: %w: %s", err, out)
 	}
 	if err := os.WriteFile(filepath.Join(work, "git-server-test.txt"), []byte("ok\n"), 0644); err != nil {
 		return err

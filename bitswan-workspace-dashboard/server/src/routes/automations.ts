@@ -165,6 +165,42 @@ export function registerAutomationRoutes(
     },
   );
 
+  // Inspect → Secrets snapshot: a BP stage's decrypted secrets as they were at
+  // a bitswan.yaml revision. Same production redaction as the live read — the
+  // gate-verified email is passed so gitops can gate production values.
+  app.get<{
+    Params: { bp: string };
+    Querystring: { commit?: string; stage?: string };
+  }>(
+    '/api/automations/business-processes/:bp/secrets-snapshot',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      const { commit, stage } = req.query ?? {};
+      if (!commit || !stage) {
+        return reply.code(400).send({ error: 'commit and stage are required' });
+      }
+      try {
+        const email = await emailFromRequest(req, app.log);
+        const r = await gitops.bpSecretsSnapshot(
+          req.params.bp,
+          commit,
+          stage,
+          email ?? undefined,
+        );
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'bp secrets snapshot failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   // Deployments → Secrets: apply a BP's secrets (encrypted + versioned, one
   // commit). Names are shared across stages; values are per stage, so the body
   // carries every realm's map: { dev, staging, production }.

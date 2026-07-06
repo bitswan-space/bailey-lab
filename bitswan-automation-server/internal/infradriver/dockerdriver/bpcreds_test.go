@@ -93,8 +93,14 @@ func TestEnsureBPRoleCommands(t *testing.T) {
 	}
 	all := joined(*calls)
 	for _, want := range []string{
-		`CREATE ROLE "u_bp_acme" LOGIN PASSWORD`,
+		// Role is created with a server-side connection cap so a runaway backend
+		// pool can't exhaust the shared postgres server.
+		`CREATE ROLE "u_bp_acme" LOGIN CONNECTION LIMIT 10 PASSWORD`,
+		`ALTER ROLE "u_bp_acme" WITH LOGIN CONNECTION LIMIT 10 PASSWORD`,
 		`GRANT ALL ON SCHEMA public TO "u_bp_acme"`,
+		// Role must OWN its tables so backend migrations (DDL) work.
+		`ALTER TABLE public.%I OWNER TO "u_bp_acme"`,
+		`ALTER SEQUENCE public.%I OWNER TO "u_bp_acme"`,
 		`REVOKE CONNECT ON DATABASE "bp_acme" FROM PUBLIC`,
 		`GRANT CONNECT ON DATABASE "bp_acme" TO "u_bp_acme"`,
 		"\x00-d\x00bp_acme\x00", // grants run connected to the BP's own database

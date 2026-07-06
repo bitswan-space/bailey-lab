@@ -159,7 +159,7 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	// drops the outer+inner Traefik/Caddy routers AND the Bailey endpoint +
 	// protected_route rows; an unreachable ingress is treated as success. This
 	// is the fix for the routes that leaked when gitops was unreachable.
-	if hosts, herr := listGitopsManagedHosts(workspaceName); herr != nil {
+	if hosts, herr := listGitopsManagedHosts(workspaceName, ""); herr != nil { // "" = every BP: removing the whole workspace
 		fmt.Fprintf(writer, "Warning: could not list managed routes for %s: %v\n", workspaceName, herr)
 	} else {
 		for _, h := range hosts {

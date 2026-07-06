@@ -48,16 +48,27 @@ func runApply(cmd *cobra.Command, gitDir string) error {
 	if gitopsDir == "" {
 		return fmt.Errorf("bitswan.gitopsdir not configured on %s", gitDir)
 	}
+	// bitswan.bp set ⇒ per-BP deploy repo: this push carries only that BP's
+	// bitswan.yaml and the apply reconciles only that BP. gitopsDir stays the
+	// SHARED source root (source/checksum trees + copies resolve there,
+	// unchanged); the per-BP state (bitswan.yaml + generated docker-compose.yaml)
+	// lives under gitops/bp/<bp>/. Empty bp ⇒ legacy whole-workspace apply.
+	bp := gitConfig(gitDir, "bitswan.bp")
+	stateDir := gitopsDir
+	if bp != "" {
+		stateDir = filepath.Join(gitopsDir, "bp", bp)
+	}
+
 	ref := pushedRef() // post-receive feeds "<old> <new> <ref>" on stdin
-	// Materialize the pushed tree into the gitops volume dir — the authoritative
-	// deployed tree the generated compose bind-mounts reference
-	// (workspaces/<ws>/gitops/<source>). It must mirror the push exactly
-	// (deletions included), so the dir is rebuilt from the archive (.git kept).
-	if err := materialize(gitDir, ref, gitopsDir); err != nil {
+	// Materialize the pushed tree into the state dir — the authoritative deployed
+	// tree (per-BP: just this BP's bitswan.yaml; the shared source root is NOT
+	// wiped). It must mirror the push exactly (deletions included), so the dir is
+	// rebuilt from the archive (.git kept).
+	if err := materialize(gitDir, ref, stateDir); err != nil {
 		return err
 	}
 
-	yamlBytes, err := os.ReadFile(gitopsDir + "/bitswan.yaml")
+	yamlBytes, err := os.ReadFile(filepath.Join(stateDir, "bitswan.yaml"))
 	if err != nil {
 		return fmt.Errorf("read bitswan.yaml from push: %w", err)
 	}
@@ -67,6 +78,7 @@ func runApply(cmd *cobra.Command, gitDir string) error {
 		GitopsDir:     gitopsDir,
 		SecretsDir:    gitConfig(gitDir, "bitswan.secretsdir"),
 		WrapAvailable: gitConfig(gitDir, "bitswan.wrap") == "true",
+		BP:            bp,
 	}
 	// The driver configures ingress itself inside Apply (k8s-style: the applier
 	// owns the Ingress), so the returned routes are informational — log a

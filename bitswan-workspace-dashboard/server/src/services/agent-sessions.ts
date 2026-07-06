@@ -144,10 +144,12 @@ export async function listSessions(filter: {
     }
     if (filter.copy !== undefined && copy !== filter.copy) continue;
     if (filter.bp !== undefined) {
-      // Copy-level sync sessions (bp=null, kind='sync') surface in any
-      // BP's Agents tab inside the copy — there's nowhere else for the
-      // user to see them. Other null-bp sessions (legacy / editor) stay
-      // filtered out so the dashboard view doesn't accidentally pick them up.
+      // Sync sessions are BP-scoped now (each BP is its own repo) and match
+      // by bp like any other kind. LEGACY copy-level sync sessions
+      // (bp=null, recorded before per-BP repos) still surface in any BP's
+      // Agents tab inside the copy — there's nowhere else for the user to
+      // see them. Other null-bp sessions (legacy / editor) stay filtered
+      // out so the dashboard view doesn't accidentally pick them up.
       const matchesBp = bp === filter.bp;
       const isSyncForCopy = kind === 'sync' && bp === null;
       if (!matchesBp && !isSyncForCopy) continue;

@@ -234,11 +234,21 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	if conf.ReplicasOrOne() <= 1 {
 		entry["container_name"] = serviceName
 	}
+	// gitops.bp is the RAW business process (from relative_path copies/<copy>/<bp>),
+	// stable across every copy of a BP — unlike gitops.context which is copy-scoped
+	// (copy-<copy>-<bp>). Per-BP deploy repos are keyed by raw bp, so BP-scoped
+	// orphan retirement matches all of a bp's containers (main + copies) via this
+	// label. Falls back to the context for a top-level automation with no bp segment.
+	bpLabel, _ := deriveBPAndCopy(rel)
+	if bpLabel == "" {
+		bpLabel = depCtx
+	}
 	labels := map[string]interface{}{
 		"gitops.deployment_id":    effectiveDepID,
 		"gitops.workspace":        c.workspaceName,
 		"gitops.automation_name":  depAutomationName,
 		"gitops.context":          depCtx,
+		"gitops.bp":               bpLabel,
 		"gitops.stage":            depStage,
 		"gitops.slot":             slot,
 		"gitops.intended_exposed": "false",
@@ -358,7 +368,12 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	}
 
 	// ---- per-(BP, stage) secrets env file ----
-	if bpSanitized != "" {
+	// User-defined secrets go ONLY to the BP's non-exposed workers (the
+	// backend that runs the code), never to the exposed, public-facing frontend
+	// — a secret must not land in a container reachable from the browser. The
+	// env file is per-(BP, realm), so it also never crosses to another BP's
+	// containers. (`cfg.Expose` marks the frontend; workers have Expose=false.)
+	if bpSanitized != "" && !cfg.Expose {
 		realm := realmForStage(stage)
 		blob := ""
 		if c.bs.Secrets != nil {
@@ -375,6 +390,24 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 			return nil, "", nil, false, err
 		}
 		appendEnvFile(entry, envFile)
+		// `docker compose up` recreates a container only when its SERVICE CONFIG
+		// changes, not when an env_file's CONTENTS change. A secret-only change
+		// keeps the same image + env_file path, so without this the backend would
+		// never be recreated and the new secret would never take effect. Fold a
+		// digest of the secret content into a label so a changed secret changes
+		// the config and forces the recreate.
+		//
+		// SLOTTED (production) backends are EXCLUDED: they run blue-green, so an
+		// in-place recreate of the LIVE slot would cause downtime. A production
+		// secret is applied with zero downtime on the next promote instead — the
+		// idle slot is brought up fresh and reads the current env file — so the
+		// live slot must never be force-recreated here. Only single-slot
+		// (dev/staging) backends get the hash.
+		if slot == "" {
+			if h := secretsContentHash(values); h != "" {
+				labels["gitops.secrets_hash"] = h
+			}
+		}
 	}
 
 	// ---- scoped per-BP database / bucket credentials ----
@@ -707,13 +740,15 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 		proxy := g.gw + "-proxy"
 		services[proxy] = map[string]interface{}{
 			"image": c.gatewayImage,
-			// Always re-pull: the gateway image is a floating tag (default
-			// bitswan/egress-gateway:latest) tied to the automation-server version,
-			// and the driver's `compose up` passes no --pull flag — so without this
-			// a host keeps a stale local image indefinitely (e.g. the pre-role-split
-			// proxy that crash-loops on iptables). Per-service so the local-only
-			// internal/* BP images are never pull-attempted.
-			"pull_policy":    "always",
+			// pull_policy: missing, NOT always — combined with an IMMUTABLE version
+			// tag (see gatewayImage). "always" made every one of the (often dozens
+			// of) gateway services hit the registry on every deploy AND, because a
+			// re-pull of a floating tag can yield a new image id, forced docker to
+			// recreate every netns-sharing worker each time — the dominant cost of
+			// deploy/promote. With a version-pinned tag the image content is fixed,
+			// so "missing" pulls it exactly once (when the version changes) and never
+			// re-pulls or churns workers, while never serving a stale image.
+			"pull_policy":    "missing",
 			"container_name": proxy,
 			"restart":        "unless-stopped",
 			"environment": map[string]interface{}{
@@ -742,8 +777,8 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 		}
 		services[g.gw] = map[string]interface{}{
 			"image": c.gatewayImage,
-			// Always re-pull the floating gateway image (see the proxy above).
-			"pull_policy":    "always",
+			// pull_policy: missing — refreshed once per apply, see the proxy above.
+			"pull_policy":    "missing",
 			"container_name": g.gw,
 			"restart":        "unless-stopped",
 			"cap_add":        []interface{}{"NET_ADMIN"},

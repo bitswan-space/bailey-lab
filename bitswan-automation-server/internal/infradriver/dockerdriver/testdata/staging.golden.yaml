@@ -81,6 +81,7 @@ services:
         image: internal/ws3-acme-backend:shabk
         labels:
             gitops.automation_name: backend
+            gitops.bp: acme
             gitops.context: acme
             gitops.deployment_id: backend-acme-staging
             gitops.intended_exposed: "false"
@@ -98,7 +99,6 @@ services:
     ws3-frontend-822b-staging:
         container_name: ws3-frontend-822b-staging
         env_file:
-            - __ROOT__/secrets/bp/acme/staging
             - __ROOT__/secrets/postgres-staging
             - __ROOT__/secrets/minio-staging
         environment:
@@ -117,6 +117,7 @@ services:
         image: internal/ws3-acme-frontend:shafr
         labels:
             gitops.automation_name: frontend
+            gitops.bp: acme
             gitops.context: acme
             gitops.deployment_id: frontend-acme-staging
             gitops.intended_exposed: "true"

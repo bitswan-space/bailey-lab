@@ -89,27 +89,37 @@ def _git(*args, cwd, env_extra=None, capture=False):
 
 
 def test_bp_diff(tmp_path, monkeypatch):
-    """bp_diff returns the unified diff of a BP's source between two commits."""
+    """bp_diff returns the unified diff of a BP's source between two commits.
+    Per-BP layout: each BP is its own repo, so the diff runs inside the BP's
+    clone at copies/main/<bp> (copies/main itself is no longer a repo), and the
+    paths are BP-relative (no bp/ prefix)."""
+    repos = tmp_path / "git"
     copies = tmp_path / "copies"
-    main = copies / "main"
-    (main / "shop").mkdir(parents=True)
+    repos.mkdir(parents=True)
+    (copies / "main").mkdir(parents=True)
+    monkeypatch.setenv("BITSWAN_GIT_REPOS_DIR", str(repos))
     monkeypatch.setenv("BITSWAN_COPIES_DIR", str(copies))
-    _git("init", "-q", cwd=str(main))
-    _git("config", "user.email", "t@t", cwd=str(main))
-    _git("config", "user.name", "t", cwd=str(main))
-    (main / "shop" / "f.txt").write_text("v1\n")
-    _git("add", "-A", cwd=str(main))
-    _git("commit", "-qm", "c1", cwd=str(main))
-    sha1 = _git("rev-parse", "HEAD", cwd=str(main), capture=True).stdout.strip()
-    (main / "shop" / "f.txt").write_text("v2\n")
-    _git("add", "-A", cwd=str(main))
-    _git("commit", "-qm", "c2", cwd=str(main))
-    sha2 = _git("rev-parse", "HEAD", cwd=str(main), capture=True).stdout.strip()
+    bare = repos / "shop.git"
+    _git("init", "-q", "--bare", "--initial-branch=main", str(bare), cwd=str(tmp_path))
+    clone = copies / "main" / "shop"
+    _git("clone", "-q", str(bare), str(clone), cwd=str(tmp_path))
+    _git("config", "user.email", "t@t", cwd=str(clone))
+    _git("config", "user.name", "t", cwd=str(clone))
+    (clone / "f.txt").write_text("v1\n")
+    _git("add", "-A", cwd=str(clone))
+    _git("commit", "-qm", "c1", cwd=str(clone))
+    _git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=str(clone))
+    sha1 = _git("rev-parse", "HEAD", cwd=str(clone), capture=True).stdout.strip()
+    (clone / "f.txt").write_text("v2\n")
+    _git("add", "-A", cwd=str(clone))
+    _git("commit", "-qm", "c2", cwd=str(clone))
+    _git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=str(clone))
+    sha2 = _git("rev-parse", "HEAD", cwd=str(clone), capture=True).stdout.strip()
 
     svc = AutomationService()
     r = asyncio.run(svc.bp_diff("shop", sha1, sha2))
     assert "+v2" in r["diff"] and "-v1" in r["diff"]
-    assert "shop/f.txt" in r["diff"]
+    assert "f.txt" in r["diff"]
 
 
 def test_write_bp_deploy_sets_only_commit_no_history(tmp_path, monkeypatch):
@@ -119,7 +129,7 @@ def test_write_bp_deploy_sets_only_commit_no_history(tmp_path, monkeypatch):
     async def _noop_update_git(*a, **k):
         return None
 
-    monkeypatch.setattr(asvc, "update_git", _noop_update_git)
+    monkeypatch.setattr(asvc, "update_bp_git", _noop_update_git)
     svc = AutomationService()
     svc.gitops_dir = str(tmp_path)
     svc.gitops_dir_host = str(tmp_path)
@@ -149,7 +159,10 @@ def test_bp_history_from_git_log(tmp_path):
     import os as _os
 
     _os.environ.pop("BITSWAN_COPIES_DIR", None)
-    repo = tmp_path
+    # bp_history reads the BP's OWN deploy repo at <gitops>/bp/<bp>, so build the
+    # history there (one bitswan.yaml per BP).
+    repo = tmp_path / "bp" / "shop"
+    repo.mkdir(parents=True)
     _git("init", "-q", cwd=str(repo))
     _git("config", "user.email", "t@t", cwd=str(repo))
     _git("config", "user.name", "t", cwd=str(repo))
@@ -193,8 +206,8 @@ def test_bp_history_from_git_log(tmp_path):
     commit_state("aaaaaaaa", "rollback shop → dev @ aaaaaaaa")
 
     svc = AutomationService()
-    svc.gitops_dir = str(repo)
-    svc.gitops_dir_host = str(repo)
+    svc.gitops_dir = str(tmp_path)
+    svc.gitops_dir_host = str(tmp_path)
 
     h = asyncio.run(svc.bp_history("shop", "dev"))
     srcs = [e["source_commit"] for e in h["history"]]

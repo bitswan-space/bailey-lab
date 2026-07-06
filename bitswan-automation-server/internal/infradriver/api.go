@@ -66,7 +66,18 @@ const (
 	// image. gitops then runs grype on the SBOM locally (no docker needed). The
 	// response body is the raw syft-json document.
 	PathImagesSBOM = "/v1/images/sbom"
+	// PathDeployRepoEnsure provisions the per-BP bare deploy repo (init + config +
+	// post-receive hook) so gitops can push to it. smart-HTTP can't push to a
+	// nonexistent repo and the driver (root) owns the deploy volume, so gitops
+	// asks the driver to create a BP's repo at BP-creation and before each push.
+	// body EnsureDeployRepoBody → JSON OKResult. Idempotent.
+	PathDeployRepoEnsure = "/v1/deploy-repo/ensure"
 )
+
+// EnsureDeployRepoBody names the business process whose deploy repo to provision.
+type EnsureDeployRepoBody struct {
+	BP string `json:"bp"`
+}
 
 // ImageListResult is the JSON response of /v1/images/list.
 type ImageListResult struct {
