@@ -558,8 +558,15 @@ function ContainersSection({
   onRefresh: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const anyRunning = members.some((m) => m.present);
-  const asleep = members.length > 0 && members.every((m) => !m.present);
+  // "Running" is the live container state, NOT whether a deploy record exists —
+  // an asleep stage still has its records (present=true) but no running container.
+  const isUp = (m: Member) =>
+    m.display === 'running' ||
+    m.display === 'starting' ||
+    m.display === 'restarting' ||
+    m.display === 'created';
+  const anyRunning = members.some(isUp);
+  const asleep = members.length > 0 && members.every((m) => !isUp(m));
   // Sleep/Wake apply to the promoted stages (their context is the raw BP); DR is
   // a standby slot managed via the backup swap, so no power toggle there.
   const canPower = stage === 'dev' || stage === 'staging' || stage === 'production';
@@ -1444,9 +1451,18 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   );
 
   const friendly = useMemo(() => {
+    const isUp = (m: Member) =>
+      m.display === 'running' ||
+      m.display === 'starting' ||
+      m.display === 'restarting' ||
+      m.display === 'created';
     const failing = members.filter((m) => m.display === 'failed' || m.display === 'stopped').length;
     if (!currentEntry)
       return { label: 'Not deployed yet', color: 'text-muted-foreground', dot: 'bg-zinc-400', ring: 'ring-zinc-400/10' };
+    // Deployed but nothing running = intentionally asleep (manual sleep or the
+    // on-demand memory sweep). Distinct from a failure; wakes on access.
+    if (members.length > 0 && !members.some(isUp))
+      return { label: 'Asleep', color: 'text-sky-600', dot: 'bg-sky-500', ring: 'ring-sky-500/10' };
     if (failing > 0)
       return { label: `${failing} service${failing === 1 ? '' : 's'} not running`, color: 'text-red-600', dot: 'bg-red-500', ring: 'ring-red-500/10' };
     return { label: 'Healthy', color: 'text-emerald-600', dot: 'bg-emerald-500', ring: 'ring-emerald-500/10' };
@@ -1685,13 +1701,22 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
               </div>
               <div className="flex flex-wrap gap-2.5">
                 {frontends.map((f) => {
-                  const deployed = f.display === 'running';
+                  const running = f.display === 'running';
+                  // A URL is openable even when the container is down: opening an
+                  // on-demand host wakes it (loading screen → app). Only when there
+                  // is no URL at all is it truly unreachable.
+                  const openable = !!f.url;
+                  const subtitle = f.url
+                    ? running
+                      ? f.url.replace('https://', '')
+                      : 'Asleep — opens with a loading screen'
+                    : 'Not deployed';
                   const inner = (
                     <>
                       <span
                         className={cn(
                           'flex size-9 shrink-0 items-center justify-center rounded-lg',
-                          deployed ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+                          running ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
                         )}
                       >
                         <Globe className="size-[18px]" aria-hidden />
@@ -1700,29 +1725,36 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                         <span
                           className={cn(
                             'block truncate font-mono text-[13px] font-semibold',
-                            deployed ? 'text-foreground' : 'text-muted-foreground',
+                            openable ? 'text-foreground' : 'text-muted-foreground',
                           )}
                         >
                           {f.name}
                         </span>
                         <span className="block truncate text-[11px] text-muted-foreground">
-                          {deployed && f.url ? f.url.replace('https://', '') : 'Not deployed'}
+                          {subtitle}
                         </span>
                       </span>
-                      {deployed && f.url ? (
-                        <ExternalLink className="size-3.5 shrink-0 text-primary" aria-hidden />
+                      {openable ? (
+                        running ? (
+                          <ExternalLink className="size-3.5 shrink-0 text-primary" aria-hidden />
+                        ) : (
+                          <Moon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                        )
                       ) : (
                         <CircleSlash className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
                       )}
                     </>
                   );
-                  return deployed && f.url ? (
+                  return openable ? (
                     <a
                       key={f.id}
-                      href={f.url}
+                      href={f.url ?? undefined}
                       target="_blank"
                       rel="noreferrer"
-                      className="flex w-[280px] max-w-full items-center gap-2.5 rounded-[10px] border border-border px-3.5 py-3 hover:border-primary/40 hover:shadow-sm"
+                      className={cn(
+                        'flex w-[280px] max-w-full items-center gap-2.5 rounded-[10px] border border-border px-3.5 py-3 hover:border-primary/40 hover:shadow-sm',
+                        !running && 'bg-muted/30',
+                      )}
                     >
                       {inner}
                     </a>

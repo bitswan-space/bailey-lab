@@ -662,6 +662,24 @@ class AutomationService:
                         a.mem_usage_bytes > a.mem_reservation_mb * 1024 * 1024
                     )
 
+        # An EXPOSED automation with no running container (asleep / evicted / not
+        # yet up) still has a stable public URL — surface it so the dashboard can
+        # offer an "open" link. Opening an on-demand host triggers wake-on-access
+        # (the gate serves a loading page and rehydrates it). Without this the URL
+        # would be blank whenever the container is down and the user couldn't wake it.
+        for a in entries:
+            if a.expose and not a.automation_url and a.deployment_id:
+                base_id = a.deployment_id.split("@")[0]
+                dep_conf = dep_configs.get(base_id, {})
+                a.automation_url = generate_workspace_url(
+                    self.workspace_name,
+                    dep_conf.get("automation_name", base_id),
+                    dep_conf.get("context", ""),
+                    dep_conf.get("stage", "production") or "production",
+                    gitops_domain,
+                    True,
+                )
+
     async def get_automations(self) -> list[DeployedAutomation]:
         """Return every automation across all scopes, with live Docker state.
 
