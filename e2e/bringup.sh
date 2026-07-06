@@ -44,6 +44,10 @@ CODING_AGENT_IMAGE="bitswan/coding-agent-local:latest"
 # the dashboard's "needs review" feed. Without this image the gateway service
 # can't start and no egress is ever observed.
 EGRESS_GATEWAY_IMAGE="bitswan/egress-gateway:latest"
+# The per-workspace infra-driver sidecar. Pinned to the local :latest build below
+# and forwarded as an override so the daemon's resolver uses it instead of the
+# Docker Hub -staging version.
+INFRA_DRIVER_IMAGE="bitswan/infra-driver:latest"
 
 # The SIEM target: a real, lightweight OpenTelemetry collector with an OTLP
 # receiver (gRPC :4317 + HTTP :4318) and a debug exporter. Bailey's SIEM
@@ -92,7 +96,7 @@ mark "[1/7] docker build: automation-server-runtime image"
 # binary baked in). The workspace compose references bitswan/infra-driver:latest
 # and brings it up with --pull missing, so build the tag here or the sidecar (the
 # only container with docker.sock) can't start and the workspace never comes up.
-docker build -t bitswan/infra-driver:latest -f "$REPO_ROOT/bitswan-automation-server/cmd/infra-driver/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
+docker build -t "$INFRA_DRIVER_IMAGE" -f "$REPO_ROOT/bitswan-automation-server/cmd/infra-driver/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
 mark "[1/7] docker build: infra-driver image"
 
 echo "=== [2/7] Daemon + traefik ingress ==="
@@ -104,6 +108,8 @@ sudo env \
   BITSWAN_GITOPS_IMAGE="$GITOPS_IMAGE" \
   BITSWAN_DASHBOARD_IMAGE="$DASHBOARD_IMAGE" \
   BITSWAN_CODING_AGENT_IMAGE="$CODING_AGENT_IMAGE" \
+  BITSWAN_INFRA_DRIVER_IMAGE="$INFRA_DRIVER_IMAGE" \
+  BITSWAN_EGRESS_GATEWAY_IMAGE="$EGRESS_GATEWAY_IMAGE" \
   "$BITSWAN" automation-server-daemon init
 sleep 5
 "$BITSWAN" automation-server-daemon status

@@ -76,19 +76,21 @@ type ServiceStopRequest struct {
 
 // ServiceUpdateRequest represents the request to update a service
 type ServiceUpdateRequest struct {
-	ServiceType      string `json:"service_type"`
-	Workspace        string `json:"workspace"`
-	Stage            string `json:"stage,omitempty"`
-	DashboardImage   string `json:"dashboard_image,omitempty"`
-	TrustCA          bool   `json:"trust_ca,omitempty"`
-	KafkaImage       string `json:"kafka_image,omitempty"`
-	ZookeeperImage   string `json:"zookeeper_image,omitempty"`
-	CouchDBImage     string `json:"couchdb_image,omitempty"`
-	PostgresImage    string `json:"postgres_image,omitempty"`
-	PgAdminImage     string `json:"pgadmin_image,omitempty"`
-	MinioImage       string `json:"minio_image,omitempty"`
-	CodingAgentImage string `json:"coding_agent_image,omitempty"`
-	Staging          bool   `json:"staging,omitempty"`
+	ServiceType        string `json:"service_type"`
+	Workspace          string `json:"workspace"`
+	Stage              string `json:"stage,omitempty"`
+	DashboardImage     string `json:"dashboard_image,omitempty"`
+	TrustCA            bool   `json:"trust_ca,omitempty"`
+	KafkaImage         string `json:"kafka_image,omitempty"`
+	ZookeeperImage     string `json:"zookeeper_image,omitempty"`
+	CouchDBImage       string `json:"couchdb_image,omitempty"`
+	PostgresImage      string `json:"postgres_image,omitempty"`
+	PgAdminImage       string `json:"pgadmin_image,omitempty"`
+	MinioImage         string `json:"minio_image,omitempty"`
+	CodingAgentImage   string `json:"coding_agent_image,omitempty"`
+	InfraDriverImage   string `json:"infra_driver_image,omitempty"`
+	EgressGatewayImage string `json:"egress_gateway_image,omitempty"`
+	Staging            bool   `json:"staging,omitempty"`
 }
 
 // ServiceBackupRequest represents the request to backup CouchDB
@@ -405,6 +407,18 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request, ser
 			Success: true,
 			Data:    statusData,
 		})
+	case "infra-driver", "egress-gateway":
+		statusData, err := s.getInfraServiceStatus(serviceType, workspace)
+		if err != nil {
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(ServiceResponse{
+			Success: true,
+			Data:    statusData,
+		})
 	case "kafka", "couchdb", "postgres", "minio":
 		// Build query string for gitops
 		gitopsPath := fmt.Sprintf("/services/%s/status?stage=%s&show_passwords=%v", serviceType, stage, showPasswords)
@@ -558,6 +572,17 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request, ser
 		json.NewEncoder(w).Encode(ServiceResponse{
 			Success: true,
 			Message: "coding-agent service updated successfully",
+		})
+	case "infra-driver", "egress-gateway":
+		if err := s.updateInfraService(serviceType, req); err != nil {
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(ServiceResponse{
+			Success: true,
+			Message: serviceType + " service updated successfully",
 		})
 	case "kafka", "couchdb", "postgres", "minio":
 		gitopsBody := gitopsServiceRequest{

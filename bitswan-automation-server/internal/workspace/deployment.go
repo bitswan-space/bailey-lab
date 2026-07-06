@@ -14,7 +14,7 @@ import (
 )
 
 // UpdateWorkspaceDeployment updates the workspace deployment with new AOC configuration
-func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, staging bool, trustCA bool) error {
+func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, customInfraDriverImage string, customEgressGatewayImage string, staging bool, trustCA bool) error {
 	// Use HOME for file operations (works inside container and outside)
 	// The workspace files are accessible via the container path
 	homeDir := os.Getenv("HOME")
@@ -63,6 +63,36 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, s
 		}
 	}
 
+	// Resolve the infra-driver + egress-gateway images the same staging-aware way,
+	// so a `workspace update` re-pins them to a current version instead of leaving
+	// them at whatever was baked before (or falling back to :latest).
+	infraDriverImage := customInfraDriverImage
+	if infraDriverImage == "" {
+		var err error
+		infraDriverImage, err = dockerhub.ResolveInfraDriverImage(staging)
+		if err != nil {
+			fmt.Printf("    ⚠️  Failed to get latest infra-driver image, using 'latest': %v\n", err)
+			if staging {
+				infraDriverImage = "bitswan/infra-driver-staging:latest"
+			} else {
+				infraDriverImage = "bitswan/infra-driver:latest"
+			}
+		}
+	}
+	egressGatewayImage := customEgressGatewayImage
+	if egressGatewayImage == "" {
+		var err error
+		egressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(staging)
+		if err != nil {
+			fmt.Printf("    ⚠️  Failed to get latest egress-gateway image, using 'latest': %v\n", err)
+			if staging {
+				egressGatewayImage = "bitswan/egress-gateway-staging:latest"
+			} else {
+				egressGatewayImage = "bitswan/egress-gateway:latest"
+			}
+		}
+	}
+
 	// Get GitOps dev source directory if set
 	var gitopsDevSourceDir string
 	if metadata.GitopsDevSourceDir != nil {
@@ -84,6 +114,8 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, s
 		// 401 "Invalid agent token" after a `workspace update`. The init path
 		// already sets this — the update path must too, or it strips it.
 		CodingAgentSecret:  metadata.CodingAgentSecret,
+		InfraDriverImage:   infraDriverImage,
+		EgressGatewayImage: egressGatewayImage,
 		AocEnvVars:         aocEnvVars,
 		GitopsDevSourceDir: gitopsDevSourceDir,
 		TrustCA:            trustCA,

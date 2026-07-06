@@ -29,21 +29,8 @@ jobs:
         password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
     - name: Build and Push
-      run: |
-        # The per-workspace infra-driver sidecar references this image by
-        # BITSWAN_INFRA_DRIVER_IMAGE, which defaults to bitswan/infra-driver:latest
-        # — publish exactly that tag (plus an immutable build-stamped tag) or every
-        # workspace's driver can't pull it.
-        # Build context = the bitswan-automation-server module root.
-        YEAR=$(date +%Y)
-        COMMIT_HASH=$(git rev-parse --short HEAD)
-        IMAGE_TAG="bitswan/infra-driver"
-
-        docker build \
-          -t $IMAGE_TAG:latest \
-          -t $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH \
-          -f bitswan-automation-server/cmd/infra-driver/Dockerfile \
-          bitswan-automation-server
-
-        docker push $IMAGE_TAG:latest
-        docker push $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH
+      working-directory: bitswan-automation-server
+      # Publishes bitswan/infra-driver-staging with the same three-tag versioned
+      # scheme as gitops/workspace-dashboard/coding-agent; the version tag is what
+      # dockerhub.ResolveInfraDriverImage(staging) pins.
+      run: bash ./cmd/infra-driver/build_and_push.sh

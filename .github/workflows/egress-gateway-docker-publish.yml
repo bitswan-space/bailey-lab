@@ -29,20 +29,8 @@ jobs:
         password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
     - name: Build and Push
-      run: |
-        # gitops references this image by BITSWAN_EGRESS_GATEWAY_IMAGE, which
-        # defaults to bitswan/egress-gateway:latest — publish exactly that tag
-        # (plus an immutable build-stamped tag) or every BP deploy can't pull it.
-        # Build context = the bitswan-automation-server module root.
-        YEAR=$(date +%Y)
-        COMMIT_HASH=$(git rev-parse --short HEAD)
-        IMAGE_TAG="bitswan/egress-gateway"
-
-        docker build \
-          -t $IMAGE_TAG:latest \
-          -t $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH \
-          -f bitswan-automation-server/cmd/egress-gateway/Dockerfile \
-          bitswan-automation-server
-
-        docker push $IMAGE_TAG:latest
-        docker push $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH
+      working-directory: bitswan-automation-server
+      # Publishes bitswan/egress-gateway-staging with the same three-tag versioned
+      # scheme as gitops/workspace-dashboard/coding-agent; the version tag is what
+      # dockerhub.ResolveEgressGatewayImage(staging) pins.
+      run: bash ./cmd/egress-gateway/build_and_push.sh

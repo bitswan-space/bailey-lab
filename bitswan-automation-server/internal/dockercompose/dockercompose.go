@@ -25,6 +25,8 @@ type DockerComposeConfig struct {
 	GitopsPath         string
 	WorkspaceName      string
 	GitopsImage        string
+	InfraDriverImage   string // resolved infra-driver image; falls back to env/:latest when empty
+	EgressGatewayImage string // resolved egress-gateway image the driver pins for per-BP gateways
 	Domain             string
 	AocEnvVars         []string
 	GitopsDevSourceDir string
@@ -242,7 +244,13 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 // subpaths the compiler reads/writes. It serves the deploy repo over git
 // smart-HTTP + the /v1 primitives, guarded by the shared token.
 func (config *DockerComposeConfig) buildDriverService(token string, wsVolume func(string, string) map[string]interface{}, homeDir string) map[string]interface{} {
-	driverImage := os.Getenv("BITSWAN_INFRA_DRIVER_IMAGE")
+	// Prefer the version resolved at init (config.InfraDriverImage). Fall back to
+	// the env override / :latest only when unset (e.g. an older caller that hasn't
+	// been updated to pass the resolved image).
+	driverImage := config.InfraDriverImage
+	if driverImage == "" {
+		driverImage = os.Getenv("BITSWAN_INFRA_DRIVER_IMAGE")
+	}
 	if driverImage == "" {
 		driverImage = "bitswan/infra-driver:latest"
 	}
@@ -253,6 +261,13 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		"BITSWAN_GITOPS_DIR_HOST=" + config.GitopsPath,
 		"BITSWAN_CERTS_DIR=" + homeDir + "/.config/bitswan/certauthorities",
 		"BITSWAN_WORKSPACE_NAME=" + config.WorkspaceName,
+	}
+	// Pin the egress-gateway image the driver's compiler materializes for per-BP
+	// firewall gateways (compile.go reads BITSWAN_EGRESS_GATEWAY_IMAGE, inherited
+	// by the apply hook via githttp.go). Resolved at init like every other image;
+	// when unset the compiler keeps its own env-or-:latest default.
+	if config.EgressGatewayImage != "" {
+		env = append(env, "BITSWAN_EGRESS_GATEWAY_IMAGE="+config.EgressGatewayImage)
 	}
 	// The compiler reads the same AOC env gitops used (org group path, etc.).
 	env = append(env, config.AocEnvVars...)

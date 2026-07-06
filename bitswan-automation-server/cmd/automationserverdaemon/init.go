@@ -305,7 +305,7 @@ func startDaemonContainer(startMessage, successMessage string) error {
 	// it creates (incl. via the Server Console UI) use them instead of the Docker
 	// Hub "latest". Lets operators run a private registry — and CI test images
 	// built from this checkout.
-	for _, key := range []string{"BITSWAN_GITOPS_IMAGE", "BITSWAN_DASHBOARD_IMAGE", "BITSWAN_CODING_AGENT_IMAGE", "BITSWAN_INFRA_DRIVER_IMAGE"} {
+	for _, key := range []string{"BITSWAN_GITOPS_IMAGE", "BITSWAN_DASHBOARD_IMAGE", "BITSWAN_CODING_AGENT_IMAGE", "BITSWAN_INFRA_DRIVER_IMAGE", "BITSWAN_EGRESS_GATEWAY_IMAGE"} {
 		if v := os.Getenv(key); v != "" {
 			runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%s", key, v))
 		}

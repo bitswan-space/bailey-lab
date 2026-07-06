@@ -1867,6 +1867,12 @@ func (c *Client) UpdateService(serviceType, workspace string, options map[string
 	if codingAgentImage, ok := options["coding_agent_image"].(string); ok {
 		reqBody.CodingAgentImage = codingAgentImage
 	}
+	if infraDriverImage, ok := options["infra_driver_image"].(string); ok {
+		reqBody.InfraDriverImage = infraDriverImage
+	}
+	if egressGatewayImage, ok := options["egress_gateway_image"].(string); ok {
+		reqBody.EgressGatewayImage = egressGatewayImage
+	}
 	if staging, ok := options["staging"].(bool); ok {
 		reqBody.Staging = staging
 	}

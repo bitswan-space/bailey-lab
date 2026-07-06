@@ -147,7 +147,14 @@ jobs:
 
       - name: Initialize daemon
         run: |
-          sudo ./bitswan automation-server-daemon init
+          # Pin the infra-driver + egress-gateway to the locally-built :latest
+          # images so the daemon's resolver uses them instead of pulling the
+          # Docker Hub -staging version (sudo strips env, so set it via `env`).
+          # gitops/coding-agent are pinned per-workspace via _test init flags.
+          sudo env \
+            BITSWAN_INFRA_DRIVER_IMAGE=bitswan/infra-driver:latest \
+            BITSWAN_EGRESS_GATEWAY_IMAGE=bitswan/egress-gateway:latest \
+            ./bitswan automation-server-daemon init
           # Fix permissions on config file so runner user can read it
           sudo chmod 644 /home/runner/.config/bitswan/automation_server_config.toml || true
           # Wait for daemon to be ready

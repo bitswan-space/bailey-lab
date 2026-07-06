@@ -41,9 +41,10 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	gitopsImage := fs.String("gitops-image", "", "")
 	dashboardImage := fs.String("dashboard-image", "", "")
 	codingAgentImage := fs.String("coding-agent-image", "", "")
+	infraDriverImage := fs.String("infra-driver-image", "", "")
+	egressGatewayImage := fs.String("egress-gateway-image", "", "")
 	gitopsDevSourceDir := fs.String("gitops-dev-source-dir", "", "")
 	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
-	codingAgentDevSourceDir := fs.String("coding-agent-dev-source-dir", "", "")
 	sshPort := fs.String("ssh-port", "", "")
 	staging := fs.Bool("staging", false, "")
 	// Email of the user creating the workspace. Passed through to
@@ -583,6 +584,27 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		}
 	}
 
+	// The infra-driver sidecar is always present; the egress-gateway image is
+	// pinned onto the driver so the per-BP firewall gateways it materializes use a
+	// resolved version instead of :latest. Both follow the same staging-aware
+	// resolver + --*-image override / BITSWAN_*_IMAGE env pattern as the others.
+	bitswanInfraDriverImage := *infraDriverImage
+	if bitswanInfraDriverImage == "" {
+		var err error
+		bitswanInfraDriverImage, err = dockerhub.ResolveInfraDriverImage(*staging)
+		if err != nil {
+			return fmt.Errorf("failed to get latest BitSwan infra-driver image: %w", err)
+		}
+	}
+	bitswanEgressGatewayImage := *egressGatewayImage
+	if bitswanEgressGatewayImage == "" {
+		var err error
+		bitswanEgressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(*staging)
+		if err != nil {
+			return fmt.Errorf("failed to get latest BitSwan egress-gateway image: %w", err)
+		}
+	}
+
 	// Generate the coding-agent secret up-front so it can be persisted to
 	// metadata before the service starts. The coding-agent container is started
 	// with this secret in env, and gitops re-discovers it via `docker inspect`.
@@ -667,6 +689,8 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		GitopsPath:         gitopsConfig,
 		WorkspaceName:      workspaceName,
 		GitopsImage:        imgopsImage,
+		InfraDriverImage:   bitswanInfraDriverImage,
+		EgressGatewayImage: bitswanEgressGatewayImage,
 		Domain:             *domain,
 		AocEnvVars:         aocEnvVars,
 		GitopsDevSourceDir: *gitopsDevSourceDir,
@@ -694,7 +718,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	fmt.Println("GitOps deployment set up successfully!")
 
 	// Save metadata to file
-	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noDashboard, *noCodingAgent, &workspaceId, *gitopsDevSourceDir, *dashboardDevSourceDir, *codingAgentDevSourceDir, codingAgentSecret); err != nil {
+	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noDashboard, *noCodingAgent, &workspaceId, *gitopsDevSourceDir, *dashboardDevSourceDir, codingAgentSecret); err != nil {
 		fmt.Printf("Warning: Failed to save metadata: %v\n", err)
 	}
 
@@ -759,15 +783,9 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			return fmt.Errorf("failed to create coding-agent service: %w", err)
 		}
 
-		var devConfig *services.CodingAgentDevConfig
-		if *codingAgentDevSourceDir != "" {
-			devConfig = &services.CodingAgentDevConfig{
-				DevMode:   true,
-				SourceDir: *codingAgentDevSourceDir,
-			}
-		}
-
-		if err := codingAgentService.Enable(codingAgentSecret, bitswanCodingAgentImage, *domain, devConfig); err != nil {
+		// Coding-agent has no durable live-dev mode (only gitops + dashboard do),
+		// so init never sets a dev config — enable with the plain image.
+		if err := codingAgentService.Enable(codingAgentSecret, bitswanCodingAgentImage, *domain, nil); err != nil {
 			return fmt.Errorf("failed to enable coding-agent service: %w", err)
 		}
 
@@ -846,7 +864,7 @@ func setHostsFile(workspaceName, domain string) error {
 	return nil
 }
 
-func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentDevSourceDir, codingAgentSecret string) error {
+func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret string) error {
 	metadata := config.WorkspaceMetadata{
 		Domain:       domain,
 		GitopsURL:    fmt.Sprintf("https://%s-gitops.%s", workspaceName, domain),
@@ -877,10 +895,6 @@ func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard
 	if !noCodingAgent {
 		metadata.CodingAgentEnabled = true
 		metadata.CodingAgentSecret = codingAgentSecret
-	}
-
-	if codingAgentDevSourceDir != "" {
-		metadata.DevMode = true
 	}
 
 	metadataPath := filepath.Join(gitopsConfig, "metadata.yaml")
