@@ -23,6 +23,8 @@ import {
   KeyRound,
   Layers,
   MemoryStick,
+  Moon,
+  Power,
   LifeBuoy,
   Loader2,
   Lock,
@@ -544,15 +546,65 @@ function ContainersSection({
   members,
   stage,
   stageLabel,
+  bp,
   onAction,
+  onRefresh,
 }: {
   members: Member[];
   stage: StageId;
   stageLabel: string;
+  bp: string;
   onAction: (action: 'start' | 'stop' | 'restart', id: string, name: string) => void;
+  onRefresh: () => void;
 }) {
+  const [busy, setBusy] = useState(false);
+  const anyRunning = members.some((m) => m.present);
+  const asleep = members.length > 0 && members.every((m) => !m.present);
+  // Sleep/Wake apply to the promoted stages (their context is the raw BP); DR is
+  // a standby slot managed via the backup swap, so no power toggle there.
+  const canPower = stage === 'dev' || stage === 'staging' || stage === 'production';
+
+  const power = async (action: 'sleep' | 'wake') => {
+    setBusy(true);
+    const work = api.stagePower(action, bp, stage, null);
+    toast.promise(work, {
+      loading: action === 'sleep' ? `Putting ${stageLabel} to sleep…` : `Waking ${stageLabel}…`,
+      success: action === 'sleep' ? `${stageLabel} put to sleep` : `${stageLabel} woken`,
+      error: (e: unknown) => `Failed to ${action} ${stageLabel}: ${String(e)}`,
+    });
+    try {
+      await work;
+      onRefresh();
+    } catch {
+      /* toast handled */
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-2">
+      {canPower && (members.length > 0 || asleep) && (
+        <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
+          <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
+          <span className="text-[12.5px] text-muted-foreground">
+            {asleep
+              ? 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
+              : 'Free this stage’s memory now. On-demand stages wake automatically on access.'}
+          </span>
+          {asleep ? (
+            <Button variant="outline" size="sm" className="ml-auto h-7" disabled={busy}
+              onClick={() => power('wake')}>
+              <Power className="mr-1.5 size-3.5" aria-hidden /> Wake
+            </Button>
+          ) : (
+            <Button variant="outline" size="sm" className="ml-auto h-7" disabled={busy || !anyRunning}
+              onClick={() => power('sleep')}>
+              <Moon className="mr-1.5 size-3.5" aria-hidden /> Put to sleep
+            </Button>
+          )}
+        </div>
+      )}
       <StageServicesRow stage={stage} />
       {members.length === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-muted-foreground">
@@ -1749,7 +1801,9 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 members={members}
                 stage={activeStage}
                 stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
+                bp={bp.name}
                 onAction={runContainer}
+                onRefresh={refresh}
               />
             ) : visibleSection === 'secrets' ? (
               isDr ? (

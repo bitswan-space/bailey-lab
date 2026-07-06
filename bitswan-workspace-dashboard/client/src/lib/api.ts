@@ -647,6 +647,14 @@ export const api = {
       `/api/automations/business-processes/${encodeURIComponent(bp)}/wake-live-dev`,
       { copy: copy ?? undefined },
     ),
+  /** Manually sleep (mark inactive + remove containers) or wake (re-activate +
+   *  redeploy) a BP stage. Sleep frees memory now; an on-demand stage also wakes
+   *  on URL access. */
+  stagePower: (action: 'sleep' | 'wake', bp: string, stage: string, copy: string | null) =>
+    postJson<{ context: string; slept?: string[]; deployment_ids?: string[] }>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/${action}`,
+      { stage, copy: copy ?? undefined },
+    ),
   promoteBusinessProcess: (body: PromoteBPRequest) =>
     postJson<DeployBPResponse>('/api/automations/promote-bp', body),
   /** Per-stage deployment history for a business process (newest-first). */

@@ -209,3 +209,68 @@ def test_wake_hydrating_instance_is_touch_only(tmp_path, monkeypatch):
         res = asyncio.run(svc.wake_live_dev("copy-a-bp"))
         assert res.get("already_running") is True
         assert applied == []  # not redeployed
+
+
+def test_manual_sleep_evicts_stage_group(tmp_path, monkeypatch):
+    # sleep_context_stage resolves a (context, stage) group's deployment_ids from
+    # bitswan.yaml and evicts them (mark inactive + remove) — the manual power-off.
+    svc = _svc(tmp_path, cap=15, containers=[])
+    import app.services.automation_service as mod
+
+    orig_read = mod.read_bitswan_yaml
+
+    def _read(path):
+        bs = orig_read(path) or {}
+        deps = bs.setdefault("deployments", {})
+        deps["be-shop-staging"] = {"context": "shop", "stage": "staging"}
+        deps["fe-shop-staging"] = {"context": "shop", "stage": "staging"}
+        deps["be-shop-dev"] = {"context": "shop", "stage": "dev"}  # other stage
+        return bs
+
+    monkeypatch.setattr(mod, "read_bitswan_yaml", _read)
+    evicted: list[str] = []
+
+    async def _evict(ids):
+        evicted.extend(ids)
+        return {"evicted": list(ids), "hosts": []}
+
+    monkeypatch.setattr(svc, "evict_deployments", _evict)
+    res = asyncio.run(svc.sleep_context_stage("shop", "staging"))
+    # Only the staging members of context "shop" — never the dev one.
+    assert set(res["slept"]) == {"be-shop-staging", "fe-shop-staging"}
+    assert "be-shop-dev" not in evicted
+
+
+def test_manual_wake_reactivates_stage_group(tmp_path, monkeypatch):
+    # wake_context_stage re-activates + redeploys a (context, stage) group.
+    svc = _svc(tmp_path, cap=15, containers=[])
+    import app.services.automation_service as mod
+
+    orig_read = mod.read_bitswan_yaml
+
+    def _read(path):
+        bs = orig_read(path) or {}
+        bs.setdefault("deployments", {})["be-shop-staging"] = {
+            "context": "shop",
+            "stage": "staging",
+            "active": False,
+        }
+        return bs
+
+    monkeypatch.setattr(mod, "read_bitswan_yaml", _read)
+    activated: list[str] = []
+    applied: list[list[str]] = []
+
+    async def _mark_active(dep):
+        activated.append(dep)
+
+    async def _apply(ids, deployed_by=None, report=None):
+        applied.append(list(ids))
+        return {}
+
+    monkeypatch.setattr(svc, "mark_as_active", _mark_active)
+    monkeypatch.setattr(svc, "apply_compose_for_deployments", _apply)
+    res = asyncio.run(svc.wake_context_stage("shop", "staging"))
+    assert activated == ["be-shop-staging"]
+    assert applied == [["be-shop-staging"]]
+    assert res["deployment_ids"] == ["be-shop-staging"]

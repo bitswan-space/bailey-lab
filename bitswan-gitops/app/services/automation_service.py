@@ -4291,6 +4291,31 @@ class AutomationService:
             logger.warning("on-demand wake redeploy of %s failed: %s", context, e)
         return {"context": context, "deployment_ids": deps}
 
+    async def sleep_context_stage(self, context: str, stage: str) -> dict:
+        """Manually put a (context, stage) deployment group to sleep: mark each
+        member inactive + REMOVE its containers so it costs nothing. The public
+        counterpart of the memory sweep's eviction — used by the dashboard's
+        Sleep control (test the on-demand path + manual memory management). An
+        on-demand group wakes on URL access; any group wakes via wake_context_stage.
+        stage is the persisted form ('' for production)."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        want = stage or ""
+        deps = [
+            did
+            for did, conf in (bs.get("deployments") or {}).items()
+            if (conf or {}).get("context") == context
+            and ((conf or {}).get("stage") or "") == want
+        ]
+        if not deps:
+            return {"context": context, "slept": []}
+        res = await self.evict_deployments(deps)
+        return {"context": context, "slept": res.get("evicted", [])}
+
+    async def wake_context_stage(self, context: str, stage: str) -> dict:
+        """Public wake for a (context, stage) group — re-activate + redeploy.
+        The manual counterpart of on-demand wake-on-access (dashboard Wake button)."""
+        return await self._wake_context_stage(context, stage)
+
     async def wake_by_host(self, host: str) -> dict:
         """Resolve a request hostname to its ON-DEMAND deployment group and
         rehydrate it — the daemon gate's scale-from-zero hook calls this when a

@@ -647,6 +647,42 @@ async def wake_live_dev_route(
     return await automation_service.wake_live_dev(context)
 
 
+class StageActionRequest(BaseModel):
+    stage: str
+    copy: str | None = None
+
+
+def _context_for(bp: str, copy: str | None) -> str:
+    return f"copy-{copy}-{bp}" if copy and copy != "main" else bp
+
+
+@router.post("/business-processes/{bp}/sleep")
+async def sleep_bp_stage(
+    bp: str,
+    body: StageActionRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Manually put a BP stage to sleep — mark its members inactive + remove their
+    containers so it costs nothing. On-demand stages wake on URL access; any stage
+    can be woken with the /wake endpoint. Manual memory management + a way to test
+    the on-demand path."""
+    context = _context_for(bp, body.copy)
+    stage = "" if body.stage == "production" else body.stage
+    return await automation_service.sleep_context_stage(context, stage)
+
+
+@router.post("/business-processes/{bp}/wake")
+async def wake_bp_stage(
+    bp: str,
+    body: StageActionRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Manually wake a slept BP stage — re-activate its members + redeploy."""
+    context = _context_for(bp, body.copy)
+    stage = "" if body.stage == "production" else body.stage
+    return await automation_service.wake_context_stage(context, stage)
+
+
 class WakeByHostRequest(BaseModel):
     host: str
 

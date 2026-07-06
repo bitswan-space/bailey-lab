@@ -550,6 +550,32 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** `POST .../business-processes/{bp}/{sleep|wake}` — manually put a stage to
+   *  sleep (mark inactive + remove its containers) or wake it (re-activate +
+   *  redeploy). Manual memory management + a way to exercise the on-demand path. */
+  async stagePower(
+    action: 'sleep' | 'wake',
+    bp: string,
+    stage: string,
+    copy?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/${action}`,
+      {
+        method: 'POST',
+        headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage, ...(copy ? { copy } : {}) }),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /**
    * `POST /automations/promote-bp` — promote every automation under one
    * business process from the previous stage to `stage` as a single unit
