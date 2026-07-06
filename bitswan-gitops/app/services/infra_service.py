@@ -5,7 +5,6 @@ Ported from Go implementations in bitswan-automation-server/internal/services/.
 Manages infrastructure services (CouchDB, Kafka) as Docker Compose deployments.
 """
 
-import asyncio
 import io
 import logging
 import os
@@ -13,8 +12,6 @@ import secrets
 import string
 import tarfile
 from abc import ABC, abstractmethod
-
-import requests
 
 from app.utils import SERVICE_REALMS
 
@@ -248,8 +245,8 @@ class InfraService(ABC):
         base = self.service_type.capitalize()
         return f"{base} ({self.stage})"
 
-    def caddy_hostname(self) -> str:
-        """Return the Caddy hostname for this service."""
+    def ingress_hostname(self) -> str:
+        """Return the ingress hostname for this service."""
         return f"{self.workspace_name}-{self.service_type}{self.service_suffix}.{self.gitops_domain}"
 
     @property
@@ -285,10 +282,10 @@ class InfraService(ABC):
         """Generate secrets file content. Returns the content string."""
 
     @abstractmethod
-    def _get_caddy_upstream(self) -> str:
-        """Return the upstream address for Caddy (e.g., 'container:5984')."""
+    def _get_ingress_upstream(self) -> str:
+        """Return the upstream address for the ingress (e.g., 'container:5984')."""
 
-    async def _register_with_caddy(self) -> bool:
+    async def _register_with_ingress(self) -> bool:
         """Register this service with the ingress daemon."""
         from app.utils import add_route_to_ingress
 
@@ -298,8 +295,8 @@ class InfraService(ABC):
             )
             return False
 
-        hostname = self.caddy_hostname()
-        upstream = self._get_caddy_upstream()
+        hostname = self.ingress_hostname()
+        upstream = self._get_ingress_upstream()
 
         result = add_route_to_ingress(hostname, upstream, self.workspace_name)
         if result:
@@ -310,33 +307,18 @@ class InfraService(ABC):
             logger.error(f"Failed to register {self.display_name} with ingress")
         return result
 
-    async def _unregister_from_caddy(self) -> bool:
+    async def _unregister_from_ingress(self) -> bool:
         """Remove this service from the ingress daemon."""
         if not self.gitops_domain:
             return False
 
-        hostname = self.caddy_hostname()
-        ingress_url = os.environ.get(
-            "BITSWAN_INGRESS_URL", "http://bitswan-automation-server:8080"
-        )
+        from app.utils import remove_route_by_hostname
 
-        try:
-            response = await asyncio.to_thread(
-                requests.delete,
-                f"{ingress_url}/ingress/remove-route/{hostname}",
-                timeout=5,
-            )
-            if response.status_code == 200:
-                logger.info(f"Unregistered {self.display_name} from ingress")
-                return True
-            logger.warning(
-                f"Failed to unregister {self.display_name} from ingress: "
-                f"HTTP {response.status_code} - {response.text}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Failed to unregister {self.display_name} from ingress: {e}"
-            )
+        hostname = self.ingress_hostname()
+        if remove_route_by_hostname(hostname):
+            logger.info(f"Unregistered {self.display_name} from ingress")
+            return True
+        logger.warning(f"Failed to unregister {self.display_name} from ingress")
         return False
 
     async def enable(self) -> dict:
@@ -362,7 +344,7 @@ class InfraService(ABC):
         await self._extra_enable_setup()
 
         # Register with ingress
-        await self._register_with_caddy()
+        await self._register_with_ingress()
 
         logger.info(f"{self.display_name} enabled successfully!")
         return {
@@ -400,7 +382,7 @@ class InfraService(ABC):
             logger.warning(f"Failed to stop {self.display_name}: {e}")
 
         # Unregister from ingress
-        await self._unregister_from_caddy()
+        await self._unregister_from_ingress()
 
         # Remove secrets file
         if os.path.exists(self.secrets_file_path):

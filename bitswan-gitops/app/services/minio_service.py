@@ -47,7 +47,7 @@ class MinioService(InfraService):
             f"MINIO_HOST={self.container_name}\n"
         )
 
-    def _get_caddy_upstream(self) -> str:
+    def _get_ingress_upstream(self) -> str:
         # MinIO Console runs on port 9001
         return f"{self.container_name}:9001"
 
@@ -69,7 +69,7 @@ class MinioService(InfraService):
         if info.get("host"):
             info["endpoint"] = f"http://{info['host']}:9000"
         if self.gitops_domain:
-            info["admin_ui"] = f"https://{self.caddy_hostname()}"
+            info["admin_ui"] = f"https://{self.ingress_hostname()}"
         return info
 
     async def backup(self, backup_path: str) -> dict:

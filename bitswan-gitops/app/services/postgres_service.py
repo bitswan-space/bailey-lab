@@ -61,7 +61,7 @@ class PostgresService(InfraService):
             f"PGADMIN_DEFAULT_PASSWORD={pgadmin_password}\n"
         )
 
-    def _get_caddy_upstream(self) -> str:
+    def _get_ingress_upstream(self) -> str:
         return f"{self.pgadmin_container_name}:80"
 
     def _get_connection_info(self) -> dict:
@@ -90,7 +90,7 @@ class PostgresService(InfraService):
                 f"@{info['host']}:5432/{info['database']}"
             )
         if self.gitops_domain:
-            info["admin_ui"] = f"https://{self.caddy_hostname()}"
+            info["admin_ui"] = f"https://{self.ingress_hostname()}"
         return info
 
     async def _extra_enable_setup(self) -> None:

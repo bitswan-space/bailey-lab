@@ -326,51 +326,6 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 	}
 }
 
-func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
-	caddyVolumes := []string{
-		caddyPath + "/Caddyfile:/etc/caddy/Caddyfile:z",
-		caddyPath + "/data:/data:z",
-		caddyPath + "/config:/config:z",
-		caddyPath + "/certs:/tls:z",
-	}
-
-	// Construct the docker-compose data structure
-	dockerCompose := map[string]interface{}{
-		"version": "3.8",
-		"services": map[string]interface{}{
-			"caddy": map[string]interface{}{
-				"image":          "caddy:2.9",
-				"restart":        "always",
-				"container_name": "caddy",
-				// Only the public web entrypoints are published. Caddy's admin API
-				// (:2019) allows FULL reconfiguration (load arbitrary config) and must
-				// never be reachable from outside the host; the daemon reaches it
-				// in-network (caddy:2019 on bitswan_network), so it is not published.
-				"ports":      []string{"80:80", "443:443"},
-				"networks":   []string{"bitswan_network"},
-				"volumes":    caddyVolumes,
-				"entrypoint": []string{"caddy", "run", "--resume", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"},
-			},
-		},
-		"networks": map[string]interface{}{
-			"bitswan_network": map[string]interface{}{
-				"external": true,
-			},
-		},
-	}
-
-	var buf bytes.Buffer
-
-	// Serialize the docker-compose data structure to YAML and write it to the file
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2) // Optional: Set indentation
-	if err := encoder.Encode(dockerCompose); err != nil {
-		return "", fmt.Errorf("failed to encode docker-compose data structure: %w", err)
-	}
-
-	return buf.String(), nil
-}
-
 // CreateTraefikDockerComposeFile creates a docker-compose file for global Traefik.
 // env, when non-nil, is added to the traefik service environment (used to
 // configure lego's httpreq DNS-01 provider for wildcard certificates).

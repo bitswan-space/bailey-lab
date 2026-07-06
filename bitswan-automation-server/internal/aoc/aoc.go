@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
-	httplocalhost "github.com/bitswan-space/bitswan-workspaces/internal/http"
 )
 
 // OTPExchangeRequest represents the OTP exchange request
@@ -644,23 +643,8 @@ func createHTTPClient() (*http.Client, error) {
 }
 
 // sendRequest is a helper method for making HTTP requests
-// It automatically retries with Docker network alias if localhost connection fails
 func (c *AOCClient) sendRequest(method, requestURL string, payload []byte) (*http.Response, error) {
-	var resp *http.Response
-	var err error
-
-	// Use the retry wrapper
-	err = httplocalhost.RetryWithLocalhostAlias(requestURL, func() error {
-		var retryErr error
-		resp, retryErr = c.sendRequestOnce(method, requestURL, payload)
-		return retryErr
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return resp, nil
+	return c.sendRequestOnce(method, requestURL, payload)
 }
 
 // sendRequestOnce performs a single HTTP request without retry logic

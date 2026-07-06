@@ -99,7 +99,7 @@ allowed if: hostname == "{workspace_name}.{domain}"
          or hostname starts with "{workspace_name}-"  (for service subdomains)
 ```
 
-The exact pattern should mirror how `generate_workspace_url` and `caddy_hostname`
+The exact pattern should mirror how `generate_workspace_url` and `ingress_hostname`
 construct hostnames in the gitops service.
 
 ## Rollout steps

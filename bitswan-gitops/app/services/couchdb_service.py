@@ -44,7 +44,7 @@ class CouchDBService(InfraService):
             f"COUCHDB_HOST={self.container_name}\n"
         )
 
-    def _get_caddy_upstream(self) -> str:
+    def _get_ingress_upstream(self) -> str:
         return f"{self.container_name}:5984"
 
     def _get_connection_info(self) -> dict:
@@ -61,8 +61,8 @@ class CouchDBService(InfraService):
                     elif line.startswith("COUCHDB_HOST="):
                         info["host"] = line.split("=", 1)[1]
         if self.gitops_domain:
-            info["url"] = f"https://{self.caddy_hostname()}"
-            info["admin_ui"] = f"https://{self.caddy_hostname()}/_utils/"
+            info["url"] = f"https://{self.ingress_hostname()}"
+            info["admin_ui"] = f"https://{self.ingress_hostname()}/_utils/"
         return info
 
     async def _wait_until_ready(self, timeout_seconds: int = 60) -> bool:

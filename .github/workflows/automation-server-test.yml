@@ -150,9 +150,8 @@ jobs:
           # Verify daemon is running
           ./bitswan automation-server-daemon status || exit 1
 
-      # Bring up Traefik ingress (Caddy is deprecated and no longer tested).
-      # The business-process deploy e2e below then exercises this branch's
-      # templates on top of Traefik.
+      # Bring up the Traefik ingress. The business-process deploy e2e below then
+      # exercises this branch's templates on top of Traefik.
       - name: "Ingress: Traefik init"
         timeout-minutes: 10
         run: |
@@ -160,7 +159,7 @@ jobs:
           docker rm -f traefik 2>/dev/null || true
           docker compose -p bitswan-traefik down 2>/dev/null || true
           sudo rm -rf ~/.config/bitswan/traefik
-          ./bitswan ingress init --type traefik -v || exit 1
+          ./bitswan ingress init -v || exit 1
           docker ps | grep traefik || { echo "ERROR: Traefik not running"; exit 1; }
           echo "Routes:"
           ./bitswan ingress list-routes || true

@@ -99,7 +99,7 @@ sleep 5
 # can exceed the daemon client's request deadline. Pre-pull, then retry.
 docker pull traefik:v3.6 >/dev/null 2>&1 || true
 for i in 1 2 3 4 5; do
-  "$BITSWAN" ingress init --type traefik -v && break
+  "$BITSWAN" ingress init -v && break
   echo "ingress init attempt $i timed out; traefik image now warming, retrying..."; sleep 12
 done
 docker ps | grep -q traefik || { echo "ERROR: traefik not running"; exit 1; }

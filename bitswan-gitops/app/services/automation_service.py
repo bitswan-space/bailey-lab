@@ -4312,7 +4312,7 @@ class AutomationService:
                         )
                         # Re-register with ingress in case route was lost
                         try:
-                            await svc._register_with_caddy()
+                            await svc._register_with_ingress()
                         except Exception as e:
                             logger.warning(
                                 f"Failed to re-register {svc.display_name} with ingress: {e}"

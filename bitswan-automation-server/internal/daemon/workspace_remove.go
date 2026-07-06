@@ -13,7 +13,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/automations"
-	"github.com/bitswan-space/bitswan-workspaces/internal/caddyapi"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 )
@@ -156,7 +155,7 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 
 	// (a) Every per-endpoint route this workspace registered, straight from the
 	// Bailey DB (source='gitops', hostname '<ws>-%'). removeRouteFromIngress
-	// drops the outer+inner Traefik/Caddy routers AND the Bailey endpoint +
+	// drops the outer+inner Traefik routers AND the Bailey endpoint +
 	// protected_route rows; an unreachable ingress is treated as success. This
 	// is the fix for the routes that leaked when gitops was unreachable.
 	if hosts, herr := listGitopsManagedHosts(workspaceName, ""); herr != nil { // "" = every BP: removing the whole workspace
@@ -185,21 +184,16 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 
 	// (c) Sweep residual workspace routes + per-workspace TLS cert entries from
 	// the ingress state, and tear down the workspace's own sub-traefik.
-	switch DetectIngressType() {
-	case IngressCaddy:
-		caddyapi.DeleteCaddyRecordsWithWriter(workspaceName, writer)
-	case IngressTraefik:
-		traefikapi.DeleteTraefikRecordsWithWriter(workspaceName, writer)
-		// Also stop workspace sub-traefik if it exists
-		containerName := fmt.Sprintf("%s__traefik", workspaceName)
-		traefikProjectName := fmt.Sprintf("bitswan-%s-traefik", workspaceName)
-		stopCmd := exec.Command("docker", "compose", "-p", traefikProjectName, "down")
-		stopCmd.Stdout = writer
-		stopCmd.Stderr = writer
-		if err := stopCmd.Run(); err != nil {
-			// Try force remove
-			exec.Command("docker", "rm", "-f", containerName).Run()
-		}
+	traefikapi.DeleteTraefikRecordsWithWriter(workspaceName, writer)
+	// Also stop workspace sub-traefik if it exists
+	containerName := fmt.Sprintf("%s__traefik", workspaceName)
+	traefikProjectName := fmt.Sprintf("bitswan-%s-traefik", workspaceName)
+	stopCmd := exec.Command("docker", "compose", "-p", traefikProjectName, "down")
+	stopCmd.Stdout = writer
+	stopCmd.Stderr = writer
+	if err := stopCmd.Run(); err != nil {
+		// Try force remove
+		exec.Command("docker", "rm", "-f", containerName).Run()
 	}
 	fmt.Fprintln(writer, "Ingress records removed.")
 

@@ -768,13 +768,9 @@ def repoint_route_in_ingress(
         return False
 
 
-def remove_route_from_ingress(
-    automation_name: str, context: str, stage: str, workspace_name: str
-) -> bool:
-    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
-    hostname = generate_workspace_url(
-        workspace_name, automation_name, context, stage, gitops_domain, False
-    )
+def remove_route_by_hostname(hostname: str) -> bool:
+    """Remove a single ingress route by its exact hostname, via the shared
+    (UDS-preferred) ingress client."""
     try:
         client, base = _ingress_client_and_base()
         with client:
@@ -782,6 +778,16 @@ def remove_route_from_ingress(
         return response.status_code == 200
     except Exception:
         return False
+
+
+def remove_route_from_ingress(
+    automation_name: str, context: str, stage: str, workspace_name: str
+) -> bool:
+    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
+    hostname = generate_workspace_url(
+        workspace_name, automation_name, context, stage, gitops_domain, False
+    )
+    return remove_route_by_hostname(hostname)
 
 
 def calculate_checksum(file_path):

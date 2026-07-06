@@ -9,7 +9,6 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/cmd/automation"
 	"github.com/bitswan-space/bitswan-workspaces/cmd/automationserverdaemon"
-	"github.com/bitswan-space/bitswan-workspaces/cmd/caddy"
 	"github.com/bitswan-space/bitswan-workspaces/cmd/certauthority"
 	"github.com/bitswan-space/bitswan-workspaces/cmd/ingress"
 	"github.com/bitswan-space/bitswan-workspaces/cmd/test"
@@ -58,7 +57,6 @@ func newRootCmd(version string) *cobra.Command {
 	cmd.AddCommand(newRegisterCmd())                                      // register subcommand
 	cmd.AddCommand(newDisconnectFromAOCCmd())                             // disconnect-from-aoc subcommand
 	cmd.AddCommand(ingress.NewIngressCmd())                               // ingress subcommand
-	cmd.AddCommand(caddy.NewCaddyCmd())                                   // caddy subcommand (deprecated)
 	cmd.AddCommand(certauthority.NewCertAuthorityCmd())                   // certificate authority subcommand
 	cmd.AddCommand(automationserverdaemon.NewAutomationServerDaemonCmd()) // automation server daemon subcommand
 	cmd.AddCommand(automation.NewAutomationCmd())                         // automation subcommand

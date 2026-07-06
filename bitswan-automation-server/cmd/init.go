@@ -40,7 +40,7 @@ func newInitCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "init [flags] <workspace-name>",
-		Short: "Initializes a new GitOps and Caddy workspace",
+		Short: "Initializes a new GitOps workspace",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := daemon.NewClient()
@@ -61,7 +61,7 @@ func newInitCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&o.remoteRepo, "remote", "", "The remote repository to clone")
 	cmd.Flags().StringVar(&o.workspaceBranch, "branch", "", "The branch to clone from the remote repository (defaults to the repository's default branch)")
-	cmd.Flags().StringVar(&o.domain, "domain", "", "The domain to use for the Caddyfile")
+	cmd.Flags().StringVar(&o.domain, "domain", "", "The domain to use for the workspace")
 	cmd.Flags().StringVar(&o.certsDir, "certs-dir", "", "The directory where the certificates are located")
 	cmd.Flags().BoolVar(&o.noDashboard, "no-dashboard", false, "Do not start the workspace-dashboard sidecar")
 	cmd.Flags().BoolVar(&o.noCodingAgent, "no-coding-agent", false, "Do not start the coding-agent sidecar")

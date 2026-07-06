@@ -54,7 +54,6 @@ RUN curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh  |
 COPY --from=bitswan-builder /out/bitswan /usr/local/bin/bitswan
 RUN chmod +x /usr/local/bin/bitswan
 
-ENV BITSWAN_CADDY_HOST=http://caddy:2019
 
 # Make startup script executable and move to system location
 RUN chmod +x /src/start.sh && mv /src/start.sh /usr/local/bin/start.sh

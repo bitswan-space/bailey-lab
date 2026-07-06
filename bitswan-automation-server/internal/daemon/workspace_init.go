@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
-	"github.com/bitswan-space/bitswan-workspaces/internal/caddyapi"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
@@ -98,7 +97,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	docker.EnsureDockerNetwork("bitswan_network", *verbose)
 
 	// Ensure the global ingress proxy is running.
-	// initIngress is idempotent: it detects Caddy or Traefik and returns early if already running.
+	// initIngress is idempotent: it returns early if Traefik is already running.
 	if _, err := initIngress(*verbose); err != nil {
 		return fmt.Errorf("failed to initialize ingress: %w", err)
 	}
@@ -133,30 +132,15 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 
 	// Handle certificate generation and installation
 	if *mkCerts || *certsDir != "" {
-		ingressType := DetectIngressType()
-		switch ingressType {
-		case IngressCaddy:
-			if *mkCerts {
-				if err := caddyapi.GenerateAndInstallCerts(*domain); err != nil {
-					return fmt.Errorf("error generating and installing certificates: %w", err)
-				}
-			} else if *certsDir != "" {
-				caddyCfg := bitswanConfig + "caddy"
-				if err := caddyapi.InstallCertsFromDir(*certsDir, *domain, caddyCfg); err != nil {
-					return fmt.Errorf("error installing certificates from directory: %w", err)
-				}
+		if *mkCerts {
+			// Generate wildcard cert for *.domain so subdomains (gitops, editor, automations) are covered
+			wildcardHostname := "*." + *domain
+			if err := traefikapi.InstallTLSCerts(wildcardHostname, true, ""); err != nil {
+				return fmt.Errorf("error installing wildcard certificates: %w", err)
 			}
-		case IngressTraefik:
-			if *mkCerts {
-				// Generate wildcard cert for *.domain so subdomains (gitops, editor, automations) are covered
-				wildcardHostname := "*." + *domain
-				if err := traefikapi.InstallTLSCerts(wildcardHostname, true, ""); err != nil {
-					return fmt.Errorf("error installing wildcard certificates: %w", err)
-				}
-			} else if *certsDir != "" {
-				if err := traefikapi.InstallTLSCerts(*domain, false, *certsDir); err != nil {
-					return fmt.Errorf("error installing certificates from directory: %w", err)
-				}
+		} else if *certsDir != "" {
+			if err := traefikapi.InstallTLSCerts(*domain, false, *certsDir); err != nil {
+				return fmt.Errorf("error installing certificates from directory: %w", err)
 			}
 		}
 	}
@@ -653,15 +637,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		ParentEndpoint: workspaceParent,
 	}, ""); err != nil {
 		return fmt.Errorf("failed to register GitOps service: %w", err)
-	}
-
-	// Install wildcard TLS policies for the workspace domain (Caddy needs this
-	// so all subdomains — gitops, editor, automations — are covered by the same cert).
-	// Must be done AFTER per-hostname cert registration to avoid being overwritten.
-	if (*mkCerts || *certsDir != "") && DetectIngressType() == IngressCaddy {
-		if err := caddyapi.InstallTLSCerts(workspaceName, *domain); err != nil {
-			return fmt.Errorf("failed to install TLS certificates: %w", err)
-		}
 	}
 
 	var aocEnvVars []string
