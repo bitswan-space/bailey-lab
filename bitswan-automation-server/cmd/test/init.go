@@ -49,23 +49,25 @@ func newInitCmd() *cobra.Command {
 	var noRemove bool
 	var gitopsImage string
 	var codingAgentImage string
+	var dev bool
 
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Test workspace initialization and business-process deployment",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTestInit(noRemove, gitopsImage, codingAgentImage)
+			return runTestInit(noRemove, gitopsImage, codingAgentImage, dev)
 		},
 	}
 
 	cmd.Flags().BoolVar(&noRemove, "no-remove", false, "Leave workspace and deployment running (skip cleanup)")
 	cmd.Flags().StringVar(&gitopsImage, "gitops-image", "", "Custom GitOps image to use (default: production image)")
 	cmd.Flags().StringVar(&codingAgentImage, "coding-agent-image", "", "Custom coding-agent image to use (default: production image)")
+	cmd.Flags().BoolVar(&dev, "dev", false, "Use locally-built bitswan/<svc>-dev:latest images (see build-dev-images.sh)")
 
 	return cmd
 }
 
-func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
+func runTestInit(noRemove bool, gitopsImage, codingAgentImage string, dev bool) error {
 	fmt.Println("=== BitSwan Test Suite: Init ===")
 	fmt.Println()
 
@@ -126,6 +128,9 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string) error {
 	}
 	if codingAgentImage != "" {
 		initArgs = append(initArgs, "--coding-agent-image", codingAgentImage)
+	}
+	if dev {
+		initArgs = append(initArgs, "--dev")
 	}
 	initArgs = append(initArgs, workspaceName)
 

@@ -147,7 +147,7 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 
 	// Update Docker images and docker-compose file
 	fmt.Println("Updating Docker images and docker-compose file...")
-	if err := workspace.UpdateWorkspaceDeployment(workspaceName, *gitopsImage, "", *staging, *dev, *trustCA); err != nil {
+	if err := workspace.UpdateWorkspaceDeployment(workspaceName, *gitopsImage, "", "", *staging, *dev, *trustCA); err != nil {
 		return fmt.Errorf("failed to update workspace deployment: %w", err)
 	}
 	fmt.Println("Gitops service restarted!")

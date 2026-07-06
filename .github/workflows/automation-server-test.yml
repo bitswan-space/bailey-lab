@@ -165,46 +165,23 @@ jobs:
           echo "Routes:"
           ./bitswan ingress list-routes || true
 
-      - name: Build gitops image from source
+      - name: Build workspace-service dev images from source
         run: |
-          # Build a fresh gitops image from this monorepo's source so the e2e
-          # exercises the in-repo gitops (and its baked example templates), not
-          # a published image. Absolute path: this job's default working dir is
-          # bitswan-automation-server.
-          docker build -t bitswan/gitops-local:latest -f "${{ github.workspace }}/bitswan-gitops/Dockerfile" "${{ github.workspace }}"
-
-      - name: Build coding-agent image from source
-        run: |
-          # Build the in-repo coding-agent so the e2e exercises this branch's
-          # CLI (e.g. the `--copy` flag / `?copy=` gitops calls), not a
-          # published image that may lag the gitops/daemon API.
-          docker build -t bitswan/coding-agent-local:latest -f "${{ github.workspace }}/bitswan-coding-agent/Dockerfile" "${{ github.workspace }}/bitswan-coding-agent"
-
-      - name: Build egress-gateway image from source
-        run: |
-          # Dev deployments now stand up a default monitor-mode egress firewall
-          # gateway (observe-only, zero blast radius), and the BP worker shares
-          # its netns + gates its start on the gateway becoming healthy. gitops
-          # references the gateway by BITSWAN_EGRESS_GATEWAY_IMAGE (default
-          # bitswan/egress-gateway:latest), so build that tag here or the deploy
-          # can't pull it and every BP deploy fails.
-          docker build -t bitswan/egress-gateway:latest -f "${{ github.workspace }}/bitswan-automation-server/cmd/egress-gateway/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
-
-      - name: Build automation-server-runtime image from source
-        run: |
-          # The per-workspace infra-driver sidecar runs this image (debian +
-          # docker CLI + git + git-http-backend) with the bitswan binary mounted
-          # at runtime. The workspace compose references it as
-          # bitswan/automation-server-runtime:latest and brings it up with
-          # `--pull missing`, so build the tag here or the sidecar can't start
-          # and `docker compose up` fails.
-          docker build -t bitswan/automation-server-runtime:latest -f "${{ github.workspace }}/bitswan-automation-server/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
+          # Dogfood the same script developers use: build every workspace-service
+          # image from this monorepo's source as bitswan/<svc>-dev:latest, then
+          # run the e2e with `--dev` so it exercises the in-repo gitops,
+          # coding-agent, egress-gateway and infra-driver (not published images
+          # that may lag this branch's daemon/gitops API). The dashboard is
+          # skipped — the e2e runs with --no-dashboard. The daemon itself keeps
+          # running the hub automation-server-runtime image with the freshly
+          # built bitswan binary mounted in.
+          "${{ github.workspace }}/build-dev-images.sh" --skip dashboard
 
       - name: "E2E: create a business process and reach its frontend"
         timeout-minutes: 15
         run: |
           echo "=== Creating a business process and verifying the frontend ==="
-          ./bitswan _test init --gitops-image bitswan/gitops-local:latest --coding-agent-image bitswan/coding-agent-local:latest --no-remove || exit 1
+          ./bitswan _test init --dev --no-remove || exit 1
           ./bitswan _test cleanup || true
 
       - name: "Diagnostics on E2E failure"

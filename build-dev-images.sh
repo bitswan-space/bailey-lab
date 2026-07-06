@@ -11,7 +11,7 @@
 # directory is kept, so a CI caller (or you) sees exactly what broke.
 set -uo pipefail
 
-SERVICES="gitops dashboard coding-agent egress-gateway"
+SERVICES="gitops dashboard coding-agent egress-gateway infra-driver"
 
 usage() {
 	cat <<EOF
@@ -37,6 +37,7 @@ BUILDS=(
 	"dashboard|bitswan/workspace-dashboard-dev:latest|$REPO_ROOT/bitswan-workspace-dashboard/Dockerfile|$REPO_ROOT/bitswan-workspace-dashboard"
 	"coding-agent|bitswan/coding-agent-dev:latest|$REPO_ROOT/bitswan-coding-agent/Dockerfile|$REPO_ROOT/bitswan-coding-agent"
 	"egress-gateway|bitswan/egress-gateway-dev:latest|$AS/cmd/egress-gateway/Dockerfile|$AS"
+	"infra-driver|bitswan/infra-driver-dev:latest|$AS/cmd/infra-driver/Dockerfile|$AS"
 )
 
 declare -A SKIP

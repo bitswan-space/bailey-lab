@@ -1,4 +1,4 @@
-package infradriver
+package main
 
 import (
 	"os"
@@ -60,7 +60,10 @@ func TestEnsureDeployRepoAt_PerBP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post-receive hook missing: %v", err)
 	}
-	if !strings.Contains(string(hook), "infra-driver apply --git-dir") {
+	// The standalone image's hook re-invokes this same binary (os.Executable())
+	// as `<self> apply --git-dir <repo>`, so assert the apply invocation rather
+	// than a fixed binary name.
+	if !strings.Contains(string(hook), "apply --git-dir") {
 		t.Errorf("hook does not invoke apply: %q", hook)
 	}
 	if !strings.Contains(string(hook), gitDir) {

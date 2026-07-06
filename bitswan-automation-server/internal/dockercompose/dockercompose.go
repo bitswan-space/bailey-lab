@@ -25,6 +25,7 @@ type DockerComposeConfig struct {
 	GitopsPath         string
 	WorkspaceName      string
 	GitopsImage        string
+	InfraDriverImage   string // resolved infra-driver image; falls back to env/:latest when empty
 	EgressGatewayImage string // resolved egress-gateway image the driver pins for per-BP gateways
 	Domain             string
 	AocEnvVars         []string
@@ -240,27 +241,20 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	return buf.String(), gitopsSecretToken, nil
 }
 
-// buildDriverService builds the infra-driver sidecar: the same daemon runtime
-// image (docker CLI + compose + git-http-backend), the bitswan binary
-// bind-mounted as the daemon mounts its own, docker.sock, and the workspace
-// volume subpaths the compiler reads/writes. It serves the deploy repo over
-// git smart-HTTP + the /v1 primitives, guarded by the shared token.
+// buildDriverService builds the infra-driver sidecar: its own self-contained
+// image (docker CLI + compose + git-http-backend + syft, with the infra-driver
+// binary baked in — NOT the bitswan CLI), docker.sock, and the workspace volume
+// subpaths the compiler reads/writes. It serves the per-BP deploy repos over git
+// smart-HTTP + the /v1 primitives, guarded by the shared token.
 func (config *DockerComposeConfig) buildDriverService(token string, wsVolume func(string, string) map[string]interface{}, homeDir string) map[string]interface{} {
-	driverImage := os.Getenv("BITSWAN_INFRA_DRIVER_IMAGE")
+	// Prefer the version resolved at init (config.InfraDriverImage). Fall back to
+	// the env override / :latest only when unset.
+	driverImage := config.InfraDriverImage
 	if driverImage == "" {
-		driverImage = "bitswan/automation-server-runtime:latest"
+		driverImage = os.Getenv("BITSWAN_INFRA_DRIVER_IMAGE")
 	}
-	// The host path of the bitswan binary to bind-mount. The daemon forwards its
-	// own host binary path as BITSWAN_HOST_BINARY (it cannot use os.Executable()
-	// from inside its container); a host-CLI `workspace init` falls back to its
-	// own executable.
-	driverBinary := os.Getenv("BITSWAN_HOST_BINARY")
-	if driverBinary == "" {
-		if exe, err := os.Executable(); err == nil {
-			driverBinary = exe
-		} else {
-			driverBinary = "/usr/local/bin/bitswan"
-		}
+	if driverImage == "" {
+		driverImage = "bitswan/infra-driver:latest"
 	}
 
 	env := []string{
@@ -287,7 +281,6 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 	env = append(env, config.AocEnvVars...)
 
 	volumes := []interface{}{
-		driverBinary + ":/usr/local/bin/bitswan:ro",
 		"/var/run/docker.sock:/var/run/docker.sock",
 		// The daemon ingress socket — the driver configures ingress itself
 		// (converges routes via /ingress/reconcile) after bringing the project up.
@@ -322,7 +315,7 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		"volumes":     volumes,
 		"environment": env,
 		"command": []string{
-			"/usr/local/bin/bitswan", "infra-driver", "serve",
+			"/usr/local/bin/infra-driver", "serve",
 			"--listen", ":9090",
 			"--deploy-repos-dir", "/git/deploy-repos",
 			"--gitops-dir", "/gitops/gitops",

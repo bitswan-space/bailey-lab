@@ -202,3 +202,35 @@ func ResolveEgressGatewayImage(staging, dev bool) (string, error) {
 	}
 	return "bitswan/egress-gateway:" + version, nil
 }
+
+// GetLatestInfraDriverVersion gets the latest version of the infra-driver image
+func GetLatestInfraDriverVersion() (string, error) {
+	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/infra-driver/tags/")
+}
+
+// GetLatestInfraDriverStagingVersion gets the latest version of the infra-driver-staging image
+func GetLatestInfraDriverStagingVersion() (string, error) {
+	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/infra-driver-staging/tags/")
+}
+
+// ResolveInfraDriverImage returns the full infra-driver image string based on the staging/dev flags.
+func ResolveInfraDriverImage(staging, dev bool) (string, error) {
+	if img := imageOverride("BITSWAN_INFRA_DRIVER_IMAGE"); img != "" {
+		return img, nil
+	}
+	if dev {
+		return "bitswan/infra-driver-dev:latest", nil
+	}
+	if staging {
+		version, err := GetLatestInfraDriverStagingVersion()
+		if err != nil {
+			return "", err
+		}
+		return "bitswan/infra-driver-staging:" + version, nil
+	}
+	version, err := GetLatestInfraDriverVersion()
+	if err != nil {
+		return "", err
+	}
+	return "bitswan/infra-driver:" + version, nil
+}

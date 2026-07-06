@@ -41,6 +41,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	gitopsImage := fs.String("gitops-image", "", "")
 	dashboardImage := fs.String("dashboard-image", "", "")
 	codingAgentImage := fs.String("coding-agent-image", "", "")
+	infraDriverImage := fs.String("infra-driver-image", "", "")
 	egressGatewayImage := fs.String("egress-gateway-image", "", "")
 	gitopsDevSourceDir := fs.String("gitops-dev-source-dir", "", "")
 	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
@@ -584,6 +585,15 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		}
 	}
 
+	// The infra-driver sidecar runs its own image; pin the resolved version.
+	bitswanInfraDriverImage := *infraDriverImage
+	if bitswanInfraDriverImage == "" {
+		var err error
+		bitswanInfraDriverImage, err = dockerhub.ResolveInfraDriverImage(*staging, *dev)
+		if err != nil {
+			return fmt.Errorf("failed to get latest BitSwan infra-driver image: %w", err)
+		}
+	}
 	// The egress-gateway image is pinned onto the driver so the per-BP firewall
 	// gateways it materializes use a resolved version instead of :latest. Follows
 	// the same staging/dev-aware resolver + --egress-gateway-image override /
@@ -681,6 +691,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		GitopsPath:         gitopsConfig,
 		WorkspaceName:      workspaceName,
 		GitopsImage:        imgopsImage,
+		InfraDriverImage:   bitswanInfraDriverImage,
 		EgressGatewayImage: bitswanEgressGatewayImage,
 		Domain:             *domain,
 		AocEnvVars:         aocEnvVars,
