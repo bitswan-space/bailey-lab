@@ -33,6 +33,11 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	domain := fs.String("domain", "", "")
 	certsDir := fs.String("certs-dir", "", "")
 	verbose := fs.Bool("verbose", false, "")
+	// The cobra client (cmd/init.go) advertises -v as the shorthand for
+	// --verbose, but `workspace init` forwards its raw argv here where Go's
+	// std flag package has no shorthand concept, so a bare -v would fail to
+	// parse. Accept -v explicitly and fold it into verbose below.
+	verboseShort := fs.Bool("v", false, "")
 	mkCerts := fs.Bool("mkcerts", false, "")
 	noDashboard := fs.Bool("no-dashboard", false, "")
 	noCodingAgent := fs.Bool("no-coding-agent", false, "")
@@ -55,6 +60,9 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("failed to parse flags: %w", err)
+	}
+	if *verboseShort {
+		*verbose = true
 	}
 
 	if len(fs.Args()) < 1 {
