@@ -88,7 +88,6 @@ type ServiceUpdateRequest struct {
 	PgAdminImage       string `json:"pgadmin_image,omitempty"`
 	MinioImage         string `json:"minio_image,omitempty"`
 	CodingAgentImage   string `json:"coding_agent_image,omitempty"`
-	InfraDriverImage   string `json:"infra_driver_image,omitempty"`
 	EgressGatewayImage string `json:"egress_gateway_image,omitempty"`
 	Staging            bool   `json:"staging,omitempty"`
 }
@@ -407,7 +406,7 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request, ser
 			Success: true,
 			Data:    statusData,
 		})
-	case "infra-driver", "egress-gateway":
+	case "egress-gateway":
 		statusData, err := s.getInfraServiceStatus(serviceType, workspace)
 		if err != nil {
 			writeJSONError(w, err.Error(), http.StatusInternalServerError)
@@ -573,7 +572,7 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request, ser
 			Success: true,
 			Message: "coding-agent service updated successfully",
 		})
-	case "infra-driver", "egress-gateway":
+	case "egress-gateway":
 		if err := s.updateInfraService(serviceType, req); err != nil {
 			writeJSONError(w, err.Error(), http.StatusInternalServerError)
 			return

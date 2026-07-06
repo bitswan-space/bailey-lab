@@ -102,7 +102,7 @@ function GraphRow({
  * tip. Clicking any commit shows the diff it introduced (`git show`) in the
  * right pane.
  */
-export function CopyHistoryView({ copy }: { copy: string }) {
+export function CopyHistoryView({ copy, bp }: { copy: string; bp: string }) {
   // eslint-disable-next-line no-restricted-syntax -- null = not yet loaded
   const [data, setData] = useState<CopyHistory | null>(null);
   // eslint-disable-next-line no-restricted-syntax -- null = no error
@@ -118,7 +118,7 @@ export function CopyHistoryView({ copy }: { copy: string }) {
     setError(null);
     setSelected(null);
     api.copyFiles
-      .history(copy)
+      .history(copy, bp)
       .then((d) => {
         if (alive) setData(d);
       })
@@ -128,7 +128,7 @@ export function CopyHistoryView({ copy }: { copy: string }) {
     return () => {
       alive = false;
     };
-  }, [copy]);
+  }, [copy, bp]);
 
   // Fetch the selected commit's diff.
   useEffect(() => {
@@ -139,7 +139,7 @@ export function CopyHistoryView({ copy }: { copy: string }) {
     let alive = true;
     setDiffLoading(true);
     api.copyFiles
-      .commitDiff(copy, selected.sha)
+      .commitDiff(copy, selected.sha, bp)
       .then((r) => {
         if (alive) setDiff(r.diff);
       })
@@ -152,7 +152,7 @@ export function CopyHistoryView({ copy }: { copy: string }) {
     return () => {
       alive = false;
     };
-  }, [copy, selected]);
+  }, [copy, bp, selected]);
 
   // The copy's own commits = those not yet on main. The rest of the copy's log
   // is shared history and shows on the main side.

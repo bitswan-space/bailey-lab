@@ -153,6 +153,7 @@ export class GitopsClient {
   async createProcess(input: {
     name: string;
     copy?: string;
+    created_by?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/processes/`, {
       method: 'POST',
@@ -329,9 +330,11 @@ export class GitopsClient {
   async copyCommitDiff(
     name: string,
     sha: string,
+    bp?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const qs = bp ? `?bp=${encodeURIComponent(bp)}` : '';
     const r = await fetch(
-      `${this.baseUrl}/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff`,
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff${qs}`,
       { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
@@ -386,12 +389,58 @@ export class GitopsClient {
     });
   }
 
-  /** `GET /copies/{name}/history` — copy + main commit logs with deploy tags. */
+  /** `POST /copies/{name}/rebase` — pull main's new commits INTO the copy
+   *  (rebase the whole copy onto main). Opposite direction from syncCopy. */
+  async rebaseCopy(
+    name: string,
+    deployer?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(`/copies/${encodeURIComponent(name)}/rebase`, {
+      deployer: deployer ?? null,
+    });
+  }
+
+  /** `POST /copies/{name}/bp/{bp}/ensure` — make a BP exist in a copy, cloning
+   *  it fresh from main when the copy doesn't carry it yet (idempotent). Lets
+   *  the copy switcher offer every copy for a BP. */
+  async ensureBpInCopy(
+    name: string,
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(
+      `/copies/${encodeURIComponent(name)}/bp/${encodeURIComponent(bp)}/ensure`,
+      {},
+    );
+  }
+
+  /** `GET /copies/{name}/history` — copy + main commit logs with deploy
+   *  tags. With `bp` (the normal, BP-scoped view) the logs come from that
+   *  BP's own repo. */
   async copyHistory(
+    name: string,
+    bp?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const qs = bp ? `?bp=${encodeURIComponent(bp)}` : '';
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/history${qs}`,
+      { headers: { ...this.authHeaders() } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET /copies/{name}/divergence-all` — per-BP ahead/behind for the whole
+   *  copy in one fetch (only diverging BPs are returned). */
+  async copyDivergenceAll(
     name: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
-      `${this.baseUrl}/copies/${encodeURIComponent(name)}/history`,
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/divergence-all`,
       { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
@@ -423,7 +472,7 @@ export class GitopsClient {
   /**
    * `POST /automations/start-deploy` — workspace-bind-mount deploy. Body is
    * `{ relative_path, stage, copy? }`. Gitops resolves the source under
-   * `/workspace-repo`, merges `bitswan_lib`, computes the checksum, and
+   * `/workspace-repo`, computes the checksum, and
    * spawns the deploy in the background.
    */
   async startDeploy(input: {
@@ -571,6 +620,30 @@ export class GitopsClient {
     const q = by ? `?by=${encodeURIComponent(by)}` : '';
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets${q}`,
+      { headers: { ...this.authHeaders() } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  async bpSecretsSnapshot(
+    bp: string,
+    commit: string,
+    stage: string,
+    by?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    // Inspect → Secrets snapshot: the decrypted secrets at a revision. `by` is
+    // the gate-verified caller email; gitops redacts production for non-admin/
+    // auditor callers, same as bpSecrets.
+    const params = new URLSearchParams({ commit, stage });
+    if (by) params.set('by', by);
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets-snapshot?${params.toString()}`,
       { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;

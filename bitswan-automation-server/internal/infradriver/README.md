@@ -28,19 +28,17 @@ gitops (editing + per-user copies, Sync & Deploy → resolves main)
       ▼
 driver git remote ── post-receive ──▶ compile bitswan.yaml + reconcile backend
       ▲                                 (build images, networks, compose,
-      │ HTTP over private UNIX socket    cert install, blue-green data)
+      │ HTTP over private UNIX socket    cert/oauth2 sidecars, blue-green data)
       └── container primitives: list / logs / stop / restart
 ```
 
-- The driver is its **own self-contained image** (`bitswan/infra-driver`,
-  built from `cmd/infra-driver/Dockerfile`: docker CLI + compose + git +
-  git-http-backend + syft, with the standalone `infra-driver` binary baked in —
-  NOT the bitswan CLI mounted from the host). It runs `infra-driver serve`. One
-  driver per gitops.
+- The driver is a subcommand of the existing daemon binary
+  (`bitswan infra-driver serve`) — **no new image**. One driver per gitops (and
+  one for the daemon).
 - gitops keeps its own git server + copies model unchanged. On
   deploy/promote/swap/scale/rollback it resolves the deployed `bitswan.yaml`
   and `git push`es it (with the source needed to build) to the driver's remote.
-- **Apply = the post-receive hook.** It runs `infra-driver apply`,
+- **Apply = the post-receive hook.** It runs `bitswan infra-driver apply`,
   whose stdout (the compile/reconcile progress) is relayed back over git's
   sideband to the pushing client, which gitops forwards to the dashboard.
 
@@ -90,7 +88,7 @@ Ported into the Docker driver's `Apply` (Python → Go):
   `_stage_network`, blue-green slot generation, egress-gateway wiring,
   `BITSWAN_WORKER_HOSTS`; infra services' `_generate_compose_dict`;
 - `utils.docker_compose_up`, `utils.ensure_docker_network`;
-- cert install;
+- cert install + oauth2-proxy sidecar start;
 - `_bake_source_image` (image build folds into `Apply`);
 - snapshot/backup data ops — re-expressed as `bitswan.yaml` backup state the
   compiler realizes (blue-green DB seed/restore), not a driver command.
@@ -103,18 +101,18 @@ primitives + a `git push` to deploy, and **no longer mounts `docker.sock`**.
 
 1. **Contract** — `driver.go` + `api.go` + server/client for the five
    primitives (list/logs/stop/restart/exec) + build-image (round-trip tested).
-2. **`infra-driver serve`** — host the bare deploy git remote over git
+2. **`bitswan infra-driver serve`** — host the bare deploy git remote over git
    smart-HTTP (post-receive → `apply`) + serve the primitives, all over TCP on
    the internal network, guarded by a shared bearer token.
-3. **`infra-driver apply`** — the compiler + reconciler: port
+3. **`bitswan infra-driver apply`** — the compiler + reconciler: port
    `generate_docker_compose` + reconcile to Go (`internal/dockercompose` reuse,
-   golden-tested), bring the project up, install certs, provision per-BP
+   golden-tested), bring the project up, install certs + oauth2, provision per-BP
    DBs/buckets, and **configure ingress itself** (`/ingress/reconcile` on the
    daemon — the applier owns the Ingress, k8s-style).
 4. **Cut gitops over** — replace its Docker code with: resolve+`git push` to the
    driver for apply, and the HTTP client for list/logs/stop/restart, exec, and
    build-image. Delete `async_docker.py`, the compose-generation,
-   `docker_compose_up`/`ensure_docker_network`, cert/baking Docker code,
+   `docker_compose_up`/`ensure_docker_network`, cert/oauth2/baking Docker code,
    and the deploy-path ingress registration (the driver does it). Remove the
    `docker.sock` mount. Validate the integration test + bp-lifecycle e2e green
    running through the driver.

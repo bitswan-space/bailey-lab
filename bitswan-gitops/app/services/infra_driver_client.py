@@ -6,8 +6,9 @@ component that touches docker.sock after the cut-over. It exposes two
 transports, both reached over the internal network and guarded by a shared
 bearer token (BITSWAN_INFRA_DRIVER_TOKEN):
 
-  * DEPLOY is a ``git push`` to the driver's deploy repo
-    (BITSWAN_DEPLOY_REMOTE). The driver's post-receive hook materializes the
+  * DEPLOY is a ``git push`` to the BP's own deploy repo under
+    BITSWAN_DEPLOY_REMOTE_BASE (.../deploy-repos/<bp>.deploy.git — one per
+    business process). The driver's post-receive hook materializes the
     pushed tree, compiles + applies the bitswan.yaml, and prints ``[step]
     message`` progress lines plus ``[route] {json}`` route lines on stdout,
     which git relays back to us as ``remote:`` sideband lines. The git history
@@ -28,6 +29,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Awaitable, Callable, Optional
 
@@ -227,15 +229,29 @@ class InfraDriverClient:
         self,
         base_url: Optional[str] = None,
         token: Optional[str] = None,
-        deploy_remote: Optional[str] = None,
+        deploy_remote_base: Optional[str] = None,
         timeout: float = 600.0,
     ):
         self.base_url = (base_url or _require_env("BITSWAN_INFRA_DRIVER_URL")).rstrip(
             "/"
         )
         self.token = token or _require_env("BITSWAN_INFRA_DRIVER_TOKEN")
-        self.deploy_remote = deploy_remote or _require_env("BITSWAN_DEPLOY_REMOTE")
+        # Per-BP deploy repos: BITSWAN_DEPLOY_REMOTE_BASE is the dir the driver
+        # serves (.../deploy-repos); each BP pushes to <base>/<bp>.deploy.git.
+        self.deploy_remote_base = (
+            deploy_remote_base or _require_env("BITSWAN_DEPLOY_REMOTE_BASE")
+        ).rstrip("/")
         self.timeout = timeout
+
+    def deploy_remote_for_bp(self, bp: str) -> str:
+        """The per-BP deploy repo push URL under BITSWAN_DEPLOY_REMOTE_BASE."""
+        return f"{self.deploy_remote_base}/{bp}.deploy.git"
+
+    async def ensure_deploy_repo(self, bp: str) -> None:
+        """Ask the driver to provision (init + hook + config) the BP's deploy
+        repo. Idempotent; smart-HTTP can't push to a repo that doesn't exist and
+        the driver (root) owns the deploy volume, so gitops requests creation."""
+        await self._post_json("/v1/deploy-repo/ensure", {"bp": bp})
 
     @property
     def _headers(self) -> dict:
@@ -247,32 +263,49 @@ class InfraDriverClient:
         self,
         work_tree: str,
         commit_message: str,
+        deploy_remote: str,
         progress_callback: Optional[ProgressCallback] = None,
         author: Optional[str] = None,
     ) -> list[Route]:
-        """Commit the resolved tree in ``work_tree`` and push it to the driver,
-        streaming the apply progress to ``progress_callback`` and returning the
-        ingress routes the apply produced.
+        """Commit the resolved tree in ``work_tree`` and push it to the BP's
+        deploy repo at ``deploy_remote``, streaming the apply progress to
+        ``progress_callback`` and returning the ingress routes the apply produced.
 
-        ``work_tree`` must be a git repository whose working tree is the fully
-        resolved bitswan.yaml + per-deployment source trees. The deployed state
-        is authoritative, so the push is a force-push to refs/heads/main.
-        """
+        ``work_tree`` is the BP's own working tree (its bitswan.yaml). The
+        deployed state is authoritative — the push is roll-forward to
+        refs/heads/main (the driver rejects non-fast-forward)."""
+        remote = deploy_remote
         await self._git(work_tree, "add", "-A", error="stage resolved tree for deploy")
-        # Identity is set inline so the deploy never depends on ambient git
-        # config; the operator (when known) is the author, gitops the committer.
+        # Attribute the deploy to the operator who triggered it, as BOTH author
+        # and committer, so the deploy-history actor is the acting user — never a
+        # mechanical identity. Prefer the explicit `author` ("email <email>");
+        # otherwise the request's gate-verified identity (X-Forwarded-Email in
+        # the current_requester contextvar); otherwise the gitops service.
+        # Identity is set inline so the deploy never depends on ambient config.
+        from app.task_queue import current_requester
+
+        actor = author
+        if not actor:
+            req = (current_requester.get() or "").strip()
+            if req:
+                actor = f"{req} <{req}>"
+        committer_name, committer_email = "bitswan-gitops", "gitops@bitswan.local"
+        if actor:
+            m = re.search(r"<([^>]+)>", actor)
+            email = (m.group(1) if m else actor).strip()
+            committer_name = committer_email = email
         commit_args = [
             "-c",
-            "user.name=bitswan-gitops",
+            f"user.name={committer_name}",
             "-c",
-            "user.email=gitops@bitswan.local",
+            f"user.email={committer_email}",
             "commit",
             "--allow-empty",
             "-m",
             commit_message,
         ]
-        if author:
-            commit_args += ["--author", author]
+        if actor:
+            commit_args += ["--author", actor]
         # An empty commit still triggers a push + re-apply (idempotent reconcile).
         await self._git(work_tree, *commit_args, error="commit resolved tree")
 
@@ -292,7 +325,7 @@ class InfraDriverClient:
                 # (receive.denyNonFastForwards) so the deploy history can never be
                 # clobbered. Deploys are roll-forward; a non-ff push is a real
                 # error and must fail loudly here, not overwrite history.
-                self.deploy_remote,
+                remote,
                 "HEAD:refs/heads/main",
             ],
             on_line,

@@ -474,14 +474,25 @@ async def lifespan(app: FastAPI):
 
     scheduler = AsyncIOScheduler(timezone="UTC")
 
-    # Ensure the canonical bare repo exists and is fast-forward-only before the
-    # smart-HTTP git server starts serving clones/pushes. Idempotent.
+    # Refresh config/hooks (and any missing seed commit) on every per-BP bare
+    # repo before the smart-HTTP git server starts serving clones/pushes.
+    # Idempotent; new repos are created on BP creation.
     try:
-        from app.services.git_server import ensure_bare_repo
+        from app.services.git_server import ensure_all_bp_repos
 
-        await ensure_bare_repo()
+        await ensure_all_bp_repos()
     except Exception as e:
-        logger.warning("Failed to ensure canonical bare repo: %s", e)
+        logger.warning("Failed to ensure per-BP bare repos: %s", e)
+
+    # Self-heal the main copy: align every BP's `copies/main/<bp>` checkout
+    # with its repo's main, creating missing checkouts for main-carrying BPs
+    # (e.g. a BP synced while gitops was down, or right after migration).
+    try:
+        from app.services.bp_git import refresh_all_main_checkouts
+
+        await refresh_all_main_checkouts()
+    except Exception as e:
+        logger.warning("Failed to refresh main-copy checkouts: %s", e)
 
     # Warm the ProcessService cache so the first `_broadcast_processes`
     # (SSE) read finds it populated.

@@ -1,8 +1,9 @@
-"""Tests for the canonical bare repo + fast-forward-only git server.
+"""Tests for the per-BP bare repos + fast-forward-only git server.
 
-Covers provisioning (`ensure_bare_repo`) and the append-only guarantee of the
-`pre-receive` hook (ff accepted, force-push / delete rejected, new branch
-allowed), plus the copies-aware relative_path parsing in
+Covers provisioning (`ensure_bp_bare_repo`: config, hook, empty seed commit),
+the append-only guarantee of the `pre-receive` hook (ff accepted, force-push /
+delete / main-push rejected), repo discovery + name validation, the smart-HTTP
+path validation, and the copies-aware relative_path parsing in
 `derive_bp_and_copy`.
 """
 
@@ -28,7 +29,7 @@ def _git(*args, cwd=None, check=True):
 
 
 @pytest.fixture()
-def bare_repo(tmp_path, monkeypatch):
+def repos_dir(tmp_path, monkeypatch):
     # GIT_REPOS_DIR / HOOKS_SRC_DIR are module-level constants read at import,
     # so patch the attributes directly rather than the environment.
     monkeypatch.setattr(git_server, "GIT_REPOS_DIR", str(tmp_path / "git"))
@@ -36,40 +37,60 @@ def bare_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(
         git_server, "HOOKS_SRC_DIR", str(tmp_path / "nonexistent-hooks")
     )
-    repo = asyncio.run(git_server.ensure_bare_repo())
-    return repo
+    return str(tmp_path / "git")
 
 
-def test_ensure_bare_repo_provisions_hook_and_config(bare_repo):
-    assert os.path.isdir(os.path.join(bare_repo, "objects"))
-    hook = os.path.join(bare_repo, "hooks", "pre-receive")
+def test_ensure_bp_bare_repo_provisions_hook_config_and_seed(repos_dir):
+    repo = asyncio.run(git_server.ensure_bp_bare_repo("bpa"))
+    assert repo == os.path.join(repos_dir, "bpa.git")
+    assert os.path.isdir(os.path.join(repo, "objects"))
+    hook = os.path.join(repo, "hooks", "pre-receive")
     assert os.path.isfile(hook)
     assert os.access(hook, os.X_OK)
     cfg = _git(
-        "-C", bare_repo, "config", "--get", "receive.denyNonFastForwards"
+        "-C", repo, "config", "--get", "receive.denyNonFastForwards"
     ).stdout.strip()
     assert cfg == "true"
+    # main exists and points at the EMPTY seed commit.
+    assert _git(
+        "-C", repo, "rev-parse", "--verify", "refs/heads/main", check=False
+    ).stdout.strip()
+    assert _git("-C", repo, "ls-tree", "main").stdout.strip() == ""
+    assert asyncio.run(git_server.bp_main_has_content("bpa")) is False
+
+    # Idempotent: a second ensure neither re-seeds nor errors.
+    seed_sha = _git("-C", repo, "rev-parse", "main").stdout.strip()
+    asyncio.run(git_server.ensure_bp_bare_repo("bpa"))
+    assert _git("-C", repo, "rev-parse", "main").stdout.strip() == seed_sha
 
 
-def test_fast_forward_only_enforcement(bare_repo, tmp_path):
+def test_list_bp_repos_and_ensure_all(repos_dir):
+    asyncio.run(git_server.ensure_bp_bare_repo("bpa"))
+    asyncio.run(git_server.ensure_bp_bare_repo("bpb"))
+    assert git_server.list_bp_repos() == ["bpa", "bpb"]
+    # ensure_all refreshes without error and discovers both.
+    asyncio.run(git_server.ensure_all_bp_repos())
+    assert git_server.list_bp_repos() == ["bpa", "bpb"]
+
+
+def test_bp_name_validation(repos_dir):
+    for bad in ("", ".", "..", "../x", "a/b", "-lead", ".hidden"):
+        with pytest.raises(ValueError):
+            git_server.bp_bare_repo_path(bad)
+
+
+def test_fast_forward_only_enforcement_per_repo(repos_dir, tmp_path):
+    repo = asyncio.run(git_server.ensure_bp_bare_repo("bpa"))
     work = tmp_path / "work"
-    _git("clone", bare_repo, str(work))
+    _git("clone", repo, str(work))
+    _git("checkout", "-qb", "feature1", "origin/main", cwd=work)
 
     (work / "a.txt").write_text("a")
     _git("add", "-A", cwd=work)
     _git("commit", "-qm", "c1", cwd=work)
 
-    # Creating `main` (the one-time workspace seed) is allowed.
-    assert (
-        _git("push", "origin", "HEAD:refs/heads/main", cwd=work, check=False).returncode
-        == 0
-    )
-
-    # `main` is deploy-only: a direct push to the EXISTING main is rejected,
-    # even a fast-forward — main is advanced server-side by the gated deploy.
-    (work / "b.txt").write_text("b")
-    _git("add", "-A", cwd=work)
-    _git("commit", "-qm", "c2", cwd=work)
+    # `main` is deploy-only: it always exists (the seed commit), so ANY direct
+    # push to it is rejected — main is advanced server-side by the gated sync.
     blocked = _git("push", "origin", "HEAD:refs/heads/main", cwd=work, check=False)
     assert blocked.returncode != 0
     assert "deploy-only" in (blocked.stderr + blocked.stdout).lower()
@@ -104,6 +125,37 @@ def test_fast_forward_only_enforcement(bare_repo, tmp_path):
     # Branch deletion is rejected.
     deleted = _git("push", "origin", "--delete", "feature1", cwd=work, check=False)
     assert deleted.returncode != 0
+
+    # A second BP repo is fully independent: its main is still the seed.
+    other = asyncio.run(git_server.ensure_bp_bare_repo("bpb"))
+    assert _git("-C", other, "ls-tree", "main").stdout.strip() == ""
+
+
+def test_bp_main_has_content_flips_after_server_side_advance(repos_dir, tmp_path):
+    repo = asyncio.run(git_server.ensure_bp_bare_repo("bpa"))
+    work = tmp_path / "w"
+    _git("clone", repo, str(work))
+    (work / "f.txt").write_text("x")
+    _git("add", "-A", cwd=work)
+    _git("commit", "-qm", "content", cwd=work)
+    _git("push", "origin", "HEAD:refs/heads/u1", cwd=work)
+    # Server-side ff of main (how gitops advances it — bypasses the hook).
+    _git("-C", repo, "update-ref", "refs/heads/main", "refs/heads/u1")
+    assert asyncio.run(git_server.bp_main_has_content("bpa")) is True
+
+
+def test_git_http_path_validation():
+    from app.routes.git_http import _valid_git_path
+
+    assert _valid_git_path("bpa.git/info/refs")
+    assert _valid_git_path("bpa.git/git-upload-pack")
+    assert _valid_git_path("my-bp_2.x.git/objects/info/packs")
+    assert not _valid_git_path("bpa/info/refs")  # no .git suffix
+    assert not _valid_git_path("../etc.git/info/refs")
+    assert not _valid_git_path("bpa.git/../other.git/info/refs")
+    assert not _valid_git_path(".hidden.git/info/refs")
+    assert not _valid_git_path("")
+    assert not _valid_git_path("bpa.git//info/refs")
 
 
 def test_derive_bp_and_copy_parsing():

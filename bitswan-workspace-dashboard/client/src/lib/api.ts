@@ -42,8 +42,34 @@ async function getJson<T>(url: string): Promise<T> {
     notifySessionExpired();
     throw new SessionExpiredError();
   }
-  if (!r.ok) throw new Error(`${url} returned ${r.status}`);
+  if (!r.ok) await throwHttpError(url, r);
   return (await r.json()) as T;
+}
+
+// Turn a non-2xx response into an Error that carries the server's own message
+// (the dashboard proxy forwards gitops errors as `{error, status, body:{detail}}`;
+// gitops itself uses `{detail}`), so callers can surface the REAL failure — e.g.
+// a Docker build error from the supply-chain preview — instead of a generic
+// "returned 502". Never swallow the reason.
+async function throwHttpError(url: string, r: Response): Promise<never> {
+  let detail = '';
+  try {
+    const ct = r.headers.get('content-type') ?? '';
+    if (ct.includes('application/json')) {
+      const j = (await r.json()) as Record<string, unknown>;
+      const nested = j.body as Record<string, unknown> | undefined;
+      detail =
+        (typeof nested?.detail === 'string' && nested.detail) ||
+        (typeof j.detail === 'string' && j.detail) ||
+        (typeof j.error === 'string' && j.error) ||
+        '';
+    } else {
+      detail = (await r.text()).trim().slice(0, 800);
+    }
+  } catch {
+    // Body unreadable — fall back to the status-only message below.
+  }
+  throw new Error(detail || `${url} returned ${r.status}`);
 }
 
 // Retry once on transient network errors. Container-state actions trigger a
@@ -284,9 +310,15 @@ export interface BpHistoryEntry {
   deployed_at: string;
   // eslint-disable-next-line no-restricted-syntax -- nullable wire field
   deployed_by: string | null;
-  status: string; // "deployed" | "rolled-back" | "firewall" | "backup"
-  source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall" | "backup"
+  status: string; // "deployed" | "rolled-back" | "firewall" | "backup" | "secret"
+  source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall" | "backup" | "secret"
   members: Record<string, BpHistoryMember>;
+  /** Present on secret-change events: the realm + a one-line summary. The value
+   *  itself is never sent — only that it changed (this is a rollback point). */
+  secret?: {
+    realm: string;
+    summary: string;
+  };
   /** Present on firewall-change events: the realm + a one-line summary of the
    *  change and the resulting allowed/denied counts (for the audit-log row). */
   firewall?: {
@@ -321,6 +353,17 @@ export type StageSecrets = Record<string, string>;
  *  covers live-dev). Secret NAMES are shared across stages; VALUES are per
  *  stage, so this is the full per-stage map. */
 export type BpSecrets = Record<string, StageSecrets>;
+
+/** Inspect → Secrets snapshot: a BP stage's decrypted secrets as they were at a
+ *  bitswan.yaml revision. `values` is empty for production unless the caller is
+ *  admin/auditor (redacted server-side). */
+export interface BpSecretsSnapshot {
+  bp: string;
+  commit: string;
+  stage: string;
+  realm: string;
+  values: StageSecrets;
+}
 
 /** Disaster-recovery cadence policy: how often a manual recovery test is
  *  expected. Maps to a window in days (monthly 30, quarterly 91,
@@ -499,6 +542,16 @@ export interface SyncCopyResult {
   deploy_task_id?: string | null;
 }
 
+/** Gitops `POST /copies/{name}/rebase` response — pulling main into a copy. */
+export interface RebaseCopyResult {
+  status: 'success' | 'needs_rebase' | 'noop';
+  message: string;
+  /** BPs whose image dir changed in the pull and were redeployed. */
+  redeployed_bps?: string[];
+  /** Task ids of the live-dev redeploys spawned for those BPs. */
+  deploy_task_ids?: string[];
+}
+
 /** Gitops `GET /copies/{name}/divergence?bp=` — commit counts vs main, split
  *  into the viewed business process vs all other business processes. */
 export interface BpDivergence {
@@ -593,7 +646,12 @@ export const api = {
   /** Roll a BP stage back to a prior state. `kind=deploy` (default) re-points the
    *  member deployments; `kind=firewall` restores the egress allow-list to that
    *  commit (production needs admin/auditor — gated server-side). */
-  bpRollback: (bp: string, stage: string, gitCommit: string, kind: 'deploy' | 'firewall' = 'deploy') =>
+  bpRollback: (
+    bp: string,
+    stage: string,
+    gitCommit: string,
+    kind: 'deploy' | 'firewall' = 'deploy',
+  ) =>
     postJson<{ message: string }>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/rollback`,
       { stage, git_commit: gitCommit, kind },
@@ -613,6 +671,13 @@ export const api = {
   bpSecrets: (bp: string) =>
     getJson<BpSecrets>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
+    ),
+  /** Inspect → Secrets snapshot: a BP stage's decrypted secrets at a commit.
+   *  Production values are redacted server-side unless the caller is
+   *  admin/auditor (the BFF supplies the verified identity, same as bpSecrets). */
+  bpSecretsSnapshot: (bp: string, commit: string, stage: string) =>
+    getJson<BpSecretsSnapshot>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/secrets-snapshot?commit=${encodeURIComponent(commit)}&stage=${encodeURIComponent(stage)}`,
     ),
   /** Apply a BP's secrets (all stages) — encrypts + versions them in
    *  bitswan.yaml as one commit. Names are shared; values are per stage. */
@@ -848,15 +913,30 @@ export const api = {
       getJson<BpDivergence>(
         `/api/copies/${encodeURIComponent(name)}/divergence?bp=${encodeURIComponent(bp)}`,
       ),
+    /** Per-BP ahead/behind for the whole copy in one call (only diverging BPs
+     *  are present). Lets the switcher show ↑/↓ on each BP at a glance. */
+    divergenceAll: (name: string) =>
+      getJson<Record<string, { ahead: number; behind: number }>>(
+        `/api/copies/${encodeURIComponent(name)}/divergence-all`,
+      ),
+    /** Make a BP exist in a copy, cloning it fresh from main if the copy lacks
+     *  it (idempotent). Lets the switcher offer EVERY copy for a BP — selecting
+     *  a copy that doesn't carry the BP materializes it here. */
+    ensureBp: (name: string, bp: string) =>
+      postJson<{ ok: boolean; already: boolean; copy: string; bp: string }>(
+        `/api/copies/${encodeURIComponent(name)}/bp/${encodeURIComponent(bp)}/ensure`,
+        {},
+      ),
     diff: (name: string, p?: string) =>
       getJson<{ diff: string }>(
         `/api/copies/${encodeURIComponent(name)}/diff${p ? `?path=${encodeURIComponent(p)}` : ''}`,
       ),
     /** Unified diff introduced by a single commit (`git show`), for the
-     *  clickable rows in the History view. */
-    commitDiff: (name: string, sha: string) =>
+     *  clickable rows in the History view. `bp` names the business-process
+     *  repo the commit lives in (each BP is its own repo). */
+    commitDiff: (name: string, sha: string, bp?: string) =>
       getJson<{ diff: string }>(
-        `/api/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff`,
+        `/api/copies/${encodeURIComponent(name)}/commit/${encodeURIComponent(sha)}/diff${bp ? `?bp=${encodeURIComponent(bp)}` : ''}`,
       ),
     /**
      * Sync the copy into main. Commits WIP and, when the copy is a pure
@@ -869,8 +949,23 @@ export const api = {
         `/api/copies/${encodeURIComponent(name)}/sync`,
         bp ? { bp } : {},
       ),
-    history: (name: string) =>
-      getJson<CopyHistory>(`/api/copies/${encodeURIComponent(name)}/history`),
+    /**
+     * Pull main's new commits INTO the copy (rebase the whole copy onto main).
+     * The opposite direction from `sync`. A clean rebase advances the copy and
+     * redeploys live-dev only for BPs whose image dir changed; `needs_rebase`
+     * means a conflict that the coding agent must resolve.
+     */
+    rebase: (name: string) =>
+      postJson<RebaseCopyResult>(
+        `/api/copies/${encodeURIComponent(name)}/rebase`,
+        {},
+      ),
+    /** Copy-branch + main commit logs with deploy tags, scoped to one
+     *  business process's repo. */
+    history: (name: string, bp: string) =>
+      getJson<CopyHistory>(
+        `/api/copies/${encodeURIComponent(name)}/history?bp=${encodeURIComponent(bp)}`,
+      ),
   },
 
   snapshots: {

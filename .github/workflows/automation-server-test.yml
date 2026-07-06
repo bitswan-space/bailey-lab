@@ -142,9 +142,6 @@ jobs:
 
       - name: Initialize daemon
         run: |
-          # The workspace runs the locally-built -dev images (see the dev-images
-          # build step below); `_test init --dev` resolves them, so the daemon
-          # needs no per-image env overrides here.
           sudo ./bitswan automation-server-daemon init
           # Fix permissions on config file so runner user can read it
           sudo chmod 644 /home/runner/.config/bitswan/automation_server_config.toml || true
@@ -168,28 +165,46 @@ jobs:
           echo "Routes:"
           ./bitswan ingress list-routes || true
 
-      - name: Build workspace-service dev images from source
+      - name: Build gitops image from source
         run: |
-          # Build the workspace-service images this branch runs, tagged
-          # bitswan/<svc>-dev:latest; `_test init --dev` below resolves exactly
-          # those. Skip the dashboard — the test inits with --no-dashboard. On a
-          # sub-build failure the script prints that image's full log and exits
-          # non-zero. (The daemon's own runtime image is built in the next step;
-          # it's not a workspace service.)
-          "${{ github.workspace }}/build-dev-images.sh" --skip dashboard
+          # Build a fresh gitops image from this monorepo's source so the e2e
+          # exercises the in-repo gitops (and its baked example templates), not
+          # a published image. Absolute path: this job's default working dir is
+          # bitswan-automation-server.
+          docker build -t bitswan/gitops-local:latest -f "${{ github.workspace }}/bitswan-gitops/Dockerfile" "${{ github.workspace }}"
+
+      - name: Build coding-agent image from source
+        run: |
+          # Build the in-repo coding-agent so the e2e exercises this branch's
+          # CLI (e.g. the `--copy` flag / `?copy=` gitops calls), not a
+          # published image that may lag the gitops/daemon API.
+          docker build -t bitswan/coding-agent-local:latest -f "${{ github.workspace }}/bitswan-coding-agent/Dockerfile" "${{ github.workspace }}/bitswan-coding-agent"
+
+      - name: Build egress-gateway image from source
+        run: |
+          # Dev deployments now stand up a default monitor-mode egress firewall
+          # gateway (observe-only, zero blast radius), and the BP worker shares
+          # its netns + gates its start on the gateway becoming healthy. gitops
+          # references the gateway by BITSWAN_EGRESS_GATEWAY_IMAGE (default
+          # bitswan/egress-gateway:latest), so build that tag here or the deploy
+          # can't pull it and every BP deploy fails.
+          docker build -t bitswan/egress-gateway:latest -f "${{ github.workspace }}/bitswan-automation-server/cmd/egress-gateway/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
 
       - name: Build automation-server-runtime image from source
         run: |
-          # The daemon runs this image (debian + docker CLI + git) with the
-          # bitswan binary mounted at runtime. Not a workspace service, so it is
-          # not part of build-dev-images.sh.
+          # The per-workspace infra-driver sidecar runs this image (debian +
+          # docker CLI + git + git-http-backend) with the bitswan binary mounted
+          # at runtime. The workspace compose references it as
+          # bitswan/automation-server-runtime:latest and brings it up with
+          # `--pull missing`, so build the tag here or the sidecar can't start
+          # and `docker compose up` fails.
           docker build -t bitswan/automation-server-runtime:latest -f "${{ github.workspace }}/bitswan-automation-server/Dockerfile" "${{ github.workspace }}/bitswan-automation-server"
 
       - name: "E2E: create a business process and reach its frontend"
         timeout-minutes: 15
         run: |
           echo "=== Creating a business process and verifying the frontend ==="
-          ./bitswan _test init --dev --no-remove || exit 1
+          ./bitswan _test init --gitops-image bitswan/gitops-local:latest --coding-agent-image bitswan/coding-agent-local:latest --no-remove || exit 1
           ./bitswan _test cleanup || true
 
       - name: "Diagnostics on E2E failure"

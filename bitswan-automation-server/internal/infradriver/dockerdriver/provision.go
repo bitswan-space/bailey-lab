@@ -15,6 +15,13 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 )
 
+// bpPostgresConnLimit is the per-BP-role Postgres CONNECTION LIMIT. It bounds
+// how many connections any single BP backend can hold, server-side, so a
+// runaway or misconfigured backend pool cannot exhaust the shared postgres
+// server and starve other BPs. Headroom above the example backend's pool
+// (SetMaxOpenConns(5)) to allow a couple of replicas; the superuser bypasses it.
+const bpPostgresConnLimit = 10
+
 // Port of gitops bp_databases.py's deploy-time provisioning, run after
 // compose-up (gitops's _provision_bp_databases). gitops loses docker.sock, so
 // the per-BP Postgres DBs / MinIO buckets the backends need are created here, by
@@ -262,14 +269,20 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 		return err
 	}
 	// Create the LOGIN role or sync its password — one idempotent statement.
+	// CONNECTION LIMIT is a server-side cap: a BP backend's pool cannot exceed
+	// this many connections no matter what its (arbitrary, user-controlled) code
+	// requests, so one misbehaving backend can never exhaust the shared
+	// postgres server's connection slots and starve every other BP. The
+	// superuser bypasses this, so admin/provisioning is unaffected. Applied to
+	// existing roles too (the ALTER branch), so a redeploy caps legacy roles.
 	createOrAlter := fmt.Sprintf(
-		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %q LOGIN PASSWORD '%s'; ELSE ALTER ROLE %q WITH LOGIN PASSWORD '%s'; END IF; END $$;",
-		role, role, pass, role, pass)
+		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %q LOGIN CONNECTION LIMIT %d PASSWORD '%s'; ELSE ALTER ROLE %q WITH LOGIN CONNECTION LIMIT %d PASSWORD '%s'; END IF; END $$;",
+		role, role, bpPostgresConnLimit, pass, role, bpPostgresConnLimit, pass)
 	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", createOrAlter); rc != 0 {
 		return fmt.Errorf("ensure role %s: %s", role, strings.TrimSpace(stderr))
 	}
-	// Use (not own) the public schema + its existing objects, and stay usable for
-	// objects admin creates later. Connected to the BP's own database.
+	// Full use of the public schema + its existing objects, and default privileges
+	// for objects admin creates later. Connected to the BP's own database.
 	grants := strings.Join([]string{
 		fmt.Sprintf("GRANT ALL ON SCHEMA public TO %q;", role),
 		fmt.Sprintf("GRANT ALL ON ALL TABLES IN SCHEMA public TO %q;", role),
@@ -279,6 +292,29 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 	}, " ")
 	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", grants); rc != 0 {
 		return fmt.Errorf("grant on %s to %s: %s", dbName, role, strings.TrimSpace(stderr))
+	}
+	// Make the role OWN its tables/sequences/views. Backends run arbitrary
+	// migrations (ALTER TABLE, CREATE INDEX, DROP CONSTRAINT), and Postgres
+	// requires *ownership* — not mere privileges — for DDL, so GRANT ALL alone
+	// makes any migration fail with "must be owner of table …". Existing objects
+	// may be owned by admin (legacy databases created before scoped roles) or by
+	// a different role (a live-dev DB cloned WITH TEMPLATE inherits the source
+	// role's ownership), so reassign every public-schema object to this role.
+	// The database and schema stay admin-owned, so the role still cannot drop
+	// them. Idempotent (objects the backend itself created are already owned by
+	// the role); runs each deploy so it also repairs pre-existing databases.
+	reassign := fmt.Sprintf(
+		"DO $$ DECLARE r record; BEGIN "+
+			"FOR r IN SELECT tablename FROM pg_tables WHERE schemaname='public' LOOP "+
+			"EXECUTE format('ALTER TABLE public.%%I OWNER TO %q', r.tablename); END LOOP; "+
+			"FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname='public' LOOP "+
+			"EXECUTE format('ALTER SEQUENCE public.%%I OWNER TO %q', r.sequencename); END LOOP; "+
+			"FOR r IN SELECT table_name FROM information_schema.views WHERE table_schema='public' LOOP "+
+			"EXECUTE format('ALTER VIEW public.%%I OWNER TO %q', r.table_name); END LOOP; "+
+			"END $$;",
+		role, role, role)
+	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", reassign); rc != 0 {
+		return fmt.Errorf("reassign ownership in %s to %s: %s", dbName, role, strings.TrimSpace(stderr))
 	}
 	// Lock CONNECT to this role so no other BP role can reach this database.
 	lock := fmt.Sprintf("REVOKE CONNECT ON DATABASE %q FROM PUBLIC; GRANT CONNECT ON DATABASE %q TO %q;", dbName, dbName, role)
@@ -607,16 +643,22 @@ func reconcilePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext
 		}
 	}
 	for db := range want {
-		if !existing[db] {
-			if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
-				fmt.Sprintf("CREATE DATABASE %q;", db)); rc != 0 && !strings.Contains(stderr, "already exists") {
-				report("provision", fmt.Sprintf("create database %s deferred: %s", db, strings.TrimSpace(stderr)))
-				continue
-			}
+		if existing[db] {
+			// Already provisioned by an earlier apply — its role/grants/ownership
+			// are in place. Re-running ensureBPRole (several psql execs) for EVERY
+			// database on EVERY apply was the dominant deploy cost (tens of seconds
+			// on a large workspace). Skip it for existing DBs; the LIVE DB's role is
+			// re-ensured fail-fast in ensureLivePostgresDBs whenever its backend is
+			// (re)created, so ownership repairs still reach live DBs.
+			continue
 		}
-		// Scope the per-DB login role (covers standby blue-green slots and any
-		// pre-existing DB being scoped for the first time); best-effort here, the
-		// live DB's role is created fail-fast in ensureLivePostgresDBs.
+		if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
+			fmt.Sprintf("CREATE DATABASE %q;", db)); rc != 0 && !strings.Contains(stderr, "already exists") {
+			report("provision", fmt.Sprintf("create database %s deferred: %s", db, strings.TrimSpace(stderr)))
+			continue
+		}
+		// Scope the per-DB login role for the just-created database (covers standby
+		// blue-green slots created on a promote).
 		if err := ensureBPRole(ctx, container, user, wctx.SecretsDir, realm, db); err != nil {
 			report("provision", fmt.Sprintf("scope role for %s deferred: %v", db, err))
 		}
@@ -663,15 +705,18 @@ func reconcileMinioBuckets(ctx context.Context, wctx infradriver.WorkspaceContex
 		}
 	}
 	for b := range want {
-		if !existing[b] {
-			if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+b); rc != 0 {
-				report("provision", fmt.Sprintf("create bucket %s deferred: %s", b, strings.TrimSpace(e)))
-				continue
-			}
+		if existing[b] {
+			// Already provisioned (bucket + scoped user/policy) by an earlier apply.
+			// Re-running ensureBPMinioUser (several mc execs) for EVERY bucket on
+			// EVERY apply was a dominant deploy cost. Skip existing buckets.
+			continue
 		}
-		// Scope a per-bucket MinIO user+policy so the backend reaches only its own
-		// bucket. Best-effort: runs before the production health gate, so a fresh
-		// backend that briefly raced it recovers on its next connect.
+		if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+b); rc != 0 {
+			report("provision", fmt.Sprintf("create bucket %s deferred: %s", b, strings.TrimSpace(e)))
+			continue
+		}
+		// Scope a per-bucket MinIO user+policy for the just-created bucket so the
+		// backend reaches only its own bucket.
 		if err := ensureBPMinioUser(ctx, container, ak, sk, wctx.SecretsDir, realm, b); err != nil {
 			report("provision", fmt.Sprintf("scope minio user for %s deferred: %v", b, err))
 		}

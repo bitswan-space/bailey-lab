@@ -278,6 +278,18 @@ func openBaileyDB() (*sql.DB, error) {
 			baileyDBErr = fmt.Errorf("migrate endpoints.source: %w", err)
 			return
 		}
+		// Migration for source_bp: with per-BP deploy repos each gitops route is
+		// tagged with its business process, so a per-BP ingress reconcile prunes
+		// only its OWN bp's routes — never a sibling BP's. Existing rows default to
+		// '' (untagged); an untagged gitops route is never pruned by a per-BP
+		// reconcile (it gets its bp backfilled on the next upsert), so the split
+		// can't tear down routes that predate tagging.
+		if _, err := db.Exec(`ALTER TABLE endpoints ADD COLUMN source_bp TEXT NOT NULL DEFAULT ''`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate endpoints.source_bp: %w", err)
+			return
+		}
 		// Migration for databases created before devices.origin existed. origin
 		// records HOW a device became trusted ("root" = the claim/TOFU
 		// bootstrap device; "linked" = approved/self-trusted later). The device

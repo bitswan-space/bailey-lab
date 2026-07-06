@@ -329,7 +329,34 @@ def dump_bitswan_yaml(bs_yaml: dict, f) -> None:
     yaml.dump(out, f)
 
 
-def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
+# ── per-BP deploy state ────────────────────────────────────────────────────
+# Deploy state is split into one bitswan.yaml PER business process, each in its
+# own git repo, at <gitops_dir>/bp/<bp>/bitswan.yaml (so the driver compiles +
+# `docker compose`s one BP at a time — see the per-BP-deploy-state plan). A
+# whole-workspace read AGGREGATES every per-BP file back into the single dict
+# shape all readers already expect (union of business_processes / firewall /
+# backups / secrets, then hydrate the flat `deployments` view). A per-BP read
+# targets one bp dir directly. Pre-split (legacy) workspaces have a single
+# top-level bitswan.yaml and no bp/ dir — handled transparently.
+
+_BP_KEY = "business_processes"
+# Every top-level bitswan.yaml map that is keyed by business process. A per-BP
+# file holds only its BP's entry in each; a whole-workspace read unions them.
+_WS_MERGE_KEYS = (_BP_KEY, "firewall", "backups", "secrets", "disaster_recovery")
+
+
+def bp_state_dir(gitops_dir: str) -> str:
+    """The dir holding per-BP deploy repos/state: <gitops_dir>/bp."""
+    return os.path.join(gitops_dir, "bp")
+
+
+def bp_state_path(gitops_dir: str, bp: str) -> str:
+    """The per-BP working tree for one business process: <gitops_dir>/bp/<bp>."""
+    return os.path.join(bp_state_dir(gitops_dir), bp)
+
+
+def _read_single_bitswan(bitswan_dir: str) -> dict[str, Any] | None:
+    """Read + hydrate ONE bitswan.yaml file at <bitswan_dir>/bitswan.yaml."""
     bitswan_yaml_path = os.path.join(bitswan_dir, "bitswan.yaml")
     try:
         if os.path.exists(bitswan_yaml_path):
@@ -337,11 +364,171 @@ def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
                 bs_yaml: dict = yaml.load(f, Loader=_SAFE_LOADER)
             # Hydrate the flat `deployments` view from the tree so all readers
             # work unchanged. (Legacy flat-only files are returned as-is.)
-            if isinstance(bs_yaml, dict) and bs_yaml.get("business_processes"):
+            if isinstance(bs_yaml, dict) and bs_yaml.get(_BP_KEY):
                 bs_yaml["deployments"] = _tree_to_flat(bs_yaml)
             return bs_yaml
     except Exception:
         return None
+
+
+def read_workspace_bitswan(gitops_dir: str) -> dict[str, Any] | None:
+    """Aggregate every per-BP bitswan.yaml under <gitops_dir>/bp/* into the one
+    whole-workspace dict shape readers expect. Falls back to the legacy single
+    file when no bp/ dir exists (pre-split workspace)."""
+    bp_dir = bp_state_dir(gitops_dir)
+    if not os.path.isdir(bp_dir):
+        return _read_single_bitswan(gitops_dir)
+    merged: dict[str, Any] = {k: {} for k in _WS_MERGE_KEYS}
+    for bp in sorted(os.listdir(bp_dir)):
+        sub = os.path.join(bp_dir, bp)
+        if not os.path.isdir(sub):
+            continue
+        y = _read_single_bitswan(sub)
+        if not isinstance(y, dict):
+            continue
+        for k in _WS_MERGE_KEYS:
+            for name, val in (y.get(k) or {}).items():
+                merged[k][name] = val
+    # Drop empty top-level maps to keep the dict shape identical to the legacy
+    # file (which omits keys it never wrote), then hydrate the flat view.
+    merged = {k: v for k, v in merged.items() if v}
+    merged["deployments"] = _tree_to_flat(merged) if merged.get(_BP_KEY) else {}
+    return merged
+
+
+def read_bitswan_yaml(bitswan_dir: str) -> dict[str, Any] | None:
+    """Read deploy state from a gitops dir. When the per-BP layout is present
+    (<bitswan_dir>/bp/*) this aggregates every BP; otherwise it reads the single
+    file. Per-BP callers that want ONE BP pass that BP's dir (which has a
+    bitswan.yaml and no bp/ subdir) — they get just that BP."""
+    if os.path.isdir(bp_state_dir(bitswan_dir)):
+        return read_workspace_bitswan(bitswan_dir)
+    return _read_single_bitswan(bitswan_dir)
+
+
+def bp_from_relative_path(rel: str | None) -> str:
+    """The RAW business process of a deployment, from its relative_path
+    (copies/<copy>/<bp>/<automation>). Structured path parsing — the same rule as
+    bp_databases.derive_bp_and_copy — NOT a name heuristic. Empty when the path
+    has no bp segment. Inlined here (not imported) to avoid a utils↔bp_databases
+    cycle."""
+    if not rel:
+        return ""
+    parts = rel.replace("\\", "/").split("/")
+    if len(parts) >= 2 and parts[0] == "copies":
+        parts = parts[2:]  # drop copies/<copy>
+    if len(parts) >= 2:  # <bp>/<automation>...
+        return sanitize_automation_name(parts[0])
+    return ""
+
+
+def deployment_bp(conf: dict, context_fallback: str = "") -> str:
+    """Raw bp of a deployment conf: from relative_path, falling back to the
+    deployment context (a top-level automation with no bp path segment)."""
+    return bp_from_relative_path((conf or {}).get("relative_path")) or context_fallback
+
+
+def _context_to_bp(bs_yaml: dict) -> dict[str, str]:
+    """Map each business_processes CONTEXT key (bp for main, copy-<copy>-<bp> for
+    copies) to its RAW bp, using the deployments' relative_path. Per-BP deploy
+    repos are keyed by raw bp, so a bp's file holds all its contexts."""
+    out: dict[str, str] = {}
+    tree = _flat_to_tree(bs_yaml)
+    for ctx, stages in tree.items():
+        raw = ""
+        for _stage, node in (stages or {}).items():
+            for _dep_id, conf in ((node or {}).get("deployments") or {}).items():
+                raw = deployment_bp(conf, ctx)
+                if raw:
+                    break
+            if raw:
+                break
+        out[ctx] = raw or ctx
+    return out
+
+
+def bps_in(bs_yaml: dict) -> set[str]:
+    """The set of raw bps present in a whole-workspace dict (across deployments,
+    firewall, backups, secrets)."""
+    bps = set(_context_to_bp(bs_yaml).values())
+    for k in ("firewall", "backups", "secrets"):
+        bps.update((bs_yaml.get(k) or {}).keys())
+    return {b for b in bps if b}
+
+
+def bp_slice(bs_yaml: dict, bp: str) -> dict:
+    """Extract ONE raw business process's deploy state from a whole-workspace
+    dict: every business_processes CONTEXT belonging to this bp (main + copies)
+    plus its firewall/backups/secrets entries. This is exactly what a per-BP
+    bitswan.yaml holds; aggregating every bp's slice round-trips to the whole
+    dict."""
+    tree = _flat_to_tree(bs_yaml)
+    ctx_bp = _context_to_bp(bs_yaml)
+    out: dict[str, Any] = {}
+    bp_tree = {ctx: node for ctx, node in tree.items() if ctx_bp.get(ctx, ctx) == bp}
+    if bp_tree:
+        out[_BP_KEY] = bp_tree
+    for k in _WS_MERGE_KEYS:
+        if k == _BP_KEY:
+            continue
+        m = bs_yaml.get(k) or {}
+        if bp in m:
+            out[k] = {bp: m[bp]}
+    return out
+
+
+def dump_bp_bitswan(bs_yaml: dict, bp: str, f) -> None:
+    """Persist ONE BP's slice of a whole-workspace dict to its own bitswan.yaml."""
+    yaml.dump(bp_slice(bs_yaml, bp), f)
+
+
+def write_bp_bitswan(gitops_dir: str, bp: str, bs_yaml: dict) -> str:
+    """Write bp's slice to <gitops_dir>/bp/<bp>/bitswan.yaml (creating the dir),
+    returning the per-BP working-tree path. The dir is committed + pushed to the
+    BP's own deploy repo by update_bp_git."""
+    bp_dir = bp_state_path(gitops_dir, bp)
+    os.makedirs(bp_dir, exist_ok=True)
+    with open(os.path.join(bp_dir, "bitswan.yaml"), "w") as f:
+        dump_bp_bitswan(bs_yaml, bp, f)
+    return bp_dir
+
+
+async def ensure_bp_state_repo(gitops_home: str, bp: str) -> None:
+    """Make sure the BP's state working tree (<gitops>/bp/<bp>) is a git repo.
+    LOCAL only — no remote: the BP's git history IS its deploy history (read by
+    bp_history), and the deploy PUSH is done separately by the infra-driver
+    client to the BP's deploy repo. Idempotent. A new BP (created after the
+    daemon migration) is initialized here on its first write."""
+    bp_dir = bp_state_path(gitops_home, bp)
+    os.makedirs(bp_dir, exist_ok=True)
+    if not os.path.isdir(os.path.join(bp_dir, ".git")):
+        await call_git_command("git", "init", "-b", "main", cwd=bp_dir)
+
+
+async def update_bp_git(
+    gitops_home: str,
+    gitops_home_host: str,
+    bp: str,
+    deployment_id: str,
+    action: str,
+    deployed_by: str | None = None,
+    message: str | None = None,
+    extra_paths: list[str] | None = None,
+):
+    """Commit ONE BP's bitswan.yaml in its own local repo (<gitops>/bp/<bp>), so
+    the BP's git history is its deploy history. Auto-inits the repo on first
+    write. No push here — the driver client pushes this working tree to the BP's
+    deploy repo separately (see apply_compose_for_deployments)."""
+    await ensure_bp_state_repo(gitops_home, bp)
+    await update_git(
+        bp_state_path(gitops_home, bp),
+        bp_state_path(gitops_home_host, bp),
+        deployment_id,
+        action,
+        deployed_by=deployed_by,
+        message=message,
+        extra_paths=extra_paths,
+    )
 
 
 def calculate_uptime(created_at: str) -> str:
@@ -888,15 +1075,22 @@ async def update_git(
             )
 
         # Attribute the commit to the operator who triggered the deploy/promote.
-        # `deployed_by` is their email; use it for BOTH the author and the
-        # committer so `git log --format='%an <%ae>|%cn <%ce>'` shows the
-        # operator, not the gitops service identity. We set the committer via
-        # `-c user.name/user.email` (which survive the nsenter/host path that
-        # GIT_COMMITTER_* env vars would not) and the author via --author.
-        if deployed_by:
-            author = f"{deployed_by} <{deployed_by}>"
-            ident_name = deployed_by
-            ident_email = deployed_by
+        # Prefer the explicit `deployed_by`; otherwise fall back to the request's
+        # gate-verified identity (X-Forwarded-Email, carried in the
+        # `current_requester` contextvar — set for synchronous requests and
+        # copied into background deploy tasks) so the actor is the acting user,
+        # not the gitops service identity. Use it for BOTH author and committer
+        # so `git log --format='%an <%ae>|%cn <%ce>'` shows the operator. We set
+        # the committer via `-c user.name/user.email` (which survive the
+        # nsenter/host path that GIT_COMMITTER_* env vars would not) and the
+        # author via --author.
+        from app.task_queue import current_requester
+
+        actor = deployed_by or current_requester.get()
+        if actor:
+            author = f"{actor} <{actor}>"
+            ident_name = actor
+            ident_email = actor
         else:
             author = "gitops <info@bitswan.space>"
             ident_name = "gitops"

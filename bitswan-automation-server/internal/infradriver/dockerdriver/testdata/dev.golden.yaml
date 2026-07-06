@@ -90,6 +90,7 @@ services:
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: backend
+            gitops.bp: acme
             gitops.context: acme
             gitops.deployment_id: backend-acme-dev
             gitops.intended_exposed: "false"
@@ -107,7 +108,6 @@ services:
     ws1-frontend-822b-dev:
         container_name: ws1-frontend-822b-dev
         env_file:
-            - __ROOT__/secrets/bp/acme/dev
             - __ROOT__/secrets/postgres-dev
             - __ROOT__/secrets/minio-dev
         environment:
@@ -126,6 +126,7 @@ services:
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: frontend
+            gitops.bp: acme
             gitops.context: acme
             gitops.deployment_id: frontend-acme-dev
             gitops.intended_exposed: "true"
@@ -172,7 +173,7 @@ services:
             ws1-dev:
                 aliases:
                     - ws1-fwgw-822b-dev
-        pull_policy: always
+        pull_policy: missing
         restart: unless-stopped
     ws1-fwgw-822b-dev-proxy:
         container_name: ws1-fwgw-822b-dev-proxy
@@ -199,7 +200,7 @@ services:
             ws1-dev:
                 aliases:
                     - ws1-fwgw-822b-dev-proxy
-        pull_policy: always
+        pull_policy: missing
         restart: unless-stopped
         volumes:
             - __ROOT__/firewall:/firewall

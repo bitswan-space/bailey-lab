@@ -464,16 +464,33 @@ async def get_bp_file_content(
     return await automation_service.bp_file_content(bp, commit, path)
 
 
+@router.get("/business-processes/{bp}/secrets-snapshot")
+async def get_bp_secrets_snapshot(
+    bp: str,
+    commit: str = Query(...),
+    stage: str = Query(...),
+    by: str | None = None,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """A BP stage's decrypted secrets as they were at a bitswan.yaml revision
+    (Inspect → Secrets snapshot). The values come from the encrypted blob in
+    bitswan.yaml at `commit` — the same source a rollback restores. Production
+    values are redacted unless `by` resolves to admin/auditor."""
+    return await automation_service.read_bp_secrets_at(bp, commit, stage, by=by)
+
+
 @router.post("/business-processes/{bp}/rollback")
 async def rollback_bp(
     bp: str,
     body: RollbackBPRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    """Roll a BP stage back to a prior state. `kind=deploy` (default) re-points
-    the member deployments to a prior version; `kind=firewall` restores the
-    stage's egress allow-list to a prior commit (production needs admin/auditor).
-    Both come from the same git-derived history timeline."""
+    """Roll a BP back to a prior state. Rollback restores the BP's bitswan.yaml at
+    `git_commit` — which holds everything (deployment images, secrets, firewall,
+    backups) — so one flow covers every kind of change; a secret/deploy history
+    entry rolls back the same way. `kind=firewall` keeps the role-gated egress
+    rollback (production needs admin/auditor). All come from the same git-derived
+    history timeline."""
     if body.kind == "firewall":
         return await automation_service.rollback_firewall(
             bp=bp,
@@ -500,7 +517,7 @@ async def start_deploy(
     Replaces the editor's upload+deploy flow for environments where the
     workspace is co-located with gitops. The body is intentionally minimal
     (relative_path, stage, copy?) — gitops reads the automation source
-    directly from `/workspace-repo`, merges `bitswan_lib` if present,
+    directly from `/workspace-repo`,
     computes the merged-tree checksum, materialises `<checksum>/` if needed,
     and kicks off the existing deploy pipeline.
     """

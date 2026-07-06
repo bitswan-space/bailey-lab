@@ -25,7 +25,6 @@ type DockerComposeConfig struct {
 	GitopsPath         string
 	WorkspaceName      string
 	GitopsImage        string
-	InfraDriverImage   string // resolved infra-driver image; falls back to env/:latest when empty
 	EgressGatewayImage string // resolved egress-gateway image the driver pins for per-BP gateways
 	Domain             string
 	AocEnvVars         []string
@@ -135,17 +134,19 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 			// this (+ BITSWAN_WORKSPACE_NAME) to mount business-process containers
 			// off the volume via subpaths instead of host bind paths.
 			"BITSWAN_VOLUME_NAME=bitswan",
-			// Canonical bare repo (served over smart-HTTP, fast-forward only)
-			// and the per-copy checkouts under the workspace-repo dir. Keeping
-			// copies at <workspace-repo>/copies makes a deployment's
-			// workspace-root-relative path ("copies/<copy>/<rel>") resolve
-			// correctly both as a container-local path (join with
-			// BITSWAN_WORKSPACE_REPO_DIR) and as a volume subpath
-			// (workspaces/<ws>/<rel-path>). The `main` copy is the default scope.
+			// Per-BP canonical bare repos (<bp>.git, served over smart-HTTP,
+			// fast-forward only) and the per-copy checkouts under the
+			// workspace-repo dir. Keeping copies at <workspace-repo>/copies
+			// makes a deployment's workspace-root-relative path
+			// ("copies/<copy>/<rel>") resolve correctly both as a
+			// container-local path (join with BITSWAN_WORKSPACE_REPO_DIR) and
+			// as a volume subpath (workspaces/<ws>/<rel-path>). The `main`
+			// copy is the default scope. BITSWAN_GIT_REMOTE is the BASE URL:
+			// each BP clone's origin is <base>/<bp>.git.
 			"BITSWAN_GIT_REPOS_DIR=/git",
 			"BITSWAN_WORKSPACE_REPO_DIR=/workspace-repo",
 			"BITSWAN_COPIES_DIR=/workspace-repo/copies",
-			"BITSWAN_GIT_REMOTE=http://" + config.WorkspaceName + "-gitops:8079/git/repo.git",
+			"BITSWAN_GIT_REMOTE=http://" + config.WorkspaceName + "-gitops:8079/git",
 		},
 	}
 
@@ -180,11 +181,11 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), caEnvVars...)
 	}
 
-	// Mount the canonical bare repo (served over smart-HTTP) and the per-copy
-	// checkouts (the deploy unit). These replace the old shared workspace
-	// working-tree mount + gitops orphan-worktree gitdir rewrite.
+	// Mount the per-BP bare repos dir (each <bp>.git served over smart-HTTP)
+	// and the per-copy checkouts (the deploy unit). These replace the old
+	// shared workspace working-tree mount + single canonical repo.
 	gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
-		wsVolume("repo.git", "/git/repo.git"),
+		wsVolume("git-repos", "/git"),
 		wsVolume("copies", "/workspace-repo/copies"),
 	)
 	if hostOs == WindowsMac {
@@ -202,7 +203,8 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	gitopsService["environment"] = append(gitopsService["environment"].([]string),
 		"BITSWAN_INFRA_DRIVER_URL=http://"+config.WorkspaceName+"-infra-driver:9090",
 		"BITSWAN_INFRA_DRIVER_TOKEN="+driverToken,
-		"BITSWAN_DEPLOY_REMOTE=http://x:"+driverToken+"@"+config.WorkspaceName+"-infra-driver:9090/deploy.git",
+		// Per-BP deploy repos: each BP pushes to <base>/<bp>.deploy.git.
+		"BITSWAN_DEPLOY_REMOTE_BASE=http://x:"+driverToken+"@"+config.WorkspaceName+"-infra-driver:9090/deploy-repos",
 	)
 
 	driverService := config.buildDriverService(driverToken, wsVolume, homeDir)
@@ -238,21 +240,27 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	return buf.String(), gitopsSecretToken, nil
 }
 
-// buildDriverService builds the infra-driver sidecar: its own self-contained
-// image (docker CLI + compose + git-http-backend + syft, with the infra-driver
-// binary baked in — NOT the bitswan CLI), docker.sock, and the workspace volume
-// subpaths the compiler reads/writes. It serves the deploy repo over git
-// smart-HTTP + the /v1 primitives, guarded by the shared token.
+// buildDriverService builds the infra-driver sidecar: the same daemon runtime
+// image (docker CLI + compose + git-http-backend), the bitswan binary
+// bind-mounted as the daemon mounts its own, docker.sock, and the workspace
+// volume subpaths the compiler reads/writes. It serves the deploy repo over
+// git smart-HTTP + the /v1 primitives, guarded by the shared token.
 func (config *DockerComposeConfig) buildDriverService(token string, wsVolume func(string, string) map[string]interface{}, homeDir string) map[string]interface{} {
-	// Prefer the version resolved at init (config.InfraDriverImage). Fall back to
-	// the env override / :latest only when unset (e.g. an older caller that hasn't
-	// been updated to pass the resolved image).
-	driverImage := config.InfraDriverImage
+	driverImage := os.Getenv("BITSWAN_INFRA_DRIVER_IMAGE")
 	if driverImage == "" {
-		driverImage = os.Getenv("BITSWAN_INFRA_DRIVER_IMAGE")
+		driverImage = "bitswan/automation-server-runtime:latest"
 	}
-	if driverImage == "" {
-		driverImage = "bitswan/infra-driver:latest"
+	// The host path of the bitswan binary to bind-mount. The daemon forwards its
+	// own host binary path as BITSWAN_HOST_BINARY (it cannot use os.Executable()
+	// from inside its container); a host-CLI `workspace init` falls back to its
+	// own executable.
+	driverBinary := os.Getenv("BITSWAN_HOST_BINARY")
+	if driverBinary == "" {
+		if exe, err := os.Executable(); err == nil {
+			driverBinary = exe
+		} else {
+			driverBinary = "/usr/local/bin/bitswan"
+		}
 	}
 
 	env := []string{
@@ -262,22 +270,29 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		"BITSWAN_CERTS_DIR=" + homeDir + "/.config/bitswan/certauthorities",
 		"BITSWAN_WORKSPACE_NAME=" + config.WorkspaceName,
 	}
-	// Pin the egress-gateway image the driver's compiler materializes for per-BP
-	// firewall gateways (compile.go reads BITSWAN_EGRESS_GATEWAY_IMAGE, inherited
-	// by the apply hook via githttp.go). Resolved at init like every other image;
-	// when unset the compiler keeps its own env-or-:latest default.
-	if config.EgressGatewayImage != "" {
-		env = append(env, "BITSWAN_EGRESS_GATEWAY_IMAGE="+config.EgressGatewayImage)
+	// Pin the egress-gateway image the compiler stamps into every BP's firewall
+	// workers so the compose references an IMMUTABLE tag. That lets the gateway
+	// services use pull_policy: missing — pulled once when the version changes,
+	// never re-pulled or churned — instead of the old pull_policy: always. Prefer
+	// the version resolved at init (config.EgressGatewayImage); fall back to the
+	// BITSWAN_EGRESS_GATEWAY_IMAGE env override, else the compiler's own default.
+	egressImage := config.EgressGatewayImage
+	if egressImage == "" {
+		egressImage = os.Getenv("BITSWAN_EGRESS_GATEWAY_IMAGE")
+	}
+	if egressImage != "" {
+		env = append(env, "BITSWAN_EGRESS_GATEWAY_IMAGE="+egressImage)
 	}
 	// The compiler reads the same AOC env gitops used (org group path, etc.).
 	env = append(env, config.AocEnvVars...)
 
 	volumes := []interface{}{
+		driverBinary + ":/usr/local/bin/bitswan:ro",
 		"/var/run/docker.sock:/var/run/docker.sock",
 		// The daemon ingress socket — the driver configures ingress itself
 		// (converges routes via /ingress/reconcile) after bringing the project up.
 		"/var/run/bitswan:/var/run/bitswan",
-		wsVolume("deploy.git", "/git/deploy.git"),
+		wsVolume("deploy-repos", "/git/deploy-repos"),
 		// The deployed tree the generated compose's bind-mounts reference
 		// (workspaces/<ws>/gitops/<source>); apply materializes the push here.
 		wsVolume("gitops", "/gitops/gitops"),
@@ -307,9 +322,9 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		"volumes":     volumes,
 		"environment": env,
 		"command": []string{
-			"/usr/local/bin/infra-driver", "serve",
+			"/usr/local/bin/bitswan", "infra-driver", "serve",
 			"--listen", ":9090",
-			"--git-dir", "/git/deploy.git",
+			"--deploy-repos-dir", "/git/deploy-repos",
 			"--gitops-dir", "/gitops/gitops",
 			"--secrets-dir", "/gitops/secrets",
 			"--workspace", config.WorkspaceName,

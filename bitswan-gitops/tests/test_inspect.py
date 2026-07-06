@@ -24,23 +24,45 @@ def _git(*args, cwd):
     )
 
 
-def test_bp_files_list_and_read(tmp_path, monkeypatch):
+def _setup_bp_repo(tmp_path, monkeypatch, bp="shop"):
+    """Build the per-BP layout the Inspect backend now expects: a bare repo at
+    BITSWAN_GIT_REPOS_DIR/<bp>.git and its clone at copies/main/<bp> (copies/main
+    itself is NOT a repo anymore). Returns the clone path."""
+    repos = tmp_path / "git"
     copies = tmp_path / "copies"
-    main = copies / "main"
-    (main / "shop" / "backend").mkdir(parents=True)
+    repos.mkdir(parents=True, exist_ok=True)
+    (copies / "main").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("BITSWAN_GIT_REPOS_DIR", str(repos))
     monkeypatch.setenv("BITSWAN_COPIES_DIR", str(copies))
-    _git("init", "-q", cwd=str(main))
-    _git("config", "user.email", "t@t", cwd=str(main))
-    _git("config", "user.name", "t", cwd=str(main))
-    (main / "shop" / "README.md").write_text("# shop\n")
-    (main / "shop" / "backend" / "main.go").write_text("package main\n")
-    _git("add", "-A", cwd=str(main))
-    _git("commit", "-qm", "c1", cwd=str(main))
-    sha = _git("rev-parse", "HEAD", cwd=str(main)).stdout.strip()
+    bare = repos / f"{bp}.git"
+    _git("init", "-q", "--bare", "--initial-branch=main", str(bare), cwd=str(tmp_path))
+    clone = copies / "main" / bp
+    _git("clone", "-q", str(bare), str(clone), cwd=str(tmp_path))
+    _git("config", "user.email", "t@t", cwd=str(clone))
+    _git("config", "user.name", "t", cwd=str(clone))
+    return clone
+
+
+def _commit_push(clone, message):
+    _git("add", "-A", cwd=str(clone))
+    _git("commit", "-qm", message, cwd=str(clone))
+    # main is deploy-only on a real bare (pre-receive hook), but this test bare
+    # has no hook — push straight to main so fetch_main can see the commit.
+    _git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=str(clone))
+    return _git("rev-parse", "HEAD", cwd=str(clone)).stdout.strip()
+
+
+def test_bp_files_list_and_read(tmp_path, monkeypatch):
+    clone = _setup_bp_repo(tmp_path, monkeypatch)
+    (clone / "backend").mkdir(parents=True)
+    (clone / "README.md").write_text("# shop\n")
+    (clone / "backend" / "main.go").write_text("package main\n")
+    sha = _commit_push(clone, "c1")
 
     svc = AutomationService()
 
-    # Full recursive tree of the BP, nested folders-before-files.
+    # Full recursive tree of the BP, nested folders-before-files. Paths are
+    # BP-relative (the clone IS the BP repo — no bp/ prefix).
     tree = asyncio.run(svc.bp_file_tree("shop", sha))
     entries = tree["entries"]
     names = {e["name"]: e["kind"] for e in entries}
@@ -56,6 +78,27 @@ def test_bp_files_list_and_read(tmp_path, monkeypatch):
     # A nested file resolves too.
     g = asyncio.run(svc.bp_file_content("shop", sha, "backend/main.go"))
     assert g["content"] == "package main\n"
+
+
+def test_bp_diff_between_two_deploys(tmp_path, monkeypatch):
+    """Inspect → "Diff vs current": diffing a prior deploy's source commit
+    against the current one must surface the change (the e2e history chapter).
+    Regression guard for the per-BP layout — the diff runs inside the BP's own
+    clone in copies/main, not the (now non-repo) copies/main root."""
+    clone = _setup_bp_repo(tmp_path, monkeypatch)
+    (clone / "README.md").write_text("# shop v1\n")
+    v1 = _commit_push(clone, "v1")
+    (clone / "README.md").write_text("# shop v1\n\nManager approval tier (v2)\n")
+    v2 = _commit_push(clone, "v2")
+
+    svc = AutomationService()
+    res = asyncio.run(svc.bp_diff("shop", v1, v2))
+    assert "Manager approval tier (v2)" in res["diff"], res
+    assert res["from"] == v1 and res["to"] == v2
+
+    # A no-op diff (same commit) is genuinely empty, not an error.
+    same = asyncio.run(svc.bp_diff("shop", v2, v2))
+    assert same["diff"] == ""
 
 
 def test_scale_business_process_scales_all_members(tmp_path, monkeypatch):

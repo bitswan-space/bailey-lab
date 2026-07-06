@@ -90,8 +90,12 @@ type IngressAddRouteResponse struct {
 // for the workspace that is NOT in the set. Manual routes are never touched.
 // This is the "kubectl apply" of ingress: re-sending the same set is a no-op.
 type IngressReconcileRequest struct {
-	WorkspaceName string                   `json:"workspace_name"`
-	Routes        []IngressAddRouteRequest `json:"routes"`
+	WorkspaceName string `json:"workspace_name"`
+	// BusinessProcess scopes the reconcile to one BP (per-BP deploy repos): the
+	// prune only removes gitops routes tagged with this BP, never a sibling's.
+	// Empty = legacy whole-workspace reconcile (every gitops route is prunable).
+	BusinessProcess string                   `json:"business_process,omitempty"`
+	Routes          []IngressAddRouteRequest `json:"routes"`
 }
 
 // IngressReconcileResponse reports what converging did.
@@ -1683,7 +1687,7 @@ func (s *Server) handleIngressReconcile(w http.ResponseWriter, r *http.Request) 
 				fmt.Sprintf("apply %s: %v", route.Hostname, err))
 			continue
 		}
-		if err := setEndpointSource(outer, "gitops"); err != nil {
+		if err := setEndpointSourceBP(outer, "gitops", req.BusinessProcess); err != nil {
 			resp.Warnings = append(resp.Warnings,
 				fmt.Sprintf("mark %s gitops: %v", outer, err))
 		}
@@ -1692,7 +1696,9 @@ func (s *Server) handleIngressReconcile(w http.ResponseWriter, r *http.Request) 
 
 	// 2. Prune gitops-managed routes for this workspace that are no longer
 	//    desired. Manual routes are not in this list, so they're never pruned.
-	managed, err := listGitopsManagedHosts(req.WorkspaceName)
+	//    For a per-BP reconcile only this BP's tagged routes are candidates, so a
+	//    one-BP deploy never removes a sibling BP's (or an untagged) route.
+	managed, err := listGitopsManagedHosts(req.WorkspaceName, req.BusinessProcess)
 	if err != nil {
 		resp.Warnings = append(resp.Warnings, "list managed: "+err.Error())
 	}

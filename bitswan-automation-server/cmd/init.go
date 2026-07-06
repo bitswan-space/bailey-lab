@@ -22,7 +22,6 @@ type initOptions struct {
 	gitopsImage        string
 	dashboardImage     string
 	codingAgentImage   string
-	infraDriverImage   string
 	egressGatewayImage string
 	gitopsDevSourceDir    string
 	dashboardDevSourceDir string
@@ -72,7 +71,6 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.gitopsImage, "gitops-image", "", "Custom image for the gitops")
 	cmd.Flags().StringVar(&o.dashboardImage, "dashboard-image", "", "Custom image for the workspace-dashboard")
 	cmd.Flags().StringVar(&o.codingAgentImage, "coding-agent-image", "", "Custom image for the coding-agent")
-	cmd.Flags().StringVar(&o.infraDriverImage, "infra-driver-image", "", "Custom image for the infra-driver sidecar")
 	cmd.Flags().StringVar(&o.egressGatewayImage, "egress-gateway-image", "", "Custom image for the per-BP egress-gateway")
 	cmd.Flags().StringVar(&o.gitopsDevSourceDir, "gitops-dev-source-dir", "", "Directory to mount as /src/app in gitops container for development")
 	cmd.Flags().StringVar(&o.dashboardDevSourceDir, "dashboard-dev-source-dir", "", "Directory to mount as /workspace/dashboard-src in the workspace-dashboard container for hot-reload development")

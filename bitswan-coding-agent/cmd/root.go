@@ -12,10 +12,13 @@ var rootCmd = &cobra.Command{
 	Short: "BitSwan Coding Agent CLI",
 	Long: `CLI tool for BitSwan coding agents to interact with the workspace environment.
 
-You are working inside a BitSwan workspace COPY — your own independent clone of
-the project repo, checked out on a feature branch and isolated from other
-copies. git is installed and ` + "`origin`" + ` is already configured to the workspace
-git server.
+You are working inside a BitSwan workspace COPY — your own working environment,
+isolated from other copies. Every business-process directory under the copy
+(/workspace/copies/<copy>/<bp>/) is its OWN independent git clone on branch
+<copy>; the copy root itself is NOT a git repository. Run all git commands from
+inside a business-process directory. git is installed and ` + "`origin`" + ` is already
+configured in each clone to that business process's repo on the workspace git
+server.
 
 COMMANDS
   requirements  — Manage & run testable requirements (list, add, test, update)
@@ -75,7 +78,7 @@ DIRECTORY STRUCTURE
     image/           — Custom Dockerfile for the automation
   Live-dev deployments auto-reload when source files change.
 
-VERSION CONTROL (use normal git)
+VERSION CONTROL (use normal git, always from inside a business-process dir)
 
   Commit your work:
     git add -A && git commit -m "implement feature X"
@@ -86,6 +89,11 @@ VERSION CONTROL (use normal git)
 
   Publish your branch:
     git push origin <your-branch>
+
+  Each business process is a SEPARATE repository: committing/pushing in one
+  never publishes another business process's changes. Never run git from the
+  copy root, and never run git in a business-process directory other than the
+  one you are working on.
 
   IMPORTANT: history on the server is fast-forward-only. NEVER use
   ` + "`git push --force`" + ` / ` + "`-f`" + ` and never rewrite commits you have already

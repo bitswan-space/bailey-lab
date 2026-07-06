@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+from app.services.bp_git import publish_bp_clone
 from app.utils import (
     GitLockContext,
     call_git_command,
@@ -227,8 +228,8 @@ def discover_templates(workspace_root: str) -> dict:
 
 def _copy_dir_recursive(src: str, dest: str, skip: Optional[set[str]] = None) -> None:
     """Symlink-preserving recursive copy. Symlinks are re-created with their
-    original (verbatim) target, since templates ship links pointing at
-    in-container paths (e.g. `bitswan_lib` → `/workspace/bitswan_lib`)."""
+    original (verbatim) target, since templates may ship links pointing at
+    in-container paths."""
     if not os.path.isdir(src):
         raise ValueError(f"Template source is not a directory: {src}")
     os.makedirs(dest, exist_ok=True)
@@ -299,18 +300,24 @@ def _bp_destination(
 
 
 async def _commit(
-    cwd: str, message: str, author_email: str = "gitops@bitswan.local"
+    cwd: str, message: str, author_email: Optional[str] = None
 ) -> Optional[str]:
     """Stage everything under `cwd` and commit. Returns commit hash or None
-    if there was nothing to commit. Raises on hard failures."""
+    if there was nothing to commit. Raises on hard failures.
+
+    `author_email` (the acting user) is set as BOTH the author AND the committer
+    — via `-c user.name/email`, not just `--author`, so history shows the real
+    user and not the mechanical gitops identity. Falls back to gitops@bitswan.local
+    when no user is known."""
+    email = (author_email or "").strip() or "gitops@bitswan.local"
+    ident = ["-c", f"user.name={email}", "-c", f"user.email={email}"]
     async with GitLockContext(timeout=15.0, kind="apply template"):
         ok = await call_git_command("git", "add", "-A", cwd=cwd)
         if not ok:
             raise RuntimeError("git add -A failed")
 
-        author = f"{author_email} <{author_email}>"
         stdout, stderr, rc = await call_git_command_with_output(
-            "git", "commit", "-m", message, "--author", author, cwd=cwd
+            "git", *ident, "commit", "-m", message, cwd=cwd
         )
         if rc != 0:
             if "nothing to commit" in stdout or "nothing to commit" in stderr:
@@ -355,9 +362,12 @@ async def rename_automation(
         )
     os.rename(src, dest)
 
-    commit_cwd = os.path.join(_copies_dir(), copy or "main")
+    # Commit in the BP's own clone; a main-scope rename must also advance the
+    # repo's deploy-only main (the checkout would otherwise be realigned over).
+    commit_cwd = os.path.join(_copies_dir(), copy or "main", bp)
     try:
         await _commit(commit_cwd, f"Rename automation {old_san} → {new_san}")
+        await publish_bp_clone(commit_cwd, bp, copy)
     except Exception as e:  # noqa: BLE001 — surface but don't undo the rename
         logger.warning("rename commit failed: %s", e)
 
@@ -372,6 +382,7 @@ async def create_automation_from_template(
     group_id: Optional[str] = None,
     name: Optional[str] = None,
     copy: Optional[str] = None,
+    created_by: Optional[str] = None,
 ) -> dict:
     """Copy a template (or every automation in a group) into the BP directory
     and commit. Returns `{ "created": [ { "name", "relative_path" } ] }`.
@@ -448,12 +459,13 @@ async def create_automation_from_template(
         names = ", ".join(c["name"] for c in created)
         message = f"Add automations: {names}"
 
-    # Commit in the copy's checkout (main copy when copy is None). `git` finds
-    # the right repo from the cwd, so commits land on the right branch
-    # automatically.
-    commit_cwd = os.path.join(_copies_dir(), copy or "main")
+    # Commit in the BP's own clone (each BP is its own repo; `git` finds it
+    # from the cwd, so the commit lands on the scope's branch automatically).
+    # A main-scope scaffold must also advance the repo's deploy-only main.
+    commit_cwd = os.path.join(_copies_dir(), copy or "main", bp)
     try:
-        await _commit(commit_cwd, message)
+        await _commit(commit_cwd, message, author_email=created_by)
+        await publish_bp_clone(commit_cwd, bp, copy)
     except Exception as e:  # noqa: BLE001 — surface commit failures but don't undo the copy
         logger.warning("template commit failed: %s", e)
 

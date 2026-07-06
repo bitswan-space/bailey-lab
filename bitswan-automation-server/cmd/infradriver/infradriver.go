@@ -1,4 +1,9 @@
-package main
+// Package infradriver provides the `bitswan infra-driver` subcommands: a
+// per-workspace driver that (a) hosts a bare git remote whose post-receive hook
+// compiles + applies the pushed bitswan.yaml, and (b) serves the operational
+// container primitives + build-image over a private UNIX socket. See
+// internal/infradriver/README.md for the architecture.
+package infradriver
 
 import (
 	"context"
@@ -9,12 +14,24 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/dockerdriver"
 	"github.com/spf13/cobra"
 )
+
+// NewInfraDriverCmd is the `infra-driver` command group.
+func NewInfraDriverCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "infra-driver",
+		Short: "Per-workspace infrastructure driver (git-push apply + container primitives)",
+	}
+	cmd.AddCommand(newServeCmd())
+	cmd.AddCommand(newApplyCmd())
+	return cmd
+}
 
 // ctxFlags holds the WorkspaceContext supplied to serve and recorded in the
 // bare repo's git config so the post-receive `apply` can read it back.
@@ -36,17 +53,21 @@ func (f *ctxFlags) bind(cmd *cobra.Command) {
 
 func newServeCmd() *cobra.Command {
 	var (
-		listen string
-		gitDir string
-		token  string
-		cf     ctxFlags
+		listen         string
+		gitDir         string
+		deployReposDir string
+		token          string
+		cf             ctxFlags
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Host the deploy git remote (smart-HTTP) + container primitives over TCP",
+		Short: "Host the deploy git remote(s) (smart-HTTP) + container primitives over TCP",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if listen == "" || gitDir == "" {
-				return fmt.Errorf("--listen and --git-dir are required")
+			// Two modes: per-BP (--deploy-repos-dir, one bare repo per BP) or the
+			// legacy single-repo (--git-dir). Per-BP is preferred; --git-dir is kept
+			// so a workspace that hasn't been split yet still serves.
+			if listen == "" || (gitDir == "" && deployReposDir == "") {
+				return fmt.Errorf("--listen and one of --git-dir/--deploy-repos-dir are required")
 			}
 			if token == "" {
 				token = os.Getenv("BITSWAN_INFRA_DRIVER_TOKEN")
@@ -57,23 +78,63 @@ func newServeCmd() *cobra.Command {
 			if token == "" {
 				return fmt.Errorf("no driver token configured (set --token or BITSWAN_INFRA_DRIVER_TOKEN); refusing to serve without authentication")
 			}
-			if err := ensureBareRepo(gitDir, cf); err != nil {
-				return err
+			if deployReposDir != "" {
+				if err := ensureAllDeployRepos(deployReposDir, cf); err != nil {
+					return err
+				}
+			} else {
+				if err := ensureBareRepo(gitDir, cf); err != nil {
+					return err
+				}
 			}
-			return serveHTTP(cmd.Context(), listen, gitDir, token, cf.workspace)
+			return serveHTTP(cmd.Context(), listen, gitDir, deployReposDir, token, cf)
 		},
 	}
 	cmd.Flags().StringVar(&listen, "listen", "", "TCP address to serve git smart-HTTP + the primitive API on (e.g. :9090)")
-	cmd.Flags().StringVar(&gitDir, "git-dir", "", "bare git repo to host (post-receive applies on push)")
+	cmd.Flags().StringVar(&gitDir, "git-dir", "", "legacy single bare deploy repo to host (post-receive applies on push)")
+	cmd.Flags().StringVar(&deployReposDir, "deploy-repos-dir", "", "dir of per-BP bare deploy repos (<bp>.deploy.git); each post-receive applies only its BP")
 	cmd.Flags().StringVar(&token, "token", "", "shared bearer token guarding every endpoint (defaults to $BITSWAN_INFRA_DRIVER_TOKEN)")
 	cf.bind(cmd)
 	return cmd
 }
 
-// ensureBareRepo creates the bare repo if missing, records the workspace
-// context in its git config, and installs the post-receive hook that runs
-// `infra-driver apply`.
+// deployRepoDirFor returns the bare-repo path for a BP under reposDir.
+func deployRepoDirFor(reposDir, bp string) string {
+	return filepath.Join(reposDir, bp+".deploy.git")
+}
+
+// ensureAllDeployRepos provisions/refreshes every existing per-BP deploy repo on
+// serve startup — the driver-side analogue of gitops's ensure_all_bp_repos. New
+// BPs created after startup are provisioned on demand via the ensure primitive.
+func ensureAllDeployRepos(reposDir string, cf ctxFlags) error {
+	if err := os.MkdirAll(reposDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir deploy-repos dir %s: %w", reposDir, err)
+	}
+	entries, err := filepath.Glob(filepath.Join(reposDir, "*.deploy.git"))
+	if err != nil {
+		return err
+	}
+	for _, dir := range entries {
+		bp := strings.TrimSuffix(filepath.Base(dir), ".deploy.git")
+		if err := ensureDeployRepoAt(dir, bp, cf); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureBareRepo provisions the legacy single (whole-workspace) deploy repo.
 func ensureBareRepo(gitDir string, cf ctxFlags) error {
+	return ensureDeployRepoAt(gitDir, "", cf)
+}
+
+// ensureDeployRepoAt creates the bare repo if missing, records the workspace
+// context in its git config, and installs the post-receive hook that runs
+// `bitswan infra-driver apply`. When bp != "" it also records `bitswan.bp`, so
+// the hook's apply compiles + reconciles ONLY that business process (its
+// materialize target and bitswan.yaml are derived from gitopsdir + bp in
+// apply.go). bp == "" is the legacy whole-workspace repo.
+func ensureDeployRepoAt(gitDir, bp string, cf ctxFlags) error {
 	// The deploy repo lives on the workspace volume (owned by user1000) but the
 	// driver runs as root, so every git op (init, http-backend receive-pack, the
 	// apply hook's archive) trips git's "dubious ownership" guard and fails. Mark
@@ -99,7 +160,7 @@ func ensureBareRepo(gitDir string, cf ctxFlags) error {
 		return fmt.Errorf("git symbolic-ref HEAD main: %w: %s", err, out)
 	}
 	// Record the context so the hook can rebuild it without flags.
-	for k, v := range map[string]string{
+	cfg := map[string]string{
 		"bitswan.workspace":  cf.workspace,
 		"bitswan.domain":     cf.domain,
 		"bitswan.secretsdir": cf.secretsDir,
@@ -115,16 +176,22 @@ func ensureBareRepo(gitDir string, cf ctxFlags) error {
 		// new commit that restores a prior tree), so this never blocks a deploy.
 		"receive.denyNonFastForwards": "true",
 		"receive.denyDeletes":         "true",
-	} {
+	}
+	if bp != "" {
+		// The hook applies only this BP; apply.go derives the per-BP materialize
+		// target + bitswan.yaml path from bitswan.gitopsdir + bitswan.bp.
+		cfg["bitswan.bp"] = bp
+	}
+	for k, v := range cfg {
 		if err := exec.Command("git", "--git-dir", gitDir, "config", k, v).Run(); err != nil {
 			return fmt.Errorf("git config %s: %w", k, err)
 		}
 	}
 	self, err := os.Executable()
 	if err != nil {
-		self = "infra-driver"
+		self = "bitswan"
 	}
-	hook := fmt.Sprintf("#!/bin/sh\nexec %q apply --git-dir %q\n", self, gitDir)
+	hook := fmt.Sprintf("#!/bin/sh\nexec %q infra-driver apply --git-dir %q\n", self, gitDir)
 	hookPath := filepath.Join(gitDir, "hooks", "post-receive")
 	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
 		return fmt.Errorf("write post-receive hook: %w", err)
@@ -133,17 +200,34 @@ func ensureBareRepo(gitDir string, cf ctxFlags) error {
 }
 
 // serveHTTP serves the driver over TCP until the context is cancelled: git
-// smart-HTTP for the deploy repo (gitops pushes here; post-receive applies) plus
-// the build-image + container primitives, all guarded by the shared token.
-func serveHTTP(ctx context.Context, listen, gitDir, token, workspace string) error {
+// smart-HTTP for the deploy repo(s) (gitops pushes here; post-receive applies)
+// plus the build-image + container primitives, all guarded by the shared token.
+// Exactly one of gitDir (legacy single repo) / deployReposDir (per-BP repos) is
+// non-empty; GIT_PROJECT_ROOT is set so git-http-backend resolves the nested
+// bare repo(s) from the request path.
+func serveHTTP(ctx context.Context, listen, gitDir, deployReposDir, token string, cf ctxFlags) error {
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", listen, err)
 	}
 	// The driver is scoped to its workspace: container primitives refuse any
 	// container not labelled gitops.workspace=<workspace>.
-	server := infradriver.NewServer(dockerdriver.New(workspace))
-	server.GitProjectRoot = filepath.Dir(gitDir) // GIT_PROJECT_ROOT holds the bare repo
+	server := infradriver.NewServer(dockerdriver.New(cf.workspace))
+	var label string
+	if deployReposDir != "" {
+		// GIT_PROJECT_ROOT is the parent of the repos dir so every nested
+		// <bp>.deploy.git resolves (git-http-backend maps PATH_INFO under it).
+		server.GitProjectRoot = filepath.Dir(deployReposDir)
+		// Provision a per-BP deploy repo on demand (a BP created after startup
+		// can't be pushed to until its bare repo exists). Idempotent.
+		server.EnsureDeployRepo = func(bp string) error {
+			return ensureDeployRepoAt(deployRepoDirFor(deployReposDir, bp), bp, cf)
+		}
+		label = filepath.Base(deployReposDir)
+	} else {
+		server.GitProjectRoot = filepath.Dir(gitDir) // GIT_PROJECT_ROOT holds the bare repo
+		label = filepath.Base(gitDir)
+	}
 	server.Token = token
 	srv := &http.Server{Handler: server.Handler()}
 
@@ -153,7 +237,7 @@ func serveHTTP(ctx context.Context, listen, gitDir, token, workspace string) err
 		<-ctx.Done()
 		_ = srv.Close()
 	}()
-	fmt.Printf("infra-driver serving git+primitives on %s (repo %s)\n", listen, filepath.Base(gitDir))
+	fmt.Printf("infra-driver serving git+primitives on %s (repo %s)\n", listen, label)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}

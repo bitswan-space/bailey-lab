@@ -21,7 +21,6 @@ func NewServiceCmd() *cobra.Command {
 	cmd.AddCommand(NewMinioCmd())
 	cmd.AddCommand(NewDashboardCmd())
 	cmd.AddCommand(NewCodingAgentCmd())
-	cmd.AddCommand(NewInfraDriverCmd())
 	cmd.AddCommand(NewEgressGatewayCmd())
 
 	return cmd

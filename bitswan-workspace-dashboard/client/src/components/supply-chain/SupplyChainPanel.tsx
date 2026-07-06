@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, ExternalLink, EyeOff, Loader2, ShieldOff, Undo2 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { api, type CveSeverity, type SupplyChainReport } from '@/lib/api';
+import { SessionExpiredError } from '@/lib/session';
 import { useSupplyChainTick } from '@/components/workspace/WorkspaceProvider';
 import { cn } from '@/lib/utils';
 
@@ -63,6 +64,7 @@ export function SupplyChainPanel({
   intro?: React.ReactNode;
 }) {
   const [report, setReport] = useState<SupplyChainReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [showClean, setShowClean] = useState(false);
   const [dialog, setDialog] = useState<{
@@ -108,14 +110,23 @@ export function SupplyChainPanel({
       fetchingRef.current = true;
       queuedRef.current = false;
       if (showLoading) setLoading(true);
+      setError(null);
       fetchReport()
         .then((r) => {
           if (!mountedRef.current) return;
           statusRef.current = r?.status;
           setReport(r);
+          setError(null);
         })
-        .catch(() => {
-          if (mountedRef.current && showLoading) setReport(null);
+        .catch((e: unknown) => {
+          if (!mountedRef.current) return;
+          // Session-gone is handled app-wide by a re-login banner — stay silent.
+          // Every other failure is a REAL error (e.g. the on-demand image build
+          // failed): surface its message instead of the misleading "no source"
+          // empty state.
+          if (e instanceof SessionExpiredError) return;
+          if (showLoading) setReport(null);
+          setError(e instanceof Error ? e.message : String(e));
         })
         .finally(() => {
           fetchingRef.current = false;
@@ -194,6 +205,26 @@ export function SupplyChainPanel({
     return (
       <div className="flex items-center justify-center gap-2 p-6 text-xs text-muted-foreground">
         <Loader2 className="size-4 animate-spin" aria-hidden /> Loading supply chain…
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="flex flex-col items-center gap-3 px-3 py-12 text-center">
+        <AlertTriangle className="size-7 text-muted-foreground" aria-hidden />
+        <div className="max-w-md text-[13px] text-muted-foreground">
+          Couldn’t build or scan the image for {bp}.
+        </div>
+        <pre className="max-w-md overflow-auto whitespace-pre-wrap rounded bg-muted px-3 py-2 text-left text-[11px] text-muted-foreground">
+          {error}
+        </pre>
+        <button
+          type="button"
+          onClick={() => runFetch(true)}
+          className="rounded border border-border px-3 py-1 text-xs font-medium hover:bg-accent"
+        >
+          Retry
+        </button>
       </div>
     );
   }
