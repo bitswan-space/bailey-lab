@@ -8,9 +8,9 @@ import "testing"
 // (ingress route + Bailey rows) without depending on gitops, and without
 // touching another workspace's endpoints.
 //
-// No ingress container runs under `go test`, so DetectIngressType() defaults to
-// Traefik and traefikapi.RemoveRoute treats "unreachable" as success — which is
-// exactly the path that still deletes the Bailey endpoint/protected_route rows.
+// No ingress container runs under `go test`, so traefikapi.RemoveRoute treats
+// "unreachable" as success — which is exactly the path that still deletes the
+// Bailey endpoint/protected_route rows.
 func TestWorkspaceRemove_RouteCleanupEnumeration(t *testing.T) {
 	// Isolate the Bailey DB (it lives under $HOME/.config/bitswan).
 	t.Setenv("HOME", t.TempDir())

@@ -321,7 +321,7 @@ func (s *Server) Run() error {
 
 	// Set up ingress route for docs (with retry logic)
 	go func() {
-		// Wait a bit for Caddy to be ready
+		// Wait a bit for the ingress to be ready
 		time.Sleep(2 * time.Second)
 		maxRetries := 5
 		for i := 0; i < maxRetries; i++ {

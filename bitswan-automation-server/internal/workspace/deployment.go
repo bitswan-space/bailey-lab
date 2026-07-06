@@ -10,12 +10,11 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
-	"github.com/bitswan-space/bitswan-workspaces/internal/oauth"
 	"gopkg.in/yaml.v3"
 )
 
 // UpdateWorkspaceDeployment updates the workspace deployment with new AOC configuration
-func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, staging bool, trustCA bool) error {
+func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, customInfraDriverImage string, customEgressGatewayImage string, staging bool, dev bool, trustCA bool) error {
 	// Use HOME for file operations (works inside container and outside)
 	// The workspace files are accessible via the container path
 	homeDir := os.Getenv("HOME")
@@ -46,15 +45,6 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, s
 		}
 	}
 
-	// Create OAuth environment variables for GitOps if OAuth is configured (optional)
-	var oauthEnvVars []string
-	var keycloakURL string
-	oauthConfig, _ := oauth.GetOauthConfig(workspaceName)
-	if oauthConfig != nil {
-		oauthEnvVars = oauth.CreateOAuthEnvVars(oauthConfig, "gitops", workspaceName, metadata.Domain)
-		keycloakURL = oauthConfig.IssuerUrl
-	}
-
 	// Get gitops image - use custom image if provided, otherwise get latest
 	var gitopsImage string
 	if customGitopsImage != "" {
@@ -62,13 +52,49 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, s
 		fmt.Printf("Using custom gitops image: %s\n", gitopsImage)
 	} else {
 		var err error
-		gitopsImage, err = dockerhub.ResolveGitopsImage(staging)
+		gitopsImage, err = dockerhub.ResolveGitopsImage(staging, dev)
 		if err != nil {
 			fmt.Printf("    ⚠️  Failed to get latest gitops image, using 'latest': %v\n", err)
-			if staging {
+			if dev {
+				gitopsImage = "bitswan/gitops-dev:latest"
+			} else if staging {
 				gitopsImage = "bitswan/gitops-staging:latest"
 			} else {
 				gitopsImage = "bitswan/gitops:latest"
+			}
+		}
+	}
+
+	// Resolve the infra-driver + egress-gateway images the same staging/dev-aware
+	// way, so a `workspace update` re-pins them to a current version instead of
+	// leaving them at whatever was baked before (or falling back to :latest).
+	infraDriverImage := customInfraDriverImage
+	if infraDriverImage == "" {
+		var err error
+		infraDriverImage, err = dockerhub.ResolveInfraDriverImage(staging, dev)
+		if err != nil {
+			fmt.Printf("    ⚠️  Failed to get latest infra-driver image, using 'latest': %v\n", err)
+			if dev {
+				infraDriverImage = "bitswan/infra-driver-dev:latest"
+			} else if staging {
+				infraDriverImage = "bitswan/infra-driver-staging:latest"
+			} else {
+				infraDriverImage = "bitswan/infra-driver:latest"
+			}
+		}
+	}
+	egressGatewayImage := customEgressGatewayImage
+	if egressGatewayImage == "" {
+		var err error
+		egressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(staging, dev)
+		if err != nil {
+			fmt.Printf("    ⚠️  Failed to get latest egress-gateway image, using 'latest': %v\n", err)
+			if dev {
+				egressGatewayImage = "bitswan/egress-gateway-dev:latest"
+			} else if staging {
+				egressGatewayImage = "bitswan/egress-gateway-staging:latest"
+			} else {
+				egressGatewayImage = "bitswan/egress-gateway:latest"
 			}
 		}
 	}
@@ -94,11 +120,11 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, s
 		// 401 "Invalid agent token" after a `workspace update`. The init path
 		// already sets this — the update path must too, or it strips it.
 		CodingAgentSecret:  metadata.CodingAgentSecret,
+		InfraDriverImage:   infraDriverImage,
+		EgressGatewayImage: egressGatewayImage,
 		AocEnvVars:         aocEnvVars,
-		OAuthEnvVars:       oauthEnvVars,
 		GitopsDevSourceDir: gitopsDevSourceDir,
 		TrustCA:            trustCA,
-		KeycloakURL:        keycloakURL,
 	}
 
 	// Use existing gitops secret

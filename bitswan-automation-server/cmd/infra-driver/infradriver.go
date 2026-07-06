@@ -1,9 +1,4 @@
-// Package infradriver provides the `bitswan infra-driver` subcommands: a
-// per-workspace driver that (a) hosts a bare git remote whose post-receive hook
-// compiles + applies the pushed bitswan.yaml, and (b) serves the operational
-// container primitives + build-image over a private UNIX socket. See
-// internal/infradriver/README.md for the architecture.
-package infradriver
+package main
 
 import (
 	"context"
@@ -22,16 +17,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// NewInfraDriverCmd is the `infra-driver` command group.
-func NewInfraDriverCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "infra-driver",
-		Short: "Per-workspace infrastructure driver (git-push apply + container primitives)",
-	}
-	cmd.AddCommand(newServeCmd())
-	cmd.AddCommand(newApplyCmd())
-	return cmd
-}
 
 // ctxFlags holds the WorkspaceContext supplied to serve and recorded in the
 // bare repo's git config so the post-receive `apply` can read it back.
@@ -189,9 +174,9 @@ func ensureDeployRepoAt(gitDir, bp string, cf ctxFlags) error {
 	}
 	self, err := os.Executable()
 	if err != nil {
-		self = "bitswan"
+		self = "infra-driver"
 	}
-	hook := fmt.Sprintf("#!/bin/sh\nexec %q infra-driver apply --git-dir %q\n", self, gitDir)
+	hook := fmt.Sprintf("#!/bin/sh\nexec %q apply --git-dir %q\n", self, gitDir)
 	hookPath := filepath.Join(gitDir, "hooks", "post-receive")
 	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
 		return fmt.Errorf("write post-receive hook: %w", err)

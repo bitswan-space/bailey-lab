@@ -17,7 +17,7 @@ import (
 
 // isRunningInDaemon returns true if we're running inside the automation server daemon container
 func isRunningInDaemon() bool {
-	return os.Getenv("BITSWAN_CADDY_HOST") != ""
+	return os.Getenv("BITSWAN_TRAEFIK_HOST") != ""
 }
 
 // TransformURLForDaemon converts a public gitops URL to an internal Docker network URL
@@ -248,7 +248,7 @@ func GetAutomations(workspaceName string) ([]Automation, error) {
 }
 
 // GetAutomationsWithOptions fetches the list of automations for a given workspace
-// If usePublicURL is true, the public URL (via Caddy) will be used instead of the Docker network URL
+// If usePublicURL is true, the public URL (via the ingress) will be used instead of the Docker network URL
 func GetAutomationsWithOptions(workspaceName string, usePublicURL bool) ([]Automation, error) {
 	metadata, err := config.GetWorkspaceMetadata(workspaceName)
 	if err != nil {

@@ -27,23 +27,22 @@ var stderrMutex sync.Mutex
 
 // ServiceEnableRequest represents the request to enable a service
 type ServiceEnableRequest struct {
-	ServiceType      string                 `json:"service_type"` // "kafka", "couchdb", "postgres", "minio"
-	Workspace        string                 `json:"workspace"`
-	Stage            string                 `json:"stage,omitempty"`
-	DashboardImage   string                 `json:"dashboard_image,omitempty"`
-	OAuthConfig      map[string]interface{} `json:"oauth_config,omitempty"` // OAuth config as JSON object
-	TrustCA          bool                   `json:"trust_ca,omitempty"`
-	KafkaImage       string                 `json:"kafka_image,omitempty"`
-	UIImage          string                 `json:"ui_image,omitempty"`
-	ZookeeperImage   string                 `json:"zookeeper_image,omitempty"`
-	CouchDBImage     string                 `json:"couchdb_image,omitempty"`
-	PostgresImage    string                 `json:"postgres_image,omitempty"`
-	PgAdminImage     string                 `json:"pgadmin_image,omitempty"`
-	MinioImage       string                 `json:"minio_image,omitempty"`
-	CodingAgentImage string                 `json:"coding_agent_image,omitempty"`
-	Staging          bool                   `json:"staging,omitempty"`
-	DevMode          bool                   `json:"dev_mode,omitempty"`
-	SourceDir        string                 `json:"source_dir,omitempty"`
+	ServiceType      string `json:"service_type"` // "kafka", "couchdb", "postgres", "minio"
+	Workspace        string `json:"workspace"`
+	Stage            string `json:"stage,omitempty"`
+	DashboardImage   string `json:"dashboard_image,omitempty"`
+	TrustCA          bool   `json:"trust_ca,omitempty"`
+	KafkaImage       string `json:"kafka_image,omitempty"`
+	UIImage          string `json:"ui_image,omitempty"`
+	ZookeeperImage   string `json:"zookeeper_image,omitempty"`
+	CouchDBImage     string `json:"couchdb_image,omitempty"`
+	PostgresImage    string `json:"postgres_image,omitempty"`
+	PgAdminImage     string `json:"pgadmin_image,omitempty"`
+	MinioImage       string `json:"minio_image,omitempty"`
+	CodingAgentImage string `json:"coding_agent_image,omitempty"`
+	Staging          bool   `json:"staging,omitempty"`
+	DevMode          bool   `json:"dev_mode,omitempty"`
+	SourceDir        string `json:"source_dir,omitempty"`
 }
 
 // ServiceDisableRequest represents the request to disable a service
@@ -77,19 +76,21 @@ type ServiceStopRequest struct {
 
 // ServiceUpdateRequest represents the request to update a service
 type ServiceUpdateRequest struct {
-	ServiceType      string `json:"service_type"`
-	Workspace        string `json:"workspace"`
-	Stage            string `json:"stage,omitempty"`
-	DashboardImage   string `json:"dashboard_image,omitempty"`
-	TrustCA          bool   `json:"trust_ca,omitempty"`
-	KafkaImage       string `json:"kafka_image,omitempty"`
-	ZookeeperImage   string `json:"zookeeper_image,omitempty"`
-	CouchDBImage     string `json:"couchdb_image,omitempty"`
-	PostgresImage    string `json:"postgres_image,omitempty"`
-	PgAdminImage     string `json:"pgadmin_image,omitempty"`
-	MinioImage       string `json:"minio_image,omitempty"`
-	CodingAgentImage string `json:"coding_agent_image,omitempty"`
-	Staging          bool   `json:"staging,omitempty"`
+	ServiceType        string `json:"service_type"`
+	Workspace          string `json:"workspace"`
+	Stage              string `json:"stage,omitempty"`
+	DashboardImage     string `json:"dashboard_image,omitempty"`
+	TrustCA            bool   `json:"trust_ca,omitempty"`
+	KafkaImage         string `json:"kafka_image,omitempty"`
+	ZookeeperImage     string `json:"zookeeper_image,omitempty"`
+	CouchDBImage       string `json:"couchdb_image,omitempty"`
+	PostgresImage      string `json:"postgres_image,omitempty"`
+	PgAdminImage       string `json:"pgadmin_image,omitempty"`
+	MinioImage         string `json:"minio_image,omitempty"`
+	CodingAgentImage   string `json:"coding_agent_image,omitempty"`
+	InfraDriverImage   string `json:"infra_driver_image,omitempty"`
+	EgressGatewayImage string `json:"egress_gateway_image,omitempty"`
+	Staging            bool   `json:"staging,omitempty"`
 }
 
 // ServiceBackupRequest represents the request to backup CouchDB
@@ -406,6 +407,18 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request, ser
 			Success: true,
 			Data:    statusData,
 		})
+	case "infra-driver", "egress-gateway":
+		statusData, err := s.getInfraServiceStatus(serviceType, workspace)
+		if err != nil {
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(ServiceResponse{
+			Success: true,
+			Data:    statusData,
+		})
 	case "kafka", "couchdb", "postgres", "minio":
 		// Build query string for gitops
 		gitopsPath := fmt.Sprintf("/services/%s/status?stage=%s&show_passwords=%v", serviceType, stage, showPasswords)
@@ -559,6 +572,17 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request, ser
 		json.NewEncoder(w).Encode(ServiceResponse{
 			Success: true,
 			Message: "coding-agent service updated successfully",
+		})
+	case "infra-driver", "egress-gateway":
+		if err := s.updateInfraService(serviceType, req); err != nil {
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(ServiceResponse{
+			Success: true,
+			Message: serviceType + " service updated successfully",
 		})
 	case "kafka", "couchdb", "postgres", "minio":
 		gitopsBody := gitopsServiceRequest{
@@ -796,7 +820,7 @@ func (s *Server) enableCodingAgentService(req ServiceEnableRequest) error {
 
 	image := req.CodingAgentImage
 	if image == "" {
-		resolved, err := dockerhub.ResolveCodingAgentImage(req.Staging)
+		resolved, err := dockerhub.ResolveCodingAgentImage(req.Staging, false)
 		if err != nil {
 			return fmt.Errorf("failed to resolve coding-agent image: %w", err)
 		}
@@ -990,8 +1014,7 @@ func (s *Server) enableDashboardService(req ServiceEnableRequest) error {
 	}
 
 	// The dashboard runs no oauth2-proxy of its own — it's authenticated by the
-	// platform protected-proxy inside the Bailey iframe — so req.OAuthConfig is
-	// intentionally not consumed here.
+	// platform protected-proxy inside the Bailey iframe.
 	if err := dashboardService.Enable(gitopsSecretToken, bitswanDashboardImage, req.TrustCA); err != nil {
 		return err
 	}

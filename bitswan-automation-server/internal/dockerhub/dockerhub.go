@@ -86,9 +86,12 @@ func GetLatestGitopsStagingVersion() (string, error) {
 }
 
 // ResolveGitopsImage returns the full gitops image string based on the staging flag.
-func ResolveGitopsImage(staging bool) (string, error) {
+func ResolveGitopsImage(staging, dev bool) (string, error) {
 	if img := imageOverride("BITSWAN_GITOPS_IMAGE"); img != "" {
 		return img, nil
+	}
+	if dev {
+		return "bitswan/gitops-dev:latest", nil
 	}
 	if staging {
 		version, err := GetLatestGitopsStagingVersion()
@@ -115,9 +118,12 @@ func GetLatestDashboardStagingVersion() (string, error) {
 }
 
 // ResolveDashboardImage returns the full workspace-dashboard image string based on the staging flag.
-func ResolveDashboardImage(staging bool) (string, error) {
+func ResolveDashboardImage(staging, dev bool) (string, error) {
 	if img := imageOverride("BITSWAN_DASHBOARD_IMAGE"); img != "" {
 		return img, nil
+	}
+	if dev {
+		return "bitswan/workspace-dashboard-dev:latest", nil
 	}
 	if staging {
 		version, err := GetLatestDashboardStagingVersion()
@@ -144,9 +150,12 @@ func GetLatestCodingAgentStagingVersion() (string, error) {
 }
 
 // ResolveCodingAgentImage returns the full coding-agent image string based on the staging flag.
-func ResolveCodingAgentImage(staging bool) (string, error) {
+func ResolveCodingAgentImage(staging, dev bool) (string, error) {
 	if img := imageOverride("BITSWAN_CODING_AGENT_IMAGE"); img != "" {
 		return img, nil
+	}
+	if dev {
+		return "bitswan/coding-agent-dev:latest", nil
 	}
 	if staging {
 		version, err := GetLatestCodingAgentStagingVersion()
@@ -160,4 +169,68 @@ func ResolveCodingAgentImage(staging bool) (string, error) {
 		return "", err
 	}
 	return "bitswan/coding-agent:" + version, nil
+}
+
+// GetLatestEgressGatewayVersion gets the latest version of the egress-gateway image
+func GetLatestEgressGatewayVersion() (string, error) {
+	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/egress-gateway/tags/")
+}
+
+// GetLatestEgressGatewayStagingVersion gets the latest version of the egress-gateway-staging image
+func GetLatestEgressGatewayStagingVersion() (string, error) {
+	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/egress-gateway-staging/tags/")
+}
+
+// ResolveEgressGatewayImage returns the full egress-gateway image string based on the staging flag.
+func ResolveEgressGatewayImage(staging, dev bool) (string, error) {
+	if img := imageOverride("BITSWAN_EGRESS_GATEWAY_IMAGE"); img != "" {
+		return img, nil
+	}
+	if dev {
+		return "bitswan/egress-gateway-dev:latest", nil
+	}
+	if staging {
+		version, err := GetLatestEgressGatewayStagingVersion()
+		if err != nil {
+			return "", err
+		}
+		return "bitswan/egress-gateway-staging:" + version, nil
+	}
+	version, err := GetLatestEgressGatewayVersion()
+	if err != nil {
+		return "", err
+	}
+	return "bitswan/egress-gateway:" + version, nil
+}
+
+// GetLatestInfraDriverVersion gets the latest version of the infra-driver image
+func GetLatestInfraDriverVersion() (string, error) {
+	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/infra-driver/tags/")
+}
+
+// GetLatestInfraDriverStagingVersion gets the latest version of the infra-driver-staging image
+func GetLatestInfraDriverStagingVersion() (string, error) {
+	return GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/infra-driver-staging/tags/")
+}
+
+// ResolveInfraDriverImage returns the full infra-driver image string based on the staging/dev flags.
+func ResolveInfraDriverImage(staging, dev bool) (string, error) {
+	if img := imageOverride("BITSWAN_INFRA_DRIVER_IMAGE"); img != "" {
+		return img, nil
+	}
+	if dev {
+		return "bitswan/infra-driver-dev:latest", nil
+	}
+	if staging {
+		version, err := GetLatestInfraDriverStagingVersion()
+		if err != nil {
+			return "", err
+		}
+		return "bitswan/infra-driver-staging:" + version, nil
+	}
+	version, err := GetLatestInfraDriverVersion()
+	if err != nil {
+		return "", err
+	}
+	return "bitswan/infra-driver:" + version, nil
 }

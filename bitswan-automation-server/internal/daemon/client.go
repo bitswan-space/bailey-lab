@@ -812,13 +812,9 @@ func (c *Client) RemoveCertAuthority(certName string) error {
 	return nil
 }
 
-// InitIngress initializes the ingress proxy.
-// ingressType is optional: "caddy", "traefik", or "" for auto-detect.
-func (c *Client) InitIngress(verbose bool, ingressType ...string) (*IngressInitResponse, error) {
+// InitIngress initializes the Traefik ingress proxy.
+func (c *Client) InitIngress(verbose bool) (*IngressInitResponse, error) {
 	reqBody := IngressInitRequest{Verbose: verbose}
-	if len(ingressType) > 0 {
-		reqBody.IngressType = ingressType[0]
-	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -1000,40 +996,6 @@ func (c *Client) RemoveIngressRoute(hostname string) error {
 	return nil
 }
 
-// MigrateIngress migrates from Caddy to Traefik, preserving all routes
-func (c *Client) MigrateIngress(verbose bool) error {
-	reqBody := map[string]bool{"verbose": verbose}
-	bodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "http://unix/ingress/migrate", strings.NewReader(string(bodyBytes)))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Use longer timeout for migration as it involves stopping Caddy,
-	// starting Traefik, and re-adding routes
-	resp, err := c.doLongRunningRequest(req)
-	if err != nil {
-		return fmt.Errorf("failed to connect to daemon: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		var errResp ErrorResponse
-		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return fmt.Errorf("%s", errResp.Error)
-		}
-		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
-
 // UpdateIngress updates the ingress proxy to the latest version, preserving all routes
 func (c *Client) UpdateIngress(verbose bool) error {
 	reqBody := map[string]bool{"verbose": verbose}
@@ -1068,32 +1030,6 @@ func (c *Client) UpdateIngress(verbose bool) error {
 	return nil
 }
 
-// GetIngressType returns the current ingress type ("caddy" or "traefik")
-func (c *Client) GetIngressType() (string, error) {
-	req, err := http.NewRequest("GET", "http://unix/ingress/type", nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := c.doRequest(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to connect to daemon: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	var result map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return result["type"], nil
-}
-
 // EnableService enables a service (dashboard, kafka, or couchdb) with streaming logs
 func (c *Client) EnableService(serviceType, workspace string, options map[string]interface{}) (*ServiceResponse, error) {
 	reqBody := ServiceEnableRequest{
@@ -1107,9 +1043,6 @@ func (c *Client) EnableService(serviceType, workspace string, options map[string
 	}
 	if dashboardImage, ok := options["dashboard_image"].(string); ok {
 		reqBody.DashboardImage = dashboardImage
-	}
-	if oauthConfig, ok := options["oauth_config"].(map[string]interface{}); ok {
-		reqBody.OAuthConfig = oauthConfig
 	}
 	if trustCA, ok := options["trust_ca"].(bool); ok {
 		reqBody.TrustCA = trustCA
@@ -1869,6 +1802,12 @@ func (c *Client) UpdateService(serviceType, workspace string, options map[string
 	}
 	if codingAgentImage, ok := options["coding_agent_image"].(string); ok {
 		reqBody.CodingAgentImage = codingAgentImage
+	}
+	if infraDriverImage, ok := options["infra_driver_image"].(string); ok {
+		reqBody.InfraDriverImage = infraDriverImage
+	}
+	if egressGatewayImage, ok := options["egress_gateway_image"].(string); ok {
+		reqBody.EgressGatewayImage = egressGatewayImage
 	}
 	if staging, ok := options["staging"].(bool); ok {
 		reqBody.Staging = staging

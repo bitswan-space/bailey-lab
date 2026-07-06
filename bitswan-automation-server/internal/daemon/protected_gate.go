@@ -186,6 +186,18 @@ func startProtectedGate() error {
 			if h := r.Header.Get("X-Forwarded-Host"); h != "" {
 				r.Host = h
 			}
+			// The platform terminates TLS at the edge (platform-traefik →
+			// oauth2-proxy); every leg from here on is plain HTTP on the
+			// internal network. Tell the upstream the original scheme was
+			// HTTPS so apps behind a TLS-terminating proxy (e.g. pgAdmin's
+			// Flask/ProxyFix) emit https:// URLs instead of http:// ones —
+			// the latter get blocked as mixed content / by the https-only
+			// inner CSP (strictInnerCSP), which renders pgAdmin as a blank
+			// page. The oauth2-proxy hop already sets this; fill it in only
+			// if it's somehow absent so we never downgrade a real value.
+			if r.Header.Get("X-Forwarded-Proto") == "" {
+				r.Header.Set("X-Forwarded-Proto", "https")
+			}
 			// Re-apply the gate-trusted identity to the upstreams that
 			// legitimately consume it: the Bailey daemon upstream AND the
 			// first-party workspace dashboard (endpoint kind "workspace"),

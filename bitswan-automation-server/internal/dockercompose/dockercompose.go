@@ -25,14 +25,14 @@ type DockerComposeConfig struct {
 	GitopsPath         string
 	WorkspaceName      string
 	GitopsImage        string
+	InfraDriverImage   string // resolved infra-driver image; falls back to env/:latest when empty
+	EgressGatewayImage string // resolved egress-gateway image the driver pins for per-BP gateways
 	Domain             string
 	AocEnvVars         []string
-	OAuthEnvVars       []string
 	GitopsDevSourceDir string
 	TrustCA            bool
 	LocalRemotePath    string // Host path to local repository (if using local remote)
 	LocalRemoteName    string // Mount name for local repository (used for mount point path)
-	KeycloakURL        string // Keycloak base URL for authentication
 	CodingAgentSecret  string // Bearer token gitops uses to verify coding-agent requests
 }
 
@@ -162,19 +162,9 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		)
 	}
 
-	// Add Keycloak URL if configured
-	if config.KeycloakURL != "" {
-		gitopsService["environment"] = append(gitopsService["environment"].([]string), "KEYCLOAK_URL="+config.KeycloakURL)
-	}
-
 	// Append AOC env variables when workspace is registered as an automation server
 	if len(config.AocEnvVars) > 0 {
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), config.AocEnvVars...)
-	}
-
-	// Append OAuth env variables when OAuth is configured
-	if len(config.OAuthEnvVars) > 0 {
-		gitopsService["environment"] = append(gitopsService["environment"].([]string), config.OAuthEnvVars...)
 	}
 
 	// Add dev source directory volume mount and DEBUG env var if provided
@@ -251,27 +241,20 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 	return buf.String(), gitopsSecretToken, nil
 }
 
-// buildDriverService builds the infra-driver sidecar: the same daemon runtime
-// image (docker CLI + compose + git-http-backend), the bitswan binary
-// bind-mounted as the daemon mounts its own, docker.sock, and the workspace
-// volume subpaths the compiler reads/writes. It serves the deploy repo over
-// git smart-HTTP + the /v1 primitives, guarded by the shared token.
+// buildDriverService builds the infra-driver sidecar: its own self-contained
+// image (docker CLI + compose + git-http-backend + syft, with the infra-driver
+// binary baked in — NOT the bitswan CLI), docker.sock, and the workspace volume
+// subpaths the compiler reads/writes. It serves the per-BP deploy repos over git
+// smart-HTTP + the /v1 primitives, guarded by the shared token.
 func (config *DockerComposeConfig) buildDriverService(token string, wsVolume func(string, string) map[string]interface{}, homeDir string) map[string]interface{} {
-	driverImage := os.Getenv("BITSWAN_INFRA_DRIVER_IMAGE")
+	// Prefer the version resolved at init (config.InfraDriverImage). Fall back to
+	// the env override / :latest only when unset.
+	driverImage := config.InfraDriverImage
 	if driverImage == "" {
-		driverImage = "bitswan/automation-server-runtime:latest"
+		driverImage = os.Getenv("BITSWAN_INFRA_DRIVER_IMAGE")
 	}
-	// The host path of the bitswan binary to bind-mount. The daemon forwards its
-	// own host binary path as BITSWAN_HOST_BINARY (it cannot use os.Executable()
-	// from inside its container); a host-CLI `workspace init` falls back to its
-	// own executable.
-	driverBinary := os.Getenv("BITSWAN_HOST_BINARY")
-	if driverBinary == "" {
-		if exe, err := os.Executable(); err == nil {
-			driverBinary = exe
-		} else {
-			driverBinary = "/usr/local/bin/bitswan"
-		}
+	if driverImage == "" {
+		driverImage = "bitswan/infra-driver:latest"
 	}
 
 	env := []string{
@@ -281,26 +264,23 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		"BITSWAN_CERTS_DIR=" + homeDir + "/.config/bitswan/certauthorities",
 		"BITSWAN_WORKSPACE_NAME=" + config.WorkspaceName,
 	}
-	if config.KeycloakURL != "" {
-		env = append(env, "KEYCLOAK_URL="+config.KeycloakURL)
-	}
 	// Pin the egress-gateway image the compiler stamps into every BP's firewall
-	// workers. Forward the daemon's pinned tag (set at release time, same as
-	// BITSWAN_GITOPS_IMAGE / BITSWAN_INFRA_DRIVER_IMAGE) so the compose
-	// references an IMMUTABLE tag. That lets the gateway services use
-	// pull_policy: missing — pulled once when the version changes, never
-	// re-pulled or churned — instead of the old pull_policy: always, which hit
-	// the registry for every worker on every deploy and recreated them all.
-	if gw := os.Getenv("BITSWAN_EGRESS_GATEWAY_IMAGE"); gw != "" {
-		env = append(env, "BITSWAN_EGRESS_GATEWAY_IMAGE="+gw)
+	// workers so the compose references an IMMUTABLE tag. That lets the gateway
+	// services use pull_policy: missing — pulled once when the version changes,
+	// never re-pulled or churned — instead of the old pull_policy: always. Prefer
+	// the version resolved at init (config.EgressGatewayImage); fall back to the
+	// BITSWAN_EGRESS_GATEWAY_IMAGE env override, else the compiler's own default.
+	egressImage := config.EgressGatewayImage
+	if egressImage == "" {
+		egressImage = os.Getenv("BITSWAN_EGRESS_GATEWAY_IMAGE")
 	}
-	// The compiler reads the same AOC/OAuth env gitops used (org group path,
-	// oauth2-proxy config it materializes per BP, etc.).
+	if egressImage != "" {
+		env = append(env, "BITSWAN_EGRESS_GATEWAY_IMAGE="+egressImage)
+	}
+	// The compiler reads the same AOC env gitops used (org group path, etc.).
 	env = append(env, config.AocEnvVars...)
-	env = append(env, config.OAuthEnvVars...)
 
 	volumes := []interface{}{
-		driverBinary + ":/usr/local/bin/bitswan:ro",
 		"/var/run/docker.sock:/var/run/docker.sock",
 		// The daemon ingress socket — the driver configures ingress itself
 		// (converges routes via /ingress/reconcile) after bringing the project up.
@@ -335,7 +315,7 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 		"volumes":     volumes,
 		"environment": env,
 		"command": []string{
-			"/usr/local/bin/bitswan", "infra-driver", "serve",
+			"/usr/local/bin/infra-driver", "serve",
 			"--listen", ":9090",
 			"--deploy-repos-dir", "/git/deploy-repos",
 			"--gitops-dir", "/gitops/gitops",
@@ -344,51 +324,6 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 			"--domain", config.Domain,
 		},
 	}
-}
-
-func CreateCaddyDockerComposeFile(caddyPath string) (string, error) {
-	caddyVolumes := []string{
-		caddyPath + "/Caddyfile:/etc/caddy/Caddyfile:z",
-		caddyPath + "/data:/data:z",
-		caddyPath + "/config:/config:z",
-		caddyPath + "/certs:/tls:z",
-	}
-
-	// Construct the docker-compose data structure
-	dockerCompose := map[string]interface{}{
-		"version": "3.8",
-		"services": map[string]interface{}{
-			"caddy": map[string]interface{}{
-				"image":          "caddy:2.9",
-				"restart":        "always",
-				"container_name": "caddy",
-				// Only the public web entrypoints are published. Caddy's admin API
-				// (:2019) allows FULL reconfiguration (load arbitrary config) and must
-				// never be reachable from outside the host; the daemon reaches it
-				// in-network (caddy:2019 on bitswan_network), so it is not published.
-				"ports":      []string{"80:80", "443:443"},
-				"networks":   []string{"bitswan_network"},
-				"volumes":    caddyVolumes,
-				"entrypoint": []string{"caddy", "run", "--resume", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"},
-			},
-		},
-		"networks": map[string]interface{}{
-			"bitswan_network": map[string]interface{}{
-				"external": true,
-			},
-		},
-	}
-
-	var buf bytes.Buffer
-
-	// Serialize the docker-compose data structure to YAML and write it to the file
-	encoder := yaml.NewEncoder(&buf)
-	encoder.SetIndent(2) // Optional: Set indentation
-	if err := encoder.Encode(dockerCompose); err != nil {
-		return "", fmt.Errorf("failed to encode docker-compose data structure: %w", err)
-	}
-
-	return buf.String(), nil
 }
 
 // CreateTraefikDockerComposeFile creates a docker-compose file for global Traefik.

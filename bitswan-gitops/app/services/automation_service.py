@@ -2897,7 +2897,7 @@ class AutomationService:
         # resolved bitswan.yaml + source trees live in gitops_dir. Push that tree
         # to the driver; its post-receive hook compiles to compose and reconciles
         # EVERYTHING server-side — networks, compose up, per-BP DB/bucket
-        # provisioning, CA certs, oauth2 sidecars, and ingress. gitops no longer
+        # provisioning, CA certs, and ingress. gitops no longer
         # generates compose, brings up containers, or touches the daemon ingress.
         await _report("deploying", "Pushing deployment to the infra-driver...")
 
@@ -3696,7 +3696,7 @@ class AutomationService:
             del bs_yaml["deployments"][k]
 
         # Push the resolved tree to the driver — it compiles, brings up the
-        # service + its infra, provisions DBs/buckets, installs certs/oauth2,
+        # service + its infra, provisions DBs/buckets, installs certs,
         # and configures ingress server-side. Image tags were recorded into
         # automation.toml at build time, which the driver's compiler reads.
         await self.apply_compose_for_deployments(
@@ -3746,7 +3746,7 @@ class AutomationService:
 
         deployments = active_deployments
         # Deploy-all: push the full resolved tree to the driver, which brings
-        # up every service + infra, provisions, installs certs/oauth2, and
+        # up every service + infra, provisions, installs certs, and
         # configures ingress server-side.
         await self.apply_compose_for_deployments(list(deployments.keys()))
         return {
@@ -3807,8 +3807,8 @@ class AutomationService:
             await self.enable_services(deploy_services, stage)
 
         # Push the mutated tree to the driver; it re-applies the full state
-        # (replica count change included) — compose up, provision, certs/
-        # oauth2, ingress — server-side.
+        # (replica count change included) — compose up, provision, certs,
+        # ingress — server-side.
         await self.apply_compose_for_deployments([deployment_id])
 
         return {
@@ -3845,7 +3845,7 @@ class AutomationService:
             }
 
         # The driver exposes restart (which starts a stopped container); re-apply
-        # so reconcile restores the CA certs + oauth2-proxy on the live container.
+        # so reconcile restores the CA certs on the live container.
         ctx = self._workspace_ctx()
         for container in containers:
             await self.infra_driver.container_restart(ctx, container.get("Id"))
@@ -3962,10 +3962,9 @@ class AutomationService:
         for container in containers:
             await self.infra_driver.container_restart(ctx, container.get("Id"))
 
-        # A bare restart drops the post-up sidecar setup (CA certs + the
-        # oauth2-proxy process the driver injects via exec). Re-apply so the
-        # driver's reconcile re-installs them — its compose-up is a no-op for the
-        # unchanged service, but the cert/oauth2 steps run on the live container.
+        # A bare restart drops the post-up sidecar setup (CA certs). Re-apply so
+        # the driver's reconcile re-installs them — its compose-up is a no-op for
+        # the unchanged service, but the cert steps run on the live container.
         await self.apply_compose_for_deployments([deployment_id])
 
         return {
@@ -4313,7 +4312,7 @@ class AutomationService:
                         )
                         # Re-register with ingress in case route was lost
                         try:
-                            await svc._register_with_caddy()
+                            await svc._register_with_ingress()
                         except Exception as e:
                             logger.warning(
                                 f"Failed to re-register {svc.display_name} with ingress: {e}"

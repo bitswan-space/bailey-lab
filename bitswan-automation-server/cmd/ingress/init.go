@@ -10,11 +10,10 @@ import (
 
 func newInitCmd() *cobra.Command {
 	var verbose bool
-	var ingressType string
 
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Initializes an ingress proxy",
+		Short: "Initializes the Traefik ingress proxy",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := daemon.NewClient()
@@ -24,7 +23,7 @@ func newInitCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			result, err := client.InitIngress(verbose, ingressType)
+			result, err := client.InitIngress(verbose)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -36,7 +35,6 @@ func newInitCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
-	cmd.Flags().StringVar(&ingressType, "type", "", "Force ingress type: 'caddy' or 'traefik' (default: auto-detect)")
 
 	return cmd
 }

@@ -82,7 +82,7 @@ class KafkaService(InfraService):
             logger.warning(f"Failed to stop Kafka UI container: {e}")
         return result
 
-    def _get_caddy_upstream(self) -> str:
+    def _get_ingress_upstream(self) -> str:
         # Kafka UI is the web-accessible service
         return f"{self.ui_container_name}:8080"
 
@@ -100,5 +100,5 @@ class KafkaService(InfraService):
                     elif line.startswith("KAFKA_UI_PASSWORD="):
                         info["ui_password"] = line.split("=", 1)[1]
         if self.gitops_domain:
-            info["ui_url"] = f"https://{self.caddy_hostname()}/kafka"
+            info["ui_url"] = f"https://{self.ingress_hostname()}/kafka"
         return info

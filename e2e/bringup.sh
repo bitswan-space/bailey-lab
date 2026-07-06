@@ -35,15 +35,19 @@ BAILEY_URL="https://bailey.${DOMAIN}"
 ONBOARD_URL="https://bailey-onboard.${DOMAIN}"
 DAEMON_CTR="bitswan-automation-server-daemon"
 
-GITOPS_IMAGE="bitswan/gitops-local:latest"
-DASHBOARD_IMAGE="bitswan/workspace-dashboard-local:latest"
-CODING_AGENT_IMAGE="bitswan/coding-agent-local:latest"
-# The per-BP egress firewall gateway. gitops references it by this exact tag
-# (BITSWAN_EGRESS_GATEWAY_IMAGE default in automation_service), so a deployed
-# firewall can stand up the SNI/Host allow-list proxy that observes egress for
-# the dashboard's "needs review" feed. Without this image the gateway service
-# can't start and no egress is ever observed.
-EGRESS_GATEWAY_IMAGE="bitswan/egress-gateway:latest"
+# Dogfood the -dev images built by build-dev-images.sh (see [1/7] below) and
+# pin the daemon to them via the BITSWAN_*_IMAGE overrides, so workspaces the
+# Server Console UI creates run THIS checkout's services.
+GITOPS_IMAGE="bitswan/gitops-dev:latest"
+DASHBOARD_IMAGE="bitswan/workspace-dashboard-dev:latest"
+CODING_AGENT_IMAGE="bitswan/coding-agent-dev:latest"
+# The per-workspace infra-driver sidecar (the only container with docker.sock).
+INFRA_DRIVER_IMAGE="bitswan/infra-driver-dev:latest"
+# The per-BP egress firewall gateway. gitops references it by BITSWAN_EGRESS_GATEWAY_IMAGE
+# so a deployed firewall can stand up the SNI/Host allow-list proxy that observes
+# egress for the dashboard's "needs review" feed. Without this image the gateway
+# service can't start and no egress is ever observed.
+EGRESS_GATEWAY_IMAGE="bitswan/egress-gateway-dev:latest"
 
 # The SIEM target: a real, lightweight OpenTelemetry collector with an OTLP
 # receiver (gRPC :4317 + HTTP :4318) and a debug exporter. Bailey's SIEM
@@ -59,33 +63,21 @@ echo "=== [1/7] Build the Server Console SPA + the bitswan CLI + component image
 # internal/daemon/serverconsole_dist (not committed). Build it into the embed
 # dir BEFORE compiling the CLI, or the gate serves an empty console (a directory
 # listing) instead of the real onboarding/console UI.
-npm --prefix bitswan-server-console install --no-audit --no-fund
-mark "[1/7] server-console: npm install"
-npm --prefix bitswan-server-console run build
-mark "[1/7] server-console: vite build"
-rm -rf bitswan-automation-server/internal/daemon/serverconsole_dist
-mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
-cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
+make -C "$REPO_ROOT/bitswan-automation-server" console
+mark "[1/7] server-console: make console"
 ( cd bitswan-automation-server && go build -o bitswan ./main.go )
 mark "[1/7] bitswan CLI: go build"
 BITSWAN="$REPO_ROOT/bitswan-automation-server/bitswan"
-docker build -t "$GITOPS_IMAGE"       -f "$REPO_ROOT/bitswan-gitops/Dockerfile" "$REPO_ROOT"
-mark "[1/7] docker build: gitops image"
-docker build -t "$DASHBOARD_IMAGE"    -f "$REPO_ROOT/bitswan-workspace-dashboard/Dockerfile" "$REPO_ROOT/bitswan-workspace-dashboard"
-mark "[1/7] docker build: dashboard image"
-docker build -t "$CODING_AGENT_IMAGE" -f "$REPO_ROOT/bitswan-coding-agent/Dockerfile" "$REPO_ROOT/bitswan-coding-agent"
-mark "[1/7] docker build: coding-agent image"
-# The egress firewall gateway image (build context = the automation-server repo
-# root, per its Dockerfile). gitops deploys this per (bp,stage) when a firewall
-# is active, so it must exist locally or the gateway never starts.
-docker build -t "$EGRESS_GATEWAY_IMAGE" -f "$REPO_ROOT/bitswan-automation-server/cmd/egress-gateway/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
-mark "[1/7] docker build: egress-gateway image"
+# Build every workspace-service image (gitops, dashboard, coding-agent,
+# egress-gateway, infra-driver) as bitswan/<svc>-dev:latest in one parallel pass
+# — the same script developers run locally. The daemon is pinned to these -dev
+# tags below, so the Server Console UI creates workspaces on this checkout's code.
+"$REPO_ROOT/build-dev-images.sh"
+mark "[1/7] build-dev-images.sh: gitops/dashboard/coding-agent/egress/infra-driver"
 
-# The per-workspace infra-driver sidecar runs this image (debian + docker CLI +
-# git + git-http-backend) with the bitswan binary mounted at runtime. The
-# workspace compose references bitswan/automation-server-runtime:latest and
-# brings it up with --pull missing, so build the tag here or the sidecar (the
-# only container with docker.sock) can't start and the workspace never comes up.
+# The daemon container itself runs this image (debian + docker CLI + git +
+# git-http-backend) with the bitswan binary mounted at runtime, so build the tag
+# here or `automation-server-daemon init` can't start it on a hub-less VM.
 docker build -t bitswan/automation-server-runtime:latest -f "$REPO_ROOT/bitswan-automation-server/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
 mark "[1/7] docker build: automation-server-runtime image"
 
@@ -98,6 +90,8 @@ sudo env \
   BITSWAN_GITOPS_IMAGE="$GITOPS_IMAGE" \
   BITSWAN_DASHBOARD_IMAGE="$DASHBOARD_IMAGE" \
   BITSWAN_CODING_AGENT_IMAGE="$CODING_AGENT_IMAGE" \
+  BITSWAN_INFRA_DRIVER_IMAGE="$INFRA_DRIVER_IMAGE" \
+  BITSWAN_EGRESS_GATEWAY_IMAGE="$EGRESS_GATEWAY_IMAGE" \
   "$BITSWAN" automation-server-daemon init
 sleep 5
 "$BITSWAN" automation-server-daemon status
@@ -105,7 +99,7 @@ sleep 5
 # can exceed the daemon client's request deadline. Pre-pull, then retry.
 docker pull traefik:v3.6 >/dev/null 2>&1 || true
 for i in 1 2 3 4 5; do
-  "$BITSWAN" ingress init --type traefik -v && break
+  "$BITSWAN" ingress init -v && break
   echo "ingress init attempt $i timed out; traefik image now warming, retrying..."; sleep 12
 done
 docker ps | grep -q traefik || { echo "ERROR: traefik not running"; exit 1; }

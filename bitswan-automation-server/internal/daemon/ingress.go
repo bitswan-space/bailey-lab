@@ -12,7 +12,6 @@ import (
 
 	"net/url"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/caddyapi"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
@@ -20,18 +19,9 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/util"
 )
 
-// IngressType represents which ingress proxy is in use
-type IngressType string
-
-const (
-	IngressCaddy   IngressType = "caddy"
-	IngressTraefik IngressType = "traefik"
-)
-
 // IngressInitRequest represents the request to initialize ingress
 type IngressInitRequest struct {
-	Verbose     bool   `json:"verbose"`
-	IngressType string `json:"ingress_type,omitempty"` // "caddy" or "traefik" (default: auto-detect)
+	Verbose bool `json:"verbose"`
 }
 
 // IngressInitResponse represents the response from initializing ingress
@@ -125,26 +115,6 @@ type IngressRemoveRouteResponse struct {
 	Message string `json:"message"`
 }
 
-// DetectIngressType checks which ingress proxy is currently running.
-// Returns IngressTraefik if Traefik is running, IngressCaddy if Caddy is running.
-// If neither is running, returns IngressTraefik (default for new installs).
-func DetectIngressType() IngressType {
-	// Check for Traefik container
-	traefikId, err := exec.Command("docker", "ps", "-q", "-f", "name=^traefik$").Output()
-	if err == nil && strings.TrimSpace(string(traefikId)) != "" {
-		return IngressTraefik
-	}
-
-	// Check for Caddy container
-	caddyId, err := exec.Command("docker", "ps", "-q", "-f", "name=^caddy$").Output()
-	if err == nil && strings.TrimSpace(string(caddyId)) != "" {
-		return IngressCaddy
-	}
-
-	// Neither running — default to Traefik for new installs
-	return IngressTraefik
-}
-
 // handleIngress routes ingress-related requests
 func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/ingress")
@@ -164,10 +134,6 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "remove-route/"):
 		hostname := strings.TrimPrefix(path, "remove-route/")
 		s.handleIngressRemoveRoute(w, r, hostname)
-	case path == "type":
-		s.handleIngressType(w, r)
-	case path == "migrate":
-		s.handleIngressMigrate(w, r)
 	case path == "update":
 		s.handleIngressUpdate(w, r)
 	case path == "provision-protected-proxy":
@@ -175,40 +141,6 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSONError(w, "not found", http.StatusNotFound)
 	}
-}
-
-// handleIngressType handles GET /ingress/type — returns the current ingress type
-func (s *Server) handleIngressType(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"type": string(DetectIngressType())})
-}
-
-// handleIngressMigrate handles POST /ingress/migrate — migrates from Caddy to Traefik
-func (s *Server) handleIngressMigrate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		Verbose bool `json:"verbose"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	if err := MigrateCaddyToTraefik(req.Verbose); err != nil {
-		writeJSONError(w, "migration failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": "Successfully migrated from Caddy to Traefik",
-	})
 }
 
 // handleIngressUpdate handles POST /ingress/update — updates the ingress proxy to the latest version
@@ -248,12 +180,6 @@ func (s *Server) handleIngressInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If ingress_type is specified, set it as env var for initIngress
-	if req.IngressType != "" {
-		os.Setenv("BITSWAN_INGRESS_TYPE", req.IngressType)
-		defer os.Unsetenv("BITSWAN_INGRESS_TYPE")
-	}
-
 	newlyInitialized, err := initIngress(req.Verbose)
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
@@ -274,127 +200,18 @@ func (s *Server) handleIngressInit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// initIngress initializes the ingress proxy.
-// It first checks if an existing ingress (Caddy or Traefik) is already running.
-// For new installs, it starts Traefik (unless BITSWAN_INGRESS_TYPE=caddy).
+// initIngress initializes the Traefik ingress proxy. If Traefik is already
+// running it just refreshes its file-provider config; otherwise it starts it.
 func initIngress(verbose bool) (bool, error) {
-	ingressType := DetectIngressType()
-
-	switch ingressType {
-	case IngressCaddy:
-		// Caddy is already running, keep using it
-		return false, nil
-	case IngressTraefik:
-		// Skip only if Traefik is actually RUNNING. Probe the container directly:
-		// InitTraefik no longer pushes to Traefik's REST API (it renders the
-		// file-provider config to disk) so it always succeeds and can't tell us
-		// whether Traefik is up. If it's running, just refresh its config.
-		if containerRunning("traefik") {
-			_ = traefikapi.InitTraefik()
-			return false, nil
-		}
-		// Nothing running — check if user wants to force Caddy
-		if strings.EqualFold(os.Getenv("BITSWAN_INGRESS_TYPE"), "caddy") {
-			return initCaddyIngress(verbose)
-		}
-		// Default: start Traefik
-		return initTraefikIngress(verbose)
-	}
-
-	return false, fmt.Errorf("unknown ingress type")
-}
-
-// initCaddyIngress starts a new Caddy ingress proxy.
-func initCaddyIngress(verbose bool) (bool, error) {
-	homeDir := os.Getenv("HOME")
-	bitswanConfig := homeDir + "/.config/bitswan/"
-	caddyConfig := bitswanConfig + "caddy"
-	caddyCertsDir := caddyConfig + "/certs"
-
-	caddyProjectName := "bitswan-caddy"
-
-	// If caddy container already exists, return
-	caddyContainerId, err := exec.Command("docker", "ps", "-q", "-f", "name=caddy").Output()
-	if err != nil {
-		return false, fmt.Errorf("failed to check if caddy container exists: %w", err)
-	}
-	if strings.TrimSpace(string(caddyContainerId)) != "" {
+	// Skip only if Traefik is actually RUNNING. Probe the container directly:
+	// InitTraefik no longer pushes to Traefik's REST API (it renders the
+	// file-provider config to disk) so it always succeeds and can't tell us
+	// whether Traefik is up. If it's running, just refresh its config.
+	if containerRunning("traefik") {
+		_ = traefikapi.InitTraefik()
 		return false, nil
 	}
-
-	if err := os.MkdirAll(bitswanConfig, 0755); err != nil {
-		return false, fmt.Errorf("failed to create bitswan config directory: %w", err)
-	}
-	if err := os.MkdirAll(caddyConfig, 0755); err != nil {
-		return false, fmt.Errorf("failed to create ingress config directory: %w", err)
-	}
-
-	caddyfile := `
-		{
-			email info@bitswan.space
-			admin 0.0.0.0:2019
-		}`
-
-	caddyfilePath := caddyConfig + "/Caddyfile"
-	if err := os.WriteFile(caddyfilePath, []byte(caddyfile), 0755); err != nil {
-		return false, fmt.Errorf("failed to write Caddyfile: %w", err)
-	}
-
-	hostHomeDir := os.Getenv("HOST_HOME")
-	caddyConfigForCompose := caddyConfig
-	if hostHomeDir != "" && homeDir != hostHomeDir && strings.HasPrefix(caddyConfig, homeDir) {
-		caddyConfigForCompose = strings.Replace(caddyConfig, homeDir, hostHomeDir, 1)
-
-		if err := os.MkdirAll(caddyConfigForCompose, 0755); err != nil {
-			return false, fmt.Errorf("failed to create ingress config directory on host: %w", err)
-		}
-		if err := os.MkdirAll(caddyConfigForCompose+"/data", 0755); err != nil {
-			return false, fmt.Errorf("failed to create ingress data directory on host: %w", err)
-		}
-		if err := os.MkdirAll(caddyConfigForCompose+"/config", 0755); err != nil {
-			return false, fmt.Errorf("failed to create ingress config subdirectory on host: %w", err)
-		}
-		if err := os.MkdirAll(caddyConfigForCompose+"/certs", 0755); err != nil {
-			return false, fmt.Errorf("failed to create ingress certs directory on host: %w", err)
-		}
-
-		caddyfilePathHost := caddyConfigForCompose + "/Caddyfile"
-		if _, err := os.Stat(caddyfilePathHost); os.IsNotExist(err) {
-			if err := os.WriteFile(caddyfilePathHost, []byte(caddyfile), 0755); err != nil {
-				return false, fmt.Errorf("failed to write Caddyfile on host: %w", err)
-			}
-		}
-	}
-
-	caddyDockerCompose, err := dockercompose.CreateCaddyDockerComposeFile(caddyConfigForCompose)
-	if err != nil {
-		return false, fmt.Errorf("failed to create ingress docker-compose file: %w", err)
-	}
-
-	caddyDockerComposePath := caddyConfig + "/docker-compose.yml"
-	if err := os.WriteFile(caddyDockerComposePath, []byte(caddyDockerCompose), 0755); err != nil {
-		return false, fmt.Errorf("failed to write ingress docker-compose file: %w", err)
-	}
-
-	caddyDockerComposeCom := exec.Command("docker", "compose", "-p", caddyProjectName, "up", "-d")
-	caddyDockerComposeCom.Dir = caddyConfig
-
-	if _, err := os.Stat(caddyCertsDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(caddyCertsDir, 0740); err != nil {
-			return false, fmt.Errorf("failed to create ingress certs directory: %w", err)
-		}
-	}
-
-	if err := util.RunCommandVerbose(caddyDockerComposeCom, verbose); err != nil {
-		return false, fmt.Errorf("failed to start ingress: %w", err)
-	}
-
-	time.Sleep(5 * time.Second)
-	if err := caddyapi.InitCaddy(); err != nil {
-		return false, fmt.Errorf("failed to init ingress: %w", err)
-	}
-
-	return true, nil
+	return initTraefikIngress(verbose)
 }
 
 // renderTraefikStaticConfig renders the global Traefik static configuration.
@@ -674,6 +491,8 @@ func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, err
 	traefikStaticConfig := `entryPoints:
   web:
     address: ":80"
+    forwardedHeaders:
+      insecure: true
 api:
   insecure: true
 providers:
@@ -895,20 +714,10 @@ func addRouteToIngress(req IngressAddRouteRequest, jwtToken string) error {
 		return fmt.Errorf("upstream is required")
 	}
 
-	ingressType := DetectIngressType()
 	workspaceName := resolveWorkspaceName(req, jwtToken)
 
-	switch ingressType {
-	case IngressCaddy:
-		if err := addRouteCaddy(req); err != nil {
-			return err
-		}
-	case IngressTraefik:
-		if err := addRouteTraefik(req, workspaceName); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("no ingress proxy detected")
+	if err := addRouteTraefik(req, workspaceName); err != nil {
+		return err
 	}
 
 	// Every hostname routed through the protected chain needs its OAuth
@@ -986,53 +795,6 @@ func workspaceDashboardEndpoint(workspaceName string) string {
 		return ""
 	}
 	return strings.ToLower(u.Hostname())
-}
-
-// addRouteCaddy adds a route to Caddy.
-//
-// Caddy deployments don't run the protected-ingress chain (no
-// bitswan-protected-proxy container in the Caddy path), so there is no
-// outer→wrap / inner→upstream split here. To keep the two-subdomain
-// contract stable for clients that hit either hostname form, the inner
-// sibling is registered pointing at the *same* upstream. Anything that
-// wants the wrap should use Traefik.
-func addRouteCaddy(req IngressAddRouteRequest) error {
-	if isInnerHost(req.Hostname) {
-		return fmt.Errorf("addRouteCaddy: refusing to register inner hostname %q directly — pass the outer hostname; the inner pair is registered automatically", req.Hostname)
-	}
-	outer := req.Hostname
-	inner := toInnerHost(outer)
-
-	if req.Mkcert {
-		for _, h := range []string{outer, inner} {
-			parts := strings.Split(h, ".")
-			if len(parts) < 2 {
-				return fmt.Errorf("invalid hostname format: must contain at least one dot")
-			}
-			domain := strings.Join(parts[1:], ".")
-			if err := caddyapi.GenerateAndInstallCertsForHostname(h, domain); err != nil {
-				return fmt.Errorf("failed to generate and install certificates for %s: %w", h, err)
-			}
-			if err := caddyapi.InstallTLSCertsForHostname(h, domain, "default"); err != nil {
-				return fmt.Errorf("failed to install TLS policies for %s: %w", h, err)
-			}
-		}
-	} else if req.CertsDir != "" {
-		caddyConfig := os.Getenv("HOME") + "/.config/bitswan/caddy"
-		for _, h := range []string{outer, inner} {
-			if err := caddyapi.InstallCertsFromDir(req.CertsDir, h, caddyConfig); err != nil {
-				return fmt.Errorf("failed to install certificates from directory for %s: %w", h, err)
-			}
-		}
-	}
-
-	if err := caddyapi.AddRoute(outer, req.Upstream); err != nil {
-		return fmt.Errorf("add outer route: %w", err)
-	}
-	if err := caddyapi.AddRoute(inner, req.Upstream); err != nil {
-		return fmt.Errorf("add inner route: %w", err)
-	}
-	return nil
 }
 
 // isWorkspaceTraefikRunning checks if a workspace sub-traefik container is running.
@@ -1201,7 +963,7 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 	} else {
 		// Bare environment (no protected proxy): single-tier direct
 		// routes for both hostnames so the service stays reachable at
-		// its canonical name (matches what addRouteCaddy does).
+		// its canonical name.
 		for _, h := range []string{outer, inner} {
 			if err := traefikapi.AddRouteWithTLSDomains(h, req.Upstream, "", certResolver, tlsDomains); err != nil {
 				return fmt.Errorf("failed to add route for %s: %w", h, err)
@@ -1233,17 +995,8 @@ func removeRouteFromIngress(hostname string) error {
 	outer := toOuterHost(hostname)
 	inner := toInnerHost(outer)
 
-	var err error
-	switch DetectIngressType() {
-	case IngressCaddy:
-		_ = caddyapi.RemoveRoute(inner)
-		err = caddyapi.RemoveRoute(outer)
-	case IngressTraefik:
-		_ = traefikapi.RemoveRoute(inner)
-		err = traefikapi.RemoveRoute(outer)
-	default:
-		return fmt.Errorf("no ingress proxy detected")
-	}
+	_ = traefikapi.RemoveRoute(inner)
+	err := traefikapi.RemoveRoute(outer)
 	if err == nil {
 		if derr := deleteEndpoint(outer); derr != nil {
 			fmt.Printf("Warning: failed to remove Bailey endpoint for %s: %v\n", outer, derr)
@@ -1255,103 +1008,10 @@ func removeRouteFromIngress(hostname string) error {
 	return err
 }
 
-// MigrateCaddyToTraefik migrates from Caddy to Traefik.
-// It exports routes from Caddy, stops Caddy, starts Traefik, and re-adds the routes.
-func MigrateCaddyToTraefik(verbose bool) error {
-	if DetectIngressType() != IngressCaddy {
-		return fmt.Errorf("caddy is not running, nothing to migrate")
-	}
-
-	// Step 1: Export existing routes from Caddy
-	fmt.Println("Exporting routes from Caddy...")
-	routes, err := caddyapi.ListRoutes()
-	if err != nil {
-		return fmt.Errorf("failed to list Caddy routes: %w", err)
-	}
-
-	type routeExport struct {
-		hostname string
-		upstream string
-	}
-	var exported []routeExport
-	for _, route := range routes {
-		var hostname, upstream string
-		for _, match := range route.Match {
-			if len(match.Host) > 0 {
-				hostname = match.Host[0]
-			}
-		}
-		for _, handle := range route.Handle {
-			if handle.Handler == "reverse_proxy" {
-				for _, u := range handle.Upstreams {
-					upstream = u.Dial
-				}
-			}
-			// Also check subroutes (Caddy wraps in subroute handler)
-			for _, subRoute := range handle.Routes {
-				for _, subHandle := range subRoute.Handle {
-					if subHandle.Handler == "reverse_proxy" {
-						for _, u := range subHandle.Upstreams {
-							upstream = u.Dial
-						}
-					}
-				}
-			}
-		}
-		if hostname != "" && upstream != "" {
-			exported = append(exported, routeExport{hostname: hostname, upstream: upstream})
-		}
-	}
-
-	if verbose {
-		fmt.Printf("Exported %d routes from Caddy\n", len(exported))
-	}
-
-	// Step 2: Stop Caddy
-	fmt.Println("Stopping Caddy...")
-	stopCmd := exec.Command("docker", "compose", "-p", "bitswan-caddy", "down")
-	homeDir := os.Getenv("HOME")
-	caddyConfig := homeDir + "/.config/bitswan/caddy"
-	stopCmd.Dir = caddyConfig
-	if err := util.RunCommandVerbose(stopCmd, verbose); err != nil {
-		// Try force remove if compose down fails
-		exec.Command("docker", "rm", "-f", "caddy").Run()
-	}
-
-	// Step 3: Start Traefik
-	fmt.Println("Starting Traefik...")
-	if _, err := initTraefikIngress(verbose); err != nil {
-		return fmt.Errorf("failed to start Traefik: %w", err)
-	}
-
-	// Step 4: Re-add routes to Traefik
-	fmt.Println("Migrating routes to Traefik...")
-	for _, route := range exported {
-		certResolver, tlsDomains := certResolverForHostname(route.hostname)
-		if err := traefikapi.AddRouteWithTLSDomains(route.hostname, route.upstream, "", certResolver, tlsDomains); err != nil {
-			fmt.Printf("Warning: failed to migrate route %s -> %s: %v\n", route.hostname, route.upstream, err)
-		} else if verbose {
-			fmt.Printf("Migrated route: %s -> %s\n", route.hostname, route.upstream)
-		}
-	}
-
-	fmt.Printf("Migration complete: %d routes migrated from Caddy to Traefik\n", len(exported))
-	return nil
-}
-
-// UpdateIngress updates the ingress proxy to the latest version.
+// UpdateIngress updates the Traefik ingress proxy to the latest version.
 // It exports routes, stops the container, regenerates config, restarts, and re-adds routes.
 func UpdateIngress(verbose bool) error {
-	ingressType := DetectIngressType()
-
-	switch ingressType {
-	case IngressTraefik:
-		return updateTraefik(verbose)
-	case IngressCaddy:
-		return updateCaddy(verbose)
-	}
-
-	return fmt.Errorf("no ingress proxy detected")
+	return updateTraefik(verbose)
 }
 
 // updateTraefik updates the Traefik proxy to the latest version
@@ -1430,89 +1090,6 @@ func updateTraefik(verbose bool) error {
 	return nil
 }
 
-// updateCaddy updates the Caddy proxy to the latest version
-func updateCaddy(verbose bool) error {
-	// Step 1: Export existing routes
-	fmt.Println("Exporting routes from Caddy...")
-	routes, err := caddyapi.ListRoutes()
-	if err != nil {
-		return fmt.Errorf("failed to list Caddy routes: %w", err)
-	}
-
-	type routeExport struct {
-		hostname string
-		upstream string
-	}
-	var exported []routeExport
-	for _, route := range routes {
-		var hostname, upstream string
-		for _, match := range route.Match {
-			if len(match.Host) > 0 {
-				hostname = match.Host[0]
-			}
-		}
-		for _, handle := range route.Handle {
-			if handle.Handler == "reverse_proxy" {
-				for _, u := range handle.Upstreams {
-					upstream = u.Dial
-				}
-			}
-			for _, subRoute := range handle.Routes {
-				for _, subHandle := range subRoute.Handle {
-					if subHandle.Handler == "reverse_proxy" {
-						for _, u := range subHandle.Upstreams {
-							upstream = u.Dial
-						}
-					}
-				}
-			}
-		}
-		if hostname != "" && upstream != "" {
-			exported = append(exported, routeExport{hostname: hostname, upstream: upstream})
-		}
-	}
-
-	if verbose {
-		fmt.Printf("Exported %d routes from Caddy\n", len(exported))
-	}
-
-	// Step 2: Stop Caddy
-	fmt.Println("Stopping Caddy...")
-	stopCmd := exec.Command("docker", "compose", "-p", "bitswan-caddy", "down")
-	homeDir := os.Getenv("HOME")
-	caddyConfig := homeDir + "/.config/bitswan/caddy"
-	stopCmd.Dir = caddyConfig
-	if err := util.RunCommandVerbose(stopCmd, verbose); err != nil {
-		exec.Command("docker", "rm", "-f", "caddy").Run()
-	}
-
-	// Step 3: Pull latest image
-	fmt.Println("Pulling latest Caddy image...")
-	pullCmd := exec.Command("docker", "pull", "caddy:2.9")
-	if err := util.RunCommandVerbose(pullCmd, verbose); err != nil {
-		fmt.Printf("Warning: failed to pull latest image: %v\n", err)
-	}
-
-	// Step 4: Start Caddy with new config
-	fmt.Println("Starting Caddy...")
-	if _, err := initCaddyIngress(verbose); err != nil {
-		return fmt.Errorf("failed to start Caddy: %w", err)
-	}
-
-	// Step 5: Re-add routes
-	fmt.Println("Restoring routes to Caddy...")
-	for _, route := range exported {
-		if err := caddyapi.AddRoute(route.hostname, route.upstream); err != nil {
-			fmt.Printf("Warning: failed to restore route %s -> %s: %v\n", route.hostname, route.upstream, err)
-		} else if verbose {
-			fmt.Printf("Restored route: %s -> %s\n", route.hostname, route.upstream)
-		}
-	}
-
-	fmt.Printf("Update complete: %d routes restored\n", len(exported))
-	return nil
-}
-
 // handleIngressAddRoute handles POST /ingress/add-route
 func (s *Server) handleIngressAddRoute(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1548,9 +1125,9 @@ func (s *Server) handleIngressAddRoute(w http.ResponseWriter, r *http.Request) {
 // go-live swap (point it at the other slot's containers, other DB). Unlike
 // add-route it deliberately does NOT touch TLS certs, the Bailey ACL, or
 // OAuth redirect URIs — the route already exists with all of that; only the
-// upstream the route resolves to changes. The rewrite reuses addRouteTraefik /
-// addRouteCaddy, so it is correct across every routing topology (protected
-// wrap, workspace sub-traefik, or direct) and replaces the upstream in place.
+// upstream the route resolves to changes. The rewrite reuses addRouteTraefik,
+// so it is correct across every routing topology (protected wrap, workspace
+// sub-traefik, or direct) and replaces the upstream in place.
 func (s *Server) handleIngressRepointRoute(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1570,19 +1147,8 @@ func (s *Server) handleIngressRepointRoute(w http.ResponseWriter, r *http.Reques
 	jwtToken := r.Header.Get("BITSWAN_AUTOMATION_SERVER_DAEMON_TOKEN")
 	workspaceName := resolveWorkspaceName(req, jwtToken)
 
-	switch DetectIngressType() {
-	case IngressTraefik:
-		if err := addRouteTraefik(req, workspaceName); err != nil {
-			writeJSONError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	case IngressCaddy:
-		if err := addRouteCaddy(req); err != nil {
-			writeJSONError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	default:
-		writeJSONError(w, "no ingress proxy detected", http.StatusInternalServerError)
+	if err := addRouteTraefik(req, workspaceName); err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -1724,72 +1290,33 @@ func (s *Server) handleIngressListRoutes(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ingressType := DetectIngressType()
 	var routeInfos []RouteInfo
 
-	switch ingressType {
-	case IngressCaddy:
-		routes, err := caddyapi.ListRoutes()
-		if err != nil {
-			writeJSONError(w, "failed to list routes: "+err.Error(), http.StatusInternalServerError)
-			return
+	routes, err := traefikapi.ListRoutes()
+	if err != nil {
+		writeJSONError(w, "failed to list routes: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, route := range routes {
+		var hostnames []string
+		for _, match := range route.Match {
+			hostnames = append(hostnames, match.Host...)
 		}
-		for _, route := range routes {
-			var hostnames []string
-			for _, match := range route.Match {
-				hostnames = append(hostnames, match.Host...)
-			}
-			var upstreams []string
-			for _, handle := range route.Handle {
-				if handle.Handler == "subroute" {
-					for _, subRoute := range handle.Routes {
-						for _, subHandle := range subRoute.Handle {
-							if subHandle.Handler == "reverse_proxy" {
-								for _, upstream := range subHandle.Upstreams {
-									upstreams = append(upstreams, upstream.Dial)
-								}
-							}
-						}
-					}
+		var upstreams []string
+		for _, handle := range route.Handle {
+			if handle.Handler == "reverse_proxy" {
+				for _, upstream := range handle.Upstreams {
+					upstreams = append(upstreams, upstream.Dial)
 				}
 			}
-			if len(hostnames) > 0 && len(upstreams) > 0 {
-				routeInfos = append(routeInfos, RouteInfo{
-					ID:       route.ID,
-					Hostname: hostnames[0],
-					Upstream: upstreams[0],
-					Terminal: route.Terminal,
-				})
-			}
 		}
-
-	case IngressTraefik:
-		routes, err := traefikapi.ListRoutes()
-		if err != nil {
-			writeJSONError(w, "failed to list routes: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		for _, route := range routes {
-			var hostnames []string
-			for _, match := range route.Match {
-				hostnames = append(hostnames, match.Host...)
-			}
-			var upstreams []string
-			for _, handle := range route.Handle {
-				if handle.Handler == "reverse_proxy" {
-					for _, upstream := range handle.Upstreams {
-						upstreams = append(upstreams, upstream.Dial)
-					}
-				}
-			}
-			if len(hostnames) > 0 && len(upstreams) > 0 {
-				routeInfos = append(routeInfos, RouteInfo{
-					ID:       route.ID,
-					Hostname: hostnames[0],
-					Upstream: upstreams[0],
-					Terminal: route.Terminal,
-				})
-			}
+		if len(hostnames) > 0 && len(upstreams) > 0 {
+			routeInfos = append(routeInfos, RouteInfo{
+				ID:       route.ID,
+				Hostname: hostnames[0],
+				Upstream: upstreams[0],
+				Terminal: route.Terminal,
+			})
 		}
 	}
 

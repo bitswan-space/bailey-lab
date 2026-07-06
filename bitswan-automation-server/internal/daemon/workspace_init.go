@@ -10,15 +10,12 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v3"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
-	"github.com/bitswan-space/bitswan-workspaces/internal/caddyapi"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
-	"github.com/bitswan-space/bitswan-workspaces/internal/oauth"
 	"github.com/bitswan-space/bitswan-workspaces/internal/services"
 	"github.com/bitswan-space/bitswan-workspaces/internal/ssh"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
@@ -35,6 +32,11 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	domain := fs.String("domain", "", "")
 	certsDir := fs.String("certs-dir", "", "")
 	verbose := fs.Bool("verbose", false, "")
+	// The cobra client (cmd/init.go) advertises -v as the shorthand for
+	// --verbose, but `workspace init` forwards its raw argv here where Go's
+	// std flag package has no shorthand concept, so a bare -v would fail to
+	// parse. Accept -v explicitly and fold it into verbose below.
+	verboseShort := fs.Bool("v", false, "")
 	mkCerts := fs.Bool("mkcerts", false, "")
 	noDashboard := fs.Bool("no-dashboard", false, "")
 	noCodingAgent := fs.Bool("no-coding-agent", false, "")
@@ -43,13 +45,13 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	gitopsImage := fs.String("gitops-image", "", "")
 	dashboardImage := fs.String("dashboard-image", "", "")
 	codingAgentImage := fs.String("coding-agent-image", "", "")
+	infraDriverImage := fs.String("infra-driver-image", "", "")
+	egressGatewayImage := fs.String("egress-gateway-image", "", "")
 	gitopsDevSourceDir := fs.String("gitops-dev-source-dir", "", "")
 	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
-	codingAgentDevSourceDir := fs.String("coding-agent-dev-source-dir", "", "")
-	oauthConfigFile := fs.String("oauth-config", "", "")
-	noOauth := fs.Bool("no-oauth", false, "")
 	sshPort := fs.String("ssh-port", "", "")
 	staging := fs.Bool("staging", false, "")
+	dev := fs.Bool("dev", false, "")
 	// Email of the user creating the workspace. Passed through to
 	// route registration so the workspace's endpoints (gitops,
 	// dashboard) are recorded under this owner in the Bailey ACL.
@@ -57,6 +59,9 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("failed to parse flags: %w", err)
+	}
+	if *verboseShort {
+		*verbose = true
 	}
 
 	if len(fs.Args()) < 1 {
@@ -91,17 +96,8 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	// Init bitswan network
 	docker.EnsureDockerNetwork("bitswan_network", *verbose)
 
-	var oauthConfig *oauth.Config
-	if *oauthConfigFile != "" {
-		oauthConfig, err = oauth.GetInitOauthConfig(*oauthConfigFile)
-		if err != nil {
-			return fmt.Errorf("failed to get OAuth config: %w", err)
-		}
-		fmt.Println("OAuth config read successfully!")
-	}
-
 	// Ensure the global ingress proxy is running.
-	// initIngress is idempotent: it detects Caddy or Traefik and returns early if already running.
+	// initIngress is idempotent: it returns early if Traefik is already running.
 	if _, err := initIngress(*verbose); err != nil {
 		return fmt.Errorf("failed to initialize ingress: %w", err)
 	}
@@ -136,30 +132,15 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 
 	// Handle certificate generation and installation
 	if *mkCerts || *certsDir != "" {
-		ingressType := DetectIngressType()
-		switch ingressType {
-		case IngressCaddy:
-			if *mkCerts {
-				if err := caddyapi.GenerateAndInstallCerts(*domain); err != nil {
-					return fmt.Errorf("error generating and installing certificates: %w", err)
-				}
-			} else if *certsDir != "" {
-				caddyCfg := bitswanConfig + "caddy"
-				if err := caddyapi.InstallCertsFromDir(*certsDir, *domain, caddyCfg); err != nil {
-					return fmt.Errorf("error installing certificates from directory: %w", err)
-				}
+		if *mkCerts {
+			// Generate wildcard cert for *.domain so subdomains (gitops, editor, automations) are covered
+			wildcardHostname := "*." + *domain
+			if err := traefikapi.InstallTLSCerts(wildcardHostname, true, ""); err != nil {
+				return fmt.Errorf("error installing wildcard certificates: %w", err)
 			}
-		case IngressTraefik:
-			if *mkCerts {
-				// Generate wildcard cert for *.domain so subdomains (gitops, editor, automations) are covered
-				wildcardHostname := "*." + *domain
-				if err := traefikapi.InstallTLSCerts(wildcardHostname, true, ""); err != nil {
-					return fmt.Errorf("error installing wildcard certificates: %w", err)
-				}
-			} else if *certsDir != "" {
-				if err := traefikapi.InstallTLSCerts(*domain, false, *certsDir); err != nil {
-					return fmt.Errorf("error installing certificates from directory: %w", err)
-				}
+		} else if *certsDir != "" {
+			if err := traefikapi.InstallTLSCerts(*domain, false, *certsDir); err != nil {
+				return fmt.Errorf("error installing certificates from directory: %w", err)
 			}
 		}
 	}
@@ -542,17 +523,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		return fmt.Errorf("failed to create secrets directory: %w", err)
 	}
 
-	if oauthConfig != nil {
-		oauthConfigFile := gitopsConfig + "/oauth-config.yaml"
-		oauthConfigYaml, err := yaml.Marshal(oauthConfig)
-		if err != nil {
-			return fmt.Errorf("failed to marshal OAuth config: %w", err)
-		}
-		if err := os.WriteFile(oauthConfigFile, oauthConfigYaml, 0600); err != nil {
-			return fmt.Errorf("failed to write oauth config file: %w", err)
-		}
-	}
-
 	// Generate SSH key pair for the workspace (if not already generated for remote repo)
 	if *remoteRepo == "" {
 		fmt.Println("Generating SSH key pair for workspace...")
@@ -574,7 +544,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	imgopsImage := *gitopsImage
 	if imgopsImage == "" {
 		var err error
-		imgopsImage, err = dockerhub.ResolveGitopsImage(*staging)
+		imgopsImage, err = dockerhub.ResolveGitopsImage(*staging, *dev)
 		if err != nil {
 			return fmt.Errorf("failed to get latest BitSwan GitOps image: %w", err)
 		}
@@ -588,7 +558,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		bitswanDashboardImage = *dashboardImage
 		if bitswanDashboardImage == "" {
 			var err error
-			bitswanDashboardImage, err = dockerhub.ResolveDashboardImage(*staging)
+			bitswanDashboardImage, err = dockerhub.ResolveDashboardImage(*staging, *dev)
 			if err != nil {
 				return fmt.Errorf("failed to get latest BitSwan workspace-dashboard image: %w", err)
 			}
@@ -600,10 +570,32 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		bitswanCodingAgentImage = *codingAgentImage
 		if bitswanCodingAgentImage == "" {
 			var err error
-			bitswanCodingAgentImage, err = dockerhub.ResolveCodingAgentImage(*staging)
+			bitswanCodingAgentImage, err = dockerhub.ResolveCodingAgentImage(*staging, *dev)
 			if err != nil {
 				return fmt.Errorf("failed to get latest BitSwan coding-agent image: %w", err)
 			}
+		}
+	}
+
+	// The infra-driver sidecar runs its own image; pin the resolved version.
+	bitswanInfraDriverImage := *infraDriverImage
+	if bitswanInfraDriverImage == "" {
+		var err error
+		bitswanInfraDriverImage, err = dockerhub.ResolveInfraDriverImage(*staging, *dev)
+		if err != nil {
+			return fmt.Errorf("failed to get latest BitSwan infra-driver image: %w", err)
+		}
+	}
+	// The egress-gateway image is pinned onto the driver so the per-BP firewall
+	// gateways it materializes use a resolved version instead of :latest. Follows
+	// the same staging/dev-aware resolver + --egress-gateway-image override /
+	// BITSWAN_EGRESS_GATEWAY_IMAGE env pattern as the app images.
+	bitswanEgressGatewayImage := *egressGatewayImage
+	if bitswanEgressGatewayImage == "" {
+		var err error
+		bitswanEgressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(*staging, *dev)
+		if err != nil {
+			return fmt.Errorf("failed to get latest BitSwan egress-gateway image: %w", err)
 		}
 	}
 
@@ -647,15 +639,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		return fmt.Errorf("failed to register GitOps service: %w", err)
 	}
 
-	// Install wildcard TLS policies for the workspace domain (Caddy needs this
-	// so all subdomains — gitops, editor, automations — are covered by the same cert).
-	// Must be done AFTER per-hostname cert registration to avoid being overwritten.
-	if (*mkCerts || *certsDir != "") && DetectIngressType() == IngressCaddy {
-		if err := caddyapi.InstallTLSCerts(workspaceName, *domain); err != nil {
-			return fmt.Errorf("failed to install TLS certificates: %w", err)
-		}
-	}
-
 	var aocEnvVars []string
 	workspaceId := ""
 	fmt.Println("Registering workspace...")
@@ -678,32 +661,8 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			}
 			fmt.Println("Workspace registered successfully!")
 
-			// Automatically fetch OAuth configuration when AOC is configured
-			if !*noOauth {
-				fmt.Println("Fetching OAuth configuration from AOC...")
-				oauthConfig, err = aocClient.GetOAuthConfig(workspaceId)
-				if err != nil {
-					return fmt.Errorf("failed to get OAuth config from AOC: %w", err)
-				}
-				fmt.Println("OAuth configuration fetched successfully!")
-
-				// Save OAuth config to disk
-				if err := oauth.SaveOauthConfig(workspaceName, oauthConfig); err != nil {
-					return fmt.Errorf("failed to save OAuth config: %w", err)
-				}
-			} else {
-				fmt.Println("OAuth disabled, using password authentication")
-			}
-
 			aocEnvVars = aocClient.GetAOCEnvironmentVariables(workspaceId, automationServerToken)
 		}
-	}
-
-	var oauthEnvVars []string
-	var keycloakURL string
-	if oauthConfig != nil {
-		oauthEnvVars = oauth.CreateOAuthEnvVars(oauthConfig, "gitops", workspaceName, *domain)
-		keycloakURL = oauthConfig.IssuerUrl
 	}
 
 	// Log local remote info for debugging
@@ -715,14 +674,14 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		GitopsPath:         gitopsConfig,
 		WorkspaceName:      workspaceName,
 		GitopsImage:        imgopsImage,
+		InfraDriverImage:   bitswanInfraDriverImage,
+		EgressGatewayImage: bitswanEgressGatewayImage,
 		Domain:             *domain,
 		AocEnvVars:         aocEnvVars,
-		OAuthEnvVars:       oauthEnvVars,
 		GitopsDevSourceDir: *gitopsDevSourceDir,
 		TrustCA:            true,
 		LocalRemotePath:    localRemotePath,
 		LocalRemoteName:    localRemoteName,
-		KeycloakURL:        keycloakURL,
 		CodingAgentSecret:  codingAgentSecret,
 	}
 	compose, token, err := config.CreateDockerComposeFile()
@@ -744,7 +703,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	fmt.Println("GitOps deployment set up successfully!")
 
 	// Save metadata to file
-	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noDashboard, *noCodingAgent, &workspaceId, *gitopsDevSourceDir, *dashboardDevSourceDir, *codingAgentDevSourceDir, codingAgentSecret); err != nil {
+	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noDashboard, *noCodingAgent, &workspaceId, *gitopsDevSourceDir, *dashboardDevSourceDir, codingAgentSecret); err != nil {
 		fmt.Printf("Warning: Failed to save metadata: %v\n", err)
 	}
 
@@ -809,15 +768,9 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			return fmt.Errorf("failed to create coding-agent service: %w", err)
 		}
 
-		var devConfig *services.CodingAgentDevConfig
-		if *codingAgentDevSourceDir != "" {
-			devConfig = &services.CodingAgentDevConfig{
-				DevMode:   true,
-				SourceDir: *codingAgentDevSourceDir,
-			}
-		}
-
-		if err := codingAgentService.Enable(codingAgentSecret, bitswanCodingAgentImage, *domain, devConfig); err != nil {
+		// Coding-agent has no durable live-dev mode (only gitops + dashboard do),
+		// so init never sets a dev config — enable with the plain image.
+		if err := codingAgentService.Enable(codingAgentSecret, bitswanCodingAgentImage, *domain, nil); err != nil {
 			return fmt.Errorf("failed to enable coding-agent service: %w", err)
 		}
 
@@ -833,10 +786,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	fmt.Printf("GitOps ID: %s\n", workspaceName)
 	fmt.Printf("GitOps URL: https://%s-gitops.%s\n", workspaceName, *domain)
 	fmt.Printf("GitOps Secret: %s\n", token)
-
-	if oauthConfig != nil {
-		fmt.Printf("OAuth is enabled for the Editor.\n")
-	}
 
 	return nil
 }
@@ -900,7 +849,7 @@ func setHostsFile(workspaceName, domain string) error {
 	return nil
 }
 
-func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentDevSourceDir, codingAgentSecret string) error {
+func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret string) error {
 	metadata := config.WorkspaceMetadata{
 		Domain:       domain,
 		GitopsURL:    fmt.Sprintf("https://%s-gitops.%s", workspaceName, domain),
@@ -931,10 +880,6 @@ func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard
 	if !noCodingAgent {
 		metadata.CodingAgentEnabled = true
 		metadata.CodingAgentSecret = codingAgentSecret
-	}
-
-	if codingAgentDevSourceDir != "" {
-		metadata.DevMode = true
 	}
 
 	metadataPath := filepath.Join(gitopsConfig, "metadata.yaml")

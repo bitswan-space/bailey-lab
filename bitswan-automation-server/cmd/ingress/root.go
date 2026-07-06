@@ -15,7 +15,6 @@ func NewIngressCmd() *cobra.Command {
 	cmd.AddCommand(newAddRouteCmd())
 	cmd.AddCommand(newRemoveRouteCmd())
 	cmd.AddCommand(newListRoutesCmd())
-	cmd.AddCommand(newMigrateCmd())
 	cmd.AddCommand(newUpdateCmd())
 	cmd.AddCommand(newProvisionProtectedProxyCmd())
 

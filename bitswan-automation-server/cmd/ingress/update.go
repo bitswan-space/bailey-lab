@@ -14,7 +14,7 @@ func newUpdateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Update the ingress proxy to the latest version",
-		Long: `Update the ingress proxy (Traefik or Caddy) to the latest version.
+		Long: `Update the Traefik ingress proxy to the latest version.
 
 This command:
   1. Exports all existing routes

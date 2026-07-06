@@ -1,14 +1,14 @@
-name: egress-gateway Build and Push Docker Image
+name: infra-driver Build and Push Docker Image
 
 on:
   push:
     branches: [ main ]
     paths:
       # The image is `COPY . .` over the whole automation-server module and
-      # compiles ./cmd/egress-gateway, so any Go change can affect the binary.
-      # Build broadly rather than risk shipping a stale gateway.
+      # compiles ./cmd/infra-driver, so any Go change can affect the binary.
+      # Build broadly rather than risk shipping a stale driver.
       - 'bitswan-automation-server/**'
-      - '.github/workflows/egress-gateway-docker-publish.yml'
+      - '.github/workflows/infra-driver-docker-publish.yml'
   workflow_dispatch:
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
 
     - name: Build and Push
       working-directory: bitswan-automation-server
-      # Publishes bitswan/egress-gateway-staging with the same three-tag versioned
+      # Publishes bitswan/infra-driver-staging with the same three-tag versioned
       # scheme as gitops/workspace-dashboard/coding-agent; the version tag is what
-      # dockerhub.ResolveEgressGatewayImage(staging) pins.
-      run: bash ./cmd/egress-gateway/build_and_push.sh
+      # dockerhub.ResolveInfraDriverImage(staging) pins.
+      run: bash ./cmd/infra-driver/build_and_push.sh

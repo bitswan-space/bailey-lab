@@ -14,7 +14,7 @@ import (
 )
 
 // ============================================================
-// Public types (kept API-compatible with caddyapi)
+// Public types
 // ============================================================
 
 type Route struct {
@@ -340,7 +340,7 @@ func sanitizeHostname(hostname string) string {
 }
 
 // ensureUpstreamURL ensures the upstream is a full URL for Traefik's loadBalancer.
-// Unlike Caddy, Traefik requires "http://host:port" (not just "host:port").
+// Traefik requires "http://host:port" (not just "host:port").
 // Also remaps WSS port 8084 → WS port 8083 since TLS termination happens at Traefik.
 func ensureUpstreamURL(upstream string) string {
 	upstream = strings.TrimPrefix(upstream, "/")
@@ -377,7 +377,7 @@ func extractHostFromRule(rule string) string {
 // Public functions
 // ============================================================
 
-// InitSet is a no-op stub kept for API compatibility with caddyapi.
+// InitSet is a no-op stub kept for call-site compatibility.
 // Traefik state is managed via the state file; there is no incremental init path.
 func InitSet(url string, payload []byte) error {
 	return nil
@@ -554,7 +554,7 @@ func ListRoutes() ([]Route, error) {
 
 // ListRoutesWithTraefik retrieves all current routes from the Traefik state file.
 // If traefikBaseURL is empty, uses the default from getTraefikBaseURL().
-// The returned []Route is in the caddyapi-compatible format.
+// The returned []Route is in the shared RouteInfo format.
 func ListRoutesWithTraefik(traefikBaseURL string) ([]Route, error) {
 	if traefikBaseURL == "" {
 		traefikBaseURL = getTraefikBaseURL()

@@ -304,7 +304,7 @@ func (d *DashboardService) WaitForDashboardReady() error {
 }
 
 // RegenerateDockerCompose fully regenerates docker-compose-dashboard.yml from metadata.
-func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, staging bool, trustCA bool) error {
+func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, staging bool, dev bool, trustCA bool) error {
 	if !d.IsEnabled() {
 		return fmt.Errorf("Dashboard service is not enabled for workspace '%s'", d.WorkspaceName)
 	}
@@ -318,7 +318,7 @@ func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, stagin
 	if dashboardImage != "" {
 		bitswanDashboardImage = dashboardImage
 	} else {
-		bitswanDashboardImage, err = dockerhub.ResolveDashboardImage(staging)
+		bitswanDashboardImage, err = dockerhub.ResolveDashboardImage(staging, dev)
 		if err != nil {
 			return fmt.Errorf("failed to get latest workspace-dashboard image: %w", err)
 		}

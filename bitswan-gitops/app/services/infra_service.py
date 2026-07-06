@@ -5,7 +5,6 @@ Ported from Go implementations in bitswan-automation-server/internal/services/.
 Manages infrastructure services (CouchDB, Kafka) as Docker Compose deployments.
 """
 
-import asyncio
 import io
 import logging
 import os
@@ -13,8 +12,6 @@ import secrets
 import string
 import tarfile
 from abc import ABC, abstractmethod
-
-import requests
 
 from app.utils import SERVICE_REALMS
 
@@ -248,8 +245,8 @@ class InfraService(ABC):
         base = self.service_type.capitalize()
         return f"{base} ({self.stage})"
 
-    def caddy_hostname(self) -> str:
-        """Return the Caddy hostname for this service."""
+    def ingress_hostname(self) -> str:
+        """Return the ingress hostname for this service."""
         return f"{self.workspace_name}-{self.service_type}{self.service_suffix}.{self.gitops_domain}"
 
     @property
@@ -259,11 +256,6 @@ class InfraService(ABC):
     @property
     def secrets_file_path_host(self) -> str:
         return os.path.join(self.secrets_dir_host, self.secrets_file_name)
-
-    @property
-    def oauth2_enabled(self) -> bool:
-        """Check if OAuth2 proxy is configured in the environment."""
-        return any(k.startswith("OAUTH2") for k in os.environ)
 
     def is_enabled(self) -> bool:
         """Check if the service is enabled (secrets file exists)."""
@@ -290,10 +282,10 @@ class InfraService(ABC):
         """Generate secrets file content. Returns the content string."""
 
     @abstractmethod
-    def _get_caddy_upstream(self) -> str:
-        """Return the upstream address for Caddy (e.g., 'container:5984')."""
+    def _get_ingress_upstream(self) -> str:
+        """Return the upstream address for the ingress (e.g., 'container:5984')."""
 
-    async def _register_with_caddy(self) -> bool:
+    async def _register_with_ingress(self) -> bool:
         """Register this service with the ingress daemon."""
         from app.utils import add_route_to_ingress
 
@@ -303,8 +295,8 @@ class InfraService(ABC):
             )
             return False
 
-        hostname = self.caddy_hostname()
-        upstream = self._get_caddy_upstream()
+        hostname = self.ingress_hostname()
+        upstream = self._get_ingress_upstream()
 
         result = add_route_to_ingress(hostname, upstream, self.workspace_name)
         if result:
@@ -315,81 +307,19 @@ class InfraService(ABC):
             logger.error(f"Failed to register {self.display_name} with ingress")
         return result
 
-    async def _unregister_from_caddy(self) -> bool:
+    async def _unregister_from_ingress(self) -> bool:
         """Remove this service from the ingress daemon."""
         if not self.gitops_domain:
             return False
 
-        hostname = self.caddy_hostname()
-        ingress_url = os.environ.get(
-            "BITSWAN_INGRESS_URL", "http://bitswan-automation-server:8080"
-        )
+        from app.utils import remove_route_by_hostname
 
-        try:
-            response = await asyncio.to_thread(
-                requests.delete,
-                f"{ingress_url}/ingress/remove-route/{hostname}",
-                timeout=5,
-            )
-            if response.status_code == 200:
-                logger.info(f"Unregistered {self.display_name} from ingress")
-                return True
-            logger.warning(
-                f"Failed to unregister {self.display_name} from ingress: "
-                f"HTTP {response.status_code} - {response.text}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"Failed to unregister {self.display_name} from ingress: {e}"
-            )
+        hostname = self.ingress_hostname()
+        if remove_route_by_hostname(hostname):
+            logger.info(f"Unregistered {self.display_name} from ingress")
+            return True
+        logger.warning(f"Failed to unregister {self.display_name} from ingress")
         return False
-
-    async def _register_oauth2_redirect_uri(self) -> None:
-        """Register this service's OAuth2 redirect URI with AOC/Keycloak.
-
-        Adds the service's callback URL to the workspace Keycloak client so
-        that OAuth2 login redirects are accepted.
-        """
-        if not self.oauth2_enabled or not self.gitops_domain:
-            return
-
-        aoc_url = os.environ.get("BITSWAN_AOC_URL")
-        aoc_token = os.environ.get("BITSWAN_AOC_TOKEN")
-        workspace_id = os.environ.get("BITSWAN_WORKSPACE_ID")
-
-        if not aoc_url or not aoc_token or not workspace_id:
-            logger.warning(
-                f"AOC not configured, skipping OAuth2 redirect URI registration for {self.display_name}"
-            )
-            return
-
-        redirect_uri = f"https://{self.caddy_hostname()}/oauth2/callback"
-        url = f"{aoc_url}/api/automation_server/workspaces/{workspace_id}/keycloak/add-redirect-uri/"
-
-        try:
-            response = await asyncio.to_thread(
-                requests.post,
-                url,
-                headers={
-                    "Authorization": f"Bearer {aoc_token}",
-                    "Content-Type": "application/json",
-                },
-                json={"redirect_uri": redirect_uri},
-                timeout=30,
-            )
-            if response.status_code == 200:
-                logger.info(
-                    f"Registered OAuth2 redirect URI for {self.display_name}: {redirect_uri}"
-                )
-            else:
-                logger.warning(
-                    f"Failed to register OAuth2 redirect URI for {self.display_name}: "
-                    f"{response.status_code} - {response.text}"
-                )
-        except Exception as e:
-            logger.warning(
-                f"Exception registering OAuth2 redirect URI for {self.display_name}: {e}"
-            )
 
     async def enable(self) -> dict:
         """Enable the service: generate secrets, extra setup, register with ingress.
@@ -414,10 +344,7 @@ class InfraService(ABC):
         await self._extra_enable_setup()
 
         # Register with ingress
-        await self._register_with_caddy()
-
-        # Register OAuth2 redirect URI with AOC/Keycloak
-        await self._register_oauth2_redirect_uri()
+        await self._register_with_ingress()
 
         logger.info(f"{self.display_name} enabled successfully!")
         return {
@@ -455,7 +382,7 @@ class InfraService(ABC):
             logger.warning(f"Failed to stop {self.display_name}: {e}")
 
         # Unregister from ingress
-        await self._unregister_from_caddy()
+        await self._unregister_from_ingress()
 
         # Remove secrets file
         if os.path.exists(self.secrets_file_path):
@@ -477,7 +404,7 @@ class InfraService(ABC):
 
     async def _apply_workspace(self) -> None:
         """Push the current bitswan.yaml so the driver reconciles infra services
-        (bring-up + CA certs + oauth2). Infra services are part of the compose
+        (bring-up + CA certs). Infra services are part of the compose
         the driver generates, so an apply with no narrowing reconciles them all."""
         from app.services.automation_service import AutomationService
 
@@ -486,7 +413,7 @@ class InfraService(ABC):
     async def start(self) -> dict:
         """Bring the service up via the driver. Infra services live in the
         compose the driver generates, so an apply creates/starts the container
-        and runs reconcile (CA certs + oauth2) — gitops has no `docker start`."""
+        and runs reconcile (CA certs) — gitops has no `docker start`."""
         logger.info(f"Starting {self.display_name} (apply) ...")
         await self._apply_workspace()
         logger.info(f"{self.display_name} started successfully!")

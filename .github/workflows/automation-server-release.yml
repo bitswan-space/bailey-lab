@@ -66,12 +66,7 @@ jobs:
 
       - name: Build Server Console (embedded SPA)
         working-directory: ${{ github.workspace }}
-        run: |
-          npm --prefix bitswan-server-console install --no-audit --no-fund
-          npm --prefix bitswan-server-console run build
-          rm -rf bitswan-automation-server/internal/daemon/serverconsole_dist
-          mkdir -p bitswan-automation-server/internal/daemon/serverconsole_dist
-          cp -r bitswan-server-console/dist/. bitswan-automation-server/internal/daemon/serverconsole_dist/
+        run: make -C bitswan-automation-server console
 
       # 5) Build the shipped target
       - name: Build binaries
