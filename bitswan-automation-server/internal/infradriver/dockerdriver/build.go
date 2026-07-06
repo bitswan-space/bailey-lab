@@ -60,6 +60,13 @@ func (d *DockerDriver) BuildImage(ctx context.Context, req infradriver.BuildRequ
 			mount = "/app"
 		}
 		fmt.Fprintf(df, "FROM %s\nCOPY . %s\n", req.BaseImage, mount)
+		// If the source ships a build.sh, run it as a FINAL layer so build steps
+		// (vite build, go build, …) happen ONCE here at image-build time — the
+		// deployed container then serves the pre-built artifact and starts fast,
+		// instead of building on every startup. Optional + backward-compatible:
+		// sources without a build.sh are unaffected. A failing build.sh fails the
+		// image build (and thus the deploy) loudly, which is correct.
+		fmt.Fprintf(df, "RUN if [ -f %s/build.sh ]; then cd %s && sh ./build.sh; fi\n", mount, mount)
 		if err := df.Close(); err != nil {
 			return infradriver.ImageRef{}, err
 		}
