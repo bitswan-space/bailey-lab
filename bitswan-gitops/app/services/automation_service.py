@@ -801,7 +801,15 @@ class AutomationService:
         ctx = os.path.join(self.gitops_dir, ".builds", "img-" + image_checksum)
         self._ensure_builds_gitignored()
 
+        # Persist the streamed build log under images/<checksum>/ (the same
+        # files create_image writes) so the dashboard's Build logs tab can
+        # replay this build later — the deploy-toast stream is ephemeral.
+        recorder = ImageService().build_log_recorder(
+            image_checksum, f"internal/{tag_root}"
+        )
+
         async def _prog(line: str):
+            recorder.write(line)
             if progress_callback is not None:
                 try:
                     await progress_callback(
@@ -817,8 +825,9 @@ class AutomationService:
         # The first materializes + builds; the rest are a driver cache hit by tag.
         async with _build_lock(full_tag):
             await asyncio.to_thread(self._copy_tree, image_dir, ctx)
+            recorder.start()
             try:
-                await self.infra_driver.build_image(
+                img = await self.infra_driver.build_image(
                     BuildRequest(
                         ctx=self._workspace_ctx(),
                         tag=full_tag,
@@ -829,9 +838,11 @@ class AutomationService:
                     progress_callback=_prog,
                 )
             except InfraDriverError as e:
+                recorder.finish_failed(str(e))
                 raise HTTPException(
                     status_code=500, detail=f"Image build failed for {full_tag}: {e}"
                 )
+            recorder.finish_success(cache_hit=img.cache_hit)
 
         # Write the resolved tag into automation.toml so the rest of the
         # deploy pipeline sees the up-to-date image.
