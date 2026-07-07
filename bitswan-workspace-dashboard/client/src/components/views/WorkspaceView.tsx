@@ -108,7 +108,7 @@ export function WorkspaceView({ bp, wt, tab, onTab }: WorkspaceViewProps) {
           <CenteredNote
             icon={<GitMerge className="size-5 text-primary" aria-hidden />}
             title="Not in main yet"
-            body={`“${bp.name}” only exists in copies. Sync a copy to main first — then its deployments show up here.`}
+            body={`“${bp.displayName}” only exists in copies. Sync a copy to main first — then its deployments show up here.`}
             action={
               wt && bpInWt ? (
                 <Button size="sm" onClick={() => onTab('sync-deploy')}>
@@ -146,7 +146,7 @@ function CopyGate({
   return (
     <CenteredNote
       icon={<GitBranch className="size-5 text-primary" aria-hidden />}
-      title={`“${bp.name}” isn't in copy “${wt.name}”`}
+      title={`“${bp.displayName}” isn't in copy “${wt.name}”`}
       body="Create it here with “+ New business process”, or pick another copy."
     />
   );

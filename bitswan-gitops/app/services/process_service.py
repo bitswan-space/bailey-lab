@@ -1,5 +1,7 @@
 import os
+import re
 import toml
+import unicodedata
 import uuid
 from typing import Dict, Any, Optional
 
@@ -13,6 +15,26 @@ logger = logging.getLogger(__name__)
 
 def _copies_dir() -> str:
     return os.environ.get("BITSWAN_COPIES_DIR", "/copies")
+
+
+def slugify_bp_name(name: str) -> str:
+    """Derive the filesystem/git/deployment slug from a human-readable BP name.
+
+    The slug is what the directory, the BP's bare repo, and deployment-id
+    segments are named after, and deployment ids can end up as subdomain
+    labels — so the alphabet is strictly `[a-z0-9-]`: lowercase, diacritics
+    folded to ASCII (Zpracování → zpracovani), every other run of characters
+    collapsed to a single dash. Returns "" when nothing survives (e.g. a
+    name with no Latin letters or digits); callers must treat that as
+    invalid input.
+    """
+    folded = (
+        unicodedata.normalize("NFKD", name)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+    )
+    return re.sub(r"[^a-z0-9]+", "-", folded).strip("-")
 
 
 class ProcessService:
@@ -72,9 +94,16 @@ class ProcessService:
                 if not process_id:
                     continue
 
+                # Human-readable name (issue #77). Older BPs predate the
+                # `name` key — their directory name IS the display name.
+                display_name = process_config.get("name")
+                if not isinstance(display_name, str) or not display_name.strip():
+                    display_name = item
+
                 processes[process_id] = ProcessInfo(
                     id=process_id,
                     name=item,
+                    display_name=display_name.strip(),
                     attachments=self.get_process_attachments(process_id),
                     automation_sources=self.get_process_automation_sources(process_id),
                 )
@@ -130,7 +159,9 @@ class ProcessService:
         Each entry:
             {
               "id":        process-id (from toml),
-              "name":      directory name (filesystem-safe),
+              "name":      directory name (filesystem-safe slug),
+              "display_name": human-readable name from process.toml
+                           (falls back to the directory name),
               "in_main":   bool — present in the main repo,
               "copies":    list of copy names where the same directory
                            name has a valid BP,
@@ -145,12 +176,18 @@ class ProcessService:
             for info in processes.values():
                 entry = by_name.setdefault(
                     info.name,
-                    {"id": info.id, "in_main": False, "copies": []},
+                    {
+                        "id": info.id,
+                        "display_name": info.display_name,
+                        "in_main": False,
+                        "copies": [],
+                    },
                 )
                 if scope is None:
                     entry["in_main"] = True
-                    # Main always wins as the canonical id source.
+                    # Main always wins as the canonical id + display-name source.
                     entry["id"] = info.id
+                    entry["display_name"] = info.display_name
                 else:
                     entry["copies"].append(scope)
 
@@ -162,6 +199,7 @@ class ProcessService:
                 {
                     "id": entry["id"],
                     "name": name,
+                    "display_name": entry["display_name"],
                     "in_main": entry["in_main"],
                     "copies": entry["copies"],
                     "has_copies": bool(entry["copies"]),
@@ -391,6 +429,10 @@ class ProcessService:
         the target scope, and the `process.toml` + `README.md` scaffold,
         committed and (for the main scope) published to the repo's main.
 
+        `name` is the human-readable display name (issue #77): it is stored
+        in `process.toml` and shown in the dashboard, while the directory,
+        git repo, and deployment ids use the slug derived from it.
+
         Returns the entry as it appears in `get_all_processes()`.
         """
         from app.services.bp_git import (
@@ -400,12 +442,15 @@ class ProcessService:
         )
         from app.services.git_server import ensure_bp_bare_repo
 
-        # Strip + basename to defend against path traversal. The HTTP route
-        # additionally validates the input against a regex; the repo layer
-        # (`ensure_bp_bare_repo`) validates again.
-        clean = os.path.basename((name or "").strip())
+        # Collapse whitespace runs; the display name is stored verbatim
+        # otherwise. Slugification confines the filesystem/git name to
+        # [a-z0-9-], which also rules out path traversal.
+        display = " ".join((name or "").split())
+        clean = slugify_bp_name(display)
         if not clean:
-            raise ValueError("process name is empty or invalid")
+            raise ValueError(
+                "process name must contain at least one letter or digit (a-z, 0-9)"
+            )
 
         if copy:
             scope_root = os.path.join(_copies_dir(), copy)
@@ -418,7 +463,7 @@ class ProcessService:
         process_dir = os.path.join(scope_root, clean)
         if os.path.exists(process_dir):
             raise FileExistsError(
-                f"a directory named '{clean}' already exists in "
+                f"a business process with the slug '{clean}' already exists in "
                 f"{'copy ' + copy if copy else 'main'}"
             )
 
@@ -433,12 +478,13 @@ class ProcessService:
         pid = process_id or str(uuid.uuid4())
 
         with open(os.path.join(process_dir, "process.toml"), "w") as f:
-            f.write(f'process-id = "{pid}"\n')
+            # toml.dump handles quoting/escaping of the free-form name.
+            toml.dump({"process-id": pid, "name": display}, f)
         with open(os.path.join(process_dir, "README.md"), "w") as f:
-            f.write(f"# {clean}\n")
+            f.write(f"# {display}\n")
 
         await commit_in_bp_clone(
-            process_dir, f"Create business process {clean}", author=created_by
+            process_dir, f"Create business process {display}", author=created_by
         )
         # Main-scope creation advances the repo's deploy-only main server-side;
         # copy-scope creation rides the copy until Sync & Deploy.
@@ -453,6 +499,7 @@ class ProcessService:
         return {
             "id": pid,
             "name": clean,
+            "display_name": display,
             "in_main": copy is None,
             "copies": [copy] if copy else [],
             "has_copies": bool(copy),

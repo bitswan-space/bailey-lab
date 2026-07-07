@@ -475,8 +475,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await d.getByRole('button', { name: /^Process\b/ }).first().click();
     await capture(dashPage, 'bp-switcher');
     // The BP selector trigger reads "Process <bp>" once a BP is selected.
-    const selected = d.getByRole('button', { name: new RegExp(`^Process\\b.*${BP.slug}`) }).first();
-    const existing = d.getByRole('button', { name: new RegExp(`^${BP.slug}$`) }).first();
+    // Selector + toasts show the human-readable display name (BP.title); the
+    // slug (BP.slug) lives in URLs and deployment ids.
+    const selected = d.getByRole('button', { name: new RegExp(`^Process\\b.*${BP.title}`) }).first();
+    const existing = d.getByRole('button', { name: new RegExp(`^${BP.title}$`) }).first();
     if (await existing.isVisible().catch(() => false)) {
       await existing.click();
     } else {
@@ -500,10 +502,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
           }
           await newBtn.click().catch(() => {});
         }
-        const input = dlg.getByPlaceholder('my-process').first();
+        const input = dlg.getByLabel(/^Name$/).first();
         await input.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
         if (await input.isVisible().catch(() => false)) {
-          await input.fill(BP.slug).catch(() => {});
+          // Type the human-readable name; the server derives BP.slug from it.
+          await input.fill(BP.title).catch(() => {});
           if (!shotCreate) {
             await capture(dashPage, 'bp-create');
             shotCreate = true;
@@ -542,8 +545,8 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // into / shoot a half-scaffolded BP), then let the sonner toasts CLEAR before
     // any capture so no shot is taken with a toast covering the screen. Non-fatal
     // on a re-run where it already settled (resolve on the loading toast gone).
-    const readyToast = d.getByText(new RegExp(`${BP.slug} ready`, 'i')).first();
-    const settingUp = d.getByText(new RegExp(`Setting up ${BP.slug}`, 'i')).first();
+    const readyToast = d.getByText(new RegExp(`${BP.title} ready`, 'i')).first();
+    const settingUp = d.getByText(new RegExp(`Setting up ${BP.title}`, 'i')).first();
     await Promise.race([
       readyToast.waitFor({ state: 'visible', timeout: 8 * 60_000 }).catch(() => {}),
       settingUp.waitFor({ state: 'hidden', timeout: 8 * 60_000 }).catch(() => {}),
@@ -868,7 +871,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // is the real guard). NOTE: deliberately NOT waiting the full ready window
     // here — the authoritative readiness check is reloading the opened popup
     // until it serves real content rather than a 404.
-    await d.getByText(new RegExp(`${BP.slug} ready`, 'i')).first()
+    await d.getByText(new RegExp(`${BP.title} ready`, 'i')).first()
       .waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
     // Open the deployed frontend and capture ITS rendered content AS 'live-dev'.
     // Best-effort / non-aborting throughout: a slow or blank frontend must not

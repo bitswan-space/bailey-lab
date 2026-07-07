@@ -7,6 +7,9 @@ export interface BusinessProcess {
   /** Directory name — also the value used in `/api/business-processes/:id/readme`. */
   id: string;
   name: string;
+  /** Human-readable name from process.toml; equals `name` for BPs that
+   *  predate display names. Use for rendering only — never in API paths. */
+  displayName: string;
   path: string;
   /** True when the BP exists in the main repo. */
   inMain: boolean;

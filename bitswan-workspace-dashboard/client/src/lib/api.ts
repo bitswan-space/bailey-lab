@@ -257,13 +257,16 @@ export interface PromoteRequest {
 }
 
 export interface CreateBusinessProcessRequest {
+  /** Human-readable display name; the server derives the slug from it. */
   name: string;
   copy?: string;
 }
 
 export interface CreateBusinessProcessResponse {
   id: string;
+  /** The slug the server derived from the requested display name. */
   name: string;
+  display_name?: string;
   in_main: boolean;
   copies: string[];
   has_copies: boolean;

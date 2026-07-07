@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from app.dependencies import get_automation_service
 from app.deploy_runner import spawn_set_deploy
 from app.event_broadcaster import event_broadcaster
-from app.services.process_service import process_service
+from app.services.process_service import process_service, slugify_bp_name
 from app.services import template_service
 from app.services.automation_service import AutomationService
 
@@ -25,14 +25,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/processes", tags=["processes"])
 
-# Mirrors the dashboard-side validation, kept tight enough that the name can
-# also stand in for a deployment_id segment without surprises.
-_PROCESS_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+# The display name is free-form (issue #77) — the filesystem/git/deployment
+# name is the slug derived from it (see `slugify_bp_name`). Cap the length so
+# neither the toml nor the slug get silly.
+_MAX_PROCESS_NAME_LEN = 100
 # Matches the canonical copy-name constraint used by /copies and /templates.
 _COPY_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
 
 
 class CreateProcessRequest(BaseModel):
+    # Human-readable display name; the slug (directory / git repo /
+    # deployment-id segment) is derived from it server-side.
     name: str
     copy: str | None = None
     # The email of the user creating the BP (injected by the dashboard from the
@@ -62,13 +65,21 @@ async def create_process(
     — `dev` stage for a main BP, `live-dev` for a copy BP. Failures never
     fail the BP creation; they surface in the `setup_error` response field.
     """
-    name = (body.name or "").strip()
-    if not _PROCESS_NAME_RE.match(name):
+    name = " ".join((body.name or "").split())
+    if not name or len(name) > _MAX_PROCESS_NAME_LEN:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Invalid process name: must start with a letter or digit and "
-                "contain only letters, digits, underscores, dashes, and dots."
+                "Invalid process name: must be 1 to "
+                f"{_MAX_PROCESS_NAME_LEN} characters."
+            ),
+        )
+    if not slugify_bp_name(name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid process name: must contain at least one letter or "
+                "digit (a-z, 0-9)."
             ),
         )
     if body.copy is not None and not _COPY_NAME_RE.match(body.copy):
@@ -100,6 +111,9 @@ async def create_process(
     automations_created: list[str] = []
     deploy_task_id: str | None = None
     setup_error: str | None = None
+    # Everything downstream — template scaffold, deploy members, task label —
+    # keys on the slug (the directory name), not the display name.
+    slug = entry["name"]
     try:
         # The default BP is one frontend + one backend worker (the baked
         # `business-process` group). There is no internal/external frontend
@@ -110,7 +124,7 @@ async def create_process(
         workspace_root = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
         created = await template_service.create_automation_from_template(
             workspace_root=workspace_root,
-            bp=name,
+            bp=slug,
             group_id=group_id,
             copy=body.copy,
             created_by=body.created_by,
@@ -131,9 +145,9 @@ async def create_process(
             logger.exception("Failed to broadcast automations after BP scaffold")
 
         stage = "live-dev" if body.copy else "dev"
-        members = automation_service.members_for_bp(name, copy=body.copy, stage=stage)
+        members = automation_service.members_for_bp(slug, copy=body.copy, stage=stage)
         res = await spawn_set_deploy(
-            label=name,
+            label=slug,
             members=members,
             stage=stage,
             copy=body.copy,

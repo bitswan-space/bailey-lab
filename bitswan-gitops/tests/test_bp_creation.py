@@ -95,6 +95,59 @@ def test_create_duplicate_rejected(env):
         asyncio.run(svc.create_business_process("orders"))
 
 
+def test_create_with_human_readable_name(env):
+    """Issue #77: the typed name is the display name; the directory, repo and
+    wire `name` are the slug derived from it, and process.toml records both."""
+    import toml
+
+    svc = env["svc"]
+    entry = asyncio.run(svc.create_business_process("Zpracování faktur (v2)"))
+    assert entry["name"] == "zpracovani-faktur-v2"
+    assert entry["display_name"] == "Zpracování faktur (v2)"
+
+    clone = os.path.join(env["copies_dir"], "main", "zpracovani-faktur-v2")
+    cfg = toml.load(os.path.join(clone, "process.toml"))
+    assert cfg["name"] == "Zpracování faktur (v2)"
+    assert cfg["process-id"] == entry["id"]
+    with open(os.path.join(clone, "README.md")) as f:
+        assert f.read().startswith("# Zpracování faktur (v2)")
+
+    # Discovery round-trips the display name into the SSE/REST snapshot.
+    svc.refresh(None)
+    listed = {e["name"]: e for e in svc.get_all_processes()}
+    assert listed["zpracovani-faktur-v2"]["display_name"] == "Zpracování faktur (v2)"
+
+
+def test_create_slug_collision_rejected(env):
+    """Two display names that slugify identically fight over one directory."""
+    svc = env["svc"]
+    asyncio.run(svc.create_business_process("Invoice Processing"))
+    with pytest.raises(FileExistsError):
+        asyncio.run(svc.create_business_process("invoice   PROCESSING!"))
+
+
+def test_create_unslugifiable_name_rejected(env):
+    svc = env["svc"]
+    with pytest.raises(ValueError):
+        asyncio.run(svc.create_business_process("---"))
+
+
+def test_discovery_falls_back_to_dir_name(env):
+    """BPs created before the `name` key existed display their directory name."""
+    svc = env["svc"]
+    asyncio.run(svc.create_business_process("orders"))
+    clone = os.path.join(env["copies_dir"], "main", "orders")
+    toml_path = os.path.join(clone, "process.toml")
+    with open(toml_path) as f:
+        pid_line = [line for line in f if line.startswith("process-id")]
+    with open(toml_path, "w") as f:
+        f.writelines(pid_line)
+
+    svc.refresh(None)
+    listed = {e["name"]: e for e in svc.get_all_processes()}
+    assert listed["orders"]["display_name"] == "orders"
+
+
 def test_waiver_write_publishes_main_scope(env):
     """A main-scope CVE waiver is committed in the BP clone AND advances the
     repo's main (it would otherwise be wiped by the next realign)."""
