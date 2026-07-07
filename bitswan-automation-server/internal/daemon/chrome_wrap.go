@@ -113,7 +113,15 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool, launcher laun
 <title>Bailey</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%%; overflow: hidden; background: %[1]s; }
-  iframe.bailey-content { position: fixed; inset: 0 0 %[2]dpx 0; width: 100vw; height: calc(100vh - %[2]dpx); border: 0; display: block; background: white; }
+  /* Percentages, not vh/vw: on tablets/phones 100vh is the LARGEST viewport
+     (browser bar collapsed), so height:calc(100vh - footer) overflows the
+     visible area whenever the bar is shown — the app inside then thinks its
+     viewport extends behind the footer and its bottom-anchored UI lands under
+     the bar (issue #78). Percentages on a fixed element resolve against the
+     dynamic layout viewport — the same box the footer's bottom:0 anchors to.
+     The explicit size is required: an iframe is a replaced element, so
+     opposing inset edges alone don't stretch it. */
+  iframe.bailey-content { position: fixed; inset: 0 0 %[2]dpx 0; width: 100%%; height: calc(100%% - %[2]dpx); border: 0; display: block; background: white; }
   footer.bailey-footer {
     position: fixed; left: 0; right: 0; bottom: 0; height: %[2]dpx;
     box-sizing: border-box;
