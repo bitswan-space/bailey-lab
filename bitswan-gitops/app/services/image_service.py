@@ -29,9 +29,7 @@ class BuildLogRecorder:
         self._svc = image_service
         self._checksum = checksum
         self._tag_root = tag_root
-        self._building, self._success, self._failed = image_service._log_paths(
-            checksum
-        )
+        self._building, self._success, self._failed = image_service._log_paths(checksum)
 
     def start(self):
         self._svc._write_metadata(self._checksum, self._tag_root)
@@ -59,9 +57,7 @@ class BuildLogRecorder:
                     "Image served from docker cache — no new build ran and the "
                     "original build log is not available."
                 )
-            self.write(
-                f"Build completed successfully at {datetime.now().isoformat()}"
-            )
+            self.write(f"Build completed successfully at {datetime.now().isoformat()}")
             self._promote(self._success)
         self._svc._finalize_metadata(self._checksum, "success", self._tag_root)
 
