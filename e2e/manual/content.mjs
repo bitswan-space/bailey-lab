@@ -211,7 +211,7 @@ export const MANUAL = {
         { id: 'checks-cve', label: 'Live capture', caption: 'Checks sub-tab · CVEs of the image this deploy would build' },
       ],
       sell: [
-        'One button does the careful thing: commit work-in-progress, rebase your copy onto main, fast-forward, and roll out to development — <strong>tracking the single deploy it started</strong> rather than racing a second one. While it works, the button reads <em>Working…</em> and the live deploy step streams into a toast.',
+        'One button does the careful thing: commit work-in-progress, rebase your copy onto main, fast-forward, and roll out to development — <strong>tracking the single deploy it started</strong> rather than racing a second one. While it works, the button reads <em>Working…</em> and a scrollable <strong>Build log</strong> opens beneath the header, streaming every line of the deploy — each container’s image build, the <code>build.sh</code> step that compiles the production bundle (<code>vite build</code> / <code>go build</code>), and the per-process <em>Prepared</em> markers — so a slow or silent build is never a mystery the way a single-line toast would leave it.',
         'Around the button are the three things you check before shipping: the <strong>Diff</strong> (exactly what becomes main), the <strong>History</strong> (your copy’s and main’s commits, with deploy markers), and the <strong>Checks</strong> tab — the precise CVEs of the image this deploy <em>would</em> build. Click any CVE for its advisory; record what’s out of scope into your source tree, where review can see it.',
       ],
       steps: ['Open <b>Sync &amp; Deploy</b>.', 'Review the <b>Diff</b>, the <b>History</b>, and the <b>Checks</b> tab.', 'Press <b>Sync &amp; Deploy</b> — dev goes <b>Healthy</b>.', 'Promote when you’re ready.'],
@@ -498,23 +498,25 @@ export const MANUAL = {
     },
     {
       num: '25', eyebrow: 'Make a mess safely', title: 'Memory governance & the on-demand pool',
-      lede: 'Users spin up as many previews and processes as they like without starving the workloads that matter. Bailey reserves memory for the services that must stay up and lets everything else scale to zero under pressure — waking on demand the moment someone touches it.',
+      lede: 'Users spin up as many previews and processes as they like without starving the workloads that matter. Bailey reserves memory for the services that must stay up and lets everything else scale to zero — under pressure automatically, or on demand with a button — waking the moment someone touches it, whether it’s a dev preview or a production service.',
       slots: [
-        { id: 'resource-management', label: 'Live capture', caption: 'Server Console · Resource management — the memory budget, reserved breakdown and per-business-process usage' },
+        { id: 'resource-management', label: 'Live capture', caption: 'Server Console · Resource management — the memory budget and per-process usage grouped by process and stage (asleep processes shown too), each with a Sleep control' },
         { id: 'containers-memory', label: 'Live capture', caption: 'Workspace dashboard · a business process’s containers, each showing live memory against its reservation' },
       ],
       sell: [
         'Every automation declares two things in <code>automation.toml</code>: a <strong>memory-reservation</strong> (how much it is budgeted, in MB) and a <strong>memory_reservation_policy</strong> — <em>always-on</em> for a backend that must never stop (it runs background work), or <em>on-demand</em> (the default) for everything that can be paused when idle and woken on access. The daemon reads these off the running containers and keeps a single, honest budget: host memory, minus a system reserve, minus a per-workspace infrastructure reserve, minus every always-on reservation, minus a sized <strong>on-demand pool</strong>.',
         'That pool is the trick that lets users keep <em>unlimited</em> rarely-used business processes without cost. It is sized to run the largest few on-demand services at once and grows only when someone deploys a genuinely large one — so small, idle processes never consume reserved memory. When the running on-demand set exceeds the pool, Bailey shuts down the least-recently-used ones; the next time a person opens one, a loading screen appears and it is back in seconds. Promotions and new workspaces that would not fit the reserved budget are refused up front, with a message that says exactly how much is short. And any container that outgrows its reservation raises a SIEM event and is flagged, in red, right on its Containers tab.',
+        'You don’t have to wait for pressure. The Server Console’s <strong>Resource management</strong> page lists every business process grouped by process and stage with live totals — <em>including the ones already asleep</em> — and gives each a <strong>Sleep</strong> button, plus <strong>Sleep all on-demand</strong> for the whole page. Sleeping is a true scale-to-zero: the workers <em>and</em> the shared egress gateway are torn down, so a paused process costs nothing at all; always-on services simply ignore the button. Waking is universal — not just dev previews but on-demand <em>staging and production</em> come back on first access, behind a brief loading page, rehydrated straight from the deployed source of truth (no eviction bookkeeping to lose).',
       ],
       steps: [
         'Declare <b>memory-reservation</b> (and, for a background worker, <b>memory_reservation_policy = "always-on"</b>) in <code>automation.toml</code>.',
-        'Open <b>Resource management</b> in the Server Console to see the host budget, the reserved breakdown and per-process usage.',
+        'Open <b>Resource management</b> in the Server Console to see the host budget, the reserved breakdown and per-process usage grouped by process and stage.',
         'Promote or create a workspace — Bailey admits it only if it fits the reserved budget, else tells you the shortfall.',
-        'Leave idle previews alone: they are shut down under pressure and <b>wake automatically</b> when next accessed.',
+        'Press <b>Sleep</b> on a process (or <b>Sleep all on-demand</b>) to scale it to zero now; leave idle ones alone and they are shut down under pressure anyway.',
+        'Reopen an asleep process — dev, staging or production — and it <b>wakes automatically</b> behind a brief loading page.',
         'Watch for the red <b>over-reservation</b> flag on the Containers tab — it also lands in your SIEM feed.',
       ],
-      callout: { kind: 'Reserve what matters; evict the rest', text: 'Always-on backends are guaranteed their memory; everything else lives in a bounded pool that scales to zero and wakes on demand. A busy workspace full of experiments can never starve production.' },
+      callout: { kind: 'Reserve what matters; evict the rest', text: 'Always-on backends are guaranteed their memory; everything else lives in a bounded pool that scales to zero — on demand or under pressure — and wakes on first access. A busy workspace full of experiments can never starve production.' },
       standards: [
         { code: 'ISO/IEC 27001', clause: 'A.8.6', demand: '<b>Capacity management.</b> Memory is reserved, budgeted and admission-controlled from live host state; over-use is detected and alerted.' },
         { code: 'SOC 2', clause: 'A1.1', demand: '<b>Availability.</b> Critical (always-on) workloads keep their reserved capacity; non-critical ones are shed under pressure without losing their state.' },
