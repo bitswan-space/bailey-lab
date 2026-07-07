@@ -1005,17 +1005,32 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     ] as const;
     for (const text of reqs) {
       // Skip if a prior run already recorded this requirement (idempotent).
-      const existing = d.getByText(text, { exact: false }).first();
-      if (await existing.isVisible().catch(() => false)) continue;
+      const row = d.getByText(text, { exact: false }).first();
+      if (await row.isVisible().catch(() => false)) continue;
       await d.getByRole('button', { name: /New requirement/i }).first().click();
       const field = d.getByPlaceholder(/Describe the requirement/i).first();
       await field.waitFor({ state: 'visible', timeout: SLA });
-      await field.fill(text);
-      await field.press('Enter');
-      // The committed requirement renders as a row carrying its text — wait for
-      // that so the next add doesn't race the persist round-trip.
+      // "New requirement" creates the row EMPTY server-side and edits it in
+      // place with row-local draft state. A list refresh landing mid-edit
+      // (the previous row's persist round-trip) remounts the editor and drops
+      // the draft — the row survives as "(no description)" and the typed text
+      // never commits. Do what a real operator does: if the text didn't land,
+      // reopen that orphaned row's editor (double-click) and retype.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await field.fill(text);
+        await field.press('Enter');
+        const landed = await row
+          .waitFor({ state: 'visible', timeout: 12_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (landed) break;
+        await d.getByText('(no description)', { exact: false }).first().dblclick();
+        await field.waitFor({ state: 'visible', timeout: SLA });
+      }
+      // Wait for the committed row so the next add doesn't race the persist
+      // round-trip.
       await expect(
-        d.getByText(text, { exact: false }).first(),
+        row,
         `requirement "${text}" did not land in the list`,
       ).toBeVisible({ timeout: SLA });
     }
