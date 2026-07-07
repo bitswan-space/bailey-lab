@@ -1273,7 +1273,13 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await clickTopTab(/Description/i);
     const editor = d.locator('.ProseMirror, [contenteditable="true"]').first();
     await editor.waitFor({ state: 'visible', timeout: SLA });
-    await editor.click();
+    // Click near the top-left of the editor, NOT its center: the doc embeds the
+    // flowchart drawn earlier, and the pane's center can land on that mermaid
+    // preview — whose whole surface is click-to-edit, so a center click opens
+    // the Flowchart editor modal and blocks every tab click that follows. The
+    // caret position is irrelevant here (Control+End moves it to the doc end);
+    // the click only needs to focus the editor without hitting the embed.
+    await editor.click({ position: { x: 24, y: 16 } });
     await dashPage.keyboard.press('Control+End');
     // Control+End leaves the caret at the END of the existing doc — which, after
     // the README + flowchart embed, is inside the trailing markdown LIST item (or
