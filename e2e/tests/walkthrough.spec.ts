@@ -50,9 +50,15 @@ const SLA = 60_000; // short-interaction SLA: nothing quick should wait longer
 // image), and that build's final `RUN … build.sh` layer runs a SILENT compile
 // (`go build` emits nothing for the whole compile), so docker streams no line —
 // and thus the on-screen signature holds unchanged — for well over a minute on a
-// loaded runner. Keep the window comfortably above that silent span; the 30-min
-// backstop in waitDeployDone still catches a genuine hang.
-const PROGRESS = 120_000;
+// loaded runner. The same is true of the earlier long ops driven by this rule —
+// workspace/copy creation streams a coarse setup log that holds one line through a
+// silent image-pull / multi-container `compose up`, and snapshot/DR restore hold a
+// step across a big dump/load. On a loaded CI dind runner any one such silent step
+// can exceed two minutes, so 120s produced false "went dark" trips while the op was
+// in fact progressing (the workspace/stage containers did come up). Keep the window
+// comfortably above the longest real silent step; the ABSOLUTE deadlines (8-min
+// workspace-create, 30-min deploy backstop) remain the true guard against a hang.
+const PROGRESS = 240_000;
 const NAV = 15_000; // a tab/section/stage click targets an element already on
 // screen, so it should land fast. If it can't within NAV, something (usually a
 // stuck modal) is intercepting clicks — fail fast here instead of burning the
