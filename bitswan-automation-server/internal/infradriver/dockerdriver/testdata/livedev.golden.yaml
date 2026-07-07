@@ -116,9 +116,11 @@ services:
         image: bitswan/egress-gateway:latest
         labels:
             gitops.bp: acme
+            gitops.context: copy-bar-acme
             gitops.firewall_gateway: "true"
             gitops.slot: ""
-            gitops.stage: dev
+            gitops.stage: live-dev
+            gitops.workspace: ws4
         networks:
             ws4-dev:
                 aliases:
@@ -143,9 +145,11 @@ services:
         image: bitswan/egress-gateway:latest
         labels:
             gitops.bp: acme
+            gitops.context: copy-bar-acme
             gitops.firewall_proxy: "true"
             gitops.slot: ""
-            gitops.stage: dev
+            gitops.stage: live-dev
+            gitops.workspace: ws4
         networks:
             ws4-dev:
                 aliases:

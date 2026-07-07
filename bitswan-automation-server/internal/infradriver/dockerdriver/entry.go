@@ -41,6 +41,15 @@ func (c *compileState) computeFirewallScope(deployments map[string]*Deployment) 
 		if conf == nil {
 			continue
 		}
+		// Skip inactive (slept) deployments — mirrors the workload loop
+		// (compile.go). Without this, a group whose every member is asleep still
+		// emits its egress gateway, so the gateway is never retired and orphans
+		// pile up. With it, an all-slept group drops its gateway from the desired
+		// compose (retireOrphanedContainers then reaps it) and a later apply won't
+		// recreate it — the gateway comes back only when the group is woken.
+		if conf.Active != nil && !*conf.Active {
+			continue
+		}
 		stage := conf.StageOrProduction()
 		depCtx := conf.Context
 		realm := realmForStage(stage)
@@ -796,7 +805,9 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 			"labels": map[string]interface{}{
 				"gitops.firewall_proxy": "true",
 				"gitops.bp":             g.bp,
-				"gitops.stage":          g.realm,
+				"gitops.workspace":      c.workspaceName,
+				"gitops.context":        k.ctx,
+				"gitops.stage":          k.stage,
 				"gitops.slot":           k.slot,
 			},
 		}
@@ -829,8 +840,16 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 			"labels": map[string]interface{}{
 				"gitops.firewall_gateway": "true",
 				"gitops.bp":               g.bp,
-				"gitops.stage":            g.realm,
-				"gitops.slot":             k.slot,
+				// workspace + context + FULL stage (not the collapsed realm) so
+				// eviction can match this gateway to exactly its (context, stage,
+				// slot) group — distinguishing dev vs live-dev and one copy from
+				// another. workspace is REQUIRED: the driver's ContainerList forces
+				// a gitops.workspace filter, so without it the gateway is invisible
+				// to gitops (and to the daemon inventory) and can never be reaped.
+				"gitops.workspace": c.workspaceName,
+				"gitops.context":   k.ctx,
+				"gitops.stage":     k.stage,
+				"gitops.slot":      k.slot,
 			},
 		}
 		// Declare the stage network both join as external, or `docker compose up`

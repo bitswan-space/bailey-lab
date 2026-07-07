@@ -4175,6 +4175,41 @@ class AutomationService:
         for c in await self.get_container(deployment_id):
             await self.infra_driver.container_remove(ctx, c.get("Id"))
 
+    async def _remove_group_gateway(self, context: str, stage: str) -> list[str]:
+        """Remove the egress firewall gateway + proxy of a fully-slept
+        (context, stage) group so a slept BP costs NOTHING.
+
+        The gateway is shared by the group, has no `gitops.deployment_id`, and so
+        survives the per-deployment eviction above — left alone it orphans and
+        piles up. It carries `gitops.context` + the FULL `gitops.stage`
+        (StageOrProduction form, e.g. "live-dev"/"production"), which is the exact
+        join key the workloads share, so we match it explicitly (never by name).
+        The CALLER must ensure no active member remains in the group. A wake
+        recompiles and recreates it. Returns removed container ids."""
+        ctx = self._workspace_ctx()
+        full_stage = stage or "production"
+        removed: list[str] = []
+        for role in ("gitops.firewall_gateway", "gitops.firewall_proxy"):
+            containers = await self.infra_driver.container_list(
+                ctx,
+                labels={
+                    role: "true",
+                    "gitops.workspace": self.workspace_name,
+                    "gitops.context": context,
+                    "gitops.stage": full_stage,
+                },
+            )
+            for c in containers:
+                cid = c.to_docker_dict().get("Id")
+                if not cid:
+                    continue
+                try:
+                    await self.infra_driver.container_remove(ctx, cid)
+                    removed.append(cid)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("gateway teardown of %s failed: %s", cid, e)
+        return removed
+
     async def _evict_instance(self, inst: dict) -> bool:
         """Evict a whole instance (all its members): mark inactive + remove
         containers. Best-effort per member; returns True if any member evicted."""
@@ -4391,6 +4426,36 @@ class AutomationService:
                         conf.get("stage") or "",
                     )
                 )
+        # Tear down the egress gateway of any (context, stage) group that is now
+        # fully slept — the gateway is shared + has no deployment_id, so the loop
+        # above never removes it; left behind it orphans and bloats the host.
+        # Guard on "no active member remains" so a still-live sibling group
+        # (another copy, or the dev-vs-live-dev counterpart) keeps its gateway.
+        if evicted:
+            fresh = (read_bitswan_yaml(self.gitops_dir) or {}).get("deployments") or {}
+            groups = {
+                (
+                    (deployments.get(did) or {}).get("context") or "",
+                    (deployments.get(did) or {}).get("stage") or "",
+                )
+                for did in evicted
+            }
+            for context, stage in groups:
+                if not context:
+                    continue
+                if any(
+                    (c or {}).get("context") == context
+                    and ((c or {}).get("stage") or "") == stage
+                    and (c or {}).get("active") is not False
+                    for c in fresh.values()
+                ):
+                    continue  # a member is still active — keep the shared gateway
+                try:
+                    await self._remove_group_gateway(context, stage)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "gateway teardown for %s/%s failed: %s", context, stage, e
+                    )
         if evicted:
             logger.info(
                 "memory sweep evicted %d deployment(s): %s",
