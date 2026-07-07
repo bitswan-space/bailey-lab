@@ -700,6 +700,20 @@ async def wake_by_host_route(
     return await automation_service.wake_by_host(body.host)
 
 
+@router.get("/on-demand-host")
+async def on_demand_host_route(
+    host: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Non-waking scale-from-zero check for the daemon gate: is `host` an
+    on-demand deployment? bitswan.yaml (the single source of truth) is read on
+    each call — no shadow state to drift. The gate uses this for
+    staging/production hosts (whose names lack the '-dev' suffix that marks
+    dev/live-dev as always on-demand) to decide, on a 5xx, whether to show the
+    wake-on-access loading page + rehydrate or pass the hard error through."""
+    return {"on_demand": automation_service.host_is_on_demand(host)}
+
+
 class EvictDeploymentsRequest(BaseModel):
     deployment_ids: list[str]
 

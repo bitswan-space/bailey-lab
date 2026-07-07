@@ -2,9 +2,12 @@ package daemon
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,10 +26,20 @@ import (
 // the request resolves normally once the container is healthy. Production is
 // never dehydrated, so its hosts never take this path.
 
-// isDehydratableHost reports whether host is an EPHEMERAL app host — dev or
-// live-dev, the stages the cap evicts. Both end in "-dev" (`…-dev` /
-// `…-live-dev`); staging (`…-staging`) and production (`…-production[-slot]`) do
-// NOT, so they are protected and never woken here.
+// isDehydratableHost reports whether host is a wakeable on-demand app host, i.e.
+// the gate should serve the loading page + rehydrate on a 5xx rather than pass
+// the hard error through.
+//
+//   - dev / live-dev (both end in "-dev") are ALWAYS on-demand, so the suffix
+//     alone decides — no I/O, survives restarts.
+//   - staging / production carry no policy in their name and may be on-demand OR
+//     always-on. Their asleep/awake truth lives in the workspace's bitswan.yaml
+//     (active + memory_reservation_policy), the single source of truth. We ask
+//     gitops (host_is_on_demand — reads yaml, starts nothing) on the rare 5xx,
+//     caching a positive in dehydratedOnDemandHosts so the loading page's 3s
+//     reloads don't re-ask. On any doubt — not workspace-owned, gitops
+//     unreachable, or always-on — we return false and the gate surfaces the real
+//     upstream error instead of a perpetual "waking" page.
 func isDehydratableHost(host string) bool {
 	label := strings.ToLower(host)
 	if i := strings.IndexByte(label, '.'); i >= 0 {
@@ -36,16 +49,83 @@ func isDehydratableHost(host string) bool {
 	if strings.HasSuffix(label, "-dev") {
 		return true // dev / live-dev — always on-demand
 	}
-	// On-demand staging/production have no "-dev" suffix; the memory sweep records
-	// the hosts it shuts down so the gate can wake them on access too.
-	return isHostDehydrated(host) || isHostDehydrated(label)
+	// Positive cache: recorded at eviction (sweep / Sleep button) or by a prior
+	// on-demand confirmation below.
+	if isHostDehydrated(host) || isHostDehydrated(label) {
+		return true
+	}
+	if hostIsOnDemand(host) {
+		dehydratedOnDemandHosts.Store(toOuterHost(strings.ToLower(host)), time.Now())
+		return true
+	}
+	return false
+}
+
+// workspaceGitOpsEndpoint returns the internal gitops base URL and bearer secret
+// for the workspace owning host, or ok=false if host isn't workspace-owned or
+// the secret can't be read.
+func workspaceGitOpsEndpoint(host string) (baseURL, secret string, ok bool) {
+	outer := toOuterHost(strings.ToLower(host))
+	label, _, _ := strings.Cut(outer, ".")
+	ws := workspaceFromLabel(label)
+	if ws == "" {
+		return "", "", false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", false
+	}
+	secret, err = getGitOpsSecret(ws, filepath.Join(home, ".config", "bitswan", "workspaces"))
+	if err != nil || secret == "" {
+		return "", "", false
+	}
+	// Internal address on bitswan_network (not the external gitops-url).
+	return fmt.Sprintf("http://%s-gitops:8079", ws), secret, true
+}
+
+// hostIsOnDemand asks the host's workspace gitops whether host resolves to an
+// on-demand deployment (reads bitswan.yaml; starts nothing). Synchronous —
+// called only on a 5xx for a non-"-dev" host not already cached, so at most once
+// per wake. Returns false (and logs) when the workspace can't be resolved or
+// gitops is unreachable: an unconfirmable host must show the real error, not a
+// fake loading page.
+func hostIsOnDemand(host string) bool {
+	baseURL, secret, ok := workspaceGitOpsEndpoint(host)
+	if !ok {
+		return false
+	}
+	outer := toOuterHost(strings.ToLower(host))
+	u := fmt.Sprintf("%s/automations/on-demand-host?host=%s", baseURL, url.QueryEscape(outer))
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		log.Printf("wake-on-access: on-demand check for %q failed: %v", outer, err)
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("wake-on-access: on-demand check for %q returned %d", outer, resp.StatusCode)
+		return false
+	}
+	var out struct {
+		OnDemand bool `json:"on_demand"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		log.Printf("wake-on-access: on-demand check for %q decode failed: %v", outer, err)
+		return false
+	}
+	return out.OnDemand
 }
 
 var liveDevWakeDebounce sync.Map // outer host -> time.Time of last wake POST
 
-// triggerLiveDevWake asks the host's workspace gitops to rehydrate the live-dev
-// instance, at most once per debounce window per host (the loading page retries
-// every few seconds, so we must not spam start calls). Fire-and-forget.
+// triggerLiveDevWake asks the host's workspace gitops to rehydrate the instance,
+// at most once per debounce window per host (the loading page retries every few
+// seconds, so we must not spam start calls). Fire-and-forget.
 func triggerLiveDevWake(host string) {
 	outer := toOuterHost(strings.ToLower(host))
 	now := time.Now()
@@ -56,25 +136,14 @@ func triggerLiveDevWake(host string) {
 	}
 	liveDevWakeDebounce.Store(outer, now)
 
-	label, _, _ := strings.Cut(outer, ".")
-	ws := workspaceFromLabel(label)
-	if ws == "" {
+	baseURL, secret, ok := workspaceGitOpsEndpoint(host)
+	if !ok {
 		return
 	}
 	go func() {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return
-		}
-		workspacesDir := filepath.Join(home, ".config", "bitswan", "workspaces")
-		secret, err := getGitOpsSecret(ws, workspacesDir)
-		if err != nil || secret == "" {
-			return
-		}
-		// Internal address on bitswan_network (not the external gitops-url).
-		url := fmt.Sprintf("http://%s-gitops:8079/automations/wake-by-host", ws)
+		wakeURL := baseURL + "/automations/wake-by-host"
 		body := []byte(fmt.Sprintf(`{"host":%q}`, outer))
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, wakeURL, bytes.NewReader(body))
 		if err != nil {
 			return
 		}

@@ -4401,35 +4401,58 @@ class AutomationService:
         The manual counterpart of on-demand wake-on-access (dashboard Wake button)."""
         return await self._wake_context_stage(context, stage)
 
-    async def wake_by_host(self, host: str) -> dict:
-        """Resolve a request hostname to its ON-DEMAND deployment group and
-        rehydrate it — the daemon gate's scale-from-zero hook calls this when a
-        request hits a dehydrated host. Matches the host's DNS label against each
-        deployment's COMPUTED hostname (make_hostname_label). Returns
-        {"on_demand": bool, ...}; an always-on or unknown host returns
-        on_demand=False so the gate passes the hard error through."""
+    def _resolve_host_deployment(self, host: str) -> tuple[dict, str, str] | None:
+        """Resolve a request hostname to its (conf, context, stage) by matching
+        the host's DNS label against each deployment's COMPUTED hostname
+        (make_hostname_label). Returns None if no deployment owns the host.
+        Reads bitswan.yaml only — the single source of truth for what's
+        deployed and its policy; never touches containers."""
         label = (host or "").split(".", 1)[0].lower().replace("--inner", "")
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         for conf in (bs.get("deployments") or {}).values():
             conf = conf or {}
             auto = conf.get("automation_name") or ""
-            context = conf.get("context") or ""
-            stage = conf.get("stage") or ""
             if not auto:
                 continue
+            context = conf.get("context") or ""
+            stage = conf.get("stage") or ""
             if (
                 make_hostname_label(self.workspace_name, auto, context, stage).lower()
-                != label
+                == label
             ):
-                continue
-            if not self._is_on_demand(conf):
-                return {"on_demand": False, "context": context, "deployment_ids": []}
-            if stage in self.EPHEMERAL_STAGES:
-                res = await self.wake_live_dev(context)
-            else:
-                res = await self._wake_context_stage(context, stage)
-            return {"on_demand": True, **res}
-        return {"on_demand": False, "context": None, "deployment_ids": []}
+                return conf, context, stage
+        return None
+
+    def host_is_on_demand(self, host: str) -> bool:
+        """Non-waking authoritative check: does `host` resolve to an ON-DEMAND
+        deployment? The daemon gate calls this on a 5xx to decide, for
+        staging/production hosts (whose '-dev'-less names don't reveal their
+        policy), whether to serve the wake-on-access loading page + rehydrate
+        vs pass the hard error through. Reads bitswan.yaml only; starts nothing.
+        Unknown or always-on host → False (gate shows the real error)."""
+        match = self._resolve_host_deployment(host)
+        if match is None:
+            return False
+        conf, _, _ = match
+        return self._is_on_demand(conf)
+
+    async def wake_by_host(self, host: str) -> dict:
+        """Resolve a request hostname to its ON-DEMAND deployment group and
+        rehydrate it — the daemon gate's scale-from-zero hook calls this when a
+        request hits a dehydrated host. Returns {"on_demand": bool, ...}; an
+        always-on or unknown host returns on_demand=False so the gate passes the
+        hard error through."""
+        match = self._resolve_host_deployment(host)
+        if match is None:
+            return {"on_demand": False, "context": None, "deployment_ids": []}
+        conf, context, stage = match
+        if not self._is_on_demand(conf):
+            return {"on_demand": False, "context": context, "deployment_ids": []}
+        if stage in self.EPHEMERAL_STAGES:
+            res = await self.wake_live_dev(context)
+        else:
+            res = await self._wake_context_stage(context, stage)
+        return {"on_demand": True, **res}
 
     async def evict_deployments(self, deployment_ids: list[str]) -> dict:
         """Evict specific deployments (mark inactive + REMOVE containers) — driven
