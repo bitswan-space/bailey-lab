@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { Bot, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Bot, Loader2, Pencil, Play, Plus, Trash2 } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Requirement } from '@/lib/api';
 import { StatusBadge, nextStatus } from './StatusBadge';
 
@@ -18,6 +19,10 @@ interface Props {
   onAddChild: () => void;
   onDelete: () => void;
   onRunAgent: () => void;
+  /** Run the deterministic test for this requirement in the live-dev container. */
+  onRunTest: () => void;
+  /** True while this row's test (or an all-run that includes it) is executing. */
+  running?: boolean;
 }
 
 /**
@@ -35,6 +40,8 @@ export function RequirementRow({
   onAddChild,
   onDelete,
   onRunAgent,
+  onRunTest,
+  running = false,
 }: Props) {
   const [editing, setEditing] = useState(!!editOnMount);
   const [draft, setDraft] = useState(req.description);
@@ -82,13 +89,13 @@ export function RequirementRow({
 
   return (
     <div
-      className="group flex items-start gap-3 border-b border-border bg-background py-2 pr-3 transition-colors hover:bg-muted/30"
+      className="group flex items-start gap-3 border-b border-border bg-background py-2.5 pr-3 transition-colors hover:bg-muted/40"
       style={{ paddingLeft }}
     >
-      <div className="flex w-[88px] shrink-0 items-center gap-2 pt-1">
-        <span className="font-mono text-[11px] text-muted-foreground">{req.id}</span>
+      <div className="flex w-[70px] shrink-0 items-center pt-0.5">
+        <span className="font-mono text-[11px] font-semibold text-foreground">{req.id}</span>
       </div>
-      <div className="flex shrink-0 items-center pt-0.5">
+      <div className="flex w-16 shrink-0 items-center pt-0.5">
         <StatusBadge status={req.status} onClick={onCycleStatus} />
       </div>
       <div className="min-w-0 flex-1 pt-0.5">
@@ -124,13 +131,44 @@ export function RequirementRow({
           </button>
         )}
       </div>
-      <div className="flex shrink-0 items-center gap-0.5 pt-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+      <div className="flex w-[140px] shrink-0 items-center justify-end gap-0.5 pt-0.5 opacity-70 transition-opacity group-hover:opacity-100">
         <IconButton title="Edit description" onClick={() => setEditing(true)}>
           <Pencil className="size-3.5" />
         </IconButton>
         <IconButton title="Add child requirement" onClick={onAddChild}>
           <Plus className="size-3.5" />
         </IconButton>
+        {/* Radix tooltip (not `title`) because the no-test state must explain
+            itself on hover, and native tooltips don't show on disabled
+            controls. aria-disabled + click guard keeps hover events alive —
+            same trick as SpecEditorToolbar. */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-disabled={running || !req.hasTest}
+              onClick={running || !req.hasTest ? undefined : onRunTest}
+              className={`${ICON_BTN_CLASS} ${
+                running || !req.hasTest
+                  ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-muted-foreground'
+                  : 'hover:text-foreground'
+              }`}
+            >
+              {running ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Play className="size-3.5" />
+              )}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            {running
+              ? 'Running test…'
+              : req.hasTest
+                ? 'Run this requirement’s test'
+                : 'No test written for this requirement yet — write one first (the “Write tests” agent can do it)'}
+          </TooltipContent>
+        </Tooltip>
         <IconButton title="Run agent on this requirement" onClick={onRunAgent}>
           <Bot className="size-3.5" />
         </IconButton>
@@ -146,15 +184,20 @@ export function RequirementRow({
   );
 }
 
+const ICON_BTN_CLASS =
+  'inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted';
+
 function IconButton({
   title,
   onClick,
   className = '',
+  disabled = false,
   children,
 }: {
   title: string;
   onClick: () => void;
   className?: string;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -162,7 +205,8 @@ function IconButton({
       type="button"
       title={title}
       onClick={onClick}
-      className={`inline-flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground ${className}`}
+      disabled={disabled}
+      className={`${ICON_BTN_CLASS} hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent ${className}`}
     >
       {children}
     </button>

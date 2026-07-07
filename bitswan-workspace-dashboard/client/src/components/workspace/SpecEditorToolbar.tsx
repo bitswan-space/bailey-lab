@@ -63,6 +63,12 @@ interface SpecEditorToolbarProps {
   linkShortcutRef?: MutableRefObject<() => void>;
   /** The editor's Mod-Alt-P keymap opens the image popover through this ref. */
   imageShortcutRef?: MutableRefObject<() => void>;
+  /**
+   * Trailing controls pinned to the right of the toolbar (Save, Build
+   * automation, the save-state indicator). The design folds the document
+   * actions into the formatting toolbar rather than a separate header bar.
+   */
+  toolbarRight?: ReactNode;
 }
 
 /**
@@ -75,6 +81,7 @@ export function SpecEditorToolbar({
   onInsertDiagram,
   linkShortcutRef,
   imageShortcutRef,
+  toolbarRight,
 }: SpecEditorToolbarProps) {
   const state = useEditorState();
   const { nodes, marks } = markdownSchema;
@@ -422,6 +429,9 @@ export function SpecEditorToolbar({
         disabled={!redo(state)}
         command={redo}
       />
+      {toolbarRight && (
+        <div className="ml-auto flex items-center gap-2 pl-2">{toolbarRight}</div>
+      )}
       </div>
     </TooltipProvider>
   );

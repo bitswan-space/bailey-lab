@@ -3,6 +3,7 @@ import {
   api,
   type AddRequirementRequest,
   type Requirement,
+  type RunTestsResponse,
   type UpdateRequirementRequest,
 } from '@/lib/api';
 
@@ -13,6 +14,9 @@ interface Result {
   add: (body: AddRequirementRequest) => Promise<Requirement>;
   update: (id: string, patch: UpdateRequirementRequest) => Promise<Requirement>;
   remove: (id: string) => Promise<void>;
+  /** Run the tests (one requirement when `id` is given, else all) and adopt
+   *  the canonical statuses the CLI wrote back. */
+  runTests: (id?: string) => Promise<RunTestsResponse>;
 }
 
 /**
@@ -67,7 +71,11 @@ export function useRequirements(copy: string, bp: string): Result {
   const update = useCallback(
     async (id: string, patch: UpdateRequirementRequest) => {
       const next = await api.requirements.update(bp, copy, id, patch);
-      setRequirements((prev) => prev.map((r) => (r.id === id ? next : r)));
+      // PATCH responses aren't hasTest-annotated (only list/run-tests scan
+      // the BP for tests) — keep the flag we already have for the row.
+      setRequirements((prev) =>
+        prev.map((r) => (r.id === id ? { ...next, hasTest: r.hasTest } : r)),
+      );
       return next;
     },
     [bp, copy],
@@ -81,5 +89,16 @@ export function useRequirements(copy: string, bp: string): Result {
     [bp, copy],
   );
 
-  return { requirements, loading, refresh, add, update, remove };
+  const runTests = useCallback(
+    async (id?: string) => {
+      const res = await api.requirements.runTests(bp, copy, id);
+      // Adopt the server's canonical list (the CLI just wrote pass/fail into
+      // the TOML) so badges flip without a separate refetch.
+      if (aliveRef.current) setRequirements(res.requirements);
+      return res;
+    },
+    [bp, copy],
+  );
+
+  return { requirements, loading, refresh, add, update, remove, runTests };
 }

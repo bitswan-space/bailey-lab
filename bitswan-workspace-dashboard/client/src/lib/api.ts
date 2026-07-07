@@ -1047,6 +1047,17 @@ export const api = {
       deleteEmpty(
         `/api/business-processes/${encodeURIComponent(bpId)}/requirements/${encodeURIComponent(id)}?copy=${encodeURIComponent(copy)}`,
       ),
+    /**
+     * Run the deterministic tests in the BP's live-dev container. Omit `id`
+     * to run every non-proposed requirement. The server returns the updated
+     * requirement list (the CLI writes pass/fail into the TOML) plus the run
+     * output so the caller can show detail/errors.
+     */
+    runTests: (bpId: string, copy: string, id?: string) =>
+      postJson<RunTestsResponse>(
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements/run-tests?copy=${encodeURIComponent(copy)}`,
+        id ? { id } : {},
+      ),
   },
 
   /** Git task queue. The live feed comes over the `/api/events` SSE stream;
@@ -1111,6 +1122,13 @@ export interface Requirement {
   description: string;
   status: ReqStatus;
   parent: string;
+  /**
+   * True when a test file in the BP mentions this requirement's underscore
+   * token (REQ-003 → REQ_003) — the same convention the test runner matches
+   * on. Absent on add/update responses (only list/run-tests annotate); the
+   * hook preserves the previous value across those.
+   */
+  hasTest?: boolean;
 }
 
 export interface AddRequirementRequest {
@@ -1122,4 +1140,16 @@ export interface AddRequirementRequest {
 export interface UpdateRequirementRequest {
   description?: string;
   status?: ReqStatus;
+}
+
+export interface RunTestsResponse {
+  /** True when the run itself completed (exit 0); individual pass/fail is in
+   *  the per-requirement statuses + `output`. False means the run errored
+   *  (e.g. no live-dev container, or an SSH-level failure). */
+  ok: boolean;
+  exitCode: number;
+  /** Combined stdout+stderr from `bitswan-coding-agent requirements test`. */
+  output: string;
+  /** The requirement list after the CLI wrote its verdicts. */
+  requirements: Requirement[];
 }

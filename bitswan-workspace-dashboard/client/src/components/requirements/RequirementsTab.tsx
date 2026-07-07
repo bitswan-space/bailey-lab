@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import { FlaskConical, Plus } from 'lucide-react';
+import { FlaskConical, Loader2, Play, Search, X } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import {
   AlertDialog,
@@ -12,12 +12,18 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { useRequirements } from '@/hooks/useRequirements';
 import { useSessions, type BpSessionKind } from '@/components/agents/SessionProvider';
 import { nextStatus } from './StatusBadge';
 import { RequirementsTable } from './RequirementsTable';
 import { useUrlEnum, useUrlParam } from '@/lib/urlState';
+import { cn } from '@/lib/utils';
 import type { Requirement, ReqStatus } from '@/lib/api';
 
 interface Props {
@@ -30,6 +36,17 @@ interface Props {
 type Filter = 'all' | ReqStatus;
 
 const FILTERS: Filter[] = ['all', 'pending', 'pass', 'fail', 'retest', 'proposed'];
+
+// Per-filter colour for the count digit shown in an inactive pill (matches
+// the status-badge tones; the active pill inverts to its own foreground).
+const COUNT_COLOR: Record<Filter, string> = {
+  all: 'text-muted-foreground',
+  pending: 'text-slate-600',
+  pass: 'text-green-700',
+  fail: 'text-red-700',
+  retest: 'text-amber-700',
+  proposed: 'text-violet-700',
+};
 
 /**
  * Per-(copy, bp) testable requirements view. Reads/writes the same
@@ -44,6 +61,7 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     add,
     update,
     remove,
+    runTests,
   } = useRequirements(copy, bp);
   const {
     startSession,
@@ -64,6 +82,23 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   const [filter, setFilter] = useUrlEnum('filter', FILTERS, 'all');
   const [pendingEditId, setPendingEditId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Requirement | null>(null);
+  // Ids whose test is in flight (drives per-row spinners). An all-run marks
+  // every non-proposed id at once; a per-row run marks just that one.
+  const [runningIds, setRunningIds] = useState<ReadonlySet<string>>(new Set());
+  const [runningAll, setRunningAll] = useState(false);
+  // Last run's combined output, shown in a dismissible panel under the toolbar
+  // (the row badges already reflect pass/fail; this is for detail + errors).
+  const [runResult, setRunResult] = useState<{ ok: boolean; output: string } | null>(
+    null,
+  );
+  const anyRunning = runningAll || runningIds.size > 0;
+
+  // Run-all only makes sense once at least one testable (non-proposed)
+  // requirement actually has a test written for it.
+  const hasAnyTest = useMemo(
+    () => requirements.some((r) => r.status !== 'proposed' && r.hasTest),
+    [requirements],
+  );
 
   const counts = useMemo(() => {
     const c = { total: 0, pass: 0, fail: 0, pending: 0, retest: 0, proposed: 0 };
@@ -139,6 +174,52 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     onShowAgents();
   };
 
+  // Run the deterministic test(s) in the BP's live-dev container via the
+  // server, which drives `bitswan-coding-agent requirements test`. The hook
+  // adopts the canonical statuses the CLI wrote, so badges flip on resolve.
+  const onRunTest = async (r: Requirement) => {
+    // The row's button is disabled without a test, but guard anyway — running
+    // a test that doesn't exist can only record a bogus verdict.
+    if (anyRunning || !r.hasTest) return;
+    setRunningIds(new Set([r.id]));
+    try {
+      const res = await runTests(r.id);
+      setRunResult({ ok: res.ok, output: res.output });
+      if (!res.ok) {
+        toast.error(`Test run for ${r.id} did not complete — see output below`);
+      }
+    } catch (err) {
+      toast.error(`Failed to run test for ${r.id}: ${String(err)}`);
+    } finally {
+      setRunningIds(new Set());
+    }
+  };
+
+  const onRunAll = async () => {
+    if (anyRunning) return;
+    // The CLI skips `proposed` requirements; mirror that in the spinners so we
+    // don't imply we're running rows the server will ignore.
+    const ids = requirements.filter((r) => r.status !== 'proposed').map((r) => r.id);
+    if (ids.length === 0) {
+      toast.info('No testable requirements (all are still proposed).');
+      return;
+    }
+    setRunningAll(true);
+    setRunningIds(new Set(ids));
+    try {
+      const res = await runTests();
+      setRunResult({ ok: res.ok, output: res.output });
+      if (!res.ok) {
+        toast.error('Test run did not complete — see output below');
+      }
+    } catch (err) {
+      toast.error(`Failed to run tests: ${String(err)}`);
+    } finally {
+      setRunningAll(false);
+      setRunningIds(new Set());
+    }
+  };
+
   // "Write tests" / "Build automation": same launch flow as onRunAgent but
   // against the whole requirements set — the server picks the canned prompt
   // from the kind.
@@ -155,75 +236,147 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   };
 
   return (
+    <TooltipProvider delayDuration={300}>
     <div className="flex h-full flex-col overflow-hidden bg-background">
-      <div className="flex shrink-0 flex-col gap-3 border-b border-border bg-background px-6 py-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            {loading ? (
-              'Loading…'
-            ) : (
-              <>
-                {counts.total} total
-                {counts.pass ? ` · ${counts.pass} pass` : ''}
-                {counts.fail ? ` · ${counts.fail} fail` : ''}
-                {counts.pending ? ` · ${counts.pending} pending` : ''}
-                {counts.retest ? ` · ${counts.retest} retest` : ''}
-                {counts.proposed ? ` · ${counts.proposed} proposed` : ''}
-              </>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              onClick={() => void onStartCanned('write-tests')}
-              size="sm"
-              variant="outline"
-              title="Start an agent session that writes tests for these requirements"
-            >
-              <FlaskConical className="size-3.5" aria-hidden />
-              Write tests
-            </Button>
-            <Button onClick={() => onNew()} size="sm" variant="outline">
-              <Plus className="size-3.5" aria-hidden />
-              New requirement
-            </Button>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Input
-            placeholder="Search id or description…"
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-6 py-3">
+        {/* Search */}
+        <div className="flex h-8 w-full max-w-[380px] items-center gap-2 rounded-md border border-border bg-white px-2.5">
+          <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="h-8 w-64 text-[13px]"
+            placeholder="Search requirements by id or description…"
+            className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-muted-foreground"
           />
-          <div className="flex items-center gap-1">
-            {FILTERS.map((f) => (
+          {search && (
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              aria-label="Clear search"
+              className="shrink-0 text-muted-foreground hover:text-foreground"
+            >
+              <X className="size-3.5" aria-hidden />
+            </button>
+          )}
+        </div>
+
+        {/* Status filter pills with counts */}
+        <div className="flex items-center gap-1">
+          {FILTERS.map((f) => {
+            const active = filter === f;
+            const n = f === 'all' ? counts.total : counts[f];
+            return (
               <button
                 key={f}
                 type="button"
                 onClick={() => setFilter(f)}
-                className={`rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors ${
-                  filter === f
-                    ? 'bg-foreground text-background'
-                    : 'bg-transparent text-muted-foreground hover:bg-muted'
-                }`}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-medium capitalize transition-colors',
+                  active
+                    ? 'border-foreground bg-foreground text-background'
+                    : 'border-border bg-white text-muted-foreground hover:bg-muted/60',
+                )}
               >
                 {f}
+                <span
+                  className={cn(
+                    'text-[10px] font-bold',
+                    active ? 'text-background/80' : COUNT_COLOR[f],
+                  )}
+                >
+                  {loading ? '·' : n}
+                </span>
               </button>
-            ))}
-          </div>
+            );
+          })}
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          {/* The disabled Button has pointer-events: none, so the span
+              wrapper is what keeps the tooltip hoverable in that state. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <Button
+                  onClick={() => void onRunAll()}
+                  size="sm"
+                  variant="outline"
+                  disabled={anyRunning || !hasAnyTest}
+                >
+                  {runningAll ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Play className="size-3.5" aria-hidden />
+                  )}
+                  Run tests
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              {hasAnyTest
+                ? "Run every requirement's test in the live-dev container and record pass/fail"
+                : 'No tests written yet — write them first (the “Write tests” agent can do it)'}
+            </TooltipContent>
+          </Tooltip>
+          <Button
+            onClick={() => void onStartCanned('write-tests')}
+            size="sm"
+            variant="outline"
+            title="Start an agent session that writes tests for these requirements"
+          >
+            <FlaskConical className="size-3.5" aria-hidden />
+            Write tests
+          </Button>
         </div>
       </div>
+
+      {runResult && (
+        <div
+          className={cn(
+            'shrink-0 border-b px-6 py-2.5',
+            runResult.ok
+              ? 'border-border bg-muted/40'
+              : 'border-red-200 bg-red-50',
+          )}
+        >
+          <div className="mb-1 flex items-center justify-between">
+            <span
+              className={cn(
+                'text-[11px] font-semibold uppercase tracking-wide',
+                runResult.ok ? 'text-muted-foreground' : 'text-red-700',
+              )}
+            >
+              {runResult.ok ? 'Test run output' : 'Test run failed'}
+            </span>
+            <button
+              type="button"
+              onClick={() => setRunResult(null)}
+              aria-label="Dismiss test output"
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <X className="size-3.5" aria-hidden />
+            </button>
+          </div>
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground">
+            {runResult.output.trim() || '(no output)'}
+          </pre>
+        </div>
+      )}
 
       <div className="flex-1 overflow-auto px-6 py-4">
         <RequirementsTable
           requirements={visible}
+          loading={loading}
           pendingEditId={pendingEditId}
           onEditDone={() => setPendingEditId(null)}
           onCycleStatus={onCycleStatus}
           onUpdateDescription={onUpdateDescription}
           onAddChild={(parent) => void onNew(parent)}
+          onAddRoot={() => void onNew()}
           onDelete={(r) => setDeleteTarget(r)}
           onRunAgent={(r) => void onRunAgent(r)}
+          onRunTest={(r) => void onRunTest(r)}
+          runningIds={runningIds}
         />
       </div>
 
@@ -258,5 +411,6 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
         </AlertDialogContent>
       </AlertDialog>
     </div>
+    </TooltipProvider>
   );
 }

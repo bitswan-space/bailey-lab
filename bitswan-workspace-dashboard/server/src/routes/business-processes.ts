@@ -6,12 +6,18 @@ import {
 } from '../services/workspace.js';
 import {
   addRequirement,
+  annotateHasTest,
   isReqStatus,
   listRequirements,
   removeRequirement,
   updateRequirement,
   type ReqStatus,
 } from '../services/requirements.js';
+import {
+  isSafeRequirementId,
+  runRequirementTests,
+} from '../services/agent-exec.js';
+import { emailFromRequest } from '../lib/user.js';
 import type { GitopsClient } from '../services/gitops.js';
 import { emailFromRequest } from '../lib/user.js';
 
@@ -106,15 +112,58 @@ export function registerBusinessProcessRoutes(
     const err = validateBpCopy(req.params.id, req.query.copy);
     if (err) return reply.code(400).send({ error: err });
     try {
-      return await listRequirements({
-        workspaceRoot,
-        copy: req.query.copy!,
-        bp: req.params.id,
-      });
+      const scope = { workspaceRoot, copy: req.query.copy!, bp: req.params.id };
+      // hasTest drives the UI's per-row Run button — no test yet, no run.
+      return await annotateHasTest(scope, await listRequirements(scope));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       app.log.warn({ err: e, id: req.params.id }, 'requirements list failed');
       return reply.code(500).send({ error: msg });
+    }
+  });
+
+  // Run the deterministic tests for one requirement (`{ id }`) or every
+  // non-proposed requirement (empty body). Drives
+  // `bitswan-coding-agent requirements test` inside the BP's live-dev
+  // container over SSH — the CLI writes pass/fail back to the TOML, which we
+  // re-read and return so the UI reflects the new statuses immediately.
+  app.post<{
+    Params: { id: string };
+    Querystring: { copy?: string };
+    Body: { id?: string };
+  }>('/api/business-processes/:id/requirements/run-tests', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const bp = req.params.id;
+    const copy = req.query.copy;
+    const err = validateBpCopy(bp, copy);
+    if (err) return reply.code(400).send({ error: err });
+    const reqId = req.body?.id;
+    if (reqId !== undefined && (typeof reqId !== 'string' || !isSafeRequirementId(reqId))) {
+      return reply.code(400).send({ error: 'invalid requirement id' });
+    }
+    const email = await emailFromRequest(req, app.log);
+    if (!email) return reply.code(401).send({ error: 'not authenticated' });
+    try {
+      const result = await runRequirementTests({
+        copy: copy!,
+        bp,
+        email,
+        ...(reqId ? { id: reqId } : {}),
+      });
+      // The CLI wrote the verdicts into the TOML; hand back the canonical list
+      // alongside the run output so the client doesn't need a second fetch.
+      const scope = { workspaceRoot, copy: copy!, bp };
+      const requirements = await annotateHasTest(scope, await listRequirements(scope));
+      return {
+        ok: result.exitCode === 0,
+        exitCode: result.exitCode,
+        output: result.output,
+        requirements,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      app.log.warn({ err: e, id: bp }, 'requirements run-tests failed');
+      return reply.code(502).send({ error: msg });
     }
   });
 

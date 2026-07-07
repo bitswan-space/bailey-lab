@@ -37,6 +37,11 @@ export interface Requirement {
   parent: string;
 }
 
+/** A requirement annotated with whether a matching test exists in the BP. */
+export interface RequirementWithTest extends Requirement {
+  hasTest: boolean;
+}
+
 const REQUIREMENTS_FILENAME = 'testable-requirements.toml';
 
 /**
@@ -106,6 +111,115 @@ export async function listRequirements(opts: {
     if (norm) out.push(norm);
   }
   return out;
+}
+
+/**
+ * Test-existence detection. The runner convention (shared with
+ * `bitswan-coding-agent requirements test`) turns a requirement id's hyphens
+ * into underscores and substring-matches it (`pytest -k REQ_003`,
+ * `go test -run REQ_003`). We mirror that: a requirement "has a test" when
+ * its underscore token appears in a test-looking file inside the BP
+ * directory. This is what lets the UI gray out the per-row Run button for
+ * requirements nobody has written a test for yet.
+ */
+
+/** Directories skipped while scanning for tests (dependency/VCS/build noise). */
+const SCAN_SKIP_NAMES: ReadonlySet<string> = new Set([
+  '.git',
+  'node_modules',
+  '__pycache__',
+  '.venv',
+  'venv',
+  'vendor',
+  'dist',
+  'build',
+  '.pytest_cache',
+]);
+
+/** Files larger than this are not scanned (mirrors copy-files' read cap). */
+const SCAN_FILE_SIZE_LIMIT = 1024 * 1024; // 1 MiB
+
+/**
+ * Does this path look like it holds tests? Matches the discovery rules of
+ * the common runners: pytest (test_*.py / *_test.py / tests/), go test
+ * (*_test.go), jest/vitest (*.test.* / *.spec.* / __tests__/), rspec
+ * (*_spec.rb). Deliberately NOT dash-separated names — helper scripts like
+ * run-req-test.sh mention requirement ids in usage comments without being
+ * tests themselves.
+ */
+function isTestPath(relPath: string): boolean {
+  const segments = relPath.split('/');
+  const base = segments[segments.length - 1] ?? '';
+  const dirs = segments.slice(0, -1);
+  if (dirs.some((d) => /^(tests?|specs?|__tests__)$/i.test(d))) return true;
+  const stem = base.replace(/\.[^.]+$/, '');
+  return /^test_/i.test(stem) || /(_test|_spec|\.test|\.spec)$/i.test(stem);
+}
+
+/**
+ * Scan the BP directory for test files mentioning each requirement's
+ * underscore token. Returns the set of requirement ids (original, hyphenated
+ * form) that have at least one match.
+ */
+export async function findTestedRequirementIds(opts: {
+  workspaceRoot: string;
+  copy: string;
+  bp: string;
+  ids: readonly string[];
+}): Promise<Set<string>> {
+  const found = new Set<string>();
+  if (opts.ids.length === 0) return found;
+  const bpDir = path.dirname(resolveFilePath(opts));
+  // token -> original id; substring semantics match the runners'.
+  const tokens = new Map(opts.ids.map((id) => [id.replace(/-/g, '_'), id]));
+
+  const walk = async (dir: string): Promise<void> => {
+    if (found.size === tokens.size) return;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (found.size === tokens.size) return;
+      if (SCAN_SKIP_NAMES.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        await walk(full);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      const rel = path.relative(bpDir, full).split(path.sep).join('/');
+      if (!isTestPath(rel)) continue;
+      let content: string;
+      try {
+        const st = await fs.stat(full);
+        if (!st.isFile() || st.size === 0 || st.size > SCAN_FILE_SIZE_LIMIT) continue;
+        content = await fs.readFile(full, 'utf8');
+      } catch {
+        continue;
+      }
+      for (const [token, id] of tokens) {
+        if (!found.has(id) && content.includes(token)) found.add(id);
+      }
+    }
+  };
+
+  await walk(bpDir);
+  return found;
+}
+
+/** Annotate a requirement list with per-id test existence. */
+export async function annotateHasTest(
+  opts: { workspaceRoot: string; copy: string; bp: string },
+  reqs: Requirement[],
+): Promise<RequirementWithTest[]> {
+  const tested = await findTestedRequirementIds({
+    ...opts,
+    ids: reqs.map((r) => r.id),
+  });
+  return reqs.map((r) => ({ ...r, hasTest: tested.has(r.id) }));
 }
 
 /**

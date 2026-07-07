@@ -474,42 +474,39 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
   const saveDisabled =
     load.kind !== 'ready' || save.kind === 'clean' || save.kind === 'saved' || save.kind === 'saving';
 
+  // Document actions live on the right of the formatting toolbar (the
+  // design has no separate title header — the BP name is shown by the
+  // global top nav).
+  const toolbarRight = (
+    <>
+      <SaveIndicator save={save} />
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => void doSave(true)}
+        disabled={saveDisabled}
+        title={
+          save.kind === 'conflict'
+            ? 'Overwrite the on-disk version with yours'
+            : 'Save (Ctrl+S) — edits also autosave'
+        }
+      >
+        <Save className="size-3.5" aria-hidden />
+        {save.kind === 'saving' ? 'Saving…' : save.kind === 'conflict' ? 'Overwrite' : 'Save'}
+      </Button>
+      <Button
+        size="sm"
+        onClick={() => void onBuildAutomation()}
+        title="Send this description to the coding agent and open the Coding Agent tab"
+      >
+        <Bot className="size-3.5" aria-hidden />
+        Build automation
+      </Button>
+    </>
+  );
+
   return (
     <div className="flex h-full flex-1 flex-col overflow-hidden bg-background">
-      <header className="flex shrink-0 items-center gap-3 border-b border-border bg-white px-7 py-3.5">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-[15px] font-semibold tracking-tight text-foreground">
-            <span className="truncate">{bp.name}</span>
-            <SaveIndicator save={save} />
-          </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            Describe your business process
-          </div>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => void doSave(true)}
-          disabled={saveDisabled}
-          title={
-            save.kind === 'conflict'
-              ? 'Overwrite the on-disk version with yours'
-              : 'Save (Ctrl+S) — edits also autosave'
-          }
-        >
-          <Save className="size-3.5" aria-hidden />
-          {save.kind === 'saving' ? 'Saving…' : save.kind === 'conflict' ? 'Overwrite' : 'Save'}
-        </Button>
-        <Button
-          size="sm"
-          onClick={() => void onBuildAutomation()}
-          title="Send this description to the coding agent and open the Coding Agent tab"
-        >
-          <Bot className="size-3.5" aria-hidden />
-          Build automation
-        </Button>
-      </header>
-
       {load.kind === 'loading' && (
         <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
           Loading…
@@ -535,6 +532,7 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
               linkShortcutRef={openLinkRef}
               imageShortcutRef={openImageRef}
               onInsertDiagram={openNewDiagram}
+              toolbarRight={toolbarRight}
             />
             <div className="flex-1 overflow-auto">
               <div className="spec-doc relative mx-auto mb-10 mt-6 w-full max-w-[820px] rounded-md border border-border bg-white shadow-sm">
