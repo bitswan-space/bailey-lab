@@ -158,9 +158,10 @@ func triggerLiveDevWake(host string) {
 	}()
 }
 
-// serveLiveDevLoadingResponse rewrites a 5xx response from a dehydrated live-dev
-// host into a self-refreshing loading page. Uses meta-refresh (no JS) so it
-// works under any CSP; returns 503 with Retry-After so bots/caches behave.
+// serveLiveDevLoadingResponse rewrites a 5xx response from a dehydrated
+// on-demand host (dev, live-dev, or on-demand staging/production) into a
+// self-refreshing loading page. Uses meta-refresh (no JS) so it works under any
+// CSP; returns 503 with Retry-After so bots/caches behave.
 func serveLiveDevLoadingResponse(resp *http.Response) error {
 	page := liveDevLoadingPage
 	resp.StatusCode = http.StatusServiceUnavailable
@@ -176,15 +177,17 @@ func serveLiveDevLoadingResponse(resp *http.Response) error {
 	return nil
 }
 
-// liveDevLoadingPage is the static "starting your preview" page. Self-contained,
-// no external assets, meta-refresh every 3s until the woken container answers.
+// liveDevLoadingPage is the static "starting up" page shown while any on-demand
+// stage rehydrates (generic wording — it also serves staging/production, not
+// just live-dev previews). Self-contained, no external assets, meta-refresh
+// every 3s until the woken container answers.
 var liveDevLoadingPage = []byte(`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="3">
-<title>Starting preview…</title>
+<title>Starting…</title>
 <style>
   html,body{height:100%;margin:0}
   body{display:flex;align-items:center;justify-content:center;
@@ -201,8 +204,8 @@ var liveDevLoadingPage = []byte(`<!doctype html>
 <body>
   <div class="card">
     <div class="spinner"></div>
-    <h1>Waking your live-dev preview…</h1>
-    <p>This instance was paused to free resources. It's starting back up and
+    <h1>Starting up…</h1>
+    <p>This service was paused to free resources. It's starting back up and
        will load automatically in a few seconds.</p>
   </div>
 </body>
