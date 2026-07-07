@@ -297,6 +297,10 @@ type bpMem struct {
 	Running       bool   `json:"running"`
 	Containers    int    `json:"containers"`
 	Over          bool   `json:"over_reservation"`
+	// Asleep: this (bp, stage) group is DEPLOYED (in the workspace's bitswan.yaml)
+	// but has no running containers — it was slept/evicted to zero. Surfaced so the
+	// admin page can list sleeping BPs (with a Wake action), not just running ones.
+	Asleep bool `json:"asleep"`
 }
 
 // memBudget is the computed accounting model + breakdowns (the admin DTO).

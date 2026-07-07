@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -70,13 +71,101 @@ func (s *Server) handleMemoryAdmit(w http.ResponseWriter, r *http.Request) {
 // field) so it can be swapped in tests; defaults to the docker implementation.
 var baileyMemGovernor MemoryGovernor = dockerMemoryGovernor{}
 
-// handleBaileyResources returns the live memory budget for the admin page.
+// desiredGroup is one (bp, stage) deployment group a workspace's gitops knows
+// about (from its bitswan.yaml). Used to surface SLEPT groups — deployed but
+// running zero containers — which the docker-inventory budget can't see.
+type desiredGroup struct {
+	BP            string `json:"bp"`
+	Stage         string `json:"stage"`
+	Policy        string `json:"policy"`
+	ReservationMB int    `json:"reservation_mb"`
+}
+
+// gitopsMemGroupsURL / desiredGroupsForWorkspace are package vars so tests can
+// point them at an httptest server + stub secret (mirrors evictViaGitops).
+var gitopsMemGroupsURL = func(ws string) string {
+	return fmt.Sprintf("http://%s-gitops:8079/automations/mem-groups", ws)
+}
+
+var desiredGroupsForWorkspace = func(ctx context.Context, ws string) ([]desiredGroup, error) {
+	secret, err := gitopsSecretForWorkspace(ws)
+	if err != nil || secret == "" {
+		return nil, fmt.Errorf("gitops secret for %q: %v", ws, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gitopsMemGroupsURL(ws), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mem-groups %s: HTTP %d", ws, resp.StatusCode)
+	}
+	var out []desiredGroup
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// mergeAsleepGroups appends asleep rows to the budget: (workspace, bp, stage)
+// groups a workspace has DEPLOYED but that have zero containers in the running
+// inventory (slept to nothing). Best-effort per workspace — an old gitops
+// without the endpoint (or an unreachable one) is simply skipped.
+func mergeAsleepGroups(ctx context.Context, b *memBudget) {
+	resp, err := GetWorkspaceList(false, false)
+	if err != nil || resp == nil {
+		return
+	}
+	present := map[string]bool{} // any (ws,bp,stage) that has containers
+	for _, g := range b.ByBP {
+		present[g.Workspace+"\x00"+g.BP+"\x00"+g.Stage] = true
+	}
+	added := false
+	for _, ws := range resp.Workspaces {
+		groups, err := desiredGroupsForWorkspace(ctx, ws.Name)
+		if err != nil {
+			continue
+		}
+		for _, dg := range groups {
+			if present[ws.Name+"\x00"+dg.BP+"\x00"+dg.Stage] {
+				continue // it has containers → shown as running, not asleep
+			}
+			b.ByBP = append(b.ByBP, bpMem{
+				Workspace: ws.Name, BP: dg.BP, Stage: dg.Stage, Policy: dg.Policy,
+				ReservationMB: dg.ReservationMB, Running: false, Asleep: true,
+			})
+			present[ws.Name+"\x00"+dg.BP+"\x00"+dg.Stage] = true
+			added = true
+		}
+	}
+	if added {
+		sort.Slice(b.ByBP, func(i, j int) bool {
+			if b.ByBP[i].Workspace != b.ByBP[j].Workspace {
+				return b.ByBP[i].Workspace < b.ByBP[j].Workspace
+			}
+			if b.ByBP[i].BP != b.ByBP[j].BP {
+				return b.ByBP[i].BP < b.ByBP[j].BP
+			}
+			return b.ByBP[i].Stage < b.ByBP[j].Stage
+		})
+	}
+}
+
+// handleBaileyResources returns the live memory budget for the admin page —
+// running usage from the docker inventory, plus asleep (deployed-but-zero) rows
+// merged in so sleeping BPs are visible (with a Wake action) too.
 func (s *Server) handleBaileyResources(w http.ResponseWriter, r *http.Request) {
 	budget, err := baileyMemGovernor.Budget(r.Context())
 	if err != nil {
 		writeJSONError(w, fmt.Sprintf("compute memory budget: %v", err), http.StatusInternalServerError)
 		return
 	}
+	mergeAsleepGroups(r.Context(), &budget)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(budget)
 }

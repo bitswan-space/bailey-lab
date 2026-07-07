@@ -704,6 +704,16 @@ class EvictDeploymentsRequest(BaseModel):
     deployment_ids: list[str]
 
 
+@router.get("/mem-groups")
+async def mem_groups_route(
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Deployment groups (bp, stage, reserved, policy) from bitswan.yaml. The
+    daemon merges these with the running inventory so the admin Resource page can
+    show SLEEPING (deployed-but-zero-container) BPs, not just running ones."""
+    return automation_service.mem_groups()
+
+
 @router.post("/evict-ephemeral")
 async def evict_ephemeral_route(
     body: EvictDeploymentsRequest,

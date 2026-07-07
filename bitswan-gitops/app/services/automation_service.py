@@ -4364,6 +4364,38 @@ class AutomationService:
         res = await self.evict_deployments(deps)
         return {"context": context, "slept": res.get("evicted", [])}
 
+    def mem_groups(self) -> list[dict]:
+        """Deployment groups from bitswan.yaml for the admin Resource page's
+        SLEEPING-BP view: one entry per (context, stage) with the BP name, summed
+        memory reservation, and policy. The daemon merges these with the running
+        docker inventory and renders any group that has zero running containers as
+        Asleep (so slept BPs are visible + wakeable, not just running ones)."""
+        from app.services.bp_databases import derive_bp_and_copy
+
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        groups: dict[tuple, dict] = {}
+        for conf in (bs.get("deployments") or {}).values():
+            conf = conf or {}
+            ctx = conf.get("context") or ""
+            stage = conf.get("stage") or ""
+            bp, _ = derive_bp_and_copy(conf.get("relative_path"))
+            if not bp:
+                bp = ctx
+            g = groups.get((ctx, stage))
+            if g is None:
+                g = {
+                    "bp": bp,
+                    "stage": stage,
+                    "reservation_mb": 0,
+                    "policy": conf.get("memory_reservation_policy") or "on-demand",
+                }
+                groups[(ctx, stage)] = g
+            try:
+                g["reservation_mb"] += int(conf.get("memory_reservation") or 0)
+            except (TypeError, ValueError):
+                pass
+        return list(groups.values())
+
     async def wake_context_stage(self, context: str, stage: str) -> dict:
         """Public wake for a (context, stage) group — re-activate + redeploy.
         The manual counterpart of on-demand wake-on-access (dashboard Wake button)."""

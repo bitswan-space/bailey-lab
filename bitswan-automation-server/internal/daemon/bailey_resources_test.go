@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -336,5 +338,46 @@ func TestHandleBaileyResourcesSleep(t *testing.T) {
 	(&Server{}).handleBaileyResourcesSleep(rec, httptest.NewRequest(http.MethodGet, "/bailey/api/admin/resources/sleep", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET: code=%d want 405", rec.Code)
+	}
+}
+
+// TestMergeAsleepGroups: deployed groups with no running container are appended
+// as asleep rows; groups that ARE present (running) are not duplicated.
+func TestMergeAsleepGroups(t *testing.T) {
+	prev := desiredGroupsForWorkspace
+	defer func() { desiredGroupsForWorkspace = prev }()
+
+	// A HOME with one workspace dir so GetWorkspaceList returns it.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".config", "bitswan", "workspaces", "ws1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	desiredGroupsForWorkspace = func(_ context.Context, ws string) ([]desiredGroup, error) {
+		return []desiredGroup{
+			{BP: "running-bp", Stage: "live-dev", Policy: "on-demand", ReservationMB: 128},
+			{BP: "slept-bp", Stage: "live-dev", Policy: "on-demand", ReservationMB: 256},
+		}, nil
+	}
+	b := &memBudget{ByBP: []bpMem{
+		{Workspace: "ws1", BP: "running-bp", Stage: "live-dev", Running: true, Containers: 2},
+	}}
+	mergeAsleepGroups(context.Background(), b)
+
+	var slept *bpMem
+	for i := range b.ByBP {
+		if b.ByBP[i].BP == "slept-bp" {
+			slept = &b.ByBP[i]
+		}
+		if b.ByBP[i].BP == "running-bp" && b.ByBP[i].Asleep {
+			t.Error("running-bp must not be marked asleep")
+		}
+	}
+	if slept == nil {
+		t.Fatal("slept-bp (deployed, no containers) should have been added as an asleep row")
+	}
+	if !slept.Asleep || slept.Running || slept.ReservationMB != 256 {
+		t.Errorf("slept row wrong: %+v", *slept)
 	}
 }
