@@ -19,7 +19,6 @@ import {
 } from '../services/agent-exec.js';
 import { emailFromRequest } from '../lib/user.js';
 import type { GitopsClient } from '../services/gitops.js';
-import { emailFromRequest } from '../lib/user.js';
 
 export interface BusinessProcessRoutesOptions {
   workspaceRoot: string;
