@@ -1603,8 +1603,18 @@ class AutomationService:
         non_current = ("firewall", "backup")
         if stage_key == "production":
             non_current = non_current + ("secret",)
+        # `source_commit` required: declaring a secret writes blobs for every
+        # realm (names are shared across stages), so a NEVER-deployed stage gets
+        # a secret event with no source and no members. That is an audit record
+        # + rollback point, not a deployment — it must not become "current", or
+        # a fresh BP's staging/production renders as deployed ("Current on
+        # Staging") and promotion stalls with nothing real to promote onto.
         current = next(
-            (e["commit"] for e in entries if e["source"] not in non_current),
+            (
+                e["commit"]
+                for e in entries
+                if e["source"] not in non_current and e["source_commit"]
+            ),
             None,
         )
         return {
