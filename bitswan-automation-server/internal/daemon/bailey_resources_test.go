@@ -265,3 +265,76 @@ func TestCheckOverReservationLoop(t *testing.T) {
 	}
 	overReservationState.Delete(overID)
 }
+
+// TestHandleBaileyResourcesSleep covers the operator-triggered sleep endpoint:
+// on-demand workloads are slept, always-on / infra / stopped are skipped, a
+// targeted (workspace,bp,stage) match is exact, and inputs are validated.
+func TestHandleBaileyResourcesSleep(t *testing.T) {
+	prevInv := admitInventory
+	prevURL, prevSec := gitopsEvictURL, gitopsSecretForWorkspace
+	defer func() { admitInventory = prevInv; gitopsEvictURL = prevURL; gitopsSecretForWorkspace = prevSec }()
+
+	admitInventory = func(context.Context) ([]memContainer, error) {
+		return []memContainer{
+			{Workspace: "ws", BP: "orders", Stage: "live-dev", DeploymentID: "d-od", Context: "a", Policy: "on-demand", Running: true},
+			{Workspace: "ws", BP: "billing", Stage: "", DeploymentID: "d-ao", Context: "b", Policy: "always-on", Running: true},
+			{Workspace: "ws", BP: "orders", Stage: "live-dev", DeploymentID: "", Context: "a", Policy: "on-demand", Running: true}, // infra: no dep id
+			{Workspace: "ws", BP: "stale", Stage: "dev", DeploymentID: "d-stopped", Policy: "on-demand", Running: false},
+		}, nil
+	}
+	var gotIDs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			DeploymentIDs []string `json:"deployment_ids"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotIDs = append(gotIDs, body.DeploymentIDs...)
+		_ = json.NewEncoder(w).Encode(map[string][]string{"evicted": body.DeploymentIDs, "hosts": {"ws-fe-live-dev"}})
+	}))
+	defer srv.Close()
+	gitopsEvictURL = func(string) string { return srv.URL }
+	gitopsSecretForWorkspace = func(string) (string, error) { return "s", nil }
+
+	post := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		(&Server{}).handleBaileyResourcesSleep(rec, httptest.NewRequest(http.MethodPost, "/bailey/api/admin/resources/sleep", strings.NewReader(body)))
+		return rec
+	}
+
+	// all=true → only the on-demand WORKLOAD (d-od); always-on, infra, stopped skipped.
+	gotIDs = nil
+	rec := post(`{"all":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("all: code %d body %s", rec.Code, rec.Body.String())
+	}
+	if len(gotIDs) != 1 || gotIDs[0] != "d-od" {
+		t.Fatalf("all: expected only [d-od], got %v", gotIDs)
+	}
+	var res struct{ Slept, BPs int }
+	_ = json.Unmarshal(rec.Body.Bytes(), &res)
+	if res.Slept != 1 {
+		t.Errorf("all: slept=%d, want 1", res.Slept)
+	}
+
+	// Targeted exact (ws, orders, live-dev) → same single victim.
+	gotIDs = nil
+	if rec := post(`{"workspace":"ws","bp":"orders","stage":"live-dev"}`); rec.Code != http.StatusOK || len(gotIDs) != 1 || gotIDs[0] != "d-od" {
+		t.Fatalf("targeted: code %d ids %v", rec.Code, gotIDs)
+	}
+
+	// Targeting the always-on BP is a no-op (nothing evicted).
+	gotIDs = nil
+	if rec := post(`{"workspace":"ws","bp":"billing","stage":""}`); rec.Code != http.StatusOK || len(gotIDs) != 0 {
+		t.Fatalf("always-on target should sleep nothing, code %d ids %v", rec.Code, gotIDs)
+	}
+
+	// Validation: not all + missing bp → 400. Method guard: GET → 405.
+	if rec := post(`{"workspace":"ws"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("missing bp: code=%d want 400", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	(&Server{}).handleBaileyResourcesSleep(rec, httptest.NewRequest(http.MethodGet, "/bailey/api/admin/resources/sleep", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET: code=%d want 405", rec.Code)
+	}
+}

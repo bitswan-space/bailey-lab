@@ -307,6 +307,11 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			s.handleBaileyResources(w, r)
 			return
 		}
+	case "/bailey/api/admin/resources/sleep":
+		if r.Method == http.MethodPost {
+			s.handleBaileyResourcesSleep(w, r)
+			return
+		}
 	}
 
 	http.NotFound(w, r)
