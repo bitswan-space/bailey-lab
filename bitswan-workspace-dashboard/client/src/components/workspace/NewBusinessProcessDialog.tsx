@@ -49,7 +49,10 @@ export function NewBusinessProcessDialog({
     validationError = `Keep the name under ${MAX_BP_NAME_LEN} characters.`;
   } else if (!slug) {
     validationError = 'Include at least one letter or digit (a–z, 0–9).';
-  } else if (existingNames.includes(slug)) {
+  } else if (!submitting && existingNames.includes(slug)) {
+    // Skipped while submitting: the created BP arrives over SSE (and thus in
+    // existingNames) before the create response resolves — its own name must
+    // not flash red as a "duplicate" mid-flight.
     validationError = `A business process with the id "${slug}" already exists in this scope.`;
   }
   const canSubmit = trimmed.length > 0 && !validationError && !submitting;
