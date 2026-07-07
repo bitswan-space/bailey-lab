@@ -1615,7 +1615,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const priorCard = d
       .locator('div', { has: d.getByRole('button', { name: /^Roll back$/ }) })
       .filter({ has: d.getByRole('button', { name: /^Inspect$/ }) })
-      .filter({ hasText: /\bDeployed\b/ })
+      // The chip is its own <span> with exact text "Deployed" — match that,
+      // not the card's textContent (which concatenates "…c99Deployed…", so a
+      // \b word-boundary can never sit between the sha and the chip).
+      .filter({ has: d.locator('span', { hasText: /^Deployed$/ }) })
       .last();
     const inspect = priorCard.getByRole('button', { name: /^Inspect$/ }).first();
     await expect(inspect, 'no prior (non-current) Development entry to inspect for a real diff')
