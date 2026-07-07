@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Rocket, CheckCircle2, SlidersHorizontal } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Rocket, CheckCircle2, SlidersHorizontal, Terminal } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { useSessions } from '@/components/agents/SessionProvider';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
@@ -50,7 +50,18 @@ export function SyncDeployTab({
   const { startSyncSession, agentStatus, ensureAgent } =
     useSessions();
   const [busy, setBusy] = useState(false);
+  // Append-only build log for the in-flight (or just-finished) deploy: every
+  // line gitops emits — image build steps, build.sh output (vite/go build),
+  // per-member "Prepared N/M" — not just the latest line the toast shows.
+  const [deployLog, setDeployLog] = useState<string[]>([]);
+  const logRef = useRef<HTMLPreElement>(null);
   const [view, setView] = useUrlEnum('view', ['diff', 'history', 'checks'] as const, 'diff');
+
+  // Keep the log pinned to the newest line as it streams in.
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [deployLog]);
 
   // Checks: scan the image a deploy of this BP WOULD build from this copy's
   // source (built + scanned on demand). Memoised so the panel doesn't refetch
@@ -122,6 +133,7 @@ export function SyncDeployTab({
 
   const runSyncDeploy = useCallback(async () => {
     setBusy(true);
+    setDeployLog([]);
     try {
       let result;
       try {
@@ -151,6 +163,7 @@ export function SyncDeployTab({
           loading: `Synced — deploying ${bp.name} to dev…`,
           success: `${bp.name} synced and deployed to dev`,
           failurePrefix: `Synced into main, but deploy to dev failed for ${bp.name}`,
+          onLog: setDeployLog,
         });
         // Once it's fully deployed, jump to the Deployments tab's Development
         // stage so the user lands on the result of what they just shipped.
@@ -265,6 +278,32 @@ export function SyncDeployTab({
           </div>
         )}
       </div>
+
+      {/* Live build log — every line gitops emits during the deploy, appended
+          (not overwritten like the toast), so the image build steps and
+          build.sh output (vite build / go build) are all visible. Shown while a
+          deploy is in flight and left in place afterwards so the user can read
+          what happened. */}
+      {deployLog.length > 0 && (
+        <div className="shrink-0 border-b border-border bg-muted/30 px-7 py-3">
+          <div className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            <Terminal className="size-3.5" aria-hidden />
+            Build log
+            {busy && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+                <span className="size-1.5 animate-pulse rounded-full bg-primary" />
+                running
+              </span>
+            )}
+          </div>
+          <pre
+            ref={logRef}
+            className="max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background p-3 font-mono text-[12px] leading-relaxed text-foreground/90"
+          >
+            {deployLog.join('\n')}
+          </pre>
+        </div>
+      )}
 
       {/* Diff (what becomes main) / History (copy + main commits, deploy tags). */}
       <div className="flex shrink-0 items-center gap-4 border-b border-border bg-background px-7">

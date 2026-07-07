@@ -38,6 +38,12 @@ export interface DeployToastCopy {
    *  green slots) during which the stage card would otherwise read a static
    *  "never deployed". */
   onProgress?: (message: string) => void;
+  /** Called on every poll with the full append-only deploy log so callers can
+   *  render a scrollable build log (image steps, build.sh output, per-member
+   *  progress) — not just the single latest line the toast shows. The array is
+   *  cumulative and server-side, so each poll delivers every line so far even at
+   *  a coarse poll cadence. */
+  onLog?: (log: string[]) => void;
 }
 
 /**
@@ -71,6 +77,10 @@ export async function watchDeployTask(
       status = await api.deployStatus(taskId);
       failures = 0;
       unavailable = 0;
+      // Surface the full accumulated log on every poll (including the terminal
+      // one), so the on-screen build log is complete even though the toast only
+      // shows the latest line.
+      if (status.log) copy.onLog?.(status.log);
     } catch (e) {
       // Session expired mid-deploy: the app-wide banner already prompts re-login
       // (see SessionExpiredBanner). Stop quietly — don't add a per-deploy error

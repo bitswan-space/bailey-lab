@@ -238,6 +238,10 @@ export interface DeployStatusResponse {
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
   step?: string | null;
   message?: string;
+  /** Append-only history of every progress line (image build steps, build.sh
+   *  output, per-member "Prepared N/M", …). `message` is only the latest line;
+   *  this keeps them all so the UI can render a scrollable deploy log. */
+  log?: string[];
   error?: string | null;
   bp?: string | null;
   total?: number | null;
