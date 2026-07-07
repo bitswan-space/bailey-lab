@@ -45,10 +45,14 @@ const SLA = 60_000; // short-interaction SLA: nothing quick should wait longer
 // considered "gone dark". Promote shows a single coarse "Promoting to <stage>…"
 // status (not the deploy's granular steps), and a promote now stands up
 // per-(workspace,stage) infra (postgres/minio fresh per stage) — so that one
-// status can legitimately hold for tens of seconds on CI dind. Keep the window
-// well above a real promote's coarse-status span; the 30-min backstop in
-// waitDeployDone still catches a genuine hang.
-const PROGRESS = 60_000;
+// status can legitimately hold for a while on CI dind. Crucially, promote builds
+// a FRESH per-stage image (unlike the dev deploy, which rides the cached live-dev
+// image), and that build's final `RUN … build.sh` layer runs a SILENT compile
+// (`go build` emits nothing for the whole compile), so docker streams no line —
+// and thus the on-screen signature holds unchanged — for well over a minute on a
+// loaded runner. Keep the window comfortably above that silent span; the 30-min
+// backstop in waitDeployDone still catches a genuine hang.
+const PROGRESS = 120_000;
 const NAV = 15_000; // a tab/section/stage click targets an element already on
 // screen, so it should land fast. If it can't within NAV, something (usually a
 // stuck modal) is intercepting clicks — fail fast here instead of burning the
