@@ -313,6 +313,28 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'dashboard-open');
   });
 
+  // Re-enter the workspace dashboard if the shell fell back to the Bailey
+  // Workspaces list. The dashboard opens in a popup tab (dashPage); an occasional
+  // reload of that tab (SSE reconnect / auth refresh) lands it back on the
+  // onboard Workspaces view rather than the workspace's own dashboard, which then
+  // leaves `d` pointing at a frame with no BP shell. A real operator just clicks
+  // Open again — so before a chapter that assumes the dashboard is up, verify the
+  // BP switcher is present and, if not, re-open exactly as the open step does.
+  const ensureDashboardOpen = async () => {
+    const bpSwitcher = () => d.getByRole('button', { name: /^Process\b/ }).first();
+    if (await bpSwitcher().isVisible().catch(() => false)) return;
+    await page.getByRole('button', { name: /Workspaces/i }).first().click().catch(() => {});
+    const open = page.getByRole('button', { name: /^Open$/ }).or(page.getByRole('link', { name: /^Open$/ })).first();
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const popupP = page.context().waitForEvent('page', { timeout: 20_000 }).catch(() => null);
+      await open.click().catch(() => {});
+      const popup = await popupP;
+      if (popup) { dashPage = popup; dbgPage = popup; }
+      d = await dashboard(dashPage);
+      if (await bpSwitcher().waitFor({ state: 'visible', timeout: SLA }).then(() => true).catch(() => false)) return;
+    }
+  };
+
   // ── Pure-UI helpers ─────────────────────────────────────────────────────
   // A top tab is a button whose visible text is the tab label.
   const topTab = (re: RegExp) => d.getByRole('button', { name: re }).first();
@@ -546,6 +568,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
 
   // ---- Description: TYPE a real README, then DRAW the flow with the editor ----
   await chapter('description', async () => {
+    // Recover if the dashboard tab reloaded back to the Bailey Workspaces list
+    // (the finance-dashboard backend is healthy — it served the BP create + its
+    // README 200 — but the popup can drift off the dashboard between chapters).
+    await ensureDashboardOpen();
     await clickTopTab(/Description/i);
     // The BP scaffold's first dev deploy was auto-kicked at BP creation
     // (NewBusinessProcessDialog watches it with a toast.promise "Setting up <bp>…"
