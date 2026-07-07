@@ -1593,9 +1593,14 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // Scale + Inspect; a NON-current (prior) entry has Roll back + Inspect. To
     // get a real diff we must Inspect a NON-current entry — locate the card that
     // carries a "Roll back" action and click the Inspect WITHIN that same card.
+    // Filter to the "Deployed" chip: secret audit records (the dev-secrets
+    // chapter leaves one BELOW the first dev deploy) are rollbackable too but
+    // carry no source commit, so their "Diff vs current" is legitimately empty
+    // — only a prior CODE deploy yields the real v1→v2 diff asserted below.
     const priorCard = d
       .locator('div', { has: d.getByRole('button', { name: /^Roll back$/ }) })
       .filter({ has: d.getByRole('button', { name: /^Inspect$/ }) })
+      .filter({ hasText: /\bDeployed\b/ })
       .last();
     const inspect = priorCard.getByRole('button', { name: /^Inspect$/ }).first();
     await expect(inspect, 'no prior (non-current) Development entry to inspect for a real diff')
