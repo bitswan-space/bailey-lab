@@ -498,10 +498,16 @@ function DevSecrets({ bp }: { bp: string }) {
         // Deployments → Secrets "Development" stage edits (dev/live-dev share).
         <SecretsEditor bp={bp} stage="dev" stageLabel="Development" compact />
       ) : (
-        <div className="text-[11px] text-muted-foreground">
+        // The text says "Click to edit", so the whole description must be a
+        // click target, not just the header row above (issue #79).
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="text-left text-[11px] text-muted-foreground hover:text-foreground"
+        >
           Environment variables &amp; API keys for this business process&apos;s dev
           stage (shared with live-dev). Click to edit.
-        </div>
+        </button>
       )}
     </div>
   );
