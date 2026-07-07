@@ -12,3 +12,8 @@ wireframe/uploads/
 # Design reference + test screenshots are not product artifacts.
 wireframe/
 tests/screenshots/
+
+# Generated at build time by the E2E walkthrough (chained into the release
+# build) — never commit these; see automation-server-release.yml.
+public/handbook/handbook.html
+public/handbook/handbook.pdf
