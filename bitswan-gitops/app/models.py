@@ -55,7 +55,11 @@ class DeployedAutomation(BaseModel):
 
 class ProcessInfo(BaseModel):
     id: str
+    # Directory-name slug — what git repos, deployment ids, and API routes
+    # key on. `display_name` is the human-readable name from process.toml
+    # (falls back to the slug for BPs created before it existed).
     name: str
+    display_name: str = ""
     attachments: list[str]
     automation_sources: list[str]
 

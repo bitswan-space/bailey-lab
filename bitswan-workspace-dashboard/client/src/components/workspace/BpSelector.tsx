@@ -36,12 +36,18 @@ export function BpSelector({
 
   const activeBp = bps.find((b) => b.id === activeBpId) ?? null;
   const sorted = useMemo(
-    () => [...bps].sort((a, b) => a.name.localeCompare(b.name)),
+    () => [...bps].sort((a, b) => a.displayName.localeCompare(b.displayName)),
     [bps],
   );
   const q = query.trim().toLowerCase();
+  // Match on the display name AND the slug — users may know a BP by either
+  // (the slug shows up in URLs and deployment ids).
   const visible = q
-    ? sorted.filter((b) => b.name.toLowerCase().includes(q))
+    ? sorted.filter(
+        (b) =>
+          b.displayName.toLowerCase().includes(q) ||
+          b.name.toLowerCase().includes(q),
+      )
     : sorted;
 
   useEffect(() => {
@@ -71,7 +77,7 @@ export function BpSelector({
             Process
           </span>
           <span className="max-w-40 truncate text-[13px] font-semibold text-foreground">
-            {activeBp?.name ?? 'Select a process'}
+            {activeBp?.displayName ?? 'Select a process'}
           </span>
           <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
         </button>
@@ -121,7 +127,7 @@ export function BpSelector({
                     aria-hidden
                   />
                   <span className="min-w-0 flex-1 truncate text-[13px]">
-                    {b.name}
+                    {b.displayName}
                   </span>
                   {active && (
                     <Check className="size-3.5 shrink-0 text-primary" aria-hidden />

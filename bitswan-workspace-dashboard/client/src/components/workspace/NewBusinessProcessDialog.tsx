@@ -13,8 +13,10 @@ import { Input } from '@/components/ui/input';
 import { api, isTransientNetworkError } from '@/lib/api';
 import { SessionExpiredError } from '@/lib/session';
 import { watchDeployTask } from '@/lib/deployBp';
+import { slugifyBpName } from '@/lib/slug';
 
-const BP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+// Mirrors the gitops-side cap on display-name length.
+const MAX_BP_NAME_LEN = 100;
 
 export interface NewBusinessProcessDialogProps {
   open: boolean;
@@ -34,16 +36,21 @@ export function NewBusinessProcessDialog({
   const [name, setName] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const trimmed = name.trim();
+  const trimmed = name.replace(/\s+/g, ' ').trim();
+  // The name is free-form (issue #77); the slug is what the directory, git
+  // repo, and deployment ids are named after. `existingNames` are slugs, so
+  // duplicates are checked at the slug level.
+  const slug = slugifyBpName(trimmed);
   // eslint-disable-next-line no-restricted-syntax -- error message; null = "no error yet"
   let validationError: string | null = null;
   if (trimmed.length === 0) {
     validationError = null;
-  } else if (!BP_NAME_RE.test(trimmed)) {
-    validationError =
-      'Use letters, digits, underscores, dots and dashes. Must start with a letter or digit.';
-  } else if (existingNames.includes(trimmed)) {
-    validationError = `A business process named "${trimmed}" already exists in this scope.`;
+  } else if (trimmed.length > MAX_BP_NAME_LEN) {
+    validationError = `Keep the name under ${MAX_BP_NAME_LEN} characters.`;
+  } else if (!slug) {
+    validationError = 'Include at least one letter or digit (a–z, 0–9).';
+  } else if (existingNames.includes(slug)) {
+    validationError = `A business process with the id "${slug}" already exists in this scope.`;
   }
   const canSubmit = trimmed.length > 0 && !validationError && !submitting;
 
@@ -76,7 +83,10 @@ export function NewBusinessProcessDialog({
         const res = await work;
         onOpenChange(false);
         reset();
-        onCreated(trimmed);
+        // The server's slug is the BP's id everywhere (selection, API paths);
+        // the response carries it authoritatively.
+        const createdSlug = res.name || slug;
+        onCreated(createdSlug);
         // Server-side auto-setup: the BP was scaffolded from the default
         // template group and a deploy was kicked off in the background —
         // watch its task with a second toast (fire-and-forget).
@@ -85,7 +95,7 @@ export function NewBusinessProcessDialog({
         } else if (res.deploy_task_id) {
           void watchDeployTask(
             res.deploy_task_id,
-            `bp-deploy-${copy ?? 'main'}-${trimmed}`,
+            `bp-deploy-${copy ?? 'main'}-${createdSlug}`,
             {
               loading: `Setting up ${trimmed}…`,
               success: `${trimmed} ready`,
@@ -99,7 +109,7 @@ export function NewBusinessProcessDialog({
         setSubmitting(false);
       }
     },
-    [canSubmit, trimmed, copy, onOpenChange, onCreated, reset],
+    [canSubmit, trimmed, slug, copy, onOpenChange, onCreated, reset],
   );
 
   return (
@@ -126,15 +136,22 @@ export function NewBusinessProcessDialog({
           <Input
             id="new-bp-name"
             autoFocus
-            placeholder="my-process"
+            placeholder="Invoice Processing"
             value={name}
             onChange={(e) => setName(e.target.value)}
             disabled={submitting}
             spellCheck={false}
             autoComplete="off"
           />
-          {validationError && (
+          {validationError ? (
             <p className="text-xs text-destructive">{validationError}</p>
+          ) : (
+            slug &&
+            slug !== trimmed && (
+              <p className="text-xs text-muted-foreground">
+                Will be created as <span className="font-mono">{slug}</span>
+              </p>
+            )
           )}
         </form>
         <DialogFooter>

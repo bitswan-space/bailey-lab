@@ -18,7 +18,9 @@ export const COMPANY = {
 
 /** The business process we create through the Server Console UI. */
 export const BP = {
-  // Must satisfy the workspace/BP name rule: ^[a-z][a-z0-9-]{1,32}$
+  // `title` is what the walkthrough TYPES into the create dialog (free-form
+  // display name); `slug` is what the server derives from it — the directory,
+  // git-repo, and deployment-id name that shows up in URLs.
   slug: 'invoice-processing',
   title: 'Invoice Processing',
   description:

@@ -42,6 +42,7 @@ const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 interface GitopsProcessEntry {
   id: string;
   name: string;
+  display_name?: string;
   in_main: boolean;
   copies: string[];
   has_copies: boolean;
@@ -51,6 +52,7 @@ function toBusinessProcess(p: GitopsProcessEntry): BusinessProcess {
   return {
     id: p.name,
     name: p.name,
+    displayName: p.display_name || p.name,
     path: p.name,
     inMain: p.in_main,
     copies: p.copies,
