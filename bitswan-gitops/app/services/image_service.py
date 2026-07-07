@@ -14,6 +14,72 @@ from app.event_broadcaster import event_broadcaster
 from fastapi import UploadFile, HTTPException
 
 
+class BuildLogRecorder:
+    """Persists driver build-log lines under images/<checksum>/ using the same
+    file conventions as ImageService.create_image, so deploy-path builds (which
+    run on the infra driver, not through create_image) show up in the
+    dashboard's Build logs tab.
+
+    Lifecycle: start() → write() per streamed line → finish_success() /
+    finish_failed(). A cache-hit finish keeps an existing completed log instead
+    of clobbering it with the driver's one-line "cache hit" stream.
+    """
+
+    def __init__(self, image_service: "ImageService", checksum: str, tag_root: str):
+        self._svc = image_service
+        self._checksum = checksum
+        self._tag_root = tag_root
+        self._building, self._success, self._failed = image_service._log_paths(checksum)
+
+    def start(self):
+        self._svc._write_metadata(self._checksum, self._tag_root)
+        with open(self._building, "w") as f:
+            f.write(f"Build started at {datetime.now().isoformat()}\n")
+
+    def write(self, line: str):
+        try:
+            with open(self._building, "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
+    def finish_success(self, cache_hit: bool = False):
+        if cache_hit and os.path.exists(self._success):
+            # The real build's log is already on disk; the cache-hit stream is
+            # just "cache hit: <tag>", so keep the original.
+            try:
+                os.remove(self._building)
+            except OSError:
+                pass
+        else:
+            if cache_hit:
+                self.write(
+                    "Image served from docker cache — no new build ran and the "
+                    "original build log is not available."
+                )
+            self.write(f"Build completed successfully at {datetime.now().isoformat()}")
+            self._promote(self._success)
+        self._svc._finalize_metadata(self._checksum, "success", self._tag_root)
+
+    def finish_failed(self, error: str):
+        self.write(f"Build error: {error}")
+        self._promote(self._failed)
+        self._svc._finalize_metadata(self._checksum, "failed", self._tag_root)
+
+    def _promote(self, final_path: str):
+        # A finished build supersedes any earlier outcome for this checksum.
+        for old in (self._success, self._failed):
+            if old != final_path and os.path.exists(old):
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+        try:
+            os.rename(self._building, final_path)
+        except OSError:
+            pass
+
+
 class ImageService:
     def __init__(self):
         self.bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
@@ -105,6 +171,9 @@ class ImageService:
         if os.path.exists(success):
             return "ready"
         return "ready"
+
+    def build_log_recorder(self, checksum: str, tag_root: str) -> BuildLogRecorder:
+        return BuildLogRecorder(self, checksum, tag_root)
 
     def build_log_tail(self, checksum: str) -> str | None:
         """Return the last meaningful line of the in-progress build log.
