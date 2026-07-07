@@ -14,22 +14,15 @@ import (
 	"gorm.io/gorm"
 )
 
-// startEgressProbes makes real outbound HTTPS connections to the external
-// services this invoice-processing automation legitimately talks to (vendor
-// portals, the Czech business register, the payment gateway). It runs on
-// startup and on a loop so the workspace's egress firewall observes each
-// destination and surfaces it for review — the connection a default-deny
-// firewall must see before it can be recorded (GDPR Art. 30) and allowed.
-//
-// The host list is BITSWAN_EGRESS_PROBES (comma-separated) with a sensible
-// default matching the Meridian Foods scenario. These are GETs against the
-// real internet; failures are expected when the firewall is in enforce mode
-// and are logged, never fatal.
+// startEgressProbes exercises the external hosts this automation integrates
+// with — BITSWAN_EGRESS_PROBES, comma-separated; unset means no probes. Each
+// host gets a real outbound HTTPS GET on startup and on a loop, so the
+// workspace's egress firewall observes the destination and surfaces it under
+// "Needs review", where it can be recorded (GDPR Art. 30) and allowed before
+// the firewall moves to enforce mode. Failures are expected while a host is
+// unapproved in enforce mode; they are logged, never fatal.
 func startEgressProbes() {
-	raw := envOr(
-		"BITSWAN_EGRESS_PROBES",
-		"ares.gov.cz,moravia-produkty.cz,api.gopay.com",
-	)
+	raw := os.Getenv("BITSWAN_EGRESS_PROBES")
 	var hosts []string
 	for _, h := range strings.Split(raw, ",") {
 		if h = strings.TrimSpace(h); h != "" {
@@ -134,7 +127,6 @@ func main() {
 
 	mc := mustInitMinio()
 	ensureBucket(mc)
-	preseedLogo(mc, db)
 
 	// In AOC mode KEYCLOAK_ISSUER_URL is injected and the backend validates JWTs
 	// itself. In simple/no-AOC mode it's absent — the Bailey gate authenticates
@@ -169,7 +161,7 @@ func main() {
 
 	handler := corsMiddleware(mux)
 
-	// Reach out to the external services this invoice flow integrates with so
+	// If BITSWAN_EGRESS_PROBES is configured, exercise those external hosts so
 	// the egress firewall can observe (and the operator can review) them.
 	startEgressProbes()
 

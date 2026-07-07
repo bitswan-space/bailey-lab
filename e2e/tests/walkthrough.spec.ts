@@ -30,7 +30,7 @@
  */
 import { appendFileSync } from 'node:fs';
 import { test, expect, capture, oidcLogin, dashboard, ENV, type FrameOrPage } from '../fixtures/bitswan';
-import { BP, WORKSPACE, COMPANY, SECRETS, TEAMMATE } from '../scenario';
+import { BP, WORKSPACE, COMPANY, SECRETS, TEAMMATE, EGRESS_PROBES } from '../scenario';
 
 // ── Snappiness is a product requirement, not a test nicety ──────────────────
 // SLA bounds a SHORT interaction: opening a tab, a modal, a list. Long ops
@@ -934,6 +934,50 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     if (!captured) await capture(dashPage, 'live-dev').catch(() => {});
   });
 
+  // ---- Dev secrets: declare the BP's external integrations ----
+  // The clean BP template makes NO outbound calls of its own — it probes only
+  // the hosts it is CONFIGURED to integrate with (BITSWAN_EGRESS_PROBES). A
+  // real operator declares those integrations as a dev secret here in the
+  // Environment panel; every later dev deploy injects it, and the firewall
+  // chapter then observes exactly these hosts. This is also the one place the
+  // walkthrough SAVES a secret for real (the production secrets chapter
+  // deliberately fills-but-never-saves), so the dev-secrets editor is
+  // exercised end to end. Idempotent on re-runs: if the key already exists we
+  // leave it as-is.
+  await chapter('dev-secrets', async () => {
+    // Still on the Coding Agent tab — the Environment panel carries the
+    // collapsed "Dev secrets" section. Open it (the header toggles, so only
+    // click when the editor isn't already showing) and wait for the editor.
+    const addSecret = d.getByRole('button', { name: /Add secret/i }).first();
+    if (!(await addSecret.isVisible().catch(() => false))) {
+      const devSecrets = d.getByRole('button', { name: /Dev secrets/i }).first();
+      await devSecrets.scrollIntoViewIfNeeded().catch(() => {});
+      await devSecrets.click();
+    }
+    await d.getByText(/Loading secrets…/i).first()
+      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    await addSecret.waitFor({ state: 'visible', timeout: SLA });
+    // Re-run guard: key fields carry the saved names as their input values.
+    const savedKeys = await d.getByPlaceholder('SECRET_NAME')
+      .evaluateAll((els) => els.map((el) => (el as HTMLInputElement).value))
+      .catch(() => [] as string[]);
+    if (savedKeys.includes('BITSWAN_EGRESS_PROBES')) {
+      await capture(dashPage, 'dev-secrets');
+      return;
+    }
+    await addSecret.click();
+    // The key field is uncontrolled and renames on BLUR — fill, then Enter.
+    const keyInput = d.getByPlaceholder('SECRET_NAME').last();
+    await keyInput.fill('BITSWAN_EGRESS_PROBES');
+    await keyInput.press('Enter');
+    await d.getByPlaceholder(/Needs a value|^value$/).last().fill(EGRESS_PROBES);
+    await capture(dashPage, 'dev-secrets');
+    await d.getByRole('button', { name: /^Apply/ }).first().click();
+    // Applied = encrypted + versioned in bitswan.yaml; injected on next deploy.
+    await d.getByText(/Secrets applied/i).first()
+      .waitFor({ state: 'visible', timeout: SLA });
+  });
+
   // ---- Requirements & tests: the runnable-spec tab a real operator uses ----
   await chapter('requirements', async () => {
     const reqTab = topTab(/Requirements & tests/i);
@@ -1589,12 +1633,14 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   });
 
   // ---- Firewall & data processing (N): the invoice BP makes REAL outbound
-  // calls on startup (its egress probes), which the firewall observes. On the
-  // Development stage the firewall runs in MONITOR mode, so those destinations
-  // surface under "Needs review". We open Firewall (WAIT for it to finish
-  // loading — never a "Loading firewall…" frame), find a detected egress host,
-  // open its GDPR data-processing record, FILL it, capture, and save it (the
-  // approval is idempotent — it just versions the record in bitswan.yaml).
+  // calls to the integration hosts declared in the dev-secrets chapter
+  // (BITSWAN_EGRESS_PROBES — injected into the backend by the dev deploys the
+  // sync-deploy chapter ran), which the firewall observes. On the Development
+  // stage the firewall runs in MONITOR mode, so those destinations surface
+  // under "Needs review". We open Firewall (WAIT for it to finish loading —
+  // never a "Loading firewall…" frame), find a detected egress host, open its
+  // GDPR data-processing record, FILL it, capture, and save it (the approval
+  // is idempotent — it just versions the record in bitswan.yaml).
   await chapter('firewall', async () => {
     // Development is in monitor mode and is where the live-dev/dev containers'
     // egress is observed. Select it, open Firewall, wait for the panel to load.
@@ -1608,9 +1654,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
     await d.getByText(/Monitoring|Enforcing/i).first()
       .waitFor({ state: 'visible', timeout: SLA });
-    // The BP backend fires real outbound probes on a loop, and the dashboard
-    // firewall panel now POLLS, so an observed egress host RELIABLY surfaces
-    // under "Needs review" within ~90s. This is the whole point of the chapter,
+    // The dev backend probes its configured integration hosts on a 20s loop,
+    // and the dashboard firewall panel POLLS, so an observed egress host
+    // RELIABLY surfaces under "Needs review" within ~90s. This is the whole
+    // point of the chapter,
     // so it is FATAL: hard-assert the host appears (no silent pass on an empty
     // review list). The egress host appears within ~90s.
     const needsReview = d.getByText(/Needs review/i).first();

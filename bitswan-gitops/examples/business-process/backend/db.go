@@ -155,9 +155,3 @@ func deleteGalleryImage(db *gorm.DB, key string) error {
 	}
 	return nil
 }
-
-func galleryImageExists(db *gorm.DB, key string) bool {
-	var count int64
-	db.Model(&models.GalleryImage{}).Where("key = ?", key).Count(&count)
-	return count > 0
-}

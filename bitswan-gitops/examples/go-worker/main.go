@@ -1,16 +1,65 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/minio/minio-go/v7"
 	"gorm.io/gorm"
 )
+
+// startEgressProbes exercises the external hosts this automation integrates
+// with — BITSWAN_EGRESS_PROBES, comma-separated; unset means no probes. Each
+// host gets a real outbound HTTPS GET on startup and on a loop, so the
+// workspace's egress firewall observes the destination and surfaces it under
+// "Needs review", where it can be recorded (GDPR Art. 30) and allowed before
+// the firewall moves to enforce mode. Failures are expected while a host is
+// unapproved in enforce mode; they are logged, never fatal.
+func startEgressProbes() {
+	raw := os.Getenv("BITSWAN_EGRESS_PROBES")
+	var hosts []string
+	for _, h := range strings.Split(raw, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	if len(hosts) == 0 {
+		return
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	probe := func() {
+		for _, h := range hosts {
+			url := "https://" + h + "/"
+			req, err := http.NewRequestWithContext(
+				context.Background(), http.MethodGet, url, nil,
+			)
+			if err != nil {
+				continue
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Printf("egress probe %s: blocked/failed (firewall): %v", h, err)
+				continue
+			}
+			resp.Body.Close()
+			log.Printf("egress probe %s: reached (status %d)", h, resp.StatusCode)
+		}
+	}
+	go func() {
+		probe() // immediately on startup
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			probe()
+		}
+	}()
+}
 
 // App holds shared dependencies.
 type App struct {
@@ -78,10 +127,16 @@ func main() {
 
 	mc := mustInitMinio()
 	ensureBucket(mc)
-	preseedLogo(mc, db)
 
-	issuerURL := mustEnv("KEYCLOAK_ISSUER_URL")
-	jwks := NewJWKSProvider(issuerURL)
+	// In AOC mode KEYCLOAK_ISSUER_URL is injected and the backend validates JWTs
+	// itself. In simple/no-AOC mode it's absent — the Bailey gate authenticates
+	// upstream — so run without a JWKS provider rather than refusing to start.
+	var jwks *JWKSProvider
+	if issuerURL := os.Getenv("KEYCLOAK_ISSUER_URL"); issuerURL != "" {
+		jwks = NewJWKSProvider(issuerURL)
+	} else {
+		log.Println("KEYCLOAK_ISSUER_URL not set — simple mode: the Bailey gate authenticates upstream; backend does not validate JWTs itself.")
+	}
 
 	app := &App{db: db, mc: mc, jwks: jwks}
 
@@ -106,11 +161,12 @@ func main() {
 
 	handler := corsMiddleware(mux)
 
-	// Listen on $PORT so gitops can place several workers in one shared
-	// firewall-gateway netns without :8080 collisions; defaults to 8080.
-	addr := ":" + envOr("PORT", "8080")
-	log.Println("listening on " + addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	// If BITSWAN_EGRESS_PROBES is configured, exercise those external hosts so
+	// the egress firewall can observe (and the operator can review) them.
+	startEgressProbes()
+
+	log.Println("listening on :8080")
+	if err := http.ListenAndServe(":8080", handler); err != nil {
 		log.Fatal(err)
 	}
 }

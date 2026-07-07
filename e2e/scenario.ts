@@ -149,6 +149,15 @@ export interface EgressHost {
   processesPersonalData: boolean;
 }
 
+/**
+ * Comma-separated host list the walkthrough saves as the BP's dev secret
+ * `BITSWAN_EGRESS_PROBES`. The clean BP template makes no outbound calls of
+ * its own — it only probes hosts it is configured to integrate with — so the
+ * demo declares its integrations here and the firewall chapter then observes
+ * exactly these (the same trio the template used to hardcode).
+ */
+export const EGRESS_PROBES = 'ares.gov.cz,moravia-produkty.cz,api.gopay.com';
+
 export const EGRESS: EgressHost[] = [
   { host: 'moravia-produkty.cz', purpose: 'Vendor invoice portal (produce)', processesPersonalData: false },
   { host: 'donau-logistik.de', purpose: 'Freight vendor EDI endpoint', processesPersonalData: false },
