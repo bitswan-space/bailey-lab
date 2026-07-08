@@ -498,8 +498,21 @@ function WaitingScene() {
 
 // The Operator's Handbook — a splashy, illustrated manual generated from a live
 // product walkthrough (see e2e/manual). Served as static assets alongside the
-// console (/handbook/handbook.html + .pdf). Opened in a new tab to avoid nested
-// iframes / the inner CSP.
+// console (/handbook/handbook.html + .pdf), opened in a new tab.
+//
+// The HTML link must target the PUBLIC host: the console runs on the inner
+// subdomain inside the wrap iframe, so a relative href would open the bare
+// inner origin with no Bailey chrome (issue #45). On the outer host the daemon
+// wraps any top-level HTML GET, so the handbook tab carries the usual bar and
+// launcher. The PDF stays inner-relative: the outer host serves only wrap HTML
+// (non-HTML GETs 404), and a download needs no chrome anyway.
+function handbookHTMLURL() {
+  const host = serverHost();
+  if (!host) return '/handbook/handbook.html';
+  const port = window.location.port ? ':' + window.location.port : '';
+  return window.location.protocol + '//' + host + port + '/handbook/handbook.html';
+}
+
 function HandbookView() {
   const card = { background: AC.surface, border: `1px solid ${AC.border}`, borderRadius: 14, padding: '34px 36px', maxWidth: 760 };
   const btn = (primary) => ({
@@ -523,7 +536,7 @@ function HandbookView() {
           Every screenshot was captured live, walking the real product. Bailey is best practice.
         </div>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          <a style={btn(true)} href="/handbook/handbook.html" target="_blank" rel="noopener noreferrer">
+          <a style={btn(true)} href={handbookHTMLURL()} target="_blank" rel="noopener noreferrer">
             <AIcon name="book-open" size={16} color="#fff" /> Read the handbook
           </a>
           <a style={btn(false)} href="/handbook/handbook.pdf" target="_blank" rel="noopener noreferrer" download>
