@@ -153,7 +153,13 @@ async def create_process(
         if body.copy:
             from app.services.bp_git import clone_bp_into_copy
 
-            await clone_bp_into_copy(copy_root, body.copy, name, base="main")
+            # `clone_bp_into_copy(copy_path, copy, bp, …)` keys `bp` on the SLUG
+            # (bp_bare_repo_path(bp)) — NOT the human-readable display name. Passing
+            # `name` here materialized the copy under the wrong id (or not at all),
+            # so `copies/<copy>/<slug>` never appeared, the BP's `copies` omitted the
+            # requesting copy, and the dashboard rendered the read-only README
+            # instead of the editable spec (bpInWt=false). Use the slug.
+            await clone_bp_into_copy(copy_root, body.copy, slug, base="main")
             entry["copies"] = [body.copy]
             entry["has_copies"] = True
             entry["in_main"] = True
