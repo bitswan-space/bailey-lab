@@ -63,20 +63,25 @@ export function SessionTerminal({
     return `/ws/coding-agent?${params.toString()}`;
   }, [copy, bp, kind, requirementId, sessionId, resume, token]);
 
-  // Pasted/dropped images land in `.agent-uploads/` under the session's cwd
+  // Pasted/dropped files land in `.agent-uploads/` under the session's cwd
   // — the BP dir for claude/requirement sessions, the copy root for sync
   // (mirrors the cd logic in server/src/routes/coding-agent.ts) — so the
-  // path we hand back resolves relative to where Claude is running. Files
-  // are timestamp-renamed because every clipboard paste arrives as
-  // "image.png" and the upload endpoint overwrites on name collision.
-  const onUploadImages = useCallback(
+  // path we hand back resolves relative to where Claude is running. Names
+  // are timestamp-prefixed because clipboard pastes all arrive as
+  // "image.png" and the upload endpoint overwrites on name collision; the
+  // original name rides along (it tells the agent what the file IS),
+  // squeezed to shell-safe characters since the path is typed into the PTY
+  // as a space-separated token.
+  const onUploadFiles = useCallback(
     async (files: File[]) => {
       const dir = bp ? `${bp}/.agent-uploads` : '.agent-uploads';
       const stamped = files.map((f, i) => {
-        const ext = /\.[A-Za-z0-9]+$/.exec(f.name)?.[0] ?? '.png';
-        return new File([f], `paste-${Date.now()}-${i}${ext}`, { type: f.type });
+        const safe = f.name.replace(/[^A-Za-z0-9._-]+/g, '-');
+        return new File([f], `paste-${Date.now()}-${i}-${safe || 'file'}`, {
+          type: f.type,
+        });
       });
-      // Ship a self-ignoring .gitignore with every batch so pasted images
+      // Ship a self-ignoring .gitignore with every batch so pasted files
       // never show up in the copy's git status or ride along with a
       // Sync & Deploy. Re-sent each time (2 bytes) rather than tracked,
       // since the cleanup sweeper may remove the whole directory.
@@ -92,7 +97,7 @@ export function SessionTerminal({
   return (
     <div className="h-full w-full" style={{ display: hidden ? 'none' : 'block' }}>
       {wsUrl ? (
-        <Terminal wsUrl={wsUrl} onExit={onExit} onUploadImages={onUploadImages} />
+        <Terminal wsUrl={wsUrl} onExit={onExit} onUploadFiles={onUploadFiles} />
       ) : (
         <div className="grid h-full place-items-center text-sm text-muted-foreground">
           Connecting…
