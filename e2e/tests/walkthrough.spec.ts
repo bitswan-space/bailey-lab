@@ -533,6 +533,38 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await expect(selected).toBeVisible({ timeout: SLA });
   });
 
+  // ---- Rename the BP: display name only, the slug never moves ----
+  // Rename to a temporary title and back, so every later chapter keeps
+  // addressing BP.title while the rename path (pencil in the selector →
+  // dialog → SSE-refreshed listing) is exercised for real. No regex-special
+  // characters in the temporary title — it goes into accessible-name regexes.
+  await chapter('rename-bp', async () => {
+    const renamed = `${BP.title} EU`;
+    const renameTo = async (from: string, to: string, shot?: string) => {
+      await d.getByRole('button', { name: /^Process\b/ }).first().click();
+      // The pencil sits on the row, revealed on hover; its accessible name
+      // is the title attribute.
+      const row = d.getByRole('button', { name: new RegExp(`^${from}$`) }).first();
+      await row.hover();
+      await d.getByRole('button', { name: `Rename "${from}"` }).first().click();
+      const dlg = d.getByRole('dialog');
+      const input = dlg.getByLabel(/^Name$/).first();
+      // Prefilled with the current display name — a real user edits in place.
+      await expect(input).toHaveValue(from);
+      await input.fill(to);
+      if (shot) await capture(dashPage, shot);
+      await dlg.getByRole('button', { name: /^Rename$/ }).first().click();
+      await dlg.waitFor({ state: 'hidden', timeout: SLA });
+      // The new display name flows back over the SSE feed into the trigger;
+      // the slug — and with it URLs and deployment ids — is untouched.
+      await expect(
+        d.getByRole('button', { name: new RegExp(`^Process\\b.*${to}`) }).first(),
+      ).toBeVisible({ timeout: SLA });
+    };
+    await renameTo(BP.title, renamed, 'bp-rename');
+    await renameTo(renamed, BP.title);
+  });
+
   // ---- Description: TYPE a real README, then DRAW the flow with the editor ----
   await chapter('description', async () => {
     await clickTopTab(/Description/i);

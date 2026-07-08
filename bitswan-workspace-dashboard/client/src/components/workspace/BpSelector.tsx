@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Check, ChevronsUpDown, Folder, FolderOpen, Plus } from 'lucide-react';
+import {
+  Check,
+  ChevronsUpDown,
+  Folder,
+  FolderOpen,
+  Pencil,
+  Plus,
+} from 'lucide-react';
 import {
   Popover,
   PopoverContent,
@@ -17,6 +24,8 @@ interface BpSelectorProps {
   /** Open the "new business process" flow (the dialog lives in TopNav, shared
    *  with the Automate Business Process action). */
   onNewBp: () => void;
+  /** Open the rename flow for one BP (the dialog lives in TopNav). */
+  onRenameBp: (bp: BusinessProcess) => void;
 }
 
 /**
@@ -30,6 +39,7 @@ export function BpSelector({
   activeBpId,
   onSelect,
   onNewBp,
+  onRenameBp,
 }: BpSelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -107,32 +117,49 @@ export function BpSelector({
             visible.map((b) => {
               const active = b.id === activeBpId;
               const Icon = active ? FolderOpen : Folder;
+              // The row select and the rename pencil are sibling buttons in
+              // one hover group — buttons can't nest.
               return (
-                <button
+                <div
                   key={b.id}
-                  onClick={() => {
-                    onSelect(b.id);
-                    setOpen(false);
-                  }}
                   className={cn(
-                    'flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left transition-colors',
+                    'group flex h-8 w-full items-center rounded-md transition-colors',
                     active ? 'bg-muted' : 'hover:bg-muted/60',
                   )}
                 >
-                  <Icon
-                    className={cn(
-                      'size-3.5 shrink-0',
-                      active ? 'text-primary' : 'text-muted-foreground',
+                  <button
+                    onClick={() => {
+                      onSelect(b.id);
+                      setOpen(false);
+                    }}
+                    className="flex h-full min-w-0 flex-1 items-center gap-2 px-2.5 text-left"
+                  >
+                    <Icon
+                      className={cn(
+                        'size-3.5 shrink-0',
+                        active ? 'text-primary' : 'text-muted-foreground',
+                      )}
+                      aria-hidden
+                    />
+                    <span className="min-w-0 flex-1 truncate text-[13px]">
+                      {b.displayName}
+                    </span>
+                    {active && (
+                      <Check className="size-3.5 shrink-0 text-primary" aria-hidden />
                     )}
-                    aria-hidden
-                  />
-                  <span className="min-w-0 flex-1 truncate text-[13px]">
-                    {b.displayName}
-                  </span>
-                  {active && (
-                    <Check className="size-3.5 shrink-0 text-primary" aria-hidden />
-                  )}
-                </button>
+                  </button>
+                  <button
+                    type="button"
+                    title={`Rename "${b.displayName}"`}
+                    onClick={() => {
+                      setOpen(false);
+                      onRenameBp(b);
+                    }}
+                    className="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                  >
+                    <Pencil className="size-3.5" aria-hidden />
+                  </button>
+                </div>
               );
             })
           )}

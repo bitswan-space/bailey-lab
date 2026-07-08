@@ -14,6 +14,7 @@ import {
 import { BpSelector } from '@/components/workspace/BpSelector';
 import { CopySelector } from '@/components/workspace/CopySelector';
 import { NewBusinessProcessDialog } from '@/components/workspace/NewBusinessProcessDialog';
+import { RenameBusinessProcessDialog } from '@/components/workspace/RenameBusinessProcessDialog';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess, FlowTab, Copy } from '@/types';
 
@@ -109,6 +110,8 @@ export function TopNav({
 }: TopNavProps) {
   const roleMeta = ROLE_META[role] ?? ROLE_META.member;
   const [automateOpen, setAutomateOpen] = useState(false);
+  // eslint-disable-next-line no-restricted-syntax -- null = rename dialog closed
+  const [renameBp, setRenameBp] = useState<BusinessProcess | null>(null);
 
   const activeBp = useMemo(
     () => bps.find((b) => b.id === activeBpId) ?? null,
@@ -162,6 +165,7 @@ export function TopNav({
         activeBpId={activeBpId}
         onSelect={handleSelectBp}
         onNewBp={() => setAutomateOpen(true)}
+        onRenameBp={setRenameBp}
       />
 
       {/* The copy region: the copy selector, the "add a process to this copy"
@@ -227,6 +231,11 @@ export function TopNav({
           {roleMeta.label}
         </span>
       </div>
+
+      <RenameBusinessProcessDialog
+        bp={renameBp}
+        onClose={() => setRenameBp(null)}
+      />
 
       <NewBusinessProcessDialog
         open={automateOpen}

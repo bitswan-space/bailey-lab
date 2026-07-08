@@ -73,6 +73,49 @@ export function registerBusinessProcessRoutes(
     }
   });
 
+  // Rename = change the display name only. `:id` is the immutable slug —
+  // gitops rewrites the `name` key in the BP's process.toml and commits it,
+  // then the updated `processes` snapshot arrives over SSE.
+  app.patch<{
+    Params: { id: string };
+    Body: { name?: string; copy?: string };
+  }>('/api/business-processes/:id', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
+    if (!isValidBpId(req.params.id)) {
+      return reply.code(400).send({ error: 'invalid bp id' });
+    }
+    const { name, copy } = req.body ?? {};
+    if (!name || typeof name !== 'string') {
+      return reply.code(400).send({ error: 'name is required' });
+    }
+    if (copy !== undefined && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
+    }
+    // Like create: the git author of the rename commit is the validated
+    // token email, never a client-supplied value.
+    const renamedBy = await emailFromRequest(req, app.log);
+    try {
+      const r = await gitops.renameProcess({
+        slug: req.params.id,
+        name,
+        ...(copy ? { copy } : {}),
+        ...(renamedBy ? { renamed_by: renamedBy } : {}),
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, id: req.params.id, copy }, 'BP rename failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   app.get<{
     Params: { id: string };
     Querystring: { copy?: string };

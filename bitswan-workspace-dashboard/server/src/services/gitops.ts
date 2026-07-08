@@ -173,6 +173,39 @@ export class GitopsClient {
   }
 
   /**
+   * `PATCH /processes/{slug}` — change a BP's display name. Only the `name`
+   * key in its `process.toml` moves; the slug (and with it URLs, API paths,
+   * and deployment ids) is immutable. Gitops commits the edit, refreshes its
+   * cache, and broadcasts the new `processes` snapshot over SSE.
+   */
+  async renameProcess(input: {
+    slug: string;
+    name: string;
+    copy?: string;
+    renamed_by?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const { slug, ...rest } = input;
+    const r = await fetch(
+      `${this.baseUrl}/processes/${encodeURIComponent(slug)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...this.authHeaders(),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(rest),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `GET /templates/` — workspace-aware template gallery. Built-in templates
    * come from `/workspace/examples` (bind-mounted into gitops), with optional
    * overrides at `<workspace_repo>/templates/`.

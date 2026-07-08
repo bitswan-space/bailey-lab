@@ -278,6 +278,23 @@ export interface CreateBusinessProcessResponse {
   setup_error?: string | null;
 }
 
+export interface RenameBusinessProcessRequest {
+  /** The new human-readable display name; the slug does not change. */
+  name: string;
+  /** Scope holding the process.toml to edit — omit for main. */
+  copy?: string;
+}
+
+export interface RenameBusinessProcessResponse {
+  id: string;
+  /** The immutable slug. */
+  name: string;
+  display_name?: string;
+  in_main: boolean;
+  copies: string[];
+  has_copies: boolean;
+}
+
 /** One commit row in the copy/main history. */
 export interface HistoryCommit {
   sha: string;
@@ -620,6 +637,12 @@ export const api = {
 
   createBusinessProcess: (body: CreateBusinessProcessRequest) =>
     postJson<CreateBusinessProcessResponse>('/api/business-processes', body),
+
+  renameBusinessProcess: (slug: string, body: RenameBusinessProcessRequest) =>
+    patchJson<RenameBusinessProcessResponse>(
+      `/api/business-processes/${encodeURIComponent(slug)}`,
+      body,
+    ),
 
   createCopy: (body: CreateCopyRequest) =>
     postJson<CreateCopyResponse>('/api/copies', body),
