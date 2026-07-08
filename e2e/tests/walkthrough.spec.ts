@@ -279,6 +279,22 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // then click the workspace's Open button.
   let dashPage = page;
   let d: FrameOrPage = page;
+  // Diagnostic nav trace: log every TOP-LEVEL navigation of the dashboard tab
+  // (with elapsed time) so a "wrong page" failure — e.g. the popup drifting from
+  // the workspace dashboard to the onboard console — reads as an exact nav
+  // timeline in the CI log instead of a bare "editor never appeared". A flaky
+  // test must SAY what it saw; this makes the tab's every move discrete.
+  const tNav0 = Date.now();
+  const navEl = () => ((Date.now() - tNav0) / 1000).toFixed(1) + 's';
+  const tracedTabs = new WeakSet<import('@playwright/test').Page>();
+  const traceTab = (p: import('@playwright/test').Page, tag: string) => {
+    if (tracedTabs.has(p)) return;
+    tracedTabs.add(p);
+    p.on('framenavigated', (f) => {
+      if (f === p.mainFrame()) console.log(`  nav[${tag}] ${navEl()} → ${f.url()}`);
+    });
+    p.on('close', () => console.log(`  nav[${tag}] ${navEl()} → (tab closed)`));
+  };
   await test.step('open the workspace dashboard', async () => {
     await page.getByRole('button', { name: /Workspaces/i }).first().click();
     await expect(page.getByRole('heading', { name: /Workspaces/i })).toBeVisible({ timeout: SLA });
@@ -299,7 +315,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       const popupP = page.context().waitForEvent('page', { timeout: 20_000 }).catch(() => null);
       await open.click();
       const popup = await popupP;
-      if (popup) { dashPage = popup; dbgPage = popup; }
+      if (popup) { dashPage = popup; dbgPage = popup; traceTab(popup, 'dash'); console.log(`  opened dashboard tab → ${popup.url()}`); }
       d = await dashboard(dashPage);
       ready = await bpSwitcher()
         .waitFor({ state: 'visible', timeout: SLA })
@@ -329,7 +345,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       const popupP = page.context().waitForEvent('page', { timeout: 20_000 }).catch(() => null);
       await open.click().catch(() => {});
       const popup = await popupP;
-      if (popup) { dashPage = popup; dbgPage = popup; }
+      if (popup) { dashPage = popup; dbgPage = popup; traceTab(popup, 'dash'); console.log(`  opened dashboard tab → ${popup.url()}`); }
       d = await dashboard(dashPage);
       if (await bpSwitcher().waitFor({ state: 'visible', timeout: SLA }).then(() => true).catch(() => false)) return;
     }
@@ -594,7 +610,27 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // type; the editor's markdown input-rules turn '# ', '1. ' etc into real
     // structure as a human would see while typing.
     const editor = d.locator('.ProseMirror, [contenteditable="true"]').first();
-    await editor.waitFor({ state: 'visible', timeout: SLA });
+    // Discrete pre-check with logging: BEFORE blocking on the editor, record the
+    // tab's actual state (URL + iframe count + whether the BP shell is even
+    // present). If the editor then never appears, we already know from the log
+    // whether the tab was on the dashboard at all — no guessing.
+    console.log(
+      `  description: dashPage.url()=${dashPage.url()}` +
+        ` iframes=${await dashPage.locator('iframe').count()}` +
+        ` bpSwitcher=${await d.getByRole('button', { name: /^Process\b/ }).first().isVisible().catch(() => false)}` +
+        ` descTab=${await d.getByRole('button', { name: /Description/i }).first().isVisible().catch(() => false)}`,
+    );
+    try {
+      await editor.waitFor({ state: 'visible', timeout: SLA });
+    } catch (e) {
+      console.log(
+        `  description EDITOR MISSING: dashPage.url()=${dashPage.url()}` +
+          ` iframes=${await dashPage.locator('iframe').count()}` +
+          ` bpSwitcher=${await d.getByRole('button', { name: /^Process\b/ }).first().isVisible().catch(() => false)}`,
+      );
+      await capture(dashPage, 'description-editor-missing').catch(() => {});
+      throw e;
+    }
     await editor.click();
     await editor.pressSequentially(BP.readme, { delay: 0 });
     // Force a save (Ctrl+S) and wait for it to settle (the Save button leaves
