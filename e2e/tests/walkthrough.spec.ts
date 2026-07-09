@@ -28,7 +28,7 @@
  * sonner toast, the "Working…" button, the stage status line) and fails the
  * moment the product stops telling the operator what it's doing.
  */
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { test, expect, capture, oidcLogin, dashboard, ENV, type FrameOrPage } from '../fixtures/bitswan';
 import { BP, WORKSPACE, COMPANY, SECRETS, TEAMMATE } from '../scenario';
 
@@ -68,6 +68,22 @@ const misses: string[] = [];
 // Chapters that went DARK during a long op: the watchdog observed a >PROGRESS
 // gap with no on-screen progress change. This — not "took >60s" — is the breach.
 const slow: string[] = [];
+
+// ---- User-interaction latency KPI ----------------------------------------
+// Every chapter's duration is recorded. The product KPI we optimise is the
+// latency of INTERACTIVE chapters — opening a tab/modal/list, editing a field:
+// the clicks where a human is actively waiting. LONG-OP chapters (creating a
+// workspace, deploy, promote, snapshot, DR restore, first coding-agent boot)
+// spin up containers / run builds and are legitimately long — they are the
+// "non-interactive setup" we're allowed to trade slower for snappier clicks, so
+// they're reported separately and excluded from the interactive KPI. At run end
+// we print an aggregate and write kpi.json so successive runs are comparable and
+// CI can surface the trend.
+const timings: { name: string; seconds: number }[] = [];
+const LONG_OP = /workspace|deploy|promote|sync|snapshot|backup|recover|disaster|coding agent|wake|first.?load|build/i;
+function isInteractive(name: string): boolean {
+  return !LONG_OP.test(name);
+}
 let dbgPage: import('@playwright/test').Page | null = null;
 
 // Append a row to the shared run timeline (created by run-e2e.sh's tl_begin),
@@ -76,6 +92,7 @@ let dbgPage: import('@playwright/test').Page | null = null;
 const TIMELINE = '/repo/e2e/manual/build/timeline.tsv';
 let firstChapterAt = 0;
 function recordTiming(name: string, seconds: number): void {
+  timings.push({ name, seconds });
   if (!firstChapterAt) firstChapterAt = Date.now();
   const totalS = ((Date.now() - firstChapterAt) / 1000).toFixed(1);
   const t = new Date().toISOString().slice(11, 19);
@@ -2138,6 +2155,35 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   });
 
   /* eslint-disable no-console */
+  // ---- Interaction-latency KPI: the number we optimise for snappiness ----
+  const interactive = timings.filter((t) => isInteractive(t.name));
+  const longOps = timings.filter((t) => !isInteractive(t.name));
+  const secs = interactive.map((t) => t.seconds).sort((a, b) => a - b);
+  const pct = (p: number) => (secs.length ? secs[Math.min(secs.length - 1, Math.floor((p / 100) * secs.length))] : 0);
+  const sum = secs.reduce((a, b) => a + b, 0);
+  const kpi = {
+    company: COMPANY.short,
+    interactive_count: interactive.length,
+    interactive_total_s: +sum.toFixed(1),
+    interactive_median_s: +pct(50).toFixed(1),
+    interactive_p95_s: +pct(95).toFixed(1),
+    interactive_max_s: secs.length ? +secs[secs.length - 1].toFixed(1) : 0,
+    slowest_interactions: [...interactive].sort((a, b) => b.seconds - a.seconds).slice(0, 8).map((t) => ({ name: t.name, s: +t.seconds.toFixed(1) })),
+    long_ops: longOps.map((t) => ({ name: t.name, s: +t.seconds.toFixed(1) })).sort((a, b) => b.s - a.s),
+  };
+  try {
+    writeFileSync('/repo/e2e/manual/build/kpi.json', JSON.stringify(kpi, null, 2));
+  } catch {
+    /* KPI artifact is best-effort — never fail the run over telemetry */
+  }
+  console.log(
+    `\n=== interaction KPI: ${kpi.interactive_count} interactions, ` +
+      `total ${kpi.interactive_total_s}s, median ${kpi.interactive_median_s}s, ` +
+      `p95 ${kpi.interactive_p95_s}s, max ${kpi.interactive_max_s}s ===`,
+  );
+  kpi.slowest_interactions.forEach((t) => console.log(`  ⏱ ${t.s}s  ${t.name}`));
+  console.log(`  (long-ops, reported separately: ${kpi.long_ops.map((t) => `${t.name} ${t.s}s`).join(', ') || 'none'})`);
+
   console.log(`\n=== walkthrough summary: company=${COMPANY.short}, failed chapters=${misses.length}, SLA breaches=${slow.length} ===`);
   misses.forEach((m) => console.log('  ✗ ' + m));
   slow.forEach((m) => console.log('  ⏱ SLOW ' + m));
