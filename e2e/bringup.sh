@@ -114,9 +114,21 @@ mark "[2/7] daemon + traefik ingress"
 # before handing off to the walkthrough. Moving these pulls into the
 # non-interactive setup keeps the first deploy from stalling a user on a
 # registry pull. Best-effort — a miss just falls back to a click-time pull.
-( for img in postgres:16 dpage/pgadmin4:latest minio/minio:latest couchdb:3.3 node:24-alpine; do
+( for img in postgres:16 dpage/pgadmin4:latest minio/minio:latest couchdb:3.3 node:24-alpine golang:1.25-alpine; do
     docker pull "$img" >/dev/null 2>&1 || true
-  done ) &
+  done
+  # Prebuild the BP-template frontend + backend base images so their EXPENSIVE
+  # layers are warm in the local docker cache before the first `create-bp`. The
+  # driver bakes each BP's live-dev image from these same Dockerfiles/contexts
+  # (frontend: `npm install` into /deps; backend: `go install air` + `go mod
+  # download`) — building them here once means create-bp's build is a layer-cache
+  # hit instead of a cold ~60-90s install. Throwaway tags; we only want the
+  # cached layers. Best-effort — a miss just falls back to a cold build.
+  fe="$REPO_ROOT/bitswan-gitops/examples/business-process/frontend/image"
+  be="$REPO_ROOT/bitswan-gitops/examples/business-process/backend/image"
+  [ -f "$fe/Dockerfile" ] && docker build -t bitswan/bp-frontend-template:warm "$fe" >/dev/null 2>&1 || true
+  [ -f "$be/Dockerfile" ] && docker build -t bitswan/bp-backend-template:warm "$be" >/dev/null 2>&1 || true
+) &
 PREWARM_PID=$!
 
 echo "=== [3/7] Disposable Keycloak (seeded realm: the Meridian Foods cast) on :${KC_PORT} ==="
