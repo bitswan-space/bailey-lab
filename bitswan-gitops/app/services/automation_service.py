@@ -11,7 +11,6 @@ import tempfile
 import time
 import uuid
 import yaml
-import requests
 from datetime import date, datetime
 from functools import lru_cache
 from typing import Any, Callable
@@ -712,42 +711,6 @@ class AutomationService:
             logger.debug("container_stats overlay skipped: %s", e)
         self._apply_docker_overlay(result, containers, {"_mem": mem}, bs_yaml)
         return result
-
-    async def materialize_merged_tree(self, dirs: list[str], checksum: str) -> str:
-        """Copy `dirs` (later-wins-on-collision) into `gitops_dir/<checksum>/`
-        and commit. No-op if the target directory already exists. Returns the
-        absolute output path.
-
-        Source files come from the workspace bind-mount (not from an upload).
-        Symlinks are preserved verbatim (same as the hash function), so the
-        materialized tree round-trips through `calculate_git_tree_hash` to
-        the same digest.
-        """
-        output_dir = os.path.join(self.gitops_dir, checksum)
-        if os.path.exists(output_dir) and os.listdir(output_dir):
-            return output_dir
-
-        tmp_dir = output_dir + ".tmp"
-        if os.path.exists(tmp_dir):
-            shutil.rmtree(tmp_dir)
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        try:
-            self._copy_merged_tree_sync(dirs, tmp_dir)
-            if os.path.exists(output_dir):
-                shutil.rmtree(output_dir)
-            os.rename(tmp_dir, output_dir)
-        except Exception:
-            if os.path.exists(tmp_dir):
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            raise
-
-        # The checksum tree lives at gitops/<checksum>/ on the SHARED volume, which
-        # the driver mounts directly — with per-BP deploy repos it is read from the
-        # shared mount, not transported via a deploy push, so there is nothing to
-        # commit here (the gitops root is no longer a single state repo).
-
-        return output_dir
 
     @staticmethod
     def _copy_merged_tree_sync(dirs: list[str], dest_root: str) -> None:
@@ -2191,11 +2154,6 @@ class AutomationService:
 
     def standby_db(self, bp: str) -> int:
         return self.read_backups(bp)["standby_db"]
-
-    def slot_db(self, bp: str, slot: str) -> int | None:
-        """Which DB (1|2) an app slot is wired to, or None if the slot is idle."""
-        m = self.read_backups(bp)["slots"].get(slot)
-        return int(m["db"]) if m and m.get("db") else None
 
     def _append_backup_log(
         self,
@@ -4853,139 +4811,6 @@ class AutomationService:
             "message": f"Successfully synced branch {branch_name} and processed automations",
             "image_tags": image_tags,
         }
-
-    def add_keycloak_redirect_uri(self, redirect_uri: str):
-        """Add a redirect URI to the workspace's Keycloak client"""
-        if not self.workspace_id:
-            print(
-                f"Warning: Workspace {self.workspace_name} is missing an ID, skipping Keycloak redirect URI registration"
-            )
-            return None
-        if not self.aoc_url or not self.aoc_token:
-            print(
-                "Warning: AOC URL or token not configured, skipping Keycloak redirect URI registration"
-            )
-            return None
-
-        url = f"{self.aoc_url}/api/automation_server/workspaces/{self.workspace_id}/keycloak/add-redirect-uri/"
-
-        headers = {
-            "Authorization": f"Bearer {self.aoc_token}",
-            "Content-Type": "application/json",
-        }
-        payload = {"redirect_uri": redirect_uri.strip()}
-
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            if response.status_code == 200:
-                result = response.json()
-                return result
-            else:
-                error_detail = (
-                    f"Keycloak API error: {response.status_code} - {response.text}"
-                )
-                print(
-                    f"Warning: Failed to add redirect URI to Keycloak: {error_detail}"
-                )
-                return None
-        except Exception as e:
-            print(f"Warning: Exception while adding redirect URI to Keycloak: {str(e)}")
-            return None
-
-    def get_or_create_public_client(
-        self,
-        client_id: str,
-        redirect_uri: str,
-        web_origins: list[str] | None = None,
-    ):
-        """
-        Get or create a public Keycloak client for frontend apps.
-
-        Args:
-            client_id: The client ID for the public client
-            redirect_uri: The redirect URI for this deployment
-            web_origins: List of allowed CORS origins for the client
-
-        Returns:
-            dict with client_id, issuer_url, etc. or None if failed
-        """
-        if not self.workspace_id:
-            print(
-                f"Warning: Workspace {self.workspace_name} is missing an ID, skipping public client creation"
-            )
-            return None
-        if not self.aoc_url or not self.aoc_token:
-            print(
-                "Warning: AOC URL or token not configured, skipping public client creation"
-            )
-            return None
-
-        url = f"{self.aoc_url}/api/automation_server/workspaces/{self.workspace_id}/keycloak/public-client/"
-
-        headers = {
-            "Authorization": f"Bearer {self.aoc_token}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-        }
-
-        if web_origins:
-            payload["web_origins"] = web_origins
-
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            if response.status_code == 200:
-                result = response.json()
-                print(f"Successfully got/created public client: {client_id}")
-                return result
-            else:
-                error_detail = (
-                    f"Keycloak API error: {response.status_code} - {response.text}"
-                )
-                print(f"Warning: Failed to get/create public client: {error_detail}")
-                return None
-        except Exception as e:
-            print(f"Warning: Exception while getting/creating public client: {str(e)}")
-            return None
-
-    def get_org_group_path(self):
-        """Fetch the Keycloak org group path for this workspace from AOC.
-
-        Returns the group path string (e.g. "/Example Org"), or None if AOC
-        is not configured (non-AOC deployments skip group-path resolution).
-        Raises HTTPException if AOC is configured but the call fails.
-        """
-        if not self.workspace_id or not self.aoc_url or not self.aoc_token:
-            return None
-
-        url = f"{self.aoc_url}/api/automation_server/workspaces/{self.workspace_id}/keycloak/org-group-path/"
-        headers = {"Authorization": f"Bearer {self.aoc_token}"}
-
-        try:
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code == 200:
-                group_path = response.json().get("group_path")
-                if not group_path:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="AOC returned empty org group path",
-                    )
-                print(f"Got org group path: {group_path}")
-                return group_path
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to get org group path: {response.status_code} - {response.text}",
-                )
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Exception fetching org group path: {e}",
-            )
 
     async def enable_services(self, services: dict, stage: str) -> None:
         """Auto-enable infrastructure services for a specific deployment.

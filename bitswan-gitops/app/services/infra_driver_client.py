@@ -427,9 +427,6 @@ class InfraDriverClient:
         out = await self._post_json(PATH_IMAGES_LIST, {"ctx": ctx.to_json()})
         return out.get("images") or []
 
-    async def image_remove(self, ctx: WorkspaceContext, tag: str) -> None:
-        await self._post_json(PATH_IMAGES_REMOVE, {"ctx": ctx.to_json(), "tag": tag})
-
     async def image_sbom(self, ctx: WorkspaceContext, tag: str) -> dict:
         """Run syft against a workspace image (driver-side, where docker lives)
         and return the syft-json SBOM. Only the SBOM crosses the wire — not the

@@ -30,13 +30,6 @@ def attempts_log_path(bp: str, realm: str) -> str:
     return os.path.join(firewall_dir(), f"{bp}__{realm}.attempts.jsonl")
 
 
-def allowed_hosts(bs_yaml: dict, bp: str, realm: str) -> list[str]:
-    """The allow-listed hostnames for a BP+realm (status == allowed)."""
-    rules = (((bs_yaml.get("firewall") or {}).get(bp) or {}).get(realm) or {}).get(
-        "rules"
-    ) or {}
-    return sorted(h for h, r in rules.items() if (r or {}).get("status") == "allowed")
-
 
 def read_attempts(bp: str, realm: str) -> dict:
     """Aggregate the gateway's JSONL into {host: {count, first, last, proto}}.
