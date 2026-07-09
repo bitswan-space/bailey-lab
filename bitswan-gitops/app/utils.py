@@ -390,19 +390,22 @@ def bp_state_path(gitops_dir: str, bp: str) -> str:
 
 
 def _read_single_bitswan(bitswan_dir: str) -> dict[str, Any] | None:
-    """Read + hydrate ONE bitswan.yaml file at <bitswan_dir>/bitswan.yaml."""
+    """Read + hydrate ONE bitswan.yaml file at <bitswan_dir>/bitswan.yaml.
+
+    Returns None only when the file is absent. A present-but-unparseable file
+    raises — a corrupt core state file must surface loudly, not be silently
+    treated as "no state" (which would drop the BP from the workspace aggregate).
+    """
     bitswan_yaml_path = os.path.join(bitswan_dir, "bitswan.yaml")
-    try:
-        if os.path.exists(bitswan_yaml_path):
-            with open(bitswan_yaml_path, "r") as f:
-                bs_yaml: dict = yaml.load(f, Loader=_SAFE_LOADER)
-            # Hydrate the flat `deployments` view from the tree so all readers
-            # work unchanged. (Legacy flat-only files are returned as-is.)
-            if isinstance(bs_yaml, dict) and bs_yaml.get(_BP_KEY):
-                bs_yaml["deployments"] = _tree_to_flat(bs_yaml)
-            return bs_yaml
-    except Exception:
+    if not os.path.exists(bitswan_yaml_path):
         return None
+    with open(bitswan_yaml_path, "r") as f:
+        bs_yaml: dict = yaml.load(f, Loader=_SAFE_LOADER)
+    # Hydrate the flat `deployments` view from the tree so all readers work
+    # unchanged.
+    if isinstance(bs_yaml, dict) and bs_yaml.get(_BP_KEY):
+        bs_yaml["deployments"] = _tree_to_flat(bs_yaml)
+    return bs_yaml
 
 
 def read_workspace_bitswan(gitops_dir: str) -> dict[str, Any] | None:
