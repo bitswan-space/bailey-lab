@@ -55,6 +55,47 @@ if [ "$ROLE" = "owner" ]; then
     iptables -A OUTPUT -j DROP
   fi
 
+  # ---- IPv6 egress ----
+  # Previously the gateway installed IPv4 rules only, so a worker could bypass
+  # the allow-list entirely over IPv6 whenever the stage bridge had IPv6 enabled
+  # (fail-open). Mirror the IPv4 policy with ip6tables so v6 is filtered too.
+  #
+  # If the kernel has no IPv6 stack the filter table is genuinely absent (nothing
+  # to filter) and we log + skip; any OTHER ip6tables failure is fatal under
+  # `set -e`, so we never silently run with IPv6 unfiltered.
+  if ip6tables -L OUTPUT >/dev/null 2>&1; then
+    STAGE_SUBNET6=$(ip -o -f inet6 addr show scope global 2>/dev/null | awk '{print $4; exit}')
+    # DNAT v6 :443/:80 to the proxy only if it actually has a v6 address. The
+    # proxy is normally v4-only; when it is, v6 to allow-listed hosts is dropped
+    # below and clients fall back (happy-eyeballs) to the v4 path the proxy
+    # filters — so the allow-list still holds and nothing legitimate breaks.
+    PROXY_IP6=$(host -t AAAA "$BITSWAN_FW_PROXY" 2>/dev/null | awk '/has IPv6 address/{print $NF; exit}')
+    if [ -n "$PROXY_IP6" ]; then
+      ip6tables -t nat -F OUTPUT
+      ip6tables -t nat -A OUTPUT -p tcp --dport 443 -j DNAT --to-destination "[$PROXY_IP6]:18443"
+      ip6tables -t nat -A OUTPUT -p tcp --dport 80  -j DNAT --to-destination "[$PROXY_IP6]:18080"
+    fi
+    if [ "$BITSWAN_FW_MODE" = "enforce" ]; then
+      # Default-deny v6 egress. Embedded DNS is IPv4-only (127.0.0.11), so there
+      # is no v6 DNS allowance to add — only loopback, established return
+      # traffic, the worker's own v6 stage subnet (infra peers), and the proxy.
+      ip6tables -F OUTPUT
+      ip6tables -A OUTPUT -o lo -j ACCEPT
+      ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+      ip6tables -A OUTPUT -d ::1/128 -j ACCEPT
+      [ -n "$STAGE_SUBNET6" ] && ip6tables -A OUTPUT -d "$STAGE_SUBNET6" -j ACCEPT
+      if [ -n "$PROXY_IP6" ]; then
+        ip6tables -A OUTPUT -d "$PROXY_IP6" -j ACCEPT
+        ip6tables -A OUTPUT -p tcp --dport 443 -j ACCEPT
+        ip6tables -A OUTPUT -p tcp --dport 80  -j ACCEPT
+      fi
+      ip6tables -A OUTPUT -j DROP
+    fi
+    echo "egress-gateway[owner]: IPv6 rules installed (mode=${BITSWAN_FW_MODE:-monitor}, proxy6=${PROXY_IP6:-none})"
+  else
+    echo "egress-gateway[owner]: no IPv6 stack (ip6tables OUTPUT unavailable); no v6 egress to filter"
+  fi
+
   # Signal readiness (the worker gates its start on this via the healthcheck) and
   # hold the namespace open for the worker that shares it.
   touch /tmp/fw-ready

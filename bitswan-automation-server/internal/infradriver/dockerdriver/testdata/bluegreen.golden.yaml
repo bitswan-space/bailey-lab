@@ -5,7 +5,13 @@ networks:
         external: true
 services:
     ws2-backend-8d90-production-blue:
+        cap_drop:
+            - NET_ADMIN
+            - NET_RAW
         container_name: ws2-backend-8d90-production-blue
+        depends_on:
+            ws2-fwgw-8d90-production-blue:
+                condition: service_healthy
         env_file:
             - __ROOT__/secrets/bp/shop/production
         environment:
@@ -15,10 +21,10 @@ services:
             BITSWAN_DEPLOYMENT_ID: backend-shop
             BITSWAN_GITOPS_DOMAIN: example.com
             BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-blue.example.com
-            BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-blue:8080
+            BITSWAN_WORKER_HOSTS: backend=ws2-fwgw-8d90-production-blue:8081
             BITSWAN_WORKSPACE_NAME: ws2
             DEPLOYMENT_ID: backend-shop
-            PORT: "8080"
+            PORT: "8081"
         image: internal/ws2-shop-backend:shabsum
         labels:
             gitops.automation_name: backend
@@ -29,8 +35,7 @@ services:
             gitops.slot: blue
             gitops.stage: production
             gitops.workspace: ws2
-        networks:
-            - ws2-production
+        network_mode: service:ws2-fwgw-8d90-production-blue
         restart: always
         ulimits:
             nofile:
@@ -38,7 +43,13 @@ services:
                 soft: 65536
         volumes: []
     ws2-backend-8d90-production-green:
+        cap_drop:
+            - NET_ADMIN
+            - NET_RAW
         container_name: ws2-backend-8d90-production-green
+        depends_on:
+            ws2-fwgw-8d90-production-green:
+                condition: service_healthy
         env_file:
             - __ROOT__/secrets/bp/shop/production
         environment:
@@ -48,10 +59,10 @@ services:
             BITSWAN_DEPLOYMENT_ID: backend-shop@green
             BITSWAN_GITOPS_DOMAIN: example.com
             BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-green.example.com
-            BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-green:8080
+            BITSWAN_WORKER_HOSTS: backend=ws2-fwgw-8d90-production-green:8081
             BITSWAN_WORKSPACE_NAME: ws2
             DEPLOYMENT_ID: backend-shop@green
-            PORT: "8080"
+            PORT: "8081"
         image: internal/ws2-shop-backend:shabsum
         labels:
             gitops.automation_name: backend
@@ -62,8 +73,7 @@ services:
             gitops.slot: green
             gitops.stage: production
             gitops.workspace: ws2
-        networks:
-            - ws2-production
+        network_mode: service:ws2-fwgw-8d90-production-green
         restart: always
         ulimits:
             nofile:
@@ -71,7 +81,13 @@ services:
                 soft: 65536
         volumes: []
     ws2-frontend-8d90-production-blue:
+        cap_drop:
+            - NET_ADMIN
+            - NET_RAW
         container_name: ws2-frontend-8d90-production-blue
+        depends_on:
+            ws2-fwgw-8d90-production-blue:
+                condition: service_healthy
         environment:
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-production.example.com
@@ -82,7 +98,7 @@ services:
             BITSWAN_URL_PREFIX: https://ws2-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-blue.example.com
-            BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-blue:8080
+            BITSWAN_WORKER_HOSTS: backend=ws2-fwgw-8d90-production-blue:8081
             BITSWAN_WORKSPACE_NAME: ws2
             DEPLOYMENT_ID: frontend-shop
         image: internal/ws2-shop-frontend:shafsum
@@ -95,10 +111,7 @@ services:
             gitops.slot: blue
             gitops.stage: production
             gitops.workspace: ws2
-        networks:
-            ws2-production:
-                aliases:
-                    - ws2-frontend-8d90-production-blue.example.com
+        network_mode: service:ws2-fwgw-8d90-production-blue
         restart: always
         ulimits:
             nofile:
@@ -106,7 +119,13 @@ services:
                 soft: 65536
         volumes: []
     ws2-frontend-8d90-production-green:
+        cap_drop:
+            - NET_ADMIN
+            - NET_RAW
         container_name: ws2-frontend-8d90-production-green
+        depends_on:
+            ws2-fwgw-8d90-production-green:
+                condition: service_healthy
         environment:
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-dr.example.com
@@ -117,7 +136,7 @@ services:
             BITSWAN_URL_PREFIX: https://ws2-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-green.example.com
-            BITSWAN_WORKER_HOSTS: backend=ws2-backend-8d90-production-green:8080
+            BITSWAN_WORKER_HOSTS: backend=ws2-fwgw-8d90-production-green:8081
             BITSWAN_WORKSPACE_NAME: ws2
             DEPLOYMENT_ID: frontend-shop@green
         image: internal/ws2-shop-frontend:shafsum
@@ -130,14 +149,131 @@ services:
             gitops.slot: green
             gitops.stage: production
             gitops.workspace: ws2
-        networks:
-            ws2-production:
-                aliases:
-                    - ws2-frontend-8d90-production-green.example.com
+        network_mode: service:ws2-fwgw-8d90-production-green
         restart: always
         ulimits:
             nofile:
                 hard: 65536
                 soft: 65536
         volumes: []
+    ws2-fwgw-8d90-production-blue:
+        cap_add:
+            - NET_ADMIN
+        container_name: ws2-fwgw-8d90-production-blue
+        depends_on:
+            ws2-fwgw-8d90-production-blue-proxy:
+                condition: service_healthy
+        environment:
+            BITSWAN_FW_MODE: enforce
+            BITSWAN_FW_PROXY: ws2-fwgw-8d90-production-blue-proxy
+            BITSWAN_FW_ROLE: owner
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - test -f /tmp/fw-ready
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: shop
+            gitops.firewall_gateway: "true"
+            gitops.slot: blue
+            gitops.stage: production
+        networks:
+            ws2-production:
+                aliases:
+                    - ws2-fwgw-8d90-production-blue
+        pull_policy: missing
+        restart: unless-stopped
+    ws2-fwgw-8d90-production-blue-proxy:
+        container_name: ws2-fwgw-8d90-production-blue-proxy
+        environment:
+            BITSWAN_FW_ALLOW: ""
+            BITSWAN_FW_ATTEMPTS: /firewall/shop__production__blue.attempts.jsonl
+            BITSWAN_FW_MODE: enforce
+            BITSWAN_FW_ROLE: proxy
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - nc -z 127.0.0.1 18077
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: shop
+            gitops.firewall_proxy: "true"
+            gitops.slot: blue
+            gitops.stage: production
+        networks:
+            ws2-production:
+                aliases:
+                    - ws2-fwgw-8d90-production-blue-proxy
+        pull_policy: missing
+        restart: unless-stopped
+        volumes:
+            - __ROOT__/firewall:/firewall
+    ws2-fwgw-8d90-production-green:
+        cap_add:
+            - NET_ADMIN
+        container_name: ws2-fwgw-8d90-production-green
+        depends_on:
+            ws2-fwgw-8d90-production-green-proxy:
+                condition: service_healthy
+        environment:
+            BITSWAN_FW_MODE: enforce
+            BITSWAN_FW_PROXY: ws2-fwgw-8d90-production-green-proxy
+            BITSWAN_FW_ROLE: owner
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - test -f /tmp/fw-ready
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: shop
+            gitops.firewall_gateway: "true"
+            gitops.slot: green
+            gitops.stage: production
+        networks:
+            ws2-production:
+                aliases:
+                    - ws2-fwgw-8d90-production-green
+        pull_policy: missing
+        restart: unless-stopped
+    ws2-fwgw-8d90-production-green-proxy:
+        container_name: ws2-fwgw-8d90-production-green-proxy
+        environment:
+            BITSWAN_FW_ALLOW: ""
+            BITSWAN_FW_ATTEMPTS: /firewall/shop__production__green.attempts.jsonl
+            BITSWAN_FW_MODE: enforce
+            BITSWAN_FW_ROLE: proxy
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - nc -z 127.0.0.1 18077
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: shop
+            gitops.firewall_proxy: "true"
+            gitops.slot: green
+            gitops.stage: production
+        networks:
+            ws2-production:
+                aliases:
+                    - ws2-fwgw-8d90-production-green-proxy
+        pull_policy: missing
+        restart: unless-stopped
+        volumes:
+            - __ROOT__/firewall:/firewall
 version: "3"

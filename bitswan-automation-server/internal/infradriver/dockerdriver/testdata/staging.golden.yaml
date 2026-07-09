@@ -65,7 +65,13 @@ services:
         volumes:
             - __ROOT__/secrets/pgadmin-servers.json:/pgadmin4/servers.json:ro
     ws3-backend-822b-staging:
+        cap_drop:
+            - NET_ADMIN
+            - NET_RAW
         container_name: ws3-backend-822b-staging
+        depends_on:
+            ws3-fwgw-822b-staging:
+                condition: service_healthy
         env_file:
             - __ROOT__/secrets/bp/acme/staging
             - __ROOT__/secrets/postgres-staging
@@ -77,10 +83,10 @@ services:
             BITSWAN_DEPLOYMENT_ID: backend-acme-staging
             BITSWAN_GITOPS_DOMAIN: example.com
             BITSWAN_URL_TEMPLATE: https://ws3-{name}-822b-staging.example.com
-            BITSWAN_WORKER_HOSTS: backend=ws3-backend-822b-staging:8080
+            BITSWAN_WORKER_HOSTS: backend=ws3-fwgw-822b-staging:8081
             BITSWAN_WORKSPACE_NAME: ws3
             DEPLOYMENT_ID: backend-acme-staging
-            PORT: "8080"
+            PORT: "8081"
         image: internal/ws3-acme-backend:shabk
         labels:
             gitops.automation_name: backend
@@ -91,8 +97,7 @@ services:
             gitops.slot: ""
             gitops.stage: staging
             gitops.workspace: ws3
-        networks:
-            - ws3-staging
+        network_mode: service:ws3-fwgw-822b-staging
         restart: always
         ulimits:
             nofile:
@@ -100,7 +105,13 @@ services:
                 soft: 65536
         volumes: []
     ws3-frontend-822b-staging:
+        cap_drop:
+            - NET_ADMIN
+            - NET_RAW
         container_name: ws3-frontend-822b-staging
+        depends_on:
+            ws3-fwgw-822b-staging:
+                condition: service_healthy
         env_file:
             - __ROOT__/secrets/postgres-staging
             - __ROOT__/secrets/minio-staging
@@ -114,7 +125,7 @@ services:
             BITSWAN_URL_PREFIX: https://ws3-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws3-{name}-822b-staging.example.com
-            BITSWAN_WORKER_HOSTS: backend=ws3-backend-822b-staging:8080
+            BITSWAN_WORKER_HOSTS: backend=ws3-fwgw-822b-staging:8081
             BITSWAN_WORKSPACE_NAME: ws3
             DEPLOYMENT_ID: frontend-acme-staging
         image: internal/ws3-acme-frontend:shafr
@@ -127,16 +138,73 @@ services:
             gitops.slot: ""
             gitops.stage: staging
             gitops.workspace: ws3
-        networks:
-            ws3-staging:
-                aliases:
-                    - ws3-frontend-822b-staging.example.com
+        network_mode: service:ws3-fwgw-822b-staging
         restart: always
         ulimits:
             nofile:
                 hard: 65536
                 soft: 65536
         volumes: []
+    ws3-fwgw-822b-staging:
+        cap_add:
+            - NET_ADMIN
+        container_name: ws3-fwgw-822b-staging
+        depends_on:
+            ws3-fwgw-822b-staging-proxy:
+                condition: service_healthy
+        environment:
+            BITSWAN_FW_MODE: enforce
+            BITSWAN_FW_PROXY: ws3-fwgw-822b-staging-proxy
+            BITSWAN_FW_ROLE: owner
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - test -f /tmp/fw-ready
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: acme
+            gitops.firewall_gateway: "true"
+            gitops.slot: ""
+            gitops.stage: staging
+        networks:
+            ws3-staging:
+                aliases:
+                    - ws3-fwgw-822b-staging
+        pull_policy: missing
+        restart: unless-stopped
+    ws3-fwgw-822b-staging-proxy:
+        container_name: ws3-fwgw-822b-staging-proxy
+        environment:
+            BITSWAN_FW_ALLOW: ""
+            BITSWAN_FW_ATTEMPTS: /firewall/acme__staging.attempts.jsonl
+            BITSWAN_FW_MODE: enforce
+            BITSWAN_FW_ROLE: proxy
+        healthcheck:
+            interval: 3s
+            retries: 10
+            start_period: 2s
+            test:
+                - CMD-SHELL
+                - nc -z 127.0.0.1 18077
+            timeout: 3s
+        image: bitswan/egress-gateway:latest
+        labels:
+            gitops.bp: acme
+            gitops.firewall_proxy: "true"
+            gitops.slot: ""
+            gitops.stage: staging
+        networks:
+            ws3-staging:
+                aliases:
+                    - ws3-fwgw-822b-staging-proxy
+        pull_policy: missing
+        restart: unless-stopped
+        volumes:
+            - __ROOT__/firewall:/firewall
 version: "3"
 volumes:
     ws3-minio-staging-data-data: null
