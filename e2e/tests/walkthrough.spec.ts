@@ -778,9 +778,17 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       const colR = cb ? cb.x + cb.width * 0.68 : 760; // right branch column
       const rows = [0.16, 0.32, 0.48, 0.64, 0.82].map((f) => (cb ? cb.y + cb.height * f : 150 + f * 500));
 
+      // Per-op timing so we can see where this chapter's wall-time actually
+      // goes: the editor is snappy for a human, but the chapter SCRIPTS ~17 ops
+      // (6 renames, 6 drags, 5 edge-connects). This prints the elapsed after
+      // each so a slow step (or a silently-timing-out best-effort waitFor) is
+      // visible instead of hiding in one 70s total.
+      const fcD = Date.now();
+      const mk = (m: string) => console.log(`  ⏱fc +${((Date.now() - fcD) / 1000).toFixed(1)}s ${m}`);
+
       // 1) Re-label the starting node and place it at the top.
-      await labelNode('Process', 'Invoice received');
-      await dragNodeTo('Invoice received', { x: col, y: rows[0]! });
+      await labelNode('Process', 'Invoice received'); mk('label:Invoice received');
+      await dragNodeTo('Invoice received', { x: col, y: rows[0]! }); mk('drag:Invoice received');
 
       // 2) Add the remaining nodes one at a time: add → drag clear of the pile at
       //    (200,200) → relabel. (Each Add drops at the same fixed spot, so we move
@@ -788,33 +796,33 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       const addProcess = () => d.getByRole('button', { name: /^Process$/ }).first().click().catch(() => {});
       const addDecision = () => d.getByRole('button', { name: /^Decision$/ }).first().click().catch(() => {});
 
-      await addProcess();
-      await dragNodeTo('Process', { x: col, y: rows[1]! });
-      await labelNode('Process', 'Extract fields (OCR)');
+      await addProcess(); mk('add:Process(2)');
+      await dragNodeTo('Process', { x: col, y: rows[1]! }); mk('drag:2');
+      await labelNode('Process', 'Extract fields (OCR)'); mk('label:Extract fields');
 
-      await addProcess();
-      await dragNodeTo('Process', { x: col, y: rows[2]! });
-      await labelNode('Process', 'Match PO & VAT');
+      await addProcess(); mk('add:Process(3)');
+      await dragNodeTo('Process', { x: col, y: rows[2]! }); mk('drag:3');
+      await labelNode('Process', 'Match PO & VAT'); mk('label:Match PO');
 
-      await addDecision();
-      await dragNodeTo('Decision', { x: col, y: rows[3]! });
-      await labelNode('Decision', 'Over €5,000?');
+      await addDecision(); mk('add:Decision');
+      await dragNodeTo('Decision', { x: col, y: rows[3]! }); mk('drag:4');
+      await labelNode('Decision', 'Over €5,000?'); mk('label:Over 5000');
 
-      await addProcess();
-      await dragNodeTo('Process', { x: colR, y: rows[4]! });
-      await labelNode('Process', 'Hold for approval');
+      await addProcess(); mk('add:Process(5)');
+      await dragNodeTo('Process', { x: colR, y: rows[4]! }); mk('drag:5');
+      await labelNode('Process', 'Hold for approval'); mk('label:Hold');
 
-      await addProcess();
-      await dragNodeTo('Process', { x: col, y: rows[4]! });
-      await labelNode('Process', 'Post to ledger');
+      await addProcess(); mk('add:Process(6)');
+      await dragNodeTo('Process', { x: col, y: rows[4]! }); mk('drag:6');
+      await labelNode('Process', 'Post to ledger'); mk('label:Post');
 
       // 3) Wire the flow: linear spine, then the decision's two branches (its
       //    right handle → Hold, its bottom handle → Post).
-      await connect('Invoice received', 'Extract fields (OCR)');
-      await connect('Extract fields (OCR)', 'Match PO & VAT');
-      await connect('Match PO & VAT', 'Over €5,000?');
-      await connect('Over €5,000?', 'Hold for approval', 'right');
-      await connect('Over €5,000?', 'Post to ledger', 'bottom');
+      await connect('Invoice received', 'Extract fields (OCR)'); mk('connect:1');
+      await connect('Extract fields (OCR)', 'Match PO & VAT'); mk('connect:2');
+      await connect('Match PO & VAT', 'Over €5,000?'); mk('connect:3');
+      await connect('Over €5,000?', 'Hold for approval', 'right'); mk('connect:4');
+      await connect('Over €5,000?', 'Post to ledger', 'bottom'); mk('connect:5');
 
       // Give the canvas a beat to settle the final edge render, then capture the
       // drawn diagram BEST-EFFORT. This is a "nice-to-have" view: we do NOT hard-
