@@ -41,23 +41,34 @@ if ! command -v node >/dev/null; then
   apt-get install -y nodejs
 fi
 
-echo "=== dnsmasq: *.localhost -> 127.0.0.1 ==="
+echo "=== dnsmasq: *.localhost -> 127.0.0.1, forward the rest to the LAN gateway ==="
 systemctl stop systemd-resolved 2>/dev/null || true
 systemctl disable systemd-resolved 2>/dev/null || true
+# Forward non-.localhost queries to the libvirt bridge gateway's resolver, NOT a
+# public one. The sandbox's cloud firewall blocks direct external DNS
+# (8.8.8.8:53 times out); only the host-side forwarder reachable via the guest's
+# default gateway (libvirt dnsmasq, 192.168.122.1 for run-qemu / the
+# Vagrant-libvirt default net) resolves. run-qemu already points resolv.conf
+# there pre-provision — this used to clobber it back to 8.8.8.8 and break every
+# name lookup after this point (the mkcert download died with "could not resolve
+# host"). Derive the upstream from the default route so it holds on any subnet.
+DNS_UPSTREAM="$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')"
+[ -n "$DNS_UPSTREAM" ] || DNS_UPSTREAM=192.168.122.1
+echo "    (dnsmasq upstream = $DNS_UPSTREAM)"
 mkdir -p /etc/dnsmasq.d
 cat > /etc/dnsmasq.d/localhost.conf <<EOF
 address=/.localhost/127.0.0.1
 listen-address=127.0.0.1
 no-resolv
-server=8.8.8.8
+server=$DNS_UPSTREAM
 EOF
 rm -f /etc/resolv.conf
-printf 'nameserver 127.0.0.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+printf 'nameserver 127.0.0.1\nnameserver %s\n' "$DNS_UPSTREAM" > /etc/resolv.conf
 systemctl restart dnsmasq || dnsmasq
 
 echo "=== mkcert CA (trusted local TLS) ==="
 if ! command -v mkcert >/dev/null; then
-  curl -fsSL -o /usr/local/bin/mkcert "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+  curl -fsSL --retry 3 --retry-connrefused -o /usr/local/bin/mkcert "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
   chmod +x /usr/local/bin/mkcert
 fi
 mkcert -install
