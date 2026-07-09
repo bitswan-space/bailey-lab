@@ -28,21 +28,6 @@ if [ "$BITSWAN_AUTOMATION_STAGE" = "live-dev" ]; then
   # below does the equivalent under a writable /tmp copy.)
   ln -sfn /deps/node_modules /node_modules
   "$VITE" --config /deps/vite.config.mjs --host 127.0.0.1 --port 5173 &
-  # Warm Vite's dependency pre-bundle + entry transform in the BACKGROUND now, so
-  # the operator's first open of the live-dev preview isn't blocked on Vite's
-  # cold optimize (the "blank first load": dev mode pre-bundles deps and
-  # transforms the module graph on the first request, which over the
-  # popup→wrap→iframe→traefik→shim hop can take minutes). Requesting the app
-  # entry once Vite answers triggers that work here, off the user's critical path.
-  ( for _ in $(seq 1 60); do
-      wget -q -O /dev/null -T 3 "http://127.0.0.1:5173/" 2>/dev/null && break
-      sleep 1
-    done
-    # Pull the entry + let Vite crawl/optimize its import graph.
-    wget -q -O /dev/null -T 20 "http://127.0.0.1:5173/" 2>/dev/null || true
-    for entry in /src/main.tsx /src/main.jsx /src/main.ts /index.html; do
-      wget -q -O /dev/null -T 20 "http://127.0.0.1:5173${entry}" 2>/dev/null || true
-    done ) &
 else
   # The production bundle is built ONCE at image-build time by build.sh (the
   # driver runs it as a final RUN layer during the deploy image bake), so startup
