@@ -51,7 +51,6 @@ class PostgresService(InfraService):
     def _generate_secrets_content(self) -> str:
         pg_password = generate_password()
         pgadmin_password = generate_password()
-        self._generated_password = pg_password
         return (
             f"POSTGRES_USER=admin\n"
             f"POSTGRES_PASSWORD={pg_password}\n"

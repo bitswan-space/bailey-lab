@@ -106,7 +106,6 @@ class ServiceDependency:
     enabled: bool = True
 
 
-KNOWN_STAGES = {"live-dev", "dev", "staging", "production"}
 
 # Network realms: each gets its own set of infrastructure services (Kafka, CouchDB).
 # live-dev shares the dev realm.

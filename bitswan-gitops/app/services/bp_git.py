@@ -57,13 +57,9 @@ def list_bp_clones(copy_path: str) -> list[str]:
 def git_remote_url(bp: str) -> str:
     """Smart-HTTP URL a clone uses as ``origin`` for a BP's repo.
 
-    ``BITSWAN_GIT_REMOTE`` is the BASE URL (``http://<ws>-gitops:8079/git``);
-    tolerate the legacy single-repo value (`.../git/repo.git`) during rollout
-    by stripping the repo suffix.
+    ``BITSWAN_GIT_REMOTE`` is the BASE URL (``http://<ws>-gitops:8079/git``).
     """
     base = os.environ.get("BITSWAN_GIT_REMOTE", "")
-    if base.endswith("/repo.git"):
-        base = base[: -len("/repo.git")]
     if not base:
         ws = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace")
         base = f"http://{ws}-gitops:8079/git"

@@ -37,7 +37,6 @@ class CouchDBService(InfraService):
 
     def _generate_secrets_content(self) -> str:
         password = generate_password()
-        self._generated_password = password
         return (
             f"COUCHDB_USER=admin\n"
             f"COUCHDB_PASSWORD={password}\n"

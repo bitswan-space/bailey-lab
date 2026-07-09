@@ -4172,7 +4172,6 @@ class AutomationService:
     # live-dev). LRU order uses a marker file (touched on deploy/wake) since
     # docker doesn't refresh a container's Created on restart.
     EPHEMERAL_STAGES = ("dev", "live-dev")
-    LIVE_DEV_STAGE = "live-dev"  # kept for callers that name the copy-preview stage
 
     def _max_live_dev(self) -> int:
         try:
