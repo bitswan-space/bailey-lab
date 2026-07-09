@@ -4,7 +4,7 @@ import React from 'react';
 const { C: DC, Icon: DIcon, Btn: DBtn, Pill: DPill } = window.WD_SHELL;
 const {
   Card: DCard, PageHeader: DPageHeader, Modal: DModal,
-  SegmentedCode: DSeg, QRCode: DQR, QRImage: DQRImage, DeviceIcon: DDeviceIcon, ProtoHint: DProtoHint,
+  SegmentedCode: DSeg, QRImage: DQRImage, DeviceIcon: DDeviceIcon, ProtoHint: DProtoHint,
   CopyChip: DCopyChip, Toggle: DToggle, EmptyState: DEmpty, LiveState: DLiveState,
 } = window.SC_UI;
 const { Api: DApi } = window.SC_API;

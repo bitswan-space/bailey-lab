@@ -23,7 +23,6 @@ window.lucide = { createIcons: () => createIcons({ icons }) };
 // design's ordered <script> tags). console-app sets window.SC_APP.
 import './shell.jsx';
 import './console/api.js';
-import './console/console-data.jsx';
 import './console/console-ui.jsx';
 import './console/views-workspaces.jsx';
 import './console/views-people.jsx';

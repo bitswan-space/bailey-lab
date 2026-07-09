@@ -198,44 +198,9 @@ function SegmentedCode({ format = [4, 4], value, onChange, onComplete, mono = tr
   );
 }
 
-// ─── Fake-but-convincing QR (deterministic grid of squares) ─────────────────
-function QRCode({ seed = 'bailey', size = 168, fg = '#09090b' }) {
-  const N = 25;
-  // deterministic PRNG from seed
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) { h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619); }
-  const rand = () => { h ^= h << 13; h ^= h >>> 17; h ^= h << 5; return ((h >>> 0) % 1000) / 1000; };
-  const cell = size / N;
-  const rects = [];
-  const isFinder = (r, c) => (
-    (r < 7 && c < 7) || (r < 7 && c >= N - 7) || (r >= N - 7 && c < 7)
-  );
-  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
-    if (isFinder(r, c)) continue;
-    if (rand() > 0.52) rects.push(
-      <rect key={`${r}-${c}`} x={c * cell} y={r * cell} width={cell} height={cell} fill={fg} />
-    );
-  }
-  const finder = (ox, oy) => (
-    <g key={`f${ox}-${oy}`}>
-      <rect x={ox * cell} y={oy * cell} width={7 * cell} height={7 * cell} fill={fg} />
-      <rect x={(ox + 1) * cell} y={(oy + 1) * cell} width={5 * cell} height={5 * cell} fill="#fff" />
-      <rect x={(ox + 2) * cell} y={(oy + 2) * cell} width={3 * cell} height={3 * cell} fill={fg} />
-    </g>
-  );
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ display: 'block', borderRadius: 8 }}>
-      <rect x="0" y="0" width={size} height={size} fill="#fff" />
-      {rects}
-      {finder(0, 0)}{finder(N - 7, 0)}{finder(0, N - 7)}
-    </svg>
-  );
-}
-
 // ─── Real, scannable QR (encodes the given text, e.g. an otpauth:// URL) ─────
-// Distinct from the decorative QRCode above (which is a seeded pattern used in
-// prototype/preview scenes). QRImage renders an actually-scannable code so an
-// authenticator app can read the live TOTP enrolment secret.
+// QRImage renders an actually-scannable code so an authenticator app can read
+// the live TOTP enrolment secret.
 function QRImage({ value, size = 168 }) {
   const [src, setSrc] = useS('');
   const [err, setErr] = useS(false);
@@ -497,7 +462,7 @@ function LiveState({ status, error, label, onRetry }) {
 }
 
 window.SC_UI = {
-  Avatar, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRCode, QRImage,
+  Avatar, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRImage,
   Toggle, DeviceIcon, Toast, EmptyState, CopyChip, ProtoHint, Stat,
   Drawer, Select, AvatarStack, LoadBanner, ErrorBanner, LiveState,
 };
