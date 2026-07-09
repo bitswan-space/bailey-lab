@@ -458,13 +458,18 @@ type testingConfig struct {
 }
 
 // readTestingConfig parses the [testing] section of process.toml in dir.
-// A missing file or section yields the zero value.
-func readTestingConfig(dir string) testingConfig {
+// A missing file or section yields the zero value; any other read error is
+// surfaced rather than silently dropping the [testing] automation/runner
+// pinning.
+func readTestingConfig(dir string) (testingConfig, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "process.toml"))
 	if err != nil {
-		return testingConfig{}
+		if os.IsNotExist(err) {
+			return testingConfig{}, nil
+		}
+		return testingConfig{}, fmt.Errorf("read process.toml in %s: %w", dir, err)
 	}
-	return parseTestingConfig(string(data))
+	return parseTestingConfig(string(data)), nil
 }
 
 func parseTestingConfig(content string) testingConfig {
@@ -623,7 +628,10 @@ EXAMPLES
 			}
 		}
 
-		cfg := readTestingConfig(dir)
+		cfg, err := readTestingConfig(dir)
+		if err != nil {
+			return err
+		}
 		deploymentID, err := resolveLiveDevDeployment(reqTestDeployment, dir, cfg)
 		if err != nil {
 			return err
