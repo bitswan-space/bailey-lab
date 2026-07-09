@@ -2,13 +2,11 @@ package services
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/certauthority"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
@@ -253,54 +251,6 @@ func (d *DashboardService) StopContainer() error {
 	cmd.Dir = deploymentDir
 	fmt.Printf("Stopping Dashboard container for workspace '%s'...\n", d.WorkspaceName)
 	return d.runCommand(cmd)
-}
-
-// WaitForDashboardReady blocks until the dashboard's Fastify server logs that it's listening,
-// or the timeout expires.
-func (d *DashboardService) WaitForDashboardReady() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	deploymentDir := filepath.Join(d.WorkspacePath, "deployment")
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", "docker-compose-dashboard.yml", "-p", d.WorkspaceName+"-dashboard", "logs", "-f", "bitswan-dashboard")
-	cmd.Dir = deploymentDir
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start docker compose logs command: %w", err)
-	}
-
-	readyCh := make(chan struct{})
-	go func() {
-		buf := make([]byte, 4096)
-		acc := ""
-		for {
-			n, readErr := stdout.Read(buf)
-			if n > 0 {
-				acc += string(buf[:n])
-				// Fastify logs include "Server listening at" or similar; be liberal.
-				if strings.Contains(acc, "listening") || strings.Contains(acc, "Listening") {
-					close(readyCh)
-					return
-				}
-			}
-			if readErr != nil {
-				return
-			}
-		}
-	}()
-
-	select {
-	case <-readyCh:
-		_ = cmd.Process.Kill()
-		return nil
-	case <-ctx.Done():
-		_ = cmd.Process.Kill()
-		return fmt.Errorf("timeout waiting for dashboard server to be ready")
-	}
 }
 
 // RegenerateDockerCompose fully regenerates docker-compose-dashboard.yml from metadata.

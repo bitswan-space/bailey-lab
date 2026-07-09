@@ -377,12 +377,6 @@ func extractHostFromRule(rule string) string {
 // Public functions
 // ============================================================
 
-// InitSet is a no-op stub kept for call-site compatibility.
-// Traefik state is managed via the state file; there is no incremental init path.
-func InitSet(url string, payload []byte) error {
-	return nil
-}
-
 // InitTraefik ensures the global Traefik REST provider state file exists and
 // pushes an empty (or existing) configuration to Traefik.
 func InitTraefik() error {
@@ -402,39 +396,6 @@ func InitWorkspaceTraefik(workspaceName string) error {
 	return modifyState(traefikBaseURL, func(_ *traefikDynConfig) error {
 		return nil
 	})
-}
-
-// RegisterServiceWithTraefik registers a service hostname in Traefik.
-// It constructs {workspaceName}-{serviceName}.{domain} and delegates to AddRoute.
-func RegisterServiceWithTraefik(serviceName, workspaceName, domain, upstream string) error {
-	hostname := fmt.Sprintf("%s-%s.%s", workspaceName, serviceName, domain)
-	return AddRoute(hostname, upstream)
-}
-
-// UnregisterTraefikService removes a service route from Traefik.
-func UnregisterTraefikService(serviceName, workspaceName, domain string) error {
-	if domain != "" {
-		hostname := fmt.Sprintf("%s-%s.%s", workspaceName, serviceName, domain)
-		err := RemoveRoute(hostname)
-		if err == nil {
-			return nil
-		}
-		fmt.Printf("Warning: failed to remove route using hostname %s, trying legacy format: %v\n", hostname, err)
-	}
-
-	// Fall back to legacy ID (workspaceName_serviceName).
-	legacyID := fmt.Sprintf("%s_%s", workspaceName, serviceName)
-	traefikBaseURL := getTraefikBaseURL()
-	return modifyState(traefikBaseURL, func(state *traefikDynConfig) error {
-		delete(state.HTTP.Routers, legacyID)
-		delete(state.HTTP.Services, legacyID)
-		return nil
-	})
-}
-
-// AddRoute adds a route for hostname → upstream using the default Traefik base URL.
-func AddRoute(hostname, upstream string) error {
-	return AddRouteWithTraefik(hostname, upstream, "")
 }
 
 // AddRouteWithTraefik adds a route for hostname → upstream.
