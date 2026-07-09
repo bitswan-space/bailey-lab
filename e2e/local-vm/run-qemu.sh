@@ -15,15 +15,34 @@ set -euo pipefail
 
 WORK="${TMPDIR:-/tmp}/bitswan-e2e-vm"
 
-# Single-instance guard: re-exec ourselves holding an exclusive, non-blocking
-# flock so a SECOND concurrent run-qemu can never start and wipe a running VM's
-# disk out from under it (a stray duplicate launch just no-ops instead of
-# reaping the active run). The FLOCKED env marker prevents an infinite re-exec.
+# Single-instance guard: hold an exclusive, non-blocking flock on a dedicated fd
+# (9) so a SECOND concurrent run-qemu can't wipe a running VM's disk out from
+# under it. Two subtleties that used to leak a VM and silently block every
+# future run:
+#   1. We must NOT let the daemonized qemu inherit fd 9 (below we start it with
+#      `9>&-`). If it does, a KEPT or crash-orphaned VM keeps holding the lock
+#      long after run-qemu exits, so the next run can never acquire it.
+#   2. The old code `exec … flock … || { echo …; }` was a no-op message: `exec`
+#      replaces the shell, so the `||` branch was dead code and a held lock
+#      failed SILENTLY (empty log, whole run a no-op). We flock in-process and
+#      log explicitly instead.
 mkdir -p "$WORK"
-if [ -z "${RUNQEMU_FLOCKED:-}" ]; then
-  exec env RUNQEMU_FLOCKED=1 flock -n "$WORK/run-qemu.singleton.lock" "$0" "$@" || {
-    echo "another run-qemu is already running (singleton lock held) — exiting."; exit 0;
-  }
+exec 9>"$WORK/run-qemu.singleton.lock"
+if ! flock -n 9; then
+  echo "another run-qemu is actively running (singleton lock held) — exiting." >&2
+  exit 0
+fi
+# Reap a VM orphaned by a previous run (crash, SIGKILL that skipped the EXIT
+# trap, or a --keep left running). Holding the lock above guarantees no other
+# run-qemu is active, so any live qemu recorded here is stale and would collide
+# with this run's fixed IP/MAC — kill it before booting a fresh guest.
+if [ -f "$WORK/qemu.pid" ] && kill -0 "$(cat "$WORK/qemu.pid" 2>/dev/null)" 2>/dev/null; then
+  STALE_PID="$(cat "$WORK/qemu.pid")"
+  echo "--- reaping orphaned VM from a previous run (qemu pid $STALE_PID) ---"
+  kill "$STALE_PID" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do kill -0 "$STALE_PID" 2>/dev/null || break; sleep 1; done
+  kill -9 "$STALE_PID" 2>/dev/null || true
+  rm -f "$WORK/qemu.pid"
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -132,7 +151,7 @@ qemu-system-x86_64 -enable-kvm -cpu host -smp "$CPUS" -m "$MEM_MB" \
   -drive file="$OVERLAY",if=virtio,format=qcow2 \
   -drive file="$WORK/seed.iso",if=virtio,format=raw \
   -netdev bridge,id=n0,br="$BRIDGE" -device virtio-net-pci,netdev=n0,mac="$VM_MAC" \
-  -daemonize -pidfile "$WORK/qemu.pid"
+  -daemonize -pidfile "$WORK/qemu.pid" 9>&-
 
 cleanup() { [ "$KEEP" = 1 ] || { kill "$(cat "$WORK/qemu.pid")" 2>/dev/null || true; }; }
 trap cleanup EXIT
