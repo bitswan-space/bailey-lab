@@ -202,10 +202,6 @@ func startDaemonContainer(startMessage, successMessage string) error {
 	// volumes instead of host bind mounts under the user's home directory. This
 	// makes storage independent of which host user runs the commands (the
 	// root-then-ubuntu mismatch that used to leave files in the wrong place).
-	// The legacy* paths are the old bind-mount locations, used ONLY as the
-	// one-time migration source.
-	legacyConfig := filepath.Join(homeDir, ".config", "bitswan")
-	legacyMkcert := filepath.Join(homeDir, ".local", "share", "mkcert")
 
 	// Launch the daemon container
 	// Mount the binary, config directory, docker socket, and mkcert directory
@@ -272,20 +268,13 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		return fmt.Errorf("network %s does not exist and could not be created", networkName)
 	}
 
-	// Ensure the named volumes exist, and migrate any legacy bind-mount data
-	// into them (one-time, idempotent — skipped when the volume already has
-	// content). The legacy host directories are left untouched as a backup.
+	// Ensure the named volumes the daemon's config/data and the mkcert CA live in
+	// exist.
 	if err := ensureDockerVolume(configVolume); err != nil {
 		return err
 	}
 	if err := ensureDockerVolume(mkcertVolume); err != nil {
 		return err
-	}
-	if err := migrateBindMountToVolume(configVolume, legacyConfig, daemonImage); err != nil {
-		return fmt.Errorf("failed to migrate config into %s volume: %w", configVolume, err)
-	}
-	if err := migrateBindMountToVolume(mkcertVolume, legacyMkcert, daemonImage); err != nil {
-		return fmt.Errorf("failed to migrate mkcert into %s volume: %w", mkcertVolume, err)
 	}
 
 	// HOST_HOME still tells the daemon the host home directory (used for the few
@@ -541,46 +530,5 @@ func ensureDockerVolume(name string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create docker volume %s: %s: %w", name, strings.TrimSpace(string(out)), err)
 	}
-	return nil
-}
-
-// dockerVolumeEmpty reports whether the named volume contains no files. It runs
-// a throwaway container that lists the volume root.
-func dockerVolumeEmpty(name, image string) (bool, error) {
-	out, err := exec.Command("docker", "run", "--rm",
-		"-v", name+":/v:ro", image,
-		"sh", "-c", "ls -A /v 2>/dev/null | head -1").CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("failed to inspect docker volume %s: %s: %w", name, strings.TrimSpace(string(out)), err)
-	}
-	return strings.TrimSpace(string(out)) == "", nil
-}
-
-// migrateBindMountToVolume copies a legacy bind-mount directory into a named
-// volume exactly once. It is a no-op when the volume already has content (so
-// it's safe to call on every daemon start/upgrade) or when the legacy directory
-// is absent/empty (fresh installs). The legacy directory is left in place as a
-// backup — nothing is deleted.
-func migrateBindMountToVolume(volume, legacyDir, image string) error {
-	empty, err := dockerVolumeEmpty(volume, image)
-	if err != nil {
-		return err
-	}
-	if !empty {
-		return nil // already migrated, or the daemon has started populating it
-	}
-	entries, err := os.ReadDir(legacyDir)
-	if err != nil || len(entries) == 0 {
-		return nil // nothing to migrate (fresh install)
-	}
-	fmt.Printf("Migrating existing data from %s into docker volume %q ...\n", legacyDir, volume)
-	out, err := exec.Command("docker", "run", "--rm",
-		"-v", legacyDir+":/src:ro",
-		"-v", volume+":/dst",
-		image, "sh", "-c", "cp -a /src/. /dst/").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("copy %s -> volume %s failed: %s: %w", legacyDir, volume, strings.TrimSpace(string(out)), err)
-	}
-	fmt.Printf("Migrated %s into volume %q (original left in place as a backup).\n", legacyDir, volume)
 	return nil
 }
