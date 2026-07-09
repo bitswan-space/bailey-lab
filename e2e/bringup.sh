@@ -105,6 +105,20 @@ done
 docker ps | grep -q traefik || { echo "ERROR: traefik not running"; exit 1; }
 
 mark "[2/7] daemon + traefik ingress"
+
+# Prewarm every image the INTERACTIVE workspace-create + first-deploy would
+# otherwise pull at click-time: the infra services a BP enables (postgres +
+# pgadmin, minio, couchdb) and node:24-alpine (the app-image base the driver
+# bakes the frontend/backend onto). Runs in the BACKGROUND so it overlaps the
+# Keycloak/otel bring-up below and adds ~no serial setup time; we `wait` on it
+# before handing off to the walkthrough. Moving these pulls into the
+# non-interactive setup keeps the first deploy from stalling a user on a
+# registry pull. Best-effort — a miss just falls back to a click-time pull.
+( for img in postgres:16 dpage/pgadmin4:latest minio/minio:latest couchdb:3.3 node:24-alpine; do
+    docker pull "$img" >/dev/null 2>&1 || true
+  done ) &
+PREWARM_PID=$!
+
 echo "=== [3/7] Disposable Keycloak (seeded realm: the Meridian Foods cast) on :${KC_PORT} ==="
 # Published on the host port so the BROWSER (dnsmasq→127.0.0.1) and the
 # oauth2-proxy CONTAINER (extra_hosts→host-gateway) reach the SAME issuer URL,
@@ -200,6 +214,11 @@ for i in $(seq 1 60); do
 done
 
 mark "[6/7] wait onboarding chain ready"
+# Ensure the background image prewarm finished before the walkthrough starts, so
+# the first workspace-create/deploy finds every image already local.
+wait "$PREWARM_PID" 2>/dev/null || true
+mark "[6b/7] prewarm infra + app-base images"
+
 echo "=== [7/7] Write e2e/.env for the walkthrough ==="
 cat > "$REPO_ROOT/e2e/.env" <<ENV
 E2E_DOMAIN=${DOMAIN}
