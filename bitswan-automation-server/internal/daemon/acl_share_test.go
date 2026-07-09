@@ -10,8 +10,10 @@ import (
 )
 
 // shareAPIRequest performs one call against handleShareAPI as the
-// given user and returns the recorder.
-func shareAPIRequest(t *testing.T, method, host, email string, form url.Values) *httptest.ResponseRecorder {
+// given user and returns the recorder. When trusted is set, a paired
+// device cookie for email is attached — required for write methods,
+// which now demand a trusted device (callerHasTrustedDevice).
+func shareAPIRequest(t *testing.T, method, host, email string, form url.Values, trusted bool) *httptest.ResponseRecorder {
 	t.Helper()
 	var body *strings.Reader
 	if form != nil {
@@ -24,6 +26,9 @@ func shareAPIRequest(t *testing.T, method, host, email string, form url.Values) 
 	r.Header.Set("X-Forwarded-Email", email)
 	if form != nil {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if trusted {
+		r = withTrustedDevice(t, r, email)
 	}
 	w := httptest.NewRecorder()
 	handleShareAPI(w, r, email, nil)
@@ -51,16 +56,16 @@ func TestShareAPI_OwnerOnly(t *testing.T) {
 	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if w := shareAPIRequest(t, http.MethodGet, host, "stranger@example.com", nil); w.Code != http.StatusForbidden {
+	if w := shareAPIRequest(t, http.MethodGet, host, "stranger@example.com", nil, false); w.Code != http.StatusForbidden {
 		t.Errorf("non-owner GET status = %d, want 403", w.Code)
 	}
-	if w := shareAPIRequest(t, http.MethodGet, host, "owner@example.com", nil); w.Code != http.StatusOK {
+	if w := shareAPIRequest(t, http.MethodGet, host, "owner@example.com", nil, false); w.Code != http.StatusOK {
 		t.Errorf("owner GET status = %d, want 200", w.Code)
 	}
 }
 
 func TestShareAPI_UnknownEndpoint(t *testing.T) {
-	if w := shareAPIRequest(t, http.MethodGet, "share-nosuch.example.com", "x@example.com", nil); w.Code != http.StatusNotFound {
+	if w := shareAPIRequest(t, http.MethodGet, "share-nosuch.example.com", "x@example.com", nil, false); w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
@@ -76,7 +81,7 @@ func TestShareAPI_GrantRevokeLifecycle(t *testing.T) {
 		"principal_type":  {"email"},
 		"principal_value": {"friend@example.com"},
 		"role":            {"access"},
-	})
+	}, true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("grant status = %d: %s", w.Code, w.Body.String())
 	}
@@ -93,7 +98,7 @@ func TestShareAPI_GrantRevokeLifecycle(t *testing.T) {
 		"principal_type":  {"email"},
 		"principal_value": {"friend@example.com"},
 		"role":            {"access"},
-	})
+	}, true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("revoke status = %d: %s", w.Code, w.Body.String())
 	}
@@ -115,7 +120,7 @@ func TestShareAPI_GrantClearsPendingRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := shareAPIRequest(t, http.MethodGet, host, "owner@example.com", nil)
+	w := shareAPIRequest(t, http.MethodGet, host, "owner@example.com", nil, false)
 	if l := decodeListing(t, w); len(l.Requests) != 1 {
 		t.Fatalf("pending request not listed: %+v", l.Requests)
 	}
@@ -126,7 +131,7 @@ func TestShareAPI_GrantClearsPendingRequest(t *testing.T) {
 		"principal_type":  {"email"},
 		"principal_value": {"wantsin@example.com"},
 		"role":            {"access"},
-	})
+	}, true)
 	l := decodeListing(t, w)
 	if len(l.Requests) != 0 {
 		t.Errorf("request not cleared by grant: %+v", l.Requests)
@@ -147,7 +152,7 @@ func TestShareAPI_DenyRequest(t *testing.T) {
 	w := shareAPIRequest(t, http.MethodPost, host, "owner@example.com", url.Values{
 		"action": {"deny-request"},
 		"email":  {"nope@example.com"},
-	})
+	}, true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("deny status = %d: %s", w.Code, w.Body.String())
 	}
@@ -157,6 +162,87 @@ func TestShareAPI_DenyRequest(t *testing.T) {
 	}
 	if len(l.Grants) != 0 {
 		t.Errorf("deny must not grant anything: %+v", l.Grants)
+	}
+}
+
+// TestShareAPI_WriteRequiresTrustedDevice pins the defense-in-depth rule:
+// the owner can READ the ACL from any device, but a WRITE (grant) from an
+// untrusted device is refused and leaves the ACL unchanged. The same write
+// from a trusted device succeeds. This is the factor that survives a Keycloak
+// takeover: owner role comes from the (forgeable) identity headers, so a
+// mutation must also prove a paired device.
+func TestShareAPI_WriteRequiresTrustedDevice(t *testing.T) {
+	host := "share-devicetrust.example.com"
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	grant := url.Values{
+		"principal_type":  {"email"},
+		"principal_value": {"intruder@example.com"},
+		"role":            {"access"},
+	}
+
+	// Read is allowed without a trusted device.
+	if w := shareAPIRequest(t, http.MethodGet, host, "owner@example.com", nil, false); w.Code != http.StatusOK {
+		t.Fatalf("owner GET (untrusted device) status = %d, want 200", w.Code)
+	}
+
+	// Write from an UNTRUSTED device is refused with 403 and must not mutate.
+	w := shareAPIRequest(t, http.MethodPost, host, "owner@example.com", grant, false)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("owner grant from untrusted device status = %d, want 403", w.Code)
+	}
+	if role, _ := roleFor(host, "intruder@example.com", nil); role != roleNone {
+		t.Fatalf("grant took effect from an untrusted device (role=%q) — device-trust gate bypassed", role)
+	}
+
+	// The identical write from a TRUSTED device succeeds.
+	w = shareAPIRequest(t, http.MethodPost, host, "owner@example.com", grant, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("owner grant from trusted device status = %d: %s", w.Code, w.Body.String())
+	}
+	if role, _ := roleFor(host, "intruder@example.com", nil); role != roleAccess {
+		t.Fatalf("grant from trusted device not effective, role = %q", role)
+	}
+}
+
+// TestShareEndpoint_FormWriteRequiresTrustedDevice is the same rule for the
+// no-JS HTML form handler (handleShareEndpoint).
+func TestShareEndpoint_FormWriteRequiresTrustedDevice(t *testing.T) {
+	host := "share-form-devicetrust.example.com"
+	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"action":          {"grant"},
+		"principal_type":  {"email"},
+		"principal_value": {"intruder@example.com"},
+		"role":            {"access"},
+	}
+	post := func(trusted bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "https://"+host+gatePathPrefix+"/share/"+url.PathEscape(host),
+			strings.NewReader(form.Encode()))
+		r.Host = host
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if trusted {
+			r = withTrustedDevice(t, r, "owner@example.com")
+		}
+		w := httptest.NewRecorder()
+		handleShareEndpoint(w, r, "owner@example.com", nil)
+		return w
+	}
+
+	if w := post(false); w.Code != http.StatusForbidden {
+		t.Fatalf("form grant from untrusted device status = %d, want 403", w.Code)
+	}
+	if role, _ := roleFor(host, "intruder@example.com", nil); role != roleNone {
+		t.Fatalf("form grant took effect from an untrusted device (role=%q)", role)
+	}
+	if w := post(true); w.Code != http.StatusSeeOther {
+		t.Fatalf("form grant from trusted device status = %d, want 303", w.Code)
+	}
+	if role, _ := roleFor(host, "intruder@example.com", nil); role != roleAccess {
+		t.Fatalf("form grant from trusted device not effective, role = %q", role)
 	}
 }
 
