@@ -970,20 +970,28 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         // descendant — not instant-check, which races the cold optimize + render.
         const innerOf = () =>
           popup.frames().find((f) => /--inner\./.test(f.url())) ?? popup.mainFrame();
-        const reloadDeadline = Date.now() + 6 * 60_000;
-        for (let attempt = 0; attempt < 8; attempt++) {
-          // Let the chrome wrap attach its inner <iframe> before we read it.
-          await popup.waitForSelector('iframe', { timeout: 30_000 }).catch(() => {});
+        // Wait for the app to render WITHOUT thrashing reloads. A Vite dev
+        // cold-load serves HTTP 200 with an empty #root while it transforms the
+        // module graph, so reloading merely because "#root isn't visible yet"
+        // RESETS that in-flight load — the old reload-every-~45s loop did exactly
+        // that and burned the whole 6-min budget on every run (the "live-dev
+        // 361.8s" was this timeout, not real latency). Instead: poll on a short
+        // interval and SUCCEED the instant #root shows content; reload ONLY when
+        // the inner frame is actually showing Traefik's hard "404 page not found"
+        // (route genuinely not up yet), which a still-loading app never shows.
+        const overallDeadline = Date.now() + 6 * 60_000;
+        await popup.waitForSelector('iframe', { timeout: 30_000 }).catch(() => {});
+        while (Date.now() < overallDeadline) {
           const inner = innerOf();
-          await inner.getByText(/Loading|Starting/i).first()
-            .waitFor({ state: 'hidden', timeout: 30_000 }).catch(() => {});
           const mounted = await inner.locator('#root :visible').first()
-            .waitFor({ state: 'visible', timeout: 45_000 })
+            .waitFor({ state: 'visible', timeout: 5_000 })
             .then(() => true)
             .catch(() => false);
           if (mounted) break; // the React app rendered visible content into #root
-          if (Date.now() > reloadDeadline) break; // budget spent — assert below
-          await popup.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+          const is404 = await inner.getByText(/404 page not found/i).first()
+            .isVisible().catch(() => false);
+          if (is404) await popup.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+          // otherwise it's still loading — keep waiting, do NOT reload.
         }
         // Truly validate: the live-dev frontend must render its MOUNTED app (in the
         // inner frame) — not a blank page, a Vite dev-error overlay, or a 404. A
