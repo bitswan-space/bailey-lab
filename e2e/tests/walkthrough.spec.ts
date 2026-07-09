@@ -80,7 +80,12 @@ const slow: string[] = [];
 // we print an aggregate and write kpi.json so successive runs are comparable and
 // CI can surface the trend.
 const timings: { name: string; seconds: number }[] = [];
-const LONG_OP = /workspace|deploy|promote|sync|snapshot|backup|recover|disaster|coding agent|wake|first.?load|build/i;
+// Heavy operations are user-triggered but do real container/build/scan work, so
+// they're tracked separately from the "instant interaction" latency the KPI
+// optimises. Keep genuinely-interactive-but-slow chapters (e.g. the flowchart
+// editor open, the description tab) IN the interactive set — those are real
+// snappiness targets, not background work.
+const LONG_OP = /workspace|deploy|promote|sync|snapshot|backup|recover|disaster|coding.?agent|wake|first.?load|build|live-?dev|create-bp|supply-chain|cve|scan/i;
 function isInteractive(name: string): boolean {
   return !LONG_OP.test(name);
 }
