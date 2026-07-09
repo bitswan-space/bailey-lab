@@ -16,7 +16,11 @@ apt-get -y purge unattended-upgrades 2>/dev/null || true
 
 echo "=== apt deps ==="
 apt-get update -y
-apt-get install -y ca-certificates curl gnupg dnsmasq libnss3-tools sqlite3 rsync jq
+# build-essential (make + gcc): bringup [1/7] runs `make -C bitswan-automation-server
+# console` and a host-side `go build` of the daemon (cgo for its sqlite driver).
+# The minimal Ubuntu cloud image ships neither, so leaving it out fails bringup
+# with `make: command not found`.
+apt-get install -y ca-certificates curl gnupg dnsmasq libnss3-tools sqlite3 rsync jq build-essential
 
 echo "=== docker ==="
 if ! command -v docker >/dev/null; then
