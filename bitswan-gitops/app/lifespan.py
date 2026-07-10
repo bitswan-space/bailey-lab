@@ -583,6 +583,27 @@ async def lifespan(app: FastAPI):
         name="daily_backup",
     )
 
+    # Off-site retention for per-BP snapshot mirrors (snapshot_offsite):
+    # per-BP `restic forget` by the bitswan.yaml retention policy + index
+    # reconcile + failed-push retry. At 2:30 so the 2:00 whole-server run
+    # has usually released the repo lock; a collision just fails one night's
+    # run harmlessly.
+    async def _scheduled_snapshot_retention():
+        from app.services import snapshot_offsite
+
+        try:
+            await snapshot_offsite.apply_offsite_retention()
+        except Exception as e:
+            print(f"Off-site snapshot retention failed: {e}")
+
+    scheduler.add_job(
+        _scheduled_snapshot_retention,
+        trigger="cron",
+        hour=2,
+        minute=30,
+        name="bp_snapshot_offsite_retention",
+    )
+
     # Daily supply-chain re-scan at 3 AM UTC: refresh grype's vuln DB and re-run
     # it against every deployed image's cached SBOM so newly-disclosed CVEs against
     # unchanged images surface without a rebuild.

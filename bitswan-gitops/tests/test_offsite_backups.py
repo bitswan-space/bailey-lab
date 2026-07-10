@@ -210,7 +210,10 @@ def test_config_route_disable(aoc_env):
 
 def test_get_config_reports_state(aoc_env):
     client = _backups_client()
-    assert client.get("/backups/config").json() == {"configured": False}
+    assert client.get("/backups/config").json() == {
+        "configured": False,
+        "aoc_connected": True,
+    }
 
     backup_service.save_backup_config(
         {"enabled": True, "retention": {"daily": 30, "monthly": 12}}
@@ -219,9 +222,12 @@ def test_get_config_reports_state(aoc_env):
     body = client.get("/backups/config").json()
     assert body == {
         "configured": True,
+        "aoc_connected": True,
         "enabled": True,
         "retention": {"daily": 30, "monthly": 12},
         "has_key": True,
+        "last_run": None,
+        "running": False,
     }
     # No credential fields of any kind
     assert not any(k.startswith("s3_") for k in body)

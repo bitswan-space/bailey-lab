@@ -31,6 +31,7 @@ class SnapshotStep(str, Enum):
     this order, so keep it in execution order."""
 
     VALIDATING = "validating"
+    FETCH_OFFSITE = "fetch_offsite"
     SNAPSHOT_POSTGRES = "snapshot_postgres"
     SNAPSHOT_COUCHDB = "snapshot_couchdb"
     SNAPSHOT_MINIO = "snapshot_minio"
@@ -54,6 +55,7 @@ OPERATION_STEPS: dict[str, list[str]] = {
     ],
     "restore": [
         SnapshotStep.VALIDATING.value,
+        SnapshotStep.FETCH_OFFSITE.value,  # skipped when the snapshot is local
         SnapshotStep.PRE_RESTORE_SNAPSHOT.value,
         SnapshotStep.SNAPSHOT_POSTGRES.value,
         SnapshotStep.SNAPSHOT_COUCHDB.value,
@@ -74,6 +76,11 @@ OPERATION_STEPS: dict[str, list[str]] = {
         SnapshotStep.RESTORE_POSTGRES.value,
         SnapshotStep.RESTORE_COUCHDB.value,
         SnapshotStep.RESTORE_MINIO.value,
+        SnapshotStep.DONE.value,
+    ],
+    "fetch": [
+        SnapshotStep.VALIDATING.value,
+        SnapshotStep.FETCH_OFFSITE.value,
         SnapshotStep.DONE.value,
     ],
 }

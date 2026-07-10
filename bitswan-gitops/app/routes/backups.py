@@ -1,8 +1,10 @@
 """API routes for backup management."""
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.services import backup_service
@@ -10,6 +12,14 @@ from app.services import backup_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/backups", tags=["backups"])
+
+# Whole-server backups take minutes; POST /run returns 202 and the run
+# continues here. One at a time.
+_run_task: asyncio.Task | None = None
+
+
+def _backup_running() -> bool:
+    return _run_task is not None and not _run_task.done()
 
 
 # --- Configuration ---
@@ -23,15 +33,19 @@ class BackupConfigRequest(BaseModel):
 
 @router.get("/config")
 async def get_config():
-    """Get current backup configuration."""
+    """Get current backup configuration and last-run status."""
+    aoc_connected = backup_service._aoc_settings() is not None
     config = backup_service.get_backup_config()
     if not config:
-        return {"configured": False}
+        return {"configured": False, "aoc_connected": aoc_connected}
     return {
         "configured": True,
+        "aoc_connected": aoc_connected,
         "enabled": config.get("enabled", True),
         "retention": config.get("retention", {}),
         "has_key": backup_service.get_restic_key() is not None,
+        "last_run": backup_service.get_last_run(),
+        "running": _backup_running(),
     }
 
 
@@ -132,16 +146,25 @@ async def delete_key_offsite():
 
 @router.post("/run")
 async def run_backup_now():
-    """Trigger an immediate backup of all production data."""
+    """Start a whole-server backup in the background (202).
+
+    409 while one is already running. Outcome lands in `last_run` on
+    GET /backups/config."""
+    global _run_task
     if not backup_service.is_configured():
         raise HTTPException(status_code=400, detail="Backup not configured")
+    if _backup_running():
+        raise HTTPException(status_code=409, detail="A backup is already running")
     config = backup_service.get_backup_config()
 
-    try:
-        results = await backup_service.run_backup(config)
-        return results
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    async def run():
+        try:
+            await backup_service.run_backup(config)
+        except Exception:
+            logger.exception("Manual backup run failed")
+
+    _run_task = asyncio.create_task(run())
+    return JSONResponse(status_code=202, content={"status": "started"})
 
 
 @router.get("/snapshots")

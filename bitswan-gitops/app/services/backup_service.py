@@ -287,38 +287,81 @@ async def ensure_backups_enabled() -> tuple[bool, str]:
     return True, msg
 
 
+def _get_last_run_path() -> str:
+    return os.path.join(_get_backup_dir(), "last_run.json")
+
+
+def get_last_run() -> dict | None:
+    """Outcome of the most recent whole-server backup run, or None."""
+    try:
+        with open(_get_last_run_path()) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _write_last_run(record: dict) -> None:
+    try:
+        os.makedirs(_get_backup_dir(), mode=0o700, exist_ok=True)
+        with open(_get_last_run_path(), "w") as f:
+            json.dump(record, f, indent=2)
+    except OSError as e:
+        logger.warning("Failed to write backup last-run record: %s", e)
+
+
 async def run_backup(config: dict) -> dict:
     """Run a full backup of all production data."""
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
     results = {}
     timestamp = datetime.now(timezone.utc).isoformat()
+    ok = False
 
-    # 1. Backup workspace files
-    workspace_dir = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
-    if os.path.isdir(workspace_dir):
-        stdout, stderr, rc = await _run_restic(
-            ["backup", "--tag", "workspace", "--tag", workspace_name, workspace_dir],
-            config,
+    try:
+        # 1. Backup workspace files
+        workspace_dir = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
+        if os.path.isdir(workspace_dir):
+            stdout, stderr, rc = await _run_restic(
+                [
+                    "backup",
+                    "--tag",
+                    "workspace",
+                    "--tag",
+                    workspace_name,
+                    workspace_dir,
+                ],
+                config,
+            )
+            results["workspace"] = {
+                "success": rc == 0,
+                "output": stdout.strip() or stderr.strip(),
+            }
+
+        # 2. Backup Postgres via pg_dump piped through restic
+        results["postgres"] = await _backup_postgres(config, workspace_name)
+
+        # 3. Backup CouchDB via JSON export
+        results["couchdb"] = await _backup_couchdb(config, workspace_name)
+
+        # 4. Backup MinIO via mc mirror to temp dir then restic
+        results["minio"] = await _backup_minio(config, workspace_name)
+
+        # Apply retention policy
+        await _apply_retention(config)
+
+        results["timestamp"] = timestamp
+        ok = all(
+            r.get("success", True) for r in results.values() if isinstance(r, dict)
         )
-        results["workspace"] = {
-            "success": rc == 0,
-            "output": stdout.strip() or stderr.strip(),
-        }
-
-    # 2. Backup Postgres via pg_dump piped through restic
-    results["postgres"] = await _backup_postgres(config, workspace_name)
-
-    # 3. Backup CouchDB via JSON export
-    results["couchdb"] = await _backup_couchdb(config, workspace_name)
-
-    # 4. Backup MinIO via mc mirror to temp dir then restic
-    results["minio"] = await _backup_minio(config, workspace_name)
-
-    # Apply retention policy
-    await _apply_retention(config)
-
-    results["timestamp"] = timestamp
-    return results
+        return results
+    finally:
+        _write_last_run(
+            {
+                "started_at": timestamp,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "ok": ok,
+                "results": results,
+            }
+        )
 
 
 def _driver_and_ctx(workspace_name: str):
@@ -476,7 +519,11 @@ async def _backup_minio(config: dict, workspace_name: str) -> dict:
 
 
 async def _apply_retention(config: dict) -> None:
-    """Apply retention policy: keep daily for 30 days, monthly for 12 months."""
+    """Apply retention policy: keep daily for 30 days, monthly for 12 months.
+
+    Scoped to the whole-server backup tags (repeated --tag = OR) so it can
+    never prune the per-BP snapshot mirrors, which follow their own
+    per-BP retention (snapshot_offsite.apply_offsite_retention)."""
     retention = config.get("retention", {})
     daily = retention.get("daily", 30)
     monthly = retention.get("monthly", 12)
@@ -485,6 +532,14 @@ async def _apply_retention(config: dict) -> None:
         [
             "forget",
             "--prune",
+            "--tag",
+            "workspace",
+            "--tag",
+            "postgres",
+            "--tag",
+            "couchdb",
+            "--tag",
+            "minio",
             "--keep-daily",
             str(daily),
             "--keep-monthly",

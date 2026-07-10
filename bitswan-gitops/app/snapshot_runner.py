@@ -139,11 +139,40 @@ async def spawn_create_snapshot(bp: str, stage: str, label: str = "") -> dict:
     db = get_automation_service().live_db(bp) if stage == "production" else None
 
     async def run(progress):
-        return await service.create_snapshot(
+        manifest = await service.create_snapshot(
             bp, stage, label=label, kind="manual", progress=progress, db=db
         )
+        # Mirror manual snapshots off-site (fire-and-forget; no-op without
+        # AOC, and a push failure never affects the snapshot itself). Auto
+        # snapshots are transient and deliberately stay local-only.
+        from app.services import snapshot_offsite
+
+        snapshot_offsite.spawn_push(bp, stage, manifest["id"], manifest)
+        return manifest
 
     _spawn_bg(_run_task(task.task_id, f"Snapshot of {bp} ({stage})", run))
+    return {"task_id": task.task_id}
+
+
+async def spawn_fetch_snapshot(bp: str, stage: str, snapshot_id: str) -> dict:
+    """Reserve bp×stage and materialize an off-site snapshot locally in the
+    background (without restoring it)."""
+    from app.services import snapshot_offsite
+
+    task, conflict = await snapshot_manager.create_task(
+        "fetch", bp, [stage], source_stage=stage, snapshot_id=snapshot_id
+    )
+    if task is None:
+        raise BusyError(
+            f"A snapshot operation is already running for {bp} at {conflict}"
+        )
+
+    async def run(progress):
+        return await snapshot_offsite.fetch_snapshot(
+            bp, stage, snapshot_id, progress=progress
+        )
+
+    _spawn_bg(_run_task(task.task_id, f"Off-site fetch of {bp}/{snapshot_id}", run))
     return {"task_id": task.task_id}
 
 
@@ -163,12 +192,23 @@ async def spawn_restore_snapshot(
     "currently restored" pointer is recorded only after the restore succeeds,
     so a failed restore never marks DR as loaded with this backup.
     """
+    from app.services import snapshot_offsite
     from app.services.snapshot_service import get_snapshot_service
     from app.dependencies import get_automation_service
 
     service = get_snapshot_service()
     # Existence check up-front so the route can 404 before a task is created.
-    service.get_snapshot(bp, source_stage, snapshot_id)
+    # A snapshot whose local files are gone but which is mirrored off-site is
+    # still restorable — it gets fetched inside the task, before anything
+    # destructive happens.
+    local = True
+    try:
+        service.get_snapshot(bp, source_stage, snapshot_id)
+    except LookupError:
+        local = False
+        offsite_entry = snapshot_offsite.offsite_status_for(bp).get(snapshot_id)
+        if not offsite_entry or offsite_entry.get("status") != "synced":
+            raise
 
     stages = sorted({source_stage, target_stage})
     deploying = _bp_deploy_in_flight(get_automation_service(), bp, stages)
@@ -191,6 +231,12 @@ async def spawn_restore_snapshot(
         )
 
     async def run(progress):
+        if not local:
+            # A dead AOC aborts here, before validation and the pre-restore
+            # snapshot — zero side effects.
+            await snapshot_offsite.fetch_snapshot(
+                bp, source_stage, snapshot_id, progress=progress
+            )
         result = await service.restore_snapshot(
             bp, snapshot_id, source_stage, target_stage, progress=progress, db=db
         )
