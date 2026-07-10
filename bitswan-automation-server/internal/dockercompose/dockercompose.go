@@ -20,6 +20,12 @@ const (
 	Linux
 )
 
+// GrypeDBVolume is the shared, external Docker volume that holds grype's
+// vulnerability DB. The automation-server daemon downloads + refreshes it (once
+// per host per day) and every workspace's gitops container mounts it read-only,
+// so the DB download never lands on a workspace's first interactive CVE scan.
+const GrypeDBVolume = "bitswan-grype-db"
+
 // DockerComposeConfig holds the configuration required for creating a docker-compose file
 type DockerComposeConfig struct {
 	GitopsPath         string
@@ -189,6 +195,21 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		wsVolume("git-repos", "/git"),
 		wsVolume("copies", "/workspace-repo/copies"),
 	)
+
+	// Shared, daemon-managed grype vulnerability DB (see daemon.grypeDBVolume).
+	// The automation-server daemon downloads + refreshes the DB once per host per
+	// day into this volume; every workspace mounts it READ-ONLY, so the ~40s DB
+	// download never happens on a workspace's first (interactive) CVE scan, and
+	// no workspace can corrupt or poison the shared DB. gitops points grype at it
+	// via GRYPE_DB_CACHE_DIR and skips `grype db update` (BITSWAN_GRYPE_DB_MANAGED)
+	// since the mount is read-only and the daemon owns updates.
+	gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
+		GrypeDBVolume+":/grype-db:ro",
+	)
+	gitopsService["environment"] = append(gitopsService["environment"].([]string),
+		"GRYPE_DB_CACHE_DIR=/grype-db",
+		"BITSWAN_GRYPE_DB_MANAGED=1",
+	)
 	if hostOs == WindowsMac {
 		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}),
 			gitConfig+":/root/.gitconfig:z",
@@ -224,6 +245,11 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		},
 		"volumes": map[string]interface{}{
 			"bitswan": map[string]interface{}{
+				"external": true,
+			},
+			// Daemon-owned shared grype DB volume (created by the daemon before any
+			// workspace comes up); mounted read-only into gitops above.
+			GrypeDBVolume: map[string]interface{}{
 				"external": true,
 			},
 		},
