@@ -29,7 +29,7 @@
  * moment the product stops telling the operator what it's doing.
  */
 import { appendFileSync, writeFileSync } from 'node:fs';
-import { test, expect, capture, oidcLogin, dashboard, ENV, type FrameOrPage } from '../fixtures/bitswan';
+import { test, expect, capture, captureOverheadMs, oidcLogin, dashboard, ENV, type FrameOrPage } from '../fixtures/bitswan';
 import { BP, WORKSPACE, COMPANY, SECRETS, TEAMMATE, EGRESS_PROBES } from '../scenario';
 
 // ── Snappiness is a product requirement, not a test nicety ──────────────────
@@ -125,15 +125,19 @@ function flagStall(detail: string): void {
 async function chapter(name: string, fn: () => Promise<void>): Promise<void> {
   await test.step(name, async () => {
     const t0 = Date.now();
+    // Snapshot the screenshot-capture overhead accrued so far; the delta over
+    // this chapter is subtracted below so the recorded time is real
+    // click→content-visible latency, not the manual's settle+shutter cost.
+    const capBefore = captureOverheadMs();
     currentChapter = name;
     try {
       await fn();
-      const s = (Date.now() - t0) / 1000;
+      const s = (Date.now() - t0 - (captureOverheadMs() - capBefore)) / 1000;
       recordTiming(name, s);
       // eslint-disable-next-line no-console
       console.log(`✓ chapter "${name}" ${s.toFixed(1)}s`);
     } catch (e) {
-      const s = (Date.now() - t0) / 1000;
+      const s = (Date.now() - t0 - (captureOverheadMs() - capBefore)) / 1000;
       recordTiming(name, s);
       const msg = (e as Error).message.split('\n')[0];
       misses.push(`${name}: ${msg}`);
