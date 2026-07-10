@@ -15,23 +15,23 @@ export interface TerminalProps {
   /** Fires once when the underlying WebSocket reports close. */
   onExit?: () => void;
   /**
-   * Uploads image files somewhere the process on the far end of the PTY can
-   * read them, and resolves to the paths (relative to that process's cwd) to
-   * inject into the terminal as text. The PTY transport is UTF-8 only —
-   * binary frames are flattened server-side — so a file path is the only
-   * form in which an image can cross this socket.
+   * Uploads pasted/dropped files somewhere the process on the far end of the
+   * PTY can read them, and resolves to the paths (relative to that process's
+   * cwd) to inject into the terminal as text. The PTY transport is UTF-8
+   * only — binary frames are flattened server-side — so a file path is the
+   * only form in which a file can cross this socket.
    */
-  onUploadImages?: (files: File[]) => Promise<string[]>;
+  onUploadFiles?: (files: File[]) => Promise<string[]>;
 }
 
-export function Terminal({ wsUrl, onExit, onUploadImages }: TerminalProps) {
+export function Terminal({ wsUrl, onExit, onUploadFiles }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Pin the latest onExit in a ref so the effect doesn't tear down + rebuild
   // the xterm/WebSocket pair every time the parent passes a new closure.
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
-  const onUploadImagesRef = useRef(onUploadImages);
-  onUploadImagesRef.current = onUploadImages;
+  const onUploadFilesRef = useRef(onUploadFiles);
+  onUploadFilesRef.current = onUploadFiles;
 
   // Upload feedback pill. Written from inside the effect closure (setState
   // identity is stable), rendered as an overlay so nothing touches the PTY
@@ -206,10 +206,11 @@ export function Terminal({ wsUrl, onExit, onUploadImages }: TerminalProps) {
       }
     });
 
-    // Image paste / drag-drop. Claude Code accepts images only by file path
-    // in this setup (browser xterm can't do native-terminal image paste), so
-    // the parent-provided uploader puts the file on the agent's filesystem
-    // and we type the resulting path into the PTY on the user's behalf.
+    // File paste / drag-drop. Claude Code takes files (images, PDFs, CSVs,
+    // …) by path in this setup (browser xterm can't do native-terminal file
+    // paste), so the parent-provided uploader puts the file on the agent's
+    // filesystem and we type the resulting path into the PTY on the user's
+    // behalf.
     const settleUpload = (status: 'done' | 'failed') => {
       uploadsInFlightRef.current -= 1;
       if (uploadsInFlightRef.current > 0) return; // another one still running
@@ -222,8 +223,8 @@ export function Terminal({ wsUrl, onExit, onUploadImages }: TerminalProps) {
         status === 'failed' ? 4000 : 2000,
       );
     };
-    const handleImageFiles = (files: File[]) => {
-      const upload = onUploadImagesRef.current;
+    const handleFiles = (files: File[]) => {
+      const upload = onUploadFilesRef.current;
       if (!upload || files.length === 0) return;
       uploadsInFlightRef.current += 1;
       uploadEpochRef.current += 1;
@@ -237,30 +238,27 @@ export function Terminal({ wsUrl, onExit, onUploadImages }: TerminalProps) {
         })
         .catch(() => settleUpload('failed'));
     };
-    // Capture phase so an image paste never reaches xterm's own textarea
-    // paste handler (which would insert the useless "image.png" text). Text
-    // pastes fall through untouched.
+    // Capture phase so a file paste never reaches xterm's own textarea
+    // paste handler (which would insert the useless "image.png"-style text).
+    // Any file kind is taken — the upload API is universal and Claude Code
+    // reads whatever lands by path. Text pastes fall through untouched.
     const onPaste = (e: ClipboardEvent) => {
-      const images = Array.from(e.clipboardData?.items ?? [])
-        .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+      const files = Array.from(e.clipboardData?.items ?? [])
+        .filter((it) => it.kind === 'file')
         .map((it) => it.getAsFile())
         .filter((f): f is File => f !== null);
-      if (images.length === 0) return;
+      if (files.length === 0) return;
       e.preventDefault();
       e.stopPropagation();
-      handleImageFiles(images);
+      handleFiles(files);
     };
     const onDragOver = (e: DragEvent) => {
-      if (onUploadImagesRef.current) e.preventDefault();
+      if (onUploadFilesRef.current) e.preventDefault();
     };
     const onDrop = (e: DragEvent) => {
-      if (!onUploadImagesRef.current) return;
+      if (!onUploadFilesRef.current) return;
       e.preventDefault();
-      handleImageFiles(
-        Array.from(e.dataTransfer?.files ?? []).filter((f) =>
-          f.type.startsWith('image/'),
-        ),
-      );
+      handleFiles(Array.from(e.dataTransfer?.files ?? []));
     };
     host.addEventListener('paste', onPaste, true);
     host.addEventListener('dragover', onDragOver);
@@ -312,10 +310,10 @@ export function Terminal({ wsUrl, onExit, onUploadImages }: TerminalProps) {
           }`}
         >
           {uploadStatus === 'uploading'
-            ? 'Uploading image…'
+            ? 'Uploading file…'
             : uploadStatus === 'done'
-              ? 'Image attached'
-              : 'Image upload failed'}
+              ? 'File attached'
+              : 'File upload failed'}
         </div>
       )}
     </div>

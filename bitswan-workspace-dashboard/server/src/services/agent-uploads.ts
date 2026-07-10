@@ -4,8 +4,8 @@ import type { FastifyInstance } from 'fastify';
 
 /**
  * Periodic sweeper for `.agent-uploads/` directories — the drop target for
- * images pasted into agent terminals (see client SessionTerminal.tsx). The
- * images are consumed by Claude the moment they're referenced (the content
+ * files pasted/dropped into agent terminals (see client SessionTerminal.tsx).
+ * They are consumed by Claude the moment they're referenced (the content
  * is folded into its session transcript), so anything left on disk is pure
  * residue. Files older than the TTL are deleted, and a directory whose last
  * upload has aged out is removed entirely — the next paste recreates it.
@@ -83,7 +83,7 @@ export function startAgentUploadsSweeper(
     try {
       const removed = await sweepAgentUploads(opts.workspaceRoot);
       if (removed > 0) {
-        app.log.info({ removed }, 'agent-uploads sweep removed stale images');
+        app.log.info({ removed }, 'agent-uploads sweep removed stale files');
       }
     } catch (err) {
       app.log.warn({ err }, 'agent-uploads sweep failed');
