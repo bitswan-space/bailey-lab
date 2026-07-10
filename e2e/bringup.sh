@@ -97,13 +97,24 @@ BUILD_PROXY_NET="bitswan-build-proxy"
 docker network inspect "$BUILD_PROXY_NET" >/dev/null 2>&1 || docker network create "$BUILD_PROXY_NET" >/dev/null
 docker rm -f bitswan-goproxy bitswan-npmproxy >/dev/null 2>&1 || true
 # Go module proxy (Athens): read-through (download-mode=sync), disk-cached.
+# ATHENS_STORAGE_TYPE=disk REQUIRES an existing storage root — the image default
+# is a literal `/path/on/disk` placeholder that does not exist, so Athens
+# crash-loops without ATHENS_DISK_STORAGE_ROOT + a volume to back it.
+docker volume create bitswan-athens-storage >/dev/null
 docker run -d --name bitswan-goproxy --network "$BUILD_PROXY_NET" --restart unless-stopped \
-  -e ATHENS_DOWNLOAD_MODE=sync -e ATHENS_STORAGE_TYPE=disk gomods/athens:latest >/dev/null
+  -e ATHENS_DOWNLOAD_MODE=sync -e ATHENS_STORAGE_TYPE=disk \
+  -e ATHENS_DISK_STORAGE_ROOT=/var/lib/athens \
+  -v bitswan-athens-storage:/var/lib/athens \
+  gomods/athens:latest >/dev/null
 # npm registry proxy (Verdaccio): pure read-through, publish disabled (see config).
 docker run -d --name bitswan-npmproxy --network "$BUILD_PROXY_NET" --restart unless-stopped \
   -v "$REPO_ROOT/e2e/build-proxy/verdaccio.yaml:/verdaccio/conf/config.yaml:ro" \
   verdaccio/verdaccio:6 >/dev/null
-BITSWAN_GOPROXY_URL="http://bitswan-goproxy:3000,direct"
+# NOTE the `|` (not `,`): with a comma, Go only falls through to `direct` on an
+# HTTP 404/410 — a DOWN/unreachable Athens (connection refused, 5xx) would fail
+# the build outright. The pipe makes Go fall through to `direct` on ANY error,
+# so a proxy problem degrades to a direct (slower) build instead of a broken one.
+BITSWAN_GOPROXY_URL="http://bitswan-goproxy:3000|direct"
 BITSWAN_NPM_REGISTRY_URL="http://bitswan-npmproxy:4873"
 mark "[1b/7] read-through build package proxies (Athens + Verdaccio)"
 
