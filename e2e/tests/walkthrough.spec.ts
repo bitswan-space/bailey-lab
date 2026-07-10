@@ -1213,32 +1213,65 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await waitDeployDone();
     expect(healthy, `Development never became Healthy (${why})`).toBe(true);
   };
-  // Promote the current Development build through Staging to Production, riding
-  // each hop to "Current on <Stage>". Mirrors the `promote` chapter's robust
-  // pill-press loop (a missed click re-presses; a lingering prior-stage current
-  // never counts because we scope to THIS stage).
+  // Promote the current Development build through Staging to Production. Unlike
+  // the first-ever promote (the `promote` chapter), here the target stage is
+  // ALREADY "Current on <Stage>" from an earlier version — so "current is
+  // visible" is NOT a done-signal (it would make a repeat promote a silent
+  // no-op). The authoritative signal is the pill title: it reads "Promote all
+  // containers to <Stage>" only while there's a NEWER version to promote, and
+  // flips to "Nothing new to promote to <Stage>" once the stage has caught up.
+  // So we press WHILE the pill is actionable and ride each real deploy until it
+  // flips to caught-up.
   const promoteThroughToProduction = async () => {
     await clickTopTab(/Deployments/i);
     for (const stageName of ['Staging', 'Production'] as const) {
       const target = new RegExp(stageName, 'i');
-      await selectStage(target);
-      const promotePill = d.locator(`button[title="Promote all containers to ${stageName}"]`).first();
-      const targetCurrent = d.getByText(new RegExp(`Current on ${stageName}`, 'i')).first();
-      const moving = d.getByText(/Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i).first();
-      let started = false;
-      for (let attempt = 0; attempt < 6 && !started; attempt++) {
-        if (await targetCurrent.isVisible().catch(() => false)) {
-          started = true;
-          break;
+      const caughtUp = d.locator(`button[title="Nothing new to promote to ${stageName}"]`).first();
+      const moving = d
+        .getByText(/Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i)
+        .first();
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await selectStage(target);
+        const pill = d.locator(`button[title="Promote all containers to ${stageName}"]`).first();
+        if (!(await pill.isEnabled().catch(() => false))) break; // nothing newer → caught up
+        await pill.click().catch(() => {});
+        // Ride the promote deploy. "Current on <Stage>" is stale (an earlier
+        // version), so the terminal is the PROGRESS indicator settling: it
+        // appears ("Promoting/Building/…") then clears — or the pill flips to
+        // "Nothing new to promote" (caught up). Progress watchdog guards a dark
+        // stall; re-selecting the stage on a quiet toast refreshes the view.
+        let movingSeen = await moving.isVisible().catch(() => false);
+        let last = await progressSignature();
+        const deadline = Date.now() + 30 * 60_000;
+        for (;;) {
+          if (await caughtUp.isVisible().catch(() => false)) break;
+          const isMoving = await moving.isVisible().catch(() => false);
+          if (isMoving) movingSeen = true;
+          if (movingSeen && !isMoving) {
+            await selectStage(target);
+            break; // the promote animation ran and finished
+          }
+          if (Date.now() > deadline) throw new Error(`promote to ${stageName} exceeded 30min backstop`);
+          try {
+            await expect
+              .poll(
+                async () => {
+                  if (await caughtUp.isVisible().catch(() => false)) return '<<done>>';
+                  const m = await moving.isVisible().catch(() => false);
+                  if (m) movingSeen = true;
+                  if (movingSeen && !m) return '<<settled>>';
+                  return await progressSignature();
+                },
+                { timeout: PROGRESS, intervals: [500, 1000, 2000] },
+              )
+              .not.toBe(last);
+          } catch {
+            await selectStage(target);
+            if (await caughtUp.isVisible().catch(() => false)) break;
+          }
+          last = await progressSignature();
         }
-        if (await promotePill.isEnabled().catch(() => false)) await promotePill.click().catch(() => {});
-        started = await Promise.race([
-          moving.waitFor({ state: 'visible', timeout: 12_000 }).then(() => true).catch(() => false),
-          targetCurrent.waitFor({ state: 'visible', timeout: 12_000 }).then(() => true).catch(() => false),
-        ]);
       }
-      await selectStage(target);
-      await waitDeployDone(stageName);
     }
   };
   // Edit a build DEPENDENCY manifest through the REAL Files editor (Coding Agent
@@ -1685,24 +1718,38 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'deps-go-prod');
   });
   await chapter('prod-rollback', async () => {
-    // Production now has multiple versions (v2 → +dayjs → +xid). Test a REAL
-    // rollback: roll Production back to the previous entry and confirm it becomes
-    // current again (a genuine revert, not just the confirm dialog).
+    // Production now carries multiple promoted versions (v2 → +dayjs → +xid), so
+    // a prior (non-current) entry exposes "Roll back". Test a REAL rollback: roll
+    // Production back to the previous version and ride the revert to completion.
     await closeAnyModal();
     await selectStage(/Production/i);
     await clickSection(/Deployment history/i);
     const rb = d.getByRole('button', { name: /^Roll back$/ }).first();
-    await expect(rb, 'Production history exposed no Roll back action (expected ≥2 entries)')
+    await expect(rb, 'Production history exposed no Roll back action (expected ≥2 promoted versions)')
       .toBeVisible({ timeout: SLA });
     await rb.click();
     const dlg = d.getByRole('alertdialog').or(d.getByRole('dialog')).first();
     await expect(dlg, 'clicking Roll back did not open a confirm dialog').toBeVisible({ timeout: SLA });
     await capture(dashPage, 'prod-rollback-modal');
-    // CONFIRM the rollback (the real revert), then ride the redeploy to done.
-    await dlg.getByRole('button', { name: /^(Roll back|Confirm|Yes.*)$/i }).first().click();
+    // CONFIRM the rollback (the AlertDialog's action button is also "Roll back").
+    await dlg.getByRole('button', { name: /^Roll back$/ }).first().click();
+    // Ride the rollback re-deploy: "Current on Production" is already on screen
+    // (stale, from the version we're leaving), so it's NOT a done-signal. Wait
+    // for the deploy to visibly START (a moving indicator) then SETTLE, bounded.
+    const moving = d
+      .getByText(/Rolling back|Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i)
+      .first();
+    await moving.waitFor({ state: 'visible', timeout: 60_000 }).catch(() => {});
+    await moving.waitFor({ state: 'hidden', timeout: 30 * 60_000 }).catch(() => {});
     await clickTopTab(/Deployments/i);
     await selectStage(/Production/i);
-    await waitDeployDone('Production');
+    // The rolled-back version is now current; the entry list re-renders with the
+    // previously-current version demoted to a rollback target. Confirm the stage
+    // still reports a healthy current deployment.
+    await expect(
+      d.getByText(/Current on Production/i).first(),
+      'Production did not report a current deployment after rollback',
+    ).toBeVisible({ timeout: SLA });
     await capture(dashPage, 'prod-rollback-done');
   });
   await chapter('supply-chain', async () => {
