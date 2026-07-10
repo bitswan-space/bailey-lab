@@ -144,9 +144,12 @@ async def spawn_create_snapshot(bp: str, stage: str, label: str = "") -> dict:
         )
         # Mirror manual snapshots off-site (fire-and-forget; no-op without
         # AOC, and a push failure never affects the snapshot itself). Auto
-        # snapshots are transient and deliberately stay local-only.
+        # snapshots are transient and deliberately stay local-only. The
+        # pending state is recorded BEFORE this task completes so the
+        # dashboard's post-create refresh can't race the background push.
         from app.services import snapshot_offsite
 
+        await snapshot_offsite.mark_pending(bp, stage, manifest["id"], manifest)
         snapshot_offsite.spawn_push(bp, stage, manifest["id"], manifest)
         return manifest
 

@@ -166,6 +166,25 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
     })();
   }, [refresh, watchTask]);
 
+  // The off-site push runs fire-and-forget on the server — its completion
+  // doesn't flow through a watchable task. While any row is still
+  // "uploading…", poll the list until it settles (synced/failed). Capped;
+  // a straggler is retried by the server's nightly job anyway.
+  const pendingPolls = useRef(0);
+  useEffect(() => {
+    const hasPending = (data?.snapshots ?? []).some((s) => s.offsite === 'pending');
+    if (!hasPending) {
+      pendingPolls.current = 0;
+      return;
+    }
+    if (pendingPolls.current >= 45) return; // ~3 minutes
+    const timer = setTimeout(() => {
+      pendingPolls.current += 1;
+      void refresh();
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [data, refresh]);
+
   const bpSlug = data?.bp ?? bp.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const eligibility = data?.eligibility;
   const enabledStages = useMemo(

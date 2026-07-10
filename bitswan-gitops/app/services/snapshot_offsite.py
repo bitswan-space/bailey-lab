@@ -117,6 +117,38 @@ def _snapshot_tags(bp_slug: str, stage: str, snapshot_id: str) -> list[str]:
     ]
 
 
+def _base_entry(stage: str, manifest: dict) -> dict:
+    return {
+        "stage": stage,
+        "pushed_at": None,
+        "restic_id": None,
+        "error": None,
+        "manifest": manifest,
+    }
+
+
+async def mark_pending(
+    bp_slug: str, stage: str, snapshot_id: str, manifest: dict
+) -> None:
+    """Record the `pending` index entry synchronously (awaited inside the
+    create task, before the fire-and-forget push starts), so a list refresh
+    right after creation already shows the snapshot as uploading instead of
+    racing the background push. Never raises; no-op without AOC."""
+    try:
+        if not offsite_enabled():
+            return
+        await _update_entry(
+            bp_slug, snapshot_id, {**_base_entry(stage, manifest), "status": "pending"}
+        )
+    except Exception:
+        logger.exception(
+            "Recording pending off-site state for %s/%s/%s failed",
+            bp_slug,
+            stage,
+            snapshot_id,
+        )
+
+
 def spawn_push(bp_slug: str, stage: str, snapshot_id: str, manifest: dict) -> None:
     """Fire-and-forget off-site push. Never raises; no-op without AOC."""
     if not offsite_enabled():
@@ -142,13 +174,7 @@ async def push_snapshot(
             logger.warning("Off-site push: %s vanished before upload", snap_dir)
             return
 
-        base_entry = {
-            "stage": stage,
-            "pushed_at": None,
-            "restic_id": None,
-            "error": None,
-            "manifest": manifest,
-        }
+        base_entry = _base_entry(stage, manifest)
         await _update_entry(bp_slug, snapshot_id, {**base_entry, "status": "pending"})
 
         config = backup_service.get_backup_config()

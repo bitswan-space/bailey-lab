@@ -85,6 +85,24 @@ def restic_calls(monkeypatch):
 # -- push -----------------------------------------------------------------------
 
 
+async def test_mark_pending_records_entry_before_push(offsite_env, local_snapshot):
+    # Awaited inside the create task so the dashboard's post-create refresh
+    # sees "pending" instead of racing the background push.
+    await snapshot_offsite.mark_pending(BP, STAGE, SNAP_ID, _manifest())
+    entry = snapshot_offsite.offsite_status_for(BP)[SNAP_ID]
+    assert entry["status"] == "pending"
+    assert entry["manifest"]["id"] == SNAP_ID
+
+
+async def test_mark_pending_noop_without_aoc(monkeypatch, tmp_path):
+    monkeypatch.delenv("BITSWAN_AOC_URL", raising=False)
+    monkeypatch.delenv("BITSWAN_AOC_TOKEN", raising=False)
+    monkeypatch.delenv("BITSWAN_WORKSPACE_ID", raising=False)
+    monkeypatch.setenv("BITSWAN_GITOPS_DIR", str(tmp_path))
+    await snapshot_offsite.mark_pending(BP, STAGE, SNAP_ID, _manifest())
+    assert snapshot_offsite.offsite_status_for(BP) == {}
+
+
 async def test_push_tags_and_index(offsite_env, local_snapshot, restic_calls):
     await snapshot_offsite.push_snapshot(BP, STAGE, SNAP_ID, _manifest())
 
