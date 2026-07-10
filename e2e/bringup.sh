@@ -163,15 +163,22 @@ mark "[2/7] daemon + traefik ingress"
   # download`) — building them here once means create-bp's build is a layer-cache
   # hit instead of a cold ~60-90s install. Throwaway tags; we only want the
   # cached layers. Best-effort — a miss just falls back to a cold build.
-  # Build through the read-through proxies (same --network + --build-arg the
-  # driver passes at create-bp time) so this prewarm ALSO populates the Athens /
-  # Verdaccio caches from upstream. Then create-bp's build reads npm/Go deps from
-  # the warm local proxy instead of the internet.
+  # Build through the read-through proxies with EXACTLY the same --network +
+  # --build-arg the driver passes at create-bp time. This matters for two
+  # reasons: (1) it populates the Athens / Verdaccio caches from upstream; (2)
+  # BuildKit folds the GOPROXY / NPM_CONFIG_REGISTRY build-args into the cache
+  # key of the `RUN go mod download` / `RUN npm install` layers, so the per-BP
+  # build only gets a LAYER-cache hit (skipping the download entirely) when its
+  # args match this prewarm's byte-for-byte. We deliberately do NOT fall back to
+  # an argless build on failure: that would bake the warm layers under a
+  # different cache key and guarantee a miss on the real build. `|direct` in
+  # GOPROXY already makes this robust to a down proxy, so the proxy args are
+  # always the right ones to prewarm with.
   fe="$REPO_ROOT/bitswan-gitops/examples/business-process/frontend/image"
   be="$REPO_ROOT/bitswan-gitops/examples/business-process/backend/image"
   pxy=(--network "$BUILD_PROXY_NET" --build-arg "GOPROXY=$BITSWAN_GOPROXY_URL" --build-arg "NPM_CONFIG_REGISTRY=$BITSWAN_NPM_REGISTRY_URL")
-  [ -f "$fe/Dockerfile" ] && { docker build "${pxy[@]}" -t bitswan/bp-frontend-template:warm "$fe" >/dev/null 2>&1 || docker build -t bitswan/bp-frontend-template:warm "$fe" >/dev/null 2>&1 || true; }
-  [ -f "$be/Dockerfile" ] && { docker build "${pxy[@]}" -t bitswan/bp-backend-template:warm "$be" >/dev/null 2>&1 || docker build -t bitswan/bp-backend-template:warm "$be" >/dev/null 2>&1 || true; }
+  [ -f "$fe/Dockerfile" ] && { docker build "${pxy[@]}" -t bitswan/bp-frontend-template:warm "$fe" >/dev/null 2>&1 || echo "  prewarm frontend build failed (create-bp will build cold)"; }
+  [ -f "$be/Dockerfile" ] && { docker build "${pxy[@]}" -t bitswan/bp-backend-template:warm "$be" >/dev/null 2>&1 || echo "  prewarm backend build failed (create-bp will build cold)"; }
 ) &
 PREWARM_PID=$!
 
