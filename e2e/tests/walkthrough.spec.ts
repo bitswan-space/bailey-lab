@@ -1019,10 +1019,24 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       for (let attempt = 0; attempt < 3; attempt++) {
         await field.fill(text);
         await field.press('Enter');
-        const landed = await row
+        let landed = await row
           .waitFor({ state: 'visible', timeout: 12_000 })
           .then(() => true)
           .catch(() => false);
+        // Seeing the text is NOT enough: Enter renders the committed draft
+        // OPTIMISTICALLY, before the persist round-trip returns — so the row
+        // "lands" instantly even when the previous row's round-trip is about
+        // to refresh the list and clobber it back to "(no description)"
+        // (exactly how the d292ca0+main run failed: visible in ~2s, gone for
+        // the rest of the 60s assert). Only trust text that SURVIVES the
+        // refresh window: watch for the clobber; if it never comes, it stuck.
+        if (landed) {
+          const clobbered = await row
+            .waitFor({ state: 'hidden', timeout: 5_000 })
+            .then(() => true)
+            .catch(() => false);
+          landed = !clobbered;
+        }
         if (landed) break;
         await d.getByText('(no description)', { exact: false }).first().dblclick();
         await field.waitFor({ state: 'visible', timeout: SLA });
@@ -1363,7 +1377,18 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // marker also makes the whole edit idempotent: already present ⇒ skip.)
     const v2Mark = editor.getByText(/Manager approval tier \(v2\)/i).first();
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (await v2Mark.isVisible().catch(() => false)) break;
+      if (await v2Mark.isVisible().catch(() => false)) {
+        // Seeing the heading is not enough — the doc shows the draft before
+        // the save round-trip settles (same optimistic-render trap as the
+        // requirements rows). Only trust a marker that SURVIVES the remount
+        // window: a status refresh remounts ProseMirror from the server copy,
+        // dropping anything that never actually saved.
+        const clobbered = await v2Mark
+          .waitFor({ state: 'hidden', timeout: 5_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!clobbered) break;
+      }
       // Click near the top-left of the editor, NOT its center: the doc embeds the
       // flowchart drawn earlier, and the pane's center can land on that mermaid
       // preview — whose whole surface is click-to-edit, so a center click opens
