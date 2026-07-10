@@ -242,3 +242,43 @@ describe('invite intent', () => {
     expect(sessionStorage.getItem('bailey_invite_token')).toBeNull();
   });
 });
+
+describe('Handbook view links (issue #45)', () => {
+  // The console runs on the inner subdomain inside the chrome-wrap iframe. The
+  // "Read the handbook" tab must open the PUBLIC (outer) host so the daemon
+  // dresses it with the Bailey chrome — a relative href would surface the bare
+  // inner origin. The PDF download stays inner-relative (the outer host 404s
+  // non-HTML GETs).
+  it('points the HTML link at the outer host and keeps the PDF inner-relative', async () => {
+    Object.defineProperty(window, 'location', {
+      value: {
+        search: '', pathname: '/handbook', hostname: 'bailey--inner.example.test',
+        protocol: 'https:', port: '', assign: vi.fn(), reload: vi.fn(),
+      },
+      configurable: true, writable: true,
+    });
+    installFetch(fullRoutes());
+    render(<App />);
+    const read = await screen.findByText('Read the handbook');
+    expect(read.closest('a').getAttribute('href'))
+      .toBe('https://bailey.example.test/handbook/handbook.html');
+    const pdf = screen.getByText('Download PDF').closest('a');
+    expect(pdf.getAttribute('href')).toBe('/handbook/handbook.pdf');
+    expect(pdf.hasAttribute('download')).toBe(true);
+  });
+
+  it('keeps a non-standard port when building the outer URL', async () => {
+    Object.defineProperty(window, 'location', {
+      value: {
+        search: '', pathname: '/handbook', hostname: 'bailey--inner.example.test',
+        protocol: 'https:', port: '8443', assign: vi.fn(), reload: vi.fn(),
+      },
+      configurable: true, writable: true,
+    });
+    installFetch(fullRoutes());
+    render(<App />);
+    const read = await screen.findByText('Read the handbook');
+    expect(read.closest('a').getAttribute('href'))
+      .toBe('https://bailey.example.test:8443/handbook/handbook.html');
+  });
+});
