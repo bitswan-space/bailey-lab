@@ -121,7 +121,12 @@ export function handleTerminalConnection(
 
   socket.on('message', (data: Buffer, isBinary: boolean) => {
     if (isBinary) {
-      term.write(data.toString('utf8'));
+      try {
+        term.write(data.toString('utf8'));
+      } catch {
+        // pty already exited; onExit will close the socket
+        return;
+      }
       armIdle();
       return;
     }
@@ -134,7 +139,11 @@ export function handleTerminalConnection(
     switch (msg.type) {
       case 'resize':
         if (typeof msg.cols === 'number' && typeof msg.rows === 'number') {
-          term.resize(msg.cols, msg.rows);
+          try {
+            term.resize(msg.cols, msg.rows);
+          } catch {
+            // resize can race pty exit (ioctl EBADF); ignore
+          }
         }
         return;
       case 'ping':
