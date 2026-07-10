@@ -39,6 +39,17 @@ export const ENV = {
 // product interaction, so it cannot mask slowness in the product itself.
 export const SETTLE_MS = Number(process.env.E2E_SETTLE_MS) || 650;
 
+// Total wall-time spent inside capture() (the SETTLE_MS settle + fonts wait +
+// screenshot write). This is pure MANUAL-SCREENSHOT overhead, not product
+// latency — chapter() subtracts it so the interaction KPI reflects real
+// click→content-visible time, not how long a PNG took to settle+shoot. Exposed
+// as a getter (not a bare `let` export) so cross-module reads always see the
+// live value regardless of how the test runner transpiles ES modules.
+let _captureOverheadMs = 0;
+export function captureOverheadMs(): number {
+  return _captureOverheadMs;
+}
+
 /** Run a host shell command (for asserting real backend effects). */
 export function sh(cmd: string): string {
   return execSync(cmd, { encoding: 'utf8', shell: '/bin/bash' });
@@ -54,6 +65,7 @@ export async function capture(
   slotId: string,
   opts: { fullPage?: boolean; locator?: Locator } = {},
 ): Promise<void> {
+  const __capStart = Date.now();
   // Callers wait on a specific readiness signal (element visible/hidden, a
   // deploy Healthy) before capturing, but a brief settle on TOP of that yields a
   // much cleaner manual: it lets the last frame of a transition (panel mount,
@@ -65,6 +77,7 @@ export async function capture(
   const path = join(SHOTS_DIR, `${slotId}.png`);
   if (opts.locator) await opts.locator.screenshot({ path });
   else await page.screenshot({ path, fullPage: !!opts.fullPage });
+  _captureOverheadMs += Date.now() - __capStart;
   // eslint-disable-next-line no-console
   console.log(`📸 captured ${slotId}`);
 }
