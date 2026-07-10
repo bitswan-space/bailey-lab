@@ -117,8 +117,9 @@ export function BpSelector({
             visible.map((b) => {
               const active = b.id === activeBpId;
               const Icon = active ? FolderOpen : Folder;
-              // The row select and the rename pencil are sibling buttons in
-              // one hover group — buttons can't nest.
+              // The row select, the rename pencil, and the checkmark are
+              // sibling elements in one row — buttons can't nest. The pencil
+              // and checkmark only show on the selected BP, pencil first.
               return (
                 <div
                   key={b.id}
@@ -144,21 +145,23 @@ export function BpSelector({
                     <span className="min-w-0 flex-1 truncate text-[13px]">
                       {b.displayName}
                     </span>
-                    {active && (
-                      <Check className="size-3.5 shrink-0 text-primary" aria-hidden />
-                    )}
                   </button>
-                  <button
-                    type="button"
-                    title={`Rename "${b.displayName}"`}
-                    onClick={() => {
-                      setOpen(false);
-                      onRenameBp(b);
-                    }}
-                    className="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-                  >
-                    <Pencil className="size-3.5" aria-hidden />
-                  </button>
+                  {active && (
+                    <>
+                      <button
+                        type="button"
+                        title={`Rename "${b.displayName}"`}
+                        onClick={() => {
+                          setOpen(false);
+                          onRenameBp(b);
+                        }}
+                        className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      >
+                        <Pencil className="size-3.5" aria-hidden />
+                      </button>
+                      <Check className="mr-2 size-3.5 shrink-0 text-primary" aria-hidden />
+                    </>
+                  )}
                 </div>
               );
             })
