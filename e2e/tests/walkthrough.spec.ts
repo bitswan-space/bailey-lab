@@ -90,7 +90,7 @@ const timings: { name: string; seconds: number }[] = [];
 // so its ~70s chapter total is NOT a single user-interaction latency (it's the
 // sum of the whole spree + editor open/persist overhead). Excluded so it doesn't
 // falsely dominate the interaction max/p95.
-const LONG_OP = /workspace|deploy|promote|sync|snapshot|backup|recover|disaster|coding.?agent|wake|first.?load|build|live-?dev|create-bp|supply-chain|cve|scan|flowchart/i;
+const LONG_OP = /workspace|deploy|promote|sync|snapshot|backup|recover|disaster|coding.?agent|wake|first.?load|build|live-?dev|create-bp|supply-chain|cve|scan|flowchart|deps-|prod-rollback/i;
 function isInteractive(name: string): boolean {
   return !LONG_OP.test(name);
 }
@@ -1267,6 +1267,108 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       if (Date.now() > armDeadline) break; // fall through to the caller's hard assert
     }
   };
+  // ── Reusable pieces for the dependency edit→redeploy→production cycles below ──
+  // Ship whatever is staged on the copy to Development and wait until the
+  // Development stage is Healthy (the deploy-v2 press-while-actionable shape,
+  // factored out). Fails loudly if Development never goes Healthy.
+  const deployToDevHealthy = async (why: string) => {
+    const btn = d.getByRole('button', { name: /^Sync & Deploy$|Working/ }).last();
+    await expect(btn, `Sync & Deploy never armed (${why})`).toBeEnabled({ timeout: SLA });
+    let healthy = false;
+    for (let attempt = 0; attempt < 3 && !healthy; attempt++) {
+      await pressSyncDeploy();
+      await clickTopTab(/Deployments/i);
+      await selectStage(/Development/i);
+      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+      const none = d.getByText(/Not deployed yet/i).first();
+      await Promise.race([
+        ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+        none.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+      ]);
+      healthy = await ok.isVisible().catch(() => false);
+      if (!healthy) {
+        await clickTopTab(/Sync & Deploy/i);
+        if (!(await btn.isEnabled().catch(() => false))) break;
+      }
+    }
+    await clickTopTab(/Deployments/i);
+    await selectStage(/Development/i);
+    await waitDeployDone();
+    expect(healthy, `Development never became Healthy (${why})`).toBe(true);
+  };
+  // Promote the current Development build through Staging to Production, riding
+  // each hop to "Current on <Stage>". Mirrors the `promote` chapter's robust
+  // pill-press loop (a missed click re-presses; a lingering prior-stage current
+  // never counts because we scope to THIS stage).
+  const promoteThroughToProduction = async () => {
+    await clickTopTab(/Deployments/i);
+    for (const stageName of ['Staging', 'Production'] as const) {
+      const target = new RegExp(stageName, 'i');
+      await selectStage(target);
+      const promotePill = d.locator(`button[title="Promote all containers to ${stageName}"]`).first();
+      const targetCurrent = d.getByText(new RegExp(`Current on ${stageName}`, 'i')).first();
+      const moving = d.getByText(/Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i).first();
+      let started = false;
+      for (let attempt = 0; attempt < 6 && !started; attempt++) {
+        if (await targetCurrent.isVisible().catch(() => false)) {
+          started = true;
+          break;
+        }
+        if (await promotePill.isEnabled().catch(() => false)) await promotePill.click().catch(() => {});
+        started = await Promise.race([
+          moving.waitFor({ state: 'visible', timeout: 12_000 }).then(() => true).catch(() => false),
+          targetCurrent.waitFor({ state: 'visible', timeout: 12_000 }).then(() => true).catch(() => false),
+        ]);
+      }
+      await selectStage(target);
+      await waitDeployDone(stageName);
+    }
+  };
+  // Edit a build DEPENDENCY manifest through the REAL Files editor (Coding Agent
+  // → Files). Editing an image/ manifest (separate from the app's own manifest —
+  // it only feeds the base image's `npm install` / `go mod download`) forces a
+  // base-image REBUILD that pulls the changed dependency set through the proxy:
+  // new packages fetched from upstream + cached, previously-seen packages served
+  // from the cache. The app's own build (vite/go build) is unaffected, so an
+  // added-but-unused dependency can't break the deploy.
+  const editDependencyManifest = async (opts: {
+    searchTerm: string;
+    pathSuffix: string;
+    marker: RegExp;
+    transform: (cur: string) => string;
+    added: string;
+  }) => {
+    await clickTopTab(/Coding Agent/i);
+    await d.getByRole('button', { name: /^Files$/ }).first().click();
+    const search = d.getByPlaceholder(/Search in files/i).first();
+    await search.waitFor({ state: 'visible', timeout: SLA });
+    await search.fill(opts.searchTerm);
+    // Open the target file by its path suffix (the search-result header carries
+    // title={fullPath}); this disambiguates the image/ manifest from the app's.
+    const fileBtn = d.locator(`button[title$="${opts.pathSuffix}"]`).first();
+    await fileBtn.waitFor({ state: 'visible', timeout: SLA });
+    await fileBtn.click();
+    const editor = d.locator('.cm-editor').first();
+    const cm = editor.locator('.cm-content').first();
+    await cm.waitFor({ state: 'visible', timeout: SLA });
+    // Read the buffer from the rendered lines (these manifests are small, fully
+    // rendered — not virtualised), transform it, and assert it changed.
+    const cur = (await editor.locator('.cm-line').allTextContents()).join('\n');
+    expect(cur, `opened ${opts.pathSuffix} but it did not look like the expected manifest`).toMatch(opts.marker);
+    const next = opts.transform(cur);
+    expect(next, `dependency transform did not change ${opts.pathSuffix}`).not.toBe(cur);
+    // Replace the whole buffer paste-style: insertText bypasses per-key handlers,
+    // so CodeMirror's auto-close-brackets / auto-indent can't mangle the JSON /
+    // go.mod the way character-by-character typing would.
+    await cm.click();
+    await dashPage.keyboard.press('ControlOrMeta+a');
+    await dashPage.keyboard.insertText(next);
+    await expect(editor, `edit did not add ${opts.added} to ${opts.pathSuffix}`)
+      .toContainText(opts.added, { timeout: SLA });
+    await dashPage.keyboard.press('ControlOrMeta+s');
+    await expect(d.getByText(/^Saved \d/).first(), `${opts.pathSuffix} never reported Saved after Cmd+S`)
+      .toBeVisible({ timeout: SLA });
+  };
   await chapter('deploy', async () => {
     await clickTopTab(/Sync & Deploy/i);
     // Gate on there being something to ship: the BP shows pending work
@@ -1686,6 +1788,76 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     } catch {
       /* pipeline not visible — leave the slot to its honest "capture pending" placeholder */
     }
+  });
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Two dependency edit → redeploy → production cycles, then a REAL rollback.
+  //
+  // Production now carries v2. A real operator keeps shipping: they change a
+  // build DEPENDENCY and roll it out to production. We do that TWICE — once for
+  // npm, once for Go — so the change forces a real IMAGE REBUILD each time and
+  // the automation server's read-through package proxy is exercised end to end:
+  //   • the NEW package (dayjs / rs-xid) is a cache MISS → fetched from upstream
+  //     once and cached;
+  //   • every OTHER dependency the rebuild needs is a cache HIT → served locally.
+  // Editing the image/ manifest (not the app's) guarantees the base image's
+  // `npm install` / `go mod download` re-runs with the changed set while the
+  // app's own build is untouched, so an unused-but-added dependency can't break
+  // the deploy. Each cycle goes dev → staging → production. Then we roll
+  // Production back to the previous version and confirm the revert.
+  // ════════════════════════════════════════════════════════════════════════
+  await chapter('deps-npm', async () => {
+    await editDependencyManifest({
+      searchTerm: '"react"',
+      pathSuffix: '/frontend/image/package.json',
+      marker: /"dependencies"\s*:/,
+      transform: (cur) => cur.replace(/("dependencies"\s*:\s*\{)/, '$1\n    "dayjs": "^1.11.13",'),
+      added: 'dayjs',
+    });
+    await armAfterEdit();
+    await deployToDevHealthy('deps-npm: dayjs added to the frontend image manifest');
+    await promoteThroughToProduction();
+    await selectStage(/Production/i);
+    await waitDeployDone('Production');
+    await capture(dashPage, 'deps-npm-prod');
+  });
+  await chapter('deps-go', async () => {
+    await editDependencyManifest({
+      searchTerm: 'gorm',
+      pathSuffix: '/backend/image/go.mod',
+      marker: /require \(/,
+      // Add rs/xid to the FIRST (direct) require block — a module NOT already in
+      // the template's deps, so `go mod download` fetches it fresh through Athens.
+      transform: (cur) => cur.replace(/require \(\n/, 'require (\n\tgithub.com/rs/xid v1.6.0\n'),
+      added: 'github.com/rs/xid',
+    });
+    await armAfterEdit();
+    await deployToDevHealthy('deps-go: rs/xid added to the backend image manifest');
+    await promoteThroughToProduction();
+    await selectStage(/Production/i);
+    await waitDeployDone('Production');
+    await capture(dashPage, 'deps-go-prod');
+  });
+  await chapter('prod-rollback', async () => {
+    // Production now has multiple versions (v2 → +dayjs → +xid). Test a REAL
+    // rollback: roll Production back to the previous entry and confirm it becomes
+    // current again (a genuine revert, not just the confirm dialog).
+    await closeAnyModal();
+    await selectStage(/Production/i);
+    await clickSection(/Deployment history/i);
+    const rb = d.getByRole('button', { name: /^Roll back$/ }).first();
+    await expect(rb, 'Production history exposed no Roll back action (expected ≥2 entries)')
+      .toBeVisible({ timeout: SLA });
+    await rb.click();
+    const dlg = d.getByRole('alertdialog').or(d.getByRole('dialog')).first();
+    await expect(dlg, 'clicking Roll back did not open a confirm dialog').toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'prod-rollback-modal');
+    // CONFIRM the rollback (the real revert), then ride the redeploy to done.
+    await dlg.getByRole('button', { name: /^(Roll back|Confirm|Yes.*)$/i }).first().click();
+    await clickTopTab(/Deployments/i);
+    await selectStage(/Production/i);
+    await waitDeployDone('Production');
+    await capture(dashPage, 'prod-rollback-done');
   });
   await chapter('supply-chain', async () => {
     await selectStage(/Production/i);
