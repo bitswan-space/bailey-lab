@@ -243,3 +243,173 @@ def test_config_file_never_contains_credentials(aoc_env):
         "enabled": True,
         "retention": {"daily": 30, "monthly": 12},
     }
+
+
+# -- whole-server run_backup: stage-aware coverage -----------------------------
+
+
+class _FakeContainer:
+    def __init__(self, name, state="running"):
+        self.name = name
+        self.state = state
+
+
+class _FakeDriver:
+    """Driver whose container_list/exec serve the postgres dump path."""
+
+    def __init__(self, containers, dump=b"-- dump\n"):
+        self.containers = containers
+        self.dump = dump
+        self.execs = []
+
+    async def container_list(self, ctx):
+        return self.containers
+
+    async def exec(self, ctx, spec, on_stdout=None):
+        self.execs.append(spec)
+        if on_stdout:
+            await on_stdout(self.dump)
+        return 0
+
+
+class _FakeService:
+    """infra_service.get_service stand-in: enabled per (type, stage)."""
+
+    def __init__(self, service_type, workspace, stage, enabled_map):
+        suffix = "" if stage == "production" else f"-{stage}"
+        self.container_name = f"{workspace}__{service_type}{suffix}"
+        self._enabled = (service_type, stage) in enabled_map
+        self._type = service_type
+        self._stage = stage
+
+    def is_enabled(self):
+        return self._enabled
+
+    async def backup(self, backup_dir):
+        import os as _os
+
+        path = _os.path.join(backup_dir, f"{self._type}-backup-20260710-120000.tar.gz")
+        with open(path, "wb") as f:
+            f.write(f"{self._type}-{self._stage}".encode())
+        return {"backup_path": path}
+
+
+async def test_run_backup_is_stage_aware(aoc_env, monkeypatch, tmp_path):
+    """Services enabled on dev/staging are backed up too — not just
+    production — and the gitops worktree is covered alongside the
+    workspace repo."""
+
+    backup_service._save_key("k")
+
+    workspace_repo = tmp_path / "workspace-repo"
+    (workspace_repo / "copies" / "main" / "bp").mkdir(parents=True)
+    (workspace_repo / "copies" / "main" / "bp" / "app.py").write_text("x")
+    monkeypatch.setenv("BITSWAN_WORKSPACE_REPO_DIR", str(workspace_repo))
+    monkeypatch.setenv("BITSWAN_WORKSPACE_NAME", "dev")
+
+    gitops_worktree = tmp_path / "gitops"
+    gitops_worktree.mkdir()
+    (gitops_worktree / "bitswan.yaml").write_text("deployments: {}\n")
+
+    # postgres + minio enabled on dev only; couchdb nowhere (like the
+    # on-demand dev workspace that motivated this).
+    enabled = {("postgres", "dev"), ("minio", "dev")}
+    import app.services.infra_service as infra_mod
+
+    monkeypatch.setattr(
+        infra_mod,
+        "get_service",
+        lambda t, ws, stage="production", **kw: _FakeService(t, ws, stage, enabled),
+    )
+    import app.services.bp_databases as bpdb_mod
+
+    monkeypatch.setattr(
+        bpdb_mod, "get_service_secrets", lambda t, s: {"POSTGRES_USER": "pguser"}
+    )
+
+    driver = _FakeDriver([_FakeContainer("dev__postgres-dev")])
+    monkeypatch.setattr(
+        backup_service, "_driver_and_ctx", lambda ws: (driver, object())
+    )
+
+    restic_calls = []
+
+    async def fake_run_restic(args, config, timeout=3600):
+        restic_calls.append(list(args))
+        return "snapshot abc123 saved", "", 0
+
+    monkeypatch.setattr(backup_service, "_run_restic", fake_run_restic)
+
+    results = await backup_service.run_backup({"enabled": True, "retention": {}})
+
+    backups = [c for c in restic_calls if c[0] == "backup"]
+    joined_all = [" ".join(c) for c in backups]
+
+    # workspace repo + gitops worktree
+    assert any(str(workspace_repo) in j and "--tag workspace" in j for j in joined_all)
+    assert any(str(gitops_worktree) in j and "--tag gitops" in j for j in joined_all)
+
+    # dev-stage postgres dump (correct user, stage tag)
+    assert driver.execs and driver.execs[0].cmd == ["pg_dumpall", "-U", "pguser"]
+    assert any("--tag postgres" in j and "--tag stage:dev" in j for j in joined_all)
+
+    # dev-stage minio tarball; couchdb skipped everywhere
+    assert any("--tag minio" in j and "--tag stage:dev" in j for j in joined_all)
+    assert not any("--tag couchdb" in j for j in joined_all)
+
+    assert results["postgres"]["success"] is True
+    assert "dev:" in results["postgres"]["output"]
+    assert results["couchdb"]["output"] == "CouchDB not enabled on any stage, skipped"
+    assert results["minio"]["success"] is True
+    assert results["workspace"]["success"] is True
+    assert results["gitops"]["success"] is True
+    assert backup_service.get_last_run()["ok"] is True
+
+    # exactly one retention pass at the end
+    forgets = [c for c in restic_calls if c[0] == "forget"]
+    assert len(forgets) == 1
+
+
+async def test_run_backup_stage_failure_is_isolated(aoc_env, monkeypatch, tmp_path):
+    """One stage failing marks the service failed but doesn't abort the run."""
+    monkeypatch.setenv("BITSWAN_WORKSPACE_REPO_DIR", str(tmp_path / "nope"))
+    monkeypatch.setenv("BITSWAN_WORKSPACE_NAME", "dev")
+
+    enabled = {("minio", "dev"), ("minio", "production")}
+
+    class _ExplodingService(_FakeService):
+        async def backup(self, backup_dir):
+            if self._stage == "dev":
+                raise RuntimeError("mc mirror blew up")
+            return await super().backup(backup_dir)
+
+    import app.services.infra_service as infra_mod
+
+    monkeypatch.setattr(
+        infra_mod,
+        "get_service",
+        lambda t, ws, stage="production", **kw: _ExplodingService(
+            t, ws, stage, enabled
+        ),
+    )
+
+    restic_calls = []
+
+    async def fake_run_restic(args, config, timeout=3600):
+        restic_calls.append(list(args))
+        return "ok", "", 0
+
+    monkeypatch.setattr(backup_service, "_run_restic", fake_run_restic)
+
+    results = await backup_service.run_backup({"enabled": True, "retention": {}})
+
+    assert results["minio"]["success"] is False
+    assert "dev: mc mirror blew up" in results["minio"]["output"]
+    assert "production: ok" in results["minio"]["output"]
+    # production minio still got backed up despite the dev failure
+    assert any(
+        "--tag minio" in " ".join(c) and "--tag stage:production" in " ".join(c)
+        for c in restic_calls
+        if c[0] == "backup"
+    )
+    assert backup_service.get_last_run()["ok"] is False

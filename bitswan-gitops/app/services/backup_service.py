@@ -1,10 +1,11 @@
 """Backup service using restic through the AOC backup proxy.
 
 Backs up:
-- Postgres production databases (pg_dump piped to restic)
-- CouchDB production databases (JSON export)
-- MinIO production buckets
-- Workspace files (/workspace-repo)
+- Workspace files (/workspace-repo: BP source + copies, incl. git history)
+- The gitops worktree (bitswan.yaml, deployment state, its git history)
+- Postgres databases (pg_dumpall), per enabled stage
+- CouchDB databases (JSON export), per enabled stage
+- MinIO buckets, per enabled stage
 
 restic talks to AOC's restic REST-server endpoints
 (/api/automation_server/workspaces/{id}/backups/repo/), which proxy
@@ -309,41 +310,72 @@ def _write_last_run(record: dict) -> None:
         logger.warning("Failed to write backup last-run record: %s", e)
 
 
+async def _backup_dir(config: dict, workspace_name: str, path: str, tag: str) -> dict:
+    """restic backup of one directory (git worktrees included — .git dirs
+    are just files to restic, so full history travels with them)."""
+    if not os.path.isdir(path):
+        return {"success": True, "output": f"{path} missing, skipped"}
+    stdout, stderr, rc = await _run_restic(
+        ["backup", "--tag", tag, "--tag", workspace_name, path], config
+    )
+    return {"success": rc == 0, "output": stdout.strip() or stderr.strip()}
+
+
+def _aggregate_stages(service_label: str, per_stage: dict[str, dict]) -> dict:
+    """One result entry per service, summarizing every backed-up stage."""
+    if not per_stage:
+        return {
+            "success": True,
+            "output": f"{service_label} not enabled on any stage, skipped",
+        }
+    lines = []
+    for stage in sorted(per_stage):
+        result = per_stage[stage]
+        # restic output is multi-line; keep the informative last line.
+        tail = (result.get("output") or "").strip().splitlines()
+        lines.append(f"{stage}: {tail[-1] if tail else 'ok'}")
+    return {
+        "success": all(r.get("success") for r in per_stage.values()),
+        "output": "; ".join(lines),
+    }
+
+
 async def run_backup(config: dict) -> dict:
-    """Run a full backup of all production data."""
+    """Run a full off-site backup of the workspace.
+
+    Covers: the workspace repo (BP source + copies, incl. their git
+    history), the gitops worktree (bitswan.yaml, deployment state, its
+    git history), and every data service (Postgres/CouchDB/MinIO) on
+    EVERY stage where it is enabled — dev/staging services provisioned
+    on demand are covered, not just production."""
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
     results = {}
     timestamp = datetime.now(timezone.utc).isoformat()
     ok = False
 
     try:
-        # 1. Backup workspace files
+        # 1. Workspace files: BP source and copies working trees.
         workspace_dir = os.environ.get("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
-        if os.path.isdir(workspace_dir):
-            stdout, stderr, rc = await _run_restic(
-                [
-                    "backup",
-                    "--tag",
-                    "workspace",
-                    "--tag",
-                    workspace_name,
-                    workspace_dir,
-                ],
-                config,
-            )
-            results["workspace"] = {
-                "success": rc == 0,
-                "output": stdout.strip() or stderr.strip(),
-            }
+        results["workspace"] = await _backup_dir(
+            config, workspace_name, workspace_dir, "workspace"
+        )
 
-        # 2. Backup Postgres via pg_dump piped through restic
+        # 2. The gitops worktree: bitswan.yaml (deployments, blue-green
+        # state, audit log), image/build state — versioned in its own git.
+        # Secrets and local snapshot artifacts live OUTSIDE this dir and are
+        # deliberately not included (snapshots are mirrored per-snapshot by
+        # snapshot_offsite; secrets never leave the server).
+        results["gitops"] = await _backup_dir(
+            config, workspace_name, os.path.join(gitops_root, "gitops"), "gitops"
+        )
+
+        # 3-5. Data services, per enabled stage.
         results["postgres"] = await _backup_postgres(config, workspace_name)
-
-        # 3. Backup CouchDB via JSON export
-        results["couchdb"] = await _backup_couchdb(config, workspace_name)
-
-        # 4. Backup MinIO via mc mirror to temp dir then restic
-        results["minio"] = await _backup_minio(config, workspace_name)
+        results["couchdb"] = await _backup_service_stages(
+            config, workspace_name, "couchdb"
+        )
+        results["minio"] = await _backup_service_stages(config, workspace_name, "minio")
 
         # Apply retention policy
         await _apply_retention(config)
@@ -384,16 +416,39 @@ async def _container_running(client, ctx, name: str) -> bool:
 
 
 async def _backup_postgres(config: dict, workspace_name: str) -> dict:
-    """Backup Postgres production database (pg_dumpall via the driver's exec)."""
+    """Backup Postgres (pg_dumpall via the driver's exec), per enabled stage."""
+    from app.services.infra_service import get_service
+    from app.utils import SERVICE_REALMS
+
+    per_stage: dict[str, dict] = {}
+    for stage in sorted(SERVICE_REALMS):
+        try:
+            svc = get_service("postgres", workspace_name, stage=stage)
+            if not svc.is_enabled():
+                continue
+            per_stage[stage] = await _backup_postgres_stage(
+                config, workspace_name, stage, svc.container_name
+            )
+        except Exception as e:
+            per_stage[stage] = {"success": False, "output": str(e)}
+    return _aggregate_stages("Postgres", per_stage)
+
+
+async def _backup_postgres_stage(
+    config: dict, workspace_name: str, stage: str, container_name: str
+) -> dict:
+    from app.services.bp_databases import get_service_secrets
     from app.services.infra_driver_client import ExecSpec, InfraDriverError
 
     client, ctx = _driver_and_ctx(workspace_name)
-    container_name = f"{workspace_name}__postgres"
 
     try:
         if not await _container_running(client, ctx, container_name):
-            return {"success": True, "output": "No Postgres container running, skipped"}
+            return {"success": True, "output": "container not running, skipped"}
 
+        user = (get_service_secrets("postgres", stage) or {}).get(
+            "POSTGRES_USER", "admin"
+        )
         chunks: list[bytes] = []
 
         async def on_stdout(data: bytes):
@@ -402,7 +457,7 @@ async def _backup_postgres(config: dict, workspace_name: str) -> dict:
         try:
             code = await client.exec(
                 ctx,
-                ExecSpec(container=container_name, cmd=["pg_dumpall", "-U", "admin"]),
+                ExecSpec(container=container_name, cmd=["pg_dumpall", "-U", user]),
                 on_stdout=on_stdout,
             )
         except InfraDriverError as e:
@@ -414,10 +469,13 @@ async def _backup_postgres(config: dict, workspace_name: str) -> dict:
         if not dump:
             return {"success": False, "output": "Empty dump"}
 
-        # Write dump to temp file, then restic backup
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False) as f:
+        # A stable path per stage so restic's forget grouping (and dedup)
+        # sees one series, not a new singleton per run.
+        dump_dir = os.path.join(tempfile.gettempdir(), "bitswan-backup", stage)
+        os.makedirs(dump_dir, exist_ok=True)
+        dump_path = os.path.join(dump_dir, "postgres.sql")
+        with open(dump_path, "w") as f:
             f.write(dump)
-            dump_path = f.name
 
         try:
             stdout, stderr, rc = await _run_restic(
@@ -427,32 +485,15 @@ async def _backup_postgres(config: dict, workspace_name: str) -> dict:
                     "postgres",
                     "--tag",
                     workspace_name,
-                    "--stdin-filename",
-                    "postgres.sql",
-                    "--stdin",
+                    "--tag",
+                    f"stage:{stage}",
+                    dump_path,
                 ],
                 config,
             )
-            # Actually need to pipe the file. Use a different approach:
-            env = _restic_env(config)
-            proc = await asyncio.create_subprocess_exec(
-                "restic",
-                "backup",
-                "--tag",
-                "postgres",
-                "--tag",
-                workspace_name,
-                dump_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-            stdout_bytes, stderr_bytes = await proc.communicate()
-            rc = proc.returncode
             return {
                 "success": rc == 0,
-                "output": stdout_bytes.decode().strip()
-                or stderr_bytes.decode().strip(),
+                "output": stdout.strip() or stderr.strip(),
             }
         finally:
             os.unlink(dump_path)
@@ -461,61 +502,60 @@ async def _backup_postgres(config: dict, workspace_name: str) -> dict:
         return {"success": False, "output": str(e)}
 
 
-async def _backup_couchdb(config: dict, workspace_name: str) -> dict:
-    """Backup CouchDB production databases."""
+async def _backup_service_stages(
+    config: dict, workspace_name: str, service_type: str
+) -> dict:
+    """Backup couchdb/minio via the service's own backup(), per enabled stage."""
     from app.services.infra_service import get_service
+    from app.utils import SERVICE_REALMS
 
-    try:
-        svc = get_service("couchdb", workspace_name, stage="production")
-        if not svc.is_enabled():
-            return {"success": True, "output": "CouchDB not enabled, skipped"}
-
-        # Use existing backup mechanism to create a tarball
-        backup_dir = tempfile.mkdtemp(prefix="couchdb-backup-")
+    label = {"couchdb": "CouchDB", "minio": "MinIO"}.get(service_type, service_type)
+    per_stage: dict[str, dict] = {}
+    for stage in sorted(SERVICE_REALMS):
         try:
-            result = await svc.backup(backup_dir)
-            backup_path = result.get("backup_path")
-            if not backup_path or not os.path.exists(backup_path):
-                return {"success": False, "output": "Backup file not created"}
-
-            stdout, stderr, rc = await _run_restic(
-                ["backup", "--tag", "couchdb", "--tag", workspace_name, backup_path],
-                config,
+            svc = get_service(service_type, workspace_name, stage=stage)
+            if not svc.is_enabled():
+                continue
+            per_stage[stage] = await _backup_service_stage(
+                config, workspace_name, service_type, stage, svc
             )
-            return {"success": rc == 0, "output": stdout.strip() or stderr.strip()}
-        finally:
-            shutil.rmtree(backup_dir, ignore_errors=True)
-
-    except Exception as e:
-        return {"success": False, "output": str(e)}
+        except Exception as e:
+            per_stage[stage] = {"success": False, "output": str(e)}
+    return _aggregate_stages(label, per_stage)
 
 
-async def _backup_minio(config: dict, workspace_name: str) -> dict:
-    """Backup MinIO production buckets."""
-    from app.services.infra_service import get_service
-
+async def _backup_service_stage(
+    config: dict, workspace_name: str, service_type: str, stage: str, svc
+) -> dict:
+    # Stable per-stage dir so restic's forget grouping (and dedup) sees one
+    # series per (service, stage) instead of a new singleton path per run.
+    backup_dir = os.path.join(
+        tempfile.gettempdir(), "bitswan-backup", stage, service_type
+    )
+    shutil.rmtree(backup_dir, ignore_errors=True)
+    os.makedirs(backup_dir, exist_ok=True)
     try:
-        svc = get_service("minio", workspace_name, stage="production")
-        if not svc.is_enabled():
-            return {"success": True, "output": "MinIO not enabled, skipped"}
+        result = await svc.backup(backup_dir)
+        backup_path = result.get("backup_path")
+        if not backup_path or not os.path.exists(backup_path):
+            return {"success": False, "output": "Backup file not created"}
 
-        backup_dir = tempfile.mkdtemp(prefix="minio-backup-")
-        try:
-            result = await svc.backup(backup_dir)
-            backup_path = result.get("backup_path")
-            if not backup_path or not os.path.exists(backup_path):
-                return {"success": False, "output": "Backup file not created"}
-
-            stdout, stderr, rc = await _run_restic(
-                ["backup", "--tag", "minio", "--tag", workspace_name, backup_path],
-                config,
-            )
-            return {"success": rc == 0, "output": stdout.strip() or stderr.strip()}
-        finally:
-            shutil.rmtree(backup_dir, ignore_errors=True)
-
-    except Exception as e:
-        return {"success": False, "output": str(e)}
+        stdout, stderr, rc = await _run_restic(
+            [
+                "backup",
+                "--tag",
+                service_type,
+                "--tag",
+                workspace_name,
+                "--tag",
+                f"stage:{stage}",
+                backup_path,
+            ],
+            config,
+        )
+        return {"success": rc == 0, "output": stdout.strip() or stderr.strip()}
+    finally:
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 async def _apply_retention(config: dict) -> None:
@@ -523,7 +563,12 @@ async def _apply_retention(config: dict) -> None:
 
     Scoped to the whole-server backup tags (repeated --tag = OR) so it can
     never prune the per-BP snapshot mirrors, which follow their own
-    per-BP retention (snapshot_offsite.apply_offsite_retention)."""
+    per-BP retention (snapshot_offsite.apply_offsite_retention).
+
+    Grouped by host,tags — NOT the default host,paths: the couch/minio
+    tarballs (and historically the pg dumps) carry timestamped paths, so
+    path grouping made every snapshot a singleton that --keep-* never
+    pruned. Tag sets are stable per (service, stage) series."""
     retention = config.get("retention", {})
     daily = retention.get("daily", 30)
     monthly = retention.get("monthly", 12)
@@ -535,11 +580,15 @@ async def _apply_retention(config: dict) -> None:
             "--tag",
             "workspace",
             "--tag",
+            "gitops",
+            "--tag",
             "postgres",
             "--tag",
             "couchdb",
             "--tag",
             "minio",
+            "--group-by",
+            "host,tags",
             "--keep-daily",
             str(daily),
             "--keep-monthly",
@@ -610,8 +659,13 @@ async def restore_postgres(
             dump_content = f.read()
 
         # Execute in the target Postgres container (psql, dump piped to stdin).
+        from app.services.bp_databases import get_service_secrets
+
         suffix = f"-{stage}" if stage != "production" else ""
         container_name = f"{workspace_name}__postgres{suffix}"
+        user = (get_service_secrets("postgres", stage) or {}).get(
+            "POSTGRES_USER", "admin"
+        )
 
         client, ctx = _driver_and_ctx(workspace_name)
         if not await _container_running(client, ctx, container_name):
@@ -627,7 +681,7 @@ async def restore_postgres(
                 ctx,
                 ExecSpec(
                     container=container_name,
-                    cmd=["psql", "-U", "admin", "-d", "postgres"],
+                    cmd=["psql", "-U", user, "-d", "postgres"],
                 ),
                 stdin=dump_content,
                 on_stderr=on_stderr,

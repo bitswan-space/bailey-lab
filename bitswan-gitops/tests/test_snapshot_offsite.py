@@ -470,9 +470,12 @@ async def test_whole_server_retention_is_tag_scoped(offsite_env, monkeypatch):
     await backup_service._apply_retention({"retention": {"daily": 30, "monthly": 12}})
     (forget,) = calls
     joined = " ".join(forget)
-    for tag in ("workspace", "postgres", "couchdb", "minio"):
+    for tag in ("workspace", "gitops", "postgres", "couchdb", "minio"):
         assert f"--tag {tag}" in joined
     assert "bp-snapshot" not in joined
+    # Tag grouping, not path grouping: dump tarballs carry timestamped
+    # paths, which would make every snapshot an unprunable singleton.
+    assert "--group-by host,tags" in joined
 
 
 # -- fetch route -------------------------------------------------------------------
