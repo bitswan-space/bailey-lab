@@ -1331,36 +1331,70 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // reuse the Description editor mechanics, the armAfterEdit re-arm pattern, and
   // the deploy chapter's press-while-actionable retry shape.
   await chapter('deploy-v2', async () => {
+    // 0) Pin down what Development runs NOW: the current Version hash in the
+    // stage header. v2 must CHANGE it — the hard proof the press below shipped
+    // a real second version. A press with no source change is NOT a no-op on
+    // screen (it still restarts containers and ends Healthy), so without this
+    // pin a dropped edit sails through and only surfaces five chapters later
+    // in `history` with a misleading "no prior entry" message.
+    const readDevVersion = async (): Promise<string> =>
+      (await d.getByText(/^Version\s+[0-9a-f]/i).first().innerText().catch(() => ''))
+        .replace(/^Version\s*/i, '')
+        .trim();
+    await clickTopTab(/Deployments/i);
+    await selectStage(/Development/i);
+    let v1Version = '';
+    await expect
+      .poll(async () => (v1Version = await readDevVersion()), {
+        message: 'Development never showed a current Version hash to pin v1',
+        timeout: SLA,
+      })
+      .toMatch(/^[0-9a-f]{6,}$/i);
     // 1) Make the real, meaningful source edit in the Description editor.
     await clickTopTab(/Description/i);
     const editor = d.locator('.ProseMirror, [contenteditable="true"]').first();
     await editor.waitFor({ state: 'visible', timeout: SLA });
-    // Click near the top-left of the editor, NOT its center: the doc embeds the
-    // flowchart drawn earlier, and the pane's center can land on that mermaid
-    // preview — whose whole surface is click-to-edit, so a center click opens
-    // the Flowchart editor modal and blocks every tab click that follows. The
-    // caret position is irrelevant here (Control+End moves it to the doc end);
-    // the click only needs to focus the editor without hitting the embed.
-    await editor.click({ position: { x: 24, y: 16 } });
-    await dashPage.keyboard.press('Control+End');
-    // Control+End leaves the caret at the END of the existing doc — which, after
-    // the README + flowchart embed, is inside the trailing markdown LIST item (or
-    // right after the diagram block). Typing the v2 block there folds its heading
-    // and bullets into that list/block, producing the garbled README in #94.
-    // Break out into a clean empty paragraph FIRST (Enter twice exits the list),
-    // so the appended "## Manager approval tier (v2)" block renders as a proper
-    // heading + list with correct spacing. (readmeV2Addition already leads with a
-    // blank line; the explicit Enters guarantee the markdown structure breaks.)
-    await dashPage.keyboard.press('Enter').catch(() => {});
-    await dashPage.keyboard.press('Enter').catch(() => {});
-    await editor.pressSequentially(BP.readmeV2Addition, { delay: 0 });
-    await dashPage.keyboard.press('Control+s');
-    await d.getByRole('button', { name: /Saving/i }).first()
-      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
-    // Let any post-save toast clear before we read the Sync & Deploy header (a
-    // lingering toast over the top-right button can make a click never land).
-    await d.locator('[data-sonner-toast]').first()
-      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    // The editor is the same remount-on-refresh surface the requirements
+    // chapter guards against: a status refresh landing mid-edit remounts
+    // ProseMirror from the server copy and silently drops the draft — the
+    // typed v2 block vanishes, and the later Sync & Deploy ships v1's content
+    // again. Type-and-save in a bounded retype loop, gated on the v2 heading
+    // actually SURVIVING in the doc once the save round-trip settles. (The
+    // marker also makes the whole edit idempotent: already present ⇒ skip.)
+    const v2Mark = editor.getByText(/Manager approval tier \(v2\)/i).first();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await v2Mark.isVisible().catch(() => false)) break;
+      // Click near the top-left of the editor, NOT its center: the doc embeds the
+      // flowchart drawn earlier, and the pane's center can land on that mermaid
+      // preview — whose whole surface is click-to-edit, so a center click opens
+      // the Flowchart editor modal and blocks every tab click that follows. The
+      // caret position is irrelevant here (Control+End moves it to the doc end);
+      // the click only needs to focus the editor without hitting the embed.
+      await editor.click({ position: { x: 24, y: 16 } });
+      await dashPage.keyboard.press('Control+End');
+      // Control+End leaves the caret at the END of the existing doc — which, after
+      // the README + flowchart embed, is inside the trailing markdown LIST item (or
+      // right after the diagram block). Typing the v2 block there folds its heading
+      // and bullets into that list/block, producing the garbled README in #94.
+      // Break out into a clean empty paragraph FIRST (Enter twice exits the list),
+      // so the appended "## Manager approval tier (v2)" block renders as a proper
+      // heading + list with correct spacing. (readmeV2Addition already leads with a
+      // blank line; the explicit Enters guarantee the markdown structure breaks.)
+      await dashPage.keyboard.press('Enter').catch(() => {});
+      await dashPage.keyboard.press('Enter').catch(() => {});
+      await editor.pressSequentially(BP.readmeV2Addition, { delay: 0 });
+      await dashPage.keyboard.press('Control+s');
+      await d.getByRole('button', { name: /Saving/i }).first()
+        .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+      // Let any post-save toast clear before we read the Sync & Deploy header (a
+      // lingering toast over the top-right button can make a click never land).
+      await d.locator('[data-sonner-toast]').first()
+        .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    }
+    await expect(
+      v2Mark,
+      'the v2 README edit did not survive in the Description editor (draft dropped by a mid-edit refresh)',
+    ).toBeVisible({ timeout: SLA });
     // 2) Re-arm the button on the same on-screen "pending work" signal it gates on.
     await armAfterEdit();
     // 3) Ship v2: gate on actionable, then ride the deploy with the watchdog —
@@ -1387,12 +1421,38 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await clickTopTab(/Deployments/i);
     await selectStage(/Development/i);
     await waitDeployDone();
-    // Hard-assert v2 produced a SECOND Development deploy-history entry, so the
-    // later history/inspect-diff/rollback chapters have a genuine prior version.
+    // Hard-assert the press CHANGED the running version — the only signal that
+    // separates a real v2 from a same-content redeploy (which also restarts
+    // containers and ends Healthy). The stage header polls its status, so the
+    // new hash surfaces on its own.
+    await expect
+      .poll(
+        async () => {
+          // A blank/loading header must keep the poll waiting, not satisfy
+          // .not.toBe vacuously — report anything that isn't a hash as "v1".
+          const v = await readDevVersion();
+          return /^[0-9a-f]{6,}$/i.test(v) ? v : v1Version;
+        },
+        {
+          message: `Sync & Deploy finished but Development still serves v1 (${v1Version}) — the v2 edit never reached the merge`,
+          timeout: SLA,
+        },
+      )
+      .not.toBe(v1Version);
+    // Hard-assert v2 produced a SECOND Development deploy-history entry — and
+    // filter it to the "Deployed" chip exactly like the history chapter does:
+    // the dev-secrets chapter's "Secret change" audit record carries Roll back
+    // too, and it satisfied the old unfiltered assert while the v2 deploy had
+    // silently no-oped.
     await clickSection(/Deployment history/i);
+    const priorDeployed = d
+      .locator('div', { has: d.getByRole('button', { name: /^Roll back$/ }) })
+      .filter({ has: d.getByRole('button', { name: /^Inspect$/ }) })
+      .filter({ has: d.locator('span', { hasText: /^Deployed$/ }) })
+      .last();
     await expect(
-      d.getByRole('button', { name: /^Roll back$/ }).first(),
-      'a second deploy did not produce a prior (rollback-able) Development entry',
+      priorDeployed,
+      'a second deploy did not produce a prior (rollback-able) CODE deploy entry',
     ).toBeVisible({ timeout: SLA });
   });
 
