@@ -563,15 +563,14 @@ async def lifespan(app: FastAPI):
     async def _scheduled_backup():
         from app.services.backup_service import (
             get_backup_config,
-            get_restic_key,
+            is_configured,
             run_backup,
         )
 
-        config = get_backup_config()
-        if not config or not get_restic_key():
+        if not is_configured():
             return  # Not configured, skip
         try:
-            await run_backup(config)
+            await run_backup(get_backup_config())
             print("Scheduled backup completed successfully")
         except Exception as e:
             print(f"Scheduled backup failed: {e}")
@@ -623,6 +622,26 @@ async def lifespan(app: FastAPI):
     )
 
     scheduler.start()
+
+    # Self-enable backups when this workspace is connected to an AOC:
+    # write a default config, recover/generate the encryption key and
+    # init the restic repo through the AOC backup proxy (which lazily
+    # creates the bucket). No-op without AOC env or when explicitly
+    # disabled via POST /backups/config {"enabled": false}.
+    from app.services import backup_service
+
+    async def _ensure_backups():
+        ok, msg = await backup_service.ensure_backups_enabled()
+        logger.info("Backup self-enable: %s", msg)
+
+    _backups_task = asyncio.create_task(_ensure_backups())
+    _backups_task.add_done_callback(
+        lambda t: (
+            logger.warning("backup self-enable failed: %s", t.exception())
+            if not t.cancelled() and t.exception()
+            else None
+        )
+    )
 
     # Warm the history cache in the background so first requests are fast
     _cache_task = asyncio.create_task(get_automation_service().warm_history_cache())

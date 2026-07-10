@@ -1,4 +1,4 @@
-"""Backup service using restic to an S3-compatible store.
+"""Backup service using restic through the AOC backup proxy.
 
 Backs up:
 - Postgres production databases (pg_dump piped to restic)
@@ -6,7 +6,13 @@ Backs up:
 - MinIO production buckets
 - Workspace files (/workspace-repo)
 
-Encryption key and S3 config stored in secrets/.backup/
+restic talks to AOC's restic REST-server endpoints
+(/api/automation_server/workspaces/{id}/backups/repo/), which proxy
+object operations to the workspace's own bucket. The object-storage
+credentials live only in AOC — this service never sees them; it
+authenticates with the automation server's AOC token.
+
+Encryption key and backup config stored in secrets/.backup/
 """
 
 import asyncio
@@ -17,9 +23,41 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 BACKUP_CONFIG_DIR = ".backup"
+
+DEFAULT_RETENTION = {"daily": 30, "monthly": 12}
+
+
+def _aoc_settings() -> tuple[str, str, str] | None:
+    """(aoc_url, aoc_token, workspace_id) from the daemon-injected env,
+    or None when this workspace isn't connected to an AOC."""
+    aoc_url = os.environ.get("BITSWAN_AOC_URL", "").rstrip("/")
+    aoc_token = os.environ.get("BITSWAN_AOC_TOKEN", "")
+    workspace_id = os.environ.get("BITSWAN_WORKSPACE_ID", "")
+    if not (aoc_url and aoc_token and workspace_id):
+        return None
+    return aoc_url, aoc_token, workspace_id
+
+
+def _repo_url() -> str:
+    aoc_url, _token, workspace_id = _aoc_settings()
+    return f"{aoc_url}/api/automation_server/workspaces/{workspace_id}/backups/repo/"
+
+
+def _key_mirror_url() -> str:
+    aoc_url, _token, workspace_id = _aoc_settings()
+    return (
+        f"{aoc_url}/api/automation_server/workspaces/{workspace_id}/backups/restic-key"
+    )
+
+
+def _aoc_headers() -> dict:
+    _url, token, _wid = _aoc_settings()
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _get_backup_dir() -> str:
@@ -83,52 +121,57 @@ def delete_restic_key() -> None:
 
 
 def is_configured() -> bool:
-    """Check if backup is fully configured (S3 + key)."""
+    """Backups are usable: AOC-connected, enabled, and the key exists."""
+    if _aoc_settings() is None:
+        return False
     config = get_backup_config()
-    return config is not None and get_restic_key() is not None
-
-
-async def key_exists_on_s3(config: dict) -> bool:
-    """Check if the encryption key file exists on S3."""
-    stdout, stderr, rc = await _run_s3_cmd(
-        config, "ls", f"s3://{config['s3_bucket']}/.restic-key"
+    return (
+        config is not None
+        and config.get("enabled", True)
+        and get_restic_key() is not None
     )
-    return rc == 0 and ".restic-key" in stdout
 
 
-async def upload_key_to_s3(config: dict, key: str) -> tuple[bool, str]:
-    """Upload the encryption key to S3."""
-    key_tmp = os.path.join(tempfile.gettempdir(), ".restic-key-upload")
+# --- Off-site key mirror (via the AOC backup proxy) ---
+# The key object lives at the bucket root as `.restic-key`, next to the
+# restic repo, but is only reachable through AOC — GitOps never holds
+# object-storage credentials.
+
+
+async def key_exists_remote() -> bool:
+    """Check if the encryption key is mirrored off-site."""
+    return await download_key_remote() is not None
+
+
+async def upload_key_remote(key: str) -> tuple[bool, str]:
+    """Mirror the encryption key off-site through AOC."""
     try:
-        with open(key_tmp, "w") as f:
-            f.write(key)
-        stdout, stderr, rc = await _run_s3_cmd(
-            config, "cp", key_tmp, f"s3://{config['s3_bucket']}/.restic-key"
-        )
-        if rc != 0:
-            return False, stderr.strip()
+        async with httpx.AsyncClient() as client:
+            response = await client.put(
+                _key_mirror_url(),
+                content=key.encode(),
+                headers=_aoc_headers(),
+                timeout=30,
+            )
+        if response.status_code != 200:
+            return False, f"AOC returned {response.status_code}: {response.text}"
         return True, "Key uploaded"
-    finally:
-        if os.path.exists(key_tmp):
-            os.remove(key_tmp)
+    except httpx.HTTPError as e:
+        return False, str(e)
 
 
-async def download_key_from_s3(config: dict) -> str | None:
-    """Download the encryption key from S3."""
-    key_tmp = os.path.join(tempfile.gettempdir(), ".restic-key-download")
+async def download_key_remote() -> str | None:
+    """Fetch the off-site copy of the encryption key through AOC."""
     try:
-        stdout, stderr, rc = await _run_s3_cmd(
-            config, "cp", f"s3://{config['s3_bucket']}/.restic-key", key_tmp
-        )
-        if rc != 0:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                _key_mirror_url(), headers=_aoc_headers(), timeout=30
+            )
+        if response.status_code != 200:
             return None
-        with open(key_tmp) as f:
-            return f.read().strip()
-    except Exception:
+        return response.text.strip()
+    except httpx.HTTPError:
         return None
-    finally:
-        if os.path.exists(key_tmp):
-            os.remove(key_tmp)
 
 
 def _save_key(key: str) -> None:
@@ -140,50 +183,28 @@ def _save_key(key: str) -> None:
     os.chmod(_get_key_path(), 0o600)
 
 
-async def delete_key_from_s3(config: dict) -> tuple[bool, str]:
-    """Delete the encryption key from S3."""
-    stdout, stderr, rc = await _run_s3_cmd(
-        config, "rm", f"s3://{config['s3_bucket']}/.restic-key"
-    )
-    if rc != 0:
-        return False, stderr.strip()
-    return True, "Key deleted from S3"
-
-
-async def _run_s3_cmd(config: dict, *args: str) -> tuple[str, str, int]:
-    """Run an AWS CLI S3 command."""
-    env = os.environ.copy()
-    env["AWS_ACCESS_KEY_ID"] = config.get("s3_access_key", "")
-    env["AWS_SECRET_ACCESS_KEY"] = config.get("s3_secret_key", "")
-    if config.get("s3_region"):
-        env["AWS_DEFAULT_REGION"] = config["s3_region"]
-
-    # Use the S3 endpoint for non-AWS providers
-    endpoint = config.get("s3_endpoint", "")
-    cmd = ["aws", "s3"]
-    if endpoint and "amazonaws.com" not in endpoint:
-        cmd.extend(["--endpoint-url", endpoint])
-    cmd.extend(args)
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    stdout, stderr = await proc.communicate()
-    return stdout.decode(), stderr.decode(), proc.returncode
+async def delete_key_remote() -> tuple[bool, str]:
+    """Delete the off-site copy of the encryption key through AOC."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.delete(
+                _key_mirror_url(), headers=_aoc_headers(), timeout=30
+            )
+        if response.status_code not in (200, 404):
+            return False, f"AOC returned {response.status_code}: {response.text}"
+        return True, "Key deleted from off-site storage"
+    except httpx.HTTPError as e:
+        return False, str(e)
 
 
 def _restic_env(config: dict) -> dict:
     """Build environment variables for restic commands."""
+    _aoc_url, aoc_token, workspace_id = _aoc_settings()
     env = os.environ.copy()
-    env["RESTIC_REPOSITORY"] = f"s3:{config['s3_endpoint']}/{config['s3_bucket']}"
+    env["RESTIC_REPOSITORY"] = f"rest:{_repo_url()}"
+    env["RESTIC_REST_USERNAME"] = workspace_id
+    env["RESTIC_REST_PASSWORD"] = aoc_token
     env["RESTIC_PASSWORD"] = get_restic_key() or ""
-    env["AWS_ACCESS_KEY_ID"] = config.get("s3_access_key", "")
-    env["AWS_SECRET_ACCESS_KEY"] = config.get("s3_secret_key", "")
-    if config.get("s3_region"):
-        env["AWS_DEFAULT_REGION"] = config["s3_region"]
     return env
 
 
@@ -208,13 +229,62 @@ async def _run_restic(
 
 
 async def init_repo(config: dict) -> tuple[bool, str]:
-    """Initialize the restic repository on S3."""
+    """Initialize the restic repository through the AOC proxy.
+
+    restic init issues `POST ?create=true`, which makes AOC lazily
+    create the workspace's backup bucket."""
     stdout, stderr, rc = await _run_restic(["init"], config)
     if rc == 0:
         return True, "Repository initialized"
     if "already initialized" in stderr.lower() or "already exists" in stderr.lower():
         return True, "Repository already initialized"
     return False, stderr.strip()
+
+
+async def ensure_backups_enabled() -> tuple[bool, str]:
+    """Self-enable backups when this workspace is connected to an AOC.
+
+    Idempotent: called at startup. Writes a default config if none
+    exists, recovers or generates the encryption key, and initializes
+    the restic repo (AOC creates the bucket on demand). Respects an
+    explicit ``enabled: false`` in the saved config.
+    """
+    if _aoc_settings() is None:
+        return False, "Not connected to an AOC; backups stay unconfigured"
+
+    config = get_backup_config()
+    if config is not None and not config.get("enabled", True):
+        return False, "Backups explicitly disabled"
+
+    if config is None:
+        config = {"enabled": True, "retention": dict(DEFAULT_RETENTION)}
+        save_backup_config(config)
+
+    recovered = False
+    if not get_restic_key():
+        # A rebuilt server may find its key mirrored off-site
+        key = await download_key_remote()
+        if key:
+            _save_key(key)
+            recovered = True
+
+    generated = False
+    if not get_restic_key():
+        generate_restic_key()
+        generated = True
+
+    ok, msg = await init_repo(config)
+    if not ok:
+        return False, f"Failed to initialize restic repo: {msg}"
+
+    if generated:
+        key = get_restic_key()
+        if key:
+            await upload_key_remote(key)
+
+    if recovered:
+        return True, "Connected to existing backup repository. Key recovered."
+    return True, msg
 
 
 async def run_backup(config: dict) -> dict:
