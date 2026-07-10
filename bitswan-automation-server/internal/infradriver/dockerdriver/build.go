@@ -91,8 +91,17 @@ func (d *DockerDriver) BuildImage(ctx context.Context, req infradriver.BuildRequ
 	//   BITSWAN_GOPROXY        — GOPROXY value (e.g. http://<athens>:3000,direct).
 	//   BITSWAN_NPM_REGISTRY   — npm registry URL (the Verdaccio proxy).
 	// The template Dockerfiles declare matching ARGs (default empty ⇒ direct).
+	forceLegacyBuilder := false
 	if net := os.Getenv("BITSWAN_BUILD_NETWORK"); net != "" {
 		args = append(args, "--network", net)
+		// A custom build network is a LEGACY-builder-only feature: BuildKit
+		// rejects it ("network mode X not supported by buildkit"). So whenever we
+		// route the build through the proxy network we must pin the legacy builder
+		// (below). This also keeps the driver's layer cache in the SAME store the
+		// automation server's prewarm populates (the prewarm is legacy for the
+		// same reason) — otherwise the expensive `go install`/`npm install` layers
+		// would rebuild every time despite being prewarmed.
+		forceLegacyBuilder = true
 	}
 	if gp := os.Getenv("BITSWAN_GOPROXY"); gp != "" {
 		args = append(args, "--build-arg", "GOPROXY="+gp)
@@ -102,6 +111,9 @@ func (d *DockerDriver) BuildImage(ctx context.Context, req infradriver.BuildRequ
 	}
 	args = append(args, req.SourcePath)
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	if forceLegacyBuilder {
+		cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=0")
+	}
 	if err := streamCombined(cmd, prog); err != nil {
 		return infradriver.ImageRef{}, fmt.Errorf("docker build %s: %w", req.Tag, err)
 	}
