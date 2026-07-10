@@ -277,6 +277,18 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 	if egressImage != "" {
 		env = append(env, "BITSWAN_EGRESS_GATEWAY_IMAGE="+egressImage)
 	}
+	// Route per-BP image builds through the automation-server's shared
+	// read-through package proxies when they're configured (see
+	// dockerdriver.BuildImage). Propagated from the daemon's own env so a
+	// deployment WITHOUT proxies builds directly (empty ⇒ no-op, current
+	// behaviour). The proxies are pure read-through (no client writes), so they
+	// can't be a cross-workspace channel, and BITSWAN_BUILD_NETWORK is a proxy-only
+	// network so a build can't reach other workspaces.
+	for _, k := range []string{"BITSWAN_BUILD_NETWORK", "BITSWAN_GOPROXY", "BITSWAN_NPM_REGISTRY"} {
+		if v := os.Getenv(k); v != "" {
+			env = append(env, k+"="+v)
+		}
+	}
 	// The compiler reads the same AOC env gitops used (org group path, etc.).
 	env = append(env, config.AocEnvVars...)
 
