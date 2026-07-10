@@ -176,9 +176,18 @@ mark "[2/7] daemon + traefik ingress"
   # always the right ones to prewarm with.
   fe="$REPO_ROOT/bitswan-gitops/examples/business-process/frontend/image"
   be="$REPO_ROOT/bitswan-gitops/examples/business-process/backend/image"
+  # DOCKER_BUILDKIT=0 (legacy builder) is REQUIRED here, for two reasons:
+  #   1. BuildKit rejects a custom --network ("network mode X not supported by
+  #      buildkit"), so a BuildKit prewarm would just fail — and the driver's
+  #      per-BP build uses --network "$BUILD_PROXY_NET", so we must match it.
+  #   2. BuildKit and the legacy builder keep SEPARATE, non-shared layer caches.
+  #      The driver builds with the legacy builder (its runtime image has no
+  #      buildx), so this prewarm must ALSO be legacy or the warm layers land in
+  #      a cache the driver never consults — the create-bp build would recompile
+  #      `go install air` (~40s) every time despite a "successful" prewarm.
   pxy=(--network "$BUILD_PROXY_NET" --build-arg "GOPROXY=$BITSWAN_GOPROXY_URL" --build-arg "NPM_CONFIG_REGISTRY=$BITSWAN_NPM_REGISTRY_URL")
-  [ -f "$fe/Dockerfile" ] && { docker build "${pxy[@]}" -t bitswan/bp-frontend-template:warm "$fe" >/dev/null 2>&1 || echo "  prewarm frontend build failed (create-bp will build cold)"; }
-  [ -f "$be/Dockerfile" ] && { docker build "${pxy[@]}" -t bitswan/bp-backend-template:warm "$be" >/dev/null 2>&1 || echo "  prewarm backend build failed (create-bp will build cold)"; }
+  [ -f "$fe/Dockerfile" ] && { DOCKER_BUILDKIT=0 docker build "${pxy[@]}" -t bitswan/bp-frontend-template:warm "$fe" >/dev/null 2>&1 || echo "  prewarm frontend build failed (create-bp will build cold)"; }
+  [ -f "$be/Dockerfile" ] && { DOCKER_BUILDKIT=0 docker build "${pxy[@]}" -t bitswan/bp-backend-template:warm "$be" >/dev/null 2>&1 || echo "  prewarm backend build failed (create-bp will build cold)"; }
 ) &
 PREWARM_PID=$!
 
