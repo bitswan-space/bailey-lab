@@ -505,6 +505,69 @@ class ProcessService:
             "has_copies": bool(copy),
         }
 
+    async def rename_business_process(
+        self,
+        name: str,
+        new_name: str,
+        copy: Optional[str] = None,
+        renamed_by: Optional[str] = None,
+    ) -> dict:
+        """Change a business process's display name (issue #77 follow-up).
+
+        Only the `name` key in `process.toml` changes — the slug (`name`
+        here) still names the directory, the bare git repo, and deployment-id
+        segments, so URLs, API paths, and deployments are untouched. The
+        edit is committed in the BP clone and, for the main scope, published
+        to the repo's deploy-only main (same rules as creation).
+
+        Returns the entry as it appears in `get_all_processes()`.
+        """
+        from app.services.bp_git import commit_in_bp_clone, publish_bp_clone
+
+        display = " ".join((new_name or "").split())
+        if not slugify_bp_name(display):
+            raise ValueError(
+                "process name must contain at least one letter or digit (a-z, 0-9)"
+            )
+
+        scope_root = self._scope_root(copy)
+        if copy and not os.path.isdir(scope_root):
+            raise FileNotFoundError(f"copy '{copy}' does not exist")
+        process_dir = os.path.join(scope_root, name)
+        toml_path = os.path.join(process_dir, "process.toml")
+        if not os.path.isfile(toml_path):
+            raise FileNotFoundError(
+                f"no business process '{name}' in "
+                f"{'copy ' + copy if copy else 'main'}"
+            )
+
+        config = toml.load(toml_path)
+        # Pre-#77 BPs have no `name` key — their directory name IS the
+        # display name, and it reads better in the commit message too.
+        old_display = config.get("name")
+        if not isinstance(old_display, str) or not old_display.strip():
+            old_display = name
+        config["name"] = display
+        with open(toml_path, "w") as f:
+            toml.dump(config, f)
+
+        # A no-op rename leaves the clone clean; commit_in_bp_clone returns
+        # False and there is nothing to publish.
+        committed = await commit_in_bp_clone(
+            process_dir,
+            f"Rename business process {old_display} to {display}",
+            author=renamed_by,
+        )
+        if committed:
+            await publish_bp_clone(process_dir, name, copy)
+
+        self.refresh(copy)
+        for entry in self.get_all_processes():
+            if entry["name"] == name:
+                return entry
+        # The BP was on disk moments ago; only a concurrent delete gets here.
+        raise FileNotFoundError(f"business process '{name}' disappeared mid-rename")
+
 
 # Global process service instance
 process_service = ProcessService()

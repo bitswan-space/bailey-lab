@@ -148,6 +148,95 @@ def test_discovery_falls_back_to_dir_name(env):
     assert listed["orders"]["display_name"] == "orders"
 
 
+def test_rename_updates_display_name_and_publishes(env):
+    """Renaming changes only process.toml's `name`: the slug (directory,
+    repo, deployment ids) stays, and the commit reaches the deploy-only main
+    like any other main-scope service commit."""
+    import toml
+
+    svc = env["svc"]
+    created = asyncio.run(svc.create_business_process("Invoice Processing"))
+
+    entry = asyncio.run(
+        svc.rename_business_process("invoice-processing", "Zpracování faktur")
+    )
+    assert entry["name"] == "invoice-processing"
+    assert entry["display_name"] == "Zpracování faktur"
+    assert entry["id"] == created["id"]
+
+    clone = os.path.join(env["copies_dir"], "main", "invoice-processing")
+    cfg = toml.load(os.path.join(clone, "process.toml"))
+    assert cfg["name"] == "Zpracování faktur"
+    assert cfg["process-id"] == created["id"]
+
+    bare = git_server.bp_bare_repo_path("invoice-processing")
+    subject = _git("-C", bare, "log", "-1", "--format=%s", "main").stdout.strip()
+    assert subject == "Rename business process Invoice Processing to Zpracování faktur"
+
+    # Discovery round-trips the new display name into the SSE/REST snapshot.
+    listed = {e["name"]: e for e in svc.get_all_processes()}
+    assert listed["invoice-processing"]["display_name"] == "Zpracování faktur"
+
+
+def test_rename_copy_scope_stays_local(env):
+    """A copy-scope rename rides the copy until Sync & Deploy — the repo's
+    main must not advance (same rule as copy-scope creation)."""
+    svc = env["svc"]
+    copy_dir = os.path.join(env["copies_dir"], "u1")
+    os.makedirs(copy_dir)
+    asyncio.run(svc.create_business_process("orders", copy="u1"))
+
+    entry = asyncio.run(
+        svc.rename_business_process("orders", "Order Intake", copy="u1")
+    )
+    assert entry["display_name"] == "Order Intake"
+    assert asyncio.run(git_server.bp_main_has_content("orders")) is False
+
+
+def test_rename_noop_creates_no_commit(env):
+    svc = env["svc"]
+    asyncio.run(svc.create_business_process("orders"))
+    bare = git_server.bp_bare_repo_path("orders")
+    before = _git("-C", bare, "rev-parse", "main").stdout.strip()
+    asyncio.run(svc.rename_business_process("orders", "orders"))
+    assert _git("-C", bare, "rev-parse", "main").stdout.strip() == before
+
+
+def test_rename_legacy_bp_without_name_key(env):
+    """Pre-#77 BPs (no `name` in process.toml) can be renamed; the commit
+    message falls back to the directory name for the old side."""
+    import toml
+
+    svc = env["svc"]
+    asyncio.run(svc.create_business_process("orders"))
+    clone = os.path.join(env["copies_dir"], "main", "orders")
+    toml_path = os.path.join(clone, "process.toml")
+    with open(toml_path) as f:
+        pid_line = [line for line in f if line.startswith("process-id")]
+    with open(toml_path, "w") as f:
+        f.writelines(pid_line)
+    _git("add", "-A", cwd=clone)
+    _git("commit", "-m", "strip name key", cwd=clone)
+
+    asyncio.run(svc.rename_business_process("orders", "Order Intake"))
+    assert toml.load(toml_path)["name"] == "Order Intake"
+    subject = _git("log", "-1", "--format=%s", cwd=clone).stdout.strip()
+    assert subject == "Rename business process orders to Order Intake"
+
+
+def test_rename_missing_bp_rejected(env):
+    svc = env["svc"]
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(svc.rename_business_process("nope", "New Name"))
+
+
+def test_rename_unslugifiable_name_rejected(env):
+    svc = env["svc"]
+    asyncio.run(svc.create_business_process("orders"))
+    with pytest.raises(ValueError):
+        asyncio.run(svc.rename_business_process("orders", "---"))
+
+
 def test_waiver_write_publishes_main_scope(env):
     """A main-scope CVE waiver is committed in the BP clone AND advances the
     repo's main (it would otherwise be wiped by the next realign)."""

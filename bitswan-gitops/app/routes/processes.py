@@ -31,6 +31,34 @@ router = APIRouter(prefix="/processes", tags=["processes"])
 _MAX_PROCESS_NAME_LEN = 100
 # Matches the canonical copy-name constraint used by /copies and /templates.
 _COPY_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
+# Directory-name slugs in URL paths. New BPs are strictly [a-z0-9-] (see
+# `slugify_bp_name`), but BPs created before issue #77 kept the old, wider
+# directory rule — accept it so legacy BPs can be renamed too. No `/` and no
+# leading dot can pass, so path traversal is ruled out.
+_BP_DIR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _validated_display_name(raw: str) -> str:
+    """Collapse whitespace + apply the display-name rules shared by create
+    and rename. Raises HTTPException(400) on violation."""
+    name = " ".join((raw or "").split())
+    if not name or len(name) > _MAX_PROCESS_NAME_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid process name: must be 1 to "
+                f"{_MAX_PROCESS_NAME_LEN} characters."
+            ),
+        )
+    if not slugify_bp_name(name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid process name: must contain at least one letter or "
+                "digit (a-z, 0-9)."
+            ),
+        )
+    return name
 
 
 class CreateProcessRequest(BaseModel):
@@ -65,23 +93,7 @@ async def create_process(
     — `dev` stage for a main BP, `live-dev` for a copy BP. Failures never
     fail the BP creation; they surface in the `setup_error` response field.
     """
-    name = " ".join((body.name or "").split())
-    if not name or len(name) > _MAX_PROCESS_NAME_LEN:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Invalid process name: must be 1 to "
-                f"{_MAX_PROCESS_NAME_LEN} characters."
-            ),
-        )
-    if not slugify_bp_name(name):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Invalid process name: must contain at least one letter or "
-                "digit (a-z, 0-9)."
-            ),
-        )
+    name = _validated_display_name(body.name)
     if body.copy is not None and not _COPY_NAME_RE.match(body.copy):
         raise HTTPException(status_code=400, detail="Invalid copy name")
 
@@ -165,4 +177,55 @@ async def create_process(
     entry["deploy_task_id"] = deploy_task_id
     if setup_error:
         entry["setup_error"] = setup_error
+    return entry
+
+
+class RenameProcessRequest(BaseModel):
+    # The new human-readable display name. The slug (URL path segment) is
+    # immutable — it names the directory, git repo, and deployment ids.
+    name: str
+    copy: str | None = None
+    # Recorded as the git author of the rename commit (injected by the
+    # dashboard from the validated token), mirroring `created_by` on create.
+    renamed_by: str | None = None
+
+
+@router.patch("/{name}")
+async def rename_process(name: str, body: RenameProcessRequest) -> dict:
+    """Change a business process's display name.
+
+    `{name}` is the slug; only the `name` key in the BP's `process.toml`
+    changes, so URLs, API paths, and deployment ids are untouched. Renames
+    in the main scope by default; pass `copy` for a copy-only BP (the
+    display name shown in the dashboard is main's whenever the BP is in
+    main — see `get_all_processes`).
+    """
+    if not _BP_DIR_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid process slug")
+    new_name = _validated_display_name(body.name)
+    if body.copy is not None and not _COPY_NAME_RE.match(body.copy):
+        raise HTTPException(status_code=400, detail="Invalid copy name")
+
+    try:
+        entry = await process_service.rename_business_process(
+            name=name, new_name=new_name, copy=body.copy, renamed_by=body.renamed_by
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to rename process: {e}")
+
+    # Same push-the-snapshot dance as create: SSE consumers (the dashboard's
+    # BP selector) pick the new display name up without a watcher tick.
+    try:
+        await event_broadcaster.broadcast(
+            "processes", process_service.get_all_processes()
+        )
+    except Exception:
+        pass
+
     return entry

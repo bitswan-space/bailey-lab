@@ -114,6 +114,10 @@ function Shell() {
   // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
   const [copy, setCopy] = useState<string | null>(readPersistedCopy);
   const [tab, setTab] = useState<FlowTab>(readPersistedTab);
+  // The "new business process" dialog lives in TopNav, but it can be opened
+  // from more than one place (the BP switcher AND the empty-state body), so
+  // its open flag is hoisted here.
+  const [newBpOpen, setNewBpOpen] = useState(false);
   // The logged-in user's own copy, created on first login by GET /api/me and
   // auto-selected below. null until resolved; `myCopyResolved` gates copy
   // auto-selection so we don't briefly land on someone else's copy first.
@@ -305,13 +309,21 @@ function Shell() {
         tab={tab}
         onTab={handleTab}
         role={role}
+        newBpOpen={newBpOpen}
+        onNewBpOpenChange={setNewBpOpen}
       />
       {isLoading ? (
         <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
           Loading business processes…
         </div>
       ) : (
-        <WorkspaceView bp={bp} wt={wt} tab={tab} onTab={handleTab} />
+        <WorkspaceView
+          bp={bp}
+          wt={wt}
+          tab={tab}
+          onTab={handleTab}
+          onNewBp={() => setNewBpOpen(true)}
+        />
       )}
       {/* The single activity surface, anchored bottom-left: server-side git
           tasks AND transient notifications (former toasts) in one collapsible

@@ -1,4 +1,4 @@
-import { GitBranch, GitMerge, Rocket } from 'lucide-react';
+import { GitBranch, GitMerge, Plus, Rocket } from 'lucide-react';
 import { AgentFilesTab } from '@/components/views/AgentFilesTab';
 import { EnvironmentPanel } from '@/components/agents/EnvironmentPanel';
 import { DeploymentsTab } from '@/components/views/DeploymentsTab';
@@ -17,6 +17,8 @@ interface WorkspaceViewProps {
   wt: Copy | null;
   tab: FlowTab;
   onTab: (t: FlowTab) => void;
+  /** Open the "new business process" flow (the dialog lives in TopNav). */
+  onNewBp: () => void;
 }
 
 /**
@@ -24,7 +26,7 @@ interface WorkspaceViewProps {
  * without a copy (Deployments is always main-scoped); Coding Agent,
  * Requirements and Sync & Deploy follow the selected copy.
  */
-export function WorkspaceView({ bp, wt, tab, onTab }: WorkspaceViewProps) {
+export function WorkspaceView({ bp, wt, tab, onTab, onNewBp }: WorkspaceViewProps) {
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
 
   if (!bp) {
@@ -32,7 +34,13 @@ export function WorkspaceView({ bp, wt, tab, onTab }: WorkspaceViewProps) {
       <CenteredNote
         icon={<Rocket className="size-5 text-primary" aria-hidden />}
         title="No business process"
-        body="Create one with “+ New business process” in the switcher above."
+        body="Create your first business process to get started."
+        action={
+          <Button size="sm" onClick={onNewBp}>
+            <Plus className="size-3.5" aria-hidden />
+            New business process
+          </Button>
+        }
       />
     );
   }
