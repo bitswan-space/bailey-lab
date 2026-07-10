@@ -82,6 +82,31 @@ docker build -t bitswan/automation-server-runtime:latest -f "$REPO_ROOT/bitswan-
 mark "[1/7] docker build: automation-server-runtime image"
 
 echo "=== [2/7] Daemon + traefik ingress ==="
+# Shared read-through PACKAGE PROXIES for per-BP image builds (a Go module proxy
+# + an npm registry proxy). Per-BP builds otherwise re-download npm/Go deps from
+# the internet on every create-bp (~50s of the cold build); routing them through
+# a warm local proxy makes them fast. Security: both are PURE READ-THROUGH — they
+# only serve verified upstream artifacts and accept no client writes/publishes,
+# so they can't be a cross-workspace channel. They live on a DEDICATED
+# bitswan-build-proxy network (builds join only this net, never bitswan_network),
+# so a build can reach the proxies + the internet but NOT other workspaces.
+# Client-side integrity (GOSUMDB / npm lockfile) stays on. All opt-in: the daemon
+# passes the wiring to each workspace's driver via env; without it, builds go
+# direct.
+BUILD_PROXY_NET="bitswan-build-proxy"
+docker network inspect "$BUILD_PROXY_NET" >/dev/null 2>&1 || docker network create "$BUILD_PROXY_NET" >/dev/null
+docker rm -f bitswan-goproxy bitswan-npmproxy >/dev/null 2>&1 || true
+# Go module proxy (Athens): read-through (download-mode=sync), disk-cached.
+docker run -d --name bitswan-goproxy --network "$BUILD_PROXY_NET" --restart unless-stopped \
+  -e ATHENS_DOWNLOAD_MODE=sync -e ATHENS_STORAGE_TYPE=disk gomods/athens:latest >/dev/null
+# npm registry proxy (Verdaccio): pure read-through, publish disabled (see config).
+docker run -d --name bitswan-npmproxy --network "$BUILD_PROXY_NET" --restart unless-stopped \
+  -v "$REPO_ROOT/e2e/build-proxy/verdaccio.yaml:/verdaccio/conf/config.yaml:ro" \
+  verdaccio/verdaccio:6 >/dev/null
+BITSWAN_GOPROXY_URL="http://bitswan-goproxy:3000,direct"
+BITSWAN_NPM_REGISTRY_URL="http://bitswan-npmproxy:4873"
+mark "[1b/7] read-through build package proxies (Athens + Verdaccio)"
+
 # Pin the daemon to THIS checkout's images so workspaces it creates via the
 # Server Console UI run the branch's gitops/dashboard/coding-agent (with the
 # features the manual documents) instead of Docker Hub 'latest'. sudo strips the
@@ -92,6 +117,9 @@ sudo env \
   BITSWAN_CODING_AGENT_IMAGE="$CODING_AGENT_IMAGE" \
   BITSWAN_INFRA_DRIVER_IMAGE="$INFRA_DRIVER_IMAGE" \
   BITSWAN_EGRESS_GATEWAY_IMAGE="$EGRESS_GATEWAY_IMAGE" \
+  BITSWAN_BUILD_NETWORK="$BUILD_PROXY_NET" \
+  BITSWAN_GOPROXY="$BITSWAN_GOPROXY_URL" \
+  BITSWAN_NPM_REGISTRY="$BITSWAN_NPM_REGISTRY_URL" \
   "$BITSWAN" automation-server-daemon init
 sleep 5
 "$BITSWAN" automation-server-daemon status
@@ -124,10 +152,15 @@ mark "[2/7] daemon + traefik ingress"
   # download`) — building them here once means create-bp's build is a layer-cache
   # hit instead of a cold ~60-90s install. Throwaway tags; we only want the
   # cached layers. Best-effort — a miss just falls back to a cold build.
+  # Build through the read-through proxies (same --network + --build-arg the
+  # driver passes at create-bp time) so this prewarm ALSO populates the Athens /
+  # Verdaccio caches from upstream. Then create-bp's build reads npm/Go deps from
+  # the warm local proxy instead of the internet.
   fe="$REPO_ROOT/bitswan-gitops/examples/business-process/frontend/image"
   be="$REPO_ROOT/bitswan-gitops/examples/business-process/backend/image"
-  [ -f "$fe/Dockerfile" ] && docker build -t bitswan/bp-frontend-template:warm "$fe" >/dev/null 2>&1 || true
-  [ -f "$be/Dockerfile" ] && docker build -t bitswan/bp-backend-template:warm "$be" >/dev/null 2>&1 || true
+  pxy=(--network "$BUILD_PROXY_NET" --build-arg "GOPROXY=$BITSWAN_GOPROXY_URL" --build-arg "NPM_CONFIG_REGISTRY=$BITSWAN_NPM_REGISTRY_URL")
+  [ -f "$fe/Dockerfile" ] && { docker build "${pxy[@]}" -t bitswan/bp-frontend-template:warm "$fe" >/dev/null 2>&1 || docker build -t bitswan/bp-frontend-template:warm "$fe" >/dev/null 2>&1 || true; }
+  [ -f "$be/Dockerfile" ] && { docker build "${pxy[@]}" -t bitswan/bp-backend-template:warm "$be" >/dev/null 2>&1 || docker build -t bitswan/bp-backend-template:warm "$be" >/dev/null 2>&1 || true; }
 ) &
 PREWARM_PID=$!
 

@@ -1,0 +1,31 @@
+# Pure read-through npm registry proxy for per-BP image builds.
+#
+# It ONLY proxies + caches from the public registry (uplink npmjs). Publishing is
+# impossible: user registration is disabled (max_users: -1), so there are no
+# authenticated users and `publish`/`unpublish` (which require auth) can never
+# succeed. Clients can therefore only GET verified upstream packages — they can
+# neither write shared state nor use the registry as a cross-workspace channel.
+# npm's own lockfile integrity still verifies every tarball, so even a
+# compromised proxy cannot swap package content.
+storage: /verdaccio/storage
+web:
+  enable: false
+auth:
+  htpasswd:
+    file: /verdaccio/htpasswd
+    max_users: -1 # registration disabled → no authenticated users → no publish
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
+    cache: true
+    maxage: 30m
+packages:
+  '@*/*':
+    access: $all
+    publish: $authenticated # unreachable (no users exist) — read-only in practice
+    proxy: npmjs
+  '**':
+    access: $all
+    publish: $authenticated # unreachable — read-only in practice
+    proxy: npmjs
+log: { type: stdout, format: pretty, level: warn }
