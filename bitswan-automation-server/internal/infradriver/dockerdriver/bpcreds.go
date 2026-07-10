@@ -79,6 +79,8 @@ func getOrCreateDBCreds(secretsDir, realm, dbName string) (user, password string
 	}); err != nil {
 		return "", "", err
 	}
+	// gitops (uid 1000) reads and rewrites these creds too — see ownForGitops.
+	ownForGitops(filepath.Join(secretsDir, "dbcreds"), filepath.Dir(path), path)
 	return user, password, nil
 }
 
@@ -100,6 +102,8 @@ func getOrCreateBucketCreds(secretsDir, realm, bucket string) (accessKey, secret
 	}); err != nil {
 		return "", "", err
 	}
+	// gitops (uid 1000) reads and rewrites these creds too — see ownForGitops.
+	ownForGitops(filepath.Join(secretsDir, "miniocreds"), filepath.Dir(path), path)
 	return accessKey, secretKey, nil
 }
 

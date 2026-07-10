@@ -1597,7 +1597,12 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         <div className="flex items-center gap-2 px-11 pt-7">
           {STAGES.map((s, i) => {
             const sHist = byStage[stageDataId(s.id)];
-            const deployed = !!sHist && sHist.history.length > 0;
+            // "Deployed" needs a real deployment (an entry with a source
+            // commit). Secret/firewall/backup audit records land in history
+            // for stages that never deployed — declaring a secret writes
+            // blobs to every realm — and must not light the stage up as ✓.
+            const deployed =
+              !!sHist && sHist.history.some((h) => !!h.source_commit);
             const next = STAGES[i + 1];
             // Promotable when the source stage RUNS different content than the
             // target — compared by baked-image content hash, not source_commit

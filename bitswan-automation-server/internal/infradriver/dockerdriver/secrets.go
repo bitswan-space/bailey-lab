@@ -23,6 +23,24 @@ const (
 	aesNonceBytes = 12
 )
 
+// The gitops container writes this same secrets volume as uid 1000 (user1000)
+// while the driver runs as root, and BP creation auto-deploys — so the driver
+// usually touches a BP's secrets paths first. A dir it leaves root-owned locks
+// gitops out of every later secret write for that BP (EACCES → the dashboard's
+// "Apply" 502s), and a root-owned 0600 file (.aes-key, db/bucket creds) is
+// silently unreadable to gitops. Hand everything the driver creates here to
+// the gitops user.
+const gitopsUID = 1000
+
+// ownForGitops best-effort chowns driver-created secrets paths to the gitops
+// user. Chown is a no-op failure where the driver runs unprivileged (unit
+// tests) — there the paths already belong to the writing uid.
+func ownForGitops(paths ...string) {
+	for _, p := range paths {
+		_ = os.Chown(p, gitopsUID, gitopsUID)
+	}
+}
+
 // bpSecretEnvFilePath is <secrets>/bp/<slug>/<realm> (bp_secrets.env_file_path).
 func bpSecretEnvFilePath(secretsDir, bp, stage string) string {
 	return filepath.Join(secretsDir, "bp", sanitizeAutomationName(bp), realmForStage(stage))
@@ -49,6 +67,7 @@ func loadAESKey(secretsDir string) ([]byte, error) {
 	if err := os.Rename(tmp, path); err != nil {
 		return nil, err
 	}
+	ownForGitops(secretsDir, path)
 	return key, nil
 }
 
@@ -96,6 +115,7 @@ func materializeEnv(secretsDir, bp, stage string, values map[string]string) (str
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
+	ownForGitops(filepath.Join(secretsDir, "bp"), filepath.Dir(path))
 	keys := make([]string, 0, len(values))
 	for k := range values {
 		keys = append(keys, k)
@@ -118,6 +138,7 @@ func materializeEnv(secretsDir, bp, stage string, values map[string]string) (str
 	if err := os.Rename(tmp, path); err != nil {
 		return "", err
 	}
+	ownForGitops(path)
 	return path, nil
 }
 

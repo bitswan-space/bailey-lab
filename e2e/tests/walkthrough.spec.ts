@@ -30,7 +30,7 @@
  */
 import { appendFileSync } from 'node:fs';
 import { test, expect, capture, oidcLogin, dashboard, ENV, type FrameOrPage } from '../fixtures/bitswan';
-import { BP, WORKSPACE, COMPANY, SECRETS, TEAMMATE } from '../scenario';
+import { BP, WORKSPACE, COMPANY, SECRETS, TEAMMATE, EGRESS_PROBES } from '../scenario';
 
 // ── Snappiness is a product requirement, not a test nicety ──────────────────
 // SLA bounds a SHORT interaction: opening a tab, a modal, a list. Long ops
@@ -1013,6 +1013,50 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     if (!captured) await capture(dashPage, 'live-dev').catch(() => {});
   });
 
+  // ---- Dev secrets: declare the BP's external integrations ----
+  // The clean BP template makes NO outbound calls of its own — it probes only
+  // the hosts it is CONFIGURED to integrate with (BITSWAN_EGRESS_PROBES). A
+  // real operator declares those integrations as a dev secret here in the
+  // Environment panel; every later dev deploy injects it, and the firewall
+  // chapter then observes exactly these hosts. This is also the one place the
+  // walkthrough SAVES a secret for real (the production secrets chapter
+  // deliberately fills-but-never-saves), so the dev-secrets editor is
+  // exercised end to end. Idempotent on re-runs: if the key already exists we
+  // leave it as-is.
+  await chapter('dev-secrets', async () => {
+    // Still on the Coding Agent tab — the Environment panel carries the
+    // collapsed "Dev secrets" section. Open it (the header toggles, so only
+    // click when the editor isn't already showing) and wait for the editor.
+    const addSecret = d.getByRole('button', { name: /Add secret/i }).first();
+    if (!(await addSecret.isVisible().catch(() => false))) {
+      const devSecrets = d.getByRole('button', { name: /Dev secrets/i }).first();
+      await devSecrets.scrollIntoViewIfNeeded().catch(() => {});
+      await devSecrets.click();
+    }
+    await d.getByText(/Loading secrets…/i).first()
+      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    await addSecret.waitFor({ state: 'visible', timeout: SLA });
+    // Re-run guard: key fields carry the saved names as their input values.
+    const savedKeys = await d.getByPlaceholder('SECRET_NAME')
+      .evaluateAll((els) => els.map((el) => (el as HTMLInputElement).value))
+      .catch(() => [] as string[]);
+    if (savedKeys.includes('BITSWAN_EGRESS_PROBES')) {
+      await capture(dashPage, 'dev-secrets');
+      return;
+    }
+    await addSecret.click();
+    // The key field is uncontrolled and renames on BLUR — fill, then Enter.
+    const keyInput = d.getByPlaceholder('SECRET_NAME').last();
+    await keyInput.fill('BITSWAN_EGRESS_PROBES');
+    await keyInput.press('Enter');
+    await d.getByPlaceholder(/Needs a value|^value$/).last().fill(EGRESS_PROBES);
+    await capture(dashPage, 'dev-secrets');
+    await d.getByRole('button', { name: /^Apply/ }).first().click();
+    // Applied = encrypted + versioned in bitswan.yaml; injected on next deploy.
+    await d.getByText(/Secrets applied/i).first()
+      .waitFor({ state: 'visible', timeout: SLA });
+  });
+
   // ---- Requirements & tests: the runnable-spec tab a real operator uses ----
   await chapter('requirements', async () => {
     const reqTab = topTab(/Requirements & tests/i);
@@ -1040,17 +1084,46 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     ] as const;
     for (const text of reqs) {
       // Skip if a prior run already recorded this requirement (idempotent).
-      const existing = d.getByText(text, { exact: false }).first();
-      if (await existing.isVisible().catch(() => false)) continue;
+      const row = d.getByText(text, { exact: false }).first();
+      if (await row.isVisible().catch(() => false)) continue;
       await d.getByRole('button', { name: /New requirement/i }).first().click();
       const field = d.getByPlaceholder(/Describe the requirement/i).first();
       await field.waitFor({ state: 'visible', timeout: SLA });
-      await field.fill(text);
-      await field.press('Enter');
-      // The committed requirement renders as a row carrying its text — wait for
-      // that so the next add doesn't race the persist round-trip.
+      // "New requirement" creates the row EMPTY server-side and edits it in
+      // place with row-local draft state. A list refresh landing mid-edit
+      // (the previous row's persist round-trip) remounts the editor and drops
+      // the draft — the row survives as "(no description)" and the typed text
+      // never commits. Do what a real operator does: if the text didn't land,
+      // reopen that orphaned row's editor (double-click) and retype.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await field.fill(text);
+        await field.press('Enter');
+        let landed = await row
+          .waitFor({ state: 'visible', timeout: 12_000 })
+          .then(() => true)
+          .catch(() => false);
+        // Seeing the text is NOT enough: Enter renders the committed draft
+        // OPTIMISTICALLY, before the persist round-trip returns — so the row
+        // "lands" instantly even when the previous row's round-trip is about
+        // to refresh the list and clobber it back to "(no description)"
+        // (exactly how the d292ca0+main run failed: visible in ~2s, gone for
+        // the rest of the 60s assert). Only trust text that SURVIVES the
+        // refresh window: watch for the clobber; if it never comes, it stuck.
+        if (landed) {
+          const clobbered = await row
+            .waitFor({ state: 'hidden', timeout: 5_000 })
+            .then(() => true)
+            .catch(() => false);
+          landed = !clobbered;
+        }
+        if (landed) break;
+        await d.getByText('(no description)', { exact: false }).first().dblclick();
+        await field.waitFor({ state: 'visible', timeout: SLA });
+      }
+      // Wait for the committed row so the next add doesn't race the persist
+      // round-trip.
       await expect(
-        d.getByText(text, { exact: false }).first(),
+        row,
         `requirement "${text}" did not land in the list`,
       ).toBeVisible({ timeout: SLA });
     }
@@ -1355,36 +1428,81 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // reuse the Description editor mechanics, the armAfterEdit re-arm pattern, and
   // the deploy chapter's press-while-actionable retry shape.
   await chapter('deploy-v2', async () => {
+    // 0) Pin down what Development runs NOW: the current Version hash in the
+    // stage header. v2 must CHANGE it — the hard proof the press below shipped
+    // a real second version. A press with no source change is NOT a no-op on
+    // screen (it still restarts containers and ends Healthy), so without this
+    // pin a dropped edit sails through and only surfaces five chapters later
+    // in `history` with a misleading "no prior entry" message.
+    const readDevVersion = async (): Promise<string> =>
+      (await d.getByText(/^Version\s+[0-9a-f]/i).first().innerText().catch(() => ''))
+        .replace(/^Version\s*/i, '')
+        .trim();
+    await clickTopTab(/Deployments/i);
+    await selectStage(/Development/i);
+    let v1Version = '';
+    await expect
+      .poll(async () => (v1Version = await readDevVersion()), {
+        message: 'Development never showed a current Version hash to pin v1',
+        timeout: SLA,
+      })
+      .toMatch(/^[0-9a-f]{6,}$/i);
     // 1) Make the real, meaningful source edit in the Description editor.
     await clickTopTab(/Description/i);
     const editor = d.locator('.ProseMirror, [contenteditable="true"]').first();
     await editor.waitFor({ state: 'visible', timeout: SLA });
-    // Click near the top-left of the editor, NOT its center: the doc embeds the
-    // flowchart drawn earlier, and the pane's center can land on that mermaid
-    // preview — whose whole surface is click-to-edit, so a center click opens
-    // the Flowchart editor modal and blocks every tab click that follows. The
-    // caret position is irrelevant here (Control+End moves it to the doc end);
-    // the click only needs to focus the editor without hitting the embed.
-    await editor.click({ position: { x: 24, y: 16 } });
-    await dashPage.keyboard.press('Control+End');
-    // Control+End leaves the caret at the END of the existing doc — which, after
-    // the README + flowchart embed, is inside the trailing markdown LIST item (or
-    // right after the diagram block). Typing the v2 block there folds its heading
-    // and bullets into that list/block, producing the garbled README in #94.
-    // Break out into a clean empty paragraph FIRST (Enter twice exits the list),
-    // so the appended "## Manager approval tier (v2)" block renders as a proper
-    // heading + list with correct spacing. (readmeV2Addition already leads with a
-    // blank line; the explicit Enters guarantee the markdown structure breaks.)
-    await dashPage.keyboard.press('Enter').catch(() => {});
-    await dashPage.keyboard.press('Enter').catch(() => {});
-    await editor.pressSequentially(BP.readmeV2Addition, { delay: 0 });
-    await dashPage.keyboard.press('Control+s');
-    await d.getByRole('button', { name: /Saving/i }).first()
-      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
-    // Let any post-save toast clear before we read the Sync & Deploy header (a
-    // lingering toast over the top-right button can make a click never land).
-    await d.locator('[data-sonner-toast]').first()
-      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    // The editor is the same remount-on-refresh surface the requirements
+    // chapter guards against: a status refresh landing mid-edit remounts
+    // ProseMirror from the server copy and silently drops the draft — the
+    // typed v2 block vanishes, and the later Sync & Deploy ships v1's content
+    // again. Type-and-save in a bounded retype loop, gated on the v2 heading
+    // actually SURVIVING in the doc once the save round-trip settles. (The
+    // marker also makes the whole edit idempotent: already present ⇒ skip.)
+    const v2Mark = editor.getByText(/Manager approval tier \(v2\)/i).first();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await v2Mark.isVisible().catch(() => false)) {
+        // Seeing the heading is not enough — the doc shows the draft before
+        // the save round-trip settles (same optimistic-render trap as the
+        // requirements rows). Only trust a marker that SURVIVES the remount
+        // window: a status refresh remounts ProseMirror from the server copy,
+        // dropping anything that never actually saved.
+        const clobbered = await v2Mark
+          .waitFor({ state: 'hidden', timeout: 5_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!clobbered) break;
+      }
+      // Click near the top-left of the editor, NOT its center: the doc embeds the
+      // flowchart drawn earlier, and the pane's center can land on that mermaid
+      // preview — whose whole surface is click-to-edit, so a center click opens
+      // the Flowchart editor modal and blocks every tab click that follows. The
+      // caret position is irrelevant here (Control+End moves it to the doc end);
+      // the click only needs to focus the editor without hitting the embed.
+      await editor.click({ position: { x: 24, y: 16 } });
+      await dashPage.keyboard.press('Control+End');
+      // Control+End leaves the caret at the END of the existing doc — which, after
+      // the README + flowchart embed, is inside the trailing markdown LIST item (or
+      // right after the diagram block). Typing the v2 block there folds its heading
+      // and bullets into that list/block, producing the garbled README in #94.
+      // Break out into a clean empty paragraph FIRST (Enter twice exits the list),
+      // so the appended "## Manager approval tier (v2)" block renders as a proper
+      // heading + list with correct spacing. (readmeV2Addition already leads with a
+      // blank line; the explicit Enters guarantee the markdown structure breaks.)
+      await dashPage.keyboard.press('Enter').catch(() => {});
+      await dashPage.keyboard.press('Enter').catch(() => {});
+      await editor.pressSequentially(BP.readmeV2Addition, { delay: 0 });
+      await dashPage.keyboard.press('Control+s');
+      await d.getByRole('button', { name: /Saving/i }).first()
+        .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+      // Let any post-save toast clear before we read the Sync & Deploy header (a
+      // lingering toast over the top-right button can make a click never land).
+      await d.locator('[data-sonner-toast]').first()
+        .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    }
+    await expect(
+      v2Mark,
+      'the v2 README edit did not survive in the Description editor (draft dropped by a mid-edit refresh)',
+    ).toBeVisible({ timeout: SLA });
     // 2) Re-arm the button on the same on-screen "pending work" signal it gates on.
     await armAfterEdit();
     // 3) Ship v2: gate on actionable, then ride the deploy with the watchdog —
@@ -1411,12 +1529,38 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await clickTopTab(/Deployments/i);
     await selectStage(/Development/i);
     await waitDeployDone();
-    // Hard-assert v2 produced a SECOND Development deploy-history entry, so the
-    // later history/inspect-diff/rollback chapters have a genuine prior version.
+    // Hard-assert the press CHANGED the running version — the only signal that
+    // separates a real v2 from a same-content redeploy (which also restarts
+    // containers and ends Healthy). The stage header polls its status, so the
+    // new hash surfaces on its own.
+    await expect
+      .poll(
+        async () => {
+          // A blank/loading header must keep the poll waiting, not satisfy
+          // .not.toBe vacuously — report anything that isn't a hash as "v1".
+          const v = await readDevVersion();
+          return /^[0-9a-f]{6,}$/i.test(v) ? v : v1Version;
+        },
+        {
+          message: `Sync & Deploy finished but Development still serves v1 (${v1Version}) — the v2 edit never reached the merge`,
+          timeout: SLA,
+        },
+      )
+      .not.toBe(v1Version);
+    // Hard-assert v2 produced a SECOND Development deploy-history entry — and
+    // filter it to the "Deployed" chip exactly like the history chapter does:
+    // the dev-secrets chapter's "Secret change" audit record carries Roll back
+    // too, and it satisfied the old unfiltered assert while the v2 deploy had
+    // silently no-oped.
     await clickSection(/Deployment history/i);
+    const priorDeployed = d
+      .locator('div', { has: d.getByRole('button', { name: /^Roll back$/ }) })
+      .filter({ has: d.getByRole('button', { name: /^Inspect$/ }) })
+      .filter({ has: d.locator('span', { hasText: /^Deployed$/ }) })
+      .last();
     await expect(
-      d.getByRole('button', { name: /^Roll back$/ }).first(),
-      'a second deploy did not produce a prior (rollback-able) Development entry',
+      priorDeployed,
+      'a second deploy did not produce a prior (rollback-able) CODE deploy entry',
     ).toBeVisible({ timeout: SLA });
   });
 
@@ -1632,9 +1776,17 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // Scale + Inspect; a NON-current (prior) entry has Roll back + Inspect. To
     // get a real diff we must Inspect a NON-current entry — locate the card that
     // carries a "Roll back" action and click the Inspect WITHIN that same card.
+    // Filter to the "Deployed" chip: secret audit records (the dev-secrets
+    // chapter leaves one BELOW the first dev deploy) are rollbackable too but
+    // carry no source commit, so their "Diff vs current" is legitimately empty
+    // — only a prior CODE deploy yields the real v1→v2 diff asserted below.
     const priorCard = d
       .locator('div', { has: d.getByRole('button', { name: /^Roll back$/ }) })
       .filter({ has: d.getByRole('button', { name: /^Inspect$/ }) })
+      // The chip is its own <span> with exact text "Deployed" — match that,
+      // not the card's textContent (which concatenates "…c99Deployed…", so a
+      // \b word-boundary can never sit between the sha and the chip).
+      .filter({ has: d.locator('span', { hasText: /^Deployed$/ }) })
       .last();
     const inspect = priorCard.getByRole('button', { name: /^Inspect$/ }).first();
     await expect(inspect, 'no prior (non-current) Development entry to inspect for a real diff')
@@ -1672,12 +1824,14 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   });
 
   // ---- Firewall & data processing (N): the invoice BP makes REAL outbound
-  // calls on startup (its egress probes), which the firewall observes. On the
-  // Development stage the firewall runs in MONITOR mode, so those destinations
-  // surface under "Needs review". We open Firewall (WAIT for it to finish
-  // loading — never a "Loading firewall…" frame), find a detected egress host,
-  // open its GDPR data-processing record, FILL it, capture, and save it (the
-  // approval is idempotent — it just versions the record in bitswan.yaml).
+  // calls to the integration hosts declared in the dev-secrets chapter
+  // (BITSWAN_EGRESS_PROBES — injected into the backend by the dev deploys the
+  // sync-deploy chapter ran), which the firewall observes. On the Development
+  // stage the firewall runs in MONITOR mode, so those destinations surface
+  // under "Needs review". We open Firewall (WAIT for it to finish loading —
+  // never a "Loading firewall…" frame), find a detected egress host, open its
+  // GDPR data-processing record, FILL it, capture, and save it (the approval
+  // is idempotent — it just versions the record in bitswan.yaml).
   await chapter('firewall', async () => {
     // Development is in monitor mode and is where the live-dev/dev containers'
     // egress is observed. Select it, open Firewall, wait for the panel to load.
@@ -1691,9 +1845,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
     await d.getByText(/Monitoring|Enforcing/i).first()
       .waitFor({ state: 'visible', timeout: SLA });
-    // The BP backend fires real outbound probes on a loop, and the dashboard
-    // firewall panel now POLLS, so an observed egress host RELIABLY surfaces
-    // under "Needs review" within ~90s. This is the whole point of the chapter,
+    // The dev backend probes its configured integration hosts on a 20s loop,
+    // and the dashboard firewall panel POLLS, so an observed egress host
+    // RELIABLY surfaces under "Needs review" within ~90s. This is the whole
+    // point of the chapter,
     // so it is FATAL: hard-assert the host appears (no silent pass on an empty
     // review list). The egress host appears within ~90s.
     const needsReview = d.getByText(/Needs review/i).first();

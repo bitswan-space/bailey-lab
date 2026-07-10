@@ -214,3 +214,34 @@ def test_production_secret_change_is_pending_not_applied(tmp_path, monkeypatch):
     sec = [e for e in h["history"] if e["source"] == "secret"]
     assert sec, h["history"]
     assert h["current"] != sec[0]["commit"]
+
+
+def test_secret_on_never_deployed_stage_is_not_current(tmp_path, monkeypatch):
+    """Declaring a secret writes blobs for EVERY realm (names are shared across
+    stages), so stages that never deployed get a secret history event too. That
+    event is an audit record + rollback point — it must NOT become the stage's
+    current deployment, or a fresh BP's staging/production renders as deployed
+    ("Current on Staging") and the promote pipeline stalls on a stage that has
+    nothing actually running."""
+    svc = _svc(tmp_path)
+
+    async def _noop_apply(ids, deployed_by=None, report=None):
+        return {"deployment_ids": list(ids)}
+
+    monkeypatch.setattr(svc, "apply_compose_for_deployments", _noop_apply)
+
+    # The dashboard's dev-secrets editor sends all three realms; undeployed
+    # stages carry the declared-but-unset ("") value.
+    asyncio.run(
+        svc.write_bp_secrets(
+            "shop",
+            {"dev": {"K": "v"}, "staging": {"K": ""}, "production": {"K": ""}},
+            deployed_by="a@x",
+        )
+    )
+    for stage in ("dev", "staging", "production"):
+        h = asyncio.run(svc.bp_history("shop", stage))
+        events = [e for e in h["history"] if e["source"] == "secret"]
+        assert events, (stage, h["history"])  # audit record IS there…
+        assert events[0]["source_commit"] is None  # …but deploys nothing…
+        assert h["current"] is None, (stage, h)  # …so nothing is current.

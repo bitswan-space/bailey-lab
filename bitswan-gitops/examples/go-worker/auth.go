@@ -26,9 +26,11 @@ func init() {
 	allowedGroup = os.Getenv("BITSWAN_ALLOWED_GROUP")
 	groupCheckEnabled = allowedGroup != ""
 	if !groupCheckEnabled {
-		// Simple-mode (no AOC): the Bailey gate already authenticates; run
-		// without per-request group gating rather than refusing to start.
-		log.Println("BITSWAN_ALLOWED_GROUP not set — simple mode: skipping per-request group membership checks (the Bailey gate enforces access).")
+		// Simple-mode (no AOC): gitops does not inject BITSWAN_ALLOWED_GROUP
+		// because the Bailey protected gate in front already authenticates every
+		// request. Run without per-request group gating rather than refusing to
+		// start — the example must work in the default simple deployment.
+		log.Println("BITSWAN_ALLOWED_GROUP not set — simple mode: the Bailey gate enforces access; skipping per-request group membership checks.")
 	}
 }
 
@@ -120,6 +122,12 @@ func (p *JWKSProvider) getKey(kid string) (*rsa.PublicKey, error) {
 // requireAuth returns middleware that validates a Bearer JWT and stores claims in context.
 func (app *App) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simple mode (no JWKS provider configured): the Bailey gate has already
+		// authenticated this request upstream, so trust it and pass through.
+		if app.jwks == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
 			writeError(w, http.StatusUnauthorized, "Missing authorization token")
@@ -145,7 +153,7 @@ func (app *App) requireAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// Verify group membership
+		// Verify group membership — only when a group is configured (AOC mode).
 		if groupCheckEnabled && !hasGroup(claims, allowedGroup) {
 			writeError(w, http.StatusForbidden, "User not in required group: "+allowedGroup)
 			return
