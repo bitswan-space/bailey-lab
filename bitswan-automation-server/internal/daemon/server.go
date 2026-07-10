@@ -391,6 +391,11 @@ func (s *Server) Run() error {
 	// workspace's first interactive CVE scan (see grype_db.go).
 	startGrypeDBRefresher()
 
+	// Own the shared read-through build proxies (Go module + npm) so per-BP image
+	// builds pull common packages from a warm, persistent, cross-workspace cache
+	// instead of the internet (see build_proxy.go). No-op if externally managed.
+	startBuildProxies()
+
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
