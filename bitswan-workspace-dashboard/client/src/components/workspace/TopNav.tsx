@@ -4,7 +4,6 @@ import {
   CheckSquare,
   ChevronRight,
   FileText,
-  Plus,
   RefreshCw,
   Rocket,
   Server,
@@ -50,6 +49,10 @@ interface TopNavProps {
   tab: FlowTab;
   onTab: (t: FlowTab) => void;
   role: Role;
+  /** "New business process" dialog open state, hoisted to App so the
+   *  empty-state body can open it too. */
+  newBpOpen: boolean;
+  onNewBpOpenChange: (open: boolean) => void;
 }
 
 interface FlowStep {
@@ -107,9 +110,10 @@ export function TopNav({
   tab,
   onTab,
   role,
+  newBpOpen,
+  onNewBpOpenChange,
 }: TopNavProps) {
   const roleMeta = ROLE_META[role] ?? ROLE_META.member;
-  const [automateOpen, setAutomateOpen] = useState(false);
   // eslint-disable-next-line no-restricted-syntax -- null = rename dialog closed
   const [renameBp, setRenameBp] = useState<BusinessProcess | null>(null);
 
@@ -164,13 +168,13 @@ export function TopNav({
         bps={bps}
         activeBpId={activeBpId}
         onSelect={handleSelectBp}
-        onNewBp={() => setAutomateOpen(true)}
+        onNewBp={() => onNewBpOpenChange(true)}
         onRenameBp={setRenameBp}
       />
 
-      {/* The copy region: the copy selector, the "add a process to this copy"
-          action, and every step up to Sync & Deploy live in one card, so it's
-          visually clear they all happen inside the chosen copy. */}
+      {/* The copy region: the copy selector and every step up to Sync &
+          Deploy live in one card, so it's visually clear they all happen
+          inside the chosen copy. */}
       <div className="flex min-w-0 items-center gap-1 overflow-x-auto rounded-xl border border-border bg-muted/40 px-1.5 py-1">
         <CopySelector
           copies={copies}
@@ -180,25 +184,6 @@ export function TopNav({
           onPull={onPullCopy}
           onCreatedCopy={(name) => onSelectCopy(name)}
         />
-        {/* Add a new business process IN this copy. Quiet, tab-styled — a
-            secondary action that belongs to the copy. */}
-        <button
-          type="button"
-          onClick={() => copy && setAutomateOpen(true)}
-          disabled={copy === null}
-          title={
-            copy === null
-              ? 'Create or select a copy first'
-              : 'Create a new business process in this copy'
-          }
-          className={cn(
-            'inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground',
-            copy === null && 'cursor-not-allowed opacity-50 hover:bg-transparent',
-          )}
-        >
-          <Plus className="size-3.5" aria-hidden />
-          New Business Process
-        </button>
         <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
         {IN_COPY_STEPS.map((step, i) => (
           <div key={step.id} className="flex shrink-0 items-center gap-1">
@@ -238,8 +223,8 @@ export function TopNav({
       />
 
       <NewBusinessProcessDialog
-        open={automateOpen}
-        onOpenChange={setAutomateOpen}
+        open={newBpOpen}
+        onOpenChange={onNewBpOpenChange}
         copy={copy ?? undefined}
         existingNames={copyBpNames}
         onCreated={(name) => {
