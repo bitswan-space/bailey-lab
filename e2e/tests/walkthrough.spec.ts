@@ -540,52 +540,41 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     if (await existing.isVisible().catch(() => false)) {
       await existing.click();
     } else {
-      // Wait for the copy to finish setting up before we try to create in it.
-      await d.getByText(/Setting up your copy/i).first()
-        .waitFor({ state: 'hidden', timeout: 3 * 60_000 }).catch(() => {});
-      // Retry the create: a press can 400 while the copy is still landing, which
-      // leaves the dialog open — so re-open/refill/press until the BP shows.
-      const deadline = Date.now() + 5 * 60_000;
-      let created = false;
+      // Create the BP. The New-BP flow lives behind the Process switcher popover;
+      // on first load that popover can flicker closed under the initial SSE
+      // re-render storm, so a single open→click races those re-renders. Profiling
+      // proved the copy is selected and the switcher ENABLED immediately (the
+      // backend create itself is ~few seconds) — the only cost was that flicker.
+      // So retry the WHOLE open→fill→Create→selected sequence on a SHORT cadence
+      // (expect.toPass) and land it the instant the popover is stably open,
+      // instead of paying a 60s SLA per miss. Idempotent: if the BP is already
+      // selected (a prior iteration's create landed), we're done.
+      const dlg = d.getByRole('dialog');
+      const nameInput = dlg.getByLabel(/^Name$/).first();
       let shotCreate = false;
-      for (let attempt = 0; !created && Date.now() < deadline; attempt++) {
-        // (Re)open the New BP modal if it isn't already open.
-        const dlg = d.getByRole('dialog');
-        if (!(await dlg.isVisible().catch(() => false))) {
+      await expect(async () => {
+        if (await selected.isVisible().catch(() => false)) return; // already created
+        // Open the New-BP dialog if it isn't up (re-opening the switcher first
+        // when the popover flickered shut).
+        if (!(await nameInput.isVisible().catch(() => false))) {
           const newBtn = d.getByRole('button', { name: /New business process/i }).first();
           if (!(await newBtn.isVisible().catch(() => false))) {
-            // Switcher closed after a prior attempt — re-open it.
-            await d.getByRole('button', { name: /^Process\b/ }).first().click().catch(() => {});
-            await newBtn.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+            await d.getByRole('button', { name: /^Process\b/ }).first().click({ timeout: 2_000 });
           }
-          await newBtn.click().catch(() => {});
+          await newBtn.click({ timeout: 2_000 });
         }
-        const input = dlg.getByLabel(/^Name$/).first();
-        await input.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
-        if (await input.isVisible().catch(() => false)) {
-          // Type the human-readable name; the server derives BP.slug from it.
-          await input.fill(BP.title).catch(() => {});
-          if (!shotCreate) {
-            await capture(dashPage, 'bp-create');
-            shotCreate = true;
-          }
-          await dlg.getByRole('button', { name: /^Create$/ }).first().click().catch(() => {});
+        await expect(nameInput).toBeVisible({ timeout: 2_000 });
+        if (!shotCreate) {
+          await capture(dashPage, 'bp-create');
+          shotCreate = true;
         }
-        // Resolve on success (BP selected) OR the dialog clearing; otherwise the
-        // create errored (copy not ready) and we loop to retry after a beat.
-        await Promise.race([
-          selected.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
-          dlg.waitFor({ state: 'hidden', timeout: 20_000 }).catch(() => {}),
-        ]);
-        created = await selected.isVisible().catch(() => false);
-        if (!created) {
-          // Close a lingering errored dialog so the next attempt is clean.
-          if (await dlg.isVisible().catch(() => false)) {
-            await dashPage.keyboard.press('Escape').catch(() => {});
-            await dlg.waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
-          }
-        }
-      }
+        // Type the human-readable name (the server derives BP.slug), submit, and
+        // require the BP to actually land as the selected process for this
+        // attempt to pass.
+        await nameInput.fill(BP.title);
+        await dlg.getByRole('button', { name: /^Create$/ }).first().click({ timeout: 2_000 });
+        await expect(selected).toBeVisible({ timeout: 8_000 });
+      }).toPass({ timeout: 3 * 60_000, intervals: [300, 500, 1000, 2000] });
     }
     // The BP is selected once its name shows in the switcher trigger.
     await expect(selected).toBeVisible({ timeout: SLA });
