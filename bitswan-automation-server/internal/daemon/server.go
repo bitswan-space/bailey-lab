@@ -173,6 +173,10 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// re-deriving it from SSO groups. Read-only, keyed by email.
 	mux.HandleFunc("/bailey/role", s.authMiddleware(s.handleUserRole))
 
+	// Memory admission (trusted, socket-auth): gitops calls this to gate a
+	// promote against the reserved budget before deploying.
+	mux.HandleFunc("/memory/admit", s.authMiddleware(s.handleMemoryAdmit))
+
 	// Bailey endpoint access grants (authenticated; socket-trusted, CLI-only —
 	// deliberately not exposed on the public gate mux to keep the share UI
 	// least-privileged). Backs `bitswan bailey access {grant,revoke,list}`.
@@ -371,6 +375,19 @@ func (s *Server) Run() error {
 			fmt.Printf("Warning: protected gate failed to start: %v\n", err)
 		}
 		setupBaileyRoutes()
+	}()
+
+	// Memory governance sweep: every 5 minutes shed the oldest on-demand
+	// instances that push the on-demand pool over budget, and emit over-reservation
+	// SIEM events. Always-on services are never touched; evicted ones wake on access.
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+			s.enforceMemoryBudget(ctx)
+			cancel()
+		}
 	}()
 
 	// Handle shutdown signals

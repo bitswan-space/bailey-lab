@@ -238,6 +238,10 @@ export interface DeployStatusResponse {
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
   step?: string | null;
   message?: string;
+  /** Append-only history of every progress line (image build steps, build.sh
+   *  output, per-member "Prepared N/M", …). `message` is only the latest line;
+   *  this keeps them all so the UI can render a scrollable deploy log. */
+  log?: string[];
   error?: string | null;
   bp?: string | null;
   total?: number | null;
@@ -662,6 +666,22 @@ export const api = {
     postJson<DeployResponse>('/api/automations/deploy', body),
   deployBusinessProcess: (body: DeployBPRequest) =>
     postJson<DeployBPResponse>('/api/automations/deploy-bp', body),
+  /** Rehydrate + LRU-touch a copy's live-dev instance when its BP is opened.
+   *  Idempotent: a running instance is only marked recently-used (kept hot); an
+   *  evicted one is restarted. Fire-and-forget from the UI. */
+  wakeLiveDev: (bp: string, copy: string | null) =>
+    postJson<{ context: string | null; deployment_ids: string[] }>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/wake-live-dev`,
+      { copy: copy ?? undefined },
+    ),
+  /** Manually sleep (mark inactive + remove containers) or wake (re-activate +
+   *  redeploy) a BP stage. Sleep frees memory now; an on-demand stage also wakes
+   *  on URL access. */
+  stagePower: (action: 'sleep' | 'wake', bp: string, stage: string, copy: string | null) =>
+    postJson<{ context: string; slept?: string[]; deployment_ids?: string[] }>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/${action}`,
+      { stage, copy: copy ?? undefined },
+    ),
   promoteBusinessProcess: (body: PromoteBPRequest) =>
     postJson<DeployBPResponse>('/api/automations/promote-bp', body),
   /** Per-stage deployment history for a business process (newest-first). */

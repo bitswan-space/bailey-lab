@@ -21,6 +21,8 @@ const (
 	auditInviteResend    = "invite.resend"    // an admin re-sent an invite (fresh token + expiry)
 	auditInviteRevoke    = "invite.revoke"    // an admin revoked an outstanding invite
 	auditInviteRedeem    = "invite.redeem"    // an invitee redeemed their invite (first device trusted)
+
+	auditMemOverReservation = "container.mem_over_reservation" // a container's memory usage exceeded its reservation
 )
 
 // eventRecord is one audit row, JSON-shaped for the overview feed.

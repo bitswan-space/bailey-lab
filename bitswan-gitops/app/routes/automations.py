@@ -625,6 +625,120 @@ async def deploy_bp(
     )
 
 
+class WakeLiveDevRequest(BaseModel):
+    # The copy whose live-dev instance to rehydrate (None/"main" = the main copy).
+    copy: str | None = None
+
+
+@router.post("/business-processes/{bp}/wake-live-dev")
+async def wake_live_dev_route(
+    bp: str,
+    body: WakeLiveDevRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Rehydrate an evicted live-dev instance — called when a user opens the BP
+    in a copy (dashboard) or first hits its URL (the daemon gate). Starts the
+    instance's stopped workers (or redeploys if cold-GC'd), stamps last-activity,
+    and re-enforces the pool cap. Idempotent: a running instance is a no-op
+    (well, a cheap restart). Returns the deployment_ids so the caller can poll
+    health / show a loading screen."""
+    copy = body.copy
+    context = f"copy-{copy}-{bp}" if copy and copy != "main" else bp
+    return await automation_service.wake_live_dev(context)
+
+
+class StageActionRequest(BaseModel):
+    stage: str
+    copy: str | None = None
+
+
+def _context_for(bp: str, copy: str | None) -> str:
+    return f"copy-{copy}-{bp}" if copy and copy != "main" else bp
+
+
+@router.post("/business-processes/{bp}/sleep")
+async def sleep_bp_stage(
+    bp: str,
+    body: StageActionRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Manually put a BP stage to sleep — mark its members inactive + remove their
+    containers so it costs nothing. On-demand stages wake on URL access; any stage
+    can be woken with the /wake endpoint. Manual memory management + a way to test
+    the on-demand path."""
+    context = _context_for(bp, body.copy)
+    stage = "" if body.stage == "production" else body.stage
+    return await automation_service.sleep_context_stage(context, stage)
+
+
+@router.post("/business-processes/{bp}/wake")
+async def wake_bp_stage(
+    bp: str,
+    body: StageActionRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Manually wake a slept BP stage — re-activate its members + redeploy."""
+    context = _context_for(bp, body.copy)
+    stage = "" if body.stage == "production" else body.stage
+    return await automation_service.wake_context_stage(context, stage)
+
+
+class WakeByHostRequest(BaseModel):
+    host: str
+
+
+@router.post("/wake-by-host")
+async def wake_by_host_route(
+    body: WakeByHostRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Rehydrate the live-dev instance serving `host` — called by the daemon gate
+    when a request hits a dehydrated live-dev URL (scale-from-zero). Resolves the
+    host to its instance and starts it; the gate meanwhile serves a loading page
+    that retries until the container is healthy. No-op for unknown/non-live-dev
+    hosts."""
+    return await automation_service.wake_by_host(body.host)
+
+
+@router.get("/on-demand-host")
+async def on_demand_host_route(
+    host: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Non-waking scale-from-zero check for the daemon gate: is `host` an
+    on-demand deployment? bitswan.yaml (the single source of truth) is read on
+    each call — no shadow state to drift. The gate uses this for
+    staging/production hosts (whose names lack the '-dev' suffix that marks
+    dev/live-dev as always on-demand) to decide, on a 5xx, whether to show the
+    wake-on-access loading page + rehydrate or pass the hard error through."""
+    return {"on_demand": automation_service.host_is_on_demand(host)}
+
+
+class EvictDeploymentsRequest(BaseModel):
+    deployment_ids: list[str]
+
+
+@router.get("/mem-groups")
+async def mem_groups_route(
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Deployment groups (bp, stage, reserved, policy) from bitswan.yaml. The
+    daemon merges these with the running inventory so the admin Resource page can
+    show SLEEPING (deployed-but-zero-container) BPs, not just running ones."""
+    return automation_service.mem_groups()
+
+
+@router.post("/evict-ephemeral")
+async def evict_ephemeral_route(
+    body: EvictDeploymentsRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Evict specific on-demand deployments (mark inactive + remove containers) —
+    called by the daemon's global memory sweep under pressure. Returns the evicted
+    ids + their ingress hosts so the daemon can mark them dehydrated for wake."""
+    return await automation_service.evict_deployments(body.deployment_ids)
+
+
 @router.post("/promote-bp")
 async def promote_bp(
     body: PromoteBPRequest,

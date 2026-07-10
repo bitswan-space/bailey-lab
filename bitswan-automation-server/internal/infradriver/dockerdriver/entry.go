@@ -41,6 +41,15 @@ func (c *compileState) computeFirewallScope(deployments map[string]*Deployment) 
 		if conf == nil {
 			continue
 		}
+		// Skip inactive (slept) deployments — mirrors the workload loop
+		// (compile.go). Without this, a group whose every member is asleep still
+		// emits its egress gateway, so the gateway is never retired and orphans
+		// pile up. With it, an all-slept group drops its gateway from the desired
+		// compose (retireOrphanedContainers then reaps it) and a later apply won't
+		// recreate it — the gateway comes back only when the group is woken.
+		if conf.Active != nil && !*conf.Active {
+			continue
+		}
 		stage := conf.StageOrProduction()
 		depCtx := conf.Context
 		realm := realmForStage(stage)
@@ -179,6 +188,29 @@ func (c *compileState) resolveAutomationConfig(conf *Deployment) automationConfi
 // buildServiceEntry ports the per-(deployment, slot) body of the main loop. It
 // returns the compose entry, its service name, the desired route (or nil), and
 // whether to emit (conf.enabled).
+// defaultMemReservationMB is the memory reserved for a container whose
+// automation.toml declares no memory-reservation (legacy / undeclared) — small
+// on purpose, so an unset field isn't a big hammer against the budget.
+const defaultMemReservationMB = 50
+
+// memReservationMB is the effective per-container memory reservation stamped as
+// the gitops.mem_reservation_mb label the daemon budgets against.
+func memReservationMB(conf *Deployment) int {
+	if conf.MemoryReservation != nil && *conf.MemoryReservation > 0 {
+		return *conf.MemoryReservation
+	}
+	return defaultMemReservationMB
+}
+
+// memPolicy is the effective reservation policy ("always-on" | "on-demand");
+// anything but "always-on" is on-demand (evictable-under-pressure + wake-on-access).
+func memPolicy(conf *Deployment) string {
+	if conf.MemPolicy == "always-on" {
+		return "always-on"
+	}
+	return "on-demand"
+}
+
 func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot string, db int, workerHosts map[fwKey][]string, workerPorts map[workerPortKey]int, fwScope map[fwKey]*fwGroup) (map[string]interface{}, string, *infradriver.Route, bool, error) {
 	depStage := conf.StageOrProduction()
 	depAutomationName := conf.AutomationNameOr(depID)
@@ -244,14 +276,16 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		bpLabel = depCtx
 	}
 	labels := map[string]interface{}{
-		"gitops.deployment_id":    effectiveDepID,
-		"gitops.workspace":        c.workspaceName,
-		"gitops.automation_name":  depAutomationName,
-		"gitops.context":          depCtx,
-		"gitops.bp":               bpLabel,
-		"gitops.stage":            depStage,
-		"gitops.slot":             slot,
-		"gitops.intended_exposed": "false",
+		"gitops.deployment_id":      effectiveDepID,
+		"gitops.workspace":          c.workspaceName,
+		"gitops.automation_name":    depAutomationName,
+		"gitops.context":            depCtx,
+		"gitops.bp":                 bpLabel,
+		"gitops.stage":              depStage,
+		"gitops.slot":               slot,
+		"gitops.intended_exposed":   "false",
+		"gitops.mem_reservation_mb": fmt.Sprintf("%d", memReservationMB(conf)),
+		"gitops.mem_policy":         memPolicy(conf),
 	}
 	entry["labels"] = labels
 
@@ -771,7 +805,9 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 			"labels": map[string]interface{}{
 				"gitops.firewall_proxy": "true",
 				"gitops.bp":             g.bp,
-				"gitops.stage":          g.realm,
+				"gitops.workspace":      c.workspaceName,
+				"gitops.context":        k.ctx,
+				"gitops.stage":          k.stage,
 				"gitops.slot":           k.slot,
 			},
 		}
@@ -804,8 +840,16 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 			"labels": map[string]interface{}{
 				"gitops.firewall_gateway": "true",
 				"gitops.bp":               g.bp,
-				"gitops.stage":            g.realm,
-				"gitops.slot":             k.slot,
+				// workspace + context + FULL stage (not the collapsed realm) so
+				// eviction can match this gateway to exactly its (context, stage,
+				// slot) group — distinguishing dev vs live-dev and one copy from
+				// another. workspace is REQUIRED: the driver's ContainerList forces
+				// a gitops.workspace filter, so without it the gateway is invisible
+				// to gitops (and to the daemon inventory) and can never be reaped.
+				"gitops.workspace": c.workspaceName,
+				"gitops.context":   k.ctx,
+				"gitops.stage":     k.stage,
+				"gitops.slot":      k.slot,
 			},
 		}
 		// Declare the stage network both join as external, or `docker compose up`

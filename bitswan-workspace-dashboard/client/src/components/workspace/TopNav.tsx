@@ -41,6 +41,7 @@ interface TopNavProps {
   // eslint-disable-next-line no-restricted-syntax -- null = no BP selected yet
   activeBpId: string | null;
   onSelectBp: (id: string) => void;
+  onBpCreated: (name: string) => void;
   // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
   copy: string | null;
   copies: Copy[];
@@ -103,6 +104,7 @@ export function TopNav({
   bps,
   activeBpId,
   onSelectBp,
+  onBpCreated,
   copy,
   copies,
   onSelectCopy,
@@ -229,9 +231,10 @@ export function TopNav({
         existingNames={copyBpNames}
         onCreated={(name) => {
           // Select the new BP and land on its Description (the copy is already
-          // the selected one).
-          onSelectBp(name);
-          onTab('description');
+          // the selected one). onBpCreated marks it as just-created so the
+          // consistency effect keeps it selected until the SSE feed delivers it
+          // — otherwise the selection snaps to whichever BP sorts first.
+          onBpCreated(name);
         }}
       />
     </div>

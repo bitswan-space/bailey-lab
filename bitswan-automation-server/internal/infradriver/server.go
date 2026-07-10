@@ -40,11 +40,13 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(PathBuildImage, s.handleBuildImage)
 	mux.HandleFunc(PathContainersList, s.handleList)
+	mux.HandleFunc(PathContainersStats, s.handleStats)
 	mux.HandleFunc(PathContainersEvents, s.handleEvents)
 	mux.HandleFunc(PathContainersInspect, s.handleInspect)
 	mux.HandleFunc(PathContainersLogs, s.handleLogs)
 	mux.HandleFunc(PathContainersStop, s.handleStop)
 	mux.HandleFunc(PathContainersRestart, s.handleRestart)
+	mux.HandleFunc(PathContainersRemove, s.handleRemove)
 	mux.HandleFunc(PathContainersExec, s.handleExec)
 	mux.HandleFunc(PathContainersCopyOut, s.handleCopyOut)
 	mux.HandleFunc(PathContainersCopyIn, s.handleCopyIn)
@@ -89,6 +91,19 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, ContainerListResult{Containers: containers})
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	var body ListBody // reuses {ctx, filter}
+	if !decode(w, r, &body) {
+		return
+	}
+	stats, err := s.driver.ContainerStats(r.Context(), body.Ctx, body.Filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, ContainerStatsResult{Stats: stats})
 }
 
 func (s *Server) handleImageList(w http.ResponseWriter, r *http.Request) {
@@ -190,6 +205,12 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	s.containerAction(w, r, func(ctx WorkspaceContext, name string) error {
 		return s.driver.ContainerRestart(r.Context(), ctx, name)
+	})
+}
+
+func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
+	s.containerAction(w, r, func(ctx WorkspaceContext, name string) error {
+		return s.driver.ContainerRemove(r.Context(), ctx, name)
 	})
 }
 

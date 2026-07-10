@@ -22,6 +22,9 @@ import {
   History,
   KeyRound,
   Layers,
+  MemoryStick,
+  Moon,
+  Power,
   LifeBuoy,
   Loader2,
   Lock,
@@ -334,6 +337,21 @@ function EmptyTab({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
 }
 
 // ── Containers tab ──────────────────────────────────────────────────────────
+
+// Human byte size (binary units — what `free -h` shows).
+function fmtBytes(n: number): string {
+  if (!n && n !== 0) return '—';
+  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  const s = v >= 100 || i === 0 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, '');
+  return `${s} ${u[i]}`;
+}
+
 interface Member {
   id: string;
   name: string;
@@ -343,6 +361,11 @@ interface Member {
   // eslint-disable-next-line no-restricted-syntax -- null = no URL
   url: string | null;
   expose: boolean;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
+  memUsageBytes: number | null;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
+  memReservationMB: number | null;
+  memOver: boolean;
 }
 
 const SERVICE_META: Record<ServiceType, { label: string; icon: LucideIcon }> = {
@@ -446,6 +469,22 @@ function ContainerCard({
             {m.replicas}
           </span>
         )}
+        {m.memReservationMB != null && (
+          <span
+            className={cn(
+              'inline-flex items-center gap-1 text-[11px]',
+              m.memOver ? 'font-semibold text-red-600' : 'text-muted-foreground',
+            )}
+            title={
+              m.memOver
+                ? 'Memory usage exceeds this container’s reservation'
+                : 'Memory usage / reserved'
+            }
+          >
+            <MemoryStick className="size-3" aria-hidden />
+            {m.memUsageBytes != null ? fmtBytes(m.memUsageBytes) : '—'} / {m.memReservationMB} MB
+          </span>
+        )}
         {m.present && (
           <div className="flex items-center gap-0.5">
             <Button variant="ghost" size="icon" className="size-8" title="Restart"
@@ -507,15 +546,72 @@ function ContainersSection({
   members,
   stage,
   stageLabel,
+  bp,
   onAction,
+  onRefresh,
 }: {
   members: Member[];
   stage: StageId;
   stageLabel: string;
+  bp: string;
   onAction: (action: 'start' | 'stop' | 'restart', id: string, name: string) => void;
+  onRefresh: () => void;
 }) {
+  const [busy, setBusy] = useState(false);
+  // "Running" is the live container state, NOT whether a deploy record exists —
+  // an asleep stage still has its records (present=true) but no running container.
+  const isUp = (m: Member) =>
+    m.display === 'running' ||
+    m.display === 'restarting' ||
+    m.display === 'building' ||
+    m.display === 'deployed';
+  const anyRunning = members.some(isUp);
+  const asleep = members.length > 0 && members.every((m) => !isUp(m));
+  // Sleep/Wake apply to the promoted stages (their context is the raw BP); DR is
+  // a standby slot managed via the backup swap, so no power toggle there.
+  const canPower = stage === 'dev' || stage === 'staging' || stage === 'production';
+
+  const power = async (action: 'sleep' | 'wake') => {
+    setBusy(true);
+    const work = api.stagePower(action, bp, stage, null);
+    toast.promise(work, {
+      loading: action === 'sleep' ? `Putting ${stageLabel} to sleep…` : `Waking ${stageLabel}…`,
+      success: action === 'sleep' ? `${stageLabel} put to sleep` : `${stageLabel} woken`,
+      error: (e: unknown) => `Failed to ${action} ${stageLabel}: ${String(e)}`,
+    });
+    try {
+      await work;
+      onRefresh();
+    } catch {
+      /* toast handled */
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-2">
+      {canPower && (members.length > 0 || asleep) && (
+        <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
+          <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
+          <span className="text-[12.5px] text-muted-foreground">
+            {asleep
+              ? 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
+              : 'Free this stage’s memory now. On-demand stages wake automatically on access.'}
+          </span>
+          {asleep ? (
+            <Button variant="outline" size="sm" className="ml-auto h-7" disabled={busy}
+              onClick={() => power('wake')}>
+              <Power className="mr-1.5 size-3.5" aria-hidden /> Wake
+            </Button>
+          ) : (
+            <Button variant="outline" size="sm" className="ml-auto h-7" disabled={busy || !anyRunning}
+              onClick={() => power('sleep')}>
+              <Moon className="mr-1.5 size-3.5" aria-hidden /> Put to sleep
+            </Button>
+          )}
+        </div>
+      )}
       <StageServicesRow stage={stage} />
       {members.length === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-muted-foreground">
@@ -1263,6 +1359,9 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         replicas: a?.replicas ?? 0,
         url: a?.automation_url ?? null,
         expose: a?.expose ?? false,
+        memUsageBytes: a?.mem_usage_bytes ?? null,
+        memReservationMB: a?.mem_reservation_mb ?? null,
+        memOver: a?.mem_over_reservation ?? false,
       };
     });
   }, [currentEntry, automations, isDr, drSlot]);
@@ -1352,9 +1451,18 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   );
 
   const friendly = useMemo(() => {
+    const isUp = (m: Member) =>
+      m.display === 'running' ||
+      m.display === 'restarting' ||
+      m.display === 'building' ||
+      m.display === 'deployed';
     const failing = members.filter((m) => m.display === 'failed' || m.display === 'stopped').length;
     if (!currentEntry)
       return { label: 'Not deployed yet', color: 'text-muted-foreground', dot: 'bg-zinc-400', ring: 'ring-zinc-400/10' };
+    // Deployed but nothing running = intentionally asleep (manual sleep or the
+    // on-demand memory sweep). Distinct from a failure; wakes on access.
+    if (members.length > 0 && !members.some(isUp))
+      return { label: 'Asleep', color: 'text-sky-600', dot: 'bg-sky-500', ring: 'ring-sky-500/10' };
     if (failing > 0)
       return { label: `${failing} service${failing === 1 ? '' : 's'} not running`, color: 'text-red-600', dot: 'bg-red-500', ring: 'ring-red-500/10' };
     return { label: 'Healthy', color: 'text-emerald-600', dot: 'bg-emerald-500', ring: 'ring-emerald-500/10' };
@@ -1593,13 +1701,22 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
               </div>
               <div className="flex flex-wrap gap-2.5">
                 {frontends.map((f) => {
-                  const deployed = f.display === 'running';
+                  const running = f.display === 'running';
+                  // A URL is openable even when the container is down: opening an
+                  // on-demand host wakes it (loading screen → app). Only when there
+                  // is no URL at all is it truly unreachable.
+                  const openable = !!f.url;
+                  const subtitle = f.url
+                    ? running
+                      ? f.url.replace('https://', '')
+                      : 'Asleep — opens with a loading screen'
+                    : 'Not deployed';
                   const inner = (
                     <>
                       <span
                         className={cn(
                           'flex size-9 shrink-0 items-center justify-center rounded-lg',
-                          deployed ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+                          running ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
                         )}
                       >
                         <Globe className="size-[18px]" aria-hidden />
@@ -1608,29 +1725,36 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                         <span
                           className={cn(
                             'block truncate font-mono text-[13px] font-semibold',
-                            deployed ? 'text-foreground' : 'text-muted-foreground',
+                            openable ? 'text-foreground' : 'text-muted-foreground',
                           )}
                         >
                           {f.name}
                         </span>
                         <span className="block truncate text-[11px] text-muted-foreground">
-                          {deployed && f.url ? f.url.replace('https://', '') : 'Not deployed'}
+                          {subtitle}
                         </span>
                       </span>
-                      {deployed && f.url ? (
-                        <ExternalLink className="size-3.5 shrink-0 text-primary" aria-hidden />
+                      {openable ? (
+                        running ? (
+                          <ExternalLink className="size-3.5 shrink-0 text-primary" aria-hidden />
+                        ) : (
+                          <Moon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                        )
                       ) : (
                         <CircleSlash className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
                       )}
                     </>
                   );
-                  return deployed && f.url ? (
+                  return openable ? (
                     <a
                       key={f.id}
-                      href={f.url}
+                      href={f.url ?? undefined}
                       target="_blank"
                       rel="noreferrer"
-                      className="flex w-[280px] max-w-full items-center gap-2.5 rounded-[10px] border border-border px-3.5 py-3 hover:border-primary/40 hover:shadow-sm"
+                      className={cn(
+                        'flex w-[280px] max-w-full items-center gap-2.5 rounded-[10px] border border-border px-3.5 py-3 hover:border-primary/40 hover:shadow-sm',
+                        !running && 'bg-muted/30',
+                      )}
                     >
                       {inner}
                     </a>
@@ -1709,7 +1833,9 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 members={members}
                 stage={activeStage}
                 stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
+                bp={bp.name}
                 onAction={runContainer}
+                onRefresh={refresh}
               />
             ) : visibleSection === 'secrets' ? (
               isDr ? (

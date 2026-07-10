@@ -37,6 +37,8 @@ services:
             gitops.context: copy-bar-acme
             gitops.deployment_id: backend-copy-bar-acme-live-dev
             gitops.intended_exposed: "false"
+            gitops.mem_policy: on-demand
+            gitops.mem_reservation_mb: "50"
             gitops.slot: ""
             gitops.stage: live-dev
             gitops.workspace: ws4
@@ -76,6 +78,8 @@ services:
             gitops.context: copy-bar-acme
             gitops.deployment_id: frontend-copy-bar-acme-live-dev
             gitops.intended_exposed: "true"
+            gitops.mem_policy: on-demand
+            gitops.mem_reservation_mb: "50"
             gitops.slot: ""
             gitops.stage: live-dev
             gitops.workspace: ws4
@@ -112,9 +116,11 @@ services:
         image: bitswan/egress-gateway:latest
         labels:
             gitops.bp: acme
+            gitops.context: copy-bar-acme
             gitops.firewall_gateway: "true"
             gitops.slot: ""
-            gitops.stage: dev
+            gitops.stage: live-dev
+            gitops.workspace: ws4
         networks:
             ws4-dev:
                 aliases:
@@ -139,9 +145,11 @@ services:
         image: bitswan/egress-gateway:latest
         labels:
             gitops.bp: acme
+            gitops.context: copy-bar-acme
             gitops.firewall_proxy: "true"
             gitops.slot: ""
-            gitops.stage: dev
+            gitops.stage: live-dev
+            gitops.workspace: ws4
         networks:
             ws4-dev:
                 aliases:

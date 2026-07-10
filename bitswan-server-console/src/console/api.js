@@ -267,6 +267,14 @@ export const Api = {
   adminACL: () => getJSON('/bailey/api/admin/acl'),
   adminDefaultImages: () => getJSON('/bailey/api/admin/default-images'),
   setAdminDefaultImages: (body) => postJSON('/bailey/api/admin/default-images', body),
+  // Resource management: live memory budget + per-BP breakdown. The reservation
+  // knobs are platform-tuned (env / defaults), surfaced read-only in this same
+  // payload — not user-configurable.
+  resources: () => getJSON('/bailey/api/admin/resources'),
+  // Put on-demand BP containers to sleep (evict; they wake on next access).
+  // `{ all: true }` sleeps every on-demand workload; a targeted `{ workspace,
+  // bp, stage }` sleeps one row. Always-on workloads are always skipped server-side.
+  resourcesSleep: (body) => postJSON('/bailey/api/admin/resources/sleep', body),
 };
 
 // Expose on window for the non-ESM-import console modules (they read

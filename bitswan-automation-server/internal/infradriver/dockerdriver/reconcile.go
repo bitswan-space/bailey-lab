@@ -31,6 +31,14 @@ func stateDir(wctx infradriver.WorkspaceContext) string {
 }
 
 func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, composeYAML string, routes []infradriver.Route, report func(step, msg string)) error {
+	// Per-phase profiling: attribute the wall-clock between consecutive progress
+	// steps to the step that just finished, and write a summary line at the end
+	// (perf-reconcile.log). Zero per-phase edits — every report() below is a
+	// phase boundary.
+	pt := newPhaseTimer(report)
+	report = pt.report
+	defer pt.finish(wctx.GitopsDir, wctx.BP)
+
 	// 1. Ensure the per-(workspace, stage) networks the compose references as
 	//    external exist (automation_service._ensure_stage_networks).
 	report("networks", "Ensuring stage networks...")
@@ -88,6 +96,12 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		}
 	}
 
+	// ONE post-up container snapshot, shared by the live-DB, cert and orphan
+	// steps below — none of them create or remove containers, so re-listing per
+	// step just repeats an expensive `docker ps`. (Best-effort: on error the
+	// steps that need it treat it as empty, same as their old per-call failure.)
+	postInfos, _ := listWorkspaceContainers(ctx, wctx)
+
 	// 3b. Fail-fast: ensure the live Postgres DB exists for each backend THIS
 	//     apply (re)created, before it settles into a connect-retry loop
 	//     (bp_databases.ensure_live_postgres_dbs). Scoped to fresh containers via
@@ -95,7 +109,7 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	//     running has a working DB, so there's nothing to fail-fast on. Raises if
 	//     Postgres is enabled but a needed DB can't be created.
 	report("provision", "Ensuring live databases for (re)created backends...")
-	if err := ensureLivePostgresDBs(ctx, wctx, bs, preExistingIDs, report); err != nil {
+	if err := ensureLivePostgresDBs(ctx, wctx, bs, preExistingIDs, postInfos, report); err != nil {
 		return fmt.Errorf("ensure live postgres dbs: %w", err)
 	}
 
@@ -105,7 +119,7 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	//    (No per-container oauth2-proxy: oauth2 is deprecated — Bailey's
 	//    protected-ingress handles auth at the edge.)
 	report("certs", "Installing CA certificates in (re)created containers...")
-	if err := installCertificatesInContainers(ctx, wctx, preExistingIDs, report); err != nil {
+	if err := installCertificatesInContainers(ctx, wctx, postInfos, preExistingIDs, report); err != nil {
 		return err
 	}
 
@@ -136,7 +150,7 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	//     the ingress flip, so nothing routes to a container we remove. Targeted
 	//     removal scoped to the app project — not a `compose up --remove-orphans`,
 	//     which would re-evaluate and spuriously recreate the egress workers.
-	retireOrphanedContainers(ctx, wctx, composePath, report)
+	retireOrphanedContainers(ctx, wctx, composePath, postInfos, report)
 	return nil
 }
 
@@ -176,14 +190,10 @@ func waitProductionUpstreamsHealthy(ctx context.Context, routes []infradriver.Ro
 // promote replaced). Done after the ingress cutover so a removed container is
 // never one a route still points at. Scoped to wctx.WorkspaceName's project, so
 // it never touches the site/dashboard/driver containers.
-func retireOrphanedContainers(ctx context.Context, wctx infradriver.WorkspaceContext, composePath string, report func(step, msg string)) {
+func retireOrphanedContainers(ctx context.Context, wctx infradriver.WorkspaceContext, composePath string, infos []containerInfo, report func(step, msg string)) {
 	desired := composeServiceNames(composePath)
 	if desired == nil {
 		return // couldn't parse the compose — don't remove anything
-	}
-	infos, err := listWorkspaceContainers(ctx, wctx)
-	if err != nil {
-		return
 	}
 	for _, c := range infos {
 		if c.labels["com.docker.compose.project"] != wctx.WorkspaceName {
@@ -275,25 +285,23 @@ type containerInfo struct {
 // listWorkspaceContainers returns the workspace's containers with their state
 // and labels (gitops get_container, but scoped to the whole workspace).
 func listWorkspaceContainers(ctx context.Context, wctx infradriver.WorkspaceContext) ([]containerInfo, error) {
-	out, err := exec.CommandContext(ctx, "docker", "ps", "--all", "--no-trunc", "--quiet",
+	// A single `docker ps --format` (no per-container `docker inspect`) — this
+	// helper backs the pre-snapshot, cert scoping, orphan retirement AND live-DB
+	// provisioning, so it runs several times per apply. `docker inspect <all
+	// ids>` costs ~0.3s/container on a busy shared daemon (tens of seconds each
+	// call); id/state/labels all come straight from `docker ps`.
+	out, err := exec.CommandContext(ctx, "docker", "ps", "--all", "--no-trunc",
+		"--format", psFormat,
 		"--filter", "label=gitops.workspace="+wctx.WorkspaceName).Output()
 	if err != nil {
 		return nil, fmt.Errorf("docker ps: %w", err)
 	}
-	ids := strings.Fields(string(out))
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	raw, err := exec.CommandContext(ctx, "docker", append([]string{"inspect"}, ids...)...).Output()
-	if err != nil {
-		return nil, fmt.Errorf("docker inspect: %w", err)
-	}
-	inspected, err := parseInspect(raw)
+	listed, err := parsePS(out)
 	if err != nil {
 		return nil, err
 	}
-	infos := make([]containerInfo, 0, len(inspected))
-	for _, c := range inspected {
+	infos := make([]containerInfo, 0, len(listed))
+	for _, c := range listed {
 		infos = append(infos, containerInfo{id: c.ID, state: c.State, labels: c.Labels})
 	}
 	return infos, nil
@@ -315,11 +323,7 @@ fi`
 // installCertificatesInContainers ports install_certificates_in_container: for
 // every running container labelled gitops.certs.enabled=true, exec the cert
 // install script.
-func installCertificatesInContainers(ctx context.Context, wctx infradriver.WorkspaceContext, preExistingIDs map[string]bool, report func(step, msg string)) error {
-	infos, err := listWorkspaceContainers(ctx, wctx)
-	if err != nil {
-		return err
-	}
+func installCertificatesInContainers(ctx context.Context, wctx infradriver.WorkspaceContext, infos []containerInfo, preExistingIDs map[string]bool, report func(step, msg string)) error {
 	// Install into the freshly-(re)created cert-enabled containers concurrently —
 	// each exec is independent, so a serial loop just sums their latencies. A
 	// container whose id was already present before this apply kept its CA trust

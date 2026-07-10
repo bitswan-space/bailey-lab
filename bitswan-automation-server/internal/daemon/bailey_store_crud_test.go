@@ -399,6 +399,45 @@ func TestStore_ProtectedRouteCRUD(t *testing.T) {
 	}
 }
 
+func TestStore_ListProtectedRoutes(t *testing.T) {
+	// listProtectedRoutes returns every recorded hostname→upstream (site
+	// services that are routes but not owned endpoints). Save a couple and
+	// confirm they come back.
+	want := map[string]string{
+		"list-a.example.com": "http://10.0.0.5:9000",
+		"list-b.example.com": "http://10.0.0.6:9000",
+	}
+	for h, up := range want {
+		if err := saveProtectedRoute(h, up); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for h := range want {
+			_ = deleteProtectedRoute(h)
+		}
+	})
+	routes, err := listProtectedRoutes()
+	if err != nil {
+		t.Fatalf("listProtectedRoutes: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range routes {
+		got[r.Hostname] = r.Upstream
+	}
+	for h, up := range want {
+		if got[toOuterHost(h)] != up && got[h] != up {
+			t.Errorf("listProtectedRoutes missing %q=%q; got %v", h, up, got)
+		}
+	}
+}
+
+func TestInviteConfigError_Error(t *testing.T) {
+	if got := errNoProtectedDomain.Error(); got != "no protected domain configured for this server" {
+		t.Errorf("Error() = %q", got)
+	}
+}
+
 func TestStore_NowRFC3339Parses(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, nowRFC3339()); err != nil {
 		t.Errorf("nowRFC3339 not RFC3339: %v", err)

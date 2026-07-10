@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AuthGate } from '@/components/auth/AuthGate';
 import { SessionExpiredBanner } from '@/components/auth/SessionExpiredBanner';
 import { TopNav } from '@/components/workspace/TopNav';
@@ -201,6 +201,15 @@ function Shell() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
+  // Wake-on-load: opening a BP in a copy rehydrates its (possibly evicted)
+  // live-dev instance and marks it recently-used, so the preview is warm by the
+  // time the user opens it and stays out of the LRU eviction set while in view.
+  // Fire-and-forget; the server no-ops a running instance (just a touch).
+  useEffect(() => {
+    if (!bpId) return;
+    api.wakeLiveDev(bpId, copy).catch(() => {});
+  }, [bpId, copy]);
+
   // Switching tabs drops the previous page's scoped params so the URL stays
   // a clean, faithful description of what's on screen.
   const handleTab = useCallback((next: FlowTab) => {
@@ -208,12 +217,30 @@ function Shell() {
     setUrlParams(Object.fromEntries(PAGE_SCOPED_PARAMS.map((k) => [k, null])));
   }, []);
 
+  // A just-created BP: its name is selected optimistically the instant the
+  // create call returns, but it isn't in the `processes` SSE snapshot yet. The
+  // consistency effect below must NOT clobber that selection back to the first
+  // BP while we wait for the feed — otherwise creating "memory6" lands you on
+  // whatever sorts first. Cleared once the BP actually appears. Mirrors the
+  // copy effect's optimistic-survival right below.
+  const justCreatedBpRef = useRef<string | null>(null);
+  const handleBpCreated = useCallback((name: string) => {
+    justCreatedBpRef.current = name;
+    setBpId(name);
+    handleTab('description');
+  }, [handleTab]);
+
   // The BP switcher lists every BP (main + copies; the processes feed is
   // already deduped by name). Keep `bpId` consistent: when the current BP
-  // disappears, fall back to the first available — or clear if none.
+  // disappears, fall back to the first available — or clear if none. A
+  // just-created BP survives until the SSE feed delivers it.
   useEffect(() => {
     if (processes === null) return; // still loading; don't make decisions yet
-    if (bpId && allBps.some((p) => p.id === bpId)) return;
+    if (bpId && allBps.some((p) => p.id === bpId)) {
+      justCreatedBpRef.current = null; // it's in the feed now; stop protecting it
+      return;
+    }
+    if (bpId && bpId === justCreatedBpRef.current) return; // created, not in feed yet
     setBpId(allBps[0]?.id ?? null);
   }, [processes, allBps, bpId]);
 
@@ -302,6 +329,7 @@ function Shell() {
         bps={allBps}
         activeBpId={bpId}
         onSelectBp={setBpId}
+        onBpCreated={handleBpCreated}
         copy={copy}
         copies={copies}
         onSelectCopy={setCopy}

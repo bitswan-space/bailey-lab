@@ -14,6 +14,7 @@ import (
 // fakeDriver is a programmable Driver for transport tests.
 type fakeDriver struct {
 	containers   []Container
+	stats        []ContainerStat
 	gotFilter    ContainerFilter
 	logLines     []LogLine
 	logsErr      error
@@ -21,6 +22,7 @@ type fakeDriver struct {
 	eventsErr    error
 	stopped      string
 	restarted    string
+	removed      string
 	restartErr   error
 	applyCalled  bool
 	buildLogs    []string
@@ -64,6 +66,10 @@ func (f *fakeDriver) ContainerList(_ context.Context, _ WorkspaceContext, filter
 	return f.containers, nil
 }
 
+func (f *fakeDriver) ContainerStats(_ context.Context, _ WorkspaceContext, _ ContainerFilter) ([]ContainerStat, error) {
+	return f.stats, nil
+}
+
 func (f *fakeDriver) ContainerLogs(_ context.Context, _ WorkspaceContext, _ string, _ int, _ bool, sink func(LogLine)) error {
 	for _, l := range f.logLines {
 		sink(l)
@@ -86,6 +92,11 @@ func (f *fakeDriver) ContainerStop(_ context.Context, _ WorkspaceContext, contai
 func (f *fakeDriver) ContainerRestart(_ context.Context, _ WorkspaceContext, container string) error {
 	f.restarted = container
 	return f.restartErr
+}
+
+func (f *fakeDriver) ContainerRemove(_ context.Context, _ WorkspaceContext, container string) error {
+	f.removed = container
+	return nil
 }
 
 func (f *fakeDriver) ImageList(_ context.Context, _ WorkspaceContext) ([]Image, error) {

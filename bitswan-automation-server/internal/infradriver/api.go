@@ -50,11 +50,13 @@ package infradriver
 const (
 	PathBuildImage        = "/v1/build-image"
 	PathContainersList    = "/v1/containers/list"
+	PathContainersStats   = "/v1/containers/stats"
 	PathContainersEvents  = "/v1/containers/events"
 	PathContainersInspect = "/v1/containers/inspect"
 	PathContainersLogs    = "/v1/containers/logs"
 	PathContainersStop    = "/v1/containers/stop"
 	PathContainersRestart = "/v1/containers/restart"
+	PathContainersRemove  = "/v1/containers/remove"
 	PathContainersExec    = "/v1/containers/exec"
 	PathContainersCopyOut = "/v1/containers/copy-out"
 	PathContainersCopyIn  = "/v1/containers/copy-in"
@@ -171,6 +173,12 @@ type ContainerBody struct {
 // ContainerListResult is the JSON response of /v1/containers/list.
 type ContainerListResult struct {
 	Containers []Container `json:"containers"`
+}
+
+// ContainerStatsResult is the JSON response of /v1/containers/stats. Reuses
+// ListBody (Ctx + optional Filter) as its request, like /v1/images/list.
+type ContainerStatsResult struct {
+	Stats []ContainerStat `json:"stats"`
 }
 
 // OKResult is the JSON response of a successful stop/restart.

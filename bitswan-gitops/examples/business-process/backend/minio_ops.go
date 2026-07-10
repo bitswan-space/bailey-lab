@@ -6,11 +6,22 @@ import (
 	"io"
 	"log"
 	"net"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"gorm.io/gorm"
 )
+
+// minioInitDeadline bounds the startup wait for this BP's MinIO bucket + scoped
+// user. Like the database, they are provisioned by the driver around the same
+// time the worker starts — provisioning runs AFTER `docker compose up`, so the
+// backend's first BucketExists legitimately fails with "Access Denied" until
+// the scoped user exists. We retry until reachable instead of crash-exiting: a
+// clean os.Exit(1) is NOT restarted by Air (live-dev), so a one-shot failure
+// would leave the backend dead forever even though the user appears seconds
+// later. Only after the deadline do we fail loudly. Mirrors dbInitDeadline.
+const minioInitDeadline = 3 * time.Minute
 
 // galleryBucket is the per-BP bucket injected by gitops as MINIO_BUCKET — no
 // hardcoded bucket name. Empty (unset) is caught at startup in ensureBucket.
@@ -46,18 +57,29 @@ func ensureBucket(mc *minio.Client) {
 		log.Fatal("MINIO_BUCKET is not set")
 	}
 	ctx := context.Background()
-	exists, err := mc.BucketExists(ctx, galleryBucket)
-	if err != nil {
-		log.Fatalf("checking bucket: %v", err)
-	}
-	if !exists {
-		// gitops normally pre-creates the bucket; a scoped user may not be able
-		// to create it, so don't make this fatal.
-		if err := mc.MakeBucket(ctx, galleryBucket, minio.MakeBucketOptions{}); err != nil {
-			log.Printf("warning: could not create bucket %s (expected if gitops provisions it): %v", galleryBucket, err)
-		} else {
-			log.Printf("created bucket: %s", galleryBucket)
+	// Retry BucketExists through the provisioning window (see minioInitDeadline).
+	// "Access Denied" while the scoped user isn't created yet is the transient
+	// error we ride out; a persistent one fails loudly after the deadline.
+	deadline := time.Now().Add(minioInitDeadline)
+	for attempt := 1; ; attempt++ {
+		exists, err := mc.BucketExists(ctx, galleryBucket)
+		if err == nil {
+			if !exists {
+				// gitops normally pre-creates the bucket; a scoped user may not be
+				// able to create it, so don't make this fatal.
+				if err := mc.MakeBucket(ctx, galleryBucket, minio.MakeBucketOptions{}); err != nil {
+					log.Printf("warning: could not create bucket %s (expected if gitops provisions it): %v", galleryBucket, err)
+				} else {
+					log.Printf("created bucket: %s", galleryBucket)
+				}
+			}
+			return
 		}
+		if time.Now().After(deadline) {
+			log.Fatalf("minio bucket %s not reachable after retrying for %s: %v", galleryBucket, minioInitDeadline, err)
+		}
+		log.Printf("minio not ready (attempt %d): %v — retrying in 2s…", attempt, err)
+		time.Sleep(2 * time.Second)
 	}
 }
 

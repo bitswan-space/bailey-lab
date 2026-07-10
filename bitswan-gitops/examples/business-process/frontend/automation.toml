@@ -4,3 +4,9 @@
 # share button + the workspace ACL — there is no expose_to.
 [deployment]
 expose = true
+# Memory budget for this container. Tune memory-reservation to just above real
+# peak; it is required before promoting to staging/production.
+memory-reservation = 128                 # MB
+# on-demand = paused when idle + woken on access (default); always-on = never
+# auto-shut-down (rarely needed for a request-serving frontend).
+memory_reservation_policy = "on-demand"

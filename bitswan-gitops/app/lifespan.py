@@ -603,6 +603,25 @@ async def lifespan(app: FastAPI):
         name="daily_supply_chain_scan",
     )
 
+    # Live-dev pool: keep at most BITSWAN_MAX_LIVE_DEV instances running. Enforced
+    # inline on every live-dev deploy; this interval sweep is the safety net that
+    # also reclaims instances left running by out-of-band changes (manual docker
+    # start, a crash mid-evict).
+    async def _live_dev_cap_sweep():
+        from app.dependencies import get_automation_service
+
+        try:
+            await get_automation_service().enforce_live_dev_cap()
+        except Exception as e:
+            print(f"live-dev cap sweep failed: {e}")
+
+    scheduler.add_job(
+        _live_dev_cap_sweep,
+        trigger="interval",
+        minutes=5,
+        name="live_dev_cap_sweep",
+    )
+
     scheduler.start()
 
     # Warm the history cache in the background so first requests are fast

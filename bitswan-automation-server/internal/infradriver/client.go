@@ -54,6 +54,15 @@ func (c *Client) ContainerList(ctx context.Context, wctx WorkspaceContext, filte
 	return out.Containers, nil
 }
 
+// ContainerStats returns live memory usage for the workspace's running containers.
+func (c *Client) ContainerStats(ctx context.Context, wctx WorkspaceContext, filter ContainerFilter) ([]ContainerStat, error) {
+	var out ContainerStatsResult
+	if err := c.postJSON(ctx, PathContainersStats, ListBody{Ctx: wctx, Filter: filter}, &out); err != nil {
+		return nil, err
+	}
+	return out.Stats, nil
+}
+
 // ContainerStop stops a container.
 func (c *Client) ContainerStop(ctx context.Context, wctx WorkspaceContext, container string) error {
 	return c.postJSON(ctx, PathContainersStop, ContainerBody{Ctx: wctx, Container: container}, &OKResult{})
@@ -62,6 +71,11 @@ func (c *Client) ContainerStop(ctx context.Context, wctx WorkspaceContext, conta
 // ContainerRestart restarts a container.
 func (c *Client) ContainerRestart(ctx context.Context, wctx WorkspaceContext, container string) error {
 	return c.postJSON(ctx, PathContainersRestart, ContainerBody{Ctx: wctx, Container: container}, &OKResult{})
+}
+
+// ContainerRemove force-removes a container (docker rm -f).
+func (c *Client) ContainerRemove(ctx context.Context, wctx WorkspaceContext, container string) error {
+	return c.postJSON(ctx, PathContainersRemove, ContainerBody{Ctx: wctx, Container: container}, &OKResult{})
 }
 
 // BuildImage builds a source image, streaming build log lines to prog, and

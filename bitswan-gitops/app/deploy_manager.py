@@ -14,6 +14,14 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
+# Cap on the append-only deploy log. Every progress line is retained so the UI
+# can render the full build history (image steps, build.sh output, per-member
+# "Prepared N/M", …) instead of only the latest scalar `message`, which is
+# overwritten on the next line. Bounded so a pathologically chatty build can't
+# grow the task (and its every-line broadcast payload) without limit; the oldest
+# lines are dropped first.
+_MAX_LOG_LINES = 500
+
 
 class DeployStatus(str, Enum):
     PENDING = "pending"
@@ -66,6 +74,10 @@ class DeployTask:
     status: DeployStatus = DeployStatus.PENDING
     step: DeployStep | None = None
     message: str = ""
+    # Append-only history of every progress line (see _MAX_LOG_LINES). The
+    # scalar `message` above is the latest line for a one-line toast; `log` keeps
+    # them all so the deploy view can show a scrollable build log.
+    log: list[str] = field(default_factory=list)
     error: str | None = None
     build_checksum: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -85,6 +97,7 @@ class DeployTask:
             "status": self.status.value,
             "step": self.step.value if self.step else None,
             "message": self.message,
+            "log": self.log,
             "error": self.error,
             "build_checksum": self.build_checksum,
             "started_at": self.started_at.isoformat(),
@@ -170,6 +183,15 @@ class DeployManager:
             task.step = step
         if message is not None:
             task.message = message
+            # Retain every line in the append-only log. `message` alone is
+            # useless as a build log — it's overwritten by the next line before
+            # a poller/SSE client can render it (worsened by BP members building
+            # concurrently into one field). Skip consecutive duplicates so a
+            # repeated status line doesn't spam the log, and cap the length.
+            if not task.log or task.log[-1] != message:
+                task.log.append(message)
+                if len(task.log) > _MAX_LOG_LINES:
+                    del task.log[: len(task.log) - _MAX_LOG_LINES]
         if error is not None:
             task.error = error
         if status in (DeployStatus.COMPLETED, DeployStatus.FAILED):

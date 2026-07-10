@@ -42,7 +42,13 @@ type bpNode struct {
 // ignored. The slice/map extras keep their YAML shape so they pass through
 // untouched into the generated compose (Python's `passthroughs`).
 type Deployment struct {
-	Enabled        *bool                  `yaml:"enabled"`
+	Enabled *bool `yaml:"enabled"`
+	// Active=false means the deployment is intentionally OFF (a live-dev instance
+	// evicted by the LRU cap, or a manually-stopped automation): it is EXCLUDED
+	// from the compiled compose so a reconcile neither creates nor restarts it,
+	// and its container can be removed to cost nothing until it is woken (which
+	// flips this back to true and redeploys). Absent (nil) = active, the default.
+	Active         *bool                  `yaml:"active"`
 	AutomationName string                 `yaml:"automation_name"`
 	Context        string                 `yaml:"context"`
 	Stage          string                 `yaml:"stage"`
@@ -54,6 +60,14 @@ type Deployment struct {
 	Replicas       *int                   `yaml:"replicas"`
 	DeploymentCtx  string                 `yaml:"deployment_context"`
 	Services       map[string]interface{} `yaml:"services"`
+	// MemoryReservation (MB) + MemPolicy ("on-demand" | "always-on") govern
+	// memory: gitops resolves them from automation.toml and persists them here so
+	// the compiler can stamp the gitops.mem_reservation_mb / gitops.mem_policy
+	// labels the daemon reads for its budget, over-reservation SIEM, and
+	// on-demand eviction. Absent → 50 MB / "on-demand" (see memReservationMB /
+	// memPolicy in entry.go).
+	MemoryReservation *int   `yaml:"memory_reservation"`
+	MemPolicy         string `yaml:"memory_reservation_policy"`
 	// NOTE: network_mode / networks / volumes / ports / devices / container_name
 	// are intentionally NOT fields here. The driver is a constraining compiler,
 	// not a compose passthrough — a deployment record must not be able to inject

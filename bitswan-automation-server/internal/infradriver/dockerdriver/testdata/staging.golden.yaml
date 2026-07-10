@@ -88,6 +88,8 @@ services:
             gitops.context: acme
             gitops.deployment_id: backend-acme-staging
             gitops.intended_exposed: "false"
+            gitops.mem_policy: on-demand
+            gitops.mem_reservation_mb: "50"
             gitops.slot: ""
             gitops.stage: staging
             gitops.workspace: ws3
@@ -124,6 +126,8 @@ services:
             gitops.context: acme
             gitops.deployment_id: frontend-acme-staging
             gitops.intended_exposed: "true"
+            gitops.mem_policy: on-demand
+            gitops.mem_reservation_mb: "50"
             gitops.slot: ""
             gitops.stage: staging
             gitops.workspace: ws3

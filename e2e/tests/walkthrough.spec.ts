@@ -45,10 +45,20 @@ const SLA = 60_000; // short-interaction SLA: nothing quick should wait longer
 // considered "gone dark". Promote shows a single coarse "Promoting to <stage>…"
 // status (not the deploy's granular steps), and a promote now stands up
 // per-(workspace,stage) infra (postgres/minio fresh per stage) — so that one
-// status can legitimately hold for tens of seconds on CI dind. Keep the window
-// well above a real promote's coarse-status span; the 30-min backstop in
-// waitDeployDone still catches a genuine hang.
-const PROGRESS = 60_000;
+// status can legitimately hold for a while on CI dind. Crucially, promote builds
+// a FRESH per-stage image (unlike the dev deploy, which rides the cached live-dev
+// image), and that build's final `RUN … build.sh` layer runs a SILENT compile
+// (`go build` emits nothing for the whole compile), so docker streams no line —
+// and thus the on-screen signature holds unchanged — for well over a minute on a
+// loaded runner. The same is true of the earlier long ops driven by this rule —
+// workspace/copy creation streams a coarse setup log that holds one line through a
+// silent image-pull / multi-container `compose up`, and snapshot/DR restore hold a
+// step across a big dump/load. On a loaded CI dind runner any one such silent step
+// can exceed two minutes, so 120s produced false "went dark" trips while the op was
+// in fact progressing (the workspace/stage containers did come up). Keep the window
+// comfortably above the longest real silent step; the ABSOLUTE deadlines (8-min
+// workspace-create, 30-min deploy backstop) remain the true guard against a hang.
+const PROGRESS = 240_000;
 const NAV = 15_000; // a tab/section/stage click targets an element already on
 // screen, so it should land fast. If it can't within NAV, something (usually a
 // stuck modal) is intercepting clicks — fail fast here instead of burning the
@@ -210,6 +220,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   for (const [navLabel, slot, heading] of [
     [/People & roles/i, 'people-roles', /People & roles/i],
     [/Server overview/i, 'server-overview', /Server overview|Overview/i],
+    [/Resource management/i, 'resource-management', /Resource management/i],
     [/Endpoint access/i, 'endpoint-access', /Endpoint access/i],
     [/Your devices/i, 'devices', /devices/i],
   ] as const) {
@@ -268,6 +279,22 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // then click the workspace's Open button.
   let dashPage = page;
   let d: FrameOrPage = page;
+  // Diagnostic nav trace: log every TOP-LEVEL navigation of the dashboard tab
+  // (with elapsed time) so a "wrong page" failure — e.g. the popup drifting from
+  // the workspace dashboard to the onboard console — reads as an exact nav
+  // timeline in the CI log instead of a bare "editor never appeared". A flaky
+  // test must SAY what it saw; this makes the tab's every move discrete.
+  const tNav0 = Date.now();
+  const navEl = () => ((Date.now() - tNav0) / 1000).toFixed(1) + 's';
+  const tracedTabs = new WeakSet<import('@playwright/test').Page>();
+  const traceTab = (p: import('@playwright/test').Page, tag: string) => {
+    if (tracedTabs.has(p)) return;
+    tracedTabs.add(p);
+    p.on('framenavigated', (f) => {
+      if (f === p.mainFrame()) console.log(`  nav[${tag}] ${navEl()} → ${f.url()}`);
+    });
+    p.on('close', () => console.log(`  nav[${tag}] ${navEl()} → (tab closed)`));
+  };
   await test.step('open the workspace dashboard', async () => {
     await page.getByRole('button', { name: /Workspaces/i }).first().click();
     await expect(page.getByRole('heading', { name: /Workspaces/i })).toBeVisible({ timeout: SLA });
@@ -288,7 +315,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       const popupP = page.context().waitForEvent('page', { timeout: 20_000 }).catch(() => null);
       await open.click();
       const popup = await popupP;
-      if (popup) { dashPage = popup; dbgPage = popup; }
+      if (popup) { dashPage = popup; dbgPage = popup; traceTab(popup, 'dash'); console.log(`  opened dashboard tab → ${popup.url()}`); }
       d = await dashboard(dashPage);
       ready = await bpSwitcher()
         .waitFor({ state: 'visible', timeout: SLA })
@@ -589,7 +616,27 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // type; the editor's markdown input-rules turn '# ', '1. ' etc into real
     // structure as a human would see while typing.
     const editor = d.locator('.ProseMirror, [contenteditable="true"]').first();
-    await editor.waitFor({ state: 'visible', timeout: SLA });
+    // Discrete pre-check with logging: BEFORE blocking on the editor, record the
+    // tab's actual state (URL + iframe count + whether the BP shell is even
+    // present). If the editor then never appears, we already know from the log
+    // whether the tab was on the dashboard at all — no guessing.
+    console.log(
+      `  description: dashPage.url()=${dashPage.url()}` +
+        ` iframes=${await dashPage.locator('iframe').count()}` +
+        ` bpSwitcher=${await d.getByRole('button', { name: /^Process\b/ }).first().isVisible().catch(() => false)}` +
+        ` descTab=${await d.getByRole('button', { name: /Description/i }).first().isVisible().catch(() => false)}`,
+    );
+    try {
+      await editor.waitFor({ state: 'visible', timeout: SLA });
+    } catch (e) {
+      console.log(
+        `  description EDITOR MISSING: dashPage.url()=${dashPage.url()}` +
+          ` iframes=${await dashPage.locator('iframe').count()}` +
+          ` bpSwitcher=${await d.getByRole('button', { name: /^Process\b/ }).first().isVisible().catch(() => false)}`,
+      );
+      await capture(dashPage, 'description-editor-missing').catch(() => {});
+      throw e;
+    }
     await editor.click();
     await editor.pressSequentially(BP.readme, { delay: 0 });
     // Force a save (Ctrl+S) and wait for it to settle (the Save button leaves
@@ -1238,6 +1285,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     expect(healthy, healthy ? undefined : failMsg).toBe(true);
     await waitDeployDone();
     await capture(dashPage, 'deploy-dev');
+    // The healthy Development stage shows its Containers with live memory usage
+    // against each container's reservation — capture it for the memory-governance
+    // handbook chapter (best-effort; a missing shot just leaves the slot empty).
+    await capture(dashPage, 'containers-memory').catch(() => {});
   });
 
   // ---- Checks (real CVEs) — now that a built image for this BP exists, the

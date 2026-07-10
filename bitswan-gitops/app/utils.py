@@ -127,6 +127,13 @@ class AutomationConfig:
     services: dict[str, ServiceDependency] | None = None
     # Use host network for external access (Selenium testing)
     external_testing_network: bool = False
+    # Memory governance (see resource management). memory_reservation is the MB
+    # this container is budgeted; None = undeclared (defaults to
+    # DEFAULT_MEM_RESERVATION_MB at persist time — mandatory for staging/prod
+    # promotes). memory_reservation_policy is "on-demand" (evictable under memory
+    # pressure, woken on access) or "always-on" (never auto-shut-down).
+    memory_reservation: int | None = None
+    memory_reservation_policy: str = "on-demand"
 
 
 def parse_automation_toml(content: str) -> AutomationConfig | None:
@@ -159,6 +166,27 @@ def parse_automation_toml(content: str) -> AutomationConfig | None:
                 enabled=svc_conf.get("enabled", True),
             )
 
+    # Memory governance fields. Accept both hyphen and underscore spellings for
+    # the policy key (TOML style varies); the reservation is an int MB.
+    mem_reservation = deployment.get("memory-reservation")
+    if mem_reservation is None:
+        mem_reservation = deployment.get("memory_reservation")
+    try:
+        mem_reservation = int(mem_reservation) if mem_reservation is not None else None
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"deployment.memory-reservation must be an integer (MB): {mem_reservation!r}"
+        ) from e
+    mem_policy = (
+        deployment.get("memory_reservation_policy")
+        or deployment.get("memory-reservation-policy")
+        or "on-demand"
+    )
+    if mem_policy not in ("on-demand", "always-on"):
+        raise ValueError(
+            f"deployment.memory_reservation_policy must be 'on-demand' or 'always-on': {mem_policy!r}"
+        )
+
     return AutomationConfig(
         id=deployment.get("id"),
         auth=deployment.get("auth", False),
@@ -169,6 +197,8 @@ def parse_automation_toml(content: str) -> AutomationConfig | None:
         allowed_domains=allowed_domains,
         services=services,
         external_testing_network=deployment.get("external-testing-network", False),
+        memory_reservation=mem_reservation,
+        memory_reservation_policy=mem_policy,
     )
 
 
@@ -697,6 +727,34 @@ def daemon_user_role(email: str) -> str:
         resp = client.get(f"{base}/bailey/role", params={"email": email})
         resp.raise_for_status()
         return (resp.json() or {}).get("role") or ""
+    finally:
+        client.close()
+
+
+def daemon_admit_memory(
+    kind: str,
+    always_on_add_mb: int = 0,
+    ondemand_add_mb: list[int] | None = None,
+) -> dict:
+    """Ask the daemon (the single memory accountant) whether an action fits the
+    reserved budget. `kind` is "promote" or "workspace". Returns
+    {"ok": bool, "shortfall_mb": int, "detail": str}.
+
+    Raises on transport failure so the caller can decide (promote fails OPEN on a
+    daemon hiccup — a memory-subsystem outage must not block all deploys — while a
+    computed not-ok verdict is a hard block)."""
+    client, base = _ingress_client_and_base()
+    try:
+        resp = client.post(
+            f"{base}/memory/admit",
+            json={
+                "kind": kind,
+                "always_on_add_mb": always_on_add_mb,
+                "ondemand_add_mb": ondemand_add_mb or [],
+            },
+        )
+        resp.raise_for_status()
+        return resp.json() or {"ok": True}
     finally:
         client.close()
 

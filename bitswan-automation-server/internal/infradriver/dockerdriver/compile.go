@@ -139,6 +139,13 @@ func compile(wctx infradriver.WorkspaceContext, bs *Bitswan) (composeYAML string
 			conf = &Deployment{}
 			deployments[depID] = conf
 		}
+		// active:false ⇒ intentionally off (LRU-evicted live-dev / manually
+		// stopped) — exclude it from the compose entirely so a reconcile never
+		// (re)creates or restarts it. Absent (nil) = active. This is what lets an
+		// evicted instance's container be removed and stay gone until woken.
+		if conf.Active != nil && !*conf.Active {
+			continue
+		}
 		for _, sd := range c.slotDBPairs(conf) {
 			slotConf := c.effectiveSlotConf(depID, conf, sd.slot, deployments)
 			entry, serviceName, route, emit, derr := c.buildServiceEntry(depID, slotConf, sd.slot, sd.db, workerHosts, workerPorts, fwScope)

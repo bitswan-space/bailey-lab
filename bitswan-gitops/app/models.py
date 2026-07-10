@@ -51,6 +51,12 @@ class DeployedAutomation(BaseModel):
     # [deployment] expose; drives the dashboard's Frontends vs Worker
     # containers split.
     expose: bool = False
+    # Memory governance (Containers tab): live usage vs the declared reservation,
+    # the reservation policy, and whether usage exceeds the reservation.
+    mem_usage_bytes: int | None = None
+    mem_reservation_mb: int | None = None
+    mem_policy: str | None = None
+    mem_over_reservation: bool = False
 
 
 class ProcessInfo(BaseModel):

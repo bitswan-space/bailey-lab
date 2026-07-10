@@ -38,11 +38,13 @@ import httpx
 # /v1 paths (api.go).
 PATH_BUILD_IMAGE = "/v1/build-image"
 PATH_CONTAINERS_LIST = "/v1/containers/list"
+PATH_CONTAINERS_STATS = "/v1/containers/stats"
 PATH_CONTAINERS_EVENTS = "/v1/containers/events"
 PATH_CONTAINERS_INSPECT = "/v1/containers/inspect"
 PATH_CONTAINERS_LOGS = "/v1/containers/logs"
 PATH_CONTAINERS_STOP = "/v1/containers/stop"
 PATH_CONTAINERS_RESTART = "/v1/containers/restart"
+PATH_CONTAINERS_REMOVE = "/v1/containers/remove"
 PATH_CONTAINERS_EXEC = "/v1/containers/exec"
 PATH_CONTAINERS_COPY_OUT = "/v1/containers/copy-out"
 PATH_CONTAINERS_COPY_IN = "/v1/containers/copy-in"
@@ -406,6 +408,20 @@ class InfraDriverClient:
         out = await self._post_json(PATH_CONTAINERS_LIST, body)
         return [Container.from_json(c) for c in (out.get("containers") or [])]
 
+    async def container_stats(
+        self, ctx: WorkspaceContext, labels: Optional[dict] = None
+    ) -> dict[str, int]:
+        """Live memory usage (bytes) for the workspace's RUNNING containers,
+        keyed by container id. Used to overlay actual-vs-reserved on the
+        automation listing (the Containers tab)."""
+        body = {"ctx": ctx.to_json(), "filter": {"labels": labels or {}}}
+        out = await self._post_json(PATH_CONTAINERS_STATS, body)
+        return {
+            s.get("id"): int(s.get("mem_usage_bytes") or 0)
+            for s in (out.get("stats") or [])
+            if s.get("id")
+        }
+
     async def image_list(self, ctx: WorkspaceContext) -> list[dict]:
         """The workspace's built images (internal/<ws>-…): [{id, tag, created, size}]."""
         out = await self._post_json(PATH_IMAGES_LIST, {"ctx": ctx.to_json()})
@@ -440,6 +456,14 @@ class InfraDriverClient:
     async def container_restart(self, ctx: WorkspaceContext, container: str) -> None:
         await self._post_json(
             PATH_CONTAINERS_RESTART, {"ctx": ctx.to_json(), "container": container}
+        )
+
+    async def container_remove(self, ctx: WorkspaceContext, container: str) -> None:
+        """Force-remove a container (docker rm -f), so an evicted/inactive
+        deployment costs nothing. The caller marks it active:false first, so the
+        driver's compiler excludes it and no reconcile recreates it."""
+        await self._post_json(
+            PATH_CONTAINERS_REMOVE, {"ctx": ctx.to_json(), "container": container}
         )
 
     async def container_logs(

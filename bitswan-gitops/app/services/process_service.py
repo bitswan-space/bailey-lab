@@ -421,26 +421,35 @@ class ProcessService:
     async def create_business_process(
         self,
         name: str,
-        copy: Optional[str] = None,
         process_id: Optional[str] = None,
         created_by: Optional[str] = None,
     ) -> dict:
-        """Create a new business process: its OWN git repo, a clone of it in
-        the target scope, and the `process.toml` + `README.md` scaffold,
-        committed and (for the main scope) published to the repo's main.
+        """Create a new business process, BORN IN MAIN: its own git repo, a main
+        checkout, and the `process.toml` + `README.md` scaffold committed and
+        published to the repo's deploy-only ``main``.
 
-        `name` is the human-readable display name (issue #77): it is stored
-        in `process.toml` and shown in the dashboard, while the directory,
-        git repo, and deployment ids use the slug derived from it.
+        `name` is the human-readable display name (issue #77): it is stored in
+        `process.toml` and shown in the dashboard, while the directory, git repo,
+        and deployment ids use the slug derived from it.
 
-        Returns the entry as it appears in `get_all_processes()`.
+        A BP is created in ``main`` first (this method) so it is ``in_main`` and
+        copy-switchable from birth; the requesting copy is then materialized as a
+        clone of ``main`` by the caller (the create route, after it adds the
+        template automations to ``main`` too). Historically the scaffold rode the
+        requesting copy's branch and ``main`` stayed an empty seed until Sync &
+        Deploy — which left a fresh BP invisible to every other copy.
+
+        Main-scope + globally unique: a BP whose slug already exists in ``main``
+        is a duplicate (use copy-pull to bring an existing BP into a copy, not
+        create). Returns the entry as it appears in `get_all_processes()`.
         """
         from app.services.bp_git import (
+            bp_clone_path,
             clone_bp_into_copy,
             commit_in_bp_clone,
-            publish_bp_clone,
+            publish_main_from_clone,
         )
-        from app.services.git_server import ensure_bp_bare_repo
+        from app.services.git_server import bp_main_has_content, ensure_bp_bare_repo
 
         # Collapse whitespace runs; the display name is stored verbatim
         # otherwise. Slugification confines the filesystem/git name to
@@ -452,57 +461,46 @@ class ProcessService:
                 "process name must contain at least one letter or digit (a-z, 0-9)"
             )
 
-        if copy:
-            scope_root = os.path.join(_copies_dir(), copy)
-            if not os.path.isdir(scope_root):
-                raise FileNotFoundError(f"copy '{copy}' does not exist")
-        else:
-            scope_root = os.path.join(_copies_dir(), "main")
-            os.makedirs(scope_root, exist_ok=True)
-
-        process_dir = os.path.join(scope_root, clean)
-        if os.path.exists(process_dir):
-            raise FileExistsError(
-                f"a business process with the slug '{clean}' already exists in "
-                f"{'copy ' + copy if copy else 'main'}"
-            )
-
-        # The BP's own repo (idempotent: an existing repo — e.g. the same BP
-        # created earlier in another copy — is reused; branches keep the
-        # copies apart). allow_empty: a brand-new repo has only the empty
-        # seed commit — the scaffold is the first real content, so the first
-        # sync fast-forwards main from the seed.
+        # The BP's own repo (idempotent — reused if it already exists as an empty
+        # seed from a failed earlier attempt).
         await ensure_bp_bare_repo(clean, author=created_by)
-        await clone_bp_into_copy(scope_root, copy or "main", clean, allow_empty=True)
+        if await bp_main_has_content(clean):
+            raise FileExistsError(f"a business process named '{clean}' already exists")
+
+        main_scope = os.path.join(_copies_dir(), "main")
+        os.makedirs(main_scope, exist_ok=True)
+        main_dir = bp_clone_path(None, clean)  # copies/main/<clean>
+
+        # allow_empty: the brand-new repo has only the empty seed — the scaffold
+        # is the first real content, published to main below.
+        await clone_bp_into_copy(main_scope, "main", clean, allow_empty=True)
 
         pid = process_id or str(uuid.uuid4())
-
-        with open(os.path.join(process_dir, "process.toml"), "w") as f:
+        with open(os.path.join(main_dir, "process.toml"), "w") as f:
             # toml.dump handles quoting/escaping of the free-form name.
             toml.dump({"process-id": pid, "name": display}, f)
-        with open(os.path.join(process_dir, "README.md"), "w") as f:
+        with open(os.path.join(main_dir, "README.md"), "w") as f:
             f.write(f"# {display}\n")
 
         await commit_in_bp_clone(
-            process_dir, f"Create business process {display}", author=created_by
+            main_dir, f"Create business process {display}", author=created_by
         )
-        # Main-scope creation advances the repo's deploy-only main server-side;
-        # copy-scope creation rides the copy until Sync & Deploy.
-        await publish_bp_clone(process_dir, clean, copy)
+        # Advance the repo's deploy-only main server-side (fast-forward via a temp
+        # ref, since the pre-receive hook forbids pushing main directly) and
+        # realign the main checkout.
+        await publish_main_from_clone(main_dir, clean)
 
-        # Refresh just the affected scope so the next discovery call sees
-        # the new BP. The HTTP route is expected to broadcast the snapshot
-        # over SSE after this returns; we keep the cache update local to
-        # avoid coupling the service to the broadcaster.
-        self.refresh(copy)
+        # Refresh main-scope discovery so the next call sees the new BP. The HTTP
+        # route broadcasts the snapshot over SSE after this returns.
+        self.refresh(None)
 
         return {
             "id": pid,
             "name": clean,
             "display_name": display,
-            "in_main": copy is None,
-            "copies": [copy] if copy else [],
-            "has_copies": bool(copy),
+            "in_main": True,
+            "copies": [],
+            "has_copies": False,
         }
 
     async def rename_business_process(

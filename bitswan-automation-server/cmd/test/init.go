@@ -566,29 +566,42 @@ func frontendServesAppShell(endpointURL, workspaceName string) bool {
 // success is HTTP 200 plus the React app's root mount point in the markup.
 func testFrontendEndpoint(endpointURL, workspaceName string) error {
 	reqURL := automations.TransformURLForDaemon(endpointURL, workspaceName)
-	req, err := httpReq.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return err
-	}
 
-	resp, err := httpReq.ExecuteRequestWithLocalhostResolution(req)
-	if err != nil {
-		return err
+	// The frontend shim serves 503 ("waiting for the backend") while its private
+	// backend is still starting — a transient startup state, by design, so the
+	// user never sees a live UI whose /api calls fail. That's not a failure; poll
+	// until it serves the app shell (or we time out). This also rides out the
+	// brief window before the built bundle is served.
+	deadline := time.Now().Add(3 * time.Minute)
+	var lastStatus int
+	var lastBody string
+	for {
+		req, err := httpReq.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := httpReq.ExecuteRequestWithLocalhostResolution(req)
+		if err == nil {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastStatus = resp.StatusCode
+			lastBody = string(bodyBytes)
+			if resp.StatusCode == http.StatusOK {
+				lower := strings.ToLower(lastBody)
+				if !strings.Contains(lastBody, `id="root"`) && !strings.Contains(lower, "<html") {
+					return fmt.Errorf("frontend response does not look like the app shell: %s", lastBody)
+				}
+				return nil
+			}
+			// Non-200 (503 while the backend warms) → keep polling.
+		} else {
+			lastStatus, lastBody = 0, err.Error()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("frontend never became accessible: last status %d: %s", lastStatus, lastBody)
+		}
+		time.Sleep(3 * time.Second)
 	}
-	defer resp.Body.Close()
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("frontend returned status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	body := string(bodyBytes)
-	lower := strings.ToLower(body)
-	if !strings.Contains(body, `id="root"`) && !strings.Contains(lower, "<html") {
-		return fmt.Errorf("frontend response does not look like the app shell: %s", body)
-	}
-
-	return nil
 }
 
 // testCodingAgentCLI verifies the bitswan-coding-agent CLI can authenticate to

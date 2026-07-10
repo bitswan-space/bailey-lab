@@ -86,6 +86,54 @@ export function registerAutomationRoutes(
     }
   });
 
+  // Rehydrate (+ LRU-touch) a copy's live-dev instance when its BP is opened in
+  // the dashboard. Idempotent: a running instance is only marked recently-used;
+  // an evicted one is restarted. Fire-and-forget from the UI.
+  app.post<{
+    Params: { bp: string };
+    Body: { copy?: string };
+  }>('/api/automations/business-processes/:bp/wake-live-dev', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    try {
+      const r = await gitops.wakeLiveDev(req.params.bp, req.body?.copy);
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'wake-live-dev failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Manually sleep/wake a BP stage: sleep marks its members inactive + removes
+  // their containers (frees memory now; on-demand stages also wake on URL
+  // access); wake re-activates + redeploys them.
+  app.post<{
+    Params: { bp: string; action: 'sleep' | 'wake' };
+    Body: { stage?: string; copy?: string };
+  }>('/api/automations/business-processes/:bp/:action(sleep|wake)', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const stage = req.body?.stage;
+    if (!stage) return reply.code(400).send({ error: 'stage is required' });
+    try {
+      const r = await gitops.stagePower(req.params.action, req.params.bp, stage, req.body?.copy);
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp, action: req.params.action }, 'stage power failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   // Promote a whole business process (all member automations) one stage up.
   app.post<{
     Body: { bp?: string; stage?: string };

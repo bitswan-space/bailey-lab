@@ -31,6 +31,21 @@ func (d *DockerDriver) BuildImage(ctx context.Context, req infradriver.BuildRequ
 		return infradriver.ImageRef{FullTag: req.Tag, ImageID: id, CacheHit: true}, nil
 	}
 
+	// Content-global cache hit: the tag NAME embeds the BP (internal/<ws>-<bp>-
+	// <auto>:sha<H>), so a brand-new BP misses the exact-tag check above even
+	// when a byte-identical image was already built for another BP. The `:sha<H>`
+	// suffix is a pure content address, so if any image in this workspace's
+	// namespace carries the same suffix, retag it (instant) instead of rebuilding.
+	if sha := contentSHA(req); sha != "" {
+		if found, id := d.findImageByContentSHA(ctx, sha, req.Tag); found != "" {
+			if out, err := exec.CommandContext(ctx, "docker", "tag", found, req.Tag).CombinedOutput(); err != nil {
+				return infradriver.ImageRef{}, fmt.Errorf("docker tag %s %s: %w: %s", found, req.Tag, err, strings.TrimSpace(string(out)))
+			}
+			prog(fmt.Sprintf("cache hit (retagged from %s): %s", found, req.Tag))
+			return infradriver.ImageRef{FullTag: req.Tag, ImageID: id, CacheHit: true}, nil
+		}
+	}
+
 	dockerfilePath := req.Dockerfile
 	if dockerfilePath == "" {
 		// The source-bake: a generated Dockerfile OUTSIDE the context (so it
@@ -45,6 +60,13 @@ func (d *DockerDriver) BuildImage(ctx context.Context, req infradriver.BuildRequ
 			mount = "/app"
 		}
 		fmt.Fprintf(df, "FROM %s\nCOPY . %s\n", req.BaseImage, mount)
+		// If the source ships a build.sh, run it as a FINAL layer so build steps
+		// (vite build, go build, …) happen ONCE here at image-build time — the
+		// deployed container then serves the pre-built artifact and starts fast,
+		// instead of building on every startup. Optional + backward-compatible:
+		// sources without a build.sh are unaffected. A failing build.sh fails the
+		// image build (and thus the deploy) loudly, which is correct.
+		fmt.Fprintf(df, "RUN if [ -f %s/build.sh ]; then cd %s && sh ./build.sh; fi\n", mount, mount)
 		if err := df.Close(); err != nil {
 			return infradriver.ImageRef{}, err
 		}
@@ -60,6 +82,55 @@ func (d *DockerDriver) BuildImage(ctx context.Context, req infradriver.BuildRequ
 		return infradriver.ImageRef{}, fmt.Errorf("docker build %s: %w", req.Tag, err)
 	}
 	return infradriver.ImageRef{FullTag: req.Tag, ImageID: imageID(ctx, req.Tag)}, nil
+}
+
+// contentSHA is the pure content address of a build: the SourceSHA the caller
+// sent, or (fallback) the `sha…` suffix of the requested tag. "" if neither.
+func contentSHA(req infradriver.BuildRequest) string {
+	if req.SourceSHA != "" {
+		return req.SourceSHA
+	}
+	if i := strings.LastIndex(req.Tag, ":sha"); i != -1 {
+		return req.Tag[i+len(":sha"):]
+	}
+	return ""
+}
+
+// findImageByContentSHA returns (tag, id) of an existing image in this
+// workspace's namespace whose tag ends with the given content sha, or ("","")
+// if none. `exclude` (the tag we're about to produce) is skipped. The `:sha<H>`
+// suffix is content-addressed, so any match is byte-identical and safe to retag.
+func (d *DockerDriver) findImageByContentSHA(ctx context.Context, sha, exclude string) (string, string) {
+	// docker's reference-filter glob does not cross '/', so scope by the
+	// workspace prefix (internal/<ws>-*) rather than a bare '*'. Fall back to
+	// '*/*' (any internal/<repo>) when the workspace is unknown.
+	prefix := d.imageTagPrefix()
+	ref := "*/*:sha" + sha
+	if prefix != "" {
+		ref = prefix + "*:sha" + sha
+	}
+	out, err := exec.CommandContext(ctx, "docker", "images", "--no-trunc",
+		"--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}",
+		"--filter", "reference="+ref).Output()
+	if err != nil {
+		return "", "" // a listing hiccup must never block the build; fall through.
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		tag, id, ok := strings.Cut(line, "\t")
+		if !ok || tag == "" || tag == exclude || strings.HasSuffix(tag, ":<none>") {
+			continue
+		}
+		// Belt-and-braces: confirm the content sha suffix (guards against any
+		// glob surprise) and the workspace scope.
+		if !strings.HasSuffix(tag, ":sha"+sha) {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(tag, prefix) {
+			continue
+		}
+		return tag, id
+	}
+	return "", ""
 }
 
 // imageID returns the image's id, or "" if it does not exist.
