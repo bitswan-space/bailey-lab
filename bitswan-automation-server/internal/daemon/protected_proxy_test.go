@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -57,6 +59,9 @@ func TestProtectedProxyOAuthEnv(t *testing.T) {
 		"OAUTH2_PROXY_PASS_USER_HEADERS": "true",
 		"OAUTH2_PROXY_SET_XAUTHREQUEST":  "true",
 		"OAUTH2_PROXY_OIDC_GROUPS_CLAIM": "group_membership",
+		// Concurrent logins must not share one CSRF/state cookie (issue #47).
+		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST": "true",
+		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE":      "1h",
 	}
 	for k, v := range want {
 		if env[k] != v {
@@ -72,6 +77,40 @@ func TestProtectedProxyOAuthEnv(t *testing.T) {
 	// whitelist_domains must carry the IdP host so the logout rd= is honoured.
 	if !strings.Contains(env["OAUTH2_PROXY_WHITELIST_DOMAINS"], "keycloak.staging2.bitswan.ai") {
 		t.Errorf("whitelist_domains missing IdP host: %q", env["OAUTH2_PROXY_WHITELIST_DOMAINS"])
+	}
+}
+
+func TestLoadOrCreateProxyCookieSecret(t *testing.T) {
+	dir := t.TempDir()
+
+	first, err := loadOrCreateProxyCookieSecret(dir)
+	if err != nil {
+		t.Fatalf("loadOrCreateProxyCookieSecret (create): %v", err)
+	}
+	if raw, err := base64.URLEncoding.DecodeString(first); err != nil || len(raw) != 32 {
+		t.Fatalf("created secret is not 32 bytes of base64url: %q", first)
+	}
+
+	// A second provision must reuse the persisted secret — rotating it drops
+	// every live session and 403s in-flight logins (issue #47).
+	second, err := loadOrCreateProxyCookieSecret(dir)
+	if err != nil {
+		t.Fatalf("loadOrCreateProxyCookieSecret (reuse): %v", err)
+	}
+	if second != first {
+		t.Errorf("secret rotated across provisions: %q != %q", second, first)
+	}
+
+	// A corrupt secret file falls through to a fresh valid secret.
+	if err := os.WriteFile(filepath.Join(dir, "cookie-secret"), []byte("not-a-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := loadOrCreateProxyCookieSecret(dir)
+	if err != nil {
+		t.Fatalf("loadOrCreateProxyCookieSecret (corrupt): %v", err)
+	}
+	if raw, err := base64.URLEncoding.DecodeString(replaced); err != nil || len(raw) != 32 {
+		t.Errorf("corrupt file not replaced with a valid secret: %q", replaced)
 	}
 }
 

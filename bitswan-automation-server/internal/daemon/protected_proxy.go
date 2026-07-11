@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
@@ -53,7 +55,13 @@ func provisionProtectedProxy() error {
 		return fmt.Errorf("AOC returned an incomplete protected OAuth client")
 	}
 
-	cookieSecret, err := generateProxyCookieSecret()
+	homeDir := os.Getenv("HOME")
+	proxyDir := homeDir + "/.config/bitswan/protected-proxy"
+	if err := os.MkdirAll(proxyDir, 0755); err != nil {
+		return fmt.Errorf("create protected-proxy config directory: %w", err)
+	}
+
+	cookieSecret, err := loadOrCreateProxyCookieSecret(proxyDir)
 	if err != nil {
 		return err
 	}
@@ -65,11 +73,6 @@ func provisionProtectedProxy() error {
 		return fmt.Errorf("render protected-proxy compose: %w", err)
 	}
 
-	homeDir := os.Getenv("HOME")
-	proxyDir := homeDir + "/.config/bitswan/protected-proxy"
-	if err := os.MkdirAll(proxyDir, 0755); err != nil {
-		return fmt.Errorf("create protected-proxy config directory: %w", err)
-	}
 	composePath := proxyDir + "/docker-compose.yml"
 	// 0600: the compose file carries the OAuth client secret + cookie secret.
 	if err := os.WriteFile(composePath, []byte(composeYAML), 0600); err != nil {
@@ -129,6 +132,15 @@ func protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSec
 		"OAUTH2_PROXY_COOKIE_REFRESH":       "4m",
 		"OAUTH2_PROXY_SET_XAUTHREQUEST":     "true",
 		"OAUTH2_PROXY_PASS_ACCESS_TOKEN":    "true",
+		// Without per-request CSRF cookies every in-flight login shares ONE
+		// state cookie across the whole cookie_domains family — a second tab
+		// (or a second *.domain host) starting its own handshake clobbers the
+		// first flow's cookie and that flow 403s at /oauth2/callback right
+		// after the Keycloak login (issue #47). Per-request gives each flow
+		// its own cookie; 1h (default 15m) keeps a login form that sat open a
+		// while redeemable instead of 403ing the same way.
+		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST": "true",
+		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE":      "1h",
 	}
 }
 
@@ -141,6 +153,32 @@ func keycloakHostFromIssuer(issuer string) string {
 		return ""
 	}
 	return u.Hostname()
+}
+
+// loadOrCreateProxyCookieSecret returns the proxy's persisted cookie secret,
+// generating one on first provision. Persisting it matters: the secret
+// encrypts both sessions and the login state cookies, so rotating it on every
+// re-provision (as we used to) recreates the container, logs everyone out, and
+// 403s any login that was mid-handshake at /oauth2/callback — one more source
+// of the "random 403 right after logging in" from issue #47. A file that went
+// missing or corrupt just falls through to a fresh secret.
+func loadOrCreateProxyCookieSecret(proxyDir string) (string, error) {
+	path := filepath.Join(proxyDir, "cookie-secret")
+	if b, err := os.ReadFile(path); err == nil {
+		s := strings.TrimSpace(string(b))
+		if raw, err := base64.URLEncoding.DecodeString(s); err == nil && len(raw) == 32 {
+			return s, nil
+		}
+	}
+	secret, err := generateProxyCookieSecret()
+	if err != nil {
+		return "", err
+	}
+	// 0600: the secret guards every session cookie on the domain.
+	if err := os.WriteFile(path, []byte(secret), 0600); err != nil {
+		return "", fmt.Errorf("persist protected-proxy cookie secret: %w", err)
+	}
+	return secret, nil
 }
 
 // generateProxyCookieSecret returns a base64url-encoded 32-byte secret, the

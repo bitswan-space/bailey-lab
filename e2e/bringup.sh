@@ -172,8 +172,10 @@ docker run -d --name bitswan-protected-proxy --network bitswan_network \
   -e OAUTH2_PROXY_WHITELIST_DOMAINS=".${DOMAIN},${KC_HOST}:${KC_PORT}" \
   -e OAUTH2_PROXY_COOKIE_SECURE=true \
   -e OAUTH2_PROXY_COOKIE_SAMESITE=none \
+  -e OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST=true \
+  -e OAUTH2_PROXY_COOKIE_CSRF_EXPIRE=1h \
   -e OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL=true \
-  quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+  quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
 sleep 3
 docker ps | grep -q bitswan-protected-proxy || { echo "ERROR: protected proxy not running"; docker logs --tail 50 bitswan-protected-proxy; exit 1; }
 
