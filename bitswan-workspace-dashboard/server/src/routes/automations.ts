@@ -991,29 +991,36 @@ export function registerAutomationRoutes(
     }
   });
 
-  // Live log stream. Pipes the upstream gitops SSE body verbatim.
-  app.get<{ Params: { id: string } }>('/api/automations/:id/logs', async (req, reply) => {
-    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+  // Live log stream. Pipes the upstream gitops SSE body verbatim. `lines`
+  // controls the initial tail (gitops defaults to 200, caps at 10000).
+  app.get<{ Params: { id: string }; Querystring: { lines?: string } }>(
+    '/api/automations/:id/logs',
+    async (req, reply) => {
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
 
-    const ch = openSse(req, reply);
-    try {
-      const body = await gitops.streamLogs(req.params.id, ch.signal);
-      const reader = body.getReader();
-      const decoder = new TextDecoder();
-      while (!ch.signal.aborted) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        ch.write(decoder.decode(value, { stream: true }));
+      const parsed = Number.parseInt(req.query.lines ?? '', 10);
+      const lines = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 10000) : undefined;
+
+      const ch = openSse(req, reply);
+      try {
+        const body = await gitops.streamLogs(req.params.id, ch.signal, lines);
+        const reader = body.getReader();
+        const decoder = new TextDecoder();
+        while (!ch.signal.aborted) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          ch.write(decoder.decode(value, { stream: true }));
+        }
+      } catch (err) {
+        if (!ch.signal.aborted) {
+          app.log.warn({ err, id: req.params.id }, 'logs stream error');
+          ch.write(`event: error\ndata: ${JSON.stringify(String(err))}\n\n`);
+        }
+      } finally {
+        ch.end();
       }
-    } catch (err) {
-      if (!ch.signal.aborted) {
-        app.log.warn({ err, id: req.params.id }, 'logs stream error');
-        ch.write(`event: error\ndata: ${JSON.stringify(String(err))}\n\n`);
-      }
-    } finally {
-      ch.end();
-    }
-  });
+    },
+  );
 
   // Image build-log stream by checksum. Gitops serves the `docker build` output
   // as a plain-text follow-stream; we re-frame it line-by-line as SSE `log`

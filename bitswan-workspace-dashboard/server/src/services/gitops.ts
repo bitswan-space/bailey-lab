@@ -1284,14 +1284,16 @@ export class GitopsClient {
   /**
    * Returns the upstream SSE body so the caller (Fastify route) can pipe it
    * through. The `signal` lets callers cancel when the downstream client
-   * disconnects.
+   * disconnects. `lines` sets the initial tail (gitops defaults to 200).
    */
   async streamLogs(
     deploymentId: string,
     signal: AbortSignal,
+    lines?: number,
   ): Promise<ReadableStream<Uint8Array>> {
+    const qs = lines !== undefined ? `?lines=${lines}` : '';
     const r = await fetch(
-      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/logs/stream`,
+      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/logs/stream${qs}`,
       {
         headers: {
           ...this.authHeaders(),
