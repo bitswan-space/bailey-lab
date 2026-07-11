@@ -1171,22 +1171,67 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // flat SLA; we wait for the button to leave "Working…" while requiring the
   // on-screen progress to keep moving (the watchdog), so a long real image
   // build is fine but a silent stall fails.
-  // How far this copy's BP is from main, straight from the API the Sync &
-  // Deploy header itself uses (the page request context carries the
-  // oauth2-proxy session, so this is the same authenticated view).
-  const bpDivergence = async (): Promise<{ ahead: number; behind: number } | null> => {
-    const url = new URL(dashPage.url());
-    const copy = url.searchParams.get('copy');
-    if (!copy) return null;
-    const res = await dashPage.request
-      .get(
-        `${url.origin}/api/copies/${encodeURIComponent(copy)}/divergence?bp=${encodeURIComponent(BP.slug)}`,
+  // The dashboard's own copy slug, off whichever context carries it (the shell
+  // popup and the embedded iframe both put ?copy=…&bp=… in their URL).
+  const copyParam = (u: string): string | null => {
+    try {
+      return new URL(u).searchParams.get('copy');
+    } catch {
+      return null; // about:blank and other non-URL frame locations
+    }
+  };
+  const currentCopy = (): string | null => {
+    for (const f of dashPage.frames()) {
+      const c = copyParam(f.url());
+      if (c) return c;
+    }
+    return copyParam(dashPage.url());
+  };
+  // Call the dashboard API the way the app does: a fetch issued from INSIDE the
+  // dashboard frame with a RELATIVE path, so it hits the frame's own origin
+  // (the inner host that serves /api/*) with the app's own session cookies.
+  // Calling dashPage.request against the outer shell origin would miss both.
+  const dashApi = async (
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<{ status: number; ok: boolean; body: any } | null> => {
+    const frames = dashPage.frames();
+    // Prefer the app frame (the one carrying ?copy=…); fall back to main.
+    const frame =
+      frames.find((f) => copyParam(f.url()) !== null) ?? dashPage.mainFrame();
+    return await frame
+      .evaluate(
+        async ([m, p, b]) => {
+          const res = await fetch(p as string, {
+            method: m as string,
+            headers: b ? { 'Content-Type': 'application/json' } : {},
+            body: b ? JSON.stringify(b) : undefined,
+            credentials: 'include',
+          });
+          let json: any = null;
+          try {
+            json = await res.json();
+          } catch {
+            /* non-JSON body */
+          }
+          return { status: res.status, ok: res.ok, body: json };
+        },
+        [method, path, body ?? null] as const,
       )
       .catch(() => null);
-    if (!res || !res.ok()) return null;
-    const body = await res.json().catch(() => null);
-    if (!body) return null;
-    return { ahead: body.ahead_bp ?? 0, behind: body.behind_bp ?? 0 };
+  };
+  // How far this copy's BP is from main, straight from the API the Sync &
+  // Deploy header itself uses.
+  const bpDivergence = async (): Promise<{ ahead: number; behind: number } | null> => {
+    const copy = currentCopy();
+    if (!copy) return null;
+    const res = await dashApi(
+      'GET',
+      `/api/copies/${encodeURIComponent(copy)}/divergence?bp=${encodeURIComponent(BP.slug)}`,
+    );
+    if (!res || !res.ok || !res.body) return null;
+    return { ahead: res.body.ahead_bp ?? 0, behind: res.body.behind_bp ?? 0 };
   };
   // Bring the copy CURRENT before pressing. Main-scope commits (the rename
   // chapter publishes two) leave every copy behind main; pressing Sync & Deploy
@@ -1199,17 +1244,14 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   const rebaseCopyIfBehind = async (): Promise<void> => {
     const div = await bpDivergence();
     if (!div || div.behind <= 0) return;
-    const url = new URL(dashPage.url());
-    const copy = url.searchParams.get('copy')!;
+    const copy = currentCopy()!;
     // eslint-disable-next-line no-console
     console.log(
       `  sync&deploy ▸ copy is ${div.behind} behind main — rebasing via API before pressing`,
     );
-    const res = await dashPage.request
-      .post(`${url.origin}/api/copies/${encodeURIComponent(copy)}/rebase`, { data: {} })
-      .catch(() => null);
+    const res = await dashApi('POST', `/api/copies/${encodeURIComponent(copy)}/rebase`, {});
     // eslint-disable-next-line no-console
-    console.log(`  sync&deploy ▸ rebase API → ${res ? res.status() : 'unreachable'}`);
+    console.log(`  sync&deploy ▸ rebase API → ${res ? res.status : 'unreachable'}`);
   };
   const pressSyncDeploy = async () => {
     // One press-and-ride. Returns once "Working…" has cleared; the caller loop
