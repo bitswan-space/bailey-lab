@@ -537,20 +537,39 @@ function GdprModal({
                     </div>
                   )
                 ) : (
-                  <label className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed border-input px-3 py-2.5 text-[13px] text-muted-foreground hover:bg-muted">
-                    <Upload className="size-3.5" aria-hidden />
-                    {file?.name ?? rec.dpaFile ?? 'Upload DPA PDF'}
-                    <input
-                      type="file"
-                      accept="application/pdf"
-                      className="hidden"
-                      onChange={(e) => {
-                        const f = e.target.files?.[0] ?? null;
-                        setFile(f);
-                        if (f) set('dpaFile', f.name);
-                      }}
-                    />
-                  </label>
+                  <div className="flex items-center gap-2">
+                    <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md border border-dashed border-input px-3 py-2.5 text-[13px] text-muted-foreground hover:bg-muted">
+                      <Upload className="size-3.5 shrink-0" aria-hidden />
+                      <span className="truncate">
+                        {file?.name ?? (rec.dpaFile ? `Replace ${rec.dpaFile}` : 'Upload DPA PDF')}
+                      </span>
+                      <input
+                        type="file"
+                        accept="application/pdf"
+                        className="hidden"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0] ?? null;
+                          setFile(f);
+                          if (f) set('dpaFile', f.name);
+                        }}
+                      />
+                    </label>
+                    {/* The already-stored DPA stays downloadable while editing
+                        (issue #88); a freshly picked file isn't uploaded yet, so
+                        the link only shows when no replacement is selected. */}
+                    {!file && rec.dpaFile && (
+                      <a
+                        href={api.firewallDpaUrl(bp, host)}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={`Download ${rec.dpaFile}`}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-2.5 text-[13px] text-primary hover:bg-muted"
+                      >
+                        <Download className="size-3.5" aria-hidden />
+                        Download
+                      </a>
+                    )}
+                  </div>
                 )}
               </Field>
             </>
