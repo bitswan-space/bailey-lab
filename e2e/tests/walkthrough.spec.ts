@@ -1171,49 +1171,116 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // flat SLA; we wait for the button to leave "Working…" while requiring the
   // on-screen progress to keep moving (the watchdog), so a long real image
   // build is fine but a silent stall fails.
+  // How far this copy's BP is from main, straight from the API the Sync &
+  // Deploy header itself uses (the page request context carries the
+  // oauth2-proxy session, so this is the same authenticated view).
+  const bpDivergence = async (): Promise<{ ahead: number; behind: number } | null> => {
+    const url = new URL(dashPage.url());
+    const copy = url.searchParams.get('copy');
+    if (!copy) return null;
+    const res = await dashPage.request
+      .get(
+        `${url.origin}/api/copies/${encodeURIComponent(copy)}/divergence?bp=${encodeURIComponent(BP.slug)}`,
+      )
+      .catch(() => null);
+    if (!res || !res.ok()) return null;
+    const body = await res.json().catch(() => null);
+    if (!body) return null;
+    return { ahead: body.ahead_bp ?? 0, behind: body.behind_bp ?? 0 };
+  };
+  // Bring the copy CURRENT before pressing. Main-scope commits (the rename
+  // chapter publishes two) leave every copy behind main; pressing Sync & Deploy
+  // while behind makes the product hand the rebase to a LIVE coding-agent
+  // session ("main has moved on — …press Sync & Deploy again") whose runtime
+  // this walkthrough can't ride deterministically. The very same rebase exists
+  // as a plain-git API (POST /api/copies/{copy}/rebase — what the agent would
+  // do for a conflict-free copy), so the walkthrough takes that path and keeps
+  // the press on the deploy rails.
+  const rebaseCopyIfBehind = async (): Promise<void> => {
+    const div = await bpDivergence();
+    if (!div || div.behind <= 0) return;
+    const url = new URL(dashPage.url());
+    const copy = url.searchParams.get('copy')!;
+    // eslint-disable-next-line no-console
+    console.log(
+      `  sync&deploy ▸ copy is ${div.behind} behind main — rebasing via API before pressing`,
+    );
+    const res = await dashPage.request
+      .post(`${url.origin}/api/copies/${encodeURIComponent(copy)}/rebase`, { data: {} })
+      .catch(() => null);
+    // eslint-disable-next-line no-console
+    console.log(`  sync&deploy ▸ rebase API → ${res ? res.status() : 'unreachable'}`);
+  };
   const pressSyncDeploy = async () => {
-    await clickTopTab(/Sync & Deploy/i);
-    const btn = d.getByRole('button', { name: /Sync & Deploy|Working/ }).last();
-    await expect(btn).toBeEnabled({ timeout: SLA });
-    await btn.click();
-    const working = d.getByRole('button', { name: /Working/i }).first();
-    await working.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}); // started
-    // Wait for "Working…" to clear, but as a PROGRESS WATCHDOG: every PROGRESS
-    // window the screen must move (toast step text, button label, status line)
-    // or we flag a dark stall and fail. No flat overall cap beyond the backstop.
-    let last = await progressSignature();
-    const deadline = Date.now() + 30 * 60_000;
-    for (;;) {
-      if (!(await working.isVisible().catch(() => false))) return; // finished
-      if (Date.now() > deadline) throw new Error('Sync & Deploy exceeded 30min backstop');
-      try {
-        await expect
-          .poll(
-            async () => ((await working.isVisible().catch(() => false)) ? await progressSignature() : '<<done>>'),
-            { timeout: PROGRESS, intervals: [500, 1000, 2000] },
-          )
-          .not.toBe(last);
-      } catch {
-        // The Sync & Deploy progress toast is a COSMETIC live-progress animation.
-        // In the headless walkthrough it can stop updating even though the deploy
-        // is still running fine server-side (verified live: the deploy completes
-        // and the Development stage renders normally once it does). A quiet toast
-        // must NOT fail the run — but we also must NOT return while the deploy is
-        // still in flight, or the caller's next step (selectStage → Development)
-        // races a mid-deploy view. So stop REQUIRING on-screen progress and fall
-        // back to the authoritative completion signal: wait for the "Working…"
-        // button to clear (bounded by the same 30-min backstop). The other
-        // long-op watchdogs are unchanged.
-        // eslint-disable-next-line no-console
-        console.warn(
-          `Sync & Deploy: progress toast quiet >${PROGRESS / 1000}s (last: "${last.slice(0, 120)}") — waiting for "Working…" to clear instead`,
-        );
-        await working
-          .waitFor({ state: 'hidden', timeout: Math.max(1000, deadline - Date.now()) })
-          .catch(() => {});
-        return;
+    // One press-and-ride. Returns once "Working…" has cleared; the caller loop
+    // below decides whether the press actually SYNCED or was a rebase handoff.
+    const rideOnePress = async () => {
+      const btn = d.getByRole('button', { name: /Sync & Deploy|Working/ }).last();
+      await expect(btn).toBeEnabled({ timeout: SLA });
+      await btn.click();
+      const working = d.getByRole('button', { name: /Working/i }).first();
+      await working.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}); // started
+      // Wait for "Working…" to clear, but as a PROGRESS WATCHDOG: every PROGRESS
+      // window the screen must move (toast step text, button label, status line)
+      // or we flag a dark stall and fail. No flat overall cap beyond the backstop.
+      let last = await progressSignature();
+      const deadline = Date.now() + 30 * 60_000;
+      for (;;) {
+        if (!(await working.isVisible().catch(() => false))) return; // finished
+        if (Date.now() > deadline) throw new Error('Sync & Deploy exceeded 30min backstop');
+        try {
+          await expect
+            .poll(
+              async () => ((await working.isVisible().catch(() => false)) ? await progressSignature() : '<<done>>'),
+              { timeout: PROGRESS, intervals: [500, 1000, 2000] },
+            )
+            .not.toBe(last);
+        } catch {
+          // The Sync & Deploy progress toast is a COSMETIC live-progress animation.
+          // In the headless walkthrough it can stop updating even though the deploy
+          // is still running fine server-side (verified live: the deploy completes
+          // and the Development stage renders normally once it does). A quiet toast
+          // must NOT fail the run — but we also must NOT return while the deploy is
+          // still in flight, or the caller's next step (selectStage → Development)
+          // races a mid-deploy view. So stop REQUIRING on-screen progress and fall
+          // back to the authoritative completion signal: wait for the "Working…"
+          // button to clear (bounded by the same 30-min backstop). The other
+          // long-op watchdogs are unchanged.
+          // eslint-disable-next-line no-console
+          console.warn(
+            `Sync & Deploy: progress toast quiet >${PROGRESS / 1000}s (last: "${last.slice(0, 120)}") — waiting for "Working…" to clear instead`,
+          );
+          await working
+            .waitFor({ state: 'hidden', timeout: Math.max(1000, deadline - Date.now()) })
+            .catch(() => {});
+          return;
+        }
+        last = await progressSignature();
       }
-      last = await progressSignature();
+    };
+    for (let attempt = 0; ; attempt++) {
+      await clickTopTab(/Sync & Deploy/i);
+      await rebaseCopyIfBehind();
+      await rideOnePress();
+      // A press while the copy was behind main doesn't deploy — it opens a
+      // coding-agent rebase session and returns ("main has moved on …").
+      // Authoritative check: after a REAL sync the copy converges with main
+      // (behind == 0); after a handoff it is still behind. Rebase via the API
+      // and press again — bounded, so a genuinely conflicted copy still fails
+      // loudly instead of looping.
+      const div = await bpDivergence();
+      const handedOff =
+        (div !== null && div.behind > 0) ||
+        (await d.getByText(/main has moved on/i).first().isVisible().catch(() => false));
+      if (!handedOff) return;
+      expect(
+        attempt,
+        `Sync & Deploy kept reporting "main has moved on" after ${attempt + 1} rebase-and-retry attempts (divergence: ${JSON.stringify(div)})`,
+      ).toBeLessThan(2);
+      // eslint-disable-next-line no-console
+      console.log(
+        `  sync&deploy ▸ press was a rebase handoff (divergence: ${JSON.stringify(div)}) — rebasing via API and pressing again`,
+      );
     }
   };
   // After a working-tree EDIT, re-arm the Sync & Deploy button. The button gates
