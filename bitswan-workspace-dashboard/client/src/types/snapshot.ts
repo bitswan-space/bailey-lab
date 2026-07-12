@@ -19,6 +19,9 @@ export interface SnapshotServiceMeta {
   bucket?: string;
 }
 
+/** Off-site (restic) mirror state of one snapshot. */
+export type OffsiteState = 'none' | 'pending' | 'synced' | 'failed';
+
 /** One snapshot's manifest.json. */
 export interface Snapshot {
   version: number;
@@ -39,9 +42,13 @@ export interface Snapshot {
     restored_from_stage?: string;
     target_stage?: string;
   };
+  /** False when the snapshot exists only off-site (local files deleted). */
+  local?: boolean;
+  /** Off-site mirror state; 'none' or absent when never pushed. */
+  offsite?: OffsiteState;
 }
 
-export type SnapshotOperation = 'create' | 'restore' | 'clone';
+export type SnapshotOperation = 'create' | 'restore' | 'clone' | 'fetch';
 
 export type SnapshotTaskStatus =
   | 'pending'
@@ -91,4 +98,6 @@ export interface SnapshotListResponse {
   eligibility: SnapshotEligibility;
   disk_usage_bytes: number;
   active_tasks: SnapshotTask[];
+  /** Whether this workspace can mirror snapshots off-site (AOC-connected). */
+  offsite_enabled?: boolean;
 }

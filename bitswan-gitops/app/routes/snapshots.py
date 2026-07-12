@@ -28,8 +28,10 @@ from app.snapshot_runner import (
     BusyError,
     spawn_clone_stage,
     spawn_create_snapshot,
+    spawn_fetch_snapshot,
     spawn_restore_snapshot,
 )
+from app.services import snapshot_offsite
 from app.services.snapshot_service import get_snapshot_service
 from app.utils import SERVICE_REALMS, sanitize_automation_name
 
@@ -87,7 +89,11 @@ async def get_snapshot_task(task_id: str):
 @router.get("/{bp}")
 async def list_bp_snapshots(bp: str):
     """All snapshots of one BP across stages + eligibility + disk usage +
-    any in-flight tasks (so a reloaded dashboard can resume its progress UI)."""
+    any in-flight tasks (so a reloaded dashboard can resume its progress UI).
+
+    Rows are annotated with their off-site mirror state; snapshots that
+    exist only off-site (local files deleted) are listed too, from the
+    off-site index, with `local: false`."""
     slug = _bp_slug(bp)
     service = get_snapshot_service()
     try:
@@ -98,6 +104,23 @@ async def list_bp_snapshots(bp: str):
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    offsite = snapshot_offsite.offsite_status_for(slug)
+    local_ids = {s["id"] for s in snapshots}
+    for s in snapshots:
+        s["local"] = True
+        s["offsite"] = offsite.get(s["id"], {}).get("status", "none")
+    for snapshot_id, entry in offsite.items():
+        if snapshot_id in local_ids or entry.get("status") != "synced":
+            continue
+        row = dict(entry.get("manifest") or {})
+        if row.get("id") != snapshot_id:
+            continue  # index entry without a usable manifest
+        row["local"] = False
+        row["offsite"] = "synced"
+        snapshots.append(row)
+    snapshots.sort(key=lambda m: m.get("created_at", ""), reverse=True)
+
     active = [t.to_dict() for t in snapshot_manager.get_active_tasks_for_bp(slug)]
     return {
         "bp": slug,
@@ -105,6 +128,7 @@ async def list_bp_snapshots(bp: str):
         "eligibility": eligibility,
         "disk_usage_bytes": usage,
         "active_tasks": active,
+        "offsite_enabled": snapshot_offsite.offsite_enabled(),
     }
 
 
@@ -259,6 +283,53 @@ async def clone_stage(bp: str, body: SnapshotCloneRequest):
     )
 
 
+@router.post("/{bp}/{stage}/{snapshot_id}/fetch")
+async def fetch_snapshot(bp: str, stage: str, snapshot_id: str):
+    """Materialize an off-site snapshot back into the local store (202 + task).
+
+    200 `already_local` when nothing needs fetching; the restore endpoint
+    auto-fetches on its own, so this exists for explicit "bring it back"."""
+    slug = _bp_slug(bp)
+    _validate_stage(stage)
+    if not snapshot_offsite.offsite_enabled():
+        raise HTTPException(
+            status_code=400, detail="Off-site backups are not configured"
+        )
+
+    service = get_snapshot_service()
+    try:
+        service.get_snapshot(slug, stage, snapshot_id)
+        return {"status": "already_local", "bp": slug, "snapshot_id": snapshot_id}
+    except LookupError:
+        pass
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    entry = snapshot_offsite.offsite_status_for(slug).get(snapshot_id)
+    if not entry or entry.get("status") != "synced":
+        raise HTTPException(
+            status_code=404, detail=f"Snapshot {snapshot_id} not found off-site"
+        )
+
+    try:
+        res = await spawn_fetch_snapshot(slug, stage, snapshot_id)
+    except BusyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await _audit_backup(slug, "fetched", f"{snapshot_id} ({stage})", None, stage=stage)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "task_id": res["task_id"],
+            "bp": slug,
+            "stage": stage,
+            "snapshot_id": snapshot_id,
+            "status": "pending",
+        },
+    )
+
+
 # Declared AFTER /restore, /clone and /provision: this parameterised
 # route would otherwise capture those words as a stage name.
 @router.post("/{bp}/{stage}")
@@ -305,4 +376,15 @@ async def delete_snapshot(bp: str, stage: str, snapshot_id: str):
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
-    return {"status": "deleted", "bp": slug, "stage": stage, "snapshot_id": snapshot_id}
+    # Deleting local files never deletes the off-site copy — that is pruned
+    # only by the BP's retention policy. Tell the UI so it can say so.
+    offsite_entry = snapshot_offsite.offsite_status_for(slug).get(snapshot_id)
+    return {
+        "status": "deleted",
+        "bp": slug,
+        "stage": stage,
+        "snapshot_id": snapshot_id,
+        "offsite_retained": bool(
+            offsite_entry and offsite_entry.get("status") == "synced"
+        ),
+    }

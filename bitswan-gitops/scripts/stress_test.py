@@ -29,7 +29,6 @@ import tarfile
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
 
 try:
     import httpx
@@ -594,8 +593,6 @@ async def phase_create(
     sem = asyncio.Semaphore(concurrency)
     checksums: dict[str, str] = {}
     lock = asyncio.Lock()
-
-    import random as _rnd
 
     async def create_one(dep_id: str, template: str):
         pid = str(uuid.uuid4())

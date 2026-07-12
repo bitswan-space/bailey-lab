@@ -180,34 +180,22 @@ class MinioService(InfraService):
                 f"cat > {backup_container_dir}/manifest.json << 'MANIFESTEOF'\n{manifest_json}\nMANIFESTEOF",
             )
 
-            # Create tarball inside container and copy it out
+            # Stream the mirrored dir out as a tar via `docker cp` — the
+            # archiving is done by the docker daemon, so this works although
+            # the MinIO image (UBI-micro) ships no `tar`. Stored uncompressed
+            # (restic compresses off-site); the archive is rooted at the
+            # backup dir's basename ("minio-backup/").
+            from app.services.snapshot_service import run_docker_command_to_file
+
             backup_prefix = f"minio{self.service_suffix}"
             tarball_name = (
-                f"{backup_prefix}-backup-{backup_time.strftime('%Y%m%d-%H%M%S')}.tar.gz"
+                f"{backup_prefix}-backup-{backup_time.strftime('%Y%m%d-%H%M%S')}.tar"
             )
-            tarball_container_path = f"/tmp/{tarball_name}"
-
-            stdout, stderr, rc = await run_docker_command(
-                "docker",
-                "exec",
-                self.container_name,
-                "tar",
-                "-czf",
-                tarball_container_path,
-                "-C",
-                backup_container_dir,
-                ".",
-            )
-            if rc != 0:
-                raise RuntimeError(f"tar failed: {stderr}")
-
             os.makedirs(backup_path, exist_ok=True)
             tarball_path = os.path.join(backup_path, tarball_name)
 
-            stdout, stderr, rc = await run_docker_command(
-                "docker",
-                "cp",
-                f"{self.container_name}:{tarball_container_path}",
+            stderr, rc = await run_docker_command_to_file(
+                ["docker", "cp", f"{self.container_name}:{backup_container_dir}", "-"],
                 tarball_path,
             )
             if rc != 0:
@@ -221,7 +209,6 @@ class MinioService(InfraService):
                 "rm",
                 "-rf",
                 backup_container_dir,
-                tarball_container_path,
             )
 
             logger.info(f"Backup completed: {tarball_path}")
@@ -263,8 +250,16 @@ class MinioService(InfraService):
 
         restore_container_dir = "/tmp/minio-restore"
 
-        if os.path.isfile(backup_path) and backup_path.endswith(".tar.gz"):
-            # Copy tarball into container and extract
+        if os.path.isfile(backup_path) and backup_path.endswith((".tar", ".tar.gz")):
+            # Stream the tar in via `docker cp -` — extraction is done by the
+            # docker daemon, so no `tar` is needed in the MinIO image. New
+            # backups are plain tars rooted at "minio-backup/"; legacy
+            # gzipped tars (rooted at ".") are gunzipped on our end.
+            from app.services.snapshot_service import (
+                _is_gzip,
+                run_docker_command_from_file,
+            )
+
             await run_docker_command(
                 "docker",
                 "exec",
@@ -272,6 +267,7 @@ class MinioService(InfraService):
                 "rm",
                 "-rf",
                 restore_container_dir,
+                "/tmp/minio-backup",
             )
             await run_docker_command(
                 "docker",
@@ -282,27 +278,19 @@ class MinioService(InfraService):
                 restore_container_dir,
             )
 
-            stdout, stderr, rc = await run_docker_command(
-                "docker",
-                "cp",
+            gzipped = _is_gzip(backup_path)
+            # Legacy archives extract INTO the restore dir; new ones carry
+            # their own "minio-backup/" root, so extract into /tmp and use it.
+            target = restore_container_dir if gzipped else "/tmp"
+            _, stderr, rc = await run_docker_command_from_file(
+                ["docker", "cp", "-", f"{self.container_name}:{target}"],
                 backup_path,
-                f"{self.container_name}:/tmp/minio-restore.tar.gz",
+                gunzip_input=gzipped,
             )
             if rc != 0:
                 raise RuntimeError(f"docker cp failed: {stderr}")
-
-            stdout, stderr, rc = await run_docker_command(
-                "docker",
-                "exec",
-                self.container_name,
-                "tar",
-                "-xzf",
-                "/tmp/minio-restore.tar.gz",
-                "-C",
-                restore_container_dir,
-            )
-            if rc != 0:
-                raise RuntimeError(f"tar extract failed: {stderr}")
+            if not gzipped:
+                restore_container_dir = "/tmp/minio-backup"
         elif os.path.isdir(backup_path):
             # Copy directory contents into container
             await run_docker_command(

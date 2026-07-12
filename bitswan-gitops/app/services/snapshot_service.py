@@ -7,9 +7,15 @@ database, CouchDB databases under the BP prefix, and MinIO bucket — see
 
     {BITSWAN_GITOPS_DIR}/snapshots/{bp_slug}/{stage}/{snapshot_id}/
         manifest.json
-        postgres.sql.gz      (pg_dump of the per-BP database)
-        couchdb.tar.gz       ({db}.json per prefixed database + manifest)
-        minio.tar.gz         (bucket contents via mc mirror)
+        postgres.sql         (pg_dump of the per-BP database)
+        couchdb.tar          ({db}.json per prefixed database + manifest)
+        minio.tar            (bucket contents via mc mirror)
+
+Artifacts are stored uncompressed: manual snapshots are mirrored off-site
+into the restic repo (see `snapshot_offsite.py`), and restic deduplicates
+and compresses on its own — gzip here would defeat both. Snapshots created
+before this change carry gzipped artifacts (postgres.sql.gz, ...); restores
+detect the format per file, so both restore forever.
 
 Because the per-BP resource names contain no stage, a snapshot taken at any
 stage restores into any other stage verbatim. Restores use REPLACE
@@ -54,10 +60,17 @@ AUTO_SNAPSHOTS_KEEP = 5
 _SNAPSHOT_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{8}$")
 
 _SERVICE_FILES = {
-    "postgres": "postgres.sql.gz",
-    "couchdb": "couchdb.tar.gz",
-    "minio": "minio.tar.gz",
+    "postgres": "postgres.sql",
+    "couchdb": "couchdb.tar",
+    "minio": "minio.tar",
 }
+
+
+def _is_gzip(path: str) -> bool:
+    """Snapshots predating the uncompressed-artifact format are gzipped;
+    the manifest's filename says nothing reliable, the content does."""
+    with open(path, "rb") as f:
+        return f.read(2) == b"\x1f\x8b"
 
 
 def validate_stage_name(stage: str) -> None:
@@ -698,7 +711,6 @@ class SnapshotService:
         stderr, rc = await run_docker_command_to_file(
             ["docker", "exec", container, "pg_dump", "-U", user, db],
             out_file,
-            gzip_output=True,
         )
         if rc != 0:
             raise RuntimeError(f"pg_dump of {db} failed: {stderr.strip()}")
@@ -750,7 +762,7 @@ class SnapshotService:
                 "ON_ERROR_STOP=1",
             ],
             in_file,
-            gunzip_input=True,
+            gunzip_input=_is_gzip(in_file),
         )
         if rc != 0:
             raise RuntimeError(f"psql load into {db} failed: {stderr.strip()}")
@@ -818,7 +830,7 @@ class SnapshotService:
                     )
             with open(os.path.join(temp_dir, "manifest.json"), "w") as f:
                 json.dump({"version": 1, "databases": dbs, "prefix": prefix}, f)
-            with tarfile.open(out_file, "w:gz") as tar:
+            with tarfile.open(out_file, "w") as tar:
                 for item in os.listdir(temp_dir):
                     tar.add(os.path.join(temp_dir, item), arcname=item)
             return {"databases": dbs}
@@ -844,7 +856,8 @@ class SnapshotService:
 
         extract_dir = tempfile.mkdtemp(prefix="bp-couchdb-restore-")
         try:
-            with tarfile.open(in_file, "r:gz") as tar:
+            # r:* auto-detects plain vs gzip (legacy snapshots are gzipped)
+            with tarfile.open(in_file, "r:*") as tar:
                 tar.extractall(extract_dir, filter="data")
 
             manifest_path = os.path.join(extract_dir, "manifest.json")
@@ -950,14 +963,13 @@ class SnapshotService:
             )
             if rc != 0:
                 raise RuntimeError(f"mc mirror of {bucket} failed: {stderr.strip()}")
-            # Stream the mirrored objects out as a tar via `docker cp` and gzip
-            # on our end. The archiving is done by the docker daemon, so this
-            # works even though the minio image (UBI-micro) ships no `tar`.
+            # Stream the mirrored objects out as a tar via `docker cp`. The
+            # archiving is done by the docker daemon, so this works even
+            # though the minio image (UBI-micro) ships no `tar`.
             # The archive is rooted at the scratch dir's basename.
             stderr, rc = await run_docker_command_to_file(
                 ["docker", "cp", f"{container}:{scratch}", "-"],
                 out_file,
-                gzip_output=True,
             )
             if rc != 0:
                 raise RuntimeError(f"docker cp of {bucket} failed: {stderr.strip()}")
@@ -979,12 +991,13 @@ class SnapshotService:
         scratch = f"/tmp/bpsnap-{src_bucket}"
         try:
             await run_docker_command("docker", "exec", container, "rm", "-rf", scratch)
-            # Stream the tar in via `docker cp` (gunzipped on our end; extraction
-            # is done by the docker daemon, so no `tar` is needed in the image).
+            # Stream the tar in via `docker cp` (gunzipped on our end for
+            # legacy gzipped snapshots; extraction is done by the docker
+            # daemon, so no `tar` is needed in the image).
             _, stderr, rc = await run_docker_command_from_file(
                 ["docker", "cp", "-", f"{container}:/tmp"],
                 in_file,
-                gunzip_input=True,
+                gunzip_input=_is_gzip(in_file),
             )
             if rc != 0:
                 raise RuntimeError(f"docker cp into {bucket} failed: {stderr.strip()}")

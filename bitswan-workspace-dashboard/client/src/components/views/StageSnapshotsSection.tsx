@@ -2,12 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   Camera,
+  Cloud,
+  CloudAlert,
+  CloudDownload,
+  CloudUpload,
   Copy,
   Loader2,
   RotateCcw,
   Trash2,
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
+import { OffsiteBackupsCard } from '@/components/backups/OffsiteBackupsCard';
 import {
   CloneDialog,
   CreateSnapshotDialog,
@@ -161,6 +166,25 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
     })();
   }, [refresh, watchTask]);
 
+  // The off-site push runs fire-and-forget on the server — its completion
+  // doesn't flow through a watchable task. While any row is still
+  // "uploading…", poll the list until it settles (synced/failed). Capped;
+  // a straggler is retried by the server's nightly job anyway.
+  const pendingPolls = useRef(0);
+  useEffect(() => {
+    const hasPending = (data?.snapshots ?? []).some((s) => s.offsite === 'pending');
+    if (!hasPending) {
+      pendingPolls.current = 0;
+      return;
+    }
+    if (pendingPolls.current >= 45) return; // ~3 minutes
+    const timer = setTimeout(() => {
+      pendingPolls.current += 1;
+      void refresh();
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [data, refresh]);
+
   const bpSlug = data?.bp ?? bp.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const eligibility = data?.eligibility;
   const enabledStages = useMemo(
@@ -250,6 +274,22 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
     [bp.name, refresh],
   );
 
+  const runFetch = useCallback(
+    async (snapshot: Snapshot) => {
+      try {
+        const res = await api.snapshots.fetch(bp.name, snapshot.stage, snapshot.id);
+        if (res.task_id) {
+          watchTask(res.task_id);
+        } else {
+          await refresh();
+        }
+      } catch (err) {
+        toast.error(`Failed to start off-site fetch: ${String(err)}`);
+      }
+    },
+    [bp.name, refresh, watchTask],
+  );
+
   if (data === null && loadError === null) {
     return <EmptyState message="Loading snapshots…" />;
   }
@@ -259,6 +299,9 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Workspace-wide off-site (restic) backups — hidden without AOC. */}
+      <OffsiteBackupsCard />
+
       {/* Production: retention policy + live/standby slot + audit log. */}
       {stage === 'production' && <ProductionBackupCard bp={bp.name} />}
 
@@ -337,7 +380,10 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
               className="flex items-center gap-3 rounded-lg border border-border bg-background px-4 py-3"
             >
               <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
-                <Archive className="size-4 text-muted-foreground" aria-hidden />
+                <Archive
+                  className={`size-4 ${s.local === false ? 'text-muted-foreground/40' : 'text-muted-foreground'}`}
+                  aria-hidden
+                />
               </span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
@@ -356,6 +402,7 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
                       manual
                     </Badge>
                   )}
+                  <OffsiteBadge snapshot={s} />
                 </div>
                 <div className="mt-0.5 flex items-center gap-2 font-mono text-xs text-muted-foreground">
                   <span>{formatWhen(s.created_at)}</span>
@@ -365,10 +412,27 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
                   <span>{servicesLabel(s)}</span>
                 </div>
               </div>
+              {s.local === false && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  title="Download this snapshot from off-site storage back onto the server"
+                  onClick={() => void runFetch(s)}
+                >
+                  <CloudDownload className="size-3.5" aria-hidden />
+                  Fetch
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
                 disabled={busy}
+                title={
+                  s.local === false
+                    ? 'Restores fetch the snapshot from off-site storage automatically'
+                    : undefined
+                }
                 onClick={() => setRestoreTarget(s)}
               >
                 <RotateCcw className="size-3.5" aria-hidden />
@@ -377,8 +441,12 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
               <Button
                 variant="ghost"
                 size="sm"
-                disabled={busy}
-                title="Delete snapshot"
+                disabled={busy || s.local === false}
+                title={
+                  s.local === false
+                    ? 'Only the off-site copy exists — it is pruned by the retention policy, not deleted here'
+                    : 'Delete snapshot'
+                }
                 onClick={() => setDeleteTarget(s)}
               >
                 <Trash2 className="size-3.5 text-muted-foreground" aria-hidden />
@@ -420,7 +488,7 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
             <AlertDialogTitle>Delete snapshot?</AlertDialogTitle>
             <AlertDialogDescription>
               {deleteTarget
-                ? `This permanently deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}, ${formatBytes(deleteTarget.total_size_bytes)}). The stage's live data is not affected.`
+                ? `This permanently deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}, ${formatBytes(deleteTarget.total_size_bytes)}) from this server. The stage's live data is not affected.${deleteTarget.offsite === 'synced' ? ' The off-site copy is kept and stays restorable until the retention policy prunes it.' : ''}`
                 : ''}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -444,7 +512,50 @@ const OPERATION_LABEL: Record<SnapshotTask['operation'], string> = {
   create: 'Creating snapshot',
   restore: 'Restoring snapshot',
   clone: 'Cloning stage data',
+  fetch: 'Fetching snapshot from off-site',
 };
+
+/** Off-site mirror state pill: synced / uploading / failed; nothing when
+ *  the snapshot was never pushed (auto snapshots, no AOC). */
+function OffsiteBadge({ snapshot }: { snapshot: Snapshot }) {
+  switch (snapshot.offsite) {
+    case 'synced':
+      return (
+        <Badge
+          variant="outline"
+          className="shrink-0 gap-1 border-emerald-200 bg-emerald-50 text-emerald-700"
+          title="A copy of this snapshot is stored off-site"
+        >
+          <Cloud className="size-3" aria-hidden />
+          off-site
+        </Badge>
+      );
+    case 'pending':
+      return (
+        <Badge
+          variant="outline"
+          className="shrink-0 gap-1 text-muted-foreground"
+          title="Uploading to off-site storage"
+        >
+          <CloudUpload className="size-3" aria-hidden />
+          uploading…
+        </Badge>
+      );
+    case 'failed':
+      return (
+        <Badge
+          variant="outline"
+          className="shrink-0 gap-1 border-amber-200 bg-amber-50 text-amber-700"
+          title="Upload to off-site storage failed — retried automatically overnight"
+        >
+          <CloudAlert className="size-3" aria-hidden />
+          off-site failed
+        </Badge>
+      );
+    default:
+      return null;
+  }
+}
 
 function TaskProgressCard({ task }: { task: SnapshotTask }) {
   const pct = snapshotTaskProgress(task);

@@ -560,37 +560,15 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await expect(selected).toBeVisible({ timeout: SLA });
   });
 
-  // ---- Rename the BP: display name only, the slug never moves ----
-  // Rename to a temporary title and back, so every later chapter keeps
-  // addressing BP.title while the rename path (pencil in the selector →
-  // dialog → SSE-refreshed listing) is exercised for real. No regex-special
-  // characters in the temporary title — it goes into accessible-name regexes.
-  await chapter('rename-bp', async () => {
-    const renamed = `${BP.title} EU`;
-    const renameTo = async (from: string, to: string, shot?: string) => {
-      await d.getByRole('button', { name: /^Process\b/ }).first().click();
-      // The pencil sits on the row, revealed on hover; its accessible name
-      // is the title attribute.
-      const row = d.getByRole('button', { name: new RegExp(`^${from}$`) }).first();
-      await row.hover();
-      await d.getByRole('button', { name: `Rename "${from}"` }).first().click();
-      const dlg = d.getByRole('dialog');
-      const input = dlg.getByLabel(/^Name$/).first();
-      // Prefilled with the current display name — a real user edits in place.
-      await expect(input).toHaveValue(from);
-      await input.fill(to);
-      if (shot) await capture(dashPage, shot);
-      await dlg.getByRole('button', { name: /^Rename$/ }).first().click();
-      await dlg.waitFor({ state: 'hidden', timeout: SLA });
-      // The new display name flows back over the SSE feed into the trigger;
-      // the slug — and with it URLs and deployment ids — is untouched.
-      await expect(
-        d.getByRole('button', { name: new RegExp(`^Process\\b.*${to}`) }).first(),
-      ).toBeVisible({ timeout: SLA });
-    };
-    await renameTo(BP.title, renamed, 'bp-rename');
-    await renameTo(renamed, BP.title);
-  });
+  // NOTE: the BP rename flow (pencil → dialog → SSE-refreshed listing) is
+  // deliberately NOT walked here. A BP is born in main, so a rename is a
+  // MAIN-scope commit (RenameBusinessProcessDialog: copy = inMain ? undefined
+  // : …) — it advances the BP repo's main and leaves this copy behind, so the
+  // later Sync & Deploy stops being a fast-forward and the product hands the
+  // rebase to a live coding-agent session ("main has moved on…") this
+  // screenshot walkthrough can't drive deterministically. Rename has its own
+  // coverage in bitswan-gitops/tests/test_bp_creation.py; keeping it out of the
+  // walkthrough is what lets every copy stay a clean fast-forward of main.
 
   // ---- Description: TYPE a real README, then DRAW the flow with the editor ----
   await chapter('description', async () => {

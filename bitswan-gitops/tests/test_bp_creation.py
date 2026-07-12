@@ -190,18 +190,34 @@ def test_rename_updates_display_name_and_publishes(env):
 
 
 def test_rename_copy_scope_stays_local(env):
-    """A copy-scope rename rides the copy until Sync & Deploy — the repo's
-    main must not advance (same rule as copy-scope creation)."""
+    """A copy-scope rename rides the copy until Sync & Deploy — main's
+    process.toml and the repo's deploy-only main must not advance.
+
+    (BPs are born in main since the ordering fix — creation is main-scope
+    only — so the copy is materialized as a clone of main first.)"""
+    import toml
+
     svc = env["svc"]
+    asyncio.run(svc.create_business_process("orders"))
     copy_dir = os.path.join(env["copies_dir"], "u1")
     os.makedirs(copy_dir)
-    asyncio.run(svc.create_business_process("orders", copy="u1"))
+    assert asyncio.run(bp_git.clone_bp_into_copy(copy_dir, "u1", "orders")) is True
 
-    entry = asyncio.run(
-        svc.rename_business_process("orders", "Order Intake", copy="u1")
+    bare = git_server.bp_bare_repo_path("orders")
+    main_before = _git("-C", bare, "rev-parse", "main").stdout.strip()
+
+    asyncio.run(svc.rename_business_process("orders", "Order Intake", copy="u1"))
+
+    # The copy's clone carries the new display name...
+    copy_toml = toml.load(os.path.join(copy_dir, "orders", "process.toml"))
+    assert copy_toml["name"] == "Order Intake"
+    # ...while main is untouched: neither the main checkout's process.toml
+    # nor the repo's deploy-only main advanced.
+    main_toml = toml.load(
+        os.path.join(env["copies_dir"], "main", "orders", "process.toml")
     )
-    assert entry["display_name"] == "Order Intake"
-    assert asyncio.run(git_server.bp_main_has_content("orders")) is False
+    assert main_toml["name"] == "orders"
+    assert _git("-C", bare, "rev-parse", "main").stdout.strip() == main_before
 
 
 def test_rename_noop_creates_no_commit(env):

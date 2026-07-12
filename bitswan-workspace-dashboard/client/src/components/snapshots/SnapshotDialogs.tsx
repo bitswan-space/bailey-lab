@@ -62,7 +62,11 @@ export function CreateSnapshotDialog({
       setStage(fixedStage ?? enabledStages[0] ?? null);
       setLabel('');
     }
-  }, [open, enabledStages, fixedStage]);
+    // Reset only on the closed→open transition. enabledStages gets a fresh
+    // array identity from every background list refresh (e.g. the off-site
+    // upload poll) — re-running this while open wiped the typed label.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onCancel()}>
@@ -245,7 +249,10 @@ export function CloneDialog({
       setSource(fixedSource ?? enabledStages[0] ?? null);
       setTarget(null);
     }
-  }, [open, enabledStages, fixedSource]);
+    // Closed→open transition only — see CreateSnapshotDialog: refreshing the
+    // snapshot list must not reset the user's picks mid-dialog.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   // Never clone onto live Production (same rule as restore — go via DR + swap).
   const targetChoices = useMemo(

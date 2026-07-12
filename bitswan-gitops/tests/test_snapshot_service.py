@@ -250,15 +250,17 @@ async def test_create_snapshot_writes_manifest_and_files(service, fake_docker):
 
     snap_dir = service._snapshot_dir("my-bp", "dev", manifest["id"])
     assert os.path.isdir(snap_dir)
-    for fname in ("manifest.json", "postgres.sql.gz", "couchdb.tar.gz", "minio.tar.gz"):
+    # Artifacts are stored uncompressed (restic off-site mirroring dedups
+    # and compresses; gzip would defeat both).
+    for fname in ("manifest.json", "postgres.sql", "couchdb.tar", "minio.tar"):
         assert os.path.exists(os.path.join(snap_dir, fname))
+    assert manifest["services"]["postgres"]["file"] == "postgres.sql"
 
-    # postgres dump content round-trips through gzip
-    with gzip.open(os.path.join(snap_dir, "postgres.sql.gz")) as f:
+    with open(os.path.join(snap_dir, "postgres.sql"), "rb") as f:
         assert f.read() == b"-- sql dump dev\n"
 
     # couchdb archive only contains the prefixed dbs (not unrelated-db)
-    with tarfile.open(os.path.join(snap_dir, "couchdb.tar.gz")) as tar:
+    with tarfile.open(os.path.join(snap_dir, "couchdb.tar")) as tar:
         names = tar.getnames()
     assert "bp-my-bp-orders.json" in names
     assert "bp-my-bp-users.json" in names
@@ -409,3 +411,72 @@ async def test_restore_unknown_snapshot(service, fake_docker):
         await service.restore_snapshot(
             "my-bp", "20200101-000000-deadbeef", "dev", "staging"
         )
+
+
+async def test_restore_legacy_gzipped_snapshot(service, fake_docker):
+    """Snapshots taken before the uncompressed-artifact change carry gzipped
+    files (postgres.sql.gz etc.); restores must detect and gunzip them."""
+    import io
+
+    snapshot_id = new_snapshot_id()
+    snap_dir = service._snapshot_dir("my-bp", "dev", snapshot_id)
+    os.makedirs(snap_dir)
+
+    with gzip.open(os.path.join(snap_dir, "postgres.sql.gz"), "wb") as f:
+        f.write(b"-- legacy sql\n")
+    with tarfile.open(os.path.join(snap_dir, "couchdb.tar.gz"), "w:gz") as tar:
+        docs = json.dumps({"rows": [{"doc": {"_id": "l1", "_rev": "1-a"}}]}).encode()
+        ti = tarfile.TarInfo("bp-my-bp-orders.json")
+        ti.size = len(docs)
+        tar.addfile(ti, io.BytesIO(docs))
+    minio_buf = io.BytesIO()
+    with tarfile.open(fileobj=minio_buf, mode="w") as tar:
+        ti = tarfile.TarInfo("obj.txt")
+        ti.size = 6
+        tar.addfile(ti, io.BytesIO(b"legacy"))
+    with gzip.open(os.path.join(snap_dir, "minio.tar.gz"), "wb") as f:
+        f.write(minio_buf.getvalue())
+
+    manifest = {
+        "version": 1,
+        "id": snapshot_id,
+        "bp": "my-bp",
+        "bp_name": "My BP",
+        "stage": "dev",
+        "label": "legacy",
+        "kind": "manual",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "workspace": "ws-test",
+        "services": {
+            "postgres": {
+                "included": True,
+                "file": "postgres.sql.gz",
+                "size_bytes": 1,
+                "database": "bp_my_bp",
+            },
+            "couchdb": {
+                "included": True,
+                "file": "couchdb.tar.gz",
+                "size_bytes": 1,
+                "databases": ["bp-my-bp-orders"],
+            },
+            "minio": {
+                "included": True,
+                "file": "minio.tar.gz",
+                "size_bytes": 1,
+                "bucket": "bp-my-bp",
+            },
+        },
+        "total_size_bytes": 3,
+    }
+    with open(os.path.join(snap_dir, "manifest.json"), "w") as f:
+        json.dump(manifest, f)
+
+    await service.restore_snapshot("my-bp", snapshot_id, "dev", "staging")
+
+    # Each artifact was gunzipped on the way in.
+    assert fake_docker["pg_loaded"]["staging"] == b"-- legacy sql\n"
+    bulk = fake_docker["couch_bulk"][("staging", "bp-my-bp-orders")]
+    assert bulk["docs"][0]["_id"] == "l1"
+    with tarfile.open(fileobj=io.BytesIO(fake_docker["minio_tar"]["staging"])) as tar:
+        assert "obj.txt" in tar.getnames()
