@@ -680,7 +680,7 @@ function WorkspacesView({ ctx }) {
       )}
 
       <CreateWorkspaceModal open={createOpen} onClose={() => setCreateOpen(false)} data={data} setData={setData} toast={toast} currentUser={currentUser} refresh={refresh} />
-      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} people={data.people} refresh={refresh} />
+      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} refresh={refresh} />
 
       <WModal open={!!trashTarget} onClose={trashBusy ? () => {} : () => setTrashTarget(null)} icon="trash-2"
         title={trashTarget ? `Delete “${trashTarget.name}”?` : 'Delete workspace?'}
@@ -811,11 +811,15 @@ function PersonPickList({ candidates, disabled, titleFor, onPick }) {
 // POST /bailey/api/workspaces/{name}/transfer-ownership — strictly the
 // recorded owner's call (the backend rejects even admins), the recipient
 // must already be a person on this server, and the old owner stays a member.
-function ManageWorkspaceDrawer({ ws, onClose, toast, people, refresh }) {
+function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   const [share, setShare] = useWS(null);   // {owner_email, grants} | null while loading
   const [err, setErr] = useWS('');
   const [addEmail, setAddEmail] = useWS('');
   const [busy, setBusy] = useWS('');        // '' | 'add' | <principal being removed>
+  // People directory ({email,name,invited}) feeding both pickers. The
+  // endpoint is open to any endpoint owner — every owner of this drawer
+  // gets a list. null = unavailable (fetch failed) → free-text input only.
+  const [directory, setDirectory] = useWS(null);
   // Transfer-ownership flow: inline recipient picker + an explicit confirm
   // modal (the transfer hands the workspace away — a mis-click must not).
   const [transferOpen, setTransferOpen] = useWS(false);
@@ -839,12 +843,17 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, people, refresh }) {
     // Only owners can read the live share state (the API is owner-only).
     // Non-owners render from the workspace DTO (owner_email + members), which
     // the backend computes for every member — no privileged call needed.
-    if (!ws || !canManage) { setShare(null); setErr(''); return undefined; }
+    if (!ws || !canManage) { setShare(null); setErr(''); setDirectory(null); return undefined; }
     let alive = true;
-    setShare(null); setErr(''); setAddEmail('');
+    setShare(null); setErr(''); setAddEmail(''); setDirectory(null);
     WApi.workspaceMembers(dashHost)
       .then(r => { if (alive) setShare(r); })
       .catch(e => { if (alive) { setErr(e.message || 'Could not load members.'); setShare({ owner_email: '', grants: [] }); } });
+    // Best-effort: a failed directory fetch just means no pick list — the
+    // free-text input still works and the backend still validates.
+    WApi.peopleDirectory()
+      .then(r => { if (alive) setDirectory(r && r.people ? r.people : []); })
+      .catch(() => { if (alive) setDirectory(null); });
     return () => { alive = false; };
   }, [ws && ws.id]);
 
@@ -871,27 +880,25 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, people, refresh }) {
     finally { setBusy(''); }
   };
 
-  // Candidate picker: everyone already invited into this Bailey server — the
-  // people roster App loads from /bailey/api/people (it includes invited-but-
-  // never-seen users) — minus the owner and anyone already granted, filtered
-  // by whatever is typed in the add box. The roster endpoint is admin-only,
-  // so for a non-admin owner `people` is null and the free-text input stands
-  // alone; nothing is faked.
+  // Candidate picker: everyone already invited into this Bailey server —
+  // the people directory fetched above (invited-but-never-seen users
+  // included) — minus the owner and anyone already granted, filtered by
+  // whatever is typed in the add box. If the directory couldn't load, the
+  // free-text input stands alone; nothing is faked.
   const q = addEmail.trim().toLowerCase();
   const memberSet = new Set(members.map(g => (g.principal_value || '').toLowerCase()));
-  const candidates = !canManage ? [] : (people || []).filter(p =>
+  const candidates = !canManage ? [] : (directory || []).filter(p =>
     p.email &&
     p.email.toLowerCase() !== (ownerEmail || '').toLowerCase() &&
     !memberSet.has(p.email.toLowerCase()) &&
     (!q || p.email.toLowerCase().includes(q) || (p.name || '').toLowerCase().includes(q)));
 
-  // Transfer recipients: the same roster minus the current owner. Existing
-  // members ARE eligible — promoting a member is the common case. The backend
-  // additionally requires the recipient to be a known person, so a free-typed
-  // email (the only option for a non-admin owner, who can't read the roster)
-  // is validated server-side.
+  // Transfer recipients: the same directory minus the current owner.
+  // Existing members ARE eligible — promoting a member is the common case.
+  // The backend additionally requires the recipient to be a known person,
+  // so a free-typed email is validated server-side.
   const tq = transferEmail.trim().toLowerCase();
-  const transferCandidates = !canManage ? [] : (people || []).filter(p =>
+  const transferCandidates = !canManage ? [] : (directory || []).filter(p =>
     p.email &&
     p.email.toLowerCase() !== (ownerEmail || '').toLowerCase() &&
     p.email.toLowerCase() !== tq &&

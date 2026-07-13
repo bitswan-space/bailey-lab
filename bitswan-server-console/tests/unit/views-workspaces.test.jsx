@@ -262,14 +262,13 @@ describe('WorkspacesView', () => {
     await waitFor(() => expect(screen.getByText('new@x')).toBeTruthy());
   });
 
-  // People roster rows as App's adaptPerson produces them (from
-  // /bailey/api/people) — the pool the add-member picker selects from.
+  // People directory rows as GET /bailey/api/people/directory returns them
+  // — the pool the add-member and transfer pickers select from.
   function rosterPerson(over = {}) {
-    return { id: over.email || 'p@x', name: over.email || 'p@x', email: 'p@x', role: 'member',
-      workspaceCount: 0, deviceCount: 0, lastActive: '', invited: false, ...over };
+    return { email: 'p@x', name: over.email || 'p@x', invited: false, ...over };
   }
 
-  it('manage drawer (owner, admin): picks a member from the server roster', async () => {
+  it('manage drawer (owner): picks a member from the people directory', async () => {
     const s = spies();
     let granted = null;
     installFetch({
@@ -280,14 +279,14 @@ describe('WorkspacesView', () => {
         }
         return { json: { owner_email: 'me@example.test', grants: [{ principal_type: 'email', principal_value: 'bob@x', role: 'access' }] } };
       },
+      '/bailey/api/people/directory': { json: { people: [
+        rosterPerson({ email: 'me@example.test' }),                 // the owner — excluded
+        rosterPerson({ email: 'bob@x' }),                           // already a member — excluded
+        rosterPerson({ email: 'sam@x', name: 'Sam', invited: true }), // invited-only — selectable
+        rosterPerson({ email: 'jane@y' }),                          // selectable
+      ] } },
     });
-    const people = [
-      rosterPerson({ email: 'me@example.test' }),                 // the owner — excluded
-      rosterPerson({ email: 'bob@x' }),                           // already a member — excluded
-      rosterPerson({ email: 'sam@x', name: 'Sam', invited: true }), // invited-only — selectable
-      rosterPerson({ email: 'jane@y' }),                          // selectable
-    ];
-    render(<Host View={WorkspacesView} data={makeData({ people, workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
     await waitFor(() => expect(screen.getByText(/People on this server/)).toBeTruthy());
     // Owner and existing members never appear as candidates.
@@ -303,10 +302,12 @@ describe('WorkspacesView', () => {
     expect(screen.queryByTitle('Add sam@x')).toBeNull();                 // and out of the picker
   });
 
-  it('manage drawer: typing filters the roster picker (matches email or name)', async () => {
-    installFetch({ '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } } });
-    const people = [rosterPerson({ email: 'sam@x', name: 'Sam' }), rosterPerson({ email: 'jane@y' })];
-    render(<Host View={WorkspacesView} data={makeData({ people, workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
+  it('manage drawer: typing filters the directory picker (matches email or name)', async () => {
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
+      '/bailey/api/people/directory': { json: { people: [rosterPerson({ email: 'sam@x', name: 'Sam' }), rosterPerson({ email: 'jane@y' })] } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
     await waitFor(() => expect(screen.getByTitle('Add jane@y')).toBeTruthy());
     fireEvent.change(screen.getByPlaceholderText('person@example.com'), { target: { value: 'sam' } });
@@ -317,30 +318,33 @@ describe('WorkspacesView', () => {
     expect(screen.queryByText(/people on this server/i)).toBeNull(); // no matches → no list, input still usable
   });
 
-  it('manage drawer (owner, non-admin): no roster → free-text add only, no picker', async () => {
-    installFetch({ '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } } });
-    // people:null mirrors a non-admin owner (the roster endpoint is admin-only).
-    render(<Host View={WorkspacesView} data={makeData({ people: null, workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
+  it('manage drawer (owner): directory unavailable → free-text add only, no picker', async () => {
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
+      '/bailey/api/people/directory': { status: 403, json: { error: 'only endpoint owners can list the directory' } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
     await waitFor(() => expect(screen.getByText(/No members yet/)).toBeTruthy());
     expect(screen.getByPlaceholderText('person@example.com')).toBeTruthy();
     expect(screen.queryByText(/People on this server/)).toBeNull();
   });
 
-  it('manage drawer (owner): transfers ownership via roster pick + confirm modal', async () => {
+  it('manage drawer (owner): transfers ownership via directory pick + confirm modal', async () => {
     const s = spies();
     let transferred = null;
     installFetch({
       '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
+      '/bailey/api/people/directory': { json: { people: [rosterPerson({ email: 'me@example.test' }), rosterPerson({ email: 'sam@x', name: 'Sam' })] } },
       '/bailey/api/workspaces/demo/transfer-ownership': (url, init) => {
         transferred = JSON.parse(init.body);
         return { json: { ok: true, workspace: 'demo', owner_email: transferred.email } };
       },
     });
-    const people = [rosterPerson({ email: 'me@example.test' }), rosterPerson({ email: 'sam@x', name: 'Sam' })];
-    render(<Host View={WorkspacesView} data={makeData({ people, workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
     fireEvent.click(screen.getByText('Transfer ownership'));
+    await waitFor(() => expect(screen.getByTitle('Transfer to sam@x')).toBeTruthy());
     // The current owner is never offered as a recipient.
     expect(screen.queryByTitle('Transfer to me@example.test')).toBeNull();
     fireEvent.click(screen.getByTitle('Transfer to sam@x'));   // pick fills the input…
@@ -358,10 +362,11 @@ describe('WorkspacesView', () => {
       '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
       '/bailey/api/workspaces/demo/transfer-ownership': { status: 400, json: { error: "stranger@x isn't on this server yet — invite them first" } },
     });
-    render(<Host View={WorkspacesView} data={makeData({ people: null, workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
     fireEvent.click(screen.getByText('Transfer ownership'));
-    // Non-admin owner: no roster, free-typed recipient (validated server-side).
+    // No directory route mocked → picker absent, free-typed recipient
+    // (validated server-side).
     fireEvent.change(screen.getByPlaceholderText('new-owner@example.com'), { target: { value: 'stranger@x' } });
     fireEvent.click(screen.getByText('Transfer…'));
     fireEvent.click(screen.getByText('Transfer ownership')); // modal confirm

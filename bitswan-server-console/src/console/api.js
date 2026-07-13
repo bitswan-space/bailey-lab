@@ -242,6 +242,11 @@ export const Api = {
   // device counts. Degrades to a 200 with an `error` field on partial
   // enumeration failure (the view surfaces it without dropping the roster).
   people: () => getJSON('/bailey/api/people'),
+  // Minimal people directory ({email,name,invited} rows) for the member/
+  // transfer pickers. NOT admin-only: any endpoint owner may read it —
+  // workspace owners included — so every owner gets a pickable list. 403
+  // for callers who own nothing shareable.
+  peopleDirectory: () => getJSON('/bailey/api/people/directory'),
   // ── Invites (admin-only, except redeemInvite) ──
   // AOC org roster — who can be invited. Rows carry {email, username,
   // verified, in_roster, invited}. 502 when the daemon isn't registered

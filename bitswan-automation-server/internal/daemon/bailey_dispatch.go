@@ -138,6 +138,13 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleBaileyApprovalsAPI(w, r, email, callerIsAdmin(email))
 			return
 		}
+	case "/bailey/api/people/directory":
+		// NOT admin-gated like the rest of /bailey/api/people/* — the
+		// handler enforces its own endpoint-owner check.
+		if r.Method == http.MethodGet {
+			handleBaileyPeopleDirectory(w, r, email)
+			return
+		}
 	case "/bailey/api/endpoints":
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
