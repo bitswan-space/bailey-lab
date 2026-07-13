@@ -152,6 +152,42 @@ func registerEndpoint(hostname, ownerEmail, displayName, parentEndpoint, kind, s
 	return getEndpoint(hostname)
 }
 
+// setEndpointOwner rewrites the endpoint's recorded original owner.
+// Used by workspace ownership transfer — the ONLY path that ever
+// changes owner_email after registration.
+func setEndpointOwner(hostname, ownerEmail string) error {
+	db, err := openBaileyDB()
+	if err != nil {
+		return err
+	}
+	hostname = strings.TrimSpace(hostname)
+	ownerEmail = strings.TrimSpace(ownerEmail)
+	if hostname == "" || ownerEmail == "" {
+		return fmt.Errorf("hostname and owner are required")
+	}
+	_, err = db.Exec(`UPDATE endpoints SET owner_email = ? WHERE hostname = ? COLLATE NOCASE`,
+		ownerEmail, hostname)
+	return err
+}
+
+// reassignChildEndpoints moves the recorded owner of every endpoint
+// parented to parentHost from oldOwner to newOwner. Children whose
+// owner_email is someone else were registered with an explicit owner
+// (e.g. a manual add-route) and are deliberately left alone — only the
+// rows that inherited the workspace owner at registration follow the
+// transfer.
+func reassignChildEndpoints(parentHost, oldOwner, newOwner string) error {
+	db, err := openBaileyDB()
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE endpoints SET owner_email = ?
+	    WHERE parent_endpoint = ? COLLATE NOCASE
+	      AND owner_email = ? COLLATE NOCASE`,
+		strings.TrimSpace(newOwner), strings.TrimSpace(parentHost), strings.TrimSpace(oldOwner))
+	return err
+}
+
 // deleteEndpoint removes an endpoint and (via ON DELETE CASCADE) all
 // its grants and access requests. Used by workspace remove.
 func deleteEndpoint(hostname string) error {

@@ -193,6 +193,8 @@ const ACTIVITY_KINDS = {
   'server.claim':     { icon: 'flag',         tone: 'primary', verb: 'claimed this server' },
   'workspace.create': { icon: 'folder-plus',  tone: 'primary', verb: 'created workspace' },
   'workspace.trash':  { icon: 'trash-2',      tone: 'danger',  verb: 'trashed workspace' },
+  // target = "<workspace> → <new owner>" (see the daemon's transfer handler).
+  'workspace.transfer': { icon: 'arrow-left-right', tone: 'warning', verb: 'transferred ownership of' },
   // Invite lifecycle (target = invitee email; for redeem the ACTOR is the
   // invitee and the target is who invited them — see the daemon's audit calls).
   'invite.create':    { icon: 'mail-plus',    tone: 'primary', verb: 'invited' },

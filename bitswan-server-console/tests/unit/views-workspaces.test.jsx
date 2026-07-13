@@ -327,6 +327,59 @@ describe('WorkspacesView', () => {
     expect(screen.queryByText(/People on this server/)).toBeNull();
   });
 
+  it('manage drawer (owner): transfers ownership via roster pick + confirm modal', async () => {
+    const s = spies();
+    let transferred = null;
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
+      '/bailey/api/workspaces/demo/transfer-ownership': (url, init) => {
+        transferred = JSON.parse(init.body);
+        return { json: { ok: true, workspace: 'demo', owner_email: transferred.email } };
+      },
+    });
+    const people = [rosterPerson({ email: 'me@example.test' }), rosterPerson({ email: 'sam@x', name: 'Sam' })];
+    render(<Host View={WorkspacesView} data={makeData({ people, workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    fireEvent.click(screen.getByText('Transfer ownership'));
+    // The current owner is never offered as a recipient.
+    expect(screen.queryByTitle('Transfer to me@example.test')).toBeNull();
+    fireEvent.click(screen.getByTitle('Transfer to sam@x'));   // pick fills the input…
+    fireEvent.click(screen.getByText('Transfer…'));            // …then the explicit confirm
+    expect(screen.getByText(/only the new owner can transfer it back/)).toBeTruthy();
+    fireEvent.click(screen.getByText('Transfer ownership')); // the modal's confirm (the card button is hidden while the panel is open)
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('transferred to sam@x'), 'success'));
+    expect(transferred).toEqual({ email: 'sam@x' });
+    expect(s.refresh).toHaveBeenCalledWith('workspaces');
+  });
+
+  it('manage drawer: a rejected transfer surfaces the backend error, ownership UI intact', async () => {
+    const s = spies();
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
+      '/bailey/api/workspaces/demo/transfer-ownership': { status: 400, json: { error: "stranger@x isn't on this server yet — invite them first" } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ people: null, workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    fireEvent.click(screen.getByText('Transfer ownership'));
+    // Non-admin owner: no roster, free-typed recipient (validated server-side).
+    fireEvent.change(screen.getByPlaceholderText('new-owner@example.com'), { target: { value: 'stranger@x' } });
+    fireEvent.click(screen.getByText('Transfer…'));
+    fireEvent.click(screen.getByText('Transfer ownership')); // modal confirm
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining("isn't on this server yet"), 'danger'));
+    expect(s.refresh).not.toHaveBeenCalledWith('workspaces');
+    // The panel survives the failure so the owner can correct the recipient.
+    expect(screen.getByPlaceholderText('new-owner@example.com')).toBeTruthy();
+  });
+
+  it('manage drawer (non-owner): no transfer control at all', () => {
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({
+      isOwner: false, dashboardRole: 'access', ownerEmail: 'owner@x', members: ['owner@x'],
+      dashboard: 'https://dash.example.test/',
+    })] })} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    expect(screen.queryByText('Transfer ownership')).toBeNull();
+  });
+
   it('manage drawer (non-owner): sees owner + members read-only, no add box', () => {
     const s = spies();
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({

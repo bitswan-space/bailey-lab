@@ -209,6 +209,11 @@ export const Api = {
   restoreWorkspace: (name) => postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/restore`),
   updateWorkspace: (name, onEvent) =>
     postNDJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/update`, {}, onEvent),
+  // Transfer workspace ownership to another user already on this server.
+  // Strictly the recorded owner's call — the backend rejects even admins —
+  // and the old owner is kept as a member (access grant).
+  transferWorkspaceOwnership: (name, email) =>
+    postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/transfer-ownership`, { email }),
   // Workspace membership = the ACL share state on the workspace's dashboard
   // endpoint host: owner_email + grants. Owner-only (403 otherwise). Returns
   // the updated listing on add/remove.

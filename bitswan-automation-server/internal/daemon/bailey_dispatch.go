@@ -202,6 +202,9 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			case "update":
 				s.handleUpdateWorkspace(w, r, email, workspaceName)
 				return
+			case "transfer-ownership":
+				handleTransferWorkspaceOwnership(w, r, email, workspaceName)
+				return
 			}
 		}
 	}

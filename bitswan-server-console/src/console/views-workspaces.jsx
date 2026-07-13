@@ -680,7 +680,7 @@ function WorkspacesView({ ctx }) {
       )}
 
       <CreateWorkspaceModal open={createOpen} onClose={() => setCreateOpen(false)} data={data} setData={setData} toast={toast} currentUser={currentUser} refresh={refresh} />
-      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} people={data.people} />
+      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} people={data.people} refresh={refresh} />
 
       <WModal open={!!trashTarget} onClose={trashBusy ? () => {} : () => setTrashTarget(null)} icon="trash-2"
         title={trashTarget ? `Delete “${trashTarget.name}”?` : 'Delete workspace?'}
@@ -766,26 +766,62 @@ function CreateWorkspaceModal({ open, onClose, data, setData, toast, currentUser
   );
 }
 
-// ─── MANAGE WORKSPACE DRAWER (open links + trash/restore/update) ────────────
+// ─── MANAGE WORKSPACE DRAWER (members + ownership transfer) ─────────────────
 // Every workspace shown here comes from the live /bailey/api/workspaces
-// endpoint. Membership/ownership grants are NOT exposed by that endpoint —
-// they're managed per-endpoint on the gate's /2fa-gate/share/<host> page — so
-// this drawer never shows a member roster or transfer control (there is no
-// backend for it; faking one would be mock data).
+// endpoint; the member roster is the real ACL share state of the workspace's
+// dashboard endpoint, and ownership transfer is the live workspace API.
 function hostFromUrl(u) {
   try { return new URL(u).host; } catch (e) { return ''; }
+}
+
+// PersonPickList — click-to-pick rows over the server's people roster.
+// Shared by the add-member picker and the transfer-ownership picker.
+function PersonPickList({ candidates, disabled, titleFor, onPick }) {
+  if (!candidates.length) return null;
+  return (
+    <div style={{ border: `1px solid ${WC.border}`, borderRadius: 10, maxHeight: 192, overflowY: 'auto' }}>
+      {candidates.map(p => (
+        <button key={p.email} onClick={() => onPick(p.email)} disabled={disabled} title={titleFor(p.email)} style={{
+          display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px 10px', textAlign: 'left',
+          border: 0, borderBottom: `1px solid ${WC.surface2}`, background: 'transparent',
+          cursor: disabled ? 'default' : 'pointer', fontFamily: 'inherit', opacity: disabled ? 0.6 : 1 }}
+          onMouseEnter={e => { e.currentTarget.style.background = WC.surface; }}
+          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
+          <WAvatar user={{ name: p.name || p.email }} size={28} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 500, color: WC.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {p.name && p.name !== p.email ? p.name : p.email}
+            </div>
+            {p.name && p.name !== p.email && (
+              <div style={{ fontSize: 11, color: WC.muted, fontFamily: 'Geist Mono, monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.email}</div>
+            )}
+          </div>
+          {p.invited && <WPill tone="info" size="xs">Invited</WPill>}
+          <WIcon name="user-plus" size={14} color={WC.mutedFg} />
+        </button>
+      ))}
+    </div>
+  );
 }
 
 // Ownership + Members, per the wireframe. Members are the REAL ACL grants on
 // the workspace's dashboard endpoint (GET/POST /2fa-gate/api/share/<host>):
 // owner_email + access grants. Owner-only — a non-owner can't read the share
-// state, so they get an honest read-only note. Transfer-ownership has no
-// backend, so it's shown disabled rather than faked.
-function ManageWorkspaceDrawer({ ws, onClose, toast, people }) {
+// state, so they get an honest read-only note. Ownership transfer is live:
+// POST /bailey/api/workspaces/{name}/transfer-ownership — strictly the
+// recorded owner's call (the backend rejects even admins), the recipient
+// must already be a person on this server, and the old owner stays a member.
+function ManageWorkspaceDrawer({ ws, onClose, toast, people, refresh }) {
   const [share, setShare] = useWS(null);   // {owner_email, grants} | null while loading
   const [err, setErr] = useWS('');
   const [addEmail, setAddEmail] = useWS('');
   const [busy, setBusy] = useWS('');        // '' | 'add' | <principal being removed>
+  // Transfer-ownership flow: inline recipient picker + an explicit confirm
+  // modal (the transfer hands the workspace away — a mis-click must not).
+  const [transferOpen, setTransferOpen] = useWS(false);
+  const [transferEmail, setTransferEmail] = useWS('');
+  const [transferBusy, setTransferBusy] = useWS(false);
+  const [transferConfirm, setTransferConfirm] = useWS(false);
 
   const dashHost = ws ? hostFromUrl(ws.dashboard) : '';
   // Managing members (add/remove) is only allowed for the TRUE owner of the
@@ -797,6 +833,9 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, people }) {
   const ownerEmail = ws ? ws.ownerEmail : '';
 
   React.useEffect(() => {
+    // Fresh drawer, fresh transfer flow — don't leak a half-picked recipient
+    // from the previously opened workspace.
+    setTransferOpen(false); setTransferEmail(''); setTransferConfirm(false);
     // Only owners can read the live share state (the API is owner-only).
     // Non-owners render from the workspace DTO (owner_email + members), which
     // the backend computes for every member — no privileged call needed.
@@ -845,6 +884,36 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, people }) {
     p.email.toLowerCase() !== (ownerEmail || '').toLowerCase() &&
     !memberSet.has(p.email.toLowerCase()) &&
     (!q || p.email.toLowerCase().includes(q) || (p.name || '').toLowerCase().includes(q)));
+
+  // Transfer recipients: the same roster minus the current owner. Existing
+  // members ARE eligible — promoting a member is the common case. The backend
+  // additionally requires the recipient to be a known person, so a free-typed
+  // email (the only option for a non-admin owner, who can't read the roster)
+  // is validated server-side.
+  const tq = transferEmail.trim().toLowerCase();
+  const transferCandidates = !canManage ? [] : (people || []).filter(p =>
+    p.email &&
+    p.email.toLowerCase() !== (ownerEmail || '').toLowerCase() &&
+    p.email.toLowerCase() !== tq &&
+    (!tq || p.email.toLowerCase().includes(tq) || (p.name || '').toLowerCase().includes(tq)));
+
+  // Hands the workspace to transferEmail: the backend rewrites the recorded
+  // owner (children included) and keeps the caller on as a member. On success
+  // the refreshed workspace DTO re-renders this drawer in the member view.
+  const doTransfer = async () => {
+    const email = transferEmail.trim();
+    if (!email) return;
+    setTransferBusy(true);
+    try {
+      await WApi.transferWorkspaceOwnership(ws.name, email);
+      toast(`${ws.name} transferred to ${email} — you're now a member`, 'success');
+      setTransferConfirm(false); setTransferOpen(false); setTransferEmail('');
+      if (refresh) await refresh('workspaces');
+    } catch (e) {
+      setTransferConfirm(false);
+      toast(`Couldn't transfer ownership: ${e.message}`, 'danger');
+    } finally { setTransferBusy(false); }
+  };
   const removeMember = async (g) => {
     setBusy(g.principal_value);
     try {
@@ -869,15 +938,44 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, people }) {
             </div>
           </div>
         </div>
-        {canManage && (
-          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 9 }}>
-            <span title="Transferring ownership isn't supported yet." style={{ display: 'inline-flex' }}>
-              <WBtn variant="default" size="sm" leftIcon="arrow-left-right" disabled>Transfer ownership</WBtn>
-            </span>
-            <span style={{ fontSize: 11.5, color: WC.mutedFg }}>Not available yet.</span>
+        {canManage && !transferOpen && (
+          <div style={{ marginTop: 12 }}>
+            <WBtn variant="default" size="sm" leftIcon="arrow-left-right" onClick={() => setTransferOpen(true)}>Transfer ownership</WBtn>
+          </div>
+        )}
+        {canManage && transferOpen && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 11.5, color: WC.mutedFg, marginBottom: 6 }}>
+              New owner — someone already on this server:
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ flex: 1 }}>
+                <WTextInput value={transferEmail} onChange={setTransferEmail} placeholder="new-owner@example.com" />
+              </div>
+              <WBtn variant="primary" size="sm" leftIcon="arrow-left-right" disabled={transferBusy || !transferEmail.trim()} onClick={() => setTransferConfirm(true)}>
+                Transfer…
+              </WBtn>
+              <WBtn variant="default" size="sm" disabled={transferBusy} onClick={() => { setTransferOpen(false); setTransferEmail(''); }}>Cancel</WBtn>
+            </div>
+            <PersonPickList candidates={transferCandidates} disabled={transferBusy}
+              titleFor={(e) => `Transfer to ${e}`} onPick={setTransferEmail} />
+            <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
+              They become the workspace's only owner; you stay in it as a member.
+            </div>
           </div>
         )}
       </div>
+
+      {/* Transfer confirm — the one place a workspace changes hands. */}
+      <WModal open={transferConfirm} onClose={transferBusy ? () => {} : () => setTransferConfirm(false)} icon="arrow-left-right"
+        title={`Transfer “${ws.name}” to ${transferEmail.trim() || '…'}?`}
+        subtitle="They become the workspace's only owner — members, apps, and settings go with it. You stay in the workspace as a member, and only the new owner can transfer it back."
+        footer={<>
+          <WBtn variant="default" disabled={transferBusy} onClick={() => setTransferConfirm(false)}>Cancel</WBtn>
+          <WBtn variant="primary" disabled={transferBusy} onClick={doTransfer}>
+            {transferBusy ? 'Transferring…' : 'Transfer ownership'}
+          </WBtn>
+        </>} />
 
       {/* Members */}
       <div style={{ ...SECTION, margin: '20px 0 10px', display: 'flex', justifyContent: 'space-between' }}>
@@ -924,28 +1022,8 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, people }) {
               <div style={{ fontSize: 11.5, color: WC.mutedFg, margin: '10px 0 6px' }}>
                 {q ? 'Matching people on this server — click to add:' : 'People on this server — click to add:'}
               </div>
-              <div style={{ border: `1px solid ${WC.border}`, borderRadius: 10, maxHeight: 192, overflowY: 'auto' }}>
-                {candidates.map(p => (
-                  <button key={p.email} onClick={() => addMember(p.email)} disabled={busy === 'add'} title={`Add ${p.email}`} style={{
-                    display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px 10px', textAlign: 'left',
-                    border: 0, borderBottom: `1px solid ${WC.surface2}`, background: 'transparent',
-                    cursor: busy === 'add' ? 'default' : 'pointer', fontFamily: 'inherit', opacity: busy === 'add' ? 0.6 : 1 }}
-                    onMouseEnter={e => { e.currentTarget.style.background = WC.surface; }}
-                    onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
-                    <WAvatar user={{ name: p.name || p.email }} size={28} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12.5, fontWeight: 500, color: WC.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {p.name && p.name !== p.email ? p.name : p.email}
-                      </div>
-                      {p.name && p.name !== p.email && (
-                        <div style={{ fontSize: 11, color: WC.muted, fontFamily: 'Geist Mono, monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.email}</div>
-                      )}
-                    </div>
-                    {p.invited && <WPill tone="info" size="xs">Invited</WPill>}
-                    <WIcon name="user-plus" size={14} color={WC.mutedFg} />
-                  </button>
-                ))}
-              </div>
+              <PersonPickList candidates={candidates} disabled={busy === 'add'}
+                titleFor={(e) => `Add ${e}`} onPick={addMember} />
             </>
           )}
           <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
