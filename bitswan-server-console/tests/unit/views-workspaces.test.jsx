@@ -246,20 +246,147 @@ describe('WorkspacesView', () => {
     await waitFor(() => expect(screen.getByText('create failed')).toBeTruthy());
   });
 
-  it('manage drawer (owner): add then remove a member via the share API', async () => {
+  it('manage drawer (owner): add (via directory pick) then remove a member via the share API', async () => {
     const s = spies();
     installFetch({
       '/2fa-gate/api/share/dash.example.test': (url, init) => (init && init.method === 'POST')
         ? { json: { owner_email: 'me@example.test', grants: [{ principal_type: 'email', principal_value: 'new@x', role: 'access' }] } }
         : { json: { owner_email: 'me@example.test', grants: [] } },
+      '/bailey/api/people/directory': { json: { people: [{ email: 'new@x', name: 'new@x', invited: false }] } },
     });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
     await waitFor(() => expect(screen.getByText(/No members yet/)).toBeTruthy());
-    fireEvent.change(screen.getByPlaceholderText('person@example.com'), { target: { value: 'new@x' } });
-    fireEvent.click(screen.getByText('Add'));
+    await waitFor(() => expect(screen.getByTitle('Add new@x')).toBeTruthy());
+    fireEvent.click(screen.getByTitle('Add new@x'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('added'), 'success'));
     await waitFor(() => expect(screen.getByText('new@x')).toBeTruthy());
+    // The share POST answered with the updated grant list, so the new member
+    // left the picker ("everyone's in") and can be removed again.
+    expect(screen.queryByTitle('Add new@x')).toBeNull();
+    fireEvent.click(screen.getByTitle('Remove from workspace'));
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('removed'), 'info'));
+  });
+
+  // People directory rows as GET /bailey/api/people/directory returns them
+  // — the pool the add-member and transfer pickers select from.
+  function rosterPerson(over = {}) {
+    return { email: 'p@x', name: over.email || 'p@x', invited: false, ...over };
+  }
+
+  it('manage drawer (owner): picks a member from the people directory', async () => {
+    const s = spies();
+    let granted = null;
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': (url, init) => {
+        if (init && init.method === 'POST') {
+          granted = new URLSearchParams(init.body);
+          return { json: { owner_email: 'me@example.test', grants: [{ principal_type: 'email', principal_value: granted.get('principal_value'), role: 'access' }] } };
+        }
+        return { json: { owner_email: 'me@example.test', grants: [{ principal_type: 'email', principal_value: 'bob@x', role: 'access' }] } };
+      },
+      '/bailey/api/people/directory': { json: { people: [
+        rosterPerson({ email: 'me@example.test' }),                 // the owner — excluded
+        rosterPerson({ email: 'bob@x' }),                           // already a member — excluded
+        rosterPerson({ email: 'sam@x', name: 'Sam', invited: true }), // invited-only — selectable
+        rosterPerson({ email: 'jane@y' }),                          // selectable
+      ] } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    await waitFor(() => expect(screen.getByTitle('Add jane@y')).toBeTruthy());
+    // Owner and existing members never appear as candidates.
+    expect(screen.queryByTitle('Add me@example.test')).toBeNull();
+    expect(screen.queryByTitle('Add bob@x')).toBeNull();
+    expect(screen.getByText('Invited')).toBeTruthy(); // invited-only flag on sam@x
+    fireEvent.click(screen.getByTitle('Add sam@x'));
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('sam@x added to demo', 'success'));
+    expect(granted.get('action')).toBe('grant');
+    expect(granted.get('principal_value')).toBe('sam@x');
+    await waitFor(() => expect(screen.getByText('sam@x')).toBeTruthy()); // now in Members
+    expect(screen.queryByTitle('Add sam@x')).toBeNull();                 // and out of the picker
+  });
+
+  it('manage drawer: typing filters the directory picker (matches email or name)', async () => {
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
+      '/bailey/api/people/directory': { json: { people: [rosterPerson({ email: 'sam@x', name: 'Sam' }), rosterPerson({ email: 'jane@y' })] } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    await waitFor(() => expect(screen.getByTitle('Add jane@y')).toBeTruthy());
+    fireEvent.change(screen.getByPlaceholderText('Search people…'), { target: { value: 'sam' } });
+    expect(screen.getByTitle('Add sam@x')).toBeTruthy();
+    expect(screen.queryByTitle('Add jane@y')).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText('Search people…'), { target: { value: 'nobody@z' } });
+    expect(screen.getByText('No one matches.')).toBeTruthy(); // honest empty state, search still usable
+    expect(screen.queryByTitle('Add sam@x')).toBeNull();
+  });
+
+  it('manage drawer (owner): directory unavailable → honest error, no picker', async () => {
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
+      '/bailey/api/people/directory': { status: 500, json: { error: 'enumeration failed' } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    await waitFor(() => expect(screen.getByText(/No members yet/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Couldn't load the server's people directory/)).toBeTruthy());
+    expect(screen.queryByTitle(/^Add /)).toBeNull();
+  });
+
+  it('manage drawer (owner): transfers ownership via directory pick + confirm modal', async () => {
+    const s = spies();
+    let transferred = null;
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
+      '/bailey/api/people/directory': { json: { people: [rosterPerson({ email: 'me@example.test' }), rosterPerson({ email: 'sam@x', name: 'Sam' })] } },
+      '/bailey/api/workspaces/demo/transfer-ownership': (url, init) => {
+        transferred = JSON.parse(init.body);
+        return { json: { ok: true, workspace: 'demo', owner_email: transferred.email } };
+      },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    fireEvent.click(screen.getByText('Transfer ownership'));
+    await waitFor(() => expect(screen.getByTitle('Transfer to sam@x')).toBeTruthy());
+    // The current owner is never offered as a recipient.
+    expect(screen.queryByTitle('Transfer to me@example.test')).toBeNull();
+    fireEvent.click(screen.getByTitle('Transfer to sam@x'));   // pick opens the confirm modal directly
+    expect(screen.getByText(/only the new owner can transfer it back/)).toBeTruthy();
+    fireEvent.click(screen.getByText('Transfer ownership')); // the modal's confirm (the card button is hidden while the panel is open)
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('transferred to sam@x'), 'success'));
+    expect(transferred).toEqual({ email: 'sam@x' });
+    expect(s.refresh).toHaveBeenCalledWith('workspaces');
+  });
+
+  it('manage drawer: a rejected transfer surfaces the backend error, picker intact', async () => {
+    const s = spies();
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
+      // e.g. the recipient's invite expired between listing and confirming.
+      '/bailey/api/people/directory': { json: { people: [rosterPerson({ email: 'stranger@x', invited: true })] } },
+      '/bailey/api/workspaces/demo/transfer-ownership': { status: 400, json: { error: "stranger@x isn't on this server yet — invite them first" } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    fireEvent.click(screen.getByText('Transfer ownership'));
+    await waitFor(() => expect(screen.getByTitle('Transfer to stranger@x')).toBeTruthy());
+    fireEvent.click(screen.getByTitle('Transfer to stranger@x'));
+    fireEvent.click(screen.getByText('Transfer ownership')); // modal confirm
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining("isn't on this server yet"), 'danger'));
+    expect(s.refresh).not.toHaveBeenCalledWith('workspaces');
+    // The panel survives the failure so the owner can pick someone else.
+    expect(screen.getByTitle('Transfer to stranger@x')).toBeTruthy();
+  });
+
+  it('manage drawer (non-owner): no transfer control at all', () => {
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({
+      isOwner: false, dashboardRole: 'access', ownerEmail: 'owner@x', members: ['owner@x'],
+      dashboard: 'https://dash.example.test/',
+    })] })} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    expect(screen.queryByText('Transfer ownership')).toBeNull();
   });
 
   it('manage drawer (non-owner): sees owner + members read-only, no add box', () => {
@@ -276,8 +403,8 @@ describe('WorkspacesView', () => {
     expect(screen.getByText('mate@x')).toBeTruthy();         // a fellow member
     expect(screen.getByText(/Only its owner can add or remove/)).toBeTruthy();
     // …but get no controls to change membership.
-    expect(screen.queryByPlaceholderText('person@example.com')).toBeNull();
-    expect(screen.queryByText('Add')).toBeNull();
+    expect(screen.queryByText('Add a member')).toBeNull();
+    expect(screen.queryByPlaceholderText('Search people…')).toBeNull();
   });
 
   it('workspace card shows member avatars (initials from emails)', () => {

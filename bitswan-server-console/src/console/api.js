@@ -209,6 +209,11 @@ export const Api = {
   restoreWorkspace: (name) => postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/restore`),
   updateWorkspace: (name, onEvent) =>
     postNDJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/update`, {}, onEvent),
+  // Transfer workspace ownership to another user already on this server.
+  // Strictly the recorded owner's call — the backend rejects even admins —
+  // and the old owner is kept as a member (access grant).
+  transferWorkspaceOwnership: (name, email) =>
+    postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/transfer-ownership`, { email }),
   // Workspace membership = the ACL share state on the workspace's dashboard
   // endpoint host: owner_email + grants. Owner-only (403 otherwise). Returns
   // the updated listing on add/remove.
@@ -237,6 +242,11 @@ export const Api = {
   // device counts. Degrades to a 200 with an `error` field on partial
   // enumeration failure (the view surfaces it without dropping the roster).
   people: () => getJSON('/bailey/api/people'),
+  // Minimal people directory ({email,name,invited} rows) for the member/
+  // transfer pickers. NOT admin-only: any endpoint owner may read it —
+  // workspace owners included — so every owner gets a pickable list. 403
+  // for callers who own nothing shareable.
+  peopleDirectory: () => getJSON('/bailey/api/people/directory'),
   // ── Invites (admin-only, except redeemInvite) ──
   // AOC org roster — who can be invited. Rows carry {email, username,
   // verified, in_roster, invited}. 502 when the daemon isn't registered
