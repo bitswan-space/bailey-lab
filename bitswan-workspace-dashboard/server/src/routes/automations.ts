@@ -937,14 +937,18 @@ export function registerAutomationRoutes(
   });
 
   // Remove a deployment (stops container, removes from bitswan.yaml).
-  app.delete<{ Params: { id: string } }>(
+  // ?remove_source=true also deletes the automation's source directory.
+  app.delete<{ Params: { id: string }; Querystring: { remove_source?: string } }>(
     '/api/automations/:id',
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
       if (!gitops)
         return reply.code(503).send({ error: 'gitops not configured' });
       try {
-        const r = await gitops.removeAutomation(req.params.id);
+        const r = await gitops.removeAutomation(
+          req.params.id,
+          req.query.remove_source === 'true',
+        );
         if (!r.ok) {
           return reply
             .code(r.status >= 400 && r.status < 500 ? r.status : 502)

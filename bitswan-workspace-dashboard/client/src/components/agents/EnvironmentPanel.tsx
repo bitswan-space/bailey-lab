@@ -169,8 +169,14 @@ export function EnvironmentPanel({ bp, copy }: Props) {
     // (<name>-copy-<copy>-<bp>-<stage>) — the short automation name matches
     // no container label and used to silently orphan the container. Fall back
     // to the name only when the snapshot has no deployment_id (gitops then
-    // resolves it server-side).
-    void mutate('Delete', api.removeAutomation(item.deploymentId ?? item.name));
+    // resolves it server-side). removeSource: unlike the Deployments tab's
+    // "remove deployment", deleting here means the frontend/worker leaves the
+    // BP for good — without it the next whole-BP deploy would resurrect it
+    // from the surviving source directory.
+    void mutate(
+      'Delete',
+      api.removeAutomation(item.deploymentId ?? item.name, { removeSource: true }),
+    );
   };
 
   if (collapsed) {
@@ -287,8 +293,9 @@ export function EnvironmentPanel({ bp, copy }: Props) {
               Delete {deleting?.kind} “{deleting?.item.name}”?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              The container is stopped and the deployment is removed. This
-              cannot be undone.
+              This stops the container and permanently deletes the{' '}
+              {deleting?.kind ?? 'automation'}&apos;s source folder from the
+              business process. This cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

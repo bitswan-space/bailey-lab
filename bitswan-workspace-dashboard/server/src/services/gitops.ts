@@ -1249,14 +1249,19 @@ export class GitopsClient {
 
   /**
    * `DELETE /automations/{id}` — stop the container, remove the entry from
-   * `bitswan.yaml`, commit. Returns the upstream status code so the route
-   * handler can surface 502/4xx as appropriate.
+   * `bitswan.yaml`, commit. With `removeSource`, gitops also deletes the
+   * automation's source directory from the BP (Environment-panel semantics:
+   * the worker/frontend is gone for good, not resurrected by the next
+   * whole-BP deploy). Returns the upstream status code so the route handler
+   * can surface 502/4xx as appropriate.
    */
   async removeAutomation(
     deploymentId: string,
+    removeSource = false,
   ): Promise<{ ok: boolean; status: number }> {
+    const qs = removeSource ? '?remove_source=true' : '';
     const r = await fetch(
-      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}`,
+      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}${qs}`,
       {
         method: 'DELETE',
         headers: { ...this.authHeaders() },

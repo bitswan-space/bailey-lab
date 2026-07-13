@@ -874,8 +874,10 @@ export const api = {
     ),
   promoteAutomation: (body: PromoteRequest) =>
     postJson<DeployResponse>('/api/automations/promote', body),
-  removeAutomation: (id: string) =>
-    deleteEmpty(`/api/automations/${encodeURIComponent(id)}`),
+  removeAutomation: (id: string, opts?: { removeSource?: boolean }) =>
+    deleteEmpty(
+      `/api/automations/${encodeURIComponent(id)}${opts?.removeSource ? '?remove_source=true' : ''}`,
+    ),
 
   // Stage 1.5: scaffold frontends / worker containers into a BP directly from
   // the baked templates (no gallery picker). One frontend kind; workers by

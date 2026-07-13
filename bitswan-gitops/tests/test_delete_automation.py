@@ -131,6 +131,60 @@ def test_ambiguous_short_name_is_409(tmp_path, monkeypatch):
     assert svc._infra_driver.stopped == []
 
 
+def test_remove_source_deletes_the_bp_directory(tmp_path, monkeypatch):
+    # remove_source=True (the Environment panel's delete) must also delete
+    # copies/<scope>/<bp>/<name>/ so a later whole-BP deploy can't resurrect
+    # the worker from its surviving source directory.
+    copies = tmp_path / "copies"
+    src_dir = copies / "alice" / "letsgo" / SHORT
+    src_dir.mkdir(parents=True)
+    (src_dir / "automation.toml").write_text("id = 'x'\n")
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(copies))
+
+    svc, persisted = _svc(
+        tmp_path, monkeypatch, {FULL_ID: dict(_ENTRY)}, [_Container(FULL_ID)]
+    )
+    svc.workspace_repo_dir = str(tmp_path)
+
+    res = asyncio.run(svc.delete_automation(SHORT, remove_source=True))
+    assert res["status"] == "success"
+    assert res["source_removed"] is True
+    assert persisted == [FULL_ID]
+    assert not src_dir.exists()
+
+
+def test_without_remove_source_the_directory_survives(tmp_path, monkeypatch):
+    # Deployments-tab semantics: plain delete keeps the source on disk.
+    copies = tmp_path / "copies"
+    src_dir = copies / "alice" / "letsgo" / SHORT
+    src_dir.mkdir(parents=True)
+    (src_dir / "automation.toml").write_text("id = 'x'\n")
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(copies))
+
+    svc, _ = _svc(
+        tmp_path, monkeypatch, {FULL_ID: dict(_ENTRY)}, [_Container(FULL_ID)]
+    )
+    svc.workspace_repo_dir = str(tmp_path)
+
+    res = asyncio.run(svc.delete_automation(SHORT))
+    assert res["status"] == "success"
+    assert res["source_removed"] is False
+    assert src_dir.exists()
+
+
+def test_remove_source_is_idempotent_when_dir_already_gone(tmp_path, monkeypatch):
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path / "copies"))
+    svc, persisted = _svc(
+        tmp_path, monkeypatch, {FULL_ID: dict(_ENTRY)}, [_Container(FULL_ID)]
+    )
+    svc.workspace_repo_dir = str(tmp_path)
+
+    res = asyncio.run(svc.delete_automation(SHORT, remove_source=True))
+    assert res["status"] == "success"
+    assert res["source_removed"] is False  # nothing on disk, delete still ok
+    assert persisted == [FULL_ID]
+
+
 def test_container_only_orphan_is_still_deletable(tmp_path, monkeypatch):
     # Entry already gone from bitswan.yaml but the container is still up
     # (e.g. a previously half-completed delete): the full id must still

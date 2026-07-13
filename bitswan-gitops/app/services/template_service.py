@@ -426,6 +426,41 @@ async def rename_automation(
     return {"name": new_san, "relative_path": os.path.join(bp_rel, new_san)}
 
 
+async def delete_automation_source(
+    *,
+    workspace_root: str,
+    bp: str,
+    name: str,
+    copy: Optional[str] = None,
+) -> dict:
+    """Delete an automation's source directory within a BP and commit.
+
+    The mirror of the scaffold: without this, a deleted frontend/worker's
+    directory survives and the next whole-BP deploy re-discovers it and
+    resurrects the deployment. Returns `{ "name", "relative_path" }` of the
+    removed directory. Validation of `bp`/`copy` shape happens at the caller.
+    """
+    bp_full, bp_rel = _bp_destination(workspace_root, bp, copy)
+    san = sanitize_automation_name(name or "")
+    if not san or not _AUTOMATION_NAME_RE.match(san):
+        raise ValueError("Invalid automation name")
+    target = os.path.join(bp_full, san)
+    if not os.path.isdir(target):
+        raise FileNotFoundError(f'No automation "{san}" in this business process.')
+    shutil.rmtree(target)
+
+    # Commit in the BP's own clone, like rename — a main-scope delete must also
+    # advance the repo's deploy-only main via publish_bp_clone.
+    commit_cwd = os.path.join(_copies_dir(), copy or "main", bp)
+    try:
+        await _commit(commit_cwd, f"Delete automation {san}")
+        await publish_bp_clone(commit_cwd, bp, copy)
+    except Exception as e:  # noqa: BLE001 — surface but don't undo the delete
+        logger.warning("delete-source commit failed: %s", e)
+
+    return {"name": san, "relative_path": os.path.join(bp_rel, san)}
+
+
 async def create_automation_from_template(
     *,
     workspace_root: str,
