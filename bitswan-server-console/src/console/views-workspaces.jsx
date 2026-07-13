@@ -814,18 +814,22 @@ function PersonPickList({ candidates, disabled, titleFor, onPick }) {
 function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   const [share, setShare] = useWS(null);   // {owner_email, grants} | null while loading
   const [err, setErr] = useWS('');
-  const [addEmail, setAddEmail] = useWS('');
+  const [addQuery, setAddQuery] = useWS(''); // search text over the add-member picker
   const [busy, setBusy] = useWS('');        // '' | 'add' | <principal being removed>
   // People directory ({email,name,invited}) feeding both pickers. The
   // endpoint is open to any endpoint owner — every owner of this drawer
-  // gets a list. null = unavailable (fetch failed) → free-text input only.
-  const [directory, setDirectory] = useWS(null);
-  // Transfer-ownership flow: inline recipient picker + an explicit confirm
-  // modal (the transfer hands the workspace away — a mis-click must not).
+  // gets a list. Members are added/transfers started ONLY by picking from
+  // it (the search inputs are filters, not free-text entry), so dirErr is
+  // a real failure state the sections must surface.
+  const [directory, setDirectory] = useWS(null); // null = loading
+  const [dirErr, setDirErr] = useWS(false);
+  // Transfer-ownership flow: picking a recipient goes straight to the
+  // confirm modal (the transfer hands the workspace away — a mis-click
+  // must not). transferTarget is the picked recipient; '' = modal closed.
   const [transferOpen, setTransferOpen] = useWS(false);
-  const [transferEmail, setTransferEmail] = useWS('');
+  const [transferQuery, setTransferQuery] = useWS('');
+  const [transferTarget, setTransferTarget] = useWS('');
   const [transferBusy, setTransferBusy] = useWS(false);
-  const [transferConfirm, setTransferConfirm] = useWS(false);
 
   const dashHost = ws ? hostFromUrl(ws.dashboard) : '';
   // Managing members (add/remove) is only allowed for the TRUE owner of the
@@ -839,21 +843,19 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   React.useEffect(() => {
     // Fresh drawer, fresh transfer flow — don't leak a half-picked recipient
     // from the previously opened workspace.
-    setTransferOpen(false); setTransferEmail(''); setTransferConfirm(false);
+    setTransferOpen(false); setTransferQuery(''); setTransferTarget('');
     // Only owners can read the live share state (the API is owner-only).
     // Non-owners render from the workspace DTO (owner_email + members), which
     // the backend computes for every member — no privileged call needed.
-    if (!ws || !canManage) { setShare(null); setErr(''); setDirectory(null); return undefined; }
+    if (!ws || !canManage) { setShare(null); setErr(''); setDirectory(null); setDirErr(false); return undefined; }
     let alive = true;
-    setShare(null); setErr(''); setAddEmail(''); setDirectory(null);
+    setShare(null); setErr(''); setAddQuery(''); setDirectory(null); setDirErr(false);
     WApi.workspaceMembers(dashHost)
       .then(r => { if (alive) setShare(r); })
       .catch(e => { if (alive) { setErr(e.message || 'Could not load members.'); setShare({ owner_email: '', grants: [] }); } });
-    // Best-effort: a failed directory fetch just means no pick list — the
-    // free-text input still works and the backend still validates.
     WApi.peopleDirectory()
       .then(r => { if (alive) setDirectory(r && r.people ? r.people : []); })
-      .catch(() => { if (alive) setDirectory(null); });
+      .catch(() => { if (alive) setDirErr(true); });
     return () => { alive = false; };
   }, [ws && ws.id]);
 
@@ -867,14 +869,12 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
         .map(m => ({ principal_type: 'email', principal_value: m, role: 'access' }));
   const SECTION = { fontSize: 11, fontWeight: 600, color: WC.muted, textTransform: 'uppercase', letterSpacing: 0.4 };
 
-  // Adds either the typed email or a roster pick (emailArg).
-  const addMember = async (emailArg) => {
-    const email = (typeof emailArg === 'string' ? emailArg : addEmail).trim();
+  // Adds a directory pick to the workspace.
+  const addMember = async (email) => {
     if (!email) return;
     setBusy('add');
     try {
       setShare(await WApi.addWorkspaceMember(dashHost, email));
-      setAddEmail('');
       toast(`${email} added to ${ws.name}`, 'success');
     } catch (e) { toast(`Couldn't add member: ${e.message}`, 'danger'); }
     finally { setBusy(''); }
@@ -882,10 +882,9 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
 
   // Candidate picker: everyone already invited into this Bailey server —
   // the people directory fetched above (invited-but-never-seen users
-  // included) — minus the owner and anyone already granted, filtered by
-  // whatever is typed in the add box. If the directory couldn't load, the
-  // free-text input stands alone; nothing is faked.
-  const q = addEmail.trim().toLowerCase();
+  // included) — minus the owner and anyone already granted, narrowed by
+  // the search text.
+  const q = addQuery.trim().toLowerCase();
   const memberSet = new Set(members.map(g => (g.principal_value || '').toLowerCase()));
   const candidates = !canManage ? [] : (directory || []).filter(p =>
     p.email &&
@@ -895,29 +894,40 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
 
   // Transfer recipients: the same directory minus the current owner.
   // Existing members ARE eligible — promoting a member is the common case.
-  // The backend additionally requires the recipient to be a known person,
-  // so a free-typed email is validated server-side.
-  const tq = transferEmail.trim().toLowerCase();
+  const tq = transferQuery.trim().toLowerCase();
   const transferCandidates = !canManage ? [] : (directory || []).filter(p =>
     p.email &&
     p.email.toLowerCase() !== (ownerEmail || '').toLowerCase() &&
-    p.email.toLowerCase() !== tq &&
     (!tq || p.email.toLowerCase().includes(tq) || (p.name || '').toLowerCase().includes(tq)));
 
-  // Hands the workspace to transferEmail: the backend rewrites the recorded
-  // owner (children included) and keeps the caller on as a member. On success
-  // the refreshed workspace DTO re-renders this drawer in the member view.
+  // One muted status line under a picker's search bar.
+  const pickNote = (text, red) => (
+    <div style={{ fontSize: 12, color: red ? WC.red : WC.muted, padding: '6px 2px' }}>{text}</div>
+  );
+  // Loading/error/empty/list for a picker over the directory.
+  const pickerBody = (list, emptyText, titleFor, onPick, disabled) => {
+    if (dirErr) return pickNote("Couldn't load the server's people directory — close and reopen this workspace to retry.", true);
+    if (!directory) return pickNote('Loading people…');
+    if (list.length === 0) return pickNote(emptyText);
+    return <PersonPickList candidates={list} disabled={disabled} titleFor={titleFor} onPick={onPick} />;
+  };
+
+  // Hands the workspace to the picked recipient: the backend rewrites the
+  // recorded owner (children included) and keeps the caller on as a member.
+  // On success the refreshed workspace DTO re-renders this drawer in the
+  // member view.
   const doTransfer = async () => {
-    const email = transferEmail.trim();
+    const email = transferTarget.trim();
     if (!email) return;
     setTransferBusy(true);
     try {
       await WApi.transferWorkspaceOwnership(ws.name, email);
       toast(`${ws.name} transferred to ${email} — you're now a member`, 'success');
-      setTransferConfirm(false); setTransferOpen(false); setTransferEmail('');
+      setTransferTarget(''); setTransferOpen(false); setTransferQuery('');
       if (refresh) await refresh('workspaces');
     } catch (e) {
-      setTransferConfirm(false);
+      // Keep the panel open so the owner can pick someone else.
+      setTransferTarget('');
       toast(`Couldn't transfer ownership: ${e.message}`, 'danger');
     } finally { setTransferBusy(false); }
   };
@@ -953,19 +963,18 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
         {canManage && transferOpen && (
           <div style={{ marginTop: 12 }}>
             <div style={{ fontSize: 11.5, color: WC.mutedFg, marginBottom: 6 }}>
-              New owner — someone already on this server:
+              New owner — pick someone already on this server:
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
               <div style={{ flex: 1 }}>
-                <WTextInput value={transferEmail} onChange={setTransferEmail} placeholder="new-owner@example.com" />
+                <WTextInput value={transferQuery} onChange={setTransferQuery} placeholder="Search people…" />
               </div>
-              <WBtn variant="primary" size="sm" leftIcon="arrow-left-right" disabled={transferBusy || !transferEmail.trim()} onClick={() => setTransferConfirm(true)}>
-                Transfer…
-              </WBtn>
-              <WBtn variant="default" size="sm" disabled={transferBusy} onClick={() => { setTransferOpen(false); setTransferEmail(''); }}>Cancel</WBtn>
+              <WBtn variant="default" size="sm" disabled={transferBusy} onClick={() => { setTransferOpen(false); setTransferQuery(''); }}>Cancel</WBtn>
             </div>
-            <PersonPickList candidates={transferCandidates} disabled={transferBusy}
-              titleFor={(e) => `Transfer to ${e}`} onPick={setTransferEmail} />
+            {/* Picking a recipient opens the confirm modal directly. */}
+            {pickerBody(transferCandidates,
+              tq ? 'No one matches.' : 'No one else is on this server yet — invite someone first.',
+              (e) => `Transfer to ${e}`, setTransferTarget, transferBusy)}
             <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
               They become the workspace's only owner; you stay in it as a member.
             </div>
@@ -974,11 +983,11 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
       </div>
 
       {/* Transfer confirm — the one place a workspace changes hands. */}
-      <WModal open={transferConfirm} onClose={transferBusy ? () => {} : () => setTransferConfirm(false)} icon="arrow-left-right"
-        title={`Transfer “${ws.name}” to ${transferEmail.trim() || '…'}?`}
+      <WModal open={!!transferTarget} onClose={transferBusy ? () => {} : () => setTransferTarget('')} icon="arrow-left-right"
+        title={`Transfer “${ws.name}” to ${transferTarget}?`}
         subtitle="They become the workspace's only owner — members, apps, and settings go with it. You stay in the workspace as a member, and only the new owner can transfer it back."
         footer={<>
-          <WBtn variant="default" disabled={transferBusy} onClick={() => setTransferConfirm(false)}>Cancel</WBtn>
+          <WBtn variant="default" disabled={transferBusy} onClick={() => setTransferTarget('')}>Cancel</WBtn>
           <WBtn variant="primary" disabled={transferBusy} onClick={doTransfer}>
             {transferBusy ? 'Transferring…' : 'Transfer ownership'}
           </WBtn>
@@ -1016,23 +1025,13 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
       {canManage ? (
         <>
           <div style={{ ...SECTION, margin: '20px 0 10px' }}>Add a member</div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <div style={{ flex: 1 }}>
-              <WTextInput value={addEmail} onChange={setAddEmail} placeholder="person@example.com" />
-            </div>
-            <WBtn variant="primary" leftIcon="user-plus" disabled={busy === 'add' || !addEmail.trim()} onClick={addMember}>
-              {busy === 'add' ? 'Adding…' : 'Add'}
-            </WBtn>
+          <div style={{ marginBottom: 8 }}>
+            <WTextInput value={addQuery} onChange={setAddQuery} placeholder="Search people…" />
           </div>
-          {candidates.length > 0 && (
-            <>
-              <div style={{ fontSize: 11.5, color: WC.mutedFg, margin: '10px 0 6px' }}>
-                {q ? 'Matching people on this server — click to add:' : 'People on this server — click to add:'}
-              </div>
-              <PersonPickList candidates={candidates} disabled={busy === 'add'}
-                titleFor={(e) => `Add ${e}`} onPick={addMember} />
-            </>
-          )}
+          {/* Members are picked from the server's people directory — click to add. */}
+          {pickerBody(candidates,
+            q ? 'No one matches.' : 'Everyone on this server is already in this workspace.',
+            (e) => `Add ${e}`, addMember, busy === 'add')}
           <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
             Grants this person access by email; they'll still trust a device of their own to get in.
           </div>
