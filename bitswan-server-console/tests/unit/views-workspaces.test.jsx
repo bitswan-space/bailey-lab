@@ -262,6 +262,71 @@ describe('WorkspacesView', () => {
     await waitFor(() => expect(screen.getByText('new@x')).toBeTruthy());
   });
 
+  // People roster rows as App's adaptPerson produces them (from
+  // /bailey/api/people) — the pool the add-member picker selects from.
+  function rosterPerson(over = {}) {
+    return { id: over.email || 'p@x', name: over.email || 'p@x', email: 'p@x', role: 'member',
+      workspaceCount: 0, deviceCount: 0, lastActive: '', invited: false, ...over };
+  }
+
+  it('manage drawer (owner, admin): picks a member from the server roster', async () => {
+    const s = spies();
+    let granted = null;
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': (url, init) => {
+        if (init && init.method === 'POST') {
+          granted = new URLSearchParams(init.body);
+          return { json: { owner_email: 'me@example.test', grants: [{ principal_type: 'email', principal_value: granted.get('principal_value'), role: 'access' }] } };
+        }
+        return { json: { owner_email: 'me@example.test', grants: [{ principal_type: 'email', principal_value: 'bob@x', role: 'access' }] } };
+      },
+    });
+    const people = [
+      rosterPerson({ email: 'me@example.test' }),                 // the owner — excluded
+      rosterPerson({ email: 'bob@x' }),                           // already a member — excluded
+      rosterPerson({ email: 'sam@x', name: 'Sam', invited: true }), // invited-only — selectable
+      rosterPerson({ email: 'jane@y' }),                          // selectable
+    ];
+    render(<Host View={WorkspacesView} data={makeData({ people, workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    await waitFor(() => expect(screen.getByText(/People on this server/)).toBeTruthy());
+    // Owner and existing members never appear as candidates.
+    expect(screen.queryByTitle('Add me@example.test')).toBeNull();
+    expect(screen.queryByTitle('Add bob@x')).toBeNull();
+    expect(screen.getByTitle('Add jane@y')).toBeTruthy();
+    expect(screen.getByText('Invited')).toBeTruthy(); // invited-only flag on sam@x
+    fireEvent.click(screen.getByTitle('Add sam@x'));
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('sam@x added to demo', 'success'));
+    expect(granted.get('action')).toBe('grant');
+    expect(granted.get('principal_value')).toBe('sam@x');
+    await waitFor(() => expect(screen.getByText('sam@x')).toBeTruthy()); // now in Members
+    expect(screen.queryByTitle('Add sam@x')).toBeNull();                 // and out of the picker
+  });
+
+  it('manage drawer: typing filters the roster picker (matches email or name)', async () => {
+    installFetch({ '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } } });
+    const people = [rosterPerson({ email: 'sam@x', name: 'Sam' }), rosterPerson({ email: 'jane@y' })];
+    render(<Host View={WorkspacesView} data={makeData({ people, workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    await waitFor(() => expect(screen.getByTitle('Add jane@y')).toBeTruthy());
+    fireEvent.change(screen.getByPlaceholderText('person@example.com'), { target: { value: 'sam' } });
+    expect(screen.getByText(/Matching people on this server/)).toBeTruthy();
+    expect(screen.getByTitle('Add sam@x')).toBeTruthy();
+    expect(screen.queryByTitle('Add jane@y')).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText('person@example.com'), { target: { value: 'nobody@z' } });
+    expect(screen.queryByText(/people on this server/i)).toBeNull(); // no matches → no list, input still usable
+  });
+
+  it('manage drawer (owner, non-admin): no roster → free-text add only, no picker', async () => {
+    installFetch({ '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } } });
+    // people:null mirrors a non-admin owner (the roster endpoint is admin-only).
+    render(<Host View={WorkspacesView} data={makeData({ people: null, workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    await waitFor(() => expect(screen.getByText(/No members yet/)).toBeTruthy());
+    expect(screen.getByPlaceholderText('person@example.com')).toBeTruthy();
+    expect(screen.queryByText(/People on this server/)).toBeNull();
+  });
+
   it('manage drawer (non-owner): sees owner + members read-only, no add box', () => {
     const s = spies();
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({

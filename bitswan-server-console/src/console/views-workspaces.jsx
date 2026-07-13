@@ -680,7 +680,7 @@ function WorkspacesView({ ctx }) {
       )}
 
       <CreateWorkspaceModal open={createOpen} onClose={() => setCreateOpen(false)} data={data} setData={setData} toast={toast} currentUser={currentUser} refresh={refresh} />
-      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} />
+      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} people={data.people} />
 
       <WModal open={!!trashTarget} onClose={trashBusy ? () => {} : () => setTrashTarget(null)} icon="trash-2"
         title={trashTarget ? `Delete “${trashTarget.name}”?` : 'Delete workspace?'}
@@ -781,7 +781,7 @@ function hostFromUrl(u) {
 // owner_email + access grants. Owner-only — a non-owner can't read the share
 // state, so they get an honest read-only note. Transfer-ownership has no
 // backend, so it's shown disabled rather than faked.
-function ManageWorkspaceDrawer({ ws, onClose, toast }) {
+function ManageWorkspaceDrawer({ ws, onClose, toast, people }) {
   const [share, setShare] = useWS(null);   // {owner_email, grants} | null while loading
   const [err, setErr] = useWS('');
   const [addEmail, setAddEmail] = useWS('');
@@ -819,8 +819,9 @@ function ManageWorkspaceDrawer({ ws, onClose, toast }) {
         .map(m => ({ principal_type: 'email', principal_value: m, role: 'access' }));
   const SECTION = { fontSize: 11, fontWeight: 600, color: WC.muted, textTransform: 'uppercase', letterSpacing: 0.4 };
 
-  const addMember = async () => {
-    const email = addEmail.trim();
+  // Adds either the typed email or a roster pick (emailArg).
+  const addMember = async (emailArg) => {
+    const email = (typeof emailArg === 'string' ? emailArg : addEmail).trim();
     if (!email) return;
     setBusy('add');
     try {
@@ -830,6 +831,20 @@ function ManageWorkspaceDrawer({ ws, onClose, toast }) {
     } catch (e) { toast(`Couldn't add member: ${e.message}`, 'danger'); }
     finally { setBusy(''); }
   };
+
+  // Candidate picker: everyone already invited into this Bailey server — the
+  // people roster App loads from /bailey/api/people (it includes invited-but-
+  // never-seen users) — minus the owner and anyone already granted, filtered
+  // by whatever is typed in the add box. The roster endpoint is admin-only,
+  // so for a non-admin owner `people` is null and the free-text input stands
+  // alone; nothing is faked.
+  const q = addEmail.trim().toLowerCase();
+  const memberSet = new Set(members.map(g => (g.principal_value || '').toLowerCase()));
+  const candidates = !canManage ? [] : (people || []).filter(p =>
+    p.email &&
+    p.email.toLowerCase() !== (ownerEmail || '').toLowerCase() &&
+    !memberSet.has(p.email.toLowerCase()) &&
+    (!q || p.email.toLowerCase().includes(q) || (p.name || '').toLowerCase().includes(q)));
   const removeMember = async (g) => {
     setBusy(g.principal_value);
     try {
@@ -904,6 +919,35 @@ function ManageWorkspaceDrawer({ ws, onClose, toast }) {
               {busy === 'add' ? 'Adding…' : 'Add'}
             </WBtn>
           </div>
+          {candidates.length > 0 && (
+            <>
+              <div style={{ fontSize: 11.5, color: WC.mutedFg, margin: '10px 0 6px' }}>
+                {q ? 'Matching people on this server — click to add:' : 'People on this server — click to add:'}
+              </div>
+              <div style={{ border: `1px solid ${WC.border}`, borderRadius: 10, maxHeight: 192, overflowY: 'auto' }}>
+                {candidates.map(p => (
+                  <button key={p.email} onClick={() => addMember(p.email)} disabled={busy === 'add'} title={`Add ${p.email}`} style={{
+                    display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px 10px', textAlign: 'left',
+                    border: 0, borderBottom: `1px solid ${WC.surface2}`, background: 'transparent',
+                    cursor: busy === 'add' ? 'default' : 'pointer', fontFamily: 'inherit', opacity: busy === 'add' ? 0.6 : 1 }}
+                    onMouseEnter={e => { e.currentTarget.style.background = WC.surface; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>
+                    <WAvatar user={{ name: p.name || p.email }} size={28} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 500, color: WC.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {p.name && p.name !== p.email ? p.name : p.email}
+                      </div>
+                      {p.name && p.name !== p.email && (
+                        <div style={{ fontSize: 11, color: WC.muted, fontFamily: 'Geist Mono, monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.email}</div>
+                      )}
+                    </div>
+                    {p.invited && <WPill tone="info" size="xs">Invited</WPill>}
+                    <WIcon name="user-plus" size={14} color={WC.mutedFg} />
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
           <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
             Grants this person access by email; they'll still trust a device of their own to get in.
           </div>
