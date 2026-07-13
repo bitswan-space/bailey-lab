@@ -46,6 +46,8 @@ type Status = 'running' | 'failed' | 'stopped';
 
 interface Item {
   name: string;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror: snapshot's deployment_id is nullable
+  deploymentId: string | null;
   url: string | null;
   status: Status;
   expose: boolean;
@@ -85,6 +87,7 @@ export function EnvironmentPanel({ bp, copy }: Props) {
       const prev = byName.get(name);
       byName.set(name, {
         name,
+        deploymentId: a.deployment_id ?? prev?.deploymentId ?? null,
         url: a.automation_url ?? prev?.url ?? null,
         status: status === 'running' ? 'running' : (prev?.status ?? status),
         expose: !!a.expose || !!prev?.expose,
@@ -148,9 +151,12 @@ export function EnvironmentPanel({ bp, copy }: Props) {
   const remove = (item: Item, kind: string) => {
     if (!window.confirm(`Delete ${kind} "${item.name}"? This cannot be undone.`))
       return;
-    // DELETE is keyed by deployment_id, which for a source automation is its
-    // directory name within the BP.
-    void mutate('Delete', api.removeAutomation(item.name));
+    // DELETE is keyed by the FULL deployment_id
+    // (<name>-copy-<copy>-<bp>-<stage>) — the short automation name matches
+    // no container label and used to silently orphan the container. Fall back
+    // to the name only when the snapshot has no deployment_id (gitops then
+    // resolves it server-side).
+    void mutate('Delete', api.removeAutomation(item.deploymentId ?? item.name));
   };
 
   if (collapsed) {

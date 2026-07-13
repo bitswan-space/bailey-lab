@@ -3655,7 +3655,53 @@ class AutomationService:
             "total_pages": (total + page_size - 1) // page_size,
         }
 
+    def _resolve_deployment_id(self, name_or_id: str) -> str:
+        """Resolve a caller-supplied id to a full deployment_id.
+
+        Callers (notably the dashboard's Environment panel) historically sent
+        the short automation name (`diag-worker`) instead of the full
+        deployment_id (`diag-worker-copy-<copy>-<bp>-live-dev`). A short name
+        matches nothing — not the bitswan.yaml key, not the
+        gitops.deployment_id container label — so a delete would silently
+        no-op. Map it through the entries' automation_name; ambiguity (the
+        same short name deployed in several copies/stages) is a 409 because
+        guessing here deletes someone else's instance.
+        """
+        bs_yaml = read_bitswan_yaml(self.gitops_dir) or {}
+        deployments = bs_yaml.get("deployments") or {}
+        if name_or_id in deployments:
+            return name_or_id
+        matches = [
+            k
+            for k, v in deployments.items()
+            if (v or {}).get("automation_name") == name_or_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Automation name {name_or_id!r} is ambiguous; "
+                    f"pass a full deployment_id: {sorted(matches)}"
+                ),
+            )
+        return name_or_id
+
     async def delete_automation(self, deployment_id: str):
+        deployment_id = self._resolve_deployment_id(deployment_id)
+
+        bs_yaml = read_bitswan_yaml(self.gitops_dir) or {}
+        in_yaml = deployment_id in (bs_yaml.get("deployments") or {})
+        containers = await self.get_container(deployment_id)
+        if not in_yaml and not containers:
+            # Nothing matched anywhere — a success here would let callers
+            # believe the delete worked while the container keeps running.
+            raise HTTPException(
+                status_code=404,
+                detail=f"No deployment or container found for {deployment_id!r}",
+            )
+
         # Drop the deployment from bitswan.yaml, then APPLY: the ingress reconcile
         # prunes the now-absent gitops route (it's no longer in the desired set).
         # No out-of-band remove-route — the route disappears because the file no
@@ -3665,7 +3711,6 @@ class AutomationService:
         # server-side — no extra whole-workspace commit needed.
         await self.remove_automation_from_bitswan(deployment_id)
 
-        containers = await self.get_container(deployment_id)
         if containers:
             await self.remove_automation(deployment_id)
         return {
