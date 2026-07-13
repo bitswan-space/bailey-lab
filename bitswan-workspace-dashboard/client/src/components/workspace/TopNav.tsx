@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { BpSelector } from '@/components/workspace/BpSelector';
 import { CopySelector } from '@/components/workspace/CopySelector';
+import { DeleteBusinessProcessDialog } from '@/components/workspace/DeleteBusinessProcessDialog';
 import { NewBusinessProcessDialog } from '@/components/workspace/NewBusinessProcessDialog';
 import { RenameBusinessProcessDialog } from '@/components/workspace/RenameBusinessProcessDialog';
 import { cn } from '@/lib/utils';
@@ -47,6 +48,11 @@ interface TopNavProps {
   copies: Copy[];
   onSelectCopy: (name: string) => void;
   onPullCopy: (name: string) => Promise<void>;
+  /** The signed-in user's own personal copy (delete-dialog note). */
+  // eslint-disable-next-line no-restricted-syntax -- null = not yet resolved
+  myCopy: string | null;
+  /** A copy's delete was accepted — App moves the selection off it. */
+  onCopyDeleted: (name: string) => void;
   tab: FlowTab;
   onTab: (t: FlowTab) => void;
   role: Role;
@@ -109,6 +115,8 @@ export function TopNav({
   copies,
   onSelectCopy,
   onPullCopy,
+  myCopy,
+  onCopyDeleted,
   tab,
   onTab,
   role,
@@ -118,6 +126,8 @@ export function TopNav({
   const roleMeta = ROLE_META[role] ?? ROLE_META.member;
   // eslint-disable-next-line no-restricted-syntax -- null = rename dialog closed
   const [renameBp, setRenameBp] = useState<BusinessProcess | null>(null);
+  // eslint-disable-next-line no-restricted-syntax -- null = delete dialog closed
+  const [deleteBp, setDeleteBp] = useState<BusinessProcess | null>(null);
 
   const activeBp = useMemo(
     () => bps.find((b) => b.id === activeBpId) ?? null,
@@ -172,6 +182,7 @@ export function TopNav({
         onSelect={handleSelectBp}
         onNewBp={() => onNewBpOpenChange(true)}
         onRenameBp={setRenameBp}
+        onDeleteBp={setDeleteBp}
       />
 
       {/* The copy region: the copy selector and every step up to Sync &
@@ -185,6 +196,8 @@ export function TopNav({
           onSelect={onSelectCopy}
           onPull={onPullCopy}
           onCreatedCopy={(name) => onSelectCopy(name)}
+          myCopy={myCopy}
+          onCopyDeleted={onCopyDeleted}
         />
         <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
         {IN_COPY_STEPS.map((step, i) => (
@@ -222,6 +235,11 @@ export function TopNav({
       <RenameBusinessProcessDialog
         bp={renameBp}
         onClose={() => setRenameBp(null)}
+      />
+
+      <DeleteBusinessProcessDialog
+        bp={deleteBp}
+        onClose={() => setDeleteBp(null)}
       />
 
       <NewBusinessProcessDialog

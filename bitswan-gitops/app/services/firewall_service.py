@@ -71,3 +71,18 @@ def read_attempts(bp: str, realm: str) -> dict:
     except Exception:
         pass
     return agg
+
+
+def delete_bp_attempt_logs(bp: str) -> int:
+    """Unlink every per-(bp, realm) gateway attempts log (BP delete). Returns
+    how many files were removed."""
+    import glob
+
+    removed = 0
+    for path in glob.glob(os.path.join(firewall_dir(), f"{bp}__*.attempts.jsonl")):
+        try:
+            os.unlink(path)
+            removed += 1
+        except OSError:
+            pass
+    return removed

@@ -112,3 +112,16 @@ def materialize_env(secrets_dir: str, bp: str, stage: str, values: dict) -> str:
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
     return path
+
+
+def delete_bp_secret_files(secrets_dir: str, bp: str) -> bool:
+    """Remove a BP's plaintext env-file directory (`<secrets>/bp/<slug>/`) —
+    BP delete. The ciphertext lives in the BP's bitswan.yaml slice and dies
+    with it; the workspace AES key is shared and must never be touched here."""
+    import shutil
+
+    path = os.path.join(secrets_dir, "bp", _slug(bp))
+    if not os.path.isdir(path):
+        return False
+    shutil.rmtree(path, ignore_errors=True)
+    return not os.path.exists(path)

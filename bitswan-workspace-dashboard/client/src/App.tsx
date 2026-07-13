@@ -244,6 +244,26 @@ function Shell() {
     setBpId(allBps[0]?.id ?? null);
   }, [processes, allBps, bpId]);
 
+  // Copies whose delete was ACCEPTED but that may still linger in the SSE
+  // snapshot while the async teardown runs — the selection must never land on
+  // one. Tombstones clear once the feed confirms the copy is gone (so a
+  // recreated same-name personal copy isn't excluded forever).
+  const deletedCopiesRef = useRef<Set<string>>(new Set());
+  const handleCopyDeleted = useCallback(
+    (name: string) => {
+      deletedCopiesRef.current.add(name);
+      // Deleting your own copy: stop treating it as the sticky default; a
+      // fresh personal copy is re-created by /api/me on the next visit.
+      if (myCopy === name) setMyCopy(null);
+      setCopy((cur) => {
+        if (cur !== name) return cur;
+        const next = copies.find((c) => c.name !== name);
+        return next ? next.name : null;
+      });
+    },
+    [copies, myCopy],
+  );
+
   // Keep `copy` consistent with the snapshot, defaulting to the user's
   // OWN copy. Waits until `myCopy` is resolved before auto-selecting so a new
   // user doesn't briefly land on another user's copy. An optimistic selection
@@ -252,13 +272,24 @@ function Shell() {
   useEffect(() => {
     if (copiesSnapshot === null) return;
     if (!myCopyResolved) return;
+    // Clear tombstones the feed has confirmed gone.
+    for (const name of [...deletedCopiesRef.current]) {
+      if (!copiesSnapshot.some((w) => w.name === name))
+        deletedCopiesRef.current.delete(name);
+    }
+    const available = copiesSnapshot.filter(
+      (w) => !deletedCopiesRef.current.has(w.name),
+    );
     setCopy((cur) => {
-      if (cur && (copiesSnapshot.some((w) => w.name === cur) || cur === myCopy))
-        return cur;
+      // A selection on a mid-teardown copy must move off it now, not when the
+      // snapshot finally drops it.
+      const kept = cur && !deletedCopiesRef.current.has(cur) ? cur : null;
+      if (kept && (available.some((w) => w.name === kept) || kept === myCopy))
+        return kept;
       // Prefer the user's own copy (even before it appears in the snapshot, so
       // first-login selection sticks); otherwise fall back to the first copy.
-      if (myCopy) return myCopy;
-      return copiesSnapshot[0]?.name ?? null;
+      if (myCopy && !deletedCopiesRef.current.has(myCopy)) return myCopy;
+      return available[0]?.name ?? null;
     });
   }, [copiesSnapshot, myCopy, myCopyResolved]);
 
@@ -334,6 +365,8 @@ function Shell() {
         copies={copies}
         onSelectCopy={setCopy}
         onPullCopy={handlePullCopy}
+        myCopy={myCopy}
+        onCopyDeleted={handleCopyDeleted}
         tab={tab}
         onTab={handleTab}
         role={role}

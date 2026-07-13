@@ -3655,6 +3655,25 @@ class AutomationService:
             "total_pages": (total + page_size - 1) // page_size,
         }
 
+    async def push_bp_state(
+        self, bp: str, message: str, deployed_by: str | None = None
+    ) -> None:
+        """Commit + push one BP's deploy-state repo to the driver so its
+        post-receive apply reconciles the slice (prunes routes + containers).
+
+        The delete flows need this because `apply_compose_for_deployments`
+        derives the BP from deployment entries — which a delete has already
+        removed. Extracted from its push step (see the per-BP push loop there).
+        """
+        author = f"{deployed_by} <{deployed_by}>" if deployed_by else None
+        await self.infra_driver.ensure_deploy_repo(bp)
+        await self.infra_driver.deploy(
+            work_tree=bp_state_path(self.gitops_dir, bp),
+            commit_message=message,
+            author=author,
+            deploy_remote=self.infra_driver.deploy_remote_for_bp(bp),
+        )
+
     def _resolve_deployment_id(self, name_or_id: str) -> str:
         """Resolve a caller-supplied id to a full deployment_id.
 

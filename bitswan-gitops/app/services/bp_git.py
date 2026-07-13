@@ -16,6 +16,8 @@ creation, template scaffolding and CVE waivers:
 
 import logging
 import os
+import re
+import shutil
 
 from fastapi import HTTPException
 
@@ -321,3 +323,105 @@ async def refresh_all_main_checkouts() -> None:
             await refresh_main_bp_checkout(bp)
         except Exception as e:
             logger.warning("refresh_main_bp_checkout(%s) failed: %s", bp, e)
+
+
+# ── root-owned tree removal (copy / BP delete) ──────────────────────────────
+# Moved here from routes/copies.py so the delete orchestrators can share it.
+
+
+def _own_container_id_from_proc() -> str | None:
+    cgroup_re = re.compile(r"docker[-/]([0-9a-f]{64})")
+    try:
+        with open("/proc/self/cgroup") as f:
+            for line in f:
+                m = cgroup_re.search(line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    try:
+        with open("/proc/self/mountinfo") as f:
+            for line in f:
+                m = re.search(r"/containers/([0-9a-f]{64})/", line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+async def _own_container_id() -> str | None:
+    # /proc-based id works without Docker (reads our own cgroup) — gitops has no
+    # docker.sock after the cut-over, so there is no API fallback.
+    return _own_container_id_from_proc()
+
+
+async def _rm_rf_as_root_in_container(path: str) -> bool:
+    """Wipe `path` as root by re-entering our own container via the driver's
+    exec (--user 0). A copy's working tree contains files created by other
+    containers (live-dev automations, build outputs) that uid 1000 often can't
+    unlink. The driver holds docker.sock and permits this because the gitops
+    container is labelled with this workspace.
+    """
+    container_id = await _own_container_id()
+    if not container_id:
+        logger.warning(
+            "rm -rf %s: could not determine own container ID; cannot exec as root",
+            path,
+        )
+        return False
+    from app.services.infra_driver_client import (
+        ExecSpec,
+        InfraDriverClient,
+        InfraDriverError,
+        WorkspaceContext,
+    )
+
+    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
+    client = InfraDriverClient()
+    ctx = WorkspaceContext(
+        workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local"),
+        domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+        gitops_dir=os.path.join(gitops_root, "gitops"),
+        secrets_dir=os.path.join(gitops_root, "secrets"),
+    )
+    err: list[bytes] = []
+
+    async def on_stderr(d: bytes):
+        err.append(d)
+
+    try:
+        rc = await client.exec(
+            ctx,
+            ExecSpec(container=container_id, cmd=["rm", "-rf", path], user="0"),
+            on_stderr=on_stderr,
+        )
+    except InfraDriverError as e:
+        logger.warning("rm -rf %s via driver exec raised: %s", path, e)
+        return False
+    if rc != 0:
+        logger.warning(
+            "rm -rf %s via driver exec failed (%s): %s",
+            path,
+            rc,
+            b"".join(err).decode(errors="replace").strip(),
+        )
+        return False
+    return True
+
+
+async def remove_tree(path: str) -> bool:
+    """Best-effort removal of a tree that may hold root-owned files: try the
+    driver root-exec first, fall back to shutil (dev/test environments without
+    a driver). Returns whether the path is gone."""
+    if not os.path.exists(path):
+        return True
+    await _rm_rf_as_root_in_container(path)
+    if os.path.exists(path):
+        shutil.rmtree(path, ignore_errors=True)
+    return not os.path.exists(path)
+
+
+async def remove_bp_clone(copy: str | None, bp: str) -> bool:
+    """Delete a BP's clone from a copy (BP delete). Missing clone = ok."""
+    return await remove_tree(bp_clone_path(copy, bp))

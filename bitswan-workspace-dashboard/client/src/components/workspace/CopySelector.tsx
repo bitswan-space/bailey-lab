@@ -7,6 +7,7 @@ import {
   GitBranch,
   Loader2,
   Plus,
+  Trash2,
 } from 'lucide-react';
 import {
   Popover,
@@ -14,6 +15,7 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover';
 import { Input } from '@/components/ui/input';
+import { DeleteCopyDialog } from '@/components/workspace/DeleteCopyDialog';
 import { NewCopyDialog } from '@/components/workspace/NewCopyDialog';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -92,6 +94,13 @@ interface CopySelectorProps {
   /** Pull main into a copy (rebase it onto main). Resolves when done. */
   onPull: (name: string) => Promise<void>;
   onCreatedCopy: (name: string) => void;
+  /** The signed-in user's own personal copy (for the delete dialog's "it
+   *  comes back on next visit" note). */
+  // eslint-disable-next-line no-restricted-syntax -- null = not yet resolved
+  myCopy: string | null;
+  /** Fired when a copy's delete is accepted — the parent moves the selection
+   *  off the dying copy (the SSE snapshot drops it when teardown finishes). */
+  onCopyDeleted: (name: string) => void;
 }
 
 /**
@@ -101,8 +110,9 @@ interface CopySelectorProps {
  * selector anchors the "copy region" card in the top bar: everything up to
  * Sync & Deploy happens inside the chosen copy.
  *
- * No "Delete copy" action — a copy is the user's personal working environment
- * and the dashboard must never delete it; cleanup is operator-only.
+ * The active row carries a Delete action (this used to be operator-only):
+ * whole-copy deletion behind a warn+confirm dialog that lists the unmerged/
+ * uncommitted work the delete would destroy (see DeleteCopyDialog).
  */
 export function CopySelector({
   copies,
@@ -111,6 +121,8 @@ export function CopySelector({
   onSelect,
   onPull,
   onCreatedCopy,
+  myCopy,
+  onCopyDeleted,
 }: CopySelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -119,6 +131,9 @@ export function CopySelector({
   // eslint-disable-next-line no-restricted-syntax -- null = no materialize in flight
   const [materializing, setMaterializing] = useState<string | null>(null);
   const [newCopyOpen, setNewCopyOpen] = useState(false);
+  // The copy pending delete confirmation. null = dialog closed.
+  // eslint-disable-next-line no-restricted-syntax -- null = dialog closed
+  const [deleteTarget, setDeleteTarget] = useState<Copy | null>(null);
   // Per-(BP, copy) ahead/behind, keyed by copy then BP dir. A copy key present
   // means it's been fetched (value may be {} = nothing diverges).
   const [divergence, setDivergence] = useState<
@@ -310,6 +325,19 @@ export function CopySelector({
                         is a valid standalone button; reserved check slot keeps
                         the chips aligned. */}
                     <div className="flex shrink-0 items-center gap-1.5 pr-2.5 pl-1">
+                      {active && (
+                        <button
+                          type="button"
+                          title={`Delete copy "${c.name}"`}
+                          onClick={() => {
+                            setOpen(false);
+                            setDeleteTarget(c);
+                          }}
+                          className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+                        >
+                          <Trash2 className="size-3.5" aria-hidden />
+                        </button>
+                      )}
                       {isMaterializing ? (
                         <span className="text-[10px] text-muted-foreground">adding…</span>
                       ) : !hasBp ? (
@@ -359,6 +387,13 @@ export function CopySelector({
         onOpenChange={setNewCopyOpen}
         existingNames={copies.map((c) => c.name)}
         onCreated={(name) => onCreatedCopy(name)}
+      />
+
+      <DeleteCopyDialog
+        copy={deleteTarget}
+        isOwnCopy={deleteTarget !== null && deleteTarget.name === myCopy}
+        onClose={() => setDeleteTarget(null)}
+        onDeleted={onCopyDeleted}
       />
     </>
   );

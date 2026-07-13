@@ -6,6 +6,7 @@ No Docker, no git: docker exec calls are faked at the module boundary and
 BITSWAN_GITOPS_DIR points at a tmp_path.
 """
 
+import asyncio
 import os
 
 import pytest
@@ -535,3 +536,108 @@ async def test_guard_clone_idempotent_when_db_exists(gitops_home, monkeypatch):
     }
     await bp_databases.ensure_live_postgres_dbs("ws-test", bs_yaml, ["d1"])
     assert not any("CREATE DATABASE" in " ".join(c) for c in calls)
+
+
+# =============================================================================
+# Teardown (BP / copy delete)
+# =============================================================================
+
+
+class _FakeSvc:
+    def __init__(self, enabled=True, running=True, name="ws__postgres-dev"):
+        self.container_name = name
+        self._enabled = enabled
+        self._running = running
+
+    def is_enabled(self):
+        return self._enabled
+
+    async def is_running(self):
+        return self._running
+
+
+def test_drop_bp_databases_covers_blue_green_and_clears_registry(
+    tmp_path, monkeypatch
+):
+    from app.services import bp_databases as bpdb
+
+    monkeypatch.setenv("BITSWAN_GITOPS_DIR", str(tmp_path))
+    reg = bpdb.load_registry()
+    reg["bps"]["letsgo"] = {"bp_name": "letsgo", "stages": {"dev": {}}}
+    bpdb.save_registry(reg)
+
+    dropped: list[tuple[str, str, dict]] = []
+
+    async def _capture(workspace, realm, names, results, key_prefix):
+        dropped.append((realm, key_prefix, names))
+        results[key_prefix] = "ok"
+
+    monkeypatch.setattr(bpdb, "_drop_names_at_realm", _capture)
+    res = asyncio.run(bpdb.drop_bp_databases("ws", "letsgo"))
+    assert all(v == "ok" for v in res.values())
+
+    # Every realm's single-backend names + production's blue-green 1/2.
+    pg_names = {n["postgres_db"] for _, _, n in dropped}
+    assert {"bp_letsgo", "bp_letsgo_1", "bp_letsgo_2"} <= pg_names
+    prod = [r for r, _, _ in dropped if r == "production"]
+    assert len(prod) == 3  # None + db1 + db2
+    # Full success → the registry entry is gone.
+    assert bpdb.get_bp_entry(bpdb.load_registry(), "letsgo") is None
+
+
+def test_drop_bp_databases_keeps_registry_entry_on_error(tmp_path, monkeypatch):
+    from app.services import bp_databases as bpdb
+
+    monkeypatch.setenv("BITSWAN_GITOPS_DIR", str(tmp_path))
+    reg = bpdb.load_registry()
+    reg["bps"]["letsgo"] = {"bp_name": "letsgo", "stages": {"dev": {}}}
+    bpdb.save_registry(reg)
+
+    async def _fail(workspace, realm, names, results, key_prefix):
+        results[key_prefix] = "error: service not running"
+
+    monkeypatch.setattr(bpdb, "_drop_names_at_realm", _fail)
+    res = asyncio.run(bpdb.drop_bp_databases("ws", "letsgo"))
+    assert any(v.startswith("error") for v in res.values())
+    # The kept entry is the retry marker for the idempotent delete re-run.
+    assert bpdb.get_bp_entry(bpdb.load_registry(), "letsgo") is not None
+
+
+def test_drop_copy_bp_databases_names_and_commands(tmp_path, monkeypatch):
+    from app.services import bp_databases as bpdb
+    from app.services import infra_service
+
+    monkeypatch.setenv("BITSWAN_GITOPS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        infra_service, "get_service", lambda t, w, stage: _FakeSvc(name=f"c-{t}")
+    )
+    monkeypatch.setattr(
+        bpdb,
+        "get_service_secrets",
+        lambda t, realm: {
+            "POSTGRES_USER": "admin",
+            "MINIO_ROOT_USER": "mk",
+            "MINIO_ROOT_PASSWORD": "ms",
+            "COUCHDB_USER": "cu",
+            "COUCHDB_PASSWORD": "cp",
+        },
+    )
+
+    cmds: list[tuple[str, ...]] = []
+
+    async def _exec(*args, cwd=None):
+        cmds.append(args)
+        if "curl" in args and "_all_dbs" in args[-1]:
+            return '["copy-alice-bp-letsgo-x", "unrelated"]', "", 0
+        return "", "", 0
+
+    monkeypatch.setattr(bpdb, "_driver_exec", _exec)
+    res = asyncio.run(bpdb.drop_copy_bp_databases("ws", "alice", ["letsgo"]))
+    assert all(not v.startswith("error") for v in res.values()), res
+
+    flat = ["\x00".join(c) for c in cmds]
+    assert any('DROP DATABASE IF EXISTS "copy_alice_bp_letsgo";' in f for f in flat)
+    assert any("local/copy-alice-bp-letsgo" in f and "rb" in f for f in flat)
+    # Only the prefixed couch db is DELETEd, not the unrelated one.
+    assert any("DELETE" in f and "copy-alice-bp-letsgo-x" in f for f in flat)
+    assert not any("DELETE" in f and "unrelated" in f for f in flat)

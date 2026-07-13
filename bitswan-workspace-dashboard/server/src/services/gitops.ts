@@ -173,6 +173,64 @@ export class GitopsClient {
   }
 
   /**
+   * `DELETE /processes/{slug}` — tear a whole BP down (guarded upstream: 409
+   * with a structured detail while staging/production deployments exist).
+   * Gitops answers 202 + a task id; the heavy teardown runs on its queue and
+   * the `processes` SSE snapshot dropping the BP is the completion signal.
+   */
+  async deleteProcess(input: {
+    slug: string;
+    deleted_by?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const { slug, ...rest } = input;
+    const r = await fetch(
+      `${this.baseUrl}/processes/${encodeURIComponent(slug)}`,
+      {
+        method: 'DELETE',
+        headers: {
+          ...this.authHeaders(),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(rest),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `DELETE /copies/{name}` — delete a WHOLE copy: its live-dev deployments,
+   * per-copy databases, its branch in every BP repo, and its directory.
+   * 202 + task id; the `copies` SSE snapshot dropping the copy signals done.
+   */
+  async deleteCopy(input: {
+    name: string;
+    deleted_by?: string;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const { name, ...rest } = input;
+    const r = await fetch(`${this.baseUrl}/copies/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      headers: {
+        ...this.authHeaders(),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(rest),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `PATCH /processes/{slug}` — change a BP's display name. Only the `name`
    * key in its `process.toml` moves; the slug (and with it URLs, API paths,
    * and deployment ids) is immutable. Gitops commits the edit, refreshes its
