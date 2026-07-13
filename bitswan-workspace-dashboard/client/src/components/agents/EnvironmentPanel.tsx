@@ -17,6 +17,16 @@ import {
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { api } from '@/lib/api';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
 import { cn } from '@/lib/utils';
@@ -69,6 +79,9 @@ export function EnvironmentPanel({ bp, copy }: Props) {
   const [adding, setAdding] = useState<
     { kind: 'frontend' } | { kind: 'worker'; type: string } | null
   >(null);
+  // A pending delete awaiting confirmation in the AlertDialog. null = closed.
+  // eslint-disable-next-line no-restricted-syntax -- null = no pending delete
+  const [deleting, setDeleting] = useState<{ item: Item; kind: string } | null>(null);
 
   const { frontends, workers } = useMemo(() => {
     const prefix = `copies/${copy}/${bp}/`;
@@ -148,9 +161,10 @@ export function EnvironmentPanel({ bp, copy }: Props) {
     );
   };
 
-  const remove = (item: Item, kind: string) => {
-    if (!window.confirm(`Delete ${kind} "${item.name}"? This cannot be undone.`))
-      return;
+  const confirmDelete = () => {
+    if (!deleting) return;
+    const { item } = deleting;
+    setDeleting(null);
     // DELETE is keyed by the FULL deployment_id
     // (<name>-copy-<copy>-<bp>-<stage>) — the short automation name matches
     // no container label and used to silently orphan the container. Fall back
@@ -209,7 +223,7 @@ export function EnvironmentPanel({ bp, copy }: Props) {
               onStartRename={() => setRenaming(f.name)}
               onRename={(next) => doRename(f.name, next)}
               onCancelRename={() => setRenaming(null)}
-              onDelete={() => remove(f, 'frontend')}
+              onDelete={() => setDeleting({ item: f, kind: 'frontend' })}
             />
           ))}
           {adding?.kind === 'frontend' ? (
@@ -243,7 +257,7 @@ export function EnvironmentPanel({ bp, copy }: Props) {
               onStartRename={() => setRenaming(w.name)}
               onRename={(next) => doRename(w.name, next)}
               onCancelRename={() => setRenaming(null)}
-              onDelete={() => remove(w, 'worker container')}
+              onDelete={() => setDeleting({ item: w, kind: 'worker container' })}
             />
           ))}
           {adding?.kind === 'worker' ? (
@@ -265,6 +279,29 @@ export function EnvironmentPanel({ bp, copy }: Props) {
 
         <DevSecrets bp={bp} />
       </div>
+
+      <AlertDialog open={deleting !== null} onOpenChange={(o) => !o && setDeleting(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete {deleting?.kind} “{deleting?.item.name}”?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The container is stopped and the deployment is removed. This
+              cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={confirmDelete}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
