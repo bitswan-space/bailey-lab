@@ -235,6 +235,14 @@ func EmptyTrashFor(callerEmail string, callerGroups []string, isServerOwner bool
 		}
 		removed++
 	}
+	if removed > 0 {
+		// Reconcile the workspace list to the AOC so the removed workspaces are
+		// dropped there too — otherwise a later init with the same name gets a
+		// 400 "already exists" from AOC. Best-effort, same as /workspace/remove.
+		if serr := syncWorkspaceListToAOC(); serr != nil {
+			fmt.Fprintf(writer, "Warning: failed to sync workspace list to AOC: %v\n", serr)
+		}
+	}
 	fmt.Fprintf(writer, "Emptied %d workspace(s) from trash.\n", removed)
 	return nil
 }
