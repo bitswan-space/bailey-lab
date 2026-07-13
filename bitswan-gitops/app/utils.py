@@ -63,7 +63,14 @@ class GitLockContext:
         self._sync_acquired = False
 
     async def __aenter__(self):
-        from app.task_queue import task_queue, current_requester
+        from app.task_queue import current_requester, in_queue_task, task_queue
+
+        # Re-entrant inside the queue worker: the running task ALREADY holds
+        # the queue's exclusive turn, and a nested acquire on the single-worker
+        # FIFO queue would deadlock it (found the hard way by the delete-copy
+        # orchestrator, whose _persist_bp_state commits via this context).
+        if in_queue_task.get():
+            return self
 
         self._task_id = await task_queue.acquire(
             self.kind, requester_email=current_requester.get(), label=self.label

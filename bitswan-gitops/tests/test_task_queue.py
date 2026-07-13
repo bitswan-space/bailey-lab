@@ -82,3 +82,25 @@ async def test_clear_cancels_queued_only():
     assert running_task["status"] == TaskStatus.RUNNING.value
     release_first.set()
     await asyncio.sleep(0.02)
+
+
+@pytest.mark.asyncio
+async def test_git_lock_is_reentrant_inside_a_queue_task(monkeypatch):
+    # A queued task that itself uses GitLockContext (e.g. the delete-copy
+    # orchestrator committing via _persist_bp_state) must NOT deadlock: the
+    # nested acquire would queue behind the running task on this single-worker
+    # FIFO queue and never start. Inside the worker the lock no-ops.
+    import app.task_queue as tq
+    from app.utils import GitLockContext
+
+    q = TaskQueue()
+    monkeypatch.setattr(tq, "task_queue", q)
+
+    done = asyncio.Event()
+
+    async def uses_git_lock():
+        async with GitLockContext(kind="nested commit"):
+            done.set()
+
+    q.submit("delete-copy", uses_git_lock)
+    await asyncio.wait_for(done.wait(), timeout=2)  # deadlock ⇒ TimeoutError

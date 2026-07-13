@@ -46,6 +46,15 @@ current_requester: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_requester", default=None
 )
 
+# True while executing INSIDE the queue worker's current task. Nested
+# GitLockContext acquisitions check this and no-op: the running task already
+# holds the queue's exclusive turn, and a nested acquire() on this
+# single-worker FIFO queue would deadlock it (the nested task can never start
+# while the outer one is running).
+in_queue_task: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "in_queue_task", default=False
+)
+
 
 class TaskStatus(str, Enum):
     QUEUED = "queued"
@@ -216,6 +225,7 @@ class TaskQueue:
                 # its own context never carries a requester; we set it per task
                 # from the email captured at submit time.
                 ctx_token = current_requester.set(task.requester_email)
+                in_token = in_queue_task.set(True)
                 try:
                     await fn()
                     task.status = TaskStatus.COMPLETED
@@ -227,6 +237,7 @@ class TaskQueue:
                     task.error = str(e)
                     logger.exception("task %s (%s) failed", task_id, task.kind)
                 finally:
+                    in_queue_task.reset(in_token)
                     current_requester.reset(ctx_token)
                     task.completed_at = _now()
                     self._running_id = None
