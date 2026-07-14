@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -104,9 +103,4 @@ func agentRequestJSON(method, path string, body interface{}, result interface{})
 		return json.NewDecoder(resp.Body).Decode(result)
 	}
 	return nil
-}
-
-// requirementsFilePath returns the path to the requirements file for a copy.
-func requirementsFilePath(copy string) string {
-	return filepath.Join("/workspace/copies", copy, ".requirements.json")
 }

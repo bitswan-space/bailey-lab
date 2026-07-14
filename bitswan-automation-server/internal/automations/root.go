@@ -233,7 +233,7 @@ func SendAutomationRequest(method, requestURL string, workspaceSecret string) (*
 	// Check if URL is a public URL (contains .localhost or https://)
 	// Public URLs need localhost resolution even when running in daemon
 	isPublicURL := strings.Contains(requestURL, ".localhost") || strings.HasPrefix(requestURL, "https://")
-	
+
 	// When running in daemon with Docker network URL, use simple HTTP client
 	// For public URLs or when running on host, use localhost resolution for .localhost domains
 	if isRunningInDaemon() && !isPublicURL {
@@ -319,10 +319,6 @@ func parseTimestamp(timestamp string) string {
 		return "Invalid Date"
 	}
 	return t.Format("02 Jan 2006 15:04") // Format as "DD MMM YYYY HH:MM"
-}
-
-func GetListAutomations(workspaceName string) ([]Automation, error) {
-	return GetListAutomationsWithOptions(workspaceName, false)
 }
 
 func GetListAutomationsWithOptions(workspaceName string, usePublicURL bool) ([]Automation, error) {

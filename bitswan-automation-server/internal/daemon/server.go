@@ -224,10 +224,6 @@ func (s *Server) Run() error {
 	}
 	s.token = token
 
-	// One-time: migrate existing workspaces' compose from host bind mounts to
-	// the named-volume subpath mounts (after the daemon's data volume migration).
-	go s.migrateWorkspaceDeploymentsToVolumes()
-
 	// Install all certificates from the registry into the daemon's certificate store
 	if err := installAllCertificatesInDaemon(); err != nil {
 		fmt.Printf("Warning: Failed to install certificates in daemon: %v\n", err)

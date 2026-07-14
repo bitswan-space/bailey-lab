@@ -17,12 +17,3 @@ func RunCommandVerbose(cmd *exec.Cmd, verbose bool) error {
 	}
 	return cmd.Run()
 }
-
-// BuildSudoCommand builds a command, using sudo only if not running as root.
-// This is useful when sudo might not be installed (e.g., in containers running as root).
-func BuildSudoCommand(cmd string, args ...string) *exec.Cmd {
-	if os.Geteuid() == 0 {
-		return exec.Command(cmd, args...)
-	}
-	return exec.Command("sudo", append([]string{cmd}, args...)...)
-}

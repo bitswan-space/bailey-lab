@@ -1,6 +1,5 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import logging
 import os
@@ -16,7 +15,6 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-import humanize
 import toml
 import yaml
 from fastapi import HTTPException
@@ -107,8 +105,6 @@ class ServiceDependency:
 
     enabled: bool = True
 
-
-KNOWN_STAGES = {"live-dev", "dev", "staging", "production"}
 
 # Network realms: each gets its own set of infrastructure services (Kafka, CouchDB).
 # live-dev shares the dev realm.
@@ -393,19 +389,22 @@ def bp_state_path(gitops_dir: str, bp: str) -> str:
 
 
 def _read_single_bitswan(bitswan_dir: str) -> dict[str, Any] | None:
-    """Read + hydrate ONE bitswan.yaml file at <bitswan_dir>/bitswan.yaml."""
+    """Read + hydrate ONE bitswan.yaml file at <bitswan_dir>/bitswan.yaml.
+
+    Returns None only when the file is absent. A present-but-unparseable file
+    raises — a corrupt core state file must surface loudly, not be silently
+    treated as "no state" (which would drop the BP from the workspace aggregate).
+    """
     bitswan_yaml_path = os.path.join(bitswan_dir, "bitswan.yaml")
-    try:
-        if os.path.exists(bitswan_yaml_path):
-            with open(bitswan_yaml_path, "r") as f:
-                bs_yaml: dict = yaml.load(f, Loader=_SAFE_LOADER)
-            # Hydrate the flat `deployments` view from the tree so all readers
-            # work unchanged. (Legacy flat-only files are returned as-is.)
-            if isinstance(bs_yaml, dict) and bs_yaml.get(_BP_KEY):
-                bs_yaml["deployments"] = _tree_to_flat(bs_yaml)
-            return bs_yaml
-    except Exception:
+    if not os.path.exists(bitswan_yaml_path):
         return None
+    with open(bitswan_yaml_path, "r") as f:
+        bs_yaml: dict = yaml.load(f, Loader=_SAFE_LOADER)
+    # Hydrate the flat `deployments` view from the tree so all readers work
+    # unchanged.
+    if isinstance(bs_yaml, dict) and bs_yaml.get(_BP_KEY):
+        bs_yaml["deployments"] = _tree_to_flat(bs_yaml)
+    return bs_yaml
 
 
 def read_workspace_bitswan(gitops_dir: str) -> dict[str, Any] | None:
@@ -484,15 +483,6 @@ def _context_to_bp(bs_yaml: dict) -> dict[str, str]:
     return out
 
 
-def bps_in(bs_yaml: dict) -> set[str]:
-    """The set of raw bps present in a whole-workspace dict (across deployments,
-    firewall, backups, secrets)."""
-    bps = set(_context_to_bp(bs_yaml).values())
-    for k in ("firewall", "backups", "secrets"):
-        bps.update((bs_yaml.get(k) or {}).keys())
-    return {b for b in bps if b}
-
-
 def bp_slice(bs_yaml: dict, bp: str) -> dict:
     """Extract ONE raw business process's deploy state from a whole-workspace
     dict: every business_processes CONTEXT belonging to this bp (main + copies)
@@ -568,12 +558,6 @@ async def update_bp_git(
     )
 
 
-def calculate_uptime(created_at: str) -> str:
-    created_at = datetime.fromisoformat(created_at)
-    uptime = datetime.now(timezone.utc) - created_at
-    return humanize.naturaldelta(uptime)
-
-
 def generate_workspace_url(
     workspace_name: str,
     automation_name: str,
@@ -588,110 +572,6 @@ def generate_workspace_url(
     label = make_hostname_label(workspace_name, automation_name, context, stage, slot)
     url = f"{label}.{gitops_domain}"
     return f"https://{url}" if full else url
-
-
-def workspace_route(
-    automation_name: str,
-    context: str,
-    stage: str,
-    port: str,
-    slot: str | None = None,
-    upstream_slot: str | None = None,
-    host_stage: str | None = None,
-) -> dict:
-    """PURE: the daemon ingress route an exposed automation should have — no
-    I/O. This is the single derivation of (hostname, upstream) for an exposed
-    automation; `desired_ingress_routes` collects these into the declarative set
-    the reconcile converges to, and `add_workspace_route_to_ingress` POSTs one.
-
-    The HOSTNAME and the CONTAINER it resolves to are decoupled so a stable
-    user-facing host can point at a blue-green slot's container:
-      • host_stage overrides the hostname's stage — the DR host is `…-dr` while
-        its container lives in the `production` realm.
-      • slot adds a `-<slot>` suffix to the hostname (per-slot hosts only; the
-        stable production/DR hosts pass slot=None).
-      • upstream_slot picks the container's slot (defaults to slot) — the
-        production host → the live slot, the DR host → the standby slot.
-    """
-    from app.services.automation_service import make_hostname_label
-
-    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-    container_slot = upstream_slot if upstream_slot is not None else slot
-    hostname = generate_workspace_url(
-        workspace_name,
-        automation_name,
-        context,
-        host_stage or stage,
-        gitops_domain,
-        False,
-        slot,
-    )
-    svc_name = make_hostname_label(
-        workspace_name, automation_name, context, stage, container_slot
-    )
-    return {
-        "hostname": hostname,
-        "upstream": f"{svc_name}:{port}",
-        "workspace_name": workspace_name,
-        # Frontends inherit the workspace's Bailey ACL from the dashboard
-        # endpoint, so every workspace member can share what they deploy.
-        "parent_endpoint": f"{workspace_name}-dashboard.{gitops_domain}",
-        "kind": "frontend",
-        "stage": stage,
-    }
-
-
-def add_workspace_route_to_ingress(
-    automation_name: str,
-    context: str,
-    stage: str,
-    port: str,
-    slot: str | None = None,
-    upstream_slot: str | None = None,
-    host_stage: str | None = None,
-) -> bool:
-    from app.services.automation_service import make_hostname_label
-
-    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
-    workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
-    # The HOSTNAME and the CONTAINER it resolves to are decoupled, so a stable
-    # user-facing host can point at a blue-green slot's container:
-    #   • host_stage overrides the hostname's stage — the DR host is `…-dr` while
-    #     its container lives in the `production` realm.
-    #   • slot adds a `-<slot>` suffix to the hostname (used only for per-slot
-    #     hosts; the stable production/DR hosts pass slot=None).
-    #   • upstream_slot picks the container's slot (defaults to slot) — the
-    #     production host → the live slot, the DR host → the standby slot.
-    container_slot = upstream_slot if upstream_slot is not None else slot
-    hostname = generate_workspace_url(
-        workspace_name,
-        automation_name,
-        context,
-        host_stage or stage,
-        gitops_domain,
-        False,
-        slot,
-    )
-    svc_name = make_hostname_label(
-        workspace_name, automation_name, context, stage, container_slot
-    )
-    upstream = f"{svc_name}:{port}"
-    # Frontends inherit the workspace's Bailey ACL from the dashboard
-    # endpoint, so every workspace member can share what they deploy (see
-    # the daemon's parent-delegation in acl.go). State the parent explicitly
-    # rather than relying on the daemon's metadata fallback.
-    parent_endpoint = f"{workspace_name}-dashboard.{gitops_domain}"
-    # Only exposed automations (frontends) reach this path, so mark the
-    # endpoint as a frontend for the Bailey launcher.
-    return add_route_to_ingress(
-        hostname,
-        upstream,
-        workspace_name,
-        parent_endpoint=parent_endpoint,
-        kind="frontend",
-        stage=stage,
-    )
 
 
 def _ingress_client_and_base() -> tuple:
@@ -805,34 +685,6 @@ def add_route_to_ingress(
         return False
 
 
-def repoint_route_in_ingress(
-    hostname: str, upstream: str, workspace_name: str = ""
-) -> bool:
-    """Atomically repoint an EXISTING route's upstream (the blue-green swap /
-    zero-downtime-promote primitive). Unlike add-route this does not touch TLS
-    certs, the Bailey ACL, or OAuth redirect URIs — the route already exists;
-    only the container it resolves to changes."""
-    body = {
-        "hostname": hostname,
-        "upstream": upstream,
-        "workspace_name": workspace_name,
-    }
-    try:
-        client, base = _ingress_client_and_base()
-        with client:
-            response = client.post(f"{base}/ingress/repoint-route", json=body)
-        if response.status_code != 200:
-            logger.warning(
-                f"Ingress repoint-route failed for {hostname}: "
-                f"HTTP {response.status_code} — {response.text}"
-            )
-            return False
-        return True
-    except Exception as e:
-        logger.warning(f"Ingress repoint-route request failed for {hostname}: {e}")
-        return False
-
-
 def remove_route_by_hostname(hostname: str) -> bool:
     """Remove a single ingress route by its exact hostname, via the shared
     (UDS-preferred) ingress client."""
@@ -843,24 +695,6 @@ def remove_route_by_hostname(hostname: str) -> bool:
         return response.status_code == 200
     except Exception:
         return False
-
-
-def remove_route_from_ingress(
-    automation_name: str, context: str, stage: str, workspace_name: str
-) -> bool:
-    gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "gitops.bitswan.space")
-    hostname = generate_workspace_url(
-        workspace_name, automation_name, context, stage, gitops_domain, False
-    )
-    return remove_route_by_hostname(hostname)
-
-
-def calculate_checksum(file_path):
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
 
 
 # Symlink targets we accept inside deploy-archive tarballs. Anything outside
@@ -1211,60 +1045,6 @@ _COMPOSE_EVENT_STATES = (
     "Running",
     "Recreated",
 )
-
-
-def _compose_event_message(line: str) -> str | None:
-    """Turn a `docker compose up` stderr line into a human deploy-progress
-    message, or None if it carries no container state transition.
-
-    Lines look like ` Container <name>  <State>` (plain text in non-TTY mode).
-    We surface container lifecycle so a long container-start phase — e.g. the
-    worker waiting on the egress firewall gateway's health gate before it can
-    start — keeps the deploy UI moving instead of sitting on a static message.
-    """
-    s = line.strip()
-    idx = s.find("Container ")
-    if idx == -1:
-        return None
-    rest = s[idx + len("Container ") :].strip()
-    parts = rest.rsplit(None, 1)
-    if len(parts) != 2:
-        return None
-    name, state = parts[0].strip(), parts[1].strip()
-    if state not in _COMPOSE_EVENT_STATES:
-        return None
-    return f"Starting containers… ({name} {state.lower()})"
-
-
-async def ensure_docker_network(name: str) -> None:
-    """Create a Docker network if it doesn't already exist (idempotent).
-
-    The per-(workspace, stage) networks are declared `external: true` in the
-    generated compose, so `docker compose up` fails unless they already exist.
-    The daemon also creates them (and multi-homes the workspace sub-traefik
-    across them) — this guards the ordering so a deploy never races ahead of
-    the daemon. Safe to call concurrently: a create that loses the race to an
-    already-existing network is ignored.
-    """
-    inspect = await asyncio.create_subprocess_exec(
-        "docker",
-        "network",
-        "inspect",
-        name,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    if await inspect.wait() == 0:
-        return
-    create = await asyncio.create_subprocess_exec(
-        "docker",
-        "network",
-        "create",
-        name,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await create.communicate()  # ignore "already exists" lost-race errors
 
 
 async def save_image(

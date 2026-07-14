@@ -3,7 +3,7 @@ import React from 'react';
 // first-admin bootstrap · awaiting device approval · account recovery
 
 const { C: SC, Icon: SIcon, Btn: SBtn, Pill: SPill } = window.WD_SHELL;
-const { QRCode: SQR, SegmentedCode: SSeg, CopyChip: SCopyChip, Avatar: SAvatar, Modal: SModal } = window.SC_UI;
+const { SegmentedCode: SSeg, CopyChip: SCopyChip, Avatar: SAvatar, Modal: SModal } = window.SC_UI;
 const { Api: SApi } = window.SC_API;
 const { useState: useSc, useEffect: useScE } = React;
 
@@ -256,15 +256,10 @@ function ApprovalScene({ onApproved, goConsole, gateState }) {
             {codeErr ? (
               <div style={{ textAlign: 'center', fontSize: 12.5, color: SC.red, fontWeight: 500, padding: '8px 0' }}>{codeErr}</div>
             ) : (
-              <div style={{ display: 'flex', gap: 18, alignItems: 'center', justifyContent: 'center' }}>
-                <div style={{ padding: 9, border: `1px solid ${SC.border}`, borderRadius: 12 }}>
-                  <SQR seed={'approve-' + (code || 'pending')} size={120} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: SC.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Your code</div>
-                  <div style={{ fontFamily: 'Geist Mono, monospace', fontSize: 28, fontWeight: 700, color: SC.fg, letterSpacing: 1 }}>{code || '······'}</div>
-                  <div style={{ marginTop: 10 }}><SCopyChip text={code} label="Copy code" /></div>
-                </div>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: SC.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Your code</div>
+                <div style={{ fontFamily: 'Geist Mono, monospace', fontSize: 28, fontWeight: 700, color: SC.fg, letterSpacing: 1 }}>{code || '······'}</div>
+                <div style={{ marginTop: 10 }}><SCopyChip text={code} label="Copy code" /></div>
               </div>
             )}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginTop: 20, fontSize: 13, color: SC.primary, fontWeight: 500 }}>

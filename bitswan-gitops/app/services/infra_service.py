@@ -230,16 +230,6 @@ class InfraService(ABC):
         return f"{self.workspace_name}__{self.service_type}{self.service_suffix}"
 
     @property
-    def project_name(self) -> str:
-        """Return the docker-compose project name."""
-        return f"{self.workspace_name}-{self.service_type}{self.service_suffix}"
-
-    @property
-    def volume_name(self) -> str:
-        """Return the Docker volume name."""
-        return f"{self.workspace_name}-{self.service_type}{self.service_suffix}-data"
-
-    @property
     def display_name(self) -> str:
         """Return human-readable name (e.g., 'Kafka (dev)')."""
         base = self.service_type.capitalize()
@@ -252,10 +242,6 @@ class InfraService(ABC):
     @property
     def secrets_file_path(self) -> str:
         return os.path.join(self.secrets_dir, self.secrets_file_name)
-
-    @property
-    def secrets_file_path_host(self) -> str:
-        return os.path.join(self.secrets_dir_host, self.secrets_file_name)
 
     def is_enabled(self) -> bool:
         """Check if the service is enabled (secrets file exists)."""
@@ -355,14 +341,6 @@ class InfraService(ABC):
 
     async def _extra_enable_setup(self) -> None:
         """Hook for extra setup during enable. Override in subclasses."""
-        pass
-
-    def ensure_config(self) -> None:
-        """Ensure all config files exist for an already-enabled service.
-
-        Called before generating compose dicts to handle migration cases where
-        config files moved to a new location. Override in subclasses.
-        """
         pass
 
     async def disable(self) -> dict:

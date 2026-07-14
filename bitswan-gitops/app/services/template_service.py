@@ -36,16 +36,13 @@ def _copies_dir() -> str:
 # Built-in templates are baked into the gitops image at /opt/bitswan/examples
 # (Dockerfile `COPY examples/`), so they are version-locked to the gitops
 # build. BITSWAN_TEMPLATES_DIR overrides the baked path (used in dev when the
-# source tree is mounted). The legacy /workspace/examples mount is still
-# consulted so older deployments that mount an examples repo keep working.
-# Workspace-local overrides at <workspace_repo>/templates/ win over both.
+# source tree is mounted). Workspace-local overrides at
+# <workspace_repo>/templates/ win over both.
 BUILTIN_TEMPLATE_ROOTS = [
     os.environ.get("BITSWAN_TEMPLATES_DIR", "/opt/bitswan/examples"),
     # Dev mode mounts the gitops source at /src, so the templates ship at
     # /src/examples — discover them there without needing an env override.
     "/src/examples",
-    # Legacy: an examples repo bind-mounted by older automation-server builds.
-    "/workspace/examples",
 ]
 
 

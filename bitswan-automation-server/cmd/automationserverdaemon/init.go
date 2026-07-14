@@ -202,10 +202,13 @@ func startDaemonContainer(startMessage, successMessage string) error {
 	// volumes instead of host bind mounts under the user's home directory. This
 	// makes storage independent of which host user runs the commands (the
 	// root-then-ubuntu mismatch that used to leave files in the wrong place).
-	// The legacy* paths are the old bind-mount locations, used ONLY as the
-	// one-time migration source.
-	legacyConfig := filepath.Join(homeDir, ".config", "bitswan")
-	legacyMkcert := filepath.Join(homeDir, ".local", "share", "mkcert")
+	//
+	// The daemon signs local (.localhost) certificates with the mkcert CA in its
+	// volume, while host-side clients (the CLI, browsers) verify against the CA
+	// mkcert installed on the host under ~/.local/share/mkcert. Those must be the
+	// SAME CA, so a fresh daemon adopts the host's existing mkcert CA by seeding
+	// its (empty) volume from that directory.
+	hostMkcertDir := filepath.Join(homeDir, ".local", "share", "mkcert")
 
 	// Launch the daemon container
 	// Mount the binary, config directory, docker socket, and mkcert directory
@@ -272,20 +275,19 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		return fmt.Errorf("network %s does not exist and could not be created", networkName)
 	}
 
-	// Ensure the named volumes exist, and migrate any legacy bind-mount data
-	// into them (one-time, idempotent — skipped when the volume already has
-	// content). The legacy host directories are left untouched as a backup.
+	// Ensure the named volumes the daemon's config/data and the mkcert CA live in
+	// exist.
 	if err := ensureDockerVolume(configVolume); err != nil {
 		return err
 	}
 	if err := ensureDockerVolume(mkcertVolume); err != nil {
 		return err
 	}
-	if err := migrateBindMountToVolume(configVolume, legacyConfig, daemonImage); err != nil {
-		return fmt.Errorf("failed to migrate config into %s volume: %w", configVolume, err)
-	}
-	if err := migrateBindMountToVolume(mkcertVolume, legacyMkcert, daemonImage); err != nil {
-		return fmt.Errorf("failed to migrate mkcert into %s volume: %w", mkcertVolume, err)
+	// Seed the mkcert volume from the host's existing CA so host-side clients
+	// trust the certificates the daemon issues. No-op once the volume has content
+	// (safe on every start/upgrade) or when the host has no mkcert CA yet.
+	if err := seedMkcertVolumeFromHost(mkcertVolume, hostMkcertDir, daemonImage); err != nil {
+		return fmt.Errorf("failed to seed mkcert CA into %s volume: %w", mkcertVolume, err)
 	}
 
 	// HOST_HOME still tells the daemon the host home directory (used for the few
@@ -546,41 +548,51 @@ func ensureDockerVolume(name string) error {
 
 // dockerVolumeEmpty reports whether the named volume contains no files. It runs
 // a throwaway container that lists the volume root.
+//
+// Only the container's STDOUT (the `ls` listing) is used as the empty/non-empty
+// signal. Docker writes image-pull progress ("Unable to find image ... Pulling
+// ... Downloaded") to STDERR, so when this is the first `docker run` to
+// reference the image, that pull noise must NOT be mistaken for volume contents
+// (which would falsely report a fresh volume as non-empty and skip seeding).
 func dockerVolumeEmpty(name, image string) (bool, error) {
-	out, err := exec.Command("docker", "run", "--rm",
+	cmd := exec.Command("docker", "run", "--rm",
 		"-v", name+":/v:ro", image,
-		"sh", "-c", "ls -A /v 2>/dev/null | head -1").CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("failed to inspect docker volume %s: %s: %w", name, strings.TrimSpace(string(out)), err)
+		"sh", "-c", "ls -A /v 2>/dev/null | head -1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("failed to inspect docker volume %s: %s: %w", name, strings.TrimSpace(stderr.String()), err)
 	}
-	return strings.TrimSpace(string(out)) == "", nil
+	return strings.TrimSpace(stdout.String()) == "", nil
 }
 
-// migrateBindMountToVolume copies a legacy bind-mount directory into a named
-// volume exactly once. It is a no-op when the volume already has content (so
-// it's safe to call on every daemon start/upgrade) or when the legacy directory
-// is absent/empty (fresh installs). The legacy directory is left in place as a
-// backup — nothing is deleted.
-func migrateBindMountToVolume(volume, legacyDir, image string) error {
+// seedMkcertVolumeFromHost copies the host's mkcert CA directory into the daemon's
+// mkcert volume so host-side clients (which verify against the host CA) trust the
+// certificates the daemon issues from that same CA. It is a no-op when the volume
+// already has content (safe to call on every daemon start/upgrade) or when the
+// host has no mkcert CA yet (mkcert will create one inside the volume on first
+// use). The host directory is left in place untouched.
+func seedMkcertVolumeFromHost(volume, hostMkcertDir, image string) error {
 	empty, err := dockerVolumeEmpty(volume, image)
 	if err != nil {
 		return err
 	}
 	if !empty {
-		return nil // already migrated, or the daemon has started populating it
+		return nil // already seeded, or the daemon has started populating it
 	}
-	entries, err := os.ReadDir(legacyDir)
+	entries, err := os.ReadDir(hostMkcertDir)
 	if err != nil || len(entries) == 0 {
-		return nil // nothing to migrate (fresh install)
+		return nil // host has no mkcert CA to adopt
 	}
-	fmt.Printf("Migrating existing data from %s into docker volume %q ...\n", legacyDir, volume)
+	fmt.Printf("Seeding mkcert CA from %s into docker volume %q ...\n", hostMkcertDir, volume)
 	out, err := exec.Command("docker", "run", "--rm",
-		"-v", legacyDir+":/src:ro",
+		"-v", hostMkcertDir+":/src:ro",
 		"-v", volume+":/dst",
 		image, "sh", "-c", "cp -a /src/. /dst/").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("copy %s -> volume %s failed: %s: %w", legacyDir, volume, strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("copy %s -> volume %s failed: %s: %w", hostMkcertDir, volume, strings.TrimSpace(string(out)), err)
 	}
-	fmt.Printf("Migrated %s into volume %q (original left in place as a backup).\n", legacyDir, volume)
+	fmt.Printf("Seeded mkcert CA from %s into volume %q.\n", hostMkcertDir, volume)
 	return nil
 }

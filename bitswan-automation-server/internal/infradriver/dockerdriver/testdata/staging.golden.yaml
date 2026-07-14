@@ -171,9 +171,11 @@ services:
         image: bitswan/egress-gateway:latest
         labels:
             gitops.bp: acme
+            gitops.context: acme
             gitops.firewall_gateway: "true"
             gitops.slot: ""
             gitops.stage: staging
+            gitops.workspace: ws3
         networks:
             ws3-staging:
                 aliases:
@@ -198,9 +200,11 @@ services:
         image: bitswan/egress-gateway:latest
         labels:
             gitops.bp: acme
+            gitops.context: acme
             gitops.firewall_proxy: "true"
             gitops.slot: ""
             gitops.stage: staging
+            gitops.workspace: ws3
         networks:
             ws3-staging:
                 aliases:

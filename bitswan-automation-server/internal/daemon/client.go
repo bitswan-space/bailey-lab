@@ -1908,60 +1908,6 @@ func (c *Client) BackupCouchDB(workspace, stage, backupPath string) (*ServiceRes
 	return &result, nil
 }
 
-// RestoreCouchDB restores CouchDB from a backup
-func (c *Client) RestoreCouchDB(workspace, backupPath string, force bool) (*ServiceResponse, error) {
-	reqBody := ServiceRestoreRequest{
-		Workspace:  workspace,
-		BackupPath: backupPath,
-		Force:      force,
-	}
-
-	bodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "http://unix/service/couchdb/restore", strings.NewReader(string(bodyBytes)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.doStreamingRequest(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("authentication failed: invalid or missing token")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		var errResp ErrorResponse
-		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("%s", errResp.Error)
-		}
-		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	// Check Content-Type to determine response format
-	contentType := resp.Header.Get("Content-Type")
-	if strings.Contains(contentType, "application/x-ndjson") {
-		// Stream logs to stdout and return result
-		return c.streamLogs(resp.Body, os.Stdout)
-	}
-
-	// Fall back to JSON response for backwards compatibility
-	var result ServiceResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &result, nil
-}
-
 // CreateJob creates a new interactive job
 func (c *Client) CreateJob(jobType, workspace string, params map[string]interface{}) (string, error) {
 	reqBody := map[string]interface{}{
@@ -2156,57 +2102,6 @@ func (c *Client) BackupPostgres(workspace, stage, backupPath string) (*ServiceRe
 	}
 
 	// Check Content-Type to determine response format
-	contentType := resp.Header.Get("Content-Type")
-	if strings.Contains(contentType, "application/x-ndjson") {
-		return c.streamLogs(resp.Body, os.Stdout)
-	}
-
-	var result ServiceResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &result, nil
-}
-
-// RestorePostgres restores PostgreSQL from a backup
-func (c *Client) RestorePostgres(workspace, backupPath string, force bool) (*ServiceResponse, error) {
-	reqBody := ServiceRestoreRequest{
-		Workspace:  workspace,
-		BackupPath: backupPath,
-		Force:      force,
-	}
-
-	bodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", "http://unix/service/postgres/restore", strings.NewReader(string(bodyBytes)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.doStreamingRequest(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("authentication failed: invalid or missing token")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		var errResp ErrorResponse
-		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("%s", errResp.Error)
-		}
-		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
-	}
-
 	contentType := resp.Header.Get("Content-Type")
 	if strings.Contains(contentType, "application/x-ndjson") {
 		return c.streamLogs(resp.Body, os.Stdout)

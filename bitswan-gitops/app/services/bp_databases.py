@@ -664,66 +664,6 @@ def _bp_display_name(relative_path: str | None) -> str:
     return parts[0] if len(parts) >= 2 else ""
 
 
-async def provision_for_deployments(
-    workspace: str, bs_yaml: dict | None, deployment_ids: list[str]
-) -> None:
-    """Post-compose-up hook: create the per-BP objects for any registered
-    BP×realm touched by the given deployments that still has unprovisioned
-    services. Stateless between the registration hook and this one — the
-    registry IS the contract. Best-effort; never raises (deploys must not
-    break on snapshot plumbing).
-    """
-    try:
-        deployments = (bs_yaml or {}).get("deployments") or {}
-        registry = load_registry()
-        seen: set[tuple[str, str]] = set()
-        for dep_id in deployment_ids:
-            conf = deployments.get(dep_id) or {}
-            bp_slug, wt = derive_bp_and_copy(conf.get("relative_path"))
-            if not bp_slug or wt:
-                continue
-            dep_stage = conf.get("stage") or "production"
-            realm = stage_for_deployment(dep_stage)
-            if realm not in SERVICE_REALMS or (bp_slug, realm) in seen:
-                continue
-            seen.add((bp_slug, realm))
-            entry = get_bp_entry(registry, bp_slug)
-            if not entry or realm not in entry.get("stages", {}):
-                continue
-            name = entry.get("bp_name", bp_slug)
-            stage_entry = entry["stages"][realm]
-            if realm == "production":
-                # Blue-green: provision BOTH databases (1 and 2). The app slots
-                # a/b/c wire to one of these; the standby is where restore-to-DR
-                # lands. Tracked under the per-db "dbs" registry key.
-                dbs_state = stage_entry.get("dbs", {})
-                for db in (1, 2):
-                    db_svc = dbs_state.get(str(db), {})
-                    if all(
-                        (db_svc.get(s, {}) or {}).get("provisioned")
-                        for s in BP_DATA_SERVICES
-                    ):
-                        continue
-                    results = await ensure_bp_databases(
-                        workspace, bp_slug, name, realm, db=db
-                    )
-                    logger.info(
-                        "Per-BP db%s for '%s' at %s: %s", db, bp_slug, realm, results
-                    )
-            else:
-                svc_state = stage_entry.get("services", {})
-                if all(
-                    svc_state.get(s, {}).get("provisioned") for s in BP_DATA_SERVICES
-                ):
-                    continue
-                results = await ensure_bp_databases(workspace, bp_slug, name, realm)
-                logger.info(
-                    "Per-BP databases for '%s' at %s: %s", bp_slug, realm, results
-                )
-    except Exception as e:
-        logger.warning("Per-BP database provisioning failed (non-fatal): %s", e)
-
-
 def _production_db_numbers(bs_yaml: dict | None, bp_slug: str) -> list[int]:
     """Blue-green db numbers a production BP's slots use (default [1, 2]).
 

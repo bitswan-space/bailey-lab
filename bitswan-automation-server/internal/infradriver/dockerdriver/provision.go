@@ -37,8 +37,6 @@ const bpPostgresConnLimit = 10
 // _post_deploy_infra_services is intentionally NOT ported: no concrete infra
 // service implements initialize(), so it is a no-op.
 
-var bpDataServices = [...]string{"postgres", "couchdb", "minio"}
-
 // dockerExec runs `docker exec <container> <args...>` and returns stdout,
 // stderr, and the process exit code (rc). rc is -1 if the command could not be
 // started.

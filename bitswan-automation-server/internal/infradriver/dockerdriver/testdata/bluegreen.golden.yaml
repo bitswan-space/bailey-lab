@@ -186,9 +186,11 @@ services:
         image: bitswan/egress-gateway:latest
         labels:
             gitops.bp: shop
+            gitops.context: shop
             gitops.firewall_gateway: "true"
             gitops.slot: blue
             gitops.stage: production
+            gitops.workspace: ws2
         networks:
             ws2-production:
                 aliases:
@@ -213,9 +215,11 @@ services:
         image: bitswan/egress-gateway:latest
         labels:
             gitops.bp: shop
+            gitops.context: shop
             gitops.firewall_proxy: "true"
             gitops.slot: blue
             gitops.stage: production
+            gitops.workspace: ws2
         networks:
             ws2-production:
                 aliases:
@@ -246,9 +250,11 @@ services:
         image: bitswan/egress-gateway:latest
         labels:
             gitops.bp: shop
+            gitops.context: shop
             gitops.firewall_gateway: "true"
             gitops.slot: green
             gitops.stage: production
+            gitops.workspace: ws2
         networks:
             ws2-production:
                 aliases:
@@ -273,9 +279,11 @@ services:
         image: bitswan/egress-gateway:latest
         labels:
             gitops.bp: shop
+            gitops.context: shop
             gitops.firewall_proxy: "true"
             gitops.slot: green
             gitops.stage: production
+            gitops.workspace: ws2
         networks:
             ws2-production:
                 aliases:
