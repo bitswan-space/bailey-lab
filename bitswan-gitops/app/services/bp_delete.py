@@ -96,7 +96,9 @@ def bp_has_remnants(bs_yaml: dict | None, slug: str) -> bool:
     except ValueError:
         pass
     registry = bp_databases.load_registry()
-    return bp_databases.get_bp_entry(registry, sanitize_automation_name(slug)) is not None
+    return (
+        bp_databases.get_bp_entry(registry, sanitize_automation_name(slug)) is not None
+    )
 
 
 def copy_deployments(bs_yaml: dict | None, name: str) -> dict[str, dict]:
@@ -237,9 +239,7 @@ def _finish(kind: str, target: str, results: dict[str, str]) -> dict:
     return {"status": "success", "results": results}
 
 
-async def delete_business_process(
-    slug: str, deleted_by: str | None, service
-) -> dict:
+async def delete_business_process(slug: str, deleted_by: str | None, service) -> dict:
     """Tear a BP down completely (guard already checked by the route):
     containers → deploy state (emptied + pushed) → gateways → databases →
     secrets/firewall logs → clones in every copy → bare repo. Keeps
@@ -355,10 +355,7 @@ async def delete_copy(name: str, deleted_by: str | None, service) -> dict:
     copy_path = os.path.join(bp_git.copies_dir(), name)
     affected_bps = sorted(
         {deployment_bp(conf) for conf in entries.values() if deployment_bp(conf)}
-        | {
-            sanitize_automation_name(bp)
-            for bp in bp_git.list_bp_clones(copy_path)
-        }
+        | {sanitize_automation_name(bp) for bp in bp_git.list_bp_clones(copy_path)}
     )
 
     # 1. Containers.

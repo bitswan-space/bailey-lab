@@ -556,9 +556,7 @@ class _FakeSvc:
         return self._running
 
 
-def test_drop_bp_databases_covers_blue_green_and_clears_registry(
-    tmp_path, monkeypatch
-):
+def test_drop_bp_databases_covers_blue_green_and_clears_registry(tmp_path, monkeypatch):
     from app.services import bp_databases as bpdb
 
     monkeypatch.setenv("BITSWAN_GITOPS_DIR", str(tmp_path))

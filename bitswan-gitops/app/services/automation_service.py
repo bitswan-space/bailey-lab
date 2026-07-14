@@ -3768,9 +3768,7 @@ class AutomationService:
                         await self.refresh(None if scope == "main" else scope)
                         automations = await self.get_automations()
                         data = [
-                            a.model_dump(mode="json")
-                            if hasattr(a, "model_dump")
-                            else a
+                            a.model_dump(mode="json") if hasattr(a, "model_dump") else a
                             for a in automations
                         ]
                         await event_broadcaster.broadcast("automations", data)

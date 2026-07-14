@@ -18,8 +18,12 @@ LIVE_ID = f"backend-copy-{COPY}-{BP}-live-dev"
 
 def _git(*args, cwd=None, check=True):
     env = dict(os.environ)
-    for k, v in (("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t"),
-                 ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t")):
+    for k, v in (
+        ("GIT_AUTHOR_NAME", "t"),
+        ("GIT_AUTHOR_EMAIL", "t@t"),
+        ("GIT_COMMITTER_NAME", "t"),
+        ("GIT_COMMITTER_EMAIL", "t@t"),
+    ):
         env.setdefault(k, v)
     return subprocess.run(
         ["git", *args], cwd=cwd, env=env, capture_output=True, text=True, check=check
@@ -38,7 +42,10 @@ def test_delete_copy_branch_bypasses_deny_deletes(repos_dir):
     # push-deleting a branch is forbidden, but the server-side update-ref -d
     # (the ONLY sanctioned copy-branch removal) must succeed.
     repo = asyncio.run(git_server.ensure_bp_bare_repo(BP))
-    assert _git("-C", repo, "config", "--get", "receive.denyDeletes").stdout.strip() == "true"
+    assert (
+        _git("-C", repo, "config", "--get", "receive.denyDeletes").stdout.strip()
+        == "true"
+    )
     sha = _git("-C", repo, "rev-parse", "main").stdout.strip()
     _git("-C", repo, "update-ref", f"refs/heads/{COPY}", sha)
 
@@ -183,7 +190,12 @@ def test_delete_copy_full_teardown(tmp_path, monkeypatch, repos_dir):
     for bp in (BP, "stale"):
         repo = git_server.bp_bare_repo_path(bp)
         gone = _git(
-            "-C", repo, "show-ref", "--verify", "-q", f"refs/heads/{COPY}",
+            "-C",
+            repo,
+            "show-ref",
+            "--verify",
+            "-q",
+            f"refs/heads/{COPY}",
             check=False,
         )
         assert gone.returncode != 0, bp

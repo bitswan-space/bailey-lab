@@ -161,9 +161,7 @@ def test_without_remove_source_the_directory_survives(tmp_path, monkeypatch):
     (src_dir / "automation.toml").write_text("id = 'x'\n")
     monkeypatch.setenv("BITSWAN_COPIES_DIR", str(copies))
 
-    svc, _ = _svc(
-        tmp_path, monkeypatch, {FULL_ID: dict(_ENTRY)}, [_Container(FULL_ID)]
-    )
+    svc, _ = _svc(tmp_path, monkeypatch, {FULL_ID: dict(_ENTRY)}, [_Container(FULL_ID)])
     svc.workspace_repo_dir = str(tmp_path)
 
     res = asyncio.run(svc.delete_automation(SHORT))

@@ -842,12 +842,28 @@ async def _drop_postgres_db(container: str, user: str, db_name: str) -> None:
         f"WHERE datname = '{db_name}' AND pid <> pg_backend_pid();"
     )
     await _driver_exec(
-        "docker", "exec", container, "psql", "-U", user, "-d", "postgres",
-        "-c", terminate_sql,
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        terminate_sql,
     )
     _, stderr, rc = await _driver_exec(
-        "docker", "exec", container, "psql", "-U", user, "-d", "postgres",
-        "-c", f'DROP DATABASE IF EXISTS "{db_name}";',
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        f'DROP DATABASE IF EXISTS "{db_name}";',
     )
     if rc != 0:
         raise RuntimeError(f"DROP DATABASE {db_name} failed: {stderr.strip()}")
@@ -858,8 +874,16 @@ async def _drop_minio_bucket(
 ) -> None:
     """Remove a bucket and everything in it. Missing bucket = no-op."""
     _, stderr, rc = await _driver_exec(
-        "docker", "exec", container, "mc", "alias", "set", "local",
-        "http://localhost:9000", access_key, secret_key,
+        "docker",
+        "exec",
+        container,
+        "mc",
+        "alias",
+        "set",
+        "local",
+        "http://localhost:9000",
+        access_key,
+        secret_key,
     )
     if rc != 0:
         raise RuntimeError(f"mc alias set failed: {stderr.strip()}")
@@ -876,7 +900,13 @@ async def _drop_couchdb_prefix(
     """DELETE every CouchDB database under a BP prefix (couch is lazy on the
     create side, so there may be zero)."""
     stdout, stderr, rc = await _driver_exec(
-        "docker", "exec", container, "curl", "-s", "-u", f"{user}:{password}",
+        "docker",
+        "exec",
+        container,
+        "curl",
+        "-s",
+        "-u",
+        f"{user}:{password}",
         "http://localhost:5984/_all_dbs",
     )
     if rc != 0:
@@ -889,8 +919,16 @@ async def _drop_couchdb_prefix(
         if not db.startswith(prefix):
             continue
         _, stderr, rc = await _driver_exec(
-            "docker", "exec", container, "curl", "-s", "-X", "DELETE",
-            "-u", f"{user}:{password}", f"http://localhost:5984/{db}",
+            "docker",
+            "exec",
+            container,
+            "curl",
+            "-s",
+            "-X",
+            "DELETE",
+            "-u",
+            f"{user}:{password}",
+            f"http://localhost:5984/{db}",
         )
         if rc != 0:
             raise RuntimeError(f"CouchDB DELETE /{db} failed: {stderr.strip()}")
@@ -919,9 +957,7 @@ async def _drop_names_at_realm(
             if svc_type == "postgres":
                 secrets = get_service_secrets("postgres", realm) or {}
                 user = secrets.get("POSTGRES_USER", "admin")
-                await _drop_postgres_db(
-                    svc.container_name, user, names["postgres_db"]
-                )
+                await _drop_postgres_db(svc.container_name, user, names["postgres_db"])
             elif svc_type == "minio":
                 secrets = get_service_secrets("minio", realm) or {}
                 await _drop_minio_bucket(

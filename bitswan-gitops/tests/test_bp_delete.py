@@ -180,9 +180,12 @@ def test_guard_flags_staging_and_production(tmp_path, monkeypatch):
         {"deployment_id": "backend-letsgo-production", "stage": "production"}
     ]
     # dev/live-dev never block.
-    assert bp_delete.protected_deployments(
-        {"deployments": {DEV_ID: _ENTRIES[DEV_ID], LIVE_ID: _ENTRIES[LIVE_ID]}}, BP
-    ) == []
+    assert (
+        bp_delete.protected_deployments(
+            {"deployments": {DEV_ID: _ENTRIES[DEV_ID], LIVE_ID: _ENTRIES[LIVE_ID]}}, BP
+        )
+        == []
+    )
 
 
 def test_full_teardown_inventory(tmp_path, monkeypatch):

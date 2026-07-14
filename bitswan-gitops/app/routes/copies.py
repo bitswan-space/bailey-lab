@@ -929,9 +929,7 @@ class DeleteCopyRequest(BaseModel):
 
 
 @router.delete("/{name}", status_code=202)
-async def delete_copy_route(
-    name: str, body: DeleteCopyRequest | None = None
-) -> dict:
+async def delete_copy_route(name: str, body: DeleteCopyRequest | None = None) -> dict:
     """Delete a WHOLE copy — asynchronous, idempotent.
 
     Removes the copy's live-dev deployments + containers + gateways, its
