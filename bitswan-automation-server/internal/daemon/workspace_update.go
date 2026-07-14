@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -53,47 +52,28 @@ func currentGitopsImage(workspaceName string) string {
 	return compose.Services.Gitops.Image
 }
 
-// runWorkspaceUpdate runs the workspace update logic with stdout already redirected
-func (s *Server) runWorkspaceUpdate(args []string) error {
-	// Parse flags
-	fs := flag.NewFlagSet("workspace-update", flag.ContinueOnError)
-	gitopsImage := fs.String("gitops-image", "", "")
-	dashboardImage := fs.String("dashboard-image", "", "")
-	kafkaImage := fs.String("kafka-image", "", "")
-	zookeeperImage := fs.String("zookeeper-image", "", "")
-	couchdbImage := fs.String("couchdb-image", "", "")
-	staging := fs.Bool("staging", false, "")
-	dev := fs.Bool("dev", false, "")
-	trustCA := fs.Bool("trust-ca", false, "")
-	devMode := fs.Bool("dev-mode", false, "")
-	disableDevMode := fs.Bool("disable-dev-mode", false, "")
-	gitopsDevSourceDir := fs.String("gitops-dev-source-dir", "", "")
-	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
+// runWorkspaceUpdate runs the workspace update logic with stdout already
+// redirected. The request is fully typed — the CLI's cobra layer is the only
+// flag parser (see WorkspaceUpdateRequest). Local copies keep the body
+// unchanged.
+func (s *Server) runWorkspaceUpdate(req WorkspaceUpdateRequest) error {
+	gitopsImage := req.GitopsImage
+	dashboardImage := req.DashboardImage
+	kafkaImage := req.KafkaImage
+	zookeeperImage := req.ZookeeperImage
+	couchdbImage := req.CouchdbImage
+	staging := req.Staging
+	dev := req.Dev
+	trustCA := req.TrustCA
+	devMode := req.DevMode
+	disableDevMode := req.DisableDevMode
+	gitopsDevSourceDir := req.GitopsDevSourceDir
+	dashboardDevSourceDir := req.DashboardDevSourceDir
 
-	// Go's flag package stops parsing at the first non-flag token, so a flag
-	// placed after the workspace name (e.g. `update wraptest --gitops-image X`)
-	// would be silently ignored. Parse flags interspersed with positionals by
-	// re-parsing the remainder after each positional, so flag order relative to
-	// the workspace name doesn't matter.
-	var positionals []string
-	rest := args
-	for len(rest) > 0 {
-		if err := fs.Parse(rest); err != nil {
-			return fmt.Errorf("failed to parse flags: %w", err)
-		}
-		rest = fs.Args()
-		if len(rest) == 0 {
-			break
-		}
-		positionals = append(positionals, rest[0])
-		rest = rest[1:]
-	}
-
-	if len(positionals) < 1 {
+	workspaceName := req.Workspace
+	if workspaceName == "" {
 		return fmt.Errorf("workspace name is required")
 	}
-
-	workspaceName := positionals[0]
 	// Use HOME directly - inside container this is /root, on host it's the user's home
 	// The workspace files are mounted at /root/.config/bitswan in the container
 	homeDir := os.Getenv("HOME")
@@ -101,33 +81,33 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 	metadataPath := filepath.Join(workspacePath, "metadata.yaml")
 
 	// Handle dev mode settings - update metadata if dev mode flags are provided
-	if *devMode || *disableDevMode || *gitopsDevSourceDir != "" || *dashboardDevSourceDir != "" {
+	if devMode || disableDevMode || gitopsDevSourceDir != "" || dashboardDevSourceDir != "" {
 		fmt.Println("Updating dev mode settings...")
 		metadata, err := config.GetWorkspaceMetadata(workspaceName)
 		if err != nil {
 			return fmt.Errorf("failed to read workspace metadata: %w", err)
 		}
 
-		if *devMode {
+		if devMode {
 			metadata.DevMode = true
 			fmt.Println("Dev mode enabled")
 		}
-		if *disableDevMode {
+		if disableDevMode {
 			metadata.DevMode = false
 			// Clear dev source directories when disabling dev mode
 			metadata.GitopsDevSourceDir = nil
 			metadata.DashboardDevSourceDir = nil
 			fmt.Println("Dev mode disabled")
 		}
-		if *gitopsDevSourceDir != "" {
-			metadata.GitopsDevSourceDir = gitopsDevSourceDir
+		if gitopsDevSourceDir != "" {
+			metadata.GitopsDevSourceDir = &gitopsDevSourceDir
 			metadata.DevMode = true
-			fmt.Printf("GitOps dev source directory set to: %s\n", *gitopsDevSourceDir)
+			fmt.Printf("GitOps dev source directory set to: %s\n", gitopsDevSourceDir)
 		}
-		if *dashboardDevSourceDir != "" {
-			metadata.DashboardDevSourceDir = dashboardDevSourceDir
+		if dashboardDevSourceDir != "" {
+			metadata.DashboardDevSourceDir = &dashboardDevSourceDir
 			metadata.DevMode = true
-			fmt.Printf("Dashboard dev source directory set to: %s\n", *dashboardDevSourceDir)
+			fmt.Printf("Dashboard dev source directory set to: %s\n", dashboardDevSourceDir)
 		}
 
 		if err := metadata.SaveToFile(metadataPath); err != nil {
@@ -147,14 +127,14 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 
 	// Update Docker images and docker-compose file
 	fmt.Println("Updating Docker images and docker-compose file...")
-	if err := workspace.UpdateWorkspaceDeployment(workspaceName, *gitopsImage, "", "", *staging, *dev, *trustCA); err != nil {
+	if err := workspace.UpdateWorkspaceDeployment(workspaceName, gitopsImage, "", "", staging, dev, trustCA); err != nil {
 		return fmt.Errorf("failed to update workspace deployment: %w", err)
 	}
 	fmt.Println("Gitops service restarted!")
 
 	// 3. Update services if they are enabled
 	fmt.Println("Checking for enabled services to update...")
-	if err := updateServices(workspaceName, *dashboardImage, *kafkaImage, *zookeeperImage, *couchdbImage, *staging, *dev, *trustCA); err != nil {
+	if err := updateServices(workspaceName, dashboardImage, kafkaImage, zookeeperImage, couchdbImage, staging, dev, trustCA); err != nil {
 		fmt.Printf("Warning: some services failed to update: %v\n", err)
 	}
 

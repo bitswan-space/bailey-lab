@@ -79,10 +79,18 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		return fmt.Errorf("write docker-compose.yaml: %w", err)
 	}
 
-	// 3. Reconcile. With egress workers present, bring everything else up
-	//    normally and recreate only the workers whose hash changed (or whose
-	//    gateway was recreated); otherwise a plain full `compose up`.
-	if len(workers) > 0 {
+	// 3. Reconcile. An EMPTY desired set — a BP delete pushes an emptied
+	//    bitswan.yaml, compiling to `services: {}` — has nothing to bring up,
+	//    and `docker compose up` on a services-less file fails with "no
+	//    service selected". Skip the up but run the REST of the apply: the
+	//    ingress reconcile prunes the BP's routes and orphan retirement
+	//    removes any surviving containers. With egress workers present, bring
+	//    everything else up normally and recreate only the workers whose hash
+	//    changed (or whose gateway was recreated); otherwise a plain full
+	//    `compose up`.
+	if desired := composeServiceNames(composePath); desired != nil && len(desired) == 0 {
+		report("compose_up", "No services declared — skipping compose up (empty-slice reconcile).")
+	} else if len(workers) > 0 {
 		if err := reconcileEgressAware(ctx, wctx, composePath, workers, allServices, report); err != nil {
 			return err
 		}

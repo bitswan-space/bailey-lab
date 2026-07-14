@@ -75,10 +75,54 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type WorkspaceRunRequest struct {
-	// Args are the original CLI args excluding the binary, e.g.:
-	// ["workspace","init","foo","--domain","bs-foo.localhost"]
-	Args []string `json:"args"`
+// WorkspaceInitRequest is the typed body of POST /workspace/init. The CLI's
+// cobra layer parses the flags ONCE and ships the values here — the daemon
+// never re-parses argv (the old raw-args forwarding had a second std-flag
+// parser with different semantics that silently dropped flags placed after
+// the workspace name).
+type WorkspaceInitRequest struct {
+	Workspace             string `json:"workspace"`
+	Remote                string `json:"remote,omitempty"`
+	Branch                string `json:"branch,omitempty"`
+	Domain                string `json:"domain,omitempty"`
+	CertsDir              string `json:"certs_dir,omitempty"`
+	Verbose               bool   `json:"verbose,omitempty"`
+	MkCerts               bool   `json:"mkcerts,omitempty"`
+	NoDashboard           bool   `json:"no_dashboard,omitempty"`
+	NoCodingAgent         bool   `json:"no_coding_agent,omitempty"`
+	SetHosts              bool   `json:"set_hosts,omitempty"`
+	Local                 bool   `json:"local,omitempty"`
+	GitopsImage           string `json:"gitops_image,omitempty"`
+	DashboardImage        string `json:"dashboard_image,omitempty"`
+	CodingAgentImage      string `json:"coding_agent_image,omitempty"`
+	InfraDriverImage      string `json:"infra_driver_image,omitempty"`
+	EgressGatewayImage    string `json:"egress_gateway_image,omitempty"`
+	GitopsDevSourceDir    string `json:"gitops_dev_source_dir,omitempty"`
+	DashboardDevSourceDir string `json:"dashboard_dev_source_dir,omitempty"`
+	SSHPort               string `json:"ssh_port,omitempty"`
+	Staging               bool   `json:"staging,omitempty"`
+	Dev                   bool   `json:"dev,omitempty"`
+	// Owner is the email of the user creating the workspace; its endpoints
+	// are recorded under this owner in the Bailey ACL.
+	Owner string `json:"owner,omitempty"`
+}
+
+// WorkspaceUpdateRequest is the typed body of POST /workspace/update
+// (same single-parser rule as WorkspaceInitRequest).
+type WorkspaceUpdateRequest struct {
+	Workspace             string `json:"workspace"`
+	GitopsImage           string `json:"gitops_image,omitempty"`
+	DashboardImage        string `json:"dashboard_image,omitempty"`
+	KafkaImage            string `json:"kafka_image,omitempty"`
+	ZookeeperImage        string `json:"zookeeper_image,omitempty"`
+	CouchdbImage          string `json:"couchdb_image,omitempty"`
+	Staging               bool   `json:"staging,omitempty"`
+	Dev                   bool   `json:"dev,omitempty"`
+	TrustCA               bool   `json:"trust_ca,omitempty"`
+	DevMode               bool   `json:"dev_mode,omitempty"`
+	DisableDevMode        bool   `json:"disable_dev_mode,omitempty"`
+	GitopsDevSourceDir    string `json:"gitops_dev_source_dir,omitempty"`
+	DashboardDevSourceDir string `json:"dashboard_dev_source_dir,omitempty"`
 }
 
 // WorkspaceRemoveRequest represents the request body for removing a workspace
@@ -92,14 +136,14 @@ func (s *Server) handleWorkspaceInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req WorkspaceRunRequest
+	var req WorkspaceInitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if len(req.Args) < 2 || req.Args[0] != "workspace" || req.Args[1] != "init" {
-		writeJSONError(w, "invalid args: expected prefix ['workspace','init',...]", http.StatusBadRequest)
+	if req.Workspace == "" {
+		writeJSONError(w, "workspace is required", http.StatusBadRequest)
 		return
 	}
 
@@ -165,7 +209,7 @@ func (s *Server) handleWorkspaceInit(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Parse args and run init logic
-	err = s.runWorkspaceInit(req.Args[2:], confirmCh)
+	err = s.runWorkspaceInit(req, confirmCh)
 	wPipe.Close()
 	wg.Wait()
 
@@ -204,14 +248,14 @@ func (s *Server) handleWorkspaceUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req WorkspaceRunRequest
+	var req WorkspaceUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if len(req.Args) < 2 || req.Args[0] != "workspace" || req.Args[1] != "update" {
-		writeJSONError(w, "invalid args: expected prefix ['workspace','update',...]", http.StatusBadRequest)
+	if req.Workspace == "" {
+		writeJSONError(w, "workspace is required", http.StatusBadRequest)
 		return
 	}
 
@@ -265,7 +309,7 @@ func (s *Server) handleWorkspaceUpdate(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Parse args and run update logic
-	err = s.runWorkspaceUpdate(req.Args[2:])
+	err = s.runWorkspaceUpdate(req)
 	wPipe.Close()
 	wg.Wait()
 

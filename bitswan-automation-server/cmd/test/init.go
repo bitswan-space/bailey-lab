@@ -117,23 +117,16 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string, dev bool) 
 	}
 
 	// Use local flags for workspace init (no dashboard, for faster initialization)
-	initArgs := []string{
-		"workspace", "init",
-		"--local",
-		"--no-dashboard",
+	initReq := daemon.WorkspaceInitRequest{
+		Workspace:        workspaceName,
+		Local:            true,
+		NoDashboard:      true,
+		GitopsImage:      gitopsImage,
+		CodingAgentImage: codingAgentImage,
+		Dev:              dev,
 	}
-	if gitopsImage != "" {
-		initArgs = append(initArgs, "--gitops-image", gitopsImage)
-	}
-	if codingAgentImage != "" {
-		initArgs = append(initArgs, "--coding-agent-image", codingAgentImage)
-	}
-	if dev {
-		initArgs = append(initArgs, "--dev")
-	}
-	initArgs = append(initArgs, workspaceName)
 
-	if err := client.WorkspaceInit(initArgs); err != nil {
+	if err := client.WorkspaceInit(initReq); err != nil {
 		return fmt.Errorf("failed to initialize workspace: %w", err)
 	}
 	fmt.Println("✓ Workspace initialized")

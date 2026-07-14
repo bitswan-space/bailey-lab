@@ -116,6 +116,41 @@ export function registerBusinessProcessRoutes(
     }
   });
 
+  // Delete a whole BP. Gitops guards it (409 with a structured detail while
+  // staging/production deployments exist — the 4xx passthrough below carries
+  // that payload verbatim so the dialog can render the blocking deployments)
+  // and runs the teardown async (202 + task id); the `processes` SSE snapshot
+  // dropping the BP is the completion signal.
+  app.delete<{
+    Params: { id: string };
+  }>('/api/business-processes/:id', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
+    if (!isValidBpId(req.params.id)) {
+      return reply.code(400).send({ error: 'invalid bp id' });
+    }
+    // Attribution for the delete commit + queue task: the validated token
+    // email, never a client-supplied value.
+    const deletedBy = await emailFromRequest(req, app.log);
+    try {
+      const r = await gitops.deleteProcess({
+        slug: req.params.id,
+        ...(deletedBy ? { deleted_by: deletedBy } : {}),
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return reply.code(202).send(r.body);
+    } catch (err) {
+      app.log.warn({ err, id: req.params.id }, 'BP delete failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   app.get<{
     Params: { id: string };
     Querystring: { copy?: string };

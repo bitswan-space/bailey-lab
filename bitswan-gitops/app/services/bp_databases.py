@@ -826,3 +826,197 @@ async def ensure_live_postgres_dbs(
             seen.add(("bp", db_name))
             await _wait_for_postgres(container, user)
             await _create_postgres_db(container, user, db_name)
+
+
+# =============================================================================
+# Teardown (BP / copy delete)
+# =============================================================================
+
+
+async def _drop_postgres_db(container: str, user: str, db_name: str) -> None:
+    """DROP DATABASE, terminating its sessions first (DROP refuses while any
+    session is connected — same reason clone_postgres_db_as terminates the
+    template's sessions). Missing database = no-op."""
+    terminate_sql = (
+        f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        f"WHERE datname = '{db_name}' AND pid <> pg_backend_pid();"
+    )
+    await _driver_exec(
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        terminate_sql,
+    )
+    _, stderr, rc = await _driver_exec(
+        "docker",
+        "exec",
+        container,
+        "psql",
+        "-U",
+        user,
+        "-d",
+        "postgres",
+        "-c",
+        f'DROP DATABASE IF EXISTS "{db_name}";',
+    )
+    if rc != 0:
+        raise RuntimeError(f"DROP DATABASE {db_name} failed: {stderr.strip()}")
+
+
+async def _drop_minio_bucket(
+    container: str, access_key: str, secret_key: str, bucket: str
+) -> None:
+    """Remove a bucket and everything in it. Missing bucket = no-op."""
+    _, stderr, rc = await _driver_exec(
+        "docker",
+        "exec",
+        container,
+        "mc",
+        "alias",
+        "set",
+        "local",
+        "http://localhost:9000",
+        access_key,
+        secret_key,
+    )
+    if rc != 0:
+        raise RuntimeError(f"mc alias set failed: {stderr.strip()}")
+    _, stderr, rc = await _driver_exec(
+        "docker", "exec", container, "mc", "rb", "--force", f"local/{bucket}"
+    )
+    if rc != 0 and "does not exist" not in (stderr or ""):
+        raise RuntimeError(f"mc rb {bucket} failed: {stderr.strip()}")
+
+
+async def _drop_couchdb_prefix(
+    container: str, user: str, password: str, prefix: str
+) -> None:
+    """DELETE every CouchDB database under a BP prefix (couch is lazy on the
+    create side, so there may be zero)."""
+    stdout, stderr, rc = await _driver_exec(
+        "docker",
+        "exec",
+        container,
+        "curl",
+        "-s",
+        "-u",
+        f"{user}:{password}",
+        "http://localhost:5984/_all_dbs",
+    )
+    if rc != 0:
+        raise RuntimeError(f"CouchDB _all_dbs failed: {stderr.strip()}")
+    try:
+        all_dbs = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"CouchDB _all_dbs returned non-JSON: {stdout[:200]}")
+    for db in all_dbs:
+        if not db.startswith(prefix):
+            continue
+        _, stderr, rc = await _driver_exec(
+            "docker",
+            "exec",
+            container,
+            "curl",
+            "-s",
+            "-X",
+            "DELETE",
+            "-u",
+            f"{user}:{password}",
+            f"http://localhost:5984/{db}",
+        )
+        if rc != 0:
+            raise RuntimeError(f"CouchDB DELETE /{db} failed: {stderr.strip()}")
+
+
+async def _drop_names_at_realm(
+    workspace: str, realm: str, names: dict, results: dict[str, str], key_prefix: str
+) -> None:
+    """Drop one {postgres_db, minio_bucket, couchdb_prefix} name set at one
+    realm. Per-service outcome goes into `results` under `<key_prefix>:<svc>`:
+    "ok" | "skipped: not enabled" | "error: …". A service that is enabled but
+    not running is an ERROR (its data would silently survive), unlike the
+    create path where a later deploy retries."""
+    from app.services.infra_service import get_service
+
+    for svc_type in BP_DATA_SERVICES:
+        key = f"{key_prefix}:{svc_type}"
+        try:
+            svc = get_service(svc_type, workspace, stage=realm)
+            if not svc.is_enabled():
+                results[key] = "skipped: not enabled"
+                continue
+            if not await svc.is_running():
+                results[key] = "error: service not running"
+                continue
+            if svc_type == "postgres":
+                secrets = get_service_secrets("postgres", realm) or {}
+                user = secrets.get("POSTGRES_USER", "admin")
+                await _drop_postgres_db(svc.container_name, user, names["postgres_db"])
+            elif svc_type == "minio":
+                secrets = get_service_secrets("minio", realm) or {}
+                await _drop_minio_bucket(
+                    svc.container_name,
+                    secrets.get("MINIO_ROOT_USER", "admin"),
+                    secrets.get("MINIO_ROOT_PASSWORD", ""),
+                    names["minio_bucket"],
+                )
+            elif svc_type == "couchdb":
+                secrets = get_service_secrets("couchdb", realm) or {}
+                await _drop_couchdb_prefix(
+                    svc.container_name,
+                    secrets.get("COUCHDB_USER", "admin"),
+                    secrets.get("COUCHDB_PASSWORD", ""),
+                    names["couchdb_prefix"],
+                )
+            results[key] = "ok"
+        except Exception as e:
+            logger.warning("Dropping %s (%s) failed: %s", key, names, e)
+            results[key] = f"error: {e}"
+
+
+async def drop_bp_databases(workspace: str, bp_slug: str) -> dict[str, str]:
+    """Destroy every per-BP database namespace across all realms: the
+    single-backend names at dev/staging and BOTH blue-green production
+    databases. The registry entry is removed only when nothing errored — a
+    kept entry is the retry marker for an idempotent delete re-run."""
+    validate_bp_slug(bp_slug)
+    results: dict[str, str] = {}
+    for realm in sorted(SERVICE_REALMS):
+        dbs: list[int | None] = [None] if realm != "production" else [None, 1, 2]
+        for db in dbs:
+            names = bp_resource_names(bp_slug, db)
+            suffix = f"@{realm}" + (f"#db{db}" if db else "")
+            await _drop_names_at_realm(
+                workspace, realm, names, results, f"{bp_slug}{suffix}"
+            )
+
+    if not any(v.startswith("error") for v in results.values()):
+        registry = load_registry()
+        if registry.get("bps", {}).pop(bp_slug, None) is not None:
+            save_registry(registry)
+    return results
+
+
+async def drop_copy_bp_databases(
+    workspace: str, copy_name: str, bp_slugs: list[str]
+) -> dict[str, str]:
+    """Destroy the per-(copy, BP) live-dev namespaces (`copy_<copy>_bp_<slug>`
+    etc.) for every given BP. live-dev rides the dev realm's servers."""
+    results: dict[str, str] = {}
+    for bp_slug in bp_slugs:
+        try:
+            validate_bp_slug(bp_slug)
+        except ValueError as e:
+            results[f"{copy_name}/{bp_slug}"] = f"error: {e}"
+            continue
+        names = copy_bp_resource_names(copy_name, bp_slug)
+        await _drop_names_at_realm(
+            workspace, "dev", names, results, f"copy-{copy_name}-{bp_slug}@dev"
+        )
+    return results

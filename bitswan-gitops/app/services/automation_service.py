@@ -3655,7 +3655,73 @@ class AutomationService:
             "total_pages": (total + page_size - 1) // page_size,
         }
 
-    async def delete_automation(self, deployment_id: str):
+    async def push_bp_state(
+        self, bp: str, message: str, deployed_by: str | None = None
+    ) -> None:
+        """Commit + push one BP's deploy-state repo to the driver so its
+        post-receive apply reconciles the slice (prunes routes + containers).
+
+        The delete flows need this because `apply_compose_for_deployments`
+        derives the BP from deployment entries — which a delete has already
+        removed. Extracted from its push step (see the per-BP push loop there).
+        """
+        author = f"{deployed_by} <{deployed_by}>" if deployed_by else None
+        await self.infra_driver.ensure_deploy_repo(bp)
+        await self.infra_driver.deploy(
+            work_tree=bp_state_path(self.gitops_dir, bp),
+            commit_message=message,
+            author=author,
+            deploy_remote=self.infra_driver.deploy_remote_for_bp(bp),
+        )
+
+    def _resolve_deployment_id(self, name_or_id: str) -> str:
+        """Resolve a caller-supplied id to a full deployment_id.
+
+        Callers (notably the dashboard's Environment panel) historically sent
+        the short automation name (`diag-worker`) instead of the full
+        deployment_id (`diag-worker-copy-<copy>-<bp>-live-dev`). A short name
+        matches nothing — not the bitswan.yaml key, not the
+        gitops.deployment_id container label — so a delete would silently
+        no-op. Map it through the entries' automation_name; ambiguity (the
+        same short name deployed in several copies/stages) is a 409 because
+        guessing here deletes someone else's instance.
+        """
+        bs_yaml = read_bitswan_yaml(self.gitops_dir) or {}
+        deployments = bs_yaml.get("deployments") or {}
+        if name_or_id in deployments:
+            return name_or_id
+        matches = [
+            k
+            for k, v in deployments.items()
+            if (v or {}).get("automation_name") == name_or_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Automation name {name_or_id!r} is ambiguous; "
+                    f"pass a full deployment_id: {sorted(matches)}"
+                ),
+            )
+        return name_or_id
+
+    async def delete_automation(self, deployment_id: str, remove_source: bool = False):
+        deployment_id = self._resolve_deployment_id(deployment_id)
+
+        bs_yaml = read_bitswan_yaml(self.gitops_dir) or {}
+        entry = (bs_yaml.get("deployments") or {}).get(deployment_id) or {}
+        in_yaml = deployment_id in (bs_yaml.get("deployments") or {})
+        containers = await self.get_container(deployment_id)
+        if not in_yaml and not containers:
+            # Nothing matched anywhere — a success here would let callers
+            # believe the delete worked while the container keeps running.
+            raise HTTPException(
+                status_code=404,
+                detail=f"No deployment or container found for {deployment_id!r}",
+            )
+
         # Drop the deployment from bitswan.yaml, then APPLY: the ingress reconcile
         # prunes the now-absent gitops route (it's no longer in the desired set).
         # No out-of-band remove-route — the route disappears because the file no
@@ -3665,12 +3731,56 @@ class AutomationService:
         # server-side — no extra whole-workspace commit needed.
         await self.remove_automation_from_bitswan(deployment_id)
 
-        containers = await self.get_container(deployment_id)
         if containers:
             await self.remove_automation(deployment_id)
+
+        # Optionally delete the source directory too (the Environment panel's
+        # Delete means "remove this frontend/worker from the BP for good" —
+        # leaving the source behind lets the next whole-BP deploy resurrect
+        # it). The dir is derived from the entry's relative_path
+        # (copies/<scope>/<bp>/<name>), so a container-only orphan with no
+        # bitswan.yaml entry has nothing to remove.
+        source_removed = False
+        if remove_source:
+            rel = (entry.get("relative_path") or "").replace("\\", "/").strip("/")
+            parts = [p for p in rel.split("/") if p]
+            if len(parts) == 4 and parts[0] == "copies":
+                _, scope, bp, name = parts
+                from app.services import template_service
+
+                try:
+                    await template_service.delete_automation_source(
+                        workspace_root=self.workspace_repo_dir,
+                        bp=bp,
+                        name=name,
+                        copy=None if scope == "main" else scope,
+                    )
+                    source_removed = True
+                except FileNotFoundError:
+                    pass  # already gone — keep the delete idempotent
+                if source_removed:
+                    # Push the fresh snapshot so the panel drops the item
+                    # without waiting for the FS watcher (same reason the
+                    # scaffold endpoints broadcast).
+                    try:
+                        from app.event_broadcaster import event_broadcaster
+
+                        await self.refresh(None if scope == "main" else scope)
+                        automations = await self.get_automations()
+                        data = [
+                            a.model_dump(mode="json") if hasattr(a, "model_dump") else a
+                            for a in automations
+                        ]
+                        await event_broadcaster.broadcast("automations", data)
+                    except Exception:
+                        logger.exception(
+                            "Failed to broadcast automations after source delete"
+                        )
+
         return {
             "status": "success",
             "message": f"Deployment {deployment_id} deleted successfully",
+            "source_removed": source_removed,
         }
 
     def resolve_automation_config(self, deployment_conf: dict) -> "AutomationConfig":

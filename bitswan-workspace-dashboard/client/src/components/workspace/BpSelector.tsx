@@ -6,6 +6,7 @@ import {
   FolderOpen,
   Pencil,
   Plus,
+  Trash2,
 } from 'lucide-react';
 import {
   Popover,
@@ -26,6 +27,8 @@ interface BpSelectorProps {
   onNewBp: () => void;
   /** Open the rename flow for one BP (the dialog lives in TopNav). */
   onRenameBp: (bp: BusinessProcess) => void;
+  /** Open the delete flow for one BP (the dialog lives in TopNav). */
+  onDeleteBp: (bp: BusinessProcess) => void;
 }
 
 /**
@@ -40,6 +43,7 @@ export function BpSelector({
   onSelect,
   onNewBp,
   onRenameBp,
+  onDeleteBp,
 }: BpSelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -158,6 +162,17 @@ export function BpSelector({
                         className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                       >
                         <Pencil className="size-3.5" aria-hidden />
+                      </button>
+                      <button
+                        type="button"
+                        title={`Delete "${b.displayName}"`}
+                        onClick={() => {
+                          setOpen(false);
+                          onDeleteBp(b);
+                        }}
+                        className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+                      >
+                        <Trash2 className="size-3.5" aria-hidden />
                       </button>
                       <Check className="mr-2 size-3.5 shrink-0 text-primary" aria-hidden />
                     </>

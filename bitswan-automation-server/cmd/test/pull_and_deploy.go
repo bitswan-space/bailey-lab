@@ -77,16 +77,13 @@ func runTestPullAndDeploy(gitopsImage string) error {
 
 	// Step 1: Initialize workspace 1
 	fmt.Println("\n[1/9] Initializing workspace 1...")
-	initArgs1 := []string{
-		"workspace", "init",
-		"--local",
+	initReq1 := daemon.WorkspaceInitRequest{
+		Workspace:   workspace1Name,
+		Local:       true,
+		GitopsImage: gitopsImage,
 	}
-	if gitopsImage != "" {
-		initArgs1 = append(initArgs1, "--gitops-image", gitopsImage)
-	}
-	initArgs1 = append(initArgs1, workspace1Name)
 
-	if err := client.WorkspaceInit(initArgs1); err != nil {
+	if err := client.WorkspaceInit(initReq1); err != nil {
 		return fmt.Errorf("failed to initialize workspace 1: %w", err)
 	}
 	fmt.Println("✓ Workspace 1 initialized")
@@ -232,18 +229,15 @@ func runTestPullAndDeploy(gitopsImage string) error {
 	// Use container path for cloning (since workspace is mounted there), but we'll update the remote
 	// to /host/ path after cloning so GitOps containers can fetch from it
 	containerRepoPath := filepath.Join("/root", ".config", "bitswan", "workspaces", workspace1Name, "workspace")
-	initArgs2 := []string{
-		"workspace", "init",
-		"--local",
-		"--remote", containerRepoPath,
-		"--branch", branchName,
+	initReq2 := daemon.WorkspaceInitRequest{
+		Workspace:   workspace2Name,
+		Local:       true,
+		Remote:      containerRepoPath,
+		Branch:      branchName,
+		GitopsImage: gitopsImage,
 	}
-	if gitopsImage != "" {
-		initArgs2 = append(initArgs2, "--gitops-image", gitopsImage)
-	}
-	initArgs2 = append(initArgs2, workspace2Name)
 
-	if err := client.WorkspaceInit(initArgs2); err != nil {
+	if err := client.WorkspaceInit(initReq2); err != nil {
 		cleanupWorkspace(workspace1Name)
 		return fmt.Errorf("failed to initialize workspace 2: %w", err)
 	}

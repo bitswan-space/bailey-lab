@@ -171,6 +171,28 @@ async function putJsonAllow4xx<T>(url: string, body: unknown): Promise<T> {
 }
 
 /**
+ * DELETE that may legitimately return a 4xx with a JSON body (e.g. the BP
+ * delete's 409 guard listing blocking staging/production deployments) — we
+ * surface those instead of throwing. Callers narrow via a union type on
+ * `status`.
+ */
+async function deleteAllow4xx<T>(url: string): Promise<T & { status: number }> {
+  const r = await fetch(url, {
+    method: 'DELETE',
+    credentials: 'include',
+    cache: 'no-store',
+    headers: { ...(await authHeader()) },
+  });
+  let body: unknown = {};
+  try {
+    body = await r.json();
+  } catch {
+    // non-JSON error body
+  }
+  return { ...(body as T), status: r.status };
+}
+
+/**
  * Multipart POST without our retry layer (retrying an upload would
  * double-write files and break browser progress tracking).
  */
@@ -602,6 +624,28 @@ export interface CreateCopyRequest {
   base_branch?: string;
 }
 
+/** Wire-mirror of the gitops DELETE /processes/{slug} responses: 202 carries
+ *  task_id; a 409 guard carries body.detail with the blocking deployments
+ *  (relayed verbatim through the proxy's `body` field). */
+export interface DeleteBusinessProcessResponse {
+  task_id?: string;
+  bp?: string;
+  error?: string;
+  body?: {
+    detail?: {
+      error?: string;
+      deployments?: { deployment_id: string; stage: string }[];
+    };
+  };
+}
+
+export interface DeleteCopyResponse {
+  task_id?: string;
+  copy?: string;
+  error?: string;
+  body?: { detail?: string };
+}
+
 export interface TemplateEntry {
   id: string;
   name: string;
@@ -649,10 +693,21 @@ export const api = {
       body,
     ),
 
+  // Guarded async teardown: 202 {task_id} on accept; 409 carries the guard
+  // payload (body.detail.deployments = blocking staging/production deploys)
+  // — surfaced, not thrown, so the dialog can render it.
+  deleteBusinessProcess: (slug: string) =>
+    deleteAllow4xx<DeleteBusinessProcessResponse>(
+      `/api/business-processes/${encodeURIComponent(slug)}`,
+    ),
+
   createCopy: (body: CreateCopyRequest) =>
     postJson<CreateCopyResponse>('/api/copies', body),
-  // No deleteCopy: deleting a copy (one's own or another user's) is not a
-  // user-facing action — the dashboard never exposes it.
+  // Whole-copy delete (used to be operator-only; now a user-facing action
+  // behind a warn+confirm dialog that lists unmerged/uncommitted work).
+  // 202 {task_id}; the `copies` SSE snapshot dropping the copy signals done.
+  deleteCopy: (name: string) =>
+    deleteAllow4xx<DeleteCopyResponse>(`/api/copies/${encodeURIComponent(name)}`),
 
   templates: () => getJson<TemplatesResponse>('/api/templates'),
   createAutomationFromTemplate: (body: CreateAutomationRequest) =>
@@ -874,8 +929,10 @@ export const api = {
     ),
   promoteAutomation: (body: PromoteRequest) =>
     postJson<DeployResponse>('/api/automations/promote', body),
-  removeAutomation: (id: string) =>
-    deleteEmpty(`/api/automations/${encodeURIComponent(id)}`),
+  removeAutomation: (id: string, opts?: { removeSource?: boolean }) =>
+    deleteEmpty(
+      `/api/automations/${encodeURIComponent(id)}${opts?.removeSource ? '?remove_source=true' : ''}`,
+    ),
 
   // Stage 1.5: scaffold frontends / worker containers into a BP directly from
   // the baked templates (no gallery picker). One frontend kind; workers by

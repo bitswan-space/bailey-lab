@@ -201,6 +201,44 @@ async def ensure_bp_bare_repo(bp: str, author: str | None = None) -> str:
     return repo_path
 
 
+async def delete_copy_branch(bp: str, copy: str) -> bool:
+    """Delete a copy's branch in a BP's bare repo, server-side.
+
+    `receive.denyDeletes` and the pre-receive hook only bind PUSHES
+    (receive-pack); a filesystem `update-ref -d` bypasses them by design —
+    this is the only sanctioned way a copy branch ever disappears (copy
+    delete). Returns True when the ref was deleted, False when the repo or
+    ref didn't exist (idempotent)."""
+    validate_bp_name(bp)
+    if not copy or not _BP_NAME_RE.match(copy) or copy == "main":
+        raise ValueError(f"invalid copy name: {copy!r}")
+    repo_path = bp_bare_repo_path(bp)
+    if not os.path.isdir(os.path.join(repo_path, "objects")):
+        return False
+    # Existence check first: some git versions exit 0 when -d'ing a missing
+    # ref, so rc alone can't distinguish "deleted" from "was never there".
+    _, _, rc = await call_git_command_with_output(
+        "git", "-C", repo_path, "show-ref", "--verify", "-q", f"refs/heads/{copy}"
+    )
+    if rc != 0:
+        return False
+    _, _, rc = await call_git_command_with_output(
+        "git", "-C", repo_path, "update-ref", "-d", f"refs/heads/{copy}"
+    )
+    return rc == 0
+
+
+def delete_bp_bare_repo(bp: str) -> bool:
+    """Remove a BP's canonical bare repo entirely (BP delete, last destructive
+    step — after this nothing can re-materialize the BP). Missing repo = no-op.
+    """
+    repo_path = bp_bare_repo_path(bp)
+    if not os.path.isdir(repo_path):
+        return False
+    shutil.rmtree(repo_path)
+    return True
+
+
 async def ensure_all_bp_repos() -> None:
     """Refresh config/hooks (and any missing seed commit) on every existing BP
     repo — the startup counterpart of per-BP creation. Also makes sure the

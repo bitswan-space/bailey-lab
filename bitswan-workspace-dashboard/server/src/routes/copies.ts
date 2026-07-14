@@ -7,21 +7,56 @@ export interface CopyRoutesOptions {
 }
 
 /**
- * Copy creation. The listing itself flows over the `/api/events` SSE
- * feed (gitops broadcasts a `copies` event), so this file only carries
+ * Copy creation + deletion. The listing itself flows over the `/api/events`
+ * SSE feed (gitops broadcasts a `copies` event), so this file only carries
  * mutating endpoints. Validation of the branch name is delegated to
  * gitops, which has the canonical regex.
  *
- * There is deliberately NO copy-delete route: a copy is a user's personal
- * working environment, and the dashboard must never let a user delete their
- * own copy (or, worse, anyone else's). Copy lifecycle/cleanup is an operator
- * concern handled out-of-band (the gitops endpoint + daemon), not a
- * user-facing action.
+ * Copy deletion IS a user-facing action (it used to be operator-only):
+ * the client shows a warn+confirm dialog listing unmerged/uncommitted work
+ * before calling DELETE, and gitops tears down the whole copy — live-dev
+ * deployments, per-copy databases, its branch in every BP repo, and the
+ * directory tree. Deleting your own copy is allowed; a fresh one is
+ * recreated from main on next use (via /api/me).
  */
 export function registerCopyRoutes(
   app: FastifyInstance,
   { gitops }: CopyRoutesOptions,
 ): void {
+  // Delete a whole copy. Gitops answers 202 + a task id and runs the
+  // teardown on its queue; the `copies` SSE snapshot dropping the copy is
+  // the completion signal. The unmerged-work warning is a CLIENT concern —
+  // the server never blocks on divergence.
+  app.delete<{ Params: { name: string } }>(
+    '/api/copies/:name',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      const { name } = req.params;
+      if (!name) {
+        return reply.code(400).send({ error: 'name is required' });
+      }
+      const deletedBy = await emailFromRequest(req, app.log);
+      try {
+        const r = await gitops.deleteCopy({
+          name,
+          ...(deletedBy ? { deleted_by: deletedBy } : {}),
+        });
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return reply.code(202).send(r.body);
+      } catch (err) {
+        app.log.warn({ err, name }, 'copy delete failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   app.post<{ Params: { name: string }; Body: { bp?: string } }>(
     '/api/copies/:name/sync',
     async (req, reply) => {

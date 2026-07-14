@@ -1113,9 +1113,11 @@ func (c *Client) EnableService(serviceType, workspace string, options map[string
 	return &result, nil
 }
 
-// WorkspaceInit runs `bitswan workspace init ...` via the daemon with NDJSON streaming.
-func (c *Client) WorkspaceInit(args []string) error {
-	bodyBytes, err := json.Marshal(WorkspaceRunRequest{Args: args})
+// WorkspaceInit runs `bitswan workspace init ...` via the daemon with NDJSON
+// streaming. The request is typed — cobra already parsed the flags client-side,
+// so the daemon never re-parses argv.
+func (c *Client) WorkspaceInit(req0 WorkspaceInitRequest) error {
+	bodyBytes, err := json.Marshal(req0)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
@@ -1148,9 +1150,10 @@ func (c *Client) WorkspaceInit(args []string) error {
 	return err
 }
 
-// WorkspaceUpdate runs `bitswan workspace update ...` via the daemon with NDJSON streaming.
-func (c *Client) WorkspaceUpdate(args []string) error {
-	bodyBytes, err := json.Marshal(WorkspaceRunRequest{Args: args})
+// WorkspaceUpdate runs `bitswan workspace update ...` via the daemon with
+// NDJSON streaming. Typed request — same single-parser rule as WorkspaceInit.
+func (c *Client) WorkspaceUpdate(req0 WorkspaceUpdateRequest) error {
+	bodyBytes, err := json.Marshal(req0)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}

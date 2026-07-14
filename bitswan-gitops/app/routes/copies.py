@@ -34,6 +34,7 @@ from app.services.bp_git import (
     clone_bp_into_copy as _clone_bp_into_copy,
 )
 from app.services.bp_git import (
+    _rm_rf_as_root_in_container,
     fetch_main,
     ff_main_to_ref,
     list_bp_clones,
@@ -851,87 +852,6 @@ async def rebase_copy(name: str, body: SyncCopyRequest | None = None):
     )
 
 
-def _own_container_id_from_proc() -> str | None:
-    cgroup_re = re.compile(r"docker[-/]([0-9a-f]{64})")
-    try:
-        with open("/proc/self/cgroup") as f:
-            for line in f:
-                m = cgroup_re.search(line)
-                if m:
-                    return m.group(1)
-    except OSError:
-        pass
-    try:
-        with open("/proc/self/mountinfo") as f:
-            for line in f:
-                m = re.search(r"/containers/([0-9a-f]{64})/", line)
-                if m:
-                    return m.group(1)
-    except OSError:
-        pass
-    return None
-
-
-async def _own_container_id() -> str | None:
-    # /proc-based id works without Docker (reads our own cgroup) — gitops has no
-    # docker.sock after the cut-over, so there is no API fallback.
-    return _own_container_id_from_proc()
-
-
-async def _rm_rf_as_root_in_container(path: str) -> bool:
-    """Wipe `path` as root by re-entering our own container via the driver's
-    exec (--user 0). A copy's working tree contains files created by other
-    containers (live-dev automations, build outputs) that uid 1000 often can't
-    unlink. The driver holds docker.sock and permits this because the gitops
-    container is labelled with this workspace.
-    """
-    container_id = await _own_container_id()
-    if not container_id:
-        logger.warning(
-            "rm -rf %s: could not determine own container ID; cannot exec as root",
-            path,
-        )
-        return False
-    from app.services.infra_driver_client import (
-        ExecSpec,
-        InfraDriverClient,
-        InfraDriverError,
-        WorkspaceContext,
-    )
-
-    gitops_root = os.environ.get("BITSWAN_GITOPS_DIR", "/gitops")
-    client = InfraDriverClient()
-    ctx = WorkspaceContext(
-        workspace_name=os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local"),
-        domain=os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
-        gitops_dir=os.path.join(gitops_root, "gitops"),
-        secrets_dir=os.path.join(gitops_root, "secrets"),
-    )
-    err: list[bytes] = []
-
-    async def on_stderr(d: bytes):
-        err.append(d)
-
-    try:
-        rc = await client.exec(
-            ctx,
-            ExecSpec(container=container_id, cmd=["rm", "-rf", path], user="0"),
-            on_stderr=on_stderr,
-        )
-    except InfraDriverError as e:
-        logger.warning("rm -rf %s via driver exec raised: %s", path, e)
-        return False
-    if rc != 0:
-        logger.warning(
-            "rm -rf %s via driver exec failed (%s): %s",
-            path,
-            rc,
-            b"".join(err).decode(errors="replace").strip(),
-        )
-        return False
-    return True
-
-
 def _is_safe_relative_path(p: str) -> bool:
     if not p:
         return False
@@ -1001,6 +921,47 @@ async def _clone_status(clone_path: str, bp: str, by_path: dict) -> None:
         full = f"{bp}/{p}"
         if full not in by_path:
             by_path[full] = {"path": full, "kind": "added", "adds": 0, "dels": 0}
+
+
+class DeleteCopyRequest(BaseModel):
+    # Injected by the dashboard proxy from the validated token.
+    deleted_by: str | None = None
+
+
+@router.delete("/{name}", status_code=202)
+async def delete_copy_route(name: str, body: DeleteCopyRequest | None = None) -> dict:
+    """Delete a WHOLE copy — asynchronous, idempotent.
+
+    Removes the copy's live-dev deployments + containers + gateways, its
+    per-(copy, BP) databases, its branch in every BP bare repo (server-side
+    `update-ref -d`; push-deletes stay forbidden) and its directory tree.
+    Unmerged-work warnings are a CLIENT concern (the dialog shows divergence
+    and requires confirmation) — the server never blocks on divergence.
+    404 only when nothing of the copy remains (dir, yaml entries, branches),
+    so re-issuing after a partial failure finishes the teardown. 202 +
+    task_queue task id otherwise.
+    """
+    from app.dependencies import get_automation_service
+    from app.services import bp_delete
+    from app.task_queue import task_queue
+
+    _validate_copy_name(name)
+    if name == "main":
+        raise HTTPException(status_code=400, detail="The main copy cannot be deleted")
+    deleted_by = (body.deleted_by or None) if body else None
+
+    service = get_automation_service()
+    bs_yaml = read_bitswan_yaml(service.gitops_dir) or {}
+    if not await bp_delete.copy_has_remnants(bs_yaml, name):
+        raise HTTPException(status_code=404, detail=f"No copy '{name}' found")
+
+    async def _run() -> dict:
+        return await bp_delete.delete_copy(name, deleted_by, service)
+
+    task_id = task_queue.submit(
+        "delete-copy", _run, requester_email=deleted_by, label=name
+    )
+    return {"task_id": task_id, "copy": name, "status": "pending"}
 
 
 @router.get("/{name}/status")

@@ -17,6 +17,16 @@ import {
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { api } from '@/lib/api';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
 import { cn } from '@/lib/utils';
@@ -46,6 +56,8 @@ type Status = 'running' | 'failed' | 'stopped';
 
 interface Item {
   name: string;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror: snapshot's deployment_id is nullable
+  deploymentId: string | null;
   url: string | null;
   status: Status;
   expose: boolean;
@@ -67,6 +79,9 @@ export function EnvironmentPanel({ bp, copy }: Props) {
   const [adding, setAdding] = useState<
     { kind: 'frontend' } | { kind: 'worker'; type: string } | null
   >(null);
+  // A pending delete awaiting confirmation in the AlertDialog. null = closed.
+  // eslint-disable-next-line no-restricted-syntax -- null = no pending delete
+  const [deleting, setDeleting] = useState<{ item: Item; kind: string } | null>(null);
 
   const { frontends, workers } = useMemo(() => {
     const prefix = `copies/${copy}/${bp}/`;
@@ -85,6 +100,7 @@ export function EnvironmentPanel({ bp, copy }: Props) {
       const prev = byName.get(name);
       byName.set(name, {
         name,
+        deploymentId: a.deployment_id ?? prev?.deploymentId ?? null,
         url: a.automation_url ?? prev?.url ?? null,
         status: status === 'running' ? 'running' : (prev?.status ?? status),
         expose: !!a.expose || !!prev?.expose,
@@ -145,12 +161,22 @@ export function EnvironmentPanel({ bp, copy }: Props) {
     );
   };
 
-  const remove = (item: Item, kind: string) => {
-    if (!window.confirm(`Delete ${kind} "${item.name}"? This cannot be undone.`))
-      return;
-    // DELETE is keyed by deployment_id, which for a source automation is its
-    // directory name within the BP.
-    void mutate('Delete', api.removeAutomation(item.name));
+  const confirmDelete = () => {
+    if (!deleting) return;
+    const { item } = deleting;
+    setDeleting(null);
+    // DELETE is keyed by the FULL deployment_id
+    // (<name>-copy-<copy>-<bp>-<stage>) — the short automation name matches
+    // no container label and used to silently orphan the container. Fall back
+    // to the name only when the snapshot has no deployment_id (gitops then
+    // resolves it server-side). removeSource: unlike the Deployments tab's
+    // "remove deployment", deleting here means the frontend/worker leaves the
+    // BP for good — without it the next whole-BP deploy would resurrect it
+    // from the surviving source directory.
+    void mutate(
+      'Delete',
+      api.removeAutomation(item.deploymentId ?? item.name, { removeSource: true }),
+    );
   };
 
   if (collapsed) {
@@ -203,7 +229,7 @@ export function EnvironmentPanel({ bp, copy }: Props) {
               onStartRename={() => setRenaming(f.name)}
               onRename={(next) => doRename(f.name, next)}
               onCancelRename={() => setRenaming(null)}
-              onDelete={() => remove(f, 'frontend')}
+              onDelete={() => setDeleting({ item: f, kind: 'frontend' })}
             />
           ))}
           {adding?.kind === 'frontend' ? (
@@ -237,7 +263,7 @@ export function EnvironmentPanel({ bp, copy }: Props) {
               onStartRename={() => setRenaming(w.name)}
               onRename={(next) => doRename(w.name, next)}
               onCancelRename={() => setRenaming(null)}
-              onDelete={() => remove(w, 'worker container')}
+              onDelete={() => setDeleting({ item: w, kind: 'worker container' })}
             />
           ))}
           {adding?.kind === 'worker' ? (
@@ -259,6 +285,30 @@ export function EnvironmentPanel({ bp, copy }: Props) {
 
         <DevSecrets bp={bp} />
       </div>
+
+      <AlertDialog open={deleting !== null} onOpenChange={(o) => !o && setDeleting(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete {deleting?.kind} “{deleting?.item.name}”?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This stops the container and permanently deletes the{' '}
+              {deleting?.kind ?? 'automation'}&apos;s source folder from the
+              business process. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={confirmDelete}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -383,7 +433,7 @@ function AddButton({
     <button
       onClick={onClick}
       disabled={disabled}
-      className="mt-1 flex h-[30px] items-center justify-center gap-1.5 rounded-md border-[1.5px] border-dashed border-border bg-background text-xs font-medium text-muted-foreground hover:border-primary hover:text-foreground disabled:opacity-40"
+      className="mt-1 flex h-[30px] w-full items-center justify-center gap-1.5 rounded-md border-[1.5px] border-dashed border-border bg-background text-xs font-medium text-muted-foreground hover:border-primary hover:text-foreground disabled:opacity-40"
     >
       <Plus className="size-3" aria-hidden />
       {label}

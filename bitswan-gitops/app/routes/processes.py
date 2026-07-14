@@ -61,6 +61,73 @@ def _validated_display_name(raw: str) -> str:
     return name
 
 
+class DeleteProcessRequest(BaseModel):
+    # Injected by the dashboard proxy from the validated token — attribution
+    # for the "Delete business process" commit + the queue task.
+    deleted_by: str | None = None
+
+
+@router.delete("/{slug}", status_code=202)
+async def delete_process(
+    slug: str,
+    body: DeleteProcessRequest | None = None,
+    automation_service: AutomationService = Depends(get_automation_service),
+) -> dict:
+    """Delete a business process — guarded, asynchronous, idempotent.
+
+    Refuses (409) while the BP has staging/production deployments (the user
+    tears those down first) or while any of its deployments is mid-deploy.
+    404 only when NOTHING of the BP remains (yaml entries, clone dirs, bare
+    repo, database registry) — so re-issuing after a partial failure finishes
+    the teardown. Otherwise 202 + a task_queue task id; the heavy teardown
+    (containers, DBs across all copies, git) runs serialized on the queue.
+    Keeps snapshots, backups and the per-BP deploy repo history (audit).
+    """
+    from app.deploy_manager import deploy_manager
+    from app.services import bp_delete
+    from app.task_queue import task_queue
+    from app.utils import read_bitswan_yaml
+
+    if not _BP_DIR_RE.match(slug):
+        raise HTTPException(status_code=400, detail="Invalid business process name")
+    deleted_by = (body.deleted_by or None) if body else None
+
+    bs_yaml = read_bitswan_yaml(automation_service.gitops_dir) or {}
+    protected = bp_delete.protected_deployments(bs_yaml, slug)
+    if protected:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "bp_has_protected_deployments",
+                "deployments": protected,
+            },
+        )
+    deploying = sorted(
+        did
+        for did in bp_delete.bp_deployments(bs_yaml, slug)
+        if deploy_manager.is_deploying(did)
+    )
+    if deploying:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "deploy_in_progress", "deployments": deploying},
+        )
+    if not bp_delete.bp_has_remnants(bs_yaml, slug):
+        raise HTTPException(
+            status_code=404, detail=f"No business process '{slug}' found"
+        )
+
+    async def _run() -> dict:
+        return await bp_delete.delete_business_process(
+            slug, deleted_by, automation_service
+        )
+
+    task_id = task_queue.submit(
+        "delete-bp", _run, requester_email=deleted_by, label=slug
+    )
+    return {"task_id": task_id, "bp": slug, "status": "pending"}
+
+
 class CreateProcessRequest(BaseModel):
     # Human-readable display name; the slug (directory / git repo /
     # deployment-id segment) is derived from it server-side.

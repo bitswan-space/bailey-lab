@@ -1173,6 +1173,9 @@ async def inspect_automation(
 @router.delete("/{deployment_id}")
 async def delete_automation(
     deployment_id: str,
+    remove_source: bool = Query(False),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    return await automation_service.delete_automation(deployment_id)
+    return await automation_service.delete_automation(
+        deployment_id, remove_source=remove_source
+    )
