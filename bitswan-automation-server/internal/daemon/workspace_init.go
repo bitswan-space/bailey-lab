@@ -60,18 +60,22 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	// dashboard) are recorded under this owner in the Bailey ACL.
 	owner := fs.String("owner", "", "")
 
-	if err := fs.Parse(args); err != nil {
+	// Interspersed parse: flags are honoured whether they come before or
+	// after the workspace name (std flag alone would silently drop
+	// everything after the first positional).
+	positionals, err := parseFlagsInterspersed(fs, args)
+	if err != nil {
 		return fmt.Errorf("failed to parse flags: %w", err)
 	}
 	if *verboseShort {
 		*verbose = true
 	}
 
-	if len(fs.Args()) < 1 {
+	if len(positionals) < 1 {
 		return fmt.Errorf("workspace name is required")
 	}
 
-	workspaceName := fs.Args()[0]
+	workspaceName := positionals[0]
 
 	// Memory admission: refuse a new workspace when its always-on infra reserve
 	// won't fit the host budget. Fail-open on a measurement error (never block
@@ -89,7 +93,6 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	bitswanConfig := os.Getenv("HOME") + "/.config/bitswan/"
-	var err error
 
 	// The daemon is a long-lived process. Init shells out to `docker compose`
 	// from the deployment dir via os.Chdir below, which mutates the daemon's

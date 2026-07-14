@@ -70,23 +70,9 @@ func (s *Server) runWorkspaceUpdate(args []string) error {
 	gitopsDevSourceDir := fs.String("gitops-dev-source-dir", "", "")
 	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
 
-	// Go's flag package stops parsing at the first non-flag token, so a flag
-	// placed after the workspace name (e.g. `update wraptest --gitops-image X`)
-	// would be silently ignored. Parse flags interspersed with positionals by
-	// re-parsing the remainder after each positional, so flag order relative to
-	// the workspace name doesn't matter.
-	var positionals []string
-	rest := args
-	for len(rest) > 0 {
-		if err := fs.Parse(rest); err != nil {
-			return fmt.Errorf("failed to parse flags: %w", err)
-		}
-		rest = fs.Args()
-		if len(rest) == 0 {
-			break
-		}
-		positionals = append(positionals, rest[0])
-		rest = rest[1:]
+	positionals, err := parseFlagsInterspersed(fs, args)
+	if err != nil {
+		return fmt.Errorf("failed to parse flags: %w", err)
 	}
 
 	if len(positionals) < 1 {
