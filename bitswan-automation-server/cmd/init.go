@@ -50,8 +50,35 @@ func newInitCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			// Pass through original args (excluding binary)
-			if err := client.WorkspaceInit(os.Args[1:]); err != nil {
+			// Cobra is the single flag parser: ship the parsed values as a
+			// typed request (the daemon never re-parses argv, so flag
+			// position relative to the workspace name doesn't matter).
+			owner, _ := cmd.Flags().GetString("owner")
+			req := daemon.WorkspaceInitRequest{
+				Workspace:             args[0],
+				Remote:                o.remoteRepo,
+				Branch:                o.workspaceBranch,
+				Domain:                o.domain,
+				CertsDir:              o.certsDir,
+				Verbose:               o.verbose,
+				MkCerts:               o.mkCerts,
+				NoDashboard:           o.noDashboard,
+				NoCodingAgent:         o.noCodingAgent,
+				SetHosts:              o.setHosts,
+				Local:                 o.local,
+				GitopsImage:           o.gitopsImage,
+				DashboardImage:        o.dashboardImage,
+				CodingAgentImage:      o.codingAgentImage,
+				InfraDriverImage:      o.infraDriverImage,
+				EgressGatewayImage:    o.egressGatewayImage,
+				GitopsDevSourceDir:    o.gitopsDevSourceDir,
+				DashboardDevSourceDir: o.dashboardDevSourceDir,
+				SSHPort:               o.sshPort,
+				Staging:               o.staging,
+				Dev:                   o.dev,
+				Owner:                 owner,
+			}
+			if err := client.WorkspaceInit(req); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

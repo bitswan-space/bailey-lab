@@ -82,14 +82,13 @@ func runTestUpdate(noRemove bool, customGitopsImage string) error {
 		initGitopsImage = fmt.Sprintf("bitswan/gitops:%s", latestGitopsVersion)
 	}
 
-	initArgs := []string{
-		"workspace", "init",
-		"--local",
-		"--gitops-image", initGitopsImage,
+	initReq := daemon.WorkspaceInitRequest{
+		Workspace:   workspaceName,
+		Local:       true,
+		GitopsImage: initGitopsImage,
 	}
-	initArgs = append(initArgs, workspaceName)
 
-	if err := client.WorkspaceInit(initArgs); err != nil {
+	if err := client.WorkspaceInit(initReq); err != nil {
 		return fmt.Errorf("failed to initialize workspace: %w", err)
 	}
 	fmt.Println("✓ Workspace initialized")
@@ -111,12 +110,9 @@ func runTestUpdate(noRemove bool, customGitopsImage string) error {
 
 	// Step 4: Run update command
 	fmt.Println("\n[4/6] Running update command...")
-	updateArgs := []string{
-		"workspace", "update",
-		workspaceName,
-	}
-
-	if err := client.WorkspaceUpdate(updateArgs); err != nil {
+	if err := client.WorkspaceUpdate(daemon.WorkspaceUpdateRequest{
+		Workspace: workspaceName,
+	}); err != nil {
 		if !noRemove {
 			cleanupWorkspace(workspaceName)
 		}

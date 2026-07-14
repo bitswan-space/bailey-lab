@@ -38,8 +38,25 @@ func newUpdateCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			// Pass through original args (excluding binary)
-			if err := client.WorkspaceUpdate(os.Args[1:]); err != nil {
+			// Cobra is the single flag parser: ship the parsed values as a
+			// typed request (the daemon never re-parses argv, so flag
+			// position relative to the workspace name doesn't matter).
+			req := daemon.WorkspaceUpdateRequest{
+				Workspace:             args[0],
+				GitopsImage:           o.gitopsImage,
+				DashboardImage:        o.dashboardImage,
+				KafkaImage:            o.kafkaImage,
+				ZookeeperImage:        o.zookeeperImage,
+				CouchdbImage:          o.couchdbImage,
+				Staging:               o.staging,
+				Dev:                   o.dev,
+				TrustCA:               o.trustCA,
+				DevMode:               o.devMode,
+				DisableDevMode:        o.disableDevMode,
+				GitopsDevSourceDir:    o.gitopsDevSourceDir,
+				DashboardDevSourceDir: o.dashboardDevSourceDir,
+			}
+			if err := client.WorkspaceUpdate(req); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

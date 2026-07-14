@@ -242,7 +242,12 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 	// --staging: CI publishes only the -staging gitops/dashboard/coding-agent
 	// images on every push to main, so a server running a current binary must
 	// pull those (the prod repos aren't published by CI and would be stale).
-	args := []string{"workspace", "init", "--staging", "--domain", domain, "--owner", email, name}
+	initReq := WorkspaceInitRequest{
+		Workspace: name,
+		Staging:   true,
+		Domain:    domain,
+		Owner:     email,
+	}
 	confirmCh := make(chan struct{}, 1)
 	confirmCh <- struct{}{}
 
@@ -335,7 +340,7 @@ func (s *Server) handleCreateWorkspaceFromBaileyAdmin(w http.ResponseWriter, r *
 		})
 	}()
 
-	initErr := s.runWorkspaceInit(args[2:], confirmCh)
+	initErr := s.runWorkspaceInit(initReq, confirmCh)
 	close(hbStop)
 	<-hbDone
 	// Close writer ends so the relay goroutines see EOF and exit.

@@ -127,16 +127,15 @@ func (s *Server) connectWorkspaceToAOC(workspaceName, aocUrl, automationServerId
 	// Actually update the workspace deployment via daemon
 	fmt.Printf("  🔄 Updating workspace deployment with new AOC configuration...\n")
 
-	// Use workspace update command to refresh the deployment with new AOC config
-	// runWorkspaceUpdate expects just the workspace name (it parses flags internally).
-	// Preserve the current gitops image — this refresh injects AOC env, it is not
-	// an image upgrade, so it must not downgrade a staging/newer-pinned workspace
-	// to the latest production gitops (see currentGitopsImage).
-	updateArgs := []string{workspaceName}
-	if img := currentGitopsImage(workspaceName); img != "" {
-		updateArgs = append(updateArgs, "--gitops-image", img)
-	}
-	if err := s.runWorkspaceUpdate(updateArgs); err != nil {
+	// Use the workspace-update logic to refresh the deployment with new AOC
+	// config. Preserve the current gitops image — this refresh injects AOC
+	// env, it is not an image upgrade, so it must not downgrade a
+	// staging/newer-pinned workspace to the latest production gitops (see
+	// currentGitopsImage).
+	if err := s.runWorkspaceUpdate(WorkspaceUpdateRequest{
+		Workspace:   workspaceName,
+		GitopsImage: currentGitopsImage(workspaceName),
+	}); err != nil {
 		return fmt.Errorf("failed to update workspace deployment: %w", err)
 	}
 	fmt.Printf("  ✅ Workspace deployment updated and services restarted!\n")

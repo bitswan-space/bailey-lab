@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -27,55 +26,42 @@ import (
 
 // runWorkspaceInit runs the workspace init logic with stdout already redirected.
 // confirmCh is used to block until the client confirms the SSH key prompt.
-func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) error {
-	// Parse flags
-	fs := flag.NewFlagSet("workspace-init", flag.ContinueOnError)
-	remoteRepo := fs.String("remote", "", "")
-	workspaceBranch := fs.String("branch", "", "")
-	domain := fs.String("domain", "", "")
-	certsDir := fs.String("certs-dir", "", "")
-	verbose := fs.Bool("verbose", false, "")
-	// The cobra client (cmd/init.go) advertises -v as the shorthand for
-	// --verbose, but `workspace init` forwards its raw argv here where Go's
-	// std flag package has no shorthand concept, so a bare -v would fail to
-	// parse. Accept -v explicitly and fold it into verbose below.
-	verboseShort := fs.Bool("v", false, "")
-	mkCerts := fs.Bool("mkcerts", false, "")
-	noDashboard := fs.Bool("no-dashboard", false, "")
-	noCodingAgent := fs.Bool("no-coding-agent", false, "")
-	setHosts := fs.Bool("set-hosts", false, "")
-	local := fs.Bool("local", false, "")
-	gitopsImage := fs.String("gitops-image", "", "")
-	dashboardImage := fs.String("dashboard-image", "", "")
-	codingAgentImage := fs.String("coding-agent-image", "", "")
-	infraDriverImage := fs.String("infra-driver-image", "", "")
-	egressGatewayImage := fs.String("egress-gateway-image", "", "")
-	gitopsDevSourceDir := fs.String("gitops-dev-source-dir", "", "")
-	dashboardDevSourceDir := fs.String("dashboard-dev-source-dir", "", "")
-	sshPort := fs.String("ssh-port", "", "")
-	staging := fs.Bool("staging", false, "")
-	dev := fs.Bool("dev", false, "")
+//
+// The request is fully typed: the CLI's cobra layer is the ONLY flag parser
+// (the daemon used to re-parse forwarded raw argv with Go's std flag package —
+// a second parser with subtly different semantics: no shorthands, no
+// interspersed flags — which silently dropped flags placed after the
+// workspace name). Local copies of the fields keep the body unchanged.
+func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan struct{}) error {
+	remoteRepo := req.Remote
+	workspaceBranch := req.Branch
+	domain := req.Domain
+	certsDir := req.CertsDir
+	verbose := req.Verbose
+	mkCerts := req.MkCerts
+	noDashboard := req.NoDashboard
+	noCodingAgent := req.NoCodingAgent
+	setHosts := req.SetHosts
+	local := req.Local
+	gitopsImage := req.GitopsImage
+	dashboardImage := req.DashboardImage
+	codingAgentImage := req.CodingAgentImage
+	infraDriverImage := req.InfraDriverImage
+	egressGatewayImage := req.EgressGatewayImage
+	gitopsDevSourceDir := req.GitopsDevSourceDir
+	dashboardDevSourceDir := req.DashboardDevSourceDir
+	sshPort := req.SSHPort
+	staging := req.Staging
+	dev := req.Dev
 	// Email of the user creating the workspace. Passed through to
 	// route registration so the workspace's endpoints (gitops,
 	// dashboard) are recorded under this owner in the Bailey ACL.
-	owner := fs.String("owner", "", "")
+	owner := req.Owner
 
-	// Interspersed parse: flags are honoured whether they come before or
-	// after the workspace name (std flag alone would silently drop
-	// everything after the first positional).
-	positionals, err := parseFlagsInterspersed(fs, args)
-	if err != nil {
-		return fmt.Errorf("failed to parse flags: %w", err)
-	}
-	if *verboseShort {
-		*verbose = true
-	}
-
-	if len(positionals) < 1 {
+	workspaceName := req.Workspace
+	if workspaceName == "" {
 		return fmt.Errorf("workspace name is required")
 	}
-
-	workspaceName := positionals[0]
 
 	// Memory admission: refuse a new workspace when its always-on infra reserve
 	// won't fit the host budget. Fail-open on a measurement error (never block
@@ -116,25 +102,25 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	// Init bitswan network
-	docker.EnsureDockerNetwork("bitswan_network", *verbose)
+	docker.EnsureDockerNetwork("bitswan_network", verbose)
 
 	// Ensure the global ingress proxy is running.
 	// initIngress is idempotent: it returns early if Traefik is already running.
-	if _, err := initIngress(*verbose); err != nil {
+	if _, err := initIngress(verbose); err != nil {
 		return fmt.Errorf("failed to initialize ingress: %w", err)
 	}
 	fmt.Println("Ingress proxy is ready!")
 
 	// Handle --local flag
-	if *local && (*setHosts || *mkCerts) {
+	if local && (setHosts || mkCerts) {
 		return fmt.Errorf("cannot use --local flag with --set-hosts or --mkcerts")
 	}
 
-	if *local {
-		*setHosts = true
-		*mkCerts = true
-		if *domain == "" {
-			*domain = fmt.Sprintf("bs-%s.localhost", workspaceName)
+	if local {
+		setHosts = true
+		mkCerts = true
+		if domain == "" {
+			domain = fmt.Sprintf("bs-%s.localhost", workspaceName)
 		}
 	}
 
@@ -147,21 +133,21 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	if cfg, cfgErr := config.NewAutomationServerConfig().LoadConfig(); cfgErr == nil {
 		initCfg = cfg
 	}
-	if resolved := resolveWorkspaceInitDomain(*domain, *local, initCfg); resolved != *domain {
-		*domain = resolved
-		fmt.Printf("No --domain provided; defaulting to the server's configured domain: %s\n", *domain)
+	if resolved := resolveWorkspaceInitDomain(domain, local, initCfg); resolved != domain {
+		domain = resolved
+		fmt.Printf("No --domain provided; defaulting to the server's configured domain: %s\n", domain)
 	}
 
 	// Handle certificate generation and installation
-	if *mkCerts || *certsDir != "" {
-		if *mkCerts {
+	if mkCerts || certsDir != "" {
+		if mkCerts {
 			// Generate wildcard cert for *.domain so subdomains (gitops, editor, automations) are covered
-			wildcardHostname := "*." + *domain
+			wildcardHostname := "*." + domain
 			if err := traefikapi.InstallTLSCerts(wildcardHostname, true, ""); err != nil {
 				return fmt.Errorf("error installing wildcard certificates: %w", err)
 			}
-		} else if *certsDir != "" {
-			if err := traefikapi.InstallTLSCerts(*domain, false, *certsDir); err != nil {
+		} else if certsDir != "" {
+			if err := traefikapi.InstallTLSCerts(domain, false, certsDir); err != nil {
 				return fmt.Errorf("error installing certificates from directory: %w", err)
 			}
 		}
@@ -215,13 +201,13 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	gitopsWorkspace := gitopsConfig + "/workspace"
 	var localRemoteName string
 	var localRemotePath string
-	if *remoteRepo != "" {
+	if remoteRepo != "" {
 		// Check if this is a local file path (starts with / or file://)
-		isLocalPath := strings.HasPrefix(*remoteRepo, "/") || strings.HasPrefix(*remoteRepo, "file://")
+		isLocalPath := strings.HasPrefix(remoteRepo, "/") || strings.HasPrefix(remoteRepo, "file://")
 
 		if isLocalPath {
 			// Handle local file path - clone directly without SSH setup
-			clonePath := *remoteRepo
+			clonePath := remoteRepo
 			if strings.HasPrefix(clonePath, "file://") {
 				clonePath = strings.TrimPrefix(clonePath, "file://")
 			}
@@ -231,7 +217,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			// Use su to switch to user1000 for git operations
 			// Escape the paths for shell safety
 			com := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("git clone %q %q", clonePath, gitopsWorkspace)) //nolint:gosec
-			if err := util.RunCommandVerbose(com, *verbose); err != nil {
+			if err := util.RunCommandVerbose(com, verbose); err != nil {
 				return fmt.Errorf("failed to clone local repository: %w", err)
 			}
 			fmt.Println("Local repository cloned!")
@@ -283,28 +269,28 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			}
 
 			// Checkout specified branch if provided
-			if *workspaceBranch != "" {
-				fmt.Printf("Checking out branch '%s'...\n", *workspaceBranch)
+			if workspaceBranch != "" {
+				fmt.Printf("Checking out branch '%s'...\n", workspaceBranch)
 				// First check if branch exists - run as user1000
-				checkBranchCmd := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git rev-parse --verify origin/%s", gitopsWorkspace, *workspaceBranch)) //nolint:gosec
+				checkBranchCmd := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git rev-parse --verify origin/%s", gitopsWorkspace, workspaceBranch)) //nolint:gosec
 				if checkBranchCmd.Run() == nil {
 					// Branch exists in remote, checkout it
-					checkoutCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git checkout -b %s origin/%s", gitopsWorkspace, *workspaceBranch, *workspaceBranch)) //nolint:gosec
-					if err := util.RunCommandVerbose(checkoutCom, *verbose); err != nil {
+					checkoutCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git checkout -b %s origin/%s", gitopsWorkspace, workspaceBranch, workspaceBranch)) //nolint:gosec
+					if err := util.RunCommandVerbose(checkoutCom, verbose); err != nil {
 						// Try just checking out if branch already exists locally
-						checkoutCom = exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git checkout %s", gitopsWorkspace, *workspaceBranch)) //nolint:gosec
-						if err := util.RunCommandVerbose(checkoutCom, *verbose); err != nil {
-							fmt.Printf("Warning: Failed to checkout branch '%s': %v\n", *workspaceBranch, err)
+						checkoutCom = exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git checkout %s", gitopsWorkspace, workspaceBranch)) //nolint:gosec
+						if err := util.RunCommandVerbose(checkoutCom, verbose); err != nil {
+							fmt.Printf("Warning: Failed to checkout branch '%s': %v\n", workspaceBranch, err)
 							fmt.Printf("Continuing with the default branch...\n")
 						} else {
-							fmt.Printf("Successfully checked out branch '%s'!\n", *workspaceBranch)
+							fmt.Printf("Successfully checked out branch '%s'!\n", workspaceBranch)
 						}
 					} else {
-						fmt.Printf("Successfully checked out branch '%s'!\n", *workspaceBranch)
+						fmt.Printf("Successfully checked out branch '%s'!\n", workspaceBranch)
 					}
 				} else {
 					// Branch doesn't exist in remote, it will be created as orphan branch later
-					fmt.Printf("Branch '%s' does not exist in remote, will be created as orphan branch\n", *workspaceBranch)
+					fmt.Printf("Branch '%s' does not exist in remote, will be created as orphan branch\n", workspaceBranch)
 				}
 			}
 		} else {
@@ -321,7 +307,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			chownSSHCmd.Run() // Ignore errors
 
 			// Parse repository URL to get hostname, org, and repo
-			repoInfo, err := parseRepositoryURL(*remoteRepo)
+			repoInfo, err := parseRepositoryURL(remoteRepo)
 			if err != nil {
 				return fmt.Errorf("failed to parse repository URL: %w", err)
 			}
@@ -354,9 +340,9 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 
 			// Build SSH command
 			var sshCmd string
-			if *sshPort != "" {
+			if sshPort != "" {
 				// Create SSH config file for custom port access
-				sshConfigPath, err := createSSHConfig(gitopsConfig, workspaceName, repoInfo, *sshPort)
+				sshConfigPath, err := createSSHConfig(gitopsConfig, workspaceName, repoInfo, sshPort)
 				if err != nil {
 					return fmt.Errorf("failed to create SSH config: %w", err)
 				}
@@ -371,7 +357,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			com := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", sshCmd) //nolint:gosec
 
 			fmt.Println("Cloning remote repository...")
-			if err := util.RunCommandVerbose(com, *verbose); err != nil {
+			if err := util.RunCommandVerbose(com, verbose); err != nil {
 				return fmt.Errorf("failed to clone remote repository: %w", err)
 			}
 			fmt.Println("Remote repository cloned!")
@@ -381,14 +367,14 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			chownCloneCmd.Run() // Ignore errors
 
 			// Checkout specified branch if provided
-			if *workspaceBranch != "" {
-				fmt.Printf("Checking out branch '%s'...\n", *workspaceBranch)
-				checkoutCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git checkout %s", gitopsWorkspace, *workspaceBranch)) //nolint:gosec
-				if err := util.RunCommandVerbose(checkoutCom, *verbose); err != nil {
-					fmt.Printf("Warning: Failed to checkout branch '%s': %v\n", *workspaceBranch, err)
+			if workspaceBranch != "" {
+				fmt.Printf("Checking out branch '%s'...\n", workspaceBranch)
+				checkoutCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git checkout %s", gitopsWorkspace, workspaceBranch)) //nolint:gosec
+				if err := util.RunCommandVerbose(checkoutCom, verbose); err != nil {
+					fmt.Printf("Warning: Failed to checkout branch '%s': %v\n", workspaceBranch, err)
 					fmt.Printf("Continuing with the default branch...\n")
 				} else {
-					fmt.Printf("Successfully checked out branch '%s'!\n", *workspaceBranch)
+					fmt.Printf("Successfully checked out branch '%s'!\n", workspaceBranch)
 				}
 			}
 		}
@@ -406,7 +392,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		com := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("git -C %s init", gitopsWorkspace)) //nolint:gosec
 		fmt.Println("Initializing git in workspace...")
 
-		if err := util.RunCommandVerbose(com, *verbose); err != nil {
+		if err := util.RunCommandVerbose(com, verbose); err != nil {
 			return fmt.Errorf("failed to init git in workspace: %w", err)
 		}
 
@@ -443,24 +429,24 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	worktreeAddCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", initStateRepo) //nolint:gosec
 
 	fmt.Println("Setting up GitOps state repo...")
-	if err := util.RunCommandVerbose(worktreeAddCom, *verbose); err != nil {
+	if err := util.RunCommandVerbose(worktreeAddCom, verbose); err != nil {
 		return fmt.Errorf("failed to create GitOps state repo: %w", err)
 	}
 
-	if *remoteRepo != "" {
+	if remoteRepo != "" {
 		// Check if this is a local file path
-		isLocalPath := strings.HasPrefix(*remoteRepo, "/") || strings.HasPrefix(*remoteRepo, "file://")
+		isLocalPath := strings.HasPrefix(remoteRepo, "/") || strings.HasPrefix(remoteRepo, "file://")
 
 		// Create empty commit as user1000
 		emptyCommitCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git commit --allow-empty -m 'Initial commit'", gitopsWorktree)) //nolint:gosec
-		if err := util.RunCommandVerbose(emptyCommitCom, *verbose); err != nil {
+		if err := util.RunCommandVerbose(emptyCommitCom, verbose); err != nil {
 			return fmt.Errorf("failed to create empty commit: %w", err)
 		}
 
 		if isLocalPath {
 			// For local paths, just push directly without SSH setup as user1000
 			setUpstreamCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git push -u origin %s", gitopsWorktree, workspaceName)) //nolint:gosec
-			if err := util.RunCommandVerbose(setUpstreamCom, *verbose); err != nil {
+			if err := util.RunCommandVerbose(setUpstreamCom, verbose); err != nil {
 				return fmt.Errorf("failed to set upstream: %w", err)
 			}
 
@@ -475,12 +461,12 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 				// Update in both the main workspace repo and the gitops worktree (they share the same remote config)
 				// Update in main workspace repo
 				updateRemoteCmd := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git remote set-url origin %s", gitopsWorkspace, remoteURLForGitOps)) //nolint:gosec
-				if err := util.RunCommandVerbose(updateRemoteCmd, *verbose); err != nil {
+				if err := util.RunCommandVerbose(updateRemoteCmd, verbose); err != nil {
 					fmt.Printf("Warning: Failed to update remote URL to mount point in main repo: %v\n", err)
 				}
 				// Also update in gitops worktree explicitly (though they share .git, being explicit helps)
 				updateRemoteCmdWorktree := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", fmt.Sprintf("cd %s && git remote set-url origin %s", gitopsWorktree, remoteURLForGitOps)) //nolint:gosec
-				if err := util.RunCommandVerbose(updateRemoteCmdWorktree, *verbose); err != nil {
+				if err := util.RunCommandVerbose(updateRemoteCmdWorktree, verbose); err != nil {
 					fmt.Printf("Warning: Failed to update remote URL to mount point in worktree: %v\n", err)
 				} else {
 					fmt.Printf("Remote URL updated to mount point successfully\n")
@@ -489,15 +475,15 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		} else {
 			// Push to remote using SSH key as user1000
 			var sshCmd string
-			if *sshPort != "" {
+			if sshPort != "" {
 				// Parse repository URL to get hostname, org, and repo
-				repoInfo, err := parseRepositoryURL(*remoteRepo)
+				repoInfo, err := parseRepositoryURL(remoteRepo)
 				if err != nil {
 					return fmt.Errorf("failed to parse repository URL: %w", err)
 				}
 
 				// Create SSH config file for custom port access
-				sshConfigPath, err := createSSHConfig(gitopsConfig, workspaceName, repoInfo, *sshPort)
+				sshConfigPath, err := createSSHConfig(gitopsConfig, workspaceName, repoInfo, sshPort)
 				if err != nil {
 					return fmt.Errorf("failed to create SSH config: %w", err)
 				}
@@ -511,7 +497,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			}
 
 			setUpstreamCom := exec.Command("su", "-s", "/bin/sh", "user1000", "-c", sshCmd) //nolint:gosec
-			if err := util.RunCommandVerbose(setUpstreamCom, *verbose); err != nil {
+			if err := util.RunCommandVerbose(setUpstreamCom, verbose); err != nil {
 				return fmt.Errorf("failed to set upstream: %w", err)
 			}
 		}
@@ -526,7 +512,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	// Only the gitops worktree needs to be owned by user1000 for the GitOps container.
 	fmt.Println("Fixing ownership of gitops worktree...")
 	chownGitopsCmd := exec.Command("chown", "-R", "1000:1000", gitopsWorktree)
-	if err := util.RunCommandVerbose(chownGitopsCmd, *verbose); err != nil {
+	if err := util.RunCommandVerbose(chownGitopsCmd, verbose); err != nil {
 		return fmt.Errorf("failed to fix ownership of gitops directory: %w", err)
 	}
 	fmt.Println("Ownership fixed successfully!")
@@ -535,7 +521,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	// process gets its OWN bare repo (created by gitops at BP creation); the
 	// `main` copy holds a checkout of each BP's main. The gitops worktree
 	// above remains the promoted-deployment state repo.
-	if err := setupBPRepoDirAndMainCopy(gitopsConfig, *verbose); err != nil {
+	if err := setupBPRepoDirAndMainCopy(gitopsConfig, verbose); err != nil {
 		return fmt.Errorf("failed to set up git repos dir: %w", err)
 	}
 
@@ -546,7 +532,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	// Generate SSH key pair for the workspace (if not already generated for remote repo)
-	if *remoteRepo == "" {
+	if remoteRepo == "" {
 		fmt.Println("Generating SSH key pair for workspace...")
 		sshKeyPair, err := ssh.GenerateSSHKeyPair(gitopsConfig)
 		if err != nil {
@@ -556,17 +542,17 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	// Set hosts to /etc/hosts file
-	if *setHosts {
-		err := setHostsFile(workspaceName, *domain)
+	if setHosts {
+		err := setHostsFile(workspaceName, domain)
 		if err != nil {
 			fmt.Printf("\033[33m%s\033[0m\n", err)
 		}
 	}
 
-	imgopsImage := *gitopsImage
+	imgopsImage := gitopsImage
 	if imgopsImage == "" {
 		var err error
-		imgopsImage, err = dockerhub.ResolveGitopsImage(*staging, *dev)
+		imgopsImage, err = dockerhub.ResolveGitopsImage(staging, dev)
 		if err != nil {
 			return fmt.Errorf("failed to get latest BitSwan GitOps image: %w", err)
 		}
@@ -576,11 +562,11 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	// actually deploy. Otherwise `bitswan workspace init --no-dashboard`
 	// fails if the dashboard image repo isn't reachable.
 	var bitswanDashboardImage string
-	if !*noDashboard {
-		bitswanDashboardImage = *dashboardImage
+	if !noDashboard {
+		bitswanDashboardImage = dashboardImage
 		if bitswanDashboardImage == "" {
 			var err error
-			bitswanDashboardImage, err = dockerhub.ResolveDashboardImage(*staging, *dev)
+			bitswanDashboardImage, err = dockerhub.ResolveDashboardImage(staging, dev)
 			if err != nil {
 				return fmt.Errorf("failed to get latest BitSwan workspace-dashboard image: %w", err)
 			}
@@ -588,11 +574,11 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	var bitswanCodingAgentImage string
-	if !*noCodingAgent {
-		bitswanCodingAgentImage = *codingAgentImage
+	if !noCodingAgent {
+		bitswanCodingAgentImage = codingAgentImage
 		if bitswanCodingAgentImage == "" {
 			var err error
-			bitswanCodingAgentImage, err = dockerhub.ResolveCodingAgentImage(*staging, *dev)
+			bitswanCodingAgentImage, err = dockerhub.ResolveCodingAgentImage(staging, dev)
 			if err != nil {
 				return fmt.Errorf("failed to get latest BitSwan coding-agent image: %w", err)
 			}
@@ -600,10 +586,10 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	// The infra-driver sidecar runs its own image; pin the resolved version.
-	bitswanInfraDriverImage := *infraDriverImage
+	bitswanInfraDriverImage := infraDriverImage
 	if bitswanInfraDriverImage == "" {
 		var err error
-		bitswanInfraDriverImage, err = dockerhub.ResolveInfraDriverImage(*staging, *dev)
+		bitswanInfraDriverImage, err = dockerhub.ResolveInfraDriverImage(staging, dev)
 		if err != nil {
 			return fmt.Errorf("failed to get latest BitSwan infra-driver image: %w", err)
 		}
@@ -612,10 +598,10 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	// gateways it materializes use a resolved version instead of :latest. Follows
 	// the same staging/dev-aware resolver + --egress-gateway-image override /
 	// BITSWAN_EGRESS_GATEWAY_IMAGE env pattern as the app images.
-	bitswanEgressGatewayImage := *egressGatewayImage
+	bitswanEgressGatewayImage := egressGatewayImage
 	if bitswanEgressGatewayImage == "" {
 		var err error
-		bitswanEgressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(*staging, *dev)
+		bitswanEgressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(staging, dev)
 		if err != nil {
 			return fmt.Errorf("failed to get latest BitSwan egress-gateway image: %w", err)
 		}
@@ -625,7 +611,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	// metadata before the service starts. The coding-agent container is started
 	// with this secret in env, and gitops re-discovers it via `docker inspect`.
 	var codingAgentSecret string
-	if !*noCodingAgent {
+	if !noCodingAgent {
 		codingAgentSecret = uuid.NewString()
 	}
 
@@ -640,21 +626,21 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	// every automation gitops deploys) register it as their ACL parent,
 	// so workspace members can share what the workspace spawns.
 	workspaceParent := ""
-	if !*noDashboard {
-		workspaceParent = fmt.Sprintf("%s-dashboard.%s", workspaceName, *domain)
+	if !noDashboard {
+		workspaceParent = fmt.Sprintf("%s-dashboard.%s", workspaceName, domain)
 	}
 
 	// Register GitOps service route via the daemon's ingress abstraction.
 	// addRouteToIngress detects the ingress type and handles certs + routing.
-	gitopsHostname := fmt.Sprintf("%s-gitops.%s", workspaceName, *domain)
+	gitopsHostname := fmt.Sprintf("%s-gitops.%s", workspaceName, domain)
 	gitopsUpstream := fmt.Sprintf("%s-gitops:8079", workspaceName)
 	if err := addRouteToIngress(IngressAddRouteRequest{
 		Hostname:       gitopsHostname,
 		Upstream:       gitopsUpstream,
-		Mkcert:         *mkCerts,
-		CertsDir:       *certsDir,
+		Mkcert:         mkCerts,
+		CertsDir:       certsDir,
 		WorkspaceName:  workspaceName,
-		OwnerEmail:     *owner,
+		OwnerEmail:     owner,
 		DisplayName:    workspaceName + " (gitops)",
 		ParentEndpoint: workspaceParent,
 	}, ""); err != nil {
@@ -677,7 +663,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		} else {
 			fmt.Println("Automation server token received successfully!")
 
-			workspaceId, err = aocClient.RegisterWorkspace(workspaceName, *domain)
+			workspaceId, err = aocClient.RegisterWorkspace(workspaceName, domain)
 			if err != nil {
 				return fmt.Errorf("failed to register workspace: %w", err)
 			}
@@ -698,9 +684,9 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		GitopsImage:        imgopsImage,
 		InfraDriverImage:   bitswanInfraDriverImage,
 		EgressGatewayImage: bitswanEgressGatewayImage,
-		Domain:             *domain,
+		Domain:             domain,
 		AocEnvVars:         aocEnvVars,
-		GitopsDevSourceDir: *gitopsDevSourceDir,
+		GitopsDevSourceDir: gitopsDevSourceDir,
 		TrustCA:            true,
 		LocalRemotePath:    localRemotePath,
 		LocalRemoteName:    localRemoteName,
@@ -725,7 +711,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	fmt.Println("GitOps deployment set up successfully!")
 
 	// Save metadata to file
-	if err := saveMetadata(gitopsConfig, workspaceName, token, *domain, *noDashboard, *noCodingAgent, &workspaceId, *gitopsDevSourceDir, *dashboardDevSourceDir, codingAgentSecret); err != nil {
+	if err := saveMetadata(gitopsConfig, workspaceName, token, domain, noDashboard, noCodingAgent, &workspaceId, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret); err != nil {
 		fmt.Printf("Warning: Failed to save metadata: %v\n", err)
 	}
 
@@ -747,7 +733,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 	}
 
 	// Setup dashboard service if not disabled.
-	if !*noDashboard {
+	if !noDashboard {
 		fmt.Println("Setting up workspace-dashboard service...")
 
 		dashboardService, err := services.NewDashboardService(workspaceName)
@@ -759,15 +745,15 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 			return fmt.Errorf("failed to enable dashboard service: %w", err)
 		}
 
-		dashboardHostname := fmt.Sprintf("%s-dashboard.%s", workspaceName, *domain)
+		dashboardHostname := fmt.Sprintf("%s-dashboard.%s", workspaceName, domain)
 		dashboardUpstream := fmt.Sprintf("%s-dashboard:8080", workspaceName)
 		if err := addRouteToIngress(IngressAddRouteRequest{
 			Hostname:      dashboardHostname,
 			Upstream:      dashboardUpstream,
-			Mkcert:        *mkCerts,
-			CertsDir:      *certsDir,
+			Mkcert:        mkCerts,
+			CertsDir:      certsDir,
 			WorkspaceName: workspaceName,
-			OwnerEmail:    *owner,
+			OwnerEmail:    owner,
 			DisplayName:   workspaceName + " (dashboard)",
 		}, ""); err != nil {
 			return fmt.Errorf("failed to register Dashboard service: %w", err)
@@ -778,11 +764,11 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 		}
 
 		fmt.Println("------------WORKSPACE DASHBOARD INFO------------")
-		fmt.Printf("Workspace Dashboard URL: https://%s-dashboard.%s\n", workspaceName, *domain)
+		fmt.Printf("Workspace Dashboard URL: https://%s-dashboard.%s\n", workspaceName, domain)
 	}
 
 	// Setup coding-agent service if not disabled.
-	if !*noCodingAgent {
+	if !noCodingAgent {
 		fmt.Println("Setting up coding-agent service...")
 
 		codingAgentService, err := services.NewCodingAgentService(workspaceName)
@@ -792,7 +778,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 
 		// Coding-agent has no durable live-dev mode (only gitops + dashboard do),
 		// so init never sets a dev config — enable with the plain image.
-		if err := codingAgentService.Enable(codingAgentSecret, bitswanCodingAgentImage, *domain, nil); err != nil {
+		if err := codingAgentService.Enable(codingAgentSecret, bitswanCodingAgentImage, domain, nil); err != nil {
 			return fmt.Errorf("failed to enable coding-agent service: %w", err)
 		}
 
@@ -806,7 +792,7 @@ func (s *Server) runWorkspaceInit(args []string, confirmCh <-chan struct{}) erro
 
 	fmt.Println("------------GITOPS INFO------------")
 	fmt.Printf("GitOps ID: %s\n", workspaceName)
-	fmt.Printf("GitOps URL: https://%s-gitops.%s\n", workspaceName, *domain)
+	fmt.Printf("GitOps URL: https://%s-gitops.%s\n", workspaceName, domain)
 	fmt.Printf("GitOps Secret: %s\n", token)
 
 	return nil
