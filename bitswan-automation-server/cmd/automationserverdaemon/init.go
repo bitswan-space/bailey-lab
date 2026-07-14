@@ -202,6 +202,13 @@ func startDaemonContainer(startMessage, successMessage string) error {
 	// volumes instead of host bind mounts under the user's home directory. This
 	// makes storage independent of which host user runs the commands (the
 	// root-then-ubuntu mismatch that used to leave files in the wrong place).
+	//
+	// The daemon signs local (.localhost) certificates with the mkcert CA in its
+	// volume, while host-side clients (the CLI, browsers) verify against the CA
+	// mkcert installed on the host under ~/.local/share/mkcert. Those must be the
+	// SAME CA, so a fresh daemon adopts the host's existing mkcert CA by seeding
+	// its (empty) volume from that directory.
+	hostMkcertDir := filepath.Join(homeDir, ".local", "share", "mkcert")
 
 	// Launch the daemon container
 	// Mount the binary, config directory, docker socket, and mkcert directory
@@ -275,6 +282,12 @@ func startDaemonContainer(startMessage, successMessage string) error {
 	}
 	if err := ensureDockerVolume(mkcertVolume); err != nil {
 		return err
+	}
+	// Seed the mkcert volume from the host's existing CA so host-side clients
+	// trust the certificates the daemon issues. No-op once the volume has content
+	// (safe on every start/upgrade) or when the host has no mkcert CA yet.
+	if err := seedMkcertVolumeFromHost(mkcertVolume, hostMkcertDir, daemonImage); err != nil {
+		return fmt.Errorf("failed to seed mkcert CA into %s volume: %w", mkcertVolume, err)
 	}
 
 	// HOST_HOME still tells the daemon the host home directory (used for the few
@@ -530,5 +543,47 @@ func ensureDockerVolume(name string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create docker volume %s: %s: %w", name, strings.TrimSpace(string(out)), err)
 	}
+	return nil
+}
+
+// dockerVolumeEmpty reports whether the named volume contains no files. It runs
+// a throwaway container that lists the volume root.
+func dockerVolumeEmpty(name, image string) (bool, error) {
+	out, err := exec.Command("docker", "run", "--rm",
+		"-v", name+":/v:ro", image,
+		"sh", "-c", "ls -A /v 2>/dev/null | head -1").CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect docker volume %s: %s: %w", name, strings.TrimSpace(string(out)), err)
+	}
+	return strings.TrimSpace(string(out)) == "", nil
+}
+
+// seedMkcertVolumeFromHost copies the host's mkcert CA directory into the daemon's
+// mkcert volume so host-side clients (which verify against the host CA) trust the
+// certificates the daemon issues from that same CA. It is a no-op when the volume
+// already has content (safe to call on every daemon start/upgrade) or when the
+// host has no mkcert CA yet (mkcert will create one inside the volume on first
+// use). The host directory is left in place untouched.
+func seedMkcertVolumeFromHost(volume, hostMkcertDir, image string) error {
+	empty, err := dockerVolumeEmpty(volume, image)
+	if err != nil {
+		return err
+	}
+	if !empty {
+		return nil // already seeded, or the daemon has started populating it
+	}
+	entries, err := os.ReadDir(hostMkcertDir)
+	if err != nil || len(entries) == 0 {
+		return nil // host has no mkcert CA to adopt
+	}
+	fmt.Printf("Seeding mkcert CA from %s into docker volume %q ...\n", hostMkcertDir, volume)
+	out, err := exec.Command("docker", "run", "--rm",
+		"-v", hostMkcertDir+":/src:ro",
+		"-v", volume+":/dst",
+		image, "sh", "-c", "cp -a /src/. /dst/").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("copy %s -> volume %s failed: %s: %w", hostMkcertDir, volume, strings.TrimSpace(string(out)), err)
+	}
+	fmt.Printf("Seeded mkcert CA from %s into volume %q.\n", hostMkcertDir, volume)
 	return nil
 }
