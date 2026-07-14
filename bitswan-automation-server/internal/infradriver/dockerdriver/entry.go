@@ -59,18 +59,22 @@ func (c *compileState) computeFirewallScope(deployments map[string]*Deployment) 
 			fwKeyBP = depCtx
 		}
 		fwnode := firewallNode(c.bs, fwKeyBP, realm)
-		if fwnode == nil && postureFor(realm) != "monitor" {
-			continue
-		}
+		// FAIL CLOSED (security finding F1, path 1): an enforce realm
+		// (staging/production) MUST get an egress gateway even when the
+		// workspace declares no `firewall` node for this BP/realm. With no
+		// node, allowedHosts is empty, so the synthesized gateway is
+		// default-deny — the opposite of the old behaviour, which skipped the
+		// gateway entirely and left tenant code with unrestricted outbound
+		// (incl. the cloud metadata endpoint). Monitor realms (dev/live-dev)
+		// still get an observe-only gateway with no node, unchanged.
 		for _, sd := range c.slotDBPairs(conf) {
 			key := fwKey{depCtx, stage, sd.slot}
-			g, ok := scope[key]
-			if !ok {
+			if _, ok := scope[key]; !ok {
 				mode := postureFor(realm)
 				if fwnode != nil && fwnode.Posture != "" {
 					mode = fwnode.Posture
 				}
-				g = &fwGroup{
+				scope[key] = &fwGroup{
 					gw:    makeHostnameLabel(c.workspaceName, "fwgw", depCtx, stage, sd.slot),
 					mode:  mode,
 					allow: allowedHosts(c.bs, fwKeyBP, realm),
@@ -78,11 +82,15 @@ func (c *compileState) computeFirewallScope(deployments map[string]*Deployment) 
 					bp:    fwKeyBP,
 					ok:    true,
 				}
-				scope[key] = g
 			}
-			if conf.ReplicasOrOne() > 1 {
-				g.ok = false
-			}
+			// FAIL CLOSED (F1, path 2): replicas>1 must NOT disable the
+			// firewall. A firewalled worker shares its gateway's single netns
+			// (network_mode: service:<gw>), which is incompatible with compose
+			// `deploy.replicas` — so a firewalled worker runs as a single
+			// instance (buildServiceEntry omits the replicas block when
+			// network_mode is set). Security wins over scale-out here; the old
+			// code dropped the gateway for the whole group instead, opening
+			// egress for every worker in it.
 		}
 	}
 	return scope
@@ -115,6 +123,51 @@ func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fw
 	out := map[fwKey][]string{}
 	ports := map[workerPortKey]int{}
 	usedByScope := map[fwKey]map[int]bool{}
+	reserve := func(key fwKey, port int) {
+		used := usedByScope[key]
+		if used == nil {
+			used = map[int]bool{}
+			usedByScope[key] = used
+		}
+		used[port] = true
+	}
+
+	// Pass 1 — reserve the fixed listen port of every EXPOSED worker that shares
+	// an enforce gateway's netns (security finding F1, path 3). An exposed
+	// frontend's listen port is fixed by its image (the shim hard-codes :8080)
+	// and cannot be reassigned, so it must claim its port before non-exposed
+	// peers pick collision-free ones. Exposed workers are reached via ingress,
+	// not BITSWAN_WORKER_HOSTS, so they are NOT added to `out`; their port is
+	// recorded so the ingress route (buildServiceEntry) stays in sync. Only
+	// enforce scopes firewall exposed workers — dev/live-dev keep the frontend
+	// in its own netns (monitor egress is open by design; no reason to disturb
+	// the live-dev preview's networking).
+	for _, depID := range sortedDepIDs(deployments) {
+		conf := deployments[depID]
+		if conf == nil {
+			continue
+		}
+		cfg := c.resolveAutomationConfig(conf)
+		if !cfg.Expose {
+			continue
+		}
+		stage := conf.StageOrProduction()
+		name := conf.AutomationNameOr(depID)
+		depCtx := conf.Context
+		for _, sd := range c.slotDBPairs(conf) {
+			fw := fwActive(fwScope, depCtx, stage, sd.slot)
+			if fw == nil || fw.mode != "enforce" {
+				continue
+			}
+			key := fwKey{depCtx, stage, sd.slot}
+			reserve(key, cfg.Port)
+			ports[workerPortKey{depCtx, stage, sd.slot, name}] = cfg.Port
+		}
+	}
+
+	// Pass 2 — assign every non-exposed worker a collision-free port within its
+	// scope (skipping ports reserved for exposed peers above) and advertise it
+	// in BITSWAN_WORKER_HOSTS.
 	for _, depID := range sortedDepIDs(deployments) {
 		conf := deployments[depID]
 		if conf == nil {
@@ -391,9 +444,19 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	// actually changed; unchanged ones keep serving with zero downtime.
 
 	// ---- networks / network_mode / egress firewall ----
+	// A worker joins its gateway's netns when the group is active. Non-exposed
+	// workers always do so. EXPOSED workers (the public frontend) do so too, but
+	// only under an ENFORCE gateway (security finding F1, path 3 — the frontend
+	// runs tenant code and previously kept unrestricted egress + NET_ADMIN by
+	// simply being the exposed service). Its ingress still works: the DNAT is
+	// egress-only (nat OUTPUT), INPUT is unfiltered, and the enforce chain allows
+	// ESTABLISHED return traffic — so traffic to the frontend's :port lands on
+	// the shim while its outbound is filtered. Under a monitor gateway
+	// (dev/live-dev, egress open by design) the exposed frontend keeps its own
+	// netns, so the live-dev preview's networking is untouched.
 	var networkMode string
 	fw := fwActive(fwScope, depCtx, depStage, slot)
-	if fw != nil && !cfg.Expose {
+	if fw != nil && (!cfg.Expose || fw.mode == "enforce") {
 		networkMode = "service:" + fw.gw
 		entry["cap_drop"] = sortedStrings([]string{"NET_ADMIN", "NET_RAW"})
 		entry["depends_on"] = map[string]interface{}{
@@ -589,6 +652,15 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		if publish {
 			labels["gitops.intended_exposed"] = "true"
 			r := c.workspaceRoute(depAutomationName, depCtx, depStage, port, slot, roleStage)
+			// When the frontend is firewalled (F1, path 3) it has no network of
+			// its own — it lives in the gateway's netns. Traefik must reach it
+			// via the gateway, which owns the stage-network alias <gw>, so point
+			// the upstream at <gw>:<port> instead of the (now unroutable) worker
+			// service name. The frontend still listens on its declared port
+			// inside the shared netns.
+			if networkMode != "" && fw != nil {
+				r.Upstream = fmt.Sprintf("%s:%d", fw.gw, port)
+			}
 			route = &r
 		} else {
 			labels["gitops.intended_exposed"] = "false"
