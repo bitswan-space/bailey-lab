@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,7 +11,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/automations"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 )
@@ -24,7 +22,28 @@ type Compose struct {
 	} `yaml:"services"`
 }
 
-// RunWorkspaceRemove runs the workspace remove logic
+// RunWorkspaceRemove tears down EVERYTHING a workspace consists of, entirely
+// daemon-side — it never talks to the workspace's gitops container (which may
+// already be stopped, broken, or half-removed).
+//
+// Teardown keys on what the runtime actually stamps on resources, not on
+// compose files that may no longer exist:
+//   - every runtime container (automations, per-stage infra services like
+//     <ws>__postgres-dev, egress gateways, the gitops container itself)
+//     carries the label `gitops.workspace=<ws>`;
+//   - compose-managed volumes carry `com.docker.compose.project`;
+//   - the per-workspace stage networks are exactly <ws>-{dev,staging,production}.
+//
+// Order: metadata first (files die later) → compose downs (belt & braces —
+// they also delete project networks/volumes) → label sweep → volumes →
+// networks → ingress routes/TLS → images → files → active-workspace repoint →
+// /etc/hosts. Every step is best-effort with a log line; a failed step never
+// aborts the rest (an aborted teardown leaves strictly more garbage).
+//
+// NEVER deleted here (shared across all workspaces): the `bitswan` volume
+// (every workspace and the daemon's own config live in it as subpaths — this
+// workspace's bytes go away via rm -rf of its subdirectory), the
+// `bitswan-mkcert` volume, and the `bitswan_network` network.
 func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	// Get the real user's home directory (host home, not container home)
 	homeDir, err := config.GetRealUserHomeDir()
@@ -33,71 +52,64 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 		homeDir = os.Getenv("HOME")
 	}
 	bitswanPath := filepath.Join(homeDir, ".config", "bitswan")
-
-	// 1. Ask user for confirmation (handled by CLI, but we need to check automations first)
-	// Use public URL during deletion since containers may be stopping/stopped
-	automationSet, err := automations.GetListAutomationsWithOptions(workspaceName, true)
-	var skipAutomationRemoval bool
-	if err != nil {
-		// Check if this is a WorkspaceMisbehavingError
-		var misbehavingErr *automations.WorkspaceMisbehavingError
-		if errors.As(err, &misbehavingErr) {
-			fmt.Fprintf(writer, "This workspace seems to be misbehaving. Cannot detect which automations are running within it. Would you like to stop it anyway with the risk of leaving some orphaned automations running? [y/N]: ")
-			// Note: User confirmation is handled by CLI, so we'll skip for now
-			skipAutomationRemoval = true
-			automationSet = nil
-		} else {
-			// For any other error, just skip automation removal and continue
-			fmt.Fprintf(writer, "Warning: Cannot connect to workspace to retrieve automations (%v). Continuing with removal process.\n", err)
-			skipAutomationRemoval = true
-			automationSet = nil
-		}
-	}
-
-	// 2. Remove the automations from the server
-	if !skipAutomationRemoval && len(automationSet) > 0 {
-		fmt.Fprintln(writer, "Removing automations...")
-		for _, automation := range automationSet {
-			err := automation.Remove()
-			if err != nil {
-				return fmt.Errorf("error removing automation %s: %w", automation.Name, err)
-			}
-		}
-		fmt.Fprintln(writer, "Automations removed successfully.")
-	} else if skipAutomationRemoval {
-		fmt.Fprintln(writer, "Skipping automation removal due to workspace misbehavior.")
-	} else {
-		fmt.Fprintln(writer, "No automations to remove.")
-	}
-
-	// 3. Remove GitOps docker containers and volumes
-	fmt.Fprintln(writer, "Removing docker containers and volumes...")
 	workspacesFolder := filepath.Join(bitswanPath, "workspaces")
-	dockerComposePath := filepath.Join(workspacesFolder, workspaceName, "deployment")
+	workspaceDir := filepath.Join(workspacesFolder, workspaceName)
+	dockerComposePath := filepath.Join(workspaceDir, "deployment")
+	gitopsDir := filepath.Join(workspaceDir, "gitops")
 	// Docker compose project names must be lowercase
 	projectName := strings.ToLower(workspaceName)
 
-	// Tear down the automations + infra (database) containers that gitops
-	// deployed at runtime. This runs regardless of whether the gitops API
-	// automation removal above succeeded, so it also covers the case where
-	// gitops is unreachable. gitops launches these under
-	// COMPOSE_PROJECT_NAME=<workspace> (Docker lowercases it) from
-	// <workspace>/gitops/docker-compose.yaml; the infra/DB services carry no
-	// gitops.* labels, so a compose-file down is the only reliable way to
-	// remove them.
-	gitopsDir := filepath.Join(workspacesFolder, workspaceName, "gitops")
-	gitopsCompose := filepath.Join(gitopsDir, "docker-compose.yaml")
-	if _, err := os.Stat(gitopsCompose); err == nil {
-		fmt.Fprintln(writer, "Removing automations and infra (database) containers deployed by gitops...")
-		cmd := exec.Command("docker", "compose", "-f", "docker-compose.yaml", "-p", projectName, "down", "--volumes")
-		cmd.Dir = gitopsDir
-		cmd.Stdout = writer
-		cmd.Stderr = writer
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(writer, "Warning: Failed to remove gitops-deployed containers/volumes: %v\n", err)
+	// 1. Read metadata (domain) BEFORE anything deletes files.
+	domain := ""
+	if md, merr := config.GetWorkspaceMetadata(workspaceName); merr == nil {
+		domain = md.Domain
+	}
+
+	// 2. Compose downs — belt & braces: each `down --volumes` also removes the
+	// project's own networks and volumes. The label sweep below catches
+	// whatever these miss (e.g. when the compose files are already gone).
+	fmt.Fprintln(writer, "Removing docker containers and volumes...")
+
+	// 2a. The whole-workspace runtime compose, if gitops ever wrote one. The
+	// driver deploys under the RAW workspace name as the project; older code
+	// used the lowercased form — try both when they differ.
+	gitopsProjects := []string{workspaceName}
+	if projectName != workspaceName {
+		gitopsProjects = append(gitopsProjects, projectName)
+	}
+	if _, err := os.Stat(filepath.Join(gitopsDir, "docker-compose.yaml")); err == nil {
+		for _, proj := range gitopsProjects {
+			cmd := exec.Command("docker", "compose", "-f", "docker-compose.yaml", "-p", proj, "down", "--volumes")
+			cmd.Dir = gitopsDir
+			cmd.Stdout = writer
+			cmd.Stderr = writer
+			if err := cmd.Run(); err != nil {
+				fmt.Fprintf(writer, "Warning: Failed to remove gitops-deployed containers/volumes (project %s): %v\n", proj, err)
+			}
 		}
 	}
 
+	// 2b. Per-BP runtime compose files: per-BP deploys write the compiled
+	// compose to gitops/bp/<bp>/docker-compose.yaml (NOT the root file), which
+	// is where the automation + infra (database) + gateway containers of a
+	// modern workspace actually come from.
+	if bpComposeFiles, gerr := filepath.Glob(filepath.Join(gitopsDir, "bp", "*", "docker-compose.yaml")); gerr == nil {
+		for _, composeFile := range bpComposeFiles {
+			fmt.Fprintf(writer, "Removing containers deployed from %s...\n", composeFile)
+			for _, proj := range gitopsProjects {
+				cmd := exec.Command("docker", "compose", "-f", "docker-compose.yaml", "-p", proj, "down", "--volumes")
+				cmd.Dir = filepath.Dir(composeFile)
+				cmd.Stdout = writer
+				cmd.Stderr = writer
+				if err := cmd.Run(); err != nil {
+					fmt.Fprintf(writer, "Warning: Failed compose down for %s (project %s): %v\n", composeFile, proj, err)
+				}
+			}
+		}
+	}
+
+	// 2c. The daemon-managed deployment projects (site = gitops+infra-driver,
+	// dashboard, coding-agent).
 	if _, err := os.Stat(dockerComposePath); os.IsNotExist(err) {
 		fmt.Fprintf(writer, "Warning: Deployment directory %s does not exist, skipping docker compose down.\n", dockerComposePath)
 		// Still try to remove containers by project name in case they exist
@@ -133,10 +145,86 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 			}
 		}
 	}
-	fmt.Fprintln(writer, "Docker containers and volumes removed successfully.")
 
-	// 4. Remove images used by docker-compose
-	fmt.Fprintln(writer, "Removing images used by docker-compose...")
+	// 2d. The workspace sub-traefik, under both historical project names.
+	for _, proj := range []string{fmt.Sprintf("bitswan-%s-traefik", workspaceName), fmt.Sprintf("%s__traefik", workspaceName)} {
+		cmd := exec.Command("docker", "compose", "-p", proj, "down", "--volumes")
+		cmd.Stdout = writer
+		cmd.Stderr = writer
+		_ = cmd.Run()
+	}
+	_ = exec.Command("docker", "rm", "-f", fmt.Sprintf("%s__traefik", workspaceName)).Run()
+
+	// 3. Label sweep — the authoritative teardown. Every container the
+	// workspace ever ran carries gitops.workspace=<ws>, so this removes
+	// automations, infra services, gateways and platform containers even when
+	// every compose file above was already gone.
+	if ids, lerr := dockerContainerIDsByLabel("gitops.workspace=" + workspaceName); lerr != nil {
+		fmt.Fprintf(writer, "Warning: could not list workspace containers: %v\n", lerr)
+	} else if len(ids) > 0 {
+		fmt.Fprintf(writer, "Removing %d remaining workspace container(s) by label...\n", len(ids))
+		dockerRemoveContainers(ids, writer)
+	}
+	fmt.Fprintln(writer, "Docker containers removed.")
+
+	// 4. Volume sweep by compose-project label (naming-agnostic; catches the
+	// per-stage infra data volumes like <ws>-postgres-dev-data-data).
+	for _, proj := range workspaceComposeProjects(workspaceName) {
+		vols, verr := dockerVolumesByComposeProject(proj)
+		if verr != nil {
+			fmt.Fprintf(writer, "Warning: could not list volumes for project %s: %v\n", proj, verr)
+			continue
+		}
+		dockerRemoveVolumes(vols, writer)
+	}
+	fmt.Fprintln(writer, "Docker volumes removed.")
+
+	// 5. Per-workspace stage networks (shared bitswan_network is guarded).
+	dockerRemoveNetworks(workspaceStageNetworks(workspaceName), writer)
+	fmt.Fprintln(writer, "Docker networks removed.")
+
+	// 6. Ingress records — synchronously, from the daemon's OWN Bailey DB, so
+	// cleanup never depends on gitops. Candidates are the UNION of the
+	// endpoints table AND the protected_routes table: infra-service routes
+	// (minio/postgres admin UIs) and other site services are routes without
+	// owned endpoints and would be invisible to an endpoints-only sweep (see
+	// listProtectedRoutes). ALL of the workspace's hosts are removed
+	// regardless of source ('gitops' or 'manual'): the workspace is gone, so
+	// a route that was never promoted to source='gitops' must not survive it.
+	// Hosts of a SIBLING workspace whose name extends this one (ws "pr" vs ws
+	// "pr-two" → "pr-two-gitops....") are excluded.
+	fmt.Fprintln(writer, "Removing ingress records...")
+	var candidates []string
+	if endpoints, eerr := listAllEndpoints(); eerr != nil {
+		fmt.Fprintf(writer, "Warning: could not list endpoints: %v\n", eerr)
+	} else {
+		for _, ep := range endpoints {
+			candidates = append(candidates, ep.Hostname)
+		}
+	}
+	if routes, rerr := listProtectedRoutes(); rerr != nil {
+		fmt.Fprintf(writer, "Warning: could not list protected routes: %v\n", rerr)
+	} else {
+		for _, r := range routes {
+			candidates = append(candidates, r.Hostname)
+		}
+	}
+	hosts := workspaceHostsToRemove(candidates, workspaceName, domain, listSiblingWorkspaces(workspacesFolder, workspaceName))
+	for _, h := range hosts {
+		if rerr := removeRouteFromIngress(h); rerr != nil {
+			fmt.Fprintf(writer, "Warning: failed to remove route %s: %v\n", h, rerr)
+		} else {
+			fmt.Fprintf(writer, "Removed route %s\n", h)
+		}
+	}
+	// Sweep residual workspace routes + per-workspace TLS cert entries from
+	// the ingress state (reads metadata.yaml itself — the files still exist).
+	traefikapi.DeleteTraefikRecordsWithWriter(workspaceName, writer)
+	fmt.Fprintln(writer, "Ingress records removed.")
+
+	// 7. Images: the deployment compose files' images (platform services) plus
+	// every automation image under the workspace's own namespace.
+	fmt.Fprintln(writer, "Removing images...")
 	composeFiles := []string{"docker-compose.yml"}
 	for _, f := range []string{"docker-compose-dashboard.yml", "docker-compose-coding-agent.yml"} {
 		if _, err := os.Stat(filepath.Join(dockerComposePath, f)); err == nil {
@@ -146,75 +234,31 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	for _, composeFile := range composeFiles {
 		removeImagesFromComposeFile(filepath.Join(dockerComposePath, composeFile), writer)
 	}
+	// Automation images are tagged internal/<ws>-... (raw workspace name, per
+	// the driver's imageTagPrefix); sweep the lowercased form too for safety.
+	removeImagesByPrefix("internal/"+workspaceName+"-", writer)
+	if projectName != workspaceName {
+		removeImagesByPrefix("internal/"+projectName+"-", writer)
+	}
 	fmt.Fprintln(writer, "Image removal process completed.")
 
-	// 5. Remove ingress records. Done SYNCHRONOUSLY (before the workspace dir +
-	// its metadata are removed below) and sourced from the daemon's OWN Bailey
-	// DB, so cleanup never depends on gitops being reachable.
-	fmt.Fprintln(writer, "Removing ingress records...")
-
-	// (a) Every per-endpoint route this workspace registered, straight from the
-	// Bailey DB (source='gitops', hostname '<ws>-%'). removeRouteFromIngress
-	// drops the outer+inner Traefik routers AND the Bailey endpoint +
-	// protected_route rows; an unreachable ingress is treated as success. This
-	// is the fix for the routes that leaked when gitops was unreachable.
-	if hosts, herr := listGitopsManagedHosts(workspaceName, ""); herr != nil { // "" = every BP: removing the whole workspace
-		fmt.Fprintf(writer, "Warning: could not list managed routes for %s: %v\n", workspaceName, herr)
-	} else {
-		for _, h := range hosts {
-			if rerr := removeRouteFromIngress(h); rerr != nil {
-				fmt.Fprintf(writer, "Warning: failed to remove route %s: %v\n", h, rerr)
-			} else {
-				fmt.Fprintf(writer, "Removed route %s\n", h)
-			}
-		}
-	}
-
-	// (b) The platform service routes, in case they weren't recorded as
-	// gitops-managed above. Idempotent; needs the domain from metadata, which is
-	// still on disk at this point.
-	if md, merr := config.GetWorkspaceMetadata(workspaceName); merr == nil && md.Domain != "" {
-		for _, svc := range []string{"gitops", "dashboard"} {
-			host := fmt.Sprintf("%s-%s.%s", workspaceName, svc, md.Domain)
-			if rerr := removeRouteFromIngress(host); rerr != nil {
-				fmt.Fprintf(writer, "Warning: failed to remove route %s: %v\n", host, rerr)
-			}
-		}
-	}
-
-	// (c) Sweep residual workspace routes + per-workspace TLS cert entries from
-	// the ingress state, and tear down the workspace's own sub-traefik.
-	traefikapi.DeleteTraefikRecordsWithWriter(workspaceName, writer)
-	// Also stop workspace sub-traefik if it exists
-	containerName := fmt.Sprintf("%s__traefik", workspaceName)
-	traefikProjectName := fmt.Sprintf("bitswan-%s-traefik", workspaceName)
-	stopCmd := exec.Command("docker", "compose", "-p", traefikProjectName, "down")
-	stopCmd.Stdout = writer
-	stopCmd.Stderr = writer
-	if err := stopCmd.Run(); err != nil {
-		// Try force remove
-		exec.Command("docker", "rm", "-f", containerName).Run()
-	}
-	fmt.Fprintln(writer, "Ingress records removed.")
-
-	// 6. Remove the gitops folder
-	workspaceDir := filepath.Join(workspacesFolder, workspaceName)
+	// 8. Remove the workspace directory (its subtree of the shared volume).
 	if _, err := os.Stat(workspaceDir); os.IsNotExist(err) {
 		fmt.Fprintf(writer, "Warning: Workspace directory %s does not exist, nothing to remove.\n", workspaceDir)
 	} else {
-		fmt.Fprintln(writer, "Removing gitops folder...")
+		fmt.Fprintln(writer, "Removing workspace folder...")
 		cmd := exec.Command("rm", "-rf", workspaceName)
 		cmd.Dir = workspacesFolder
 		cmd.Stdout = writer
 		cmd.Stderr = writer
 		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(writer, "Warning: Failed to remove gitops folder: %v\n", err)
+			fmt.Fprintf(writer, "Warning: Failed to remove workspace folder: %v\n", err)
 		} else {
-			fmt.Fprintln(writer, "GitOps folder removed successfully.")
+			fmt.Fprintln(writer, "Workspace folder removed successfully.")
 		}
 	}
 
-	// 6b. If the active workspace pointed at the one we just removed, repoint it
+	// 8b. If the active workspace pointed at the one we just removed, repoint it
 	// (to a remaining workspace, else clear) so later CLI defaults don't resolve
 	// to a deleted workspace. The removed dir is already gone, so GetWorkspaceList
 	// won't return it.
@@ -238,10 +282,9 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 		}
 	}
 
-	// 7. Remove entries from /etc/hosts
+	// 9. Remove entries from /etc/hosts (honouring the workspace's real domain).
 	fmt.Fprintln(writer, "Removing entries from /etc/hosts...")
-	err = deleteHostsEntry(workspaceName, writer)
-	if err != nil {
+	if err := deleteHostsEntry(workspaceName, domain, writer); err != nil {
 		return fmt.Errorf("error removing entries from /etc/hosts: %w", err)
 	}
 	fmt.Fprintln(writer, "Entries removed from /etc/hosts successfully.")
@@ -250,6 +293,228 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 
 	fmt.Fprintln(writer, "Workspace removal completed.")
 	return nil
+}
+
+// ── teardown inventory (pure — unit-testable) ───────────────────────────────
+
+// workspaceComposeProjects returns every docker-compose project name that may
+// hold the workspace's resources: the runtime project (raw + legacy lowercase)
+// plus the daemon-managed deployment and sub-traefik projects.
+func workspaceComposeProjects(workspaceName string) []string {
+	lc := strings.ToLower(workspaceName)
+	out := []string{workspaceName}
+	if lc != workspaceName {
+		out = append(out, lc)
+	}
+	return append(out,
+		lc+"-site",
+		lc+"-dashboard",
+		lc+"-coding-agent",
+		"bitswan-"+workspaceName+"-traefik",
+		workspaceName+"__traefik",
+	)
+}
+
+// workspaceStageNetworks returns the per-workspace stage networks created by
+// the sub-traefik init and the driver's reconcile.
+func workspaceStageNetworks(workspaceName string) []string {
+	return []string{
+		workspaceName + "-dev",
+		workspaceName + "-staging",
+		workspaceName + "-production",
+	}
+}
+
+// isProtectedDockerVolume guards the volumes shared by ALL workspaces (and the
+// daemon itself) against a workspace-scoped sweep.
+func isProtectedDockerVolume(name string) bool {
+	return name == "bitswan" || name == "bitswan-mkcert"
+}
+
+// isProtectedDockerNetwork guards the shared platform network.
+func isProtectedDockerNetwork(name string) bool {
+	return name == "bitswan_network"
+}
+
+// workspaceHostsToRemove selects, from candidate hostnames (the union of the
+// Bailey endpoints and protected_routes tables), the hosts a workspace
+// removal must drop: every host under the `<ws>-` prefix regardless of
+// source (gitops-managed or manual — the workspace is gone either way),
+// excluding hosts that belong to a SIBLING workspace whose name extends this
+// one (removing "pr" must not take "pr-two-gitops..." with it), plus the
+// platform gitops/dashboard hosts derived from the metadata domain.
+func workspaceHostsToRemove(candidates []string, workspaceName, domain string, siblingWorkspaces []string) []string {
+	prefix := strings.ToLower(workspaceName) + "-"
+	var siblingPrefixes []string
+	for _, s := range siblingWorkspaces {
+		ls := strings.ToLower(s)
+		if s != workspaceName && strings.HasPrefix(ls, prefix) {
+			siblingPrefixes = append(siblingPrefixes, ls+"-")
+		}
+	}
+
+	seen := map[string]bool{}
+	var out []string
+	add := func(host string) {
+		h := strings.ToLower(strings.TrimSpace(host))
+		if h == "" || seen[h] {
+			return
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+
+	for _, candidate := range candidates {
+		h := strings.ToLower(candidate)
+		if !strings.HasPrefix(h, prefix) {
+			continue
+		}
+		sibling := false
+		for _, sp := range siblingPrefixes {
+			if strings.HasPrefix(h, sp) {
+				sibling = true
+				break
+			}
+		}
+		if sibling {
+			continue
+		}
+		add(h)
+	}
+	if domain != "" {
+		for _, svc := range []string{"gitops", "dashboard"} {
+			add(fmt.Sprintf("%s-%s.%s", workspaceName, svc, domain))
+		}
+	}
+	return out
+}
+
+// listSiblingWorkspaces returns the OTHER workspace directory names, used to
+// protect a sibling whose name extends the one being removed.
+func listSiblingWorkspaces(workspacesFolder, workspaceName string) []string {
+	entries, err := os.ReadDir(workspacesFolder)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() && e.Name() != workspaceName {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// filterHostsFileLines drops every line containing one of the entry tokens.
+// Returns the kept lines and whether anything was removed.
+func filterHostsFileLines(lines []string, entries []string) ([]string, bool) {
+	var kept []string
+	found := false
+	for _, line := range lines {
+		remove := false
+		for _, entry := range entries {
+			if entry != "" && strings.Contains(line, entry) {
+				remove = true
+				break
+			}
+		}
+		if remove {
+			found = true
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return kept, found
+}
+
+// ── docker sweeps (thin exec wrappers — best-effort) ─────────────────────────
+
+func dockerContainerIDsByLabel(label string) ([]string, error) {
+	cmd := exec.Command("docker", "ps", "-aq", "--filter", "label="+label)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return strings.Fields(out.String()), nil
+}
+
+func dockerRemoveContainers(ids []string, writer io.Writer) {
+	for _, id := range ids {
+		if err := exec.Command("docker", "rm", "-f", id).Run(); err != nil {
+			fmt.Fprintf(writer, "Warning: failed to remove container %s: %v\n", id, err)
+		}
+	}
+}
+
+func dockerVolumesByComposeProject(project string) ([]string, error) {
+	cmd := exec.Command("docker", "volume", "ls", "-q", "--filter", "label=com.docker.compose.project="+project)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return nil, err
+	}
+	return strings.Fields(out.String()), nil
+}
+
+func dockerRemoveVolumes(names []string, writer io.Writer) {
+	for _, name := range names {
+		if isProtectedDockerVolume(name) {
+			fmt.Fprintf(writer, "Refusing to remove shared volume %s.\n", name)
+			continue
+		}
+		if err := exec.Command("docker", "volume", "rm", name).Run(); err != nil {
+			fmt.Fprintf(writer, "Warning: failed to remove volume %s: %v\n", name, err)
+		} else {
+			fmt.Fprintf(writer, "Removed volume %s\n", name)
+		}
+	}
+}
+
+func dockerRemoveNetworks(names []string, writer io.Writer) {
+	for _, name := range names {
+		if isProtectedDockerNetwork(name) {
+			fmt.Fprintf(writer, "Refusing to remove shared network %s.\n", name)
+			continue
+		}
+		// Missing networks are a silent no-op (idempotent re-runs).
+		if err := exec.Command("docker", "network", "inspect", name).Run(); err != nil {
+			continue
+		}
+		if err := exec.Command("docker", "network", "rm", name).Run(); err != nil {
+			fmt.Fprintf(writer, "Warning: failed to remove network %s: %v\n", name, err)
+		} else {
+			fmt.Fprintf(writer, "Removed network %s\n", name)
+		}
+	}
+}
+
+// removeImagesByPrefix best-effort removes every image whose repository:tag
+// starts with the prefix (the workspace's automation-image namespace),
+// skipping images still used by a container.
+func removeImagesByPrefix(prefix string, writer io.Writer) {
+	cmd := exec.Command("docker", "images", "--format", "{{.Repository}}:{{.Tag}}")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(writer, "Warning: could not list images: %v\n", err)
+		return
+	}
+	for _, tag := range strings.Fields(out.String()) {
+		if !strings.HasPrefix(tag, prefix) {
+			continue
+		}
+		inUse, err := checkContainerExists(tag)
+		if err == nil && inUse {
+			fmt.Fprintf(writer, "Image %s is still in use by a container. Skipping deletion.\n", tag)
+			continue
+		}
+		if err := deleteDockerImage(tag, writer); err != nil {
+			fmt.Fprintf(writer, "Warning: Failed to delete docker image %s: %v. Continuing with removal.\n", tag, err)
+		} else {
+			fmt.Fprintf(writer, "Deleted image: %s\n", tag)
+		}
+	}
 }
 
 func removeImagesFromComposeFile(composeFilePath string, writer io.Writer) {
@@ -331,7 +596,10 @@ func deleteDockerImage(image string, writer io.Writer) error {
 	return nil
 }
 
-func deleteHostsEntry(workspaceName string, writer io.Writer) error {
+// deleteHostsEntry removes the workspace's /etc/hosts entries, matching on the
+// hostname token under the workspace's REAL domain (falling back to the legacy
+// bitswan.local for entries written before domains were recorded).
+func deleteHostsEntry(workspaceName, domain string, writer io.Writer) error {
 	hostsFilePath := "/etc/hosts"
 	input, err := os.ReadFile(hostsFilePath)
 	if err != nil {
@@ -339,40 +607,16 @@ func deleteHostsEntry(workspaceName string, writer io.Writer) error {
 		return nil
 	}
 
+	entries := []string{workspaceName + "-gitops.bitswan.local"}
+	if domain != "" && domain != "bitswan.local" {
+		entries = append(entries, workspaceName+"-gitops."+domain)
+	}
+
 	lines := strings.Split(string(input), "\n")
-	var outputLines []string
-
-	// Define the entries to be removed
-	hostsEntries := []string{
-		"127.0.0.1 " + workspaceName + "-gitops.bitswan.local",
-	}
-
-	found := false
-	for _, entry := range hostsEntries {
-		if exec.Command("grep", "-wq", entry, "/etc/hosts").Run() == nil {
-			found = true
-			break
-		}
-	}
-
-	// No entries found to remove
+	outputLines, found := filterHostsFileLines(lines, entries)
 	if !found {
 		fmt.Fprintln(writer, "No entries found in /etc/hosts to remove.")
 		return nil
-	}
-
-	// Filter out the lines that match the entries
-	for _, line := range lines {
-		shouldRemove := false
-		for _, entry := range hostsEntries {
-			if strings.Contains(line, entry) {
-				shouldRemove = true
-				break
-			}
-		}
-		if !shouldRemove {
-			outputLines = append(outputLines, line)
-		}
 	}
 
 	// Write the updated content back to /etc/hosts
