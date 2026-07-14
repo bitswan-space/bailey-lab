@@ -52,6 +52,10 @@ func handleShareEndpoint(w http.ResponseWriter, r *http.Request, email string, g
 	}
 
 	if r.Method == http.MethodPost {
+		if !callerHasTrustedDevice(r, email) {
+			http.Error(w, "managing sharing requires a trusted device", http.StatusForbidden)
+			return
+		}
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -68,9 +72,22 @@ func handleShareEndpoint(w http.ResponseWriter, r *http.Request, email string, g
 	fmt.Fprint(w, sharePageHTML(ep, email))
 }
 
+// callerHasTrustedDevice reports whether the request carries a valid
+// paired-device cookie for email — the Bailey device-trust second
+// factor. ACL mutations require it as defense-in-depth: owner role is
+// derived from the OIDC identity headers, which a Keycloak / oauth2
+// compromise can forge, so a WRITE must additionally prove a trusted
+// device (the factor that survives an IdP takeover). Reads stay
+// owner-only — they leak nothing an owner shouldn't see and gating them
+// would break the untrusted-device share-index view.
+func callerHasTrustedDevice(r *http.Request, email string) bool {
+	return currentDeviceForRequest(r, email) != nil
+}
+
 // applyShareAction executes one form-encoded mutation against an
 // endpoint's ACL. Shared between the HTML form handler and the JSON
-// API. The caller must already have verified owner role.
+// API. The caller must already have verified owner role AND a trusted
+// device (callerHasTrustedDevice).
 func applyShareAction(host, callerEmail string, r *http.Request) error {
 	switch action := strings.TrimSpace(r.FormValue("action")); action {
 	case "", "grant":
@@ -170,6 +187,10 @@ func handleShareAPI(w http.ResponseWriter, r *http.Request, email string, groups
 	case http.MethodGet:
 		writeListing()
 	case http.MethodPost, http.MethodDelete:
+		if !callerHasTrustedDevice(r, email) {
+			writeJSONErrorStatus(w, "managing sharing requires a trusted device", http.StatusForbidden)
+			return
+		}
 		if err := r.ParseForm(); err != nil {
 			writeJSONErrorStatus(w, err.Error(), http.StatusBadRequest)
 			return
