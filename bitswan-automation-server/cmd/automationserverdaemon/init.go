@@ -548,14 +548,23 @@ func ensureDockerVolume(name string) error {
 
 // dockerVolumeEmpty reports whether the named volume contains no files. It runs
 // a throwaway container that lists the volume root.
+//
+// Only the container's STDOUT (the `ls` listing) is used as the empty/non-empty
+// signal. Docker writes image-pull progress ("Unable to find image ... Pulling
+// ... Downloaded") to STDERR, so when this is the first `docker run` to
+// reference the image, that pull noise must NOT be mistaken for volume contents
+// (which would falsely report a fresh volume as non-empty and skip seeding).
 func dockerVolumeEmpty(name, image string) (bool, error) {
-	out, err := exec.Command("docker", "run", "--rm",
+	cmd := exec.Command("docker", "run", "--rm",
 		"-v", name+":/v:ro", image,
-		"sh", "-c", "ls -A /v 2>/dev/null | head -1").CombinedOutput()
-	if err != nil {
-		return false, fmt.Errorf("failed to inspect docker volume %s: %s: %w", name, strings.TrimSpace(string(out)), err)
+		"sh", "-c", "ls -A /v 2>/dev/null | head -1")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("failed to inspect docker volume %s: %s: %w", name, strings.TrimSpace(stderr.String()), err)
 	}
-	return strings.TrimSpace(string(out)) == "", nil
+	return strings.TrimSpace(stdout.String()) == "", nil
 }
 
 // seedMkcertVolumeFromHost copies the host's mkcert CA directory into the daemon's
