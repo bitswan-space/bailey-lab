@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react';
+import { Archive, X } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { Button } from '@/components/ui/button';
 import {
@@ -34,6 +35,11 @@ export function NewBusinessProcessDialog({
   onCreated,
 }: NewBusinessProcessDialogProps) {
   const [name, setName] = useState('');
+  // A selected bundle switches the dialog into restore mode: the BP is
+  // recreated from a downloaded deployment bundle instead of the template
+  // scaffold, and the name becomes optional (the bundle carries one).
+  // eslint-disable-next-line no-restricted-syntax -- null = no bundle selected (create mode)
+  const [bundle, setBundle] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const trimmed = name.replace(/\s+/g, ' ').trim();
@@ -55,10 +61,14 @@ export function NewBusinessProcessDialog({
     // not flash red as a "duplicate" mid-flight.
     validationError = `A business process with the id "${slug}" already exists in this scope.`;
   }
-  const canSubmit = trimmed.length > 0 && !validationError && !submitting;
+  // With a bundle the name is optional (empty = keep the bundle's name); a
+  // typed name must still pass validation in both modes.
+  const canSubmit =
+    !validationError && !submitting && (bundle ? true : trimmed.length > 0);
 
   const reset = useCallback(() => {
     setName('');
+    setBundle(null);
     setSubmitting(false);
   }, []);
 
@@ -68,19 +78,34 @@ export function NewBusinessProcessDialog({
       if (!canSubmit) return;
       setSubmitting(true);
       const target = copy ? `copy "${copy}"` : 'main';
-      const work = api.createBusinessProcess({
-        name: trimmed,
-        ...(copy ? { copy } : {}),
-      });
+      // In restore mode without a typed name the display name comes from the
+      // bundle — use the file name in toasts until the response tells us.
+      const label = trimmed || bundle?.name || 'business process';
+      const work = bundle
+        ? api.createBusinessProcessFromBundle({
+            file: bundle,
+            ...(trimmed ? { name: trimmed } : {}),
+            ...(copy ? { copy } : {}),
+          })
+        : api.createBusinessProcess({
+            name: trimmed,
+            ...(copy ? { copy } : {}),
+          });
       toast.promise(work, {
-        loading: `Creating "${trimmed}" in ${target}…`,
-        success: `Business process "${trimmed}" created`,
+        loading: bundle
+          ? `Restoring "${label}" in ${target}…`
+          : `Creating "${label}" in ${target}…`,
+        success: bundle
+          ? `Business process restored from "${label}"`
+          : `Business process "${label}" created`,
         error: (err: unknown) =>
           err instanceof SessionExpiredError
             ? undefined // expired session → the re-login banner says it; no scary "Failed" here
             : isTransientNetworkError(err)
-              ? `Business process "${trimmed}" created`
-              : `Failed to create business process: ${String(err)}`,
+              ? bundle
+                ? `Business process restored from "${label}"`
+                : `Business process "${label}" created`
+              : `Failed to ${bundle ? 'restore' : 'create'} business process: ${String(err)}`,
       });
       try {
         const res = await work;
@@ -89,20 +114,21 @@ export function NewBusinessProcessDialog({
         // The server's slug is the BP's id everywhere (selection, API paths);
         // the response carries it authoritatively.
         const createdSlug = res.name || slug;
+        const createdLabel = res.display_name || trimmed || createdSlug;
         onCreated(createdSlug);
-        // Server-side auto-setup: the BP was scaffolded from the default
-        // template group and a deploy was kicked off in the background —
-        // watch its task with a second toast (fire-and-forget).
+        // Server-side auto-setup: create scaffolds the default template group,
+        // restore deploys the bundle's own automations — either way a deploy
+        // was kicked off in the background; watch its task with a second toast.
         if (res.setup_error) {
-          toast.error(`Auto-setup for "${trimmed}" failed: ${res.setup_error}`);
+          toast.error(`Auto-setup for "${createdLabel}" failed: ${res.setup_error}`);
         } else if (res.deploy_task_id) {
           void watchDeployTask(
             res.deploy_task_id,
             `bp-deploy-${copy ?? 'main'}-${createdSlug}`,
             {
-              loading: `Setting up ${trimmed}…`,
-              success: `${trimmed} ready`,
-              failurePrefix: `Failed to set up ${trimmed}`,
+              loading: `Setting up ${createdLabel}…`,
+              success: `${createdLabel} ready`,
+              failurePrefix: `Failed to set up ${createdLabel}`,
             },
           );
         }
@@ -112,7 +138,7 @@ export function NewBusinessProcessDialog({
         setSubmitting(false);
       }
     },
-    [canSubmit, trimmed, slug, copy, onOpenChange, onCreated, reset],
+    [canSubmit, trimmed, slug, bundle, copy, onOpenChange, onCreated, reset],
   );
 
   return (
@@ -139,7 +165,7 @@ export function NewBusinessProcessDialog({
           <Input
             id="new-bp-name"
             autoFocus
-            placeholder="Invoice Processing"
+            placeholder={bundle ? "Keep the bundle's name" : 'Invoice Processing'}
             value={name}
             onChange={(e) => setName(e.target.value)}
             disabled={submitting}
@@ -156,6 +182,48 @@ export function NewBusinessProcessDialog({
               </p>
             )
           )}
+          <div className="mt-1 flex flex-col gap-1.5">
+            <span className="text-xs text-muted-foreground">
+              …or restore from a downloaded bundle
+            </span>
+            {bundle ? (
+              <div className="flex items-center gap-2 rounded-md border border-input px-3 py-2 text-[13px]">
+                <Archive className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                <span className="min-w-0 flex-1 truncate">{bundle.name}</span>
+                <button
+                  type="button"
+                  aria-label="Remove bundle"
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                  disabled={submitting}
+                  onClick={() => setBundle(null)}
+                >
+                  <X className="size-3.5" aria-hidden />
+                </button>
+              </div>
+            ) : (
+              <label className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed border-input px-3 py-2 text-[13px] text-muted-foreground hover:bg-muted">
+                <Archive className="size-3.5" aria-hidden />
+                Choose a .tar.gz bundle
+                <input
+                  type="file"
+                  accept=".tar.gz,.tgz,application/gzip"
+                  className="hidden"
+                  disabled={submitting}
+                  onChange={(e) => {
+                    setBundle(e.target.files?.[0] ?? null);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+            )}
+            {bundle && (
+              <p className="text-xs text-muted-foreground">
+                Restores the bundle&apos;s source as a new business process
+                {trimmed ? '' : " under the bundle's own name"}; containers are
+                rebuilt and deployed automatically.
+              </p>
+            )}
+          </div>
         </form>
         <DialogFooter>
           <Button
@@ -166,7 +234,7 @@ export function NewBusinessProcessDialog({
             Cancel
           </Button>
           <Button onClick={() => void handleSubmit()} disabled={!canSubmit}>
-            Create
+            {bundle ? 'Restore' : 'Create'}
           </Button>
         </DialogFooter>
       </DialogContent>

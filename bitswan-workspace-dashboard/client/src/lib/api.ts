@@ -687,6 +687,22 @@ export const api = {
   createBusinessProcess: (body: CreateBusinessProcessRequest) =>
     postJson<CreateBusinessProcessResponse>('/api/business-processes', body),
 
+  /** Restore a business process from a downloaded deployment bundle (the
+   *  source-only tar.gz from Deployments → Inspect → Download bundle). `name`
+   *  optionally overrides the bundle's display name; the restored BP gets
+   *  fresh process/deployment ids and its deploy is kicked off server-side
+   *  (same response shape as createBusinessProcess). */
+  createBusinessProcessFromBundle: (body: { file: File; name?: string; copy?: string }) => {
+    const form = new FormData();
+    form.set('file', body.file, body.file.name);
+    if (body.name) form.set('name', body.name);
+    if (body.copy) form.set('copy', body.copy);
+    return postMultipart<CreateBusinessProcessResponse>(
+      '/api/business-processes/from-bundle',
+      form,
+    );
+  },
+
   renameBusinessProcess: (slug: string, body: RenameBusinessProcessRequest) =>
     patchJson<RenameBusinessProcessResponse>(
       `/api/business-processes/${encodeURIComponent(slug)}`,

@@ -231,6 +231,43 @@ export class GitopsClient {
   }
 
   /**
+   * `POST /processes/from-bundle` — restore a business process from a
+   * downloaded deployment bundle (the source-only `bitswan-bp-bundle/2`
+   * tar.gz from Inspect → Download bundle). Forwards as multipart to
+   * gitops, which creates a NEW BP (fresh process/deployment ids) from the
+   * bundle's source tree and kicks off its deploy. `name` optionally
+   * overrides the bundle's display name.
+   */
+  async createProcessFromBundle(input: {
+    name?: string;
+    copy?: string;
+    created_by?: string;
+    filename: string;
+    content: Buffer;
+  }): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const form = new FormData();
+    if (input.name) form.set('name', input.name);
+    if (input.copy) form.set('copy', input.copy);
+    if (input.created_by) form.set('created_by', input.created_by);
+    const blob = new Blob([new Uint8Array(input.content)], {
+      type: 'application/gzip',
+    });
+    form.set('file', blob, input.filename);
+    const r = await fetch(`${this.baseUrl}/processes/from-bundle`, {
+      method: 'POST',
+      headers: { ...this.authHeaders() },
+      body: form,
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `PATCH /processes/{slug}` — change a BP's display name. Only the `name`
    * key in its `process.toml` moves; the slug (and with it URLs, API paths,
    * and deployment ids) is immutable. Gitops commits the edit, refreshes its

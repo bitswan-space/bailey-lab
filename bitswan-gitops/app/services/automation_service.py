@@ -7,8 +7,10 @@ import json
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import time
+import toml
 import uuid
 import yaml
 from datetime import date, datetime
@@ -17,6 +19,7 @@ from typing import Any, Callable
 from app.models import DeployedAutomation
 from app.utils import (
     AutomationConfig,
+    bitswan_extract_filter,
     calculate_git_tree_hash,
     daemon_admit_memory,
     daemon_user_role,
@@ -2932,6 +2935,92 @@ class AutomationService:
         )
         cap = 1_000_000
         return {"path": path, "content": out[:cap], "truncated": len(out) > cap}
+
+    async def bundle_deployment(self, bp: str, stage: str, commit: str) -> str:
+        """Build a downloadable .tar.gz of a deployment (Inspect → Download):
+        the BP's source tree at `commit` plus a manifest recording what was
+        bundled (format ``bitswan-bp-bundle/2``, source-only — no docker images
+        or DB dumps; a restore rebuilds images and provisions a fresh DB through
+        the normal deploy pipeline). The archive is what
+        ``POST /processes/from-bundle`` accepts to restore the BP.
+
+        Returns the path to the temp archive (the route streams + deletes it).
+        """
+        if not re.fullmatch(r"[0-9a-fA-F]{4,64}", commit or ""):
+            raise HTTPException(status_code=400, detail="invalid commit")
+        validate_bp_name(bp)
+        stage_key = "production" if stage in ("", "production") else stage
+        members = self._bp_stage_members(bp, stage_key)
+        if not members:
+            raise HTTPException(
+                status_code=404, detail=f"No deployment for {bp}/{stage_key}"
+            )
+        # Each BP is its own repo; the clone at copies/main/<bp> IS the repo
+        # root, so `git archive <commit>` yields the BP tree directly.
+        clone = os.path.join(_copies_dir(), "main", bp)
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            raise HTTPException(status_code=404, detail=f"not found: {bp}@{commit}")
+        await fetch_main(clone, bp)
+
+        # Display name from process.toml AT THE COMMIT (a later rename must not
+        # leak into the bundle); pre-#77 BPs have no `name` key → slug.
+        display_name = bp
+        toml_out, _, toml_rc = await call_git_command_with_output(
+            "git", "show", f"{commit}:process.toml", cwd=clone
+        )
+        if toml_rc == 0:
+            try:
+                parsed_name = toml.loads(toml_out).get("name")
+                if isinstance(parsed_name, str) and parsed_name.strip():
+                    display_name = parsed_name.strip()
+            except Exception:
+                pass
+
+        top = f"{bp}-{stage_key}-{commit[:8]}"
+        manifest = {
+            "format": "bitswan-bp-bundle/2",
+            "bp": bp,
+            "display_name": display_name,
+            "stage": stage_key,
+            "commit": commit,
+        }
+
+        def _build() -> str:
+            staging = tempfile.mkdtemp(prefix=".bundle-")
+            try:
+                root = os.path.join(staging, top)
+                src_dir = os.path.join(root, "source")
+                os.makedirs(src_dir)
+                src_tar = os.path.join(staging, "source.tar")
+                with open(src_tar, "wb") as f:
+                    rc = subprocess.run(
+                        ["git", "archive", "--format=tar", commit],
+                        cwd=clone,
+                        stdout=f,
+                    ).returncode
+                if rc != 0:
+                    raise HTTPException(
+                        status_code=404, detail=f"not found: {bp}@{commit}"
+                    )
+                with tarfile.open(src_tar) as t:
+                    # Our own git archive, but filter anyway — it also keeps
+                    # the /deps/... symlinks React templates ship.
+                    t.extractall(src_dir, filter=bitswan_extract_filter)
+                os.remove(src_tar)
+                with open(os.path.join(root, "manifest.json"), "w") as f:
+                    json.dump(manifest, f, indent=2)
+                    f.write("\n")
+                out_fd, out_path = tempfile.mkstemp(
+                    prefix=f"{bp}-{stage_key}-", suffix=".tar.gz"
+                )
+                os.close(out_fd)
+                with tarfile.open(out_path, "w:gz") as tar:
+                    tar.add(root, arcname=top)
+                return out_path
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+
+        return await asyncio.to_thread(_build)
 
     async def apply_compose_for_deployments(
         self,

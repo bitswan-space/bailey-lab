@@ -981,13 +981,12 @@ function InspectModal({
             ) : panel === 'image' ? (
               <div className="flex flex-col gap-4 p-5">
                 <p className="text-[13px] leading-relaxed text-muted-foreground">
-                  Bundles the deployment's source at{' '}
-                  <span className="font-mono">{short(commit, 8)}</span>, the built
-                  container image(s), and the database schema into one archive you
-                  can use to recreate this deployment.
+                  Bundles the deployment&apos;s source at{' '}
+                  <span className="font-mono">{short(commit, 8)}</span> into one
+                  archive you can use to recreate this business process later.
                 </p>
                 <div className="flex flex-col gap-1.5 text-[13px] text-foreground">
-                  {['Container images (docker save)', 'Source code at the deployed commit', 'Database schema (pg_dump)'].map((l) => (
+                  {['Source code at the deployed commit', 'Manifest recording the stage and commit'].map((l) => (
                     <div key={l} className="flex items-center gap-2">
                       <Check className="size-3.5 text-emerald-500" aria-hidden />
                       {l}
@@ -1004,7 +1003,9 @@ function InspectModal({
                     Download bundle
                   </a>
                   <div className="mt-1.5 text-[11px] text-muted-foreground">
-                    Can be large (hundreds of MB) — the download may take a while.
+                    Restore it via &ldquo;+ New Business Process → Restore from
+                    bundle&rdquo; — container images are rebuilt and databases
+                    provisioned fresh by the normal deploy pipeline.
                   </div>
                 </div>
               </div>

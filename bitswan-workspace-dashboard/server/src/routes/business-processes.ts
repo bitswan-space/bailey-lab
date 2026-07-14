@@ -73,6 +73,72 @@ export function registerBusinessProcessRoutes(
     }
   });
 
+  // Restore a business process from a downloaded deployment bundle (the
+  // source-only tar.gz from Deployments → Inspect → Download bundle).
+  // Multipart: `file` (the bundle) + optional `name` (overrides the bundle's
+  // display name) + optional `copy`. gitops creates a NEW BP with fresh
+  // process/deployment ids and kicks off its deploy.
+  app.post('/api/business-processes/from-bundle', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
+    if (!req.isMultipart()) {
+      return reply.code(400).send({ error: 'expected multipart/form-data' });
+    }
+    let name = '';
+    let copy = '';
+    let filename = '';
+    let content: Buffer | null = null;
+    try {
+      // Bundles outgrow the global 5 MiB multipart cap (server.ts) — allow
+      // up to 100 MB for THIS route only (gitops enforces the same cap).
+      for await (const part of req.parts({ limits: { fileSize: 100 * 1024 * 1024 } })) {
+        if (part.type === 'file' && part.fieldname === 'file') {
+          filename = (part.filename ?? 'bundle.tar.gz').split('/').pop() || 'bundle.tar.gz';
+          content = await part.toBuffer();
+        } else if (part.type === 'field') {
+          if (part.fieldname === 'name') name = String(part.value);
+          else if (part.fieldname === 'copy') copy = String(part.value);
+        }
+      }
+    } catch (err) {
+      app.log.warn({ err }, 'bp restore-from-bundle parse failed');
+      const code = (err as { code?: string } | null)?.code;
+      if (code === 'FST_REQ_FILE_TOO_LARGE') {
+        return reply.code(413).send({ error: 'bundle too large (max 100 MB)' });
+      }
+      return reply.code(400).send({ error: 'could not read upload' });
+    }
+    if (!content) {
+      return reply.code(400).send({ error: 'file is required' });
+    }
+    if (copy && !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
+    }
+    // Like create: the git author of the restore commit is the validated
+    // token email, never a client-supplied value.
+    const createdBy = await emailFromRequest(req, app.log);
+    try {
+      const r = await gitops.createProcessFromBundle({
+        filename,
+        content,
+        ...(name ? { name } : {}),
+        ...(copy ? { copy } : {}),
+        ...(createdBy ? { created_by: createdBy } : {}),
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, name, copy }, 'BP restore from bundle failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   // Rename = change the display name only. `:id` is the immutable slug —
   // gitops rewrites the `name` key in the BP's process.toml and commits it,
   // then the updated `processes` snapshot arrives over SSE.

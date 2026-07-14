@@ -11,7 +11,7 @@ import logging
 import os
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.dependencies import get_automation_service
@@ -274,6 +274,117 @@ async def create_process(
         setup_error = str(e)
 
     entry["automations_created"] = automations_created
+    entry["deploy_task_id"] = deploy_task_id
+    if setup_error:
+        entry["setup_error"] = setup_error
+    return entry
+
+
+# Cap the buffered upload: bundles are source-only (no docker images), so even
+# a large BP is a few MB — 100 MB is generous headroom, not an invitation.
+_MAX_BUNDLE_BYTES = 100 * 1024 * 1024
+
+
+@router.post("/from-bundle")
+async def create_process_from_bundle(
+    file: UploadFile = File(...),
+    name: str | None = Form(None),
+    copy: str | None = Form(None),
+    created_by: str | None = Form(None),
+    automation_service: AutomationService = Depends(get_automation_service),
+) -> dict:
+    """Restore a business process from a downloaded deployment bundle
+    (issue #82 — the Inspect → Download bundle archive had no way back in).
+
+    Multipart: `file` is the ``bitswan-bp-bundle/2`` tar.gz; `name` optionally
+    overrides the bundle's display name (omit to keep it); `copy`/`created_by`
+    behave exactly like create. The bundle's source tree becomes a NEW BP —
+    fresh process-id and deployment ids, so it never collides with the BP it
+    was bundled from — and the same post-create auto-setup runs, EXCEPT the
+    template scaffold (the source already carries the member automations):
+    the copy is materialized from main and a deploy of the restored members is
+    kicked off in the background (images rebuild, databases provision fresh).
+    """
+    if not (file.filename or "").endswith((".tar.gz", ".tgz")):
+        raise HTTPException(status_code=400, detail="File must be a .tar.gz bundle")
+    if name is not None:
+        name = _validated_display_name(name)
+    if copy is not None and not _COPY_NAME_RE.match(copy):
+        raise HTTPException(status_code=400, detail="Invalid copy name")
+    if copy is not None:
+        copy_root = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), copy)
+        if not os.path.isdir(copy_root):
+            raise HTTPException(status_code=400, detail=f"copy '{copy}' does not exist")
+
+    # Buffer with a hard cap — a bundle that big is not a source-only bundle.
+    data = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        data.extend(chunk)
+        if len(data) > _MAX_BUNDLE_BYTES:
+            raise HTTPException(status_code=413, detail="Bundle too large (max 100 MB)")
+
+    try:
+        entry = await process_service.create_business_process_from_bundle(
+            bundle=bytes(data), name=name, created_by=created_by
+        )
+    except FileExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to restore process: {e}")
+
+    # Same post-create dance as create_process, minus the template scaffold
+    # (the bundle's source already carries the member automations).
+    try:
+        await event_broadcaster.broadcast(
+            "processes", process_service.get_all_processes()
+        )
+    except Exception:
+        pass
+
+    deploy_task_id: str | None = None
+    setup_error: str | None = None
+    slug = entry["name"]
+    try:
+        if copy:
+            from app.services.bp_git import clone_bp_into_copy
+
+            await clone_bp_into_copy(copy_root, copy, slug, base="main")
+            entry["copies"] = [copy]
+            entry["has_copies"] = True
+            entry["in_main"] = True
+
+        try:
+            await automation_service.refresh(copy)
+            automations = await automation_service.get_automations()
+            data_out = [
+                a.model_dump(mode="json") if hasattr(a, "model_dump") else a
+                for a in automations
+            ]
+            await event_broadcaster.broadcast("automations", data_out)
+        except Exception:
+            logger.exception("Failed to broadcast automations after BP restore")
+
+        stage = "live-dev" if copy else "dev"
+        members = automation_service.members_for_bp(slug, copy=copy, stage=stage)
+        res = await spawn_set_deploy(
+            label=slug,
+            members=members,
+            stage=stage,
+            copy=copy,
+            service=automation_service,
+        )
+        if res.get("deploy"):
+            deploy_task_id = res["deploy"]["task_id"]
+        elif res.get("error"):
+            setup_error = res["error"]
+    except Exception as e:
+        logger.exception("BP restore auto-setup failed for %s", slug)
+        setup_error = str(e)
+
     entry["deploy_task_id"] = deploy_task_id
     if setup_error:
         entry["setup_error"] = setup_error

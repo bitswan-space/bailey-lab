@@ -1,5 +1,10 @@
+import io
+import json
 import os
 import re
+import shutil
+import tarfile
+import tempfile
 import toml
 import unicodedata
 import uuid
@@ -35,6 +40,94 @@ def slugify_bp_name(name: str) -> str:
         .lower()
     )
     return re.sub(r"[^a-z0-9]+", "-", folded).strip("-")
+
+
+def _locate_bundle_root(extracted_dir: str) -> Optional[str]:
+    """Find the bundle payload inside an extracted archive: the directory
+    holding `manifest.json` + `source/`. Bundles we produce wrap everything in
+    one `<bp>-<stage>-<commit8>/` top-level dir; also accept the pair at the
+    archive root (a re-packed bundle). None when neither layout matches."""
+
+    def _is_root(d: str) -> bool:
+        return os.path.isfile(os.path.join(d, "manifest.json")) and os.path.isdir(
+            os.path.join(d, "source")
+        )
+
+    if _is_root(extracted_dir):
+        return extracted_dir
+    entries = [
+        e
+        for e in os.listdir(extracted_dir)
+        if os.path.isdir(os.path.join(extracted_dir, e))
+    ]
+    if len(entries) == 1 and _is_root(os.path.join(extracted_dir, entries[0])):
+        return os.path.join(extracted_dir, entries[0])
+    return None
+
+
+def _copy_bundle_tree(src: str, dest: str) -> None:
+    """Symlink-preserving recursive copy of the bundle's source tree into the
+    fresh BP clone (mirrors template_service._copy_dir_recursive). Any `.git`
+    is skipped at EVERY level — the clone has its own, and a nested one would
+    turn a member dir into an untracked gitlink."""
+    os.makedirs(dest, exist_ok=True)
+    for entry in os.listdir(src):
+        if entry == ".git":
+            continue
+        s = os.path.join(src, entry)
+        d = os.path.join(dest, entry)
+        if os.path.islink(s):
+            os.symlink(os.readlink(s), d)
+        elif os.path.isdir(s):
+            _copy_bundle_tree(s, d)
+        elif os.path.isfile(s):
+            shutil.copy2(s, d, follow_symlinks=False)
+
+
+def _regenerate_automation_ids(bp_dir: str) -> None:
+    """Give every member automation a FRESH `[deployment] id` (uuid4).
+
+    A restored BP must not collide with the BP it was bundled from — deployment
+    ids key containers, routes and bitswan.yaml entries workspace-wide, so the
+    bundle's ids are REPLACED, not merely filled in when missing (which is all
+    template_service._ensure_automation_id does). Targeted string edit, keeping
+    comments/blank lines, mirroring _ensure_automation_id's conventions."""
+    for cur, dirs, files in os.walk(bp_dir):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        if "automation.toml" in files:
+            _replace_deployment_id(os.path.join(cur, "automation.toml"))
+
+
+def _replace_deployment_id(toml_path: str) -> None:
+    new_id = str(uuid.uuid4())
+    with open(toml_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    newline = "\r\n" if "\r\n" in content else "\n"
+    lines = content.split(newline)
+    deployment_idx = -1
+    in_deployment = False
+    replaced = False
+    for i, raw in enumerate(lines):
+        trimmed = raw.strip()
+        if trimmed.startswith("[") and trimmed.endswith("]"):
+            in_deployment = trimmed.lower() == "[deployment]"
+            if in_deployment and deployment_idx < 0:
+                deployment_idx = i
+            continue
+        if in_deployment and re.match(r"^\s*id\s*=", raw):
+            lines[i] = f'id = "{new_id}"'
+            replaced = True
+            break
+    if not replaced:
+        if deployment_idx >= 0:
+            lines.insert(deployment_idx + 1, f'id = "{new_id}"')
+        else:
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append("[deployment]")
+            lines.append(f'id = "{new_id}"')
+    with open(toml_path, "w", encoding="utf-8") as f:
+        f.write(newline.join(lines))
 
 
 class ProcessService:
@@ -380,6 +473,134 @@ class ProcessService:
             "copies": [],
             "has_copies": False,
         }
+
+    async def create_business_process_from_bundle(
+        self,
+        bundle: bytes,
+        name: Optional[str] = None,
+        created_by: Optional[str] = None,
+    ) -> dict:
+        """Restore a new business process from a downloaded deployment bundle
+        (the ``bitswan-bp-bundle/2`` tar.gz produced by the Inspect →
+        Download bundle endpoint).
+
+        Source-only: the bundle carries the BP tree at the bundled commit plus
+        a manifest — no docker images or DB dumps. The restored BP goes through
+        the normal pipeline afterwards (the route kicks off a deploy that
+        rebuilds images and provisions fresh databases).
+
+        BORN IN MAIN like `create_business_process`: own repo, main checkout,
+        the bundle's source tree committed and published to the repo's
+        deploy-only ``main`` (the route materializes the requesting copy as a
+        clone of main, exactly like create).
+
+        CRITICAL — the restored BP is a NEW process, never the original:
+        `process.toml` gets a fresh uuid4 ``process-id`` and every member's
+        `automation.toml` gets a fresh ``[deployment] id``, so the restore
+        cannot collide with (or hijack) the BP it was bundled from.
+
+        `name` overrides the bundle's display name; when omitted the
+        manifest's ``display_name`` is kept. Raises ValueError on a malformed
+        bundle, FileExistsError when the slug is taken.
+        """
+        from app.services.bp_git import (
+            bp_clone_path,
+            clone_bp_into_copy,
+            commit_in_bp_clone,
+            publish_main_from_clone,
+        )
+        from app.services.git_server import bp_main_has_content, ensure_bp_bare_repo
+        from app.utils import bitswan_extract_filter
+
+        tmp = tempfile.mkdtemp(prefix=".bp-bundle-")
+        try:
+            try:
+                with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:gz") as t:
+                    # bitswan_extract_filter = PEP 706 data_filter (traversal /
+                    # absolute-path guard) + the /deps/... symlink allowance.
+                    t.extractall(tmp, filter=bitswan_extract_filter)
+            except tarfile.TarError as e:
+                raise ValueError(f"not a valid .tar.gz bundle: {e}")
+
+            root = _locate_bundle_root(tmp)
+            if root is None:
+                raise ValueError(
+                    "bundle does not contain a manifest.json + source/ directory"
+                )
+            try:
+                with open(os.path.join(root, "manifest.json")) as f:
+                    manifest = json.load(f)
+            except (OSError, ValueError):
+                raise ValueError("bundle manifest.json is missing or unreadable")
+            if not isinstance(manifest, dict) or manifest.get("format") != (
+                "bitswan-bp-bundle/2"
+            ):
+                raise ValueError(
+                    "unsupported bundle format: expected a bitswan-bp-bundle/2 "
+                    "archive (Deployments → Inspect → Download bundle)"
+                )
+            src = os.path.join(root, "source")
+            if not os.path.isfile(os.path.join(src, "process.toml")):
+                raise ValueError("bundle has no source/process.toml")
+
+            display = " ".join(
+                (
+                    name or manifest.get("display_name") or manifest.get("bp") or ""
+                ).split()
+            )
+            clean = slugify_bp_name(display)
+            if not clean:
+                raise ValueError(
+                    "process name must contain at least one letter or digit (a-z, 0-9)"
+                )
+
+            # Same born-in-main dance as create_business_process.
+            await ensure_bp_bare_repo(clean, author=created_by)
+            if await bp_main_has_content(clean):
+                raise FileExistsError(
+                    f"a business process named '{clean}' already exists"
+                )
+
+            main_scope = os.path.join(_copies_dir(), "main")
+            os.makedirs(main_scope, exist_ok=True)
+            main_dir = bp_clone_path(None, clean)  # copies/main/<clean>
+            await clone_bp_into_copy(main_scope, "main", clean, allow_empty=True)
+
+            # The bundle's source tree instead of the two-file scaffold.
+            _copy_bundle_tree(src, main_dir)
+
+            # Fresh identities: a restored BP must never collide with the
+            # original it was bundled from.
+            pid = str(uuid.uuid4())
+            toml_path = os.path.join(main_dir, "process.toml")
+            config = toml.load(toml_path)
+            config["process-id"] = pid
+            config["name"] = display
+            with open(toml_path, "w") as f:
+                toml.dump(config, f)
+            _regenerate_automation_ids(main_dir)
+
+            src_bp = manifest.get("bp") or "unknown"
+            src_commit = str(manifest.get("commit") or "")[:8] or "unknown"
+            await commit_in_bp_clone(
+                main_dir,
+                f"Restore business process {display} from bundle of "
+                f"{src_bp}@{src_commit}",
+                author=created_by,
+            )
+            await publish_main_from_clone(main_dir, clean)
+            self.refresh(None)
+
+            return {
+                "id": pid,
+                "name": clean,
+                "display_name": display,
+                "in_main": True,
+                "copies": [],
+                "has_copies": False,
+            }
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     async def rename_business_process(
         self,
