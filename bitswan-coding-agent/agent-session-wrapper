@@ -40,6 +40,20 @@ fi
 export CLAUDE_CONFIG_DIR="/home/agent/.claude_${EMAIL_SLUG}"
 mkdir -p "$CLAUDE_CONFIG_DIR"
 
+# Point Claude's statusline at the container-wide script. Merged (not
+# overwritten) into the per-user settings.json because Claude itself writes
+# other keys (theme, …) into the same file. A corrupt settings.json makes jq
+# fail; leave the file alone in that case rather than nuking user settings.
+SETTINGS_FILE="$CLAUDE_CONFIG_DIR/settings.json"
+[ -s "$SETTINGS_FILE" ] || echo '{}' > "$SETTINGS_FILE"
+SETTINGS_TMP=$(mktemp)
+if jq '.statusLine = {"type": "command", "command": "/usr/local/bin/claude-statusline"}' \
+        "$SETTINGS_FILE" > "$SETTINGS_TMP" 2>/dev/null; then
+    mv "$SETTINGS_TMP" "$SETTINGS_FILE"
+else
+    rm -f "$SETTINGS_TMP"
+fi
+
 # Attribute git commits made during this session to the actual user. Per-process
 # GIT_* env vars (not global git config) so concurrent sessions in this shared
 # container don't race. Set before every exec branch below so it covers the

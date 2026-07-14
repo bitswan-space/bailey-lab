@@ -72,6 +72,11 @@ RUN mkdir -p /workspace/copies /var/log/agent-sessions \
 COPY agent-session-wrapper /usr/local/bin/agent-session-wrapper
 RUN chmod +x /usr/local/bin/agent-session-wrapper
 
+# Copy Claude Code statusline script (wired into per-user Claude settings
+# by agent-session-wrapper)
+COPY claude-statusline.sh /usr/local/bin/claude-statusline
+RUN chmod +x /usr/local/bin/claude-statusline
+
 # Copy entrypoint
 COPY entrypoint-agent.sh /usr/local/bin/entrypoint-agent.sh
 RUN chmod +x /usr/local/bin/entrypoint-agent.sh
