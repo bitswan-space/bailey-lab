@@ -9,18 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 )
-
-// Compose represents docker-compose structure for parsing
-type Compose struct {
-	Services map[string]struct {
-		Image string `yaml:"image"`
-	} `yaml:"services"`
-}
 
 // RunWorkspaceRemove tears down EVERYTHING a workspace consists of, entirely
 // daemon-side — it never talks to the workspace's gitops container (which may
@@ -222,20 +213,15 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	traefikapi.DeleteTraefikRecordsWithWriter(workspaceName, writer)
 	fmt.Fprintln(writer, "Ingress records removed.")
 
-	// 7. Images: the deployment compose files' images (platform services) plus
-	// every automation image under the workspace's own namespace.
+	// 7. Images: ONLY the workspace's own automation images (tagged
+	// internal/<ws>-..., per the driver's imageTagPrefix; the lowercased form
+	// is swept too for safety). The platform images the deployment compose
+	// files reference (bitswan/gitops, dashboard, coding-agent, infra-driver)
+	// are SHARED across workspaces — the old per-compose-file removal deleted
+	// them whenever the last workspace using them was removed, forcing a
+	// re-pull (or, for the locally-built -dev:latest images, a full rebuild)
+	// on the next init.
 	fmt.Fprintln(writer, "Removing images...")
-	composeFiles := []string{"docker-compose.yml"}
-	for _, f := range []string{"docker-compose-dashboard.yml", "docker-compose-coding-agent.yml"} {
-		if _, err := os.Stat(filepath.Join(dockerComposePath, f)); err == nil {
-			composeFiles = append(composeFiles, f)
-		}
-	}
-	for _, composeFile := range composeFiles {
-		removeImagesFromComposeFile(filepath.Join(dockerComposePath, composeFile), writer)
-	}
-	// Automation images are tagged internal/<ws>-... (raw workspace name, per
-	// the driver's imageTagPrefix); sweep the lowercased form too for safety.
 	removeImagesByPrefix("internal/"+workspaceName+"-", writer)
 	if projectName != workspaceName {
 		removeImagesByPrefix("internal/"+projectName+"-", writer)
@@ -513,42 +499,6 @@ func removeImagesByPrefix(prefix string, writer io.Writer) {
 			fmt.Fprintf(writer, "Warning: Failed to delete docker image %s: %v. Continuing with removal.\n", tag, err)
 		} else {
 			fmt.Fprintf(writer, "Deleted image: %s\n", tag)
-		}
-	}
-}
-
-func removeImagesFromComposeFile(composeFilePath string, writer io.Writer) {
-	data, err := os.ReadFile(composeFilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fmt.Fprintf(writer, "Warning: %s not found, skipping image removal\n", composeFilePath)
-		} else {
-			fmt.Fprintf(writer, "Warning: error reading %s: %v\n", composeFilePath, err)
-		}
-		return
-	}
-	var compose Compose
-	if err := yaml.Unmarshal(data, &compose); err != nil {
-		fmt.Fprintf(writer, "Warning: error unmarshalling %s: %v\n", composeFilePath, err)
-		return
-	}
-	for _, service := range compose.Services {
-		if service.Image == "" {
-			continue
-		}
-		exists, err := checkContainerExists(service.Image)
-		if err != nil {
-			fmt.Fprintf(writer, "Warning: Error checking if image exists: %v. Continuing with removal.\n", err)
-			continue
-		}
-		if exists {
-			fmt.Fprintf(writer, "Image %s is still in use by a different container. Skipping deletion.\n", service.Image)
-			continue
-		}
-		if err := deleteDockerImage(service.Image, writer); err != nil {
-			fmt.Fprintf(writer, "Warning: Failed to delete docker image %s: %v. Continuing with removal.\n", service.Image, err)
-		} else {
-			fmt.Fprintf(writer, "Deleted image: %s\n", service.Image)
 		}
 	}
 }
