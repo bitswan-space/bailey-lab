@@ -50,10 +50,19 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	// Docker compose project names must be lowercase
 	projectName := strings.ToLower(workspaceName)
 
-	// 1. Read metadata (domain) BEFORE anything deletes files.
+	// 1. Read metadata (domain) BEFORE anything deletes files. A workspace
+	// whose init failed early has no metadata.yaml yet (certs and files can
+	// exist before it is written) — fall back to the server's configured
+	// domain, the same default init resolves, so route/TLS cleanup still
+	// knows the platform hostnames.
 	domain := ""
 	if md, merr := config.GetWorkspaceMetadata(workspaceName); merr == nil {
 		domain = md.Domain
+	}
+	if domain == "" {
+		if sc, cerr := config.NewAutomationServerConfig().LoadConfig(); cerr == nil && sc != nil {
+			domain = sc.ProtectedHostnameDomain()
+		}
 	}
 
 	// 2. Compose downs — belt & braces: each `down --volumes` also removes the
@@ -210,7 +219,20 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	}
 	// Sweep residual workspace routes + per-workspace TLS cert entries from
 	// the ingress state (reads metadata.yaml itself — the files still exist).
-	traefikapi.DeleteTraefikRecordsWithWriter(workspaceName, writer)
+	// TLS entries + cert files are matched by the EXACT host set derived
+	// above; the workspace's `*.<domain>` wildcard cert is included only when
+	// no remaining workspace declares the same domain (a shared domain's
+	// wildcard must survive siblings).
+	tlsHosts := append([]string{}, hosts...)
+	if domain != "" && !domainUsedByAnotherWorkspace(workspacesFolder, workspaceName, domain) {
+		tlsHosts = append(tlsHosts, "*."+domain)
+	}
+	// The --local convention's wildcard (`*.bs-<ws>.localhost`, installed by
+	// mkcerts BEFORE metadata.yaml exists) embeds the full workspace name, so
+	// it can never belong to a sibling — always a safe exact candidate, and
+	// the only way to find it when a failed init left no metadata behind.
+	tlsHosts = append(tlsHosts, fmt.Sprintf("*.bs-%s.localhost", workspaceName))
+	traefikapi.DeleteTraefikRecordsWithWriter(workspaceName, tlsHosts, writer)
 	fmt.Fprintln(writer, "Ingress records removed.")
 
 	// 7. Images: ONLY the workspace's own automation images (tagged
@@ -389,6 +411,18 @@ func listSiblingWorkspaces(workspacesFolder, workspaceName string) []string {
 		}
 	}
 	return out
+}
+
+// domainUsedByAnotherWorkspace reports whether any remaining workspace's
+// metadata declares the same domain. When it does, the domain's wildcard
+// TLS cert is shared and must survive this workspace's removal.
+func domainUsedByAnotherWorkspace(workspacesFolder, workspaceName, domain string) bool {
+	for _, sibling := range listSiblingWorkspaces(workspacesFolder, workspaceName) {
+		if md, err := config.GetWorkspaceMetadata(sibling); err == nil && md.Domain == domain {
+			return true
+		}
+	}
+	return false
 }
 
 // filterHostsFileLines drops every line containing one of the entry tokens.

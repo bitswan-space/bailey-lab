@@ -669,14 +669,53 @@ func InstallTLSCerts(hostname string, local bool, domain_dir string) error {
 	})
 }
 
-// DeleteTraefikRecords removes all Traefik routing entries for a workspace.
-func DeleteTraefikRecords(workspaceName string) error {
-	return DeleteTraefikRecordsWithWriter(workspaceName, nil)
+// tlsCertHostSegment extracts the sanitized-hostname path segment from a TLS
+// state entry's cert path ("/tls/<segment>/full-chain.pem" → "<segment>").
+// Returns "" when the path doesn't have that shape — such entries are never
+// matched (and therefore never pruned) by hostname.
+func tlsCertHostSegment(certFile string) string {
+	rest, ok := strings.CutPrefix(certFile, "/tls/")
+	if !ok {
+		return ""
+	}
+	seg, _, ok := strings.Cut(rest, "/")
+	if !ok {
+		return ""
+	}
+	return seg
 }
 
-// DeleteTraefikRecordsWithWriter removes all Traefik routing entries for a workspace,
-// writing progress messages to writer (stdout if nil).
-func DeleteTraefikRecordsWithWriter(workspaceName string, writer io.Writer) error {
+// pruneTLSCerts splits TLS state entries into kept and removed by EXACT
+// sanitized-hostname match against `wanted`. Exactness is the point: the old
+// sweep kept entries whose path merely didn't CONTAIN the workspace name — a
+// substring match with a cross-workspace blast radius (removing a workspace
+// named "dev" stripped the cert of every other workspace's -dev stage
+// hostname, downgrading them to Traefik's default cert).
+func pruneTLSCerts(certs []traefikTLSCert, wanted map[string]bool) (keep []traefikTLSCert, removed []string) {
+	for _, cert := range certs {
+		if seg := tlsCertHostSegment(cert.CertFile); seg != "" && wanted[seg] {
+			removed = append(removed, seg)
+			continue
+		}
+		keep = append(keep, cert)
+	}
+	return keep, removed
+}
+
+// DeleteTraefikRecords removes all Traefik routing entries for a workspace.
+func DeleteTraefikRecords(workspaceName string, hostnames []string) error {
+	return DeleteTraefikRecordsWithWriter(workspaceName, hostnames, nil)
+}
+
+// DeleteTraefikRecordsWithWriter removes all Traefik routing entries for a
+// workspace, writing progress messages to writer (stdout if nil).
+//
+// `hostnames` is the workspace's EXACT host set (the caller derives it from
+// the Bailey endpoints ∪ protected_routes union plus the platform hosts, and
+// includes the `*.<domain>` wildcard only when no remaining workspace shares
+// the domain). TLS cert entries — and their PEM files on disk, which the old
+// sweep leaked — are removed only for these hosts.
+func DeleteTraefikRecordsWithWriter(workspaceName string, hostnames []string, writer io.Writer) error {
 	log := func(format string, args ...interface{}) {
 		if writer != nil {
 			fmt.Fprintf(writer, format+"\n", args...)
@@ -722,22 +761,51 @@ func DeleteTraefikRecordsWithWriter(workspaceName string, writer io.Writer) erro
 		log("No domain found, skipping service route deletion")
 	}
 
-	// Remove TLS cert entries that belong to this workspace.
-	log("Removing TLS cert entries for workspace %s...", workspaceName)
+	// Remove TLS cert entries by EXACT hostname match (see pruneTLSCerts for
+	// why substring matching was wrong). Entries are recorded as
+	// /tls/<sanitized-hostname>/full-chain.pem, so sanitize the caller's host
+	// set the same way installs do and match the path segment. The platform
+	// gitops/dashboard hosts are folded in as belt-and-braces even though the
+	// caller normally includes them.
+	wanted := make(map[string]bool, len(hostnames)+2)
+	for _, h := range hostnames {
+		if h != "" {
+			wanted[sanitizeHostname(strings.ToLower(h))] = true
+		}
+	}
+	if domain != "" {
+		for _, service := range []string{"gitops", "dashboard"} {
+			host := fmt.Sprintf("%s-%s.%s", workspaceName, service, domain)
+			wanted[sanitizeHostname(strings.ToLower(host))] = true
+		}
+	}
+	log("Removing TLS cert entries for %d workspace hostname(s)...", len(wanted))
+	var removed []string
 	if err := modifyState(traefikBaseURL, func(state *traefikDynConfig) error {
 		if state.TLS == nil {
 			return nil
 		}
-		var keep []traefikTLSCert
-		for _, cert := range state.TLS.Certificates {
-			if !strings.Contains(cert.CertFile, workspaceName) {
-				keep = append(keep, cert)
-			}
-		}
-		state.TLS.Certificates = keep
+		state.TLS.Certificates, removed = pruneTLSCerts(state.TLS.Certificates, wanted)
 		return nil
 	}); err != nil {
 		log("Warning: failed to remove TLS cert entries: %v", err)
+	} else if len(removed) > 0 {
+		log("Removed %d TLS cert entr(ies): %s", len(removed), strings.Join(removed, ", "))
+	}
+
+	// Also unlink the cert PEM files — pruning only the state entries left
+	// the files under traefik/certs/ behind forever.
+	certsRoot := os.Getenv("HOME") + "/.config/bitswan/traefik/certs"
+	for seg := range wanted {
+		dir := filepath.Join(certsRoot, seg)
+		if _, err := os.Stat(dir); err != nil {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			log("Warning: failed to remove cert files %s: %v", dir, err)
+		} else {
+			log("Removed cert files %s", dir)
+		}
 	}
 
 	log("Traefik cleanup completed")

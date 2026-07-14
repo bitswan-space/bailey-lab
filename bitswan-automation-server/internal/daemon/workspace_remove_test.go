@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -253,5 +254,39 @@ func TestDockerSweepHelpers(t *testing.T) {
 		// exists — good, and it must still exist (guard). Nothing else to assert:
 		// inspect succeeding IS the assertion.
 		_ = err
+	}
+}
+
+// TestDomainUsedByAnotherWorkspace guards the wildcard-cert decision: the
+// `*.<domain>` TLS entry is only swept when NO remaining workspace declares
+// the same domain (a shared domain's wildcard must survive siblings).
+func TestDomainUsedByAnotherWorkspace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SUDO_USER", "")
+	wsFolder := home + "/.config/bitswan/workspaces"
+
+	mk := func(name, domain string) {
+		dir := wsFolder + "/" + name
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir+"/metadata.yaml", []byte("domain: "+domain+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("pr", "shared.example.com")
+	mk("dev", "shared.example.com")
+	mk("solo", "solo-only.example.com")
+
+	if !domainUsedByAnotherWorkspace(wsFolder, "pr", "shared.example.com") {
+		t.Error("shared domain must be reported as used by the sibling")
+	}
+	if domainUsedByAnotherWorkspace(wsFolder, "solo", "solo-only.example.com") {
+		t.Error("sole user of a domain must not report it as shared")
+	}
+	// The removed workspace's own metadata never counts.
+	if domainUsedByAnotherWorkspace(wsFolder, "solo", "nowhere.example.com") {
+		t.Error("unknown domain must not be reported as shared")
 	}
 }
