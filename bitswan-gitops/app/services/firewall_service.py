@@ -30,7 +30,6 @@ def attempts_log_path(bp: str, realm: str) -> str:
     return os.path.join(firewall_dir(), f"{bp}__{realm}.attempts.jsonl")
 
 
-
 def read_attempts(bp: str, realm: str) -> dict:
     """Aggregate the gateway's JSONL into {host: {count, first, last, proto}}.
     Tolerates a missing/partial file (telemetry, best-effort)."""

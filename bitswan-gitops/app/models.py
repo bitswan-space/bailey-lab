@@ -3,9 +3,6 @@ from datetime import datetime
 from pydantic import BaseModel
 
 
-
-
-
 class DeployedAutomation(BaseModel):
     container_id: str | None
     endpoint_name: str | None
@@ -46,9 +43,6 @@ class ProcessInfo(BaseModel):
     automation_sources: list[str]
 
 
-
-
-
 # =============================================================================
 # Infrastructure Service Models
 # =============================================================================
@@ -73,7 +67,6 @@ class ServiceActionRequest(BaseModel):
 
     stage: str = ""
     image: str | None = None
-
 
 
 class ServiceBackupRequest(BaseModel):

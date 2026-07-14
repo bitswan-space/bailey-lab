@@ -106,7 +106,6 @@ class ServiceDependency:
     enabled: bool = True
 
 
-
 # Network realms: each gets its own set of infrastructure services (Kafka, CouchDB).
 # live-dev shares the dev realm.
 SERVICE_REALMS = {"dev", "staging", "production"}
@@ -484,7 +483,6 @@ def _context_to_bp(bs_yaml: dict) -> dict[str, str]:
     return out
 
 
-
 def bp_slice(bs_yaml: dict, bp: str) -> dict:
     """Extract ONE raw business process's deploy state from a whole-workspace
     dict: every business_processes CONTEXT belonging to this bp (main + copies)
@@ -560,7 +558,6 @@ async def update_bp_git(
     )
 
 
-
 def generate_workspace_url(
     workspace_name: str,
     automation_name: str,
@@ -575,8 +572,6 @@ def generate_workspace_url(
     label = make_hostname_label(workspace_name, automation_name, context, stage, slot)
     url = f"{label}.{gitops_domain}"
     return f"https://{url}" if full else url
-
-
 
 
 def _ingress_client_and_base() -> tuple:
@@ -690,7 +685,6 @@ def add_route_to_ingress(
         return False
 
 
-
 def remove_route_by_hostname(hostname: str) -> bool:
     """Remove a single ingress route by its exact hostname, via the shared
     (UDS-preferred) ingress client."""
@@ -701,8 +695,6 @@ def remove_route_by_hostname(hostname: str) -> bool:
         return response.status_code == 200
     except Exception:
         return False
-
-
 
 
 # Symlink targets we accept inside deploy-archive tarballs. Anything outside
@@ -1053,8 +1045,6 @@ _COMPOSE_EVENT_STATES = (
     "Running",
     "Recreated",
 )
-
-
 
 
 async def save_image(

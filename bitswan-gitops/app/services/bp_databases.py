@@ -664,7 +664,6 @@ def _bp_display_name(relative_path: str | None) -> str:
     return parts[0] if len(parts) >= 2 else ""
 
 
-
 def _production_db_numbers(bs_yaml: dict | None, bp_slug: str) -> list[int]:
     """Blue-green db numbers a production BP's slots use (default [1, 2]).
 
