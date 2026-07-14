@@ -7,6 +7,11 @@ import type { GitopsClient } from '../services/gitops.js';
 import { isValidBpId, isValidCopyName } from '../services/workspace.js';
 import { castStream, findSessionOwnerEmail, listSessions } from '../services/agent-sessions.js';
 import {
+  deleteAgentStatusline,
+  getAgentStatusline,
+  putAgentStatusline,
+} from '../services/agent-exec.js';
+import {
   BUILD_AUTOMATION_PROMPT,
   DEFAULT_PROMPT,
   SYNC_PROMPT,
@@ -48,6 +53,9 @@ function bashSingleQuoteEscape(s: string): string {
 }
 
 const SSH_KEY = '/workspace/.ssh/id_ed25519';
+
+/** Upload cap for the per-user statusline script. */
+const MAX_STATUSLINE_BYTES = 64 * 1024;
 
 function agentHost(): string {
   // Allow an explicit override for setups whose coding-agent container
@@ -520,4 +528,58 @@ export function registerCodingAgentRoutes(
       }
     },
   );
+
+  // Per-user Claude statusline (Agents tab → statusline dialog). All three
+  // operate on $CLAUDE_CONFIG_DIR/statusline.sh inside the agent container,
+  // scoped to the calling user by SSH_USER_EMAIL — see agent-exec.ts.
+
+  app.get('/api/coding-agent/statusline', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const email = await emailFromRequest(req, app.log);
+    if (!email) return reply.code(401).send({ error: 'not authenticated' });
+    try {
+      return await getAgentStatusline(email);
+    } catch (err) {
+      app.log.warn({ err }, 'statusline read failed');
+      return reply.code(502).send({ error: 'coding agent unreachable' });
+    }
+  });
+
+  app.put<{ Body: { script?: string } }>(
+    '/api/coding-agent/statusline',
+    async (req, reply) => {
+      const email = await emailFromRequest(req, app.log);
+      if (!email) return reply.code(401).send({ error: 'not authenticated' });
+      const script = req.body?.script;
+      if (typeof script !== 'string' || !script.trim()) {
+        return reply.code(400).send({ ok: false, error: 'script must be a non-empty string' });
+      }
+      if (script.length > MAX_STATUSLINE_BYTES) {
+        return reply
+          .code(400)
+          .send({ ok: false, error: `script too large (max ${MAX_STATUSLINE_BYTES} bytes)` });
+      }
+      try {
+        const result = await putAgentStatusline(email, script);
+        // 422 carries the bash -n output; the client renders it inline
+        // (putJsonAllow4xx — an expected outcome, not a thrown error).
+        return reply.code(result.ok ? 200 : 422).send(result);
+      } catch (err) {
+        app.log.warn({ err }, 'statusline save failed');
+        return reply.code(502).send({ ok: false, error: 'coding agent unreachable' });
+      }
+    },
+  );
+
+  app.delete('/api/coding-agent/statusline', async (req, reply) => {
+    const email = await emailFromRequest(req, app.log);
+    if (!email) return reply.code(401).send({ error: 'not authenticated' });
+    try {
+      await deleteAgentStatusline(email);
+      return reply.code(204).send();
+    } catch (err) {
+      app.log.warn({ err }, 'statusline reset failed');
+      return reply.code(502).send({ error: 'coding agent unreachable' });
+    }
+  });
 }

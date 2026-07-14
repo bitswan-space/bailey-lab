@@ -1139,6 +1139,23 @@ export const api = {
       ),
   },
 
+  /**
+   * Per-user Claude statusline in the coding-agent container. `get` returns
+   * the user's custom script, or the container's built-in default
+   * (custom: false) as a starting point to edit. `save` may return
+   * `{ok: false, error}` with the remote `bash -n` output — an expected
+   * outcome the dialog renders inline, hence putJsonAllow4xx.
+   */
+  statusline: {
+    get: () => getJson<AgentStatusline>('/api/coding-agent/statusline'),
+    save: (script: string) =>
+      putJsonAllow4xx<{ ok: true } | { ok: false; error: string }>(
+        '/api/coding-agent/statusline',
+        { script },
+      ),
+    reset: () => deleteEmpty('/api/coding-agent/statusline'),
+  },
+
   /** Git task queue. The live feed comes over the `/api/events` SSE stream;
    *  this is the initial snapshot fetch on mount. */
   tasks: () => getJson<{ tasks: GitTask[] }>('/api/tasks'),
@@ -1219,6 +1236,12 @@ export interface AddRequirementRequest {
 export interface UpdateRequirementRequest {
   description?: string;
   status?: ReqStatus;
+}
+
+export interface AgentStatusline {
+  script: string;
+  /** True when the user has uploaded their own script; false = the shipped default. */
+  custom: boolean;
 }
 
 export interface RunTestsResponse {

@@ -13,12 +13,14 @@ import {
   PanelRightOpen,
   Pencil,
   Plus,
+  TerminalSquare,
   Trash2,
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { api } from '@/lib/api';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
+import { StatuslineDialog } from '@/components/agents/StatuslineDialog';
 import { cn } from '@/lib/utils';
 
 /**
@@ -258,7 +260,35 @@ export function EnvironmentPanel({ bp, copy }: Props) {
         </Section>
 
         <DevSecrets bp={bp} />
+
+        <StatuslineRow />
       </div>
+    </div>
+  );
+}
+
+/**
+ * ENVIRONMENT panel entry for the per-user Claude statusline. Mirrors the
+ * Dev secrets block: a header row plus a click-to-edit description; the
+ * editor itself is the StatuslineDialog modal. Per-user (not per-BP) — the
+ * script lives in the user's Claude config dir in the agent container.
+ */
+function StatuslineRow() {
+  return (
+    <div className="flex flex-col gap-2 border-t border-border px-3.5 py-3">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <TerminalSquare className="size-2.5 text-muted-foreground/60" aria-hidden />
+        Agent statusline
+      </div>
+      <StatuslineDialog>
+        <button
+          type="button"
+          className="text-left text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          The status bar shown under the agent&apos;s input box — model,
+          context usage, cost. Yours across all agents. Click to edit.
+        </button>
+      </StatuslineDialog>
     </div>
   );
 }

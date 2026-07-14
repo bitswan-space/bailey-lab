@@ -246,6 +246,14 @@ export function TaskQueuePanel({
   // A ticking clock so relative timestamps stay fresh without per-row timers.
   const [now, setNow] = useState(() => Date.now());
   const listRef = useRef<HTMLUListElement>(null);
+  // Unseen-activity tracking for the collapsed bubble. `seenCount` is the
+  // high-water mark acknowledged while the panel is open; `pulse` flashes the
+  // bubble once when new activity lands while collapsed. Together they make a
+  // *terminal* event (a save confirmation, a finished task) noticeable even
+  // though it never enters the in-progress count.
+  const [seenCount, setSeenCount] = useState(0);
+  const [pulse, setPulse] = useState(false);
+  const prevLenRef = useRef(0);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 15_000);
@@ -316,6 +324,28 @@ export function TaskQueuePanel({
     if (el) el.scrollTop = el.scrollHeight;
   }, [lastKey, collapsed]);
 
+  // While the panel is open, everything on screen counts as seen. This keeps
+  // the unseen badge at zero until the user collapses and new activity lands.
+  useEffect(() => {
+    if (!collapsed) setSeenCount(items.length);
+  }, [collapsed, items.length]);
+
+  // Pulse the collapsed bubble once whenever the item count grows while
+  // collapsed — the visual "something just happened" that a terminal
+  // notification otherwise lacks.
+  useEffect(() => {
+    const grew = items.length > prevLenRef.current;
+    prevLenRef.current = items.length;
+    if (grew && collapsed) {
+      setPulse(true);
+      const t = setTimeout(() => setPulse(false), 900);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  }, [items.length, collapsed]);
+
+  const unseen = Math.max(0, items.length - seenCount);
+
   // Nothing to show — stay out of the way entirely. (`tasks === null` means no
   // snapshot has arrived yet; with no notifications either, render nothing.)
   if (items.length === 0) return null;
@@ -333,16 +363,29 @@ export function TaskQueuePanel({
         title="Show activity"
         className="pointer-events-auto fixed bottom-4 right-4 z-50 flex size-11 items-center justify-center rounded-full border border-border bg-background text-foreground shadow-lg hover:bg-accent"
       >
+        {/* One-shot ring when new activity lands while collapsed. */}
+        {pulse && (
+          <span
+            className="absolute inset-0 animate-ping rounded-full bg-blue-500/30"
+            aria-hidden
+          />
+        )}
         {anyRunning ? (
           <Loader2 className="size-5 animate-spin text-blue-500" />
         ) : (
           <ListTodo className="size-5 text-muted-foreground" />
         )}
-        {activeCount > 0 && (
+        {/* In-progress work keeps its blue count; otherwise a terminal event
+            (save confirmation, finished task) shows an amber unseen badge. */}
+        {activeCount > 0 ? (
           <span className="absolute -right-1 -top-1 flex min-w-4 items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-semibold leading-4 text-white">
             {activeCount}
           </span>
-        )}
+        ) : unseen > 0 ? (
+          <span className="absolute -right-1 -top-1 flex min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold leading-4 text-white">
+            {unseen}
+          </span>
+        ) : null}
       </button>
     );
   }

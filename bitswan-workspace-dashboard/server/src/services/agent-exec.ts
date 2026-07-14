@@ -38,13 +38,21 @@ export interface AgentExecResult {
   exitCode: number;
   /** Combined stdout+stderr from the remote command, truncated to a cap. */
   output: string;
+  /** stdout alone, for callers that parse the command's output and can't
+   *  afford stderr noise interleaved into it. Same truncation cap. */
+  stdout: string;
 }
 
 function sshExec(opts: {
   command: string;
-  copy: string;
+  /** Omitted for commands that aren't scoped to a copy (the wrapper then
+   *  lands in `/workspace/copies`, which per-user commands don't care about). */
+  copy?: string;
   bp?: string;
   email: string;
+  /** Piped to the remote command's stdin. This is the ONLY safe channel for
+   *  user-controlled data — never interpolate it into `command`. */
+  stdin?: string;
   timeoutMs: number;
 }): Promise<AgentExecResult> {
   const host = agentHost();
@@ -55,6 +63,10 @@ function sshExec(opts: {
     'StrictHostKeyChecking=no',
     '-o',
     'UserKnownHostsFile=/dev/null',
+    // Silence the "Permanently added <host>" host-key warning — it lands on
+    // stderr and would pollute `output` for callers that show it verbatim.
+    '-o',
+    'LogLevel=ERROR',
     // Fail fast instead of hanging on a password/known-hosts prompt.
     '-o',
     'BatchMode=yes',
@@ -81,14 +93,18 @@ function sshExec(opts: {
         ...process.env,
         SSH_USER_EMAIL: opts.email,
         SSH_LOGGED: 'false',
-        SSH_WORKTREE: opts.copy,
+        ...(opts.copy ? { SSH_WORKTREE: opts.copy } : {}),
         ...(opts.bp ? { SSH_BP: opts.bp } : {}),
       },
     });
 
     let output = '';
+    let stdout = '';
     let truncated = false;
-    const capture = (chunk: Buffer) => {
+    const capture = (chunk: Buffer, isStdout: boolean) => {
+      if (isStdout && stdout.length <= MAX_OUTPUT_BYTES) {
+        stdout += chunk.toString('utf8');
+      }
       if (truncated) return;
       output += chunk.toString('utf8');
       if (output.length > MAX_OUTPUT_BYTES) {
@@ -96,8 +112,11 @@ function sshExec(opts: {
         truncated = true;
       }
     };
-    child.stdout.on('data', capture);
-    child.stderr.on('data', capture);
+    child.stdout.on('data', (c: Buffer) => capture(c, true));
+    child.stderr.on('data', (c: Buffer) => capture(c, false));
+    // End stdin either way: without this, remote commands that read stdin
+    // (`cat > file`) would block forever waiting for EOF.
+    child.stdin.end(opts.stdin ?? '');
 
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
@@ -110,9 +129,89 @@ function sshExec(opts: {
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ exitCode: code ?? -1, output });
+      resolve({ exitCode: code ?? -1, output, stdout });
     });
   });
+}
+
+/**
+ * Per-user Claude statusline script, stored at `$CLAUDE_CONFIG_DIR/statusline.sh`
+ * in the coding-agent container. The container's default statusline
+ * (/usr/local/bin/claude-statusline) execs this file when it exists, so an
+ * upload takes effect on the next render — including in already-open
+ * sessions. All three operations run as the calling user: the wrapper
+ * resolves CLAUDE_CONFIG_DIR from SSH_USER_EMAIL, so `$CLAUDE_CONFIG_DIR`
+ * below expands remotely to the right per-user dir and the server never
+ * re-derives the email slug.
+ */
+
+export interface AgentStatusline {
+  script: string;
+  /** True when the user has uploaded their own script; false = the
+   *  container's built-in default (returned as a starting point to edit). */
+  custom: boolean;
+}
+
+/** Read the user's effective statusline: their upload, or the shipped default. */
+export async function getAgentStatusline(email: string): Promise<AgentStatusline> {
+  const res = await sshExec({
+    command:
+      'if [ -f "$CLAUDE_CONFIG_DIR/statusline.sh" ]; then echo CUSTOM; cat "$CLAUDE_CONFIG_DIR/statusline.sh"; ' +
+      // Old images predate the default script — an empty DEFAULT is fine.
+      'else echo DEFAULT; cat /usr/local/bin/claude-statusline 2>/dev/null || true; fi',
+    email,
+    timeoutMs: 15_000,
+  });
+  if (res.exitCode !== 0) {
+    throw new Error(`statusline read failed (exit ${res.exitCode}): ${res.output.trim()}`);
+  }
+  const nl = res.stdout.indexOf('\n');
+  const marker = nl === -1 ? res.stdout.trim() : res.stdout.slice(0, nl).trim();
+  return {
+    script: nl === -1 ? '' : res.stdout.slice(nl + 1),
+    custom: marker === 'CUSTOM',
+  };
+}
+
+/** Exit code the remote command uses to say "script failed `bash -n`". */
+const STATUSLINE_SYNTAX_EXIT = 42;
+
+/** Install the user's statusline script; `{ok: false}` carries `bash -n` output. */
+export async function putAgentStatusline(
+  email: string,
+  script: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await sshExec({
+    // The script travels via stdin (never interpolated into the command).
+    // `bash -n` gates the install so a typo'd upload can't take effect —
+    // Claude would render nothing and the user would have no feedback why.
+    command:
+      'set -e; tmp=$(mktemp); trap \'rm -f "$tmp"\' EXIT; cat > "$tmp"; ' +
+      'if err=$(bash -n "$tmp" 2>&1); then install -m 755 "$tmp" "$CLAUDE_CONFIG_DIR/statusline.sh"; ' +
+      `else printf '%s' "$err"; exit ${STATUSLINE_SYNTAX_EXIT}; fi`,
+    email,
+    stdin: script,
+    timeoutMs: 15_000,
+  });
+  if (res.exitCode === STATUSLINE_SYNTAX_EXIT) {
+    return { ok: false, error: res.stdout.trim() || 'script failed bash -n syntax check' };
+  }
+  if (res.exitCode !== 0) {
+    throw new Error(`statusline save failed (exit ${res.exitCode}): ${res.output.trim()}`);
+  }
+  return { ok: true };
+}
+
+/** Remove the user's upload so the container's default statusline is back. */
+export async function deleteAgentStatusline(email: string): Promise<void> {
+  const res = await sshExec({
+    command: 'rm -f "$CLAUDE_CONFIG_DIR/statusline.sh"',
+    email,
+    timeoutMs: 15_000,
+  });
+  if (res.exitCode !== 0) {
+    throw new Error(`statusline reset failed (exit ${res.exitCode}): ${res.output.trim()}`);
+  }
 }
 
 /** Requirement IDs are `REQ-###` / `AI-###` style; this is the safety check

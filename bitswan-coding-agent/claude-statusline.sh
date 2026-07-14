@@ -5,6 +5,15 @@
 # this script's stdout (ANSI colors supported) under the input box. Wired
 # into each user's Claude settings by agent-session-wrapper; installed at
 # /usr/local/bin/claude-statusline by the Dockerfile.
+
+# Per-user override, uploaded through the dashboard (Agents tab → statusline
+# dialog) into the user's Claude config dir. exec keeps stdin (the JSON
+# payload) attached, so an upload applies on the very next render — even in
+# sessions that are already open.
+if [ -n "$CLAUDE_CONFIG_DIR" ] && [ -f "$CLAUDE_CONFIG_DIR/statusline.sh" ]; then
+    exec bash "$CLAUDE_CONFIG_DIR/statusline.sh"
+fi
+
 export LC_ALL=C
 input=$(cat)
 
