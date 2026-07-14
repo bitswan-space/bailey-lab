@@ -6,7 +6,7 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import { SC_UI } from './harness.js';
 
 const {
-  Avatar, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRCode, QRImage,
+  Avatar, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRImage,
   Toggle, DeviceIcon, Toast, EmptyState, CopyChip, ProtoHint, Stat,
   Drawer, Select, AvatarStack, LoadBanner, ErrorBanner, LiveState,
 } = SC_UI;
@@ -115,11 +115,7 @@ describe('SegmentedCode', () => {
   });
 });
 
-describe('QRCode / QRImage', () => {
-  it('QRCode renders an svg deterministically', () => {
-    const { container } = render(<QRCode seed="bailey" size={50} />);
-    expect(container.querySelector('svg')).toBeTruthy();
-  });
+describe('QRImage', () => {
   it('QRImage shows placeholder then an img once toDataURL resolves', async () => {
     const { container, rerender } = render(<QRImage value="" size={40} />);
     // empty value → placeholder branch, no async

@@ -7,7 +7,6 @@
 // order matters.
 import '../../src/console/api.js';
 import '../../src/console/console-ui.jsx';
-import '../../src/console/console-data.jsx';
 import '../../src/console/views-workspaces.jsx';
 import '../../src/console/views-people.jsx';
 import '../../src/console/views-devices.jsx';
@@ -17,7 +16,6 @@ import '../../src/console/console-app.jsx';
 
 export const SC_API = window.SC_API;
 export const SC_UI = window.SC_UI;
-export const SC_DATA = window.SC_DATA;
 export const SC_WORKSPACES = window.SC_WORKSPACES;
 export const SC_PEOPLE = window.SC_PEOPLE;
 export const SC_DEVICES = window.SC_DEVICES;
