@@ -1455,7 +1455,9 @@ class AutomationService:
         — that git commit IS the deployment-history record (see `bp_history`).
         No history list is kept in bitswan.yaml; git is the source of truth. The
         commit subject (`<source> <bp> → <stage>`) lets history infer the kind
-        (deploy / promote / rollback)."""
+        (deploy / promote / rollback). Audit sign-offs are NOT stamped here — the
+        history badge reads them from the stage-independent `audits` store by the
+        deployment's image content hash."""
         stage_key = "production" if stage in ("", "production") else stage
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         tree = bs.setdefault("business_processes", {})
@@ -1503,6 +1505,12 @@ class AutomationService:
         prev_fw_key: tuple | None = None
         prev_bk_key: str | None = None
         prev_sec_key: str | None = None
+        # Audit sign-offs, keyed by image content hash — read from the CURRENT
+        # store (audits are timeless, about the image, not the revision), so a
+        # deploy of image X shows every auditor of X regardless of stage or when
+        # they signed.
+        bs_now = read_bitswan_yaml(self.gitops_dir) or {}
+        audits_store = (bs_now.get("audits") or {}).get(bp) or {}
         for line in (out or "").splitlines():
             parts = line.split("\x1f")
             if len(parts) != 4:
@@ -1535,6 +1543,13 @@ class AutomationService:
                     source = "staging" if stage_key == "production" else "dev"
                 else:
                     status, source = "deployed", "deploy"
+                # This deploy's image content hash → its auditors (current
+                # verdict = approve) from the single audits store. Stage-agnostic.
+                csha = self.content_sha(
+                    (v or {}).get("checksum") or (v or {}).get("image")
+                    for v in (node.get("deployments") or {}).values()
+                )
+                approvals, _ = self.audit_verdicts(audits_store.get(csha) or [])
                 entries.append(
                     {
                         "commit": sha,  # the deploy-event id (rollback key)
@@ -1544,6 +1559,16 @@ class AutomationService:
                         "status": status,
                         "source": source,
                         "members": members,
+                        # Auditors who approved this exact image — [{who,at,note}].
+                        # Empty when the image was never audited.
+                        "audit": [
+                            {
+                                "who": e.get("who"),
+                                "at": e.get("at"),
+                                "note": e.get("note"),
+                            }
+                            for e in approvals
+                        ],
                     }
                 )
             emitted_deploy = src and dep_key != prev_dep_key
@@ -2097,6 +2122,392 @@ class AutomationService:
             message=f"dr recovery test {bp}",
         )
         return self.read_dr(bp)
+
+    # ── Staging freeze + production-promotion audit gate ─────────────────────
+    # Production promotion is gated behind TWO conditions, both per business
+    # process:
+    #   1. Staging is FROZEN — an auditor/admin locks the current staging image
+    #      so reviewers audit a fixed tag, and dev→staging promotion is closed
+    #      while frozen (a normal user can still promote dev→staging when it is
+    #      NOT frozen).
+    #   2. The AUDIT POLICY is met — N human sign-offs (approvals) on that frozen
+    #      image, with no outstanding "request changes" (policy minimum is 1).
+    # Freeze state, the policy, and the append-only audit log all live in
+    # bitswan.yaml under `staging_gate` (versioned in git like dr/firewall/
+    # secrets); the `log` list records EVERY change — freeze, unfreeze, policy
+    # edits and sign-offs — each attributed and also one git-attributed commit.
+    # Only admin/auditor may freeze, edit the policy, or
+    # sign off — resolved from the daemon's authoritative role store, failing
+    # closed. Audits attach to the frozen image's content sha; a new staging
+    # image starts a fresh trail.
+    _STAGING_GATE_ROLES = ("admin", "auditor")
+    DEFAULT_AUDITS_REQUIRED = 1
+
+    def _role_of(self, by: str | None) -> str | None:
+        """The acting user's authoritative Bailey role (email already verified by
+        a trusted shim), or None on missing identity / lookup failure — so every
+        gate that consumes it fails CLOSED (never guesses a privileged role)."""
+        if not by:
+            return None
+        try:
+            return daemon_user_role(by)
+        except Exception:
+            logger.warning("role lookup failed for %s; treating as unprivileged", by)
+            return None
+
+    @staticmethod
+    def content_sha(checksums) -> str | None:
+        """The stable content identity of a set of member images: sha256 of the
+        sorted per-member checksums. THIS is the audit key — an image is the same
+        image (and carries the same audits) regardless of which stage it sits in.
+        None when there are no checksums."""
+        parts = sorted(c for c in checksums if c)
+        if not parts:
+            return None
+        return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:40]
+
+    def staging_content_sha(self, bp: str) -> str | None:
+        """The content hash of what is currently deployed to Staging (the image an
+        auditor reviews / the promotion gate checks). None when Staging is empty."""
+        try:
+            members = self.promotable_bp_members(bp, "production")
+        except HTTPException:
+            return None
+        return self.content_sha(m.get("checksum") or m.get("image") for m in members)
+
+    @staticmethod
+    def image_audits(bs: dict, bp: str, sha: str | None) -> list[dict]:
+        """The sign-off records for one image (content hash), newest-first, from
+        the single stage-independent `audits` store. Empty when sha is None."""
+        if not sha:
+            return []
+        return list(((bs.get("audits") or {}).get(bp) or {}).get(sha) or [])
+
+    @staticmethod
+    def audit_verdicts(records: list[dict]) -> tuple[list[dict], list[dict]]:
+        """Reduce an image's sign-off records (newest-first) to each auditor's
+        CURRENT verdict, split into (approvals, rejections). An auditor can change
+        their mind: the store is append-only, but only their latest entry counts."""
+        latest_by_author: dict[str, dict] = {}
+        for e in records:
+            who = e.get("who")
+            if who and who not in latest_by_author:
+                latest_by_author[who] = e
+        approvals = [
+            e for e in latest_by_author.values() if e.get("verdict") == "approve"
+        ]
+        rejections = [
+            e for e in latest_by_author.values() if e.get("verdict") == "reject"
+        ]
+        return approvals, rejections
+
+    def read_staging_gate(self, bp: str) -> dict:
+        """A BP's staging freeze + promotion-audit state: whether staging is frozen
+        (and by whom, when, on which image content hash), the audit policy, the
+        freeze/policy governance log, the sign-offs on the staging image (from the
+        stage-independent `audits` store, keyed by content hash), and the derived
+        `promotable` flag that gates production."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rec = (bs.get("staging_gate") or {}).get(bp) or {}
+        # Minimum 1 — the audits-off (0) option was removed; clamp so any state
+        # persisted before that (or a legacy 0) still reads as "1 required".
+        required = max(
+            1,
+            int(
+                (rec.get("audit_policy") or {}).get(
+                    "required", self.DEFAULT_AUDITS_REQUIRED
+                )
+            ),
+        )
+        frozen = bool(rec.get("frozen"))
+        frozen_sha = rec.get("frozen_sha") or None
+        current_sha = self.staging_content_sha(bp)
+        # Sign-offs on the image under review come from the single audits store,
+        # keyed by the image content hash — NOT from a per-stage log.
+        key = frozen_sha or current_sha
+        signoffs = self.image_audits(bs, bp, key)
+        approvals, rejections = self.audit_verdicts(signoffs)
+        audits_met = len(approvals) >= required
+        # If the staging image drifted from the frozen tag (e.g. a direct staging
+        # deploy), the audits no longer describe what is live — force a re-freeze.
+        stale = bool(
+            frozen and frozen_sha and current_sha and frozen_sha != current_sha
+        )
+        promotable = frozen and not stale and audits_met and not rejections
+        return {
+            "bp": bp,
+            "frozen": frozen,
+            "frozen_by": rec.get("frozen_by"),
+            "frozen_at": rec.get("frozen_at"),
+            "frozen_sha": frozen_sha,
+            "current_sha": current_sha,
+            "stale": stale,
+            "required": required,
+            # Freeze/unfreeze + policy-change governance history (newest-first).
+            # Only governance events — image sign-offs live in `signoffs`.
+            "log": [
+                e
+                for e in (rec.get("log") or [])
+                if e.get("event") in ("freeze", "unfreeze", "policy")
+            ],
+            # Image sign-offs on the staging image (newest-first).
+            "signoffs": signoffs,
+            "approvals": len(approvals),
+            "rejections": len(rejections),
+            "approved_by": [
+                {"who": e.get("who"), "at": e.get("at"), "note": e.get("note")}
+                for e in approvals
+            ],
+            "audits_met": audits_met,
+            "promotable": promotable,
+        }
+
+    @staticmethod
+    def _append_gate_log(
+        rec: dict, event: str, who: str | None, role: str | None, detail: str, **extra
+    ) -> None:
+        """Append one entry to the staging gate's append-only audit log
+        (newest-first). `event` is freeze | unfreeze | policy | audit; `detail` is
+        the human-readable summary; `extra` carries event-specific fields (sha,
+        verdict, note, required)."""
+        rec.setdefault("log", []).insert(
+            0,
+            {
+                "id": f"ga{uuid.uuid4().hex}",
+                "at": AutomationService._now_str(),
+                "who": who or "unknown",
+                "role": role,
+                "event": event,
+                "detail": detail,
+                **{k: v for k, v in extra.items() if v is not None},
+            },
+        )
+
+    def _require_staging_gate_role(self, by: str | None, action: str) -> str:
+        """Resolve + enforce that `by` is an admin/auditor for a gate mutation
+        (freeze, policy edit, audit sign-off). Returns the role. 403 otherwise."""
+        role = self._role_of(by)
+        if role not in self._STAGING_GATE_ROLES:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Only admin or auditor roles may {action}",
+            )
+        return role
+
+    async def set_staging_freeze(
+        self, bp: str, frozen: bool, by: str | None = None
+    ) -> dict:
+        """Freeze or unfreeze staging for a BP (admin/auditor only), versioned in
+        bitswan.yaml. Freezing captures the current staging image sha so audits
+        attach to a fixed tag and closes dev→staging; unfreezing clears the trail
+        anchor and re-opens dev→staging."""
+        role = self._require_staging_gate_role(by, "freeze or unfreeze staging")
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rec = bs.setdefault("staging_gate", {}).setdefault(bp, {})
+        if frozen:
+            sha = self.staging_content_sha(bp)
+            if not sha:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Nothing is deployed to Staging yet — deploy to Staging "
+                        "before freezing it for audit."
+                    ),
+                )
+            rec["frozen"] = True
+            rec["frozen_by"] = by or "unknown"
+            rec["frozen_at"] = self._now_str()
+            rec["frozen_sha"] = sha
+            message = f"freeze staging {bp} @ {sha[:8]}"
+            self._append_gate_log(
+                rec, "freeze", by, role, "Froze staging for audit", sha=sha
+            )
+            await self._persist_bp_state(
+                bs, {bp}, bp, "audit", deployed_by=by, message=message
+            )
+            return self.read_staging_gate(bp)
+        # Unfreeze (role already checked above for the user-initiated path).
+        return await self._unfreeze_staging(
+            bp, by, "Unfroze staging — re-opened promotion from Development"
+        )
+
+    async def _unfreeze_staging(self, bp: str, by: str | None, reason: str) -> dict:
+        """Clear a BP's staging freeze + log the reason. No role check — callers
+        that are user-initiated gate it first; the post-promote auto-unfreeze is a
+        system action. No-op (still commits nothing) when not frozen."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rec = bs.setdefault("staging_gate", {}).setdefault(bp, {})
+        if not rec.get("frozen"):
+            return self.read_staging_gate(bp)
+        rec["frozen"] = False
+        rec["frozen_by"] = None
+        rec["frozen_at"] = None
+        rec["frozen_sha"] = None
+        self._append_gate_log(rec, "unfreeze", by, self._role_of(by), reason)
+        await self._persist_bp_state(
+            bs, {bp}, bp, "audit", deployed_by=by, message=f"unfreeze staging {bp}"
+        )
+        return self.read_staging_gate(bp)
+
+    async def set_audit_policy(
+        self, bp: str, required: int, by: str | None = None
+    ) -> dict:
+        """Set how many auditor sign-offs a frozen staging image needs before it
+        can be promoted to Production (admin/auditor only; minimum 1).
+        Versioned in bitswan.yaml."""
+        role = self._require_staging_gate_role(by, "change the audit policy")
+        if required < 1:
+            raise ValueError("Audits required must be at least 1")
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        rec = bs.setdefault("staging_gate", {}).setdefault(bp, {})
+        prev = int(
+            (rec.get("audit_policy") or {}).get(
+                "required", self.DEFAULT_AUDITS_REQUIRED
+            )
+        )
+        required = int(required)
+        rec.setdefault("audit_policy", {})["required"] = required
+        desc = f"{required} sign-off(s) required"
+        detail = (
+            f"Set audit policy to {required} required "
+            f"sign-off{'s' if required != 1 else ''}"
+        )
+        self._append_gate_log(
+            rec, "policy", by, role, detail, required=required, previous=prev
+        )
+        await self._persist_bp_state(
+            bs,
+            {bp},
+            bp,
+            "audit",
+            deployed_by=by,
+            message=f"audit policy {bp} → {desc}",
+        )
+        return self.read_staging_gate(bp)
+
+    async def record_audit(
+        self,
+        bp: str,
+        verdict: str,
+        note: str | None = None,
+        by: str | None = None,
+    ) -> dict:
+        """Record one audit sign-off on the frozen staging IMAGE (admin/auditor
+        only). `verdict` is 'approve' or 'reject' ("request changes"). Stored in
+        the single stage-independent `audits` store, keyed by the image content
+        hash — NOT per stage — so it applies wherever that image is deployed and
+        the deployment-history badge can look it up. Append-only: an auditor MAY
+        sign again to change their mind, but only their latest verdict counts
+        (see audit_verdicts). Raises 409 only if staging is not frozen."""
+        role = self._require_staging_gate_role(by, "sign off audits")
+        if verdict not in ("approve", "reject"):
+            raise ValueError("verdict must be 'approve' or 'reject'")
+        gate = self.read_staging_gate(bp)
+        if not gate["frozen"]:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Freeze staging before auditing — audits attach to a frozen "
+                    "image."
+                ),
+            )
+        sha = gate["frozen_sha"]
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        records = bs.setdefault("audits", {}).setdefault(bp, {}).setdefault(sha, [])
+        records.insert(
+            0,
+            {
+                "id": f"au{uuid.uuid4().hex}",
+                "who": by or "unknown",
+                "role": role,
+                "kind": "human",
+                "verdict": verdict,
+                "at": self._now_str(),
+                "note": (note or "").strip() or None,
+            },
+        )
+        low = "approved" if verdict == "approve" else "requested changes on"
+        await self._persist_bp_state(
+            bs,
+            {bp},
+            bp,
+            "audit",
+            deployed_by=by,
+            message=f"audit — {by or 'unknown'} {low} {bp} image {sha[:8]}",
+        )
+        return self.read_staging_gate(bp)
+
+    @staticmethod
+    def _now_str() -> str:
+        """Human timestamp for freeze/audit records, e.g. 'May 06, 2026 · 14:02'."""
+        return datetime.now().strftime("%b %d, %Y · %H:%M")
+
+    def _assert_promotable(self, bp: str, target_stage: str, by: str | None) -> None:
+        """Enforce the freeze + audit gate for a promotion. Raises 403/409 with a
+        user-facing reason when blocked; returns silently when allowed.
+
+          • dev→staging   — closed while staging is frozen (any role otherwise).
+          • staging→prod   — admin/auditor only, staging must be frozen, the
+                             frozen image unchanged, and the audit policy met
+                             (enough approvals, no outstanding request-changes).
+        """
+        if target_stage == "staging":
+            gate = self.read_staging_gate(bp)
+            if gate["frozen"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Staging is frozen for audit — unfreeze it to promote "
+                        "from Development."
+                    ),
+                )
+            return
+        if target_stage == "production":
+            role = self._role_of(by)
+            if role not in self._STAGING_GATE_ROLES:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Only admin or auditor roles may promote to Production. "
+                        "Ask an auditor to review the frozen staging image and "
+                        "promote it."
+                    ),
+                )
+            gate = self.read_staging_gate(bp)
+            if not gate["frozen"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Freeze staging and collect the required audit sign-offs "
+                        "before promoting to Production."
+                    ),
+                )
+            if gate["stale"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The staging image changed since it was frozen — "
+                        "re-freeze staging before promoting to Production."
+                    ),
+                )
+            if gate["rejections"]:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "An auditor requested changes on the frozen staging "
+                        "image — address them and re-freeze before promoting."
+                    ),
+                )
+            if not gate["audits_met"]:
+                need = max(0, gate["required"] - gate["approvals"])
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "Audit policy not met — "
+                        f"{gate['approvals']} of {gate['required']} sign-offs on "
+                        f"the frozen staging image ({need} more required)."
+                    ),
+                )
 
     # ── Backups: blue-green production (3 app slots over 2 DBs) + audit ───────
     # A production BP has TWO persistent logical databases (db 1 and db 2) and
@@ -3441,6 +3852,10 @@ class AutomationService:
                 detail=(f"No {source_stage} deployments to promote under BP '{bp}'"),
             )
 
+        # Freeze + audit gate (authoritative — the route pre-checks the same for
+        # a synchronous error, this re-enforces it wherever promote is called).
+        self._assert_promotable(bp, target_stage, deployed_by)
+
         # Memory governance: sum the promotion's reservation and check it fits the
         # reserved budget — an always-on member grows the always-on pool; a large
         # on-demand member grows the on-demand pool. memory-reservation SHOULD be
@@ -3519,6 +3934,21 @@ class AutomationService:
             source=source_stage,
             status="deployed",
         )
+
+        # The audited release is live in Production, so the freeze has served its
+        # purpose (hold the staging image steady for review) — auto-unfreeze so
+        # dev→staging re-opens without a manual step. Best-effort: a completed
+        # promote must never fail on this. The sign-offs stay in the audits store
+        # (keyed by image hash), so the production history keeps its badge.
+        if target_stage == "production":
+            try:
+                await self._unfreeze_staging(
+                    bp,
+                    deployed_by,
+                    "Unfroze staging automatically — release promoted to Production",
+                )
+            except Exception as e:
+                logger.warning("auto-unfreeze after promote failed for %s: %s", bp, e)
 
         return {
             "message": "Promoted business process successfully",
