@@ -587,11 +587,28 @@ function App() {
   const setErr = (key, msg) =>
     setData(d => ({ ...d, error: { ...d.error, [key]: msg || undefined } }));
 
+  // Transient-failure shield for the loaders. The platform re-renders
+  // traefik's routing config whenever routes change (e.g. while a workspace
+  // is being created), so a fetch can catch a one-off 404/502 from the edge
+  // even though the backend is healthy. Retry briefly before parking the view
+  // in its error state — that card waits for a human to press Retry, which
+  // turns a sub-second blip into a dead end.
+  const withRetry = async (fn, attempts = 3) => {
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+      try { return await fn(); } catch (e) {
+        lastErr = e;
+        if (i < attempts - 1) await new Promise(r => setTimeout(r, 500 * (i + 1)));
+      }
+    }
+    throw lastErr;
+  };
+
   const loadWhoami = useAR();
   loadWhoami.current = async () => {
     setLoad('whoami', 'loading');
     try {
-      const r = await Api.whoami();
+      const r = await withRetry(() => Api.whoami());
       const email = (r && r.headers && (r.headers['X-Forwarded-Email'] || r.headers['X-Auth-Request-Email'])) || '';
       setData(d => ({ ...d, me: { email, isAdmin: !!(r && r.is_admin) } }));
       setLoad('whoami', 'ok'); setErr('whoami', null);
@@ -607,7 +624,7 @@ function App() {
     const bg = opts && opts.background;
     if (!bg) setLoad('devices', 'loading');
     try {
-      const r = await Api.devices();
+      const r = await withRetry(() => Api.devices());
       setData(d => ({ ...d, myDevices: (r.devices || []).map(adaptDevice) }));
       setLoad('devices', 'ok'); setErr('devices', null);
     } catch (e) { if (!bg) { setLoad('devices', 'error'); setErr('devices', e.message); } }
@@ -618,7 +635,7 @@ function App() {
     const bg = opts && opts.background;
     if (!bg) setLoad('approvals', 'loading');
     try {
-      const r = await Api.approvals();
+      const r = await withRetry(() => Api.approvals());
       setData(d => ({ ...d, pending: (r.pending || []).map(adaptApproval) }));
       setLoad('approvals', 'ok'); setErr('approvals', null);
     } catch (e) { if (!bg) { setLoad('approvals', 'error'); setErr('approvals', e.message); } }
@@ -628,7 +645,7 @@ function App() {
   loadWorkspaces.current = async () => {
     setLoad('workspaces', 'loading');
     try {
-      const r = await Api.workspaces();
+      const r = await withRetry(() => Api.workspaces());
       const caller = (r && r.caller_email) || '';
       setData(d => ({ ...d, workspaces: (r.workspaces || []).map(w => adaptWorkspace(w, caller)) }));
       setLoad('workspaces', 'ok'); setErr('workspaces', null);
@@ -640,7 +657,7 @@ function App() {
     const bg = opts && opts.background;
     if (!bg) setLoad('overview', 'loading');
     try {
-      const r = await Api.overview();
+      const r = await withRetry(() => Api.overview());
       setData(d => ({ ...d, overview: adaptOverview(r) }));
       setLoad('overview', 'ok'); setErr('overview', null);
     } catch (e) { if (!bg) { setLoad('overview', 'error'); setErr('overview', e.message); } }
@@ -651,7 +668,7 @@ function App() {
     const bg = opts && opts.background;
     if (!bg) setLoad('resources', 'loading');
     try {
-      const r = await Api.resources();
+      const r = await withRetry(() => Api.resources());
       setData(d => ({ ...d, resources: r }));
       setLoad('resources', 'ok'); setErr('resources', null);
     } catch (e) { if (!bg) { setLoad('resources', 'error'); setErr('resources', e.message); } }
@@ -661,7 +678,7 @@ function App() {
   loadPeople.current = async () => {
     setLoad('people', 'loading');
     try {
-      const r = await Api.people();
+      const r = await withRetry(() => Api.people());
       // /people degrades gracefully: a 200 may carry an `error` describing a
       // partial-enumeration failure. Keep the roster AND surface the warning;
       // only a thrown ApiError becomes a full error state.
