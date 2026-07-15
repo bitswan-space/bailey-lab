@@ -366,6 +366,10 @@ interface Member {
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
   memReservationMB: number | null;
   memOver: boolean;
+  // Why this member is asleep — 'memory-pressure' | 'manual' — or null when it
+  // has a running container. Drives the stage's "Asleep" attribution.
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
+  asleepReason: string | null;
 }
 
 const SERVICE_META: Record<ServiceType, { label: string; icon: LucideIcon }> = {
@@ -569,7 +573,7 @@ function ContainersSection({
   const asleep = members.length > 0 && members.every((m) => !isUp(m));
   // Why it's asleep (memory-pressure | manual) — gitops stamps it on the members,
   // so the message can attribute the sleep instead of a bare "asleep".
-  const asleepReason = members.map((m) => m.asleep_reason).find(Boolean) ?? null;
+  const asleepReason = members.map((m) => m.asleepReason).find(Boolean) ?? null;
   // Sleep/Wake apply to the promoted stages (their context is the raw BP); DR is
   // a standby slot managed via the backup swap, so no power toggle there.
   const canPower = stage === 'dev' || stage === 'staging' || stage === 'production';
@@ -1370,6 +1374,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         memUsageBytes: a?.mem_usage_bytes ?? null,
         memReservationMB: a?.mem_reservation_mb ?? null,
         memOver: a?.mem_over_reservation ?? false,
+        asleepReason: a?.asleep_reason ?? null,
       };
     });
   }, [currentEntry, automations, isDr, drSlot]);
