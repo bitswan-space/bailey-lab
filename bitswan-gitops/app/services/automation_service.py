@@ -412,6 +412,27 @@ class AutomationService:
                 "gitops.workspace": self.workspace_name,
             },
         )
+        if not containers and "@" not in deployment_id:
+            # Blue-green fallback. At deploy time the LIVE production slot's
+            # container is labelled with the bare `deployment_id` and a standby
+            # with `<base>@<slot>`. But a rollback / DR swap only flips
+            # `live_slot` and repoints ingress (see finish_zero_downtime_promote /
+            # swap_production_dr) — it retires the old bare-labelled live container
+            # WITHOUT relabelling the newly-live one. So after a swap the only
+            # running container for this deployment is labelled `<base>@<slot>`,
+            # and the bare-id query above finds nothing. Fall back to the running
+            # slot container(s) so Inspect and Logs (both resolve through here)
+            # still find the live production slot instead of "No container found".
+            prefix = f"{deployment_id}@"
+            by_ws = await self.infra_driver.container_list(
+                self._workspace_ctx(),
+                labels={"gitops.workspace": self.workspace_name},
+            )
+            containers = [
+                c
+                for c in by_ws
+                if (c.labels or {}).get("gitops.deployment_id", "").startswith(prefix)
+            ]
         return [c.to_docker_dict() for c in containers]
 
     async def inspect_automation(self, deployment_id: str) -> list[dict]:
