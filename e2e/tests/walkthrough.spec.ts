@@ -1144,6 +1144,59 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'requirements');
   });
 
+  // ---- Edit a file: change the backend worker's memory policy in the editor ----
+  // The Coding Agent tab's "Files" sub-tab is a full editor over the copy's
+  // working tree — you can change any file by hand, no terminal required. Open the
+  // backend worker's automation.toml and switch its memory policy to always-on: a
+  // background worker has no inbound request to wake it, so it should stay
+  // resident rather than pause when idle. (Making it always-on is also what keeps
+  // a promoted stage's worker a permanently-running, inspectable container instead
+  // of one shed under memory pressure — see the Containers chapter later.)
+  await chapter('edit-config', async () => {
+    await clickTopTab(/Coding Agent/i);
+    // Chat | Files | Containers — switch to the file editor.
+    await d.getByRole('button', { name: /^Files$/ }).first().click({ timeout: NAV });
+    // The tree is scoped to this BP and auto-expands backend/ + frontend/. The
+    // backend folder sorts first, so the first automation.toml row is its worker's.
+    await d.getByRole('button', { name: /automation\.toml/ }).first().click({ timeout: NAV });
+    // Confirm we opened the BACKEND worker's file (the editor header shows the path).
+    await expect(
+      d.getByText(/backend\/automation\.toml$/).first(),
+      'backend/automation.toml did not open in the editor',
+    ).toBeVisible({ timeout: SLA });
+    const cm = d.locator('.cm-content').first();
+    await cm.waitFor({ state: 'visible', timeout: SLA });
+    await capture(dashPage, 'file-editor');
+    // Real, surgical edit: select just the policy VALUE and retype it. The value
+    // is the only occurrence of "on-demand" on its line, which ends `…"on-demand"`.
+    // From end of line, step left past the closing quote and select the 9-char
+    // value, then type the replacement. We type ONLY letters + a hyphen — never a
+    // bracket or quote — so CodeMirror's auto-close can't corrupt the edit.
+    const policyLine = d
+      .locator('.cm-line')
+      .filter({ hasText: 'memory_reservation_policy' })
+      .first();
+    await policyLine.click();
+    await cm.press('End');
+    await cm.press('ArrowLeft'); // step past the closing "
+    for (let i = 0; i < 'on-demand'.length; i++) await cm.press('Shift+ArrowLeft');
+    await cm.pressSequentially('always-on', { delay: 0 });
+    // The edited line now carries the new value and no longer the old one.
+    await expect(
+      policyLine,
+      'the policy value was not rewritten to always-on',
+    ).toContainText('always-on');
+    await expect(policyLine).not.toContainText('on-demand');
+    // Save the way a user does (⌘/Ctrl+S); wait for the editor's own "Saved …"
+    // confirmation before moving on so the change is committed to the copy.
+    await cm.press('Control+s');
+    await expect(
+      d.getByText(/^Saved \d/).first(),
+      'the editor never confirmed the save',
+    ).toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'file-editor-saved');
+  });
+
   // ---- Sync & Deploy: the Diff / History / Checks sub-tabs ----
   // Every sub-tab a real operator inspects before shipping: the Diff (what
   // becomes main), the History (copy + main commits with deploy tags), and the
