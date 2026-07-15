@@ -29,6 +29,10 @@ export interface DeployedAutomation {
   mem_reservation_mb?: number | null;
   mem_policy?: string | null;
   mem_over_reservation?: boolean;
+  // Why this deployment is asleep — 'memory-pressure' (evicted by the automatic
+  // budget sweep) or 'manual' (an operator's Sleep). Only set when it has no
+  // running container.
+  asleep_reason?: string | null;
 }
 
 export type AutomationState =

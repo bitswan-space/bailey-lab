@@ -60,7 +60,7 @@ def test_cap_evicts_oldest_workers_only(tmp_path, monkeypatch):
     svc = _svc(tmp_path, cap=2, containers=conts)
     evicted_deps: list[str] = []
 
-    async def _evict(dep):
+    async def _evict(dep, reason="memory-pressure"):
         evicted_deps.append(dep)
 
     monkeypatch.setattr(svc, "_evict_instance_deployment", _evict)
@@ -83,7 +83,7 @@ def test_dev_is_ephemeral_staging_protected(tmp_path, monkeypatch):
     svc = _svc(tmp_path, cap=1, containers=conts)
     evicted_deps: list[str] = []
 
-    async def _evict(dep):
+    async def _evict(dep, reason="memory-pressure"):
         evicted_deps.append(dep)
 
     monkeypatch.setattr(svc, "_evict_instance_deployment", _evict)
@@ -101,7 +101,7 @@ def test_stopped_ephemeral_is_reaped_even_under_cap(tmp_path, monkeypatch):
     svc = _svc(tmp_path, cap=15, containers=conts)
     evicted: list[str] = []
 
-    async def _evict(dep):
+    async def _evict(dep, reason="memory-pressure"):
         evicted.append(dep)
 
     monkeypatch.setattr(svc, "_evict_instance_deployment", _evict)
@@ -130,7 +130,7 @@ def test_under_cap_is_noop(tmp_path, monkeypatch):
     svc = _svc(tmp_path, cap=15, containers=conts)
     evicted: list[str] = []
 
-    async def _evict(dep):
+    async def _evict(dep, reason="memory-pressure"):
         evicted.append(dep)
 
     monkeypatch.setattr(svc, "_evict_instance_deployment", _evict)
@@ -146,7 +146,7 @@ def test_access_marker_beats_created_for_lru(tmp_path, monkeypatch):
     svc.touch_live_dev_access("copy-a-bp")  # a is now most-recently-active
     evicted: list[str] = []
 
-    async def _evict(dep):
+    async def _evict(dep, reason="memory-pressure"):
         evicted.append(dep)
 
     monkeypatch.setattr(svc, "_evict_instance_deployment", _evict)
@@ -230,8 +230,11 @@ def test_manual_sleep_evicts_stage_group(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "read_bitswan_yaml", _read)
     evicted: list[str] = []
 
-    async def _evict(ids):
+    seen_reason: list[str] = []
+
+    async def _evict(ids, reason="memory-pressure"):
         evicted.extend(ids)
+        seen_reason.append(reason)
         return {"evicted": list(ids), "hosts": []}
 
     monkeypatch.setattr(svc, "evict_deployments", _evict)
@@ -239,6 +242,8 @@ def test_manual_sleep_evicts_stage_group(tmp_path, monkeypatch):
     # Only the staging members of context "shop" — never the dev one.
     assert set(res["slept"]) == {"be-shop-staging", "fe-shop-staging"}
     assert "be-shop-dev" not in evicted
+    # A manual Sleep must reach eviction tagged "manual" (not the sweep default).
+    assert seen_reason == ["manual"]
 
 
 def test_manual_wake_reactivates_stage_group(tmp_path, monkeypatch):

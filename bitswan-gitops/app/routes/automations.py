@@ -736,6 +736,10 @@ async def on_demand_host_route(
 
 class EvictDeploymentsRequest(BaseModel):
     deployment_ids: list[str]
+    # Why they're being evicted — "memory-pressure" (the automatic budget sweep,
+    # the default) or "manual" (an operator's Sleep from the Resource page). Flows
+    # to the sleep-reason state + logs so a sleeping stage is attributable.
+    reason: str = "memory-pressure"
 
 
 @router.get("/mem-groups")
@@ -756,7 +760,9 @@ async def evict_ephemeral_route(
     """Evict specific on-demand deployments (mark inactive + remove containers) —
     called by the daemon's global memory sweep under pressure. Returns the evicted
     ids + their ingress hosts so the daemon can mark them dehydrated for wake."""
-    return await automation_service.evict_deployments(body.deployment_ids)
+    return await automation_service.evict_deployments(
+        body.deployment_ids, reason=body.reason
+    )
 
 
 @router.post("/promote-bp")

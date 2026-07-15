@@ -366,6 +366,10 @@ interface Member {
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
   memReservationMB: number | null;
   memOver: boolean;
+  // Why this member is asleep — 'memory-pressure' | 'manual' — or null when it
+  // has a running container. Drives the stage's "Asleep" attribution.
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
+  asleepReason: string | null;
 }
 
 const SERVICE_META: Record<ServiceType, { label: string; icon: LucideIcon }> = {
@@ -567,6 +571,9 @@ function ContainersSection({
     m.display === 'deployed';
   const anyRunning = members.some(isUp);
   const asleep = members.length > 0 && members.every((m) => !isUp(m));
+  // Why it's asleep (memory-pressure | manual) — gitops stamps it on the members,
+  // so the message can attribute the sleep instead of a bare "asleep".
+  const asleepReason = members.map((m) => m.asleepReason).find(Boolean) ?? null;
   // Sleep/Wake apply to the promoted stages (their context is the raw BP); DR is
   // a standby slot managed via the backup swap, so no power toggle there.
   const canPower = stage === 'dev' || stage === 'staging' || stage === 'production';
@@ -596,7 +603,11 @@ function ContainersSection({
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
           <span className="text-[12.5px] text-muted-foreground">
             {asleep
-              ? 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
+              ? asleepReason === 'manual'
+                ? 'Asleep — put to sleep manually. Wakes on access, or wake now.'
+                : asleepReason === 'memory-pressure'
+                  ? 'Asleep — evicted under memory pressure. Wakes on access, or wake now.'
+                  : 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
               : 'Free this stage’s memory now. On-demand stages wake automatically on access.'}
           </span>
           {asleep ? (
@@ -1363,6 +1374,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         memUsageBytes: a?.mem_usage_bytes ?? null,
         memReservationMB: a?.mem_reservation_mb ?? null,
         memOver: a?.mem_over_reservation ?? false,
+        asleepReason: a?.asleep_reason ?? null,
       };
     });
   }, [currentEntry, automations, isDr, drSlot]);

@@ -681,7 +681,7 @@ func (s *Server) enforceMemoryBudget(ctx context.Context) {
 	log.Printf("memory sweep: on-demand usage %d MB > pool %d MB; evicting %d instance(s)",
 		onDemandUsage/(1024*1024), b.OnDemandPoolMB, victims)
 	for ws, ids := range byWorkspace {
-		hosts, err := evictViaGitops(ctx, ws, ids)
+		hosts, err := evictViaGitops(ctx, ws, ids, "memory-pressure")
 		if err != nil {
 			log.Printf("memory sweep: evict in workspace %q failed: %v", ws, err)
 			continue
@@ -717,12 +717,16 @@ var gitopsSecretForWorkspace = func(ws string) (string, error) {
 	return getGitOpsSecret(ws, filepath.Join(home, ".config", "bitswan", "workspaces"))
 }
 
-func evictViaGitops(ctx context.Context, ws string, deploymentIDs []string) ([]string, error) {
+// evictViaGitops asks a workspace's gitops to evict (sleep) the given
+// deployments. `reason` records WHY — "memory-pressure" for the automatic budget
+// sweep, "manual" for an operator's Resource-page Sleep — so the sleeping stage
+// is attributable in gitops' logs + the dashboard, not a silent disappearance.
+func evictViaGitops(ctx context.Context, ws string, deploymentIDs []string, reason string) ([]string, error) {
 	secret, err := gitopsSecretForWorkspace(ws)
 	if err != nil || secret == "" {
 		return nil, fmt.Errorf("gitops secret for %q: %v", ws, err)
 	}
-	body, _ := json.Marshal(map[string][]string{"deployment_ids": deploymentIDs})
+	body, _ := json.Marshal(map[string]any{"deployment_ids": deploymentIDs, "reason": reason})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, gitopsEvictURL(ws), bytes.NewReader(body))
 	if err != nil {
 		return nil, err

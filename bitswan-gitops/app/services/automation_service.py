@@ -713,6 +713,18 @@ class AutomationService:
         except Exception as e:  # noqa: BLE001
             logger.debug("container_stats overlay skipped: %s", e)
         self._apply_docker_overlay(result, containers, {"_mem": mem}, bs_yaml)
+        # Attribute sleeping deployments: an entry with no running container that
+        # carries a sleep marker was put to sleep on purpose — surface WHY
+        # (memory-pressure | manual) so the dashboard/logs explain the absence
+        # instead of a container silently vanishing. Running entries clear any
+        # stale marker (self-healing).
+        for a in result:
+            if not a.deployment_id:
+                continue
+            if a.container_id:
+                self._clear_sleep_reason(a.deployment_id)
+            else:
+                a.asleep_reason = self.sleep_reason_for(a.deployment_id)
         return result
 
     @staticmethod
@@ -1004,7 +1016,11 @@ class AutomationService:
             with open(gi) as f:
                 existing = f.read()
         entries = existing.split()
-        missing = [e for e in (".builds/", ".live-dev-access/") if e not in entries]
+        missing = [
+            e
+            for e in (".builds/", ".live-dev-access/", ".sleep-state/")
+            if e not in entries
+        ]
         if missing:
             sep = "" if (not existing or existing.endswith("\n")) else "\n"
             with open(gi, "a") as f:
@@ -4283,6 +4299,52 @@ class AutomationService:
         except OSError:
             logger.debug("touch live-dev access failed for %s", context, exc_info=True)
 
+    # ── Sleep-reason tracking ────────────────────────────────────────────────
+    # WHY a deployment is asleep — "memory-pressure" (the automatic budget/LRU
+    # sweep) or "manual" (an operator's Sleep action). Persisted as a
+    # non-committed marker (mirrors .live-dev-access) so both the logs and the
+    # dashboard can attribute a sleeping stage, instead of a container silently
+    # vanishing with no trace.
+    def _sleep_state_dir(self) -> str:
+        return os.path.join(self.gitops_dir, ".sleep-state")
+
+    def _record_sleep_reason(self, deployment_id: str, reason: str) -> None:
+        """Stamp the sleep reason for a deployment. Best-effort."""
+        try:
+            d = self._sleep_state_dir()
+            os.makedirs(d, exist_ok=True)
+            with open(
+                os.path.join(d, sanitize_automation_name(deployment_id)), "w"
+            ) as f:
+                f.write(reason)
+        except OSError:
+            logger.debug(
+                "record sleep reason failed for %s", deployment_id, exc_info=True
+            )
+
+    def sleep_reason_for(self, deployment_id: str) -> str | None:
+        """The persisted sleep reason for a deployment, or None if it has none."""
+        try:
+            with open(
+                os.path.join(
+                    self._sleep_state_dir(), sanitize_automation_name(deployment_id)
+                )
+            ) as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
+
+    def _clear_sleep_reason(self, deployment_id: str) -> None:
+        """Drop the sleep marker when a deployment is woken / redeployed."""
+        try:
+            os.remove(
+                os.path.join(
+                    self._sleep_state_dir(), sanitize_automation_name(deployment_id)
+                )
+            )
+        except OSError:
+            pass
+
     def _live_dev_last_activity(self, context: str, created: int) -> float:
         """Last-activity epoch for ordering: the access marker's mtime if present
         (set on every deploy/wake), else the container's Created (first deploy)."""
@@ -4332,14 +4394,31 @@ class AutomationService:
                 inst["hydrating"] = True
         return instances
 
-    async def _evict_instance_deployment(self, deployment_id: str) -> None:
+    async def _evict_instance_deployment(
+        self, deployment_id: str, reason: str = "memory-pressure"
+    ) -> None:
         """Evict one member: mark it active:false (so the compiler excludes it —
         no reconcile will recreate it) then REMOVE its containers so it costs
-        nothing. Order matters: mark inactive first."""
+        nothing. Order matters: mark inactive first.
+
+        `reason` records WHY the member is being put to sleep — "memory-pressure"
+        (the automatic LRU/budget sweep) or "manual" (an operator's Sleep action).
+        Logged here and stamped on the LRU marker so both the logs and the
+        dashboard can say why a stage went to sleep, rather than a container just
+        silently vanishing (which is exactly what made this hard to debug)."""
         await self.mark_as_inactive(deployment_id)
         ctx = self._workspace_ctx()
+        removed = 0
         for c in await self.get_container(deployment_id):
             await self.infra_driver.container_remove(ctx, c.get("Id"))
+            removed += 1
+        self._record_sleep_reason(deployment_id, reason)
+        logger.info(
+            "SLEEP deployment=%s reason=%s containers_removed=%d",
+            deployment_id,
+            reason,
+            removed,
+        )
 
     async def _remove_group_gateway(self, context: str, stage: str) -> list[str]:
         """Remove the egress firewall gateway + proxy of a fully-slept
@@ -4376,13 +4455,15 @@ class AutomationService:
                     logger.warning("gateway teardown of %s failed: %s", cid, e)
         return removed
 
-    async def _evict_instance(self, inst: dict) -> bool:
+    async def _evict_instance(
+        self, inst: dict, reason: str = "memory-pressure"
+    ) -> bool:
         """Evict a whole instance (all its members): mark inactive + remove
         containers. Best-effort per member; returns True if any member evicted."""
         ok = False
         for dep in sorted(inst["deployment_ids"]):
             try:
-                await self._evict_instance_deployment(dep)
+                await self._evict_instance_deployment(dep, reason)
                 ok = True
             except Exception as e:  # noqa: BLE001 — one member must not abort the sweep
                 logger.warning("ephemeral evict of %s failed: %s", dep, e)
@@ -4510,13 +4591,16 @@ class AutomationService:
             logger.warning("on-demand wake redeploy of %s failed: %s", context, e)
         return {"context": context, "deployment_ids": deps}
 
-    async def sleep_context_stage(self, context: str, stage: str) -> dict:
+    async def sleep_context_stage(
+        self, context: str, stage: str, reason: str = "manual"
+    ) -> dict:
         """Manually put a (context, stage) deployment group to sleep: mark each
         member inactive + REMOVE its containers so it costs nothing. The public
         counterpart of the memory sweep's eviction — used by the dashboard's
         Sleep control (test the on-demand path + manual memory management). An
         on-demand group wakes on URL access; any group wakes via wake_context_stage.
-        stage is the persisted form ('' for production)."""
+        stage is the persisted form ('' for production). reason defaults to
+        "manual" so the operator action is attributable in the logs + UX."""
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         want = stage or ""
         deps = [
@@ -4527,7 +4611,14 @@ class AutomationService:
         ]
         if not deps:
             return {"context": context, "slept": []}
-        res = await self.evict_deployments(deps)
+        logger.info(
+            "SLEEP group context=%s stage=%s reason=%s members=%d",
+            context,
+            stage or "production",
+            reason,
+            len(deps),
+        )
+        res = await self.evict_deployments(deps, reason=reason)
         return {"context": context, "slept": res.get("evicted", [])}
 
     def mem_groups(self) -> list[dict]:
@@ -4620,11 +4711,15 @@ class AutomationService:
             res = await self._wake_context_stage(context, stage)
         return {"on_demand": True, **res}
 
-    async def evict_deployments(self, deployment_ids: list[str]) -> dict:
+    async def evict_deployments(
+        self, deployment_ids: list[str], reason: str = "memory-pressure"
+    ) -> dict:
         """Evict specific deployments (mark inactive + REMOVE containers) — driven
-        by the daemon's global memory sweep. Returns the evicted ids + their
-        computed ingress hosts, so the daemon can mark those hosts dehydrated (and
-        wake-able) for the gate. Best-effort per deployment."""
+        by the daemon's global memory sweep (reason "memory-pressure") or an
+        operator's Sleep action (reason "manual", via sleep_context_stage).
+        Returns the evicted ids + their computed ingress hosts, so the daemon can
+        mark those hosts dehydrated (and wake-able) for the gate. Best-effort per
+        deployment."""
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         deployments = bs.get("deployments") or {}
         evicted: list[str] = []
@@ -4632,7 +4727,7 @@ class AutomationService:
         for did in deployment_ids:
             conf = deployments.get(did) or {}
             try:
-                await self._evict_instance_deployment(did)
+                await self._evict_instance_deployment(did, reason)
                 evicted.append(did)
             except Exception as e:  # noqa: BLE001
                 logger.warning("memory evict of %s failed: %s", did, e)
