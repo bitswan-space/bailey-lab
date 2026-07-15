@@ -290,8 +290,35 @@ func writeDynamicConfig(traefikBaseURL string, state *traefikDynConfig) error {
 		return fmt.Errorf("failed to marshal dynamic config to YAML: %w", err)
 	}
 	path := dynamicConfigPath(traefikBaseURL)
-	if err := os.WriteFile(path, out, 0644); err != nil {
+	return writeWatchedFile(path, out)
+}
+
+// writeWatchedFile updates a file that Traefik's file provider is watching.
+// The usual atomic write (temp file + rename) is NOT possible here: the file
+// is mounted into the Traefik container as a single-file volume subpath, so
+// the mount pins the inode and Traefik would keep seeing the old file after a
+// rename. os.WriteFile is not safe either: its O_TRUNC opens a window where
+// the file is EMPTY, which is valid YAML — Traefik's watcher can load it and
+// drop every route (transient 404s on all hosts until the next write event).
+// Instead write in place WITHOUT truncating first, then cut off any old tail.
+// The intermediate states (new bytes over an old prefix / new content + stale
+// tail) are torn YAML that fails to parse, and on a parse error Traefik keeps
+// serving its last good config — so no state observable mid-write drops routes.
+func writeWatchedFile(path string, out []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open dynamic config %s: %w", path, err)
+	}
+	if _, err := f.Write(out); err != nil {
+		f.Close()
 		return fmt.Errorf("failed to write dynamic config %s: %w", path, err)
+	}
+	if err := f.Truncate(int64(len(out))); err != nil {
+		f.Close()
+		return fmt.Errorf("failed to truncate dynamic config %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close dynamic config %s: %w", path, err)
 	}
 	return nil
 }
