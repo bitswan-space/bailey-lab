@@ -61,12 +61,18 @@ export function FileViewer({
   const etagRef = useRef(etag);
   etagRef.current = etag;
 
-  // Reset state on file change / refresh.
+  // Reset state on file change / refresh. One carve-out: a successful save
+  // triggers onAfterSave → the parent refetches this file → `data` changes to
+  // the content we just wrote. Resetting to 'clean' there would wipe the
+  // "Saved HH:MM:SS" status milliseconds after it appeared — keep it until
+  // the user actually edits again or the content genuinely diverges.
   useEffect(() => {
     if (data && 'content' in data) {
       setBuffer(data.content);
       setEtag(data.etag);
-      setSave({ kind: 'clean' });
+      setSave((s) =>
+        s.kind === 'saved' && data.content === bufferRef.current ? s : { kind: 'clean' },
+      );
     } else {
       setBuffer('');
       setEtag(null);

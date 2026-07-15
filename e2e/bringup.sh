@@ -141,7 +141,12 @@ for i in 1 2 3 4 5; do
   "$BITSWAN" ingress init -v && break
   echo "ingress init attempt $i timed out; traefik image now warming, retrying..."; sleep 12
 done
-docker ps | grep -q traefik || { echo "ERROR: traefik not running"; exit 1; }
+# No pipe here on purpose: `docker ps | grep -q traefik` under pipefail is a
+# false-negative race — grep -q exits on the first match (traefik is the newest
+# container, so the first row) while docker ps is still writing its remaining
+# rows in small tabwriter chunks, docker dies of SIGPIPE (141) and pipefail
+# fails the pipeline even though the match succeeded.
+[ -n "$(docker ps -q -f name='^traefik$')" ] || { echo "ERROR: traefik not running"; exit 1; }
 
 mark "[2/7] daemon + traefik ingress"
 
