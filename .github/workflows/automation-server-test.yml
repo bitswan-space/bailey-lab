@@ -159,8 +159,15 @@ jobs:
           docker rm -f traefik 2>/dev/null || true
           docker compose -p bitswan-traefik down 2>/dev/null || true
           sudo rm -rf ~/.config/bitswan/traefik
-          ./bitswan ingress init -v || exit 1
-          docker ps | grep traefik || { echo "ERROR: Traefik not running"; exit 1; }
+          # `ingress init` makes the daemon pull + start traefik; that inline pull
+          # can make `docker compose up` exit 1 mid-pull on a cold runner. Pre-pull,
+          # then retry. And check readiness SIGPIPE-safe (GitHub run steps use
+          # `bash -eo pipefail`, so `docker ps | grep -q` false-negatives when grep
+          # exits first and docker dies of SIGPIPE — the exact bug fixed in bringup).
+          docker pull traefik:v3.6 >/dev/null 2>&1 || true
+          for i in 1 2 3 4 5; do if ./bitswan ingress init -v; then break; fi; echo "ingress init attempt $i failed; retrying"; sleep 12; done
+          for i in $(seq 1 30); do if [ -n "$(docker ps -q -f name='^traefik$')" ]; then break; fi; sleep 2; done
+          [ -n "$(docker ps -q -f name='^traefik$')" ] || { echo "ERROR: Traefik not running"; exit 1; }
           echo "Routes:"
           ./bitswan ingress list-routes || true
 
