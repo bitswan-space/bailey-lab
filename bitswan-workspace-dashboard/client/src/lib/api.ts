@@ -360,6 +360,10 @@ export interface BpHistoryEntry {
   status: string; // "deployed" | "rolled-back" | "firewall" | "backup" | "secret"
   source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall" | "backup" | "secret"
   members: Record<string, BpHistoryMember>;
+  /** Auditors who signed off the image this deploy promoted (production promotes
+   *  only) — {who, at, note}. Empty for unaudited deploys. Drives the "audited
+   *  by" badge on the history row. */
+  audit?: { who: string; at: string; note?: string | null }[];
   /** Present on secret-change events: the realm + a one-line summary. The value
    *  itself is never sent — only that it changed (this is a rollback point). */
   secret?: {
@@ -391,6 +395,63 @@ export interface BpHistory {
   // eslint-disable-next-line no-restricted-syntax -- null = nothing deployed
   current: string | null;
   history: BpHistoryEntry[];
+}
+
+/** One freeze/unfreeze/policy governance event in the staging gate's history
+ *  (persisted in bitswan.yaml under staging_gate[bp].log). `event` discriminates
+ *  the kind and `detail` is the human-readable summary. */
+export interface StagingLogEntry {
+  id: string;
+  at: string;
+  who: string;
+  // eslint-disable-next-line no-restricted-syntax -- null = role unknown
+  role: string | null;
+  event: 'freeze' | 'unfreeze' | 'policy';
+  detail: string;
+  required?: number;
+  previous?: number;
+}
+
+/** One audit sign-off on an image, from the stage-independent `audits` store
+ *  (keyed by image content hash). Append-only; only each auditor's latest
+ *  verdict counts. */
+export interface StagingSignoff {
+  id: string;
+  who: string;
+  // eslint-disable-next-line no-restricted-syntax -- null = role unknown
+  role: string | null;
+  kind: string; // 'human' (extensible)
+  verdict: 'approve' | 'reject';
+  at: string;
+  // eslint-disable-next-line no-restricted-syntax -- null = no note left
+  note?: string | null;
+}
+
+/** Gitops `GET .../business-processes/{bp}/staging-gate` — a BP's staging freeze
+ *  + production-promotion audit state. `log` is the full audit trail (newest
+ *  first); `signoffs` are the audit events on the frozen image; `promotable` is
+ *  the derived gate used to enable staging→production. */
+export interface StagingGate {
+  bp: string;
+  frozen: boolean;
+  // eslint-disable-next-line no-restricted-syntax -- null when not frozen
+  frozen_by: string | null;
+  // eslint-disable-next-line no-restricted-syntax -- null when not frozen
+  frozen_at: string | null;
+  // eslint-disable-next-line no-restricted-syntax -- null when not frozen
+  frozen_sha: string | null;
+  // eslint-disable-next-line no-restricted-syntax -- null when nothing on staging
+  current_sha: string | null;
+  stale: boolean;
+  required: number;
+  /** Freeze/unfreeze/policy governance history (newest-first). */
+  log: StagingLogEntry[];
+  /** Sign-offs on the staging image (newest-first). */
+  signoffs: StagingSignoff[];
+  approvals: number;
+  rejections: number;
+  audits_met: boolean;
+  promotable: boolean;
 }
 
 /** One stage's secret values: {KEY: value}. */
@@ -756,6 +817,38 @@ export const api = {
     ),
   promoteBusinessProcess: (body: PromoteBPRequest) =>
     postJson<DeployBPResponse>('/api/automations/promote-bp', body),
+  /** Every workspace user who can audit (admin or auditor role) — so the Audits
+   *  panel can tell a member who to ask to review a production promotion. */
+  workspaceAuditors: () =>
+    getJson<{ users: { email: string; role: string }[] }>(
+      '/api/automations/workspace-auditors',
+    ),
+  /** A BP's staging freeze + production-promotion audit gate state. */
+  stagingGate: (bp: string) =>
+    getJson<StagingGate>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/staging-gate`,
+    ),
+  /** Freeze / unfreeze staging (admin/auditor only — gated server-side). Freezing
+   *  locks the staging image for audit and closes dev→staging. */
+  setStagingFreeze: (bp: string, frozen: boolean) =>
+    putJson<StagingGate>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/freeze`,
+      { frozen },
+    ),
+  /** Set how many auditor sign-offs a frozen staging image needs before it can be
+   *  promoted to Production (admin/auditor only; 0 = gating off). */
+  setAuditPolicy: (bp: string, required: number) =>
+    putJson<StagingGate>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/policy`,
+      { required },
+    ),
+  /** Record one audit sign-off (approve / request changes) on the frozen staging
+   *  image (admin/auditor only; appended to the audit log in bitswan.yaml). */
+  recordAudit: (bp: string, verdict: 'approve' | 'reject', note?: string) =>
+    postJson<StagingGate>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/audits`,
+      { verdict, ...(note ? { note } : {}) },
+    ),
   /** Per-stage deployment history for a business process (newest-first). */
   bpHistory: (bp: string, stage: string) =>
     getJson<BpHistory>(

@@ -1140,6 +1140,109 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** `GET /automations/workspace-auditors` — every user who can audit (admin or
+   *  auditor role), so the Audits panel can tell a member who to ask. */
+  async workspaceAuditors(): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(`${this.baseUrl}/automations/workspace-auditors`, {
+      headers: { ...this.authHeaders() },
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET .../business-processes/{bp}/staging-gate` — staging freeze + audit
+   *  state (frozen flag, audit policy, audit log, promotable gate). */
+  async stagingGate(
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/staging-gate`,
+      { headers: { ...this.authHeaders() } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `PUT .../staging-gate/freeze` — freeze/unfreeze staging. gitops resolves the
+   *  actor's role from `by` and rejects non admin/auditor. */
+  async setStagingFreeze(
+    bp: string,
+    frozen: boolean,
+    by?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/freeze`,
+      {
+        method: 'PUT',
+        headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ frozen, ...(by ? { by } : {}) }),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `PUT .../staging-gate/policy` — set required auditor sign-offs (0 = off). */
+  async setAuditPolicy(
+    bp: string,
+    required: number,
+    by?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/policy`,
+      {
+        method: 'PUT',
+        headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ required, ...(by ? { by } : {}) }),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `POST .../staging-gate/audits` — record one sign-off (approve / reject) on
+   *  the frozen staging image; appended to the audit log in bitswan.yaml. */
+  async recordAudit(
+    bp: string,
+    payload: { verdict: string; note?: string; by?: string },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/audits`,
+      {
+        method: 'POST',
+        headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /** `GET /snapshots/{bp}` — the BP's snapshot list (+ eligibility/usage/tasks).
    *  Exposed for the DR panel's "tested against" snapshot picker. */
   async bpSnapshots(
