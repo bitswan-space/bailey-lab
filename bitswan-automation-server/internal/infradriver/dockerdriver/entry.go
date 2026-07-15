@@ -694,6 +694,13 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	}
 
 	// ---- keycloak ----
+	// The platform's declared auth mode ("aoc" when the daemon is
+	// AOC-connected). Workers use it to tell "identity env should exist
+	// but is missing" (refuse to run unverified) from "no identity
+	// provider on this platform at all" (gate authenticates upstream).
+	if c.authMode != "" {
+		env["BITSWAN_AUTH_MODE"] = c.authMode
+	}
 	if c.keycloakURL != "" {
 		ku := c.keycloakURL
 		if idx := strings.LastIndex(ku, "/realms/"); idx >= 0 {
@@ -708,6 +715,16 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 
 	if c.orgGroupPath != "" {
 		env["BITSWAN_ALLOWED_GROUP"] = c.orgGroupPath
+	}
+
+	// Admin gating contract: workers treat members of BITSWAN_ADMIN_GROUP
+	// as admins. Default to the platform convention — the AOC creates an
+	// `admin` child group under each org group (daemon/auth.go matches the
+	// same /admin suffix) — overridable via BITSWAN_ADMIN_GROUP.
+	if adminGroup := c.adminGroupPath; adminGroup != "" {
+		env["BITSWAN_ADMIN_GROUP"] = adminGroup
+	} else if c.orgGroupPath != "" {
+		env["BITSWAN_ADMIN_GROUP"] = c.orgGroupPath + "/admin"
 	}
 
 	// ---- volumes: certs + source mount ----

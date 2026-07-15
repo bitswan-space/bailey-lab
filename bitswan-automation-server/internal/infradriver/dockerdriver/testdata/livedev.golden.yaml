@@ -17,6 +17,9 @@ services:
             - __ROOT__/secrets/dbcreds/dev/copy_bar_bp_acme
             - __ROOT__/secrets/miniocreds/dev/copy-bar-bp-acme
         environment:
+            BITSWAN_ADMIN_GROUP: /Test Org/admin
+            BITSWAN_ALLOWED_GROUP: /Test Org
+            BITSWAN_AUTH_MODE: aoc
             BITSWAN_AUTOMATION_STAGE: live-dev
             BITSWAN_DEPLOY_CHECKSUM: live-dev
             BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
@@ -27,6 +30,9 @@ services:
             BITSWAN_WORKSPACE_NAME: ws4
             COUCHDB_DB_PREFIX: copy-bar-bp-acme-
             DEPLOYMENT_ID: backend-copy-bar-acme-live-dev
+            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_REALM: testrealm
+            KEYCLOAK_URL: https://keycloak.example.com
             MINIO_BUCKET: copy-bar-bp-acme
             PORT: "8080"
             POSTGRES_DB: copy_bar_bp_acme
@@ -56,6 +62,9 @@ services:
             - __ROOT__/secrets/dbcreds/dev/copy_bar_bp_acme
             - __ROOT__/secrets/miniocreds/dev/copy-bar-bp-acme
         environment:
+            BITSWAN_ADMIN_GROUP: /Test Org/admin
+            BITSWAN_ALLOWED_GROUP: /Test Org
+            BITSWAN_AUTH_MODE: aoc
             BITSWAN_AUTOMATION_STAGE: live-dev
             BITSWAN_AUTOMATION_URL: https://ws4-frontend-4337-live-dev.example.com
             BITSWAN_DEPLOY_CHECKSUM: live-dev
@@ -69,6 +78,9 @@ services:
             BITSWAN_WORKSPACE_NAME: ws4
             COUCHDB_DB_PREFIX: copy-bar-bp-acme-
             DEPLOYMENT_ID: frontend-copy-bar-acme-live-dev
+            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_REALM: testrealm
+            KEYCLOAK_URL: https://keycloak.example.com
             MINIO_BUCKET: copy-bar-bp-acme
             POSTGRES_DB: copy_bar_bp_acme
         image: bitswan/pipeline-runtime-environment:latest

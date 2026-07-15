@@ -77,6 +77,9 @@ services:
             - __ROOT__/secrets/postgres-dev
             - __ROOT__/secrets/minio-dev
         environment:
+            BITSWAN_ADMIN_GROUP: /Test Org/admin
+            BITSWAN_ALLOWED_GROUP: /Test Org
+            BITSWAN_AUTH_MODE: aoc
             BITSWAN_AUTOMATION_STAGE: dev
             BITSWAN_DEPLOY_CHECKSUM: backsum
             BITSWAN_DEPLOYMENT_CONTEXT: acme-dev
@@ -86,6 +89,9 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws1-fwgw-822b-dev:8080
             BITSWAN_WORKSPACE_NAME: ws1
             DEPLOYMENT_ID: backend-acme-dev
+            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_REALM: testrealm
+            KEYCLOAK_URL: https://keycloak.example.com
             PORT: "8080"
         image: bitswan/pipeline-runtime-environment:latest
         labels:
@@ -113,6 +119,9 @@ services:
             - __ROOT__/secrets/postgres-dev
             - __ROOT__/secrets/minio-dev
         environment:
+            BITSWAN_ADMIN_GROUP: /Test Org/admin
+            BITSWAN_ALLOWED_GROUP: /Test Org
+            BITSWAN_AUTH_MODE: aoc
             BITSWAN_AUTOMATION_STAGE: dev
             BITSWAN_AUTOMATION_URL: https://ws1-frontend-822b-dev.example.com
             BITSWAN_DEPLOY_CHECKSUM: frontsum
@@ -125,6 +134,9 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws1-fwgw-822b-dev:8080
             BITSWAN_WORKSPACE_NAME: ws1
             DEPLOYMENT_ID: frontend-acme-dev
+            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_REALM: testrealm
+            KEYCLOAK_URL: https://keycloak.example.com
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: frontend

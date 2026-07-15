@@ -15,6 +15,9 @@ services:
         env_file:
             - __ROOT__/secrets/bp/shop/production
         environment:
+            BITSWAN_ADMIN_GROUP: /Test Org/admin
+            BITSWAN_ALLOWED_GROUP: /Test Org
+            BITSWAN_AUTH_MODE: aoc
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_DEPLOY_CHECKSUM: bsum
             BITSWAN_DEPLOYMENT_CONTEXT: shop
@@ -24,6 +27,9 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws2-fwgw-8d90-production-blue:8081
             BITSWAN_WORKSPACE_NAME: ws2
             DEPLOYMENT_ID: backend-shop
+            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_REALM: testrealm
+            KEYCLOAK_URL: https://keycloak.example.com
             PORT: "8081"
         image: internal/ws2-shop-backend:shabsum
         labels:
@@ -55,6 +61,9 @@ services:
         env_file:
             - __ROOT__/secrets/bp/shop/production
         environment:
+            BITSWAN_ADMIN_GROUP: /Test Org/admin
+            BITSWAN_ALLOWED_GROUP: /Test Org
+            BITSWAN_AUTH_MODE: aoc
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_DEPLOY_CHECKSUM: bsum
             BITSWAN_DEPLOYMENT_CONTEXT: shop
@@ -64,6 +73,9 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws2-fwgw-8d90-production-green:8081
             BITSWAN_WORKSPACE_NAME: ws2
             DEPLOYMENT_ID: backend-shop@green
+            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_REALM: testrealm
+            KEYCLOAK_URL: https://keycloak.example.com
             PORT: "8081"
         image: internal/ws2-shop-backend:shabsum
         labels:
@@ -93,6 +105,9 @@ services:
             ws2-fwgw-8d90-production-blue:
                 condition: service_healthy
         environment:
+            BITSWAN_ADMIN_GROUP: /Test Org/admin
+            BITSWAN_ALLOWED_GROUP: /Test Org
+            BITSWAN_AUTH_MODE: aoc
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-production.example.com
             BITSWAN_DEPLOY_CHECKSUM: fsum
@@ -105,6 +120,9 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws2-fwgw-8d90-production-blue:8081
             BITSWAN_WORKSPACE_NAME: ws2
             DEPLOYMENT_ID: frontend-shop
+            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_REALM: testrealm
+            KEYCLOAK_URL: https://keycloak.example.com
         image: internal/ws2-shop-frontend:shafsum
         labels:
             gitops.automation_name: frontend
@@ -133,6 +151,9 @@ services:
             ws2-fwgw-8d90-production-green:
                 condition: service_healthy
         environment:
+            BITSWAN_ADMIN_GROUP: /Test Org/admin
+            BITSWAN_ALLOWED_GROUP: /Test Org
+            BITSWAN_AUTH_MODE: aoc
             BITSWAN_AUTOMATION_STAGE: production
             BITSWAN_AUTOMATION_URL: https://ws2-frontend-8d90-dr.example.com
             BITSWAN_DEPLOY_CHECKSUM: fsum
@@ -145,6 +166,9 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws2-fwgw-8d90-production-green:8081
             BITSWAN_WORKSPACE_NAME: ws2
             DEPLOYMENT_ID: frontend-shop@green
+            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_REALM: testrealm
+            KEYCLOAK_URL: https://keycloak.example.com
         image: internal/ws2-shop-frontend:shafsum
         labels:
             gitops.automation_name: frontend

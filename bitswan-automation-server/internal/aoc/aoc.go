@@ -371,6 +371,10 @@ type OAuthClientResponse struct {
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
 	IssuerURL    string `json:"issuer_url"`
+	// GroupPath is the org's Keycloak group path (e.g. "/Example Org") —
+	// the prefix of every group_membership claim value. Empty when the
+	// AOC predates the field or could not resolve the path.
+	GroupPath string `json:"group_path"`
 }
 
 // GetOrCreateOAuthClient provisions a Keycloak OIDC client for a named
@@ -505,11 +509,73 @@ func (c *AOCClient) GetAOCEnvironmentVariables(workspaceId, automationServerToke
 		aocUrl = "http://api.bitswan.localhost"
 	}
 
-	return []string{
+	vars := []string{
 		"BITSWAN_WORKSPACE_ID=" + workspaceId,
 		"BITSWAN_AOC_URL=" + aocUrl,
 		"BITSWAN_AOC_TOKEN=" + automationServerToken,
 	}
+	return append(vars, c.workerIdentityEnv()...)
+}
+
+// workerIdentityEnv resolves the identity contract every deployed worker
+// receives: KEYCLOAK_URL (the OIDC issuer workers validate Bearer JWTs
+// against) and BITSWAN_ALLOWED_GROUP (the org group path authorization
+// matches on). The compiler reads these from its process env and stamps
+// them into every worker's compose entry (dockerdriver/entry.go), so a
+// fresh workspace gets AOC-mode workers with zero manual env setup.
+//
+// The values ride the workspace compose (gitops + infra-driver services)
+// via GetAOCEnvironmentVariables, cross the git post-receive CGI boundary
+// through githttp.go's InheritEnv allowlist, and land in the compiler's
+// os.Getenv.
+//
+// Ambient daemon env wins as an explicit operator override; otherwise the
+// values come from the AOC's oauth-client endpoint (idempotent
+// get-or-create of the shared bitswan-protected client — the same call
+// the protected proxy provisioning makes). BITSWAN_ADMIN_GROUP is only
+// propagated when explicitly set: the compiler derives its default
+// ({allowed group}/admin) from BITSWAN_ALLOWED_GROUP. Best-effort — a
+// missing domain or an AOC that predates group_path just yields fewer
+// vars, and workers degrade exactly as before.
+//
+// BITSWAN_AUTH_MODE=aoc is stamped unconditionally: this function only
+// runs on an AOC-connected daemon, and the stamp is the workers' signal
+// that identity env SHOULD exist. It deliberately does not depend on the
+// fetch succeeding — a worker that sees the stamp without an issuer knows
+// the platform is misconfigured (and can refuse to run unverified),
+// whereas a worker with neither knows there is simply no identity
+// provider to speak of.
+func (c *AOCClient) workerIdentityEnv() []string {
+	vars := []string{"BITSWAN_AUTH_MODE=aoc"}
+
+	issuer := os.Getenv("KEYCLOAK_URL")
+	group := os.Getenv("BITSWAN_ALLOWED_GROUP")
+
+	if (issuer == "" || group == "") && c.settings.Domain != "" {
+		resp, err := c.GetOrCreateOAuthClient("bitswan-protected",
+			"https://bailey."+c.settings.Domain+"/oauth2/callback")
+		if err != nil {
+			fmt.Printf("Warning: could not fetch worker identity env from AOC: %v\n", err)
+		} else {
+			if issuer == "" {
+				issuer = resp.IssuerURL
+			}
+			if group == "" {
+				group = resp.GroupPath
+			}
+		}
+	}
+
+	if issuer != "" {
+		vars = append(vars, "KEYCLOAK_URL="+issuer)
+	}
+	if group != "" {
+		vars = append(vars, "BITSWAN_ALLOWED_GROUP="+group)
+	}
+	if admin := os.Getenv("BITSWAN_ADMIN_GROUP"); admin != "" {
+		vars = append(vars, "BITSWAN_ADMIN_GROUP="+admin)
+	}
+	return vars
 }
 
 // SetDomain sets the automation server's public domain in the settings
