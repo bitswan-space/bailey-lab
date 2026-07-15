@@ -128,11 +128,26 @@ func main() {
 	mc := mustInitMinio()
 	ensureBucket(mc)
 
-	// In AOC mode KEYCLOAK_ISSUER_URL is injected and the backend validates JWTs
-	// itself. In simple/no-AOC mode it's absent — the Bailey gate authenticates
-	// upstream — so run without a JWKS provider rather than refusing to start.
+	// Auth posture (see README.md, "Identity & admin contract"): with
+	// KEYCLOAK_ISSUER_URL injected (AOC mode) the backend validates Bearer
+	// JWTs itself. Without it the worker only continues when the platform
+	// genuinely has no identity provider — an AOC-connected platform that
+	// failed to inject the issuer is a misconfiguration and refusing to
+	// start beats silently trusting every request.
+	issuerURL := os.Getenv("KEYCLOAK_ISSUER_URL")
+	fatal, warning := resolveAuthStartup(
+		issuerURL,
+		os.Getenv("BITSWAN_AUTH_MODE"),
+		os.Getenv("BITSWAN_AUTOMATION_STAGE"),
+	)
+	if fatal != "" {
+		log.Fatal(fatal)
+	}
+	if warning != "" {
+		log.Println("WARNING: " + warning)
+	}
 	var jwks *JWKSProvider
-	if issuerURL := os.Getenv("KEYCLOAK_ISSUER_URL"); issuerURL != "" {
+	if issuerURL != "" {
 		jwks = NewJWKSProvider(issuerURL)
 	} else {
 		log.Println("KEYCLOAK_ISSUER_URL not set — simple mode: the Bailey gate authenticates upstream; backend does not validate JWTs itself.")
@@ -152,12 +167,15 @@ func main() {
 
 	// Internal routes (auth required)
 	mux.Handle("GET /internal/", app.requireAuth(http.HandlerFunc(app.handleInternalRoot)))
+	mux.Handle("GET /internal/me", app.requireAuth(http.HandlerFunc(app.handleWhoAmI)))
 	mux.Handle("GET /internal/count", app.requireAuth(http.HandlerFunc(app.handleGetCount)))
 	mux.Handle("POST /internal/count", app.requireAuth(http.HandlerFunc(app.handleIncrementCount)))
 	mux.Handle("GET /internal/gallery", app.requireAuth(http.HandlerFunc(app.handleListGallery)))
 	mux.Handle("GET /internal/gallery/{filename...}", app.requireAuth(http.HandlerFunc(app.handleGetGalleryImage)))
 	mux.Handle("POST /internal/gallery/upload", app.requireAuth(http.HandlerFunc(app.handleUploadGalleryImage)))
-	mux.Handle("DELETE /internal/gallery/{filename...}", app.requireAuth(http.HandlerFunc(app.handleDeleteGalleryImage)))
+	// Destructive op → admin-gated (BITSWAN_ADMIN_GROUP membership; see
+	// README.md). The reference for role-gating an endpoint.
+	mux.Handle("DELETE /internal/gallery/{filename...}", app.requireAdmin(http.HandlerFunc(app.handleDeleteGalleryImage)))
 
 	handler := corsMiddleware(mux)
 
