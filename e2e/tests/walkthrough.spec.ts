@@ -1766,81 +1766,94 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     ).toBeVisible({ timeout: SLA });
   });
 
-  // ---- Promote dev → staging → production, waiting for each to be Healthy ----
+  // ---- Promote dev → staging, FREEZE + AUDIT, then staging → production -------
+  // One promote hop: press the stage-specific promote pill ("Promote all
+  // containers to <Stage>", so the dev→staging pill is never confused with the
+  // staging→production one), confirm THIS stage actually starts, then ride the
+  // deploy watchdog until it is current. A click that doesn't land (a re-render
+  // detaches the pill) is re-pressed so the target never sits static long enough
+  // to trip the went-dark watchdog as a false stall.
+  const promoteHop = async (stageName: 'Staging' | 'Production') => {
+    const target = new RegExp(stageName, 'i');
+    await selectStage(target);
+    const promotePill = d
+      .locator(`button[title="Promote all containers to ${stageName}"]`)
+      .first();
+    const targetCurrent = d.getByText(new RegExp(`Current on ${stageName}`, 'i')).first();
+    const moving = d
+      .getByText(/Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i)
+      .first();
+    let started = false;
+    for (let attempt = 0; attempt < 6 && !started; attempt++) {
+      if (await targetCurrent.isVisible().catch(() => false)) {
+        started = true;
+        break;
+      }
+      if (await promotePill.isEnabled().catch(() => false)) {
+        await promotePill.click().catch(() => {});
+      }
+      started = await Promise.race([
+        moving.waitFor({ state: 'visible', timeout: 12_000 }).then(() => true).catch(() => false),
+        targetCurrent
+          .waitFor({ state: 'visible', timeout: 12_000 })
+          .then(() => true)
+          .catch(() => false),
+      ]);
+    }
+    await selectStage(target);
+    await waitDeployDone(stageName); // THIS stage reaches "Current on <Stage>"
+  };
+
   await chapter('promote', async () => {
     await clickTopTab(/Deployments/i);
-    // Two hops. For each, press the promote pill that targets THIS stage and
-    // CONFIRM this stage actually starts before riding the deploy watchdog.
-    // Robustness the dind timing demands:
-    //  - The pill is selected by its stage-specific title ("Promote all
-    //    containers to <Stage>"), so the dev→staging pill is never confused with
-    //    the staging→production one (both render as "Promote").
-    //  - "started"/"done" are scoped to THIS stage ("Current on <Stage>"): a
-    //    prior stage's lingering Healthy / "Current on …" must NOT count, or the
-    //    hop looks done while the target sits at "never deployed".
-    //  - A click that doesn't land (a re-render detaches the pill) is re-pressed,
-    //    so the target never sits static long enough for waitDeployDone to read a
-    //    dead screen and trip the went-dark watchdog as a false stall.
-    let shotStaging = false;
-    let shotProd = false;
-    for (const stageName of ['Staging', 'Production'] as const) {
-      const isProd = stageName === 'Production';
-      const target = new RegExp(stageName, 'i');
-      await selectStage(target);
-      // Title is present only while the pill is actionable (canPromote); when
-      // there's nothing to promote it reads "Nothing new to promote to <Stage>".
-      const promotePill = d
-        .locator(`button[title="Promote all containers to ${stageName}"]`)
-        .first();
-      const targetCurrent = d
-        .getByText(new RegExp(`Current on ${stageName}`, 'i'))
-        .first();
-      const moving = d
-        .getByText(/Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i)
-        .first();
-      let started = false;
-      for (let attempt = 0; attempt < 6 && !started; attempt++) {
-        if (await targetCurrent.isVisible().catch(() => false)) {
-          started = true;
-          break;
-        }
-        if (await promotePill.isEnabled().catch(() => false)) {
-          await promotePill.click().catch(() => {});
-        }
-        // Bounded wait (well under the 30-min deploy backstop) for THIS stage to
-        // start moving or land. If nothing moves, the click missed — press again.
-        started = await Promise.race([
-          moving
-            .waitFor({ state: 'visible', timeout: 12_000 })
-            .then(() => true)
-            .catch(() => false),
-          targetCurrent
-            .waitFor({ state: 'visible', timeout: 12_000 })
-            .then(() => true)
-            .catch(() => false),
-        ]);
-      }
-      // Capture the promotion IN PROGRESS on BOTH hops (the live step beat):
-      // dev→staging as `promote-progress`, staging→production as
-      // `promote-progress-prod`, so the manual documents both cutovers. The
-      // staging hop's waitDeployDone('Staging') already gated staging current
-      // before the production iteration, so the prod shot reflects a pipeline
-      // where staging is deployed (the meaningful blue-green state).
-      if (isProd && !shotProd) {
-        await targetCurrent
-          .or(moving)
-          .first()
-          .waitFor({ state: 'visible', timeout: SLA })
-          .catch(() => {});
-        await capture(dashPage, 'promote-progress-prod');
-        shotProd = true;
-      } else if (!isProd && !shotStaging) {
-        await capture(dashPage, 'promote-progress');
-        shotStaging = true;
-      }
-      await selectStage(target);
-      await waitDeployDone(stageName); // THIS stage reaches "Current on <Stage>"
-    }
+    await promoteHop('Staging');
+    await capture(dashPage, 'promote-progress');
+  });
+
+  // Production is GATED: an auditor/admin must freeze staging (locking the image
+  // under review) and collect the required audit sign-offs before the Production
+  // promote unlocks. Freezing also closes dev→staging. The walkthrough runs as an
+  // admin (who holds auditor rights), exercising the full gate as a real user —
+  // no bypass. A normal member would see the Production promote locked and would
+  // have to ask an auditor, exactly as intended.
+  await chapter('freeze-and-audit', async () => {
+    await clickTopTab(/Deployments/i);
+    // Freeze staging — the Freeze pill lives on the Staging node in the pipeline.
+    const freeze = d.getByRole('button', { name: /^Freeze$/ }).first();
+    await freeze.waitFor({ state: 'visible', timeout: SLA });
+    await freeze.click().catch(() => {});
+    // It flips to "Unfreeze" once the gate state comes back (frozen).
+    await d
+      .getByRole('button', { name: /^Unfreeze$/ })
+      .first()
+      .waitFor({ state: 'visible', timeout: SLA });
+    await capture(dashPage, 'freeze-staging');
+    // Open the Audits sub-tab via its pipeline badge and sign off an approval
+    // (admin has auditor rights). The badge reads "Audits <done>/<required>".
+    await d
+      .getByRole('button', { name: /Audits (off|\d+\/\d+)/i })
+      .first()
+      .click()
+      .catch(() => {});
+    const noteBox = d.getByPlaceholder(/Audit note/i).first();
+    await noteBox.waitFor({ state: 'visible', timeout: SLA });
+    await noteBox.fill(
+      'Reviewed the frozen staging image — migrations additive, no PII change. Approved for Production.',
+    );
+    await capture(dashPage, 'audit-signoff');
+    await d.getByRole('button', { name: /^Approve$/ }).first().click();
+    // The sign-off lands in the audit log, and the policy (1 sign-off) is met.
+    await d
+      .getByText(/Approved/i)
+      .first()
+      .waitFor({ state: 'visible', timeout: SLA });
+    await capture(dashPage, 'audit-log');
+  });
+
+  await chapter('promote-prod', async () => {
+    await clickTopTab(/Deployments/i);
+    await promoteHop('Production');
+    await capture(dashPage, 'promote-progress-prod');
   });
 
   // ---- Deployment sections; the cover hero is the live Production view ----
