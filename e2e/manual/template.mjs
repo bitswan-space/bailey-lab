@@ -159,14 +159,21 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
      guides) flow continuously instead, packing densely rather than each wasting
      the tail of its own sheet. */
   .page{ box-shadow:none; border-radius:0; margin:0; width:auto; min-height:auto; break-before:page; break-after:auto; overflow:visible }
-  .guide{ break-before:auto }
+  /* Each compliance reference (matrix, at-a-glance, and every control guide)
+     opens at the TOP of its own sheet — its heading is never stranded mid-page
+     or, worse, alone on a page. Costs a few pages; reads far cleaner. */
+  .guide{ break-before:page }
   .guide .ghead, .guide h2, .guide .gblurb, .guide table thead{ break-after:avoid }
   .matrix table thead, .matrix tr, .guide tr{ break-inside:avoid }
   /* One inset owns the page margin: the @page rule below already reserves a band
      for the running footer, so .pad only needs a modest content inset — not the
      22/20mm screen inset stacked on top of it (that double margin squeezed the
      text column and helped push chapters past the sheet). */
-  .pad{ min-height:auto; padding:12mm 14mm }
+  .pad{ min-height:auto; padding:9mm 7mm }
+  /* The manifesto sheet itself is painted dark (see .pagedjs_manifesto_page);
+     keep the section transparent so there is no offset seam between the section
+     gradient and the sheet gradient. */
+  .manifesto{ background:transparent }
 
   /* A chapter must fit ONE A4 sheet. The screen sizes (46px titles, 40px grid
      gaps, uncapped screenshots, a 46mm-margin runfoot) overflowed the sheet, so
@@ -238,17 +245,23 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
    cover is its own named page with no footer; every other page shows the
    handbook footer on the left and the page number on the right. */
 @page{
-  size:A4; margin:14mm 13mm 16mm 13mm;
+  size:A4; margin:12mm 11mm 14mm 11mm;
   @bottom-left{ content:"Bitswan Bailey · The Operator's Handbook"; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; font-size:8.5pt; color:#8a93a0; }
   @bottom-right{ content:counter(page); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; font-size:9pt; font-weight:700; color:#0c1722; }
 }
 @page :first{ margin:0; @bottom-left{ content:none } @bottom-right{ content:none } }
 @page cover{ margin:0; @bottom-left{ content:none } @bottom-right{ content:none } }
+@page manifesto{ @bottom-left{ content:none } @bottom-right{ content:none } }
 .cover{ page:cover }
+.manifesto{ page:manifesto }
 /* Paged.js renders each sheet as .pagedjs_page; let full-bleed sections paint
    their dark backgrounds to the edge by neutralising the page margin visually
    on the cover/manifesto via their own padding (.pad). */
 .pagedjs_page{ background:var(--paper) }
+/* The manifesto is a full-bleed dark sheet: paint the whole page (margin band
+   included) with its gradient so it reads as edge-to-edge dark blue, not a dark
+   box floating on the paper colour. */
+.pagedjs_manifesto_page{ background:linear-gradient(165deg,#0c1f30,#0a1622) }
 `;
 
 function coverShot(shot) {
