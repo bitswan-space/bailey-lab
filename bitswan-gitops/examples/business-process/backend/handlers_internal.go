@@ -7,6 +7,23 @@ import (
 	"strings"
 )
 
+// handleWhoAmI returns the caller's identity as read from the VERIFIED
+// token claims — the template's reference for identity resolution (never
+// read identity from forwarded headers; the gate strips them for user
+// apps, the Bearer token is the one contract). `verified` is false in
+// simple mode, where no token is validated and every field is empty.
+func (app *App) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFrom(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"username": getUsername(r),
+		"email":    claimString(claims, "email"),
+		"name":     claimString(claims, "name"),
+		"groups":   claimGroups(claims),
+		"is_admin": isAdmin(claims),
+		"verified": app.jwks != nil,
+	})
+}
+
 func (app *App) handleInternalRoot(w http.ResponseWriter, r *http.Request) {
 	username := getUsername(r)
 	writeJSON(w, http.StatusOK, map[string]string{
