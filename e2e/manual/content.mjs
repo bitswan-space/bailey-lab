@@ -227,35 +227,52 @@ export const MANUAL = {
       ],
     },
     {
-      num: '11', eyebrow: 'Promote with confidence', title: 'Freeze, audit & promote to production',
-      lede: 'Production is gated by four eyes, not two. An auditor freezes staging to lock the image under review, signs off against a policy you set, and only then can the frozen image be promoted — over three app slots on two persistent databases, with zero downtime.',
+      num: '11', eyebrow: 'Promote with confidence', title: 'Staged deployment',
+      lede: 'A change moves forward one stage at a time — dev → staging → production — and each hop is a blue-green cutover: the idle slot comes up on the live database, ingress repoints, the old slot retires. Three app slots over two persistent databases mean the live slot never blinks and the standby is always one cutover away.',
+      slots: [
+        { id: 'promote-progress', label: 'Live capture', caption: 'Promotion in flight (dev → staging) · the idle slot coming up, the live step streaming, before the cutover' },
+        { id: 'promote-progress-prod', label: 'Live capture', caption: 'Promotion in flight (staging → production) · the standby slot building on the live database before the production cutover' },
+        { id: 'deployments-prod', label: 'Live capture', caption: 'Deployments · Production Healthy after promotion, every stage green' },
+      ],
+      sell: [
+        'Promote a stage and the idle slot comes up on that stage’s live database, ingress repoints to it, and the old slot retires. The pipeline streams its live step the whole way as the standby slot builds and starts, so a promotion is never a black box — and users never see a gap.',
+        'What promotes is the <strong>image, verbatim</strong>: promotion re-deploys the exact bytes that were built and reviewed, even if the workspace source has moved on since. So what runs in production is precisely what was exercised in staging, not a fresh rebuild that might drift.',
+        'Anyone on the team can promote <strong>dev → staging</strong>. Production is different: it is a <strong>gated</strong> step that opens only once staging has been frozen and audited — that is the next chapter. Either way, the pipeline is a state you can read at a glance: which slot is live, which is standby, what is <strong>Healthy</strong>, and the version each stage is current on.',
+      ],
+      steps: ['Open <b>Deployments</b>.', 'Press <b>Promote all to Staging</b> and watch the blue-green cutover come up <b>Healthy</b>.', 'Exercise the app on staging — its own data, never production’s.', 'Production is gated — freeze &amp; audit it first (next chapter), then <b>Promote to Production</b>.'],
+      specs: [{ v: '3 slots', l: 'blue-green over 2 DBs' }, { v: '0 s', l: 'downtime on promote' }, { v: 'verbatim', l: 'the reviewed image ships' }],
+      callout: { kind: 'Why it matters', text: 'Every promotion is a zero-downtime blue-green cutover of the exact reviewed image. You can promote in the middle of the day and roll back to the standby slot just as fast — the live slot never blinks.' },
+      standards: [
+        { code: 'ISO/IEC 27001', clause: 'A.8.31', demand: '<b>Separation of development, test and production.</b> A change is deployed through isolated stages, each on its own database and network.' },
+        { code: 'SOC 2', clause: 'CC8.1', demand: '<b>Change management.</b> Changes reach production only through a deliberate, observable promotion of the reviewed image.' },
+        { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> Zero-downtime cutovers minimise the impact of changes on the availability of critical functions.' },
+      ],
+    },
+    {
+      num: '12', eyebrow: 'Four eyes on production', title: 'Freeze & audit',
+      lede: 'Production is gated by four eyes, not two. An auditor freezes staging to lock the exact image under review, signs off against a policy you set, and only then does the Production promote unlock — with every freeze, policy change and sign-off recorded in bitswan.yaml.',
       slots: [
         { id: 'freeze-staging', label: 'Live capture', caption: 'Freeze staging · an auditor locks the staging image for review — dev → staging is closed until it is unfrozen' },
         { id: 'audit-signoff', label: 'Live capture', caption: 'Audit sign-off · an auditor reviews the frozen image and approves (or requests changes) with a note' },
         { id: 'audit-log', label: 'Live capture', caption: 'Audit log · every sign-off recorded with who, when and their verdict — persisted in bitswan.yaml' },
-        { id: 'promote-progress', label: 'Live capture', caption: 'Promotion in flight (dev → staging) · the idle slot coming up, the live step streaming, before the cutover' },
-        { id: 'promote-progress-prod', label: 'Live capture', caption: 'Promotion in flight (staging → production) · the standby slot building on the live database before the production cutover' },
-        { id: 'deployments-prod', label: 'Live capture', caption: 'Deployments · Production Healthy after the audited promote, every stage green' },
       ],
       sell: [
-        'Anyone on the team can promote dev → staging. <strong>No one promotes straight to production.</strong> First an auditor or admin <strong>freezes staging</strong> — that locks the exact image under review (a fixed tag) and closes dev → staging so the thing being audited can’t change underneath the review. A normal member never sees a Production promote button they can click; they hand off to an auditor, exactly as segregation-of-duties demands.',
-        'You set the bar with an <strong>audit policy</strong>: how many auditor sign-offs (at least one) a frozen image needs before it may reach production. Each auditor reviews the frozen image and records a verdict — <strong>Approve</strong> or <strong>Request changes</strong> — with a note. Only when the policy is met does the Production promote unlock; a single “request changes” holds the line. Every change to the gate — the freeze itself, each policy change, and each sign-off — is written into <code>bitswan.yaml</code> and versioned in git, so the audit record is append-only and attributable, not a screenshot in a ticket.',
-        'Then the mechanism: promote the frozen image and the idle slot comes up on the live database, ingress repoints, the old slot retires. The pipeline streams its live step the whole way as the standby slot builds and starts. Promotion re-deploys the audited image verbatim — what reaches production is exactly the bytes the auditor signed off on, even if the workspace source has moved on. Users never see a gap.',
-        'Production is a state you can read at a glance: whether staging is frozen, how many sign-offs stand against the frozen image, which slot is live, which is standby, what’s <strong>Healthy</strong>, and the version each stage is current on.',
+        '<strong>No one promotes straight to production.</strong> First an auditor or admin <strong>freezes staging</strong> — that locks the exact image under review (a fixed tag) and closes dev → staging, so the thing being audited can’t change underneath the review. A normal member never sees a Production promote button they can click; they hand off to an auditor, exactly as segregation-of-duties demands.',
+        'You set the bar with an <strong>audit policy</strong>: how many auditor sign-offs (at least one) a frozen image needs before it may reach production. Each auditor reviews the frozen image and records a verdict — <strong>Approve</strong> or <strong>Request changes</strong> — with a note. Only when the policy is met does the Production promote unlock; a single “request changes” holds the line.',
+        'Every change to the gate — the freeze, each policy change, and each sign-off — is written into <code>bitswan.yaml</code> and versioned in git, attributed to the acting auditor and appended to a fast-forward-only history. The audit record is not a screenshot in a ticket; it is a versioned artefact you can hand an auditor. Once the audited image reaches production, staging <strong>unfreezes automatically</strong> — no point holding the lock after release.',
       ],
-      steps: ['Promote <b>dev → staging</b> as usual.', 'As an auditor, press <b>Freeze</b> on the Staging node to lock the image.', 'Open the <b>Audits</b> tab, review the frozen image and <b>Approve</b> (or <b>Request changes</b>) with a note.', 'Once the policy is met, press <b>Promote</b> to Production and watch it report <b>Healthy</b>.'],
-      specs: [{ v: '4 eyes', l: 'auditor sign-off to prod' }, { v: 'N sign-offs', l: 'policy you set' }, { v: '0 s', l: 'downtime on promote' }],
+      steps: ['As an auditor, press <b>Freeze</b> on the Staging node to lock the image under review.', 'Open the <b>Audits</b> tab, review the frozen image and <b>Approve</b> (or <b>Request changes</b>) with a note.', 'Once the sign-off policy is met, the <b>Promote to Production</b> button unlocks.', 'Promote — staging unfreezes automatically once production is live.'],
+      specs: [{ v: '4 eyes', l: 'auditor sign-off to prod' }, { v: 'N sign-offs', l: 'policy you set' }, { v: 'append-only', l: 'audit log in git' }],
       callout: { kind: 'Who audited what, in bitswan.yaml', text: 'Every freeze, policy change and sign-off is committed to <code>bitswan.yaml</code> in the process’s own git repo — attributed to the acting auditor and appended to an immutable, fast-forward-only history. The audit log isn’t a promise; it’s a versioned record you can hand an auditor.' },
       standards: [
-        { code: 'ISO/IEC 27001', clause: 'A.8.32', demand: '<b>Change management.</b> Production changes are reviewed and approved against a policy before release, then promoted verbatim.' },
         { code: 'ISO/IEC 27001', clause: 'A.5.3', demand: '<b>Segregation of duties.</b> The person who builds a change cannot unilaterally release it to production — an independent auditor must sign off.' },
-        { code: 'ISO/IEC 27001', clause: 'A.8.31', demand: '<b>Separation of development, test and production.</b> The dev / staging / production stages keep environments cleanly separated within a process.' },
+        { code: 'ISO/IEC 27001', clause: 'A.8.32', demand: '<b>Change management.</b> Production changes are reviewed and approved against a policy before release, then promoted verbatim.' },
         { code: 'SOC 2', clause: 'CC8.1', demand: '<b>Change approval.</b> Changes are authorised by required sign-offs recorded in a tamper-evident log before deployment.' },
-        { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> Minimise the impact of changes on the availability of critical functions.' },
+        { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> An independent sign-off gate limits the risk a change poses to critical functions.' },
       ],
     },
     {
-      num: '12', eyebrow: 'Show your work', title: 'Deployment history & inspect',
+      num: '13', eyebrow: 'Show your work', title: 'Deployment history & inspect',
       lede: 'A versioned, immutable audit log: every deploy, promotion, swap, backup and firewall change — and a per-deployment Inspect with the files, diff and secrets in force at the time.',
       slots: [
         { id: 'history', label: 'Live capture', caption: 'Deployment history · the audit trail of every event, with Inspect and Roll back per entry' },
@@ -279,7 +296,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '13', eyebrow: 'Keep secrets secret', title: 'Secrets',
+      num: '14', eyebrow: 'Keep secrets secret', title: 'Secrets',
       lede: 'Per-stage environment secrets, write-gated by role, injected at deploy and snapshotted with every deployment.',
       slots: [
         { id: 'secrets', label: 'Live capture', caption: 'Production · environment secrets, role-gated' },
@@ -297,7 +314,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '14', eyebrow: 'See what’s running', title: 'Containers',
+      num: '15', eyebrow: 'See what’s running', title: 'Containers',
       lede: 'The live container roster for a stage — every service of the deployment, its health, and per-container Logs, Inspect, and start/stop controls.',
       slots: [
         { id: 'containers', label: 'Live capture', caption: 'Production · the live containers of the current deployment' },
@@ -316,7 +333,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '15', eyebrow: 'Capture the truth', title: 'Backups & retention',
+      num: '16', eyebrow: 'Capture the truth', title: 'Backups & retention',
       lede: 'Point-in-time snapshots of the live database and object storage, with a retention policy and an audit trail.',
       slots: [
         { id: 'snapshot-create', label: 'Live capture', caption: 'Create snapshot · label and stage, before it runs' },
@@ -334,7 +351,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '16', eyebrow: 'Sleep at night', title: 'Rehearse & restore (DR)',
+      num: '17', eyebrow: 'Sleep at night', title: 'Rehearse & restore (DR)',
       lede: 'A backup you’ve never restored is a rumor. Bitswan makes the rehearsal a routine, the architecture legible, and the real cutover a single click.',
       slots: [
         { id: 'dr-rehearse', label: 'Live capture', caption: 'Disaster Recovery · backup loaded into DR, recovery-tested' },
@@ -354,7 +371,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '17', eyebrow: 'Control the edges', title: 'Firewall & data processing',
+      num: '18', eyebrow: 'Control the edges', title: 'Firewall & data processing',
       lede: 'An egress allow-list with a GDPR data-processing record for every external host — approval workflow, versioning and the DPA on file.',
       slots: [
         { id: 'firewall', label: 'Live capture', caption: 'Firewall · the egress allow-list and its posture (Monitoring in dev, Enforcing in production)' },
@@ -374,7 +391,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '18', eyebrow: 'Know your ingredients', title: 'Supply chain',
+      num: '19', eyebrow: 'Know your ingredients', title: 'Supply chain',
       lede: 'A full software bill of materials for what you run — vulnerabilities ranked, advisories one click away, accepted risks recorded.',
       slots: [
         { id: 'supply-chain', label: 'Live capture', caption: 'Supply chain · the SBOM/CVE panel for the deployed image' },
@@ -392,7 +409,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '19', eyebrow: 'Right people, right rights', title: 'People & roles',
+      num: '20', eyebrow: 'Right people, right rights', title: 'People & roles',
       lede: 'A roster with explicit roles — operator, auditor, member — and per-person trusted devices you can approve or revoke.',
       slots: [{ id: 'people-roles', label: 'Live capture', caption: 'People & roles · the Meridian Foods roster' }],
       sell: [
@@ -409,7 +426,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '20', eyebrow: 'Let the right people in', title: 'Sharing an endpoint',
+      num: '21', eyebrow: 'Let the right people in', title: 'Sharing an endpoint',
       lede: 'Every protected app the gate fronts — including the frontends your operators build and deploy — can be shared, by its owner, with named people or groups, at view or owner level, without touching anyone else’s access.',
       slots: [
         { id: 'share-modal', label: 'Live capture', caption: 'Share endpoint · sharing a deployed automation’s own frontend (a Bailey-protected endpoint) with a teammate at User level' },
@@ -428,7 +445,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '21', eyebrow: 'Feed the watchtower', title: 'SIEM export & monitoring',
+      num: '22', eyebrow: 'Feed the watchtower', title: 'SIEM export & monitoring',
       lede: 'Stream the server’s security audit log — access approvals, role and device changes, workspace events — to your SIEM over OpenTelemetry, as it happens.',
       slots: [
         { id: 'siem-form', label: 'Live capture', caption: 'SIEM forwarding · the config form — the OTLP endpoint base URL and the protocol, filled in before Save & connect' },
@@ -454,7 +471,7 @@ export const MANUAL = {
     // Horváth) arriving on a new device, and the admin (Tomáš) deciding —
     // deliberately, in the open — whether he and his device get in.
     {
-      num: '22', eyebrow: 'Deny by default', title: 'A teammate’s first login',
+      num: '23', eyebrow: 'Deny by default', title: 'A teammate’s first login',
       lede: 'A new teammate signs in through your identity provider from their own laptop — and gets nothing. Identity alone is not access: Bailey is deny-by-default, and an unknown device waits at the gate.',
       slots: [{ id: 'onboard-newuser-pending', label: 'Live capture', caption: 'New device · Marek is signed in, but the device isn’t trusted — a 6-digit code and “Waiting for an admin…”' }],
       sell: [
@@ -471,7 +488,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '23', eyebrow: 'You decide who gets in', title: 'Approve the person & trust the device',
+      num: '24', eyebrow: 'You decide who gets in', title: 'Approve the person & trust the device',
       lede: 'Approval is a deliberate, present-tense act. The admin sees the pending device in People & roles, confirms the person is really there by the code on their screen, and trusts the device — admitting the user in one move.',
       slots: [
         { id: 'onboard-admin-approve', label: 'Live capture', caption: 'People & roles · Marek’s “Device awaiting approval” bar — the admin types the code from his screen' },
@@ -491,7 +508,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '24', eyebrow: 'In, on a trusted device', title: 'Access granted',
+      num: '25', eyebrow: 'In, on a trusted device', title: 'Access granted',
       lede: 'The moment the admin trusts it, the teammate’s device is let through — no re-login, no second step. And the same console that admitted the device is where you cut it, the instant a laptop is lost or a person leaves.',
       slots: [{ id: 'onboard-newuser-granted', label: 'Live capture', caption: 'New device · approved and redirected through the gate — access now granted on Marek’s laptop' }],
       sell: [
@@ -508,7 +525,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '25', eyebrow: 'Make a mess safely', title: 'Memory governance & the on-demand pool',
+      num: '26', eyebrow: 'Make a mess safely', title: 'Memory governance & the on-demand pool',
       lede: 'Users spin up as many previews and processes as they like without starving the workloads that matter. Bailey reserves memory for the services that must stay up and lets everything else scale to zero — under pressure automatically, or on demand with a button — waking the moment someone touches it, whether it’s a dev preview or a production service.',
       slots: [
         { id: 'resource-management', label: 'Live capture', caption: 'Server Console · Resource management — the memory budget and per-process usage grouped by process and stage (asleep processes shown too), each with a Sleep control' },
