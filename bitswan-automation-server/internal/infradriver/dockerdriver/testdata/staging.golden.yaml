@@ -77,6 +77,9 @@ services:
             - __ROOT__/secrets/postgres-staging
             - __ROOT__/secrets/minio-staging
         environment:
+            BITSWAN_ADMIN_GROUP: /Test Org/admin
+            BITSWAN_ALLOWED_GROUP: /Test Org
+            BITSWAN_AUTH_MODE: aoc
             BITSWAN_AUTOMATION_STAGE: staging
             BITSWAN_DEPLOY_CHECKSUM: bk
             BITSWAN_DEPLOYMENT_CONTEXT: acme-staging
@@ -86,6 +89,9 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws3-fwgw-822b-staging:8081
             BITSWAN_WORKSPACE_NAME: ws3
             DEPLOYMENT_ID: backend-acme-staging
+            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_REALM: testrealm
+            KEYCLOAK_URL: https://keycloak.example.com
             PORT: "8081"
         image: internal/ws3-acme-backend:shabk
         labels:
@@ -118,6 +124,9 @@ services:
             - __ROOT__/secrets/postgres-staging
             - __ROOT__/secrets/minio-staging
         environment:
+            BITSWAN_ADMIN_GROUP: /Test Org/admin
+            BITSWAN_ALLOWED_GROUP: /Test Org
+            BITSWAN_AUTH_MODE: aoc
             BITSWAN_AUTOMATION_STAGE: staging
             BITSWAN_AUTOMATION_URL: https://ws3-frontend-822b-staging.example.com
             BITSWAN_DEPLOY_CHECKSUM: fr
@@ -130,6 +139,9 @@ services:
             BITSWAN_WORKER_HOSTS: backend=ws3-fwgw-822b-staging:8081
             BITSWAN_WORKSPACE_NAME: ws3
             DEPLOYMENT_ID: frontend-acme-staging
+            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_REALM: testrealm
+            KEYCLOAK_URL: https://keycloak.example.com
         image: internal/ws3-acme-frontend:shafr
         labels:
             gitops.automation_name: frontend

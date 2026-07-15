@@ -26,9 +26,11 @@ type compileState struct {
 	domain        string
 	certsDirHost  string
 
-	keycloakURL  string
-	orgGroupPath string
-	volumeName   string // BITSWAN_VOLUME_NAME
+	keycloakURL    string
+	orgGroupPath   string
+	adminGroupPath string // BITSWAN_ADMIN_GROUP override; default derived from orgGroupPath
+	authMode       string // BITSWAN_AUTH_MODE ("aoc" on AOC-connected platforms)
+	volumeName     string // BITSWAN_VOLUME_NAME
 	gatewayImage string // BITSWAN_EGRESS_GATEWAY_IMAGE
 	firewallDir  string // <gitops_dir>/firewall (created when a gateway is active)
 
@@ -86,8 +88,10 @@ func newCompileState(wctx infradriver.WorkspaceContext, bs *Bitswan) *compileSta
 		secretsDir:    wctx.SecretsDir,
 		domain:        wctx.Domain,
 		certsDirHost:  os.Getenv("BITSWAN_CERTS_DIR"),
-		keycloakURL:   os.Getenv("KEYCLOAK_URL"),
-		orgGroupPath:  os.Getenv("BITSWAN_ALLOWED_GROUP"),
+		keycloakURL:    os.Getenv("KEYCLOAK_URL"),
+		orgGroupPath:   os.Getenv("BITSWAN_ALLOWED_GROUP"),
+		adminGroupPath: os.Getenv("BITSWAN_ADMIN_GROUP"),
+		authMode:       os.Getenv("BITSWAN_AUTH_MODE"),
 		volumeName:    os.Getenv("BITSWAN_VOLUME_NAME"),
 		gatewayImage:  envOr("BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest"),
 

@@ -79,15 +79,19 @@ func TestCompileGoldenFixtures(t *testing.T) {
 			root := t.TempDir()
 			wctx := buildTree(t, root, sc)
 
-			// Match the Python generator's environment exactly: deterministic,
-			// no AOC / keycloak / named volume. gitops_dir_host defaults to the
-			// gitops dir (the Python AutomationService default), so bind-mount
-			// strings line up.
+			// Deterministic environment: no named volume / certs dir, but WITH
+			// the AOC-sourced identity env — the goldens must pin the worker
+			// identity contract (KEYCLOAK_* / BITSWAN_ALLOWED_GROUP and the
+			// derived BITSWAN_ADMIN_GROUP default) every deployment receives.
+			// gitops_dir_host defaults to the gitops dir (the Python
+			// AutomationService default), so bind-mount strings line up.
 			setEnv(t, "BITSWAN_GITOPS_DIR_HOST", wctx.GitopsDir)
 			setEnv(t, "BITSWAN_WORKSPACE_REPO_DIR", filepath.Join(root, "workspace-repo"))
-			unsetEnv(t, "KEYCLOAK_URL")
+			setEnv(t, "KEYCLOAK_URL", "https://keycloak.example.com/realms/testrealm")
+			setEnv(t, "BITSWAN_ALLOWED_GROUP", "/Test Org")
+			setEnv(t, "BITSWAN_AUTH_MODE", "aoc")
+			unsetEnv(t, "BITSWAN_ADMIN_GROUP")
 			unsetEnv(t, "BITSWAN_VOLUME_NAME")
-			unsetEnv(t, "BITSWAN_ALLOWED_GROUP")
 			unsetEnv(t, "BITSWAN_CERTS_DIR")
 
 			bs, err := parseBitswanYAML([]byte(sc.BitswanYAML))
