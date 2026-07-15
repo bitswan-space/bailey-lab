@@ -6,12 +6,10 @@ expose = false
 # Memory budget for this container. Tune memory-reservation to just above real
 # peak; it is required before promoting to staging/production.
 memory-reservation = 128                 # MB
-# on-demand = paused when idle + woken on access; always-on = never
-# auto-shut-down. The backend worker is always-on: it does background processing
-# with no inbound request to wake it, and keeping it resident means a promoted
-# stage always has a live, inspectable container (not one evicted under memory
-# pressure). Switch to "on-demand" for a worker that only runs on request.
-memory_reservation_policy = "always-on"
+# on-demand = paused when idle + woken on access with the frontend (default);
+# always-on = never auto-shut-down (use if this worker runs background/scheduled
+# work with no inbound request to wake it).
+memory_reservation_policy = "on-demand"
 
 [services.postgres]
 enabled = true
