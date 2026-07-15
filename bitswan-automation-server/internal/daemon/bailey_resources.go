@@ -228,7 +228,7 @@ func (s *Server) handleBaileyResourcesSleep(w http.ResponseWriter, r *http.Reque
 	var hosts []string
 	var errs []string
 	for ws, ids := range byWorkspace {
-		h, err := evictViaGitops(r.Context(), ws, ids)
+		h, err := evictViaGitops(r.Context(), ws, ids, "manual")
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", ws, err))
 			continue

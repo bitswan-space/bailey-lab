@@ -206,7 +206,10 @@ func TestEvictViaGitops(t *testing.T) {
 	prevURL, prevSec := gitopsEvictURL, gitopsSecretForWorkspace
 	defer func() { gitopsEvictURL, gitopsSecretForWorkspace = prevURL, prevSec }()
 
-	var gotBody map[string][]string
+	var gotBody struct {
+		DeploymentIDs []string `json:"deployment_ids"`
+		Reason        string   `json:"reason"`
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer sekret" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -222,20 +225,23 @@ func TestEvictViaGitops(t *testing.T) {
 	gitopsEvictURL = func(string) string { return srv.URL }
 	gitopsSecretForWorkspace = func(string) (string, error) { return "sekret", nil }
 
-	hosts, err := evictViaGitops(context.Background(), "ws", []string{"d1"})
+	hosts, err := evictViaGitops(context.Background(), "ws", []string{"d1"}, "manual")
 	if err != nil {
 		t.Fatalf("evictViaGitops: %v", err)
 	}
 	if len(hosts) != 1 || hosts[0] != "ws-fe-ab12-live-dev" {
 		t.Errorf("hosts = %v, want [ws-fe-ab12-live-dev]", hosts)
 	}
-	if len(gotBody["deployment_ids"]) != 1 || gotBody["deployment_ids"][0] != "d1" {
-		t.Errorf("request body = %v", gotBody)
+	if len(gotBody.DeploymentIDs) != 1 || gotBody.DeploymentIDs[0] != "d1" {
+		t.Errorf("request body deployment_ids = %v", gotBody.DeploymentIDs)
+	}
+	if gotBody.Reason != "manual" {
+		t.Errorf("request body reason = %q, want manual", gotBody.Reason)
 	}
 
 	// Secret error → returns an error (no HTTP call).
 	gitopsSecretForWorkspace = func(string) (string, error) { return "", context.DeadlineExceeded }
-	if _, err := evictViaGitops(context.Background(), "ws", []string{"d1"}); err == nil {
+	if _, err := evictViaGitops(context.Background(), "ws", []string{"d1"}, "manual"); err == nil {
 		t.Error("missing secret should error")
 	}
 }

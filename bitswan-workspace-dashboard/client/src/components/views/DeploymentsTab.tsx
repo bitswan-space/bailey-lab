@@ -567,6 +567,9 @@ function ContainersSection({
     m.display === 'deployed';
   const anyRunning = members.some(isUp);
   const asleep = members.length > 0 && members.every((m) => !isUp(m));
+  // Why it's asleep (memory-pressure | manual) — gitops stamps it on the members,
+  // so the message can attribute the sleep instead of a bare "asleep".
+  const asleepReason = members.map((m) => m.asleep_reason).find(Boolean) ?? null;
   // Sleep/Wake apply to the promoted stages (their context is the raw BP); DR is
   // a standby slot managed via the backup swap, so no power toggle there.
   const canPower = stage === 'dev' || stage === 'staging' || stage === 'production';
@@ -596,7 +599,11 @@ function ContainersSection({
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
           <span className="text-[12.5px] text-muted-foreground">
             {asleep
-              ? 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
+              ? asleepReason === 'manual'
+                ? 'Asleep — put to sleep manually. Wakes on access, or wake now.'
+                : asleepReason === 'memory-pressure'
+                  ? 'Asleep — evicted under memory pressure. Wakes on access, or wake now.'
+                  : 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
               : 'Free this stage’s memory now. On-demand stages wake automatically on access.'}
           </span>
           {asleep ? (

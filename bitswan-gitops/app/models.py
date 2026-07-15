@@ -30,6 +30,11 @@ class DeployedAutomation(BaseModel):
     mem_reservation_mb: int | None = None
     mem_policy: str | None = None
     mem_over_reservation: bool = False
+    # Why this deployment is asleep — "memory-pressure" (the automatic budget/LRU
+    # sweep evicted it) or "manual" (an operator's Sleep action). Only set when
+    # the deployment has no running container; lets the dashboard attribute a
+    # sleeping stage instead of showing a bare "asleep".
+    asleep_reason: str | None = None
 
 
 class ProcessInfo(BaseModel):
