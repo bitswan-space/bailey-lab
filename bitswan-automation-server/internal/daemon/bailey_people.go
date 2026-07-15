@@ -132,6 +132,36 @@ func (s *Server) handleUserRole(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleWorkspaceAuditors (GET /bailey/auditors) returns every user who can
+// audit — i.e. holds the admin or auditor role — as {email, role}, sorted by
+// email. Includes the bootstrap root admin even when they have no explicit
+// user_roles row. Mounted on the daemon's local socket (authMiddleware): a
+// trusted backend (gitops, for the dashboard's Audits panel) uses it to tell a
+// normal user which auditors/admins they can ask to review a promotion. Read-
+// only, carries no authority of its own.
+func (s *Server) handleWorkspaceAuditors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	users, err := dbListUsersByRoles(roleAdmin, roleAuditor)
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Ensure the bootstrap root admin is present (they may carry no explicit
+	// user_roles row but effectiveRole resolves them to admin).
+	seen := make(map[string]bool, len(users))
+	for _, u := range users {
+		seen[strings.ToLower(u.Email)] = true
+	}
+	if root := strings.TrimSpace(serverRootAdmin()); root != "" && !seen[strings.ToLower(root)] {
+		users = append([]userRole{{Email: root, Role: roleAdmin}}, users...)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"users": users})
+}
+
 // handleSetUserRole assigns a user's role locally (admin-only; the caller is
 // already gated in handleBailey). Stores it in user_roles, which is the
 // authoritative source for the role and the admin capability.
