@@ -10,7 +10,6 @@ vs automatic paths carry the right reason.
 import asyncio
 import logging
 
-import pytest
 import yaml
 
 from app.services.automation_service import AutomationService
