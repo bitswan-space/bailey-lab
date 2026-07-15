@@ -76,8 +76,44 @@ func (d *DockerDriver) BuildImage(ctx context.Context, req infradriver.BuildRequ
 		dockerfilePath = filepath.Join(req.SourcePath, dockerfilePath)
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", "build", "--pull=false",
-		"-t", req.Tag, "-f", dockerfilePath, req.SourcePath)
+	args := []string{"build", "--pull=false", "-t", req.Tag, "-f", dockerfilePath}
+	// Optional: route package downloads through the automation-server's shared
+	// read-through package proxies (a Go module proxy + an npm registry proxy),
+	// so npm install / go mod download hit a warm local cache instead of the
+	// internet on every per-BP build. The proxies are PURE READ-THROUGH (clients
+	// only GET verified upstream artifacts; no publish/write), so they cannot be
+	// a cross-workspace communication or contamination vector. All opt-in via
+	// env, so a deployment without them builds exactly as before. Integrity stays
+	// client-side (GOSUMDB + npm lockfile), so a bad proxy can't swap content.
+	//   BITSWAN_BUILD_NETWORK — a docker network the build joins to reach the
+	//                           proxies (and only them — not bitswan_network / other
+	//                           workspaces, so builds can't talk cross-workspace).
+	//   BITSWAN_GOPROXY        — GOPROXY value (e.g. http://<athens>:3000,direct).
+	//   BITSWAN_NPM_REGISTRY   — npm registry URL (the Verdaccio proxy).
+	// The template Dockerfiles declare matching ARGs (default empty ⇒ direct).
+	forceLegacyBuilder := false
+	if net := os.Getenv("BITSWAN_BUILD_NETWORK"); net != "" {
+		args = append(args, "--network", net)
+		// A custom build network is a LEGACY-builder-only feature: BuildKit
+		// rejects it ("network mode X not supported by buildkit"). So whenever we
+		// route the build through the proxy network we must pin the legacy builder
+		// (below). This also keeps the driver's layer cache in the SAME store the
+		// automation server's prewarm populates (the prewarm is legacy for the
+		// same reason) — otherwise the expensive `go install`/`npm install` layers
+		// would rebuild every time despite being prewarmed.
+		forceLegacyBuilder = true
+	}
+	if gp := os.Getenv("BITSWAN_GOPROXY"); gp != "" {
+		args = append(args, "--build-arg", "GOPROXY="+gp)
+	}
+	if reg := os.Getenv("BITSWAN_NPM_REGISTRY"); reg != "" {
+		args = append(args, "--build-arg", "NPM_CONFIG_REGISTRY="+reg)
+	}
+	args = append(args, req.SourcePath)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	if forceLegacyBuilder {
+		cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=0")
+	}
 	if err := streamCombined(cmd, prog); err != nil {
 		return infradriver.ImageRef{}, fmt.Errorf("docker build %s: %w", req.Tag, err)
 	}

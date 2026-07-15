@@ -98,9 +98,20 @@ async def _run(*cmd: str, timeout: int = 600) -> tuple[int, bytes, bytes]:
     return proc.returncode or 0, out, err
 
 
+# When the automation-server daemon owns the grype DB it mounts it here
+# read-only (GRYPE_DB_CACHE_DIR) and refreshes it once per host per day, so this
+# workspace must NOT try to `grype db update` (the mount is read-only, and it'd
+# duplicate the ~40s download the daemon already did for every workspace).
+_DB_MANAGED = os.environ.get("BITSWAN_GRYPE_DB_MANAGED") == "1"
+
+
 async def update_vuln_db() -> bool:
     """Refresh grype's vulnerability DB (best-effort; needs outbound internet).
-    Returns False if it couldn't update — scans then use the last cached DB."""
+    Returns False if it couldn't update — scans then use the last cached DB.
+    No-op when the daemon owns the DB (read-only shared mount): the daemon keeps
+    it current, so we just trust what's mounted."""
+    if _DB_MANAGED:
+        return True
     rc, _, _ = await _run("grype", "db", "update", timeout=300)
     return rc == 0
 
@@ -132,6 +143,11 @@ async def ensure_vuln_db() -> bool:
         if rc == 0:
             _db_ready = True
             return True
+        # Daemon-managed DB: never download here (read-only mount). If it's not
+        # ready yet the daemon's first refresh is still in flight — don't cache
+        # readiness, so a later scan rechecks once the daemon has populated it.
+        if _DB_MANAGED:
+            return False
         # Missing/invalid — download it (needs outbound internet).
         ok = await update_vuln_db()
         if ok:

@@ -82,6 +82,42 @@ docker build -t bitswan/automation-server-runtime:latest -f "$REPO_ROOT/bitswan-
 mark "[1/7] docker build: automation-server-runtime image"
 
 echo "=== [2/7] Daemon + traefik ingress ==="
+# Shared read-through PACKAGE PROXIES for per-BP image builds (a Go module proxy
+# + an npm registry proxy). Per-BP builds otherwise re-download npm/Go deps from
+# the internet on every create-bp (~50s of the cold build); routing them through
+# a warm local proxy makes them fast. Security: both are PURE READ-THROUGH — they
+# only serve verified upstream artifacts and accept no client writes/publishes,
+# so they can't be a cross-workspace channel. They live on a DEDICATED
+# bitswan-build-proxy network (builds join only this net, never bitswan_network),
+# so a build can reach the proxies + the internet but NOT other workspaces.
+# Client-side integrity (GOSUMDB / npm lockfile) stays on. All opt-in: the daemon
+# passes the wiring to each workspace's driver via env; without it, builds go
+# direct.
+BUILD_PROXY_NET="bitswan-build-proxy"
+docker network inspect "$BUILD_PROXY_NET" >/dev/null 2>&1 || docker network create "$BUILD_PROXY_NET" >/dev/null
+docker rm -f bitswan-goproxy bitswan-npmproxy >/dev/null 2>&1 || true
+# Go module proxy (Athens): read-through (download-mode=sync), disk-cached.
+# ATHENS_STORAGE_TYPE=disk REQUIRES an existing storage root — the image default
+# is a literal `/path/on/disk` placeholder that does not exist, so Athens
+# crash-loops without ATHENS_DISK_STORAGE_ROOT + a volume to back it.
+docker volume create bitswan-athens-storage >/dev/null
+docker run -d --name bitswan-goproxy --network "$BUILD_PROXY_NET" --restart unless-stopped \
+  -e ATHENS_DOWNLOAD_MODE=sync -e ATHENS_STORAGE_TYPE=disk \
+  -e ATHENS_DISK_STORAGE_ROOT=/var/lib/athens \
+  -v bitswan-athens-storage:/var/lib/athens \
+  gomods/athens:latest >/dev/null
+# npm registry proxy (Verdaccio): pure read-through, publish disabled (see config).
+docker run -d --name bitswan-npmproxy --network "$BUILD_PROXY_NET" --restart unless-stopped \
+  -v "$REPO_ROOT/e2e/build-proxy/verdaccio.yaml:/verdaccio/conf/config.yaml:ro" \
+  verdaccio/verdaccio:6 >/dev/null
+# NOTE the `|` (not `,`): with a comma, Go only falls through to `direct` on an
+# HTTP 404/410 — a DOWN/unreachable Athens (connection refused, 5xx) would fail
+# the build outright. The pipe makes Go fall through to `direct` on ANY error,
+# so a proxy problem degrades to a direct (slower) build instead of a broken one.
+BITSWAN_GOPROXY_URL="http://bitswan-goproxy:3000|direct"
+BITSWAN_NPM_REGISTRY_URL="http://bitswan-npmproxy:4873"
+mark "[1b/7] read-through build package proxies (Athens + Verdaccio)"
+
 # Pin the daemon to THIS checkout's images so workspaces it creates via the
 # Server Console UI run the branch's gitops/dashboard/coding-agent (with the
 # features the manual documents) instead of Docker Hub 'latest'. sudo strips the
@@ -92,6 +128,9 @@ sudo env \
   BITSWAN_CODING_AGENT_IMAGE="$CODING_AGENT_IMAGE" \
   BITSWAN_INFRA_DRIVER_IMAGE="$INFRA_DRIVER_IMAGE" \
   BITSWAN_EGRESS_GATEWAY_IMAGE="$EGRESS_GATEWAY_IMAGE" \
+  BITSWAN_BUILD_NETWORK="$BUILD_PROXY_NET" \
+  BITSWAN_GOPROXY="$BITSWAN_GOPROXY_URL" \
+  BITSWAN_NPM_REGISTRY="$BITSWAN_NPM_REGISTRY_URL" \
   "$BITSWAN" automation-server-daemon init
 sleep 5
 "$BITSWAN" automation-server-daemon status
@@ -105,6 +144,53 @@ done
 docker ps | grep -q traefik || { echo "ERROR: traefik not running"; exit 1; }
 
 mark "[2/7] daemon + traefik ingress"
+
+# Prewarm every image the INTERACTIVE workspace-create + first-deploy would
+# otherwise pull at click-time: the infra services a BP enables (postgres +
+# pgadmin, minio, couchdb) and node:24-alpine (the app-image base the driver
+# bakes the frontend/backend onto). Runs in the BACKGROUND so it overlaps the
+# Keycloak/otel bring-up below and adds ~no serial setup time; we `wait` on it
+# before handing off to the walkthrough. Moving these pulls into the
+# non-interactive setup keeps the first deploy from stalling a user on a
+# registry pull. Best-effort — a miss just falls back to a click-time pull.
+( for img in postgres:16 dpage/pgadmin4:latest minio/minio:latest couchdb:3.3 node:24-alpine golang:1.25-alpine; do
+    docker pull "$img" >/dev/null 2>&1 || true
+  done
+  # Prebuild the BP-template frontend + backend base images so their EXPENSIVE
+  # layers are warm in the local docker cache before the first `create-bp`. The
+  # driver bakes each BP's live-dev image from these same Dockerfiles/contexts
+  # (frontend: `npm install` into /deps; backend: `go install air` + `go mod
+  # download`) — building them here once means create-bp's build is a layer-cache
+  # hit instead of a cold ~60-90s install. Throwaway tags; we only want the
+  # cached layers. Best-effort — a miss just falls back to a cold build.
+  # Build through the read-through proxies with EXACTLY the same --network +
+  # --build-arg the driver passes at create-bp time. This matters for two
+  # reasons: (1) it populates the Athens / Verdaccio caches from upstream; (2)
+  # BuildKit folds the GOPROXY / NPM_CONFIG_REGISTRY build-args into the cache
+  # key of the `RUN go mod download` / `RUN npm install` layers, so the per-BP
+  # build only gets a LAYER-cache hit (skipping the download entirely) when its
+  # args match this prewarm's byte-for-byte. We deliberately do NOT fall back to
+  # an argless build on failure: that would bake the warm layers under a
+  # different cache key and guarantee a miss on the real build. `|direct` in
+  # GOPROXY already makes this robust to a down proxy, so the proxy args are
+  # always the right ones to prewarm with.
+  fe="$REPO_ROOT/bitswan-gitops/examples/business-process/frontend/image"
+  be="$REPO_ROOT/bitswan-gitops/examples/business-process/backend/image"
+  # DOCKER_BUILDKIT=0 (legacy builder) is REQUIRED here, for two reasons:
+  #   1. BuildKit rejects a custom --network ("network mode X not supported by
+  #      buildkit"), so a BuildKit prewarm would just fail — and the driver's
+  #      per-BP build uses --network "$BUILD_PROXY_NET", so we must match it.
+  #   2. BuildKit and the legacy builder keep SEPARATE, non-shared layer caches.
+  #      The driver builds with the legacy builder (its runtime image has no
+  #      buildx), so this prewarm must ALSO be legacy or the warm layers land in
+  #      a cache the driver never consults — the create-bp build would recompile
+  #      `go install air` (~40s) every time despite a "successful" prewarm.
+  pxy=(--network "$BUILD_PROXY_NET" --build-arg "GOPROXY=$BITSWAN_GOPROXY_URL" --build-arg "NPM_CONFIG_REGISTRY=$BITSWAN_NPM_REGISTRY_URL")
+  [ -f "$fe/Dockerfile" ] && { DOCKER_BUILDKIT=0 docker build "${pxy[@]}" -t bitswan/bp-frontend-template:warm "$fe" >/dev/null 2>&1 || echo "  prewarm frontend build failed (create-bp will build cold)"; }
+  [ -f "$be/Dockerfile" ] && { DOCKER_BUILDKIT=0 docker build "${pxy[@]}" -t bitswan/bp-backend-template:warm "$be" >/dev/null 2>&1 || echo "  prewarm backend build failed (create-bp will build cold)"; }
+) &
+PREWARM_PID=$!
+
 echo "=== [3/7] Disposable Keycloak (seeded realm: the Meridian Foods cast) on :${KC_PORT} ==="
 # Published on the host port so the BROWSER (dnsmasq→127.0.0.1) and the
 # oauth2-proxy CONTAINER (extra_hosts→host-gateway) reach the SAME issuer URL,
@@ -202,6 +288,11 @@ for i in $(seq 1 60); do
 done
 
 mark "[6/7] wait onboarding chain ready"
+# Ensure the background image prewarm finished before the walkthrough starts, so
+# the first workspace-create/deploy finds every image already local.
+wait "$PREWARM_PID" 2>/dev/null || true
+mark "[6b/7] prewarm infra + app-base images"
+
 echo "=== [7/7] Write e2e/.env for the walkthrough ==="
 cat > "$REPO_ROOT/e2e/.env" <<ENV
 E2E_DOMAIN=${DOMAIN}

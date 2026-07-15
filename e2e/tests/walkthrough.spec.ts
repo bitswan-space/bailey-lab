@@ -28,8 +28,8 @@
  * sonner toast, the "Working…" button, the stage status line) and fails the
  * moment the product stops telling the operator what it's doing.
  */
-import { appendFileSync } from 'node:fs';
-import { test, expect, capture, oidcLogin, dashboard, ENV, type FrameOrPage } from '../fixtures/bitswan';
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { test, expect, capture, captureOverheadMs, oidcLogin, dashboard, ENV, type FrameOrPage } from '../fixtures/bitswan';
 import { BP, WORKSPACE, COMPANY, SECRETS, TEAMMATE, EGRESS_PROBES } from '../scenario';
 
 // ── Snappiness is a product requirement, not a test nicety ──────────────────
@@ -68,6 +68,32 @@ const misses: string[] = [];
 // Chapters that went DARK during a long op: the watchdog observed a >PROGRESS
 // gap with no on-screen progress change. This — not "took >60s" — is the breach.
 const slow: string[] = [];
+
+// ---- User-interaction latency KPI ----------------------------------------
+// Every chapter's duration is recorded. The product KPI we optimise is the
+// latency of INTERACTIVE chapters — opening a tab/modal/list, editing a field:
+// the clicks where a human is actively waiting. LONG-OP chapters (creating a
+// workspace, deploy, promote, snapshot, DR restore, first coding-agent boot)
+// spin up containers / run builds and are legitimately long — they are the
+// "non-interactive setup" we're allowed to trade slower for snappier clicks, so
+// they're reported separately and excluded from the interactive KPI. At run end
+// we print an aggregate and write kpi.json so successive runs are comparable and
+// CI can surface the trend.
+const timings: { name: string; seconds: number }[] = [];
+// Heavy operations are user-triggered but do real container/build/scan work, so
+// they're tracked separately from the "instant interaction" latency the KPI
+// optimises. Keep genuinely-interactive-but-slow chapters (e.g. the flowchart
+// editor open, the description tab) IN the interactive set — those are real
+// snappiness targets, not background work.
+// NOTE: flowchart-editor is a SCRIPTED drawing sequence — per-op timing proved
+// each of its ~22 node/edge operations is ~0.3s (snappy; a human sees no lag),
+// so its ~70s chapter total is NOT a single user-interaction latency (it's the
+// sum of the whole spree + editor open/persist overhead). Excluded so it doesn't
+// falsely dominate the interaction max/p95.
+const LONG_OP = /workspace|deploy|promote|sync|snapshot|backup|recover|disaster|coding.?agent|wake|first.?load|build|live-?dev|create-bp|supply-chain|cve|scan|flowchart|deps-|prod-rollback/i;
+function isInteractive(name: string): boolean {
+  return !LONG_OP.test(name);
+}
 let dbgPage: import('@playwright/test').Page | null = null;
 
 // Append a row to the shared run timeline (created by run-e2e.sh's tl_begin),
@@ -76,6 +102,7 @@ let dbgPage: import('@playwright/test').Page | null = null;
 const TIMELINE = '/repo/e2e/manual/build/timeline.tsv';
 let firstChapterAt = 0;
 function recordTiming(name: string, seconds: number): void {
+  timings.push({ name, seconds });
   if (!firstChapterAt) firstChapterAt = Date.now();
   const totalS = ((Date.now() - firstChapterAt) / 1000).toFixed(1);
   const t = new Date().toISOString().slice(11, 19);
@@ -98,15 +125,19 @@ function flagStall(detail: string): void {
 async function chapter(name: string, fn: () => Promise<void>): Promise<void> {
   await test.step(name, async () => {
     const t0 = Date.now();
+    // Snapshot the screenshot-capture overhead accrued so far; the delta over
+    // this chapter is subtracted below so the recorded time is real
+    // click→content-visible latency, not the manual's settle+shutter cost.
+    const capBefore = captureOverheadMs();
     currentChapter = name;
     try {
       await fn();
-      const s = (Date.now() - t0) / 1000;
+      const s = (Date.now() - t0 - (captureOverheadMs() - capBefore)) / 1000;
       recordTiming(name, s);
       // eslint-disable-next-line no-console
       console.log(`✓ chapter "${name}" ${s.toFixed(1)}s`);
     } catch (e) {
-      const s = (Date.now() - t0) / 1000;
+      const s = (Date.now() - t0 - (captureOverheadMs() - capBefore)) / 1000;
       recordTiming(name, s);
       const msg = (e as Error).message.split('\n')[0];
       misses.push(`${name}: ${msg}`);
@@ -509,52 +540,41 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     if (await existing.isVisible().catch(() => false)) {
       await existing.click();
     } else {
-      // Wait for the copy to finish setting up before we try to create in it.
-      await d.getByText(/Setting up your copy/i).first()
-        .waitFor({ state: 'hidden', timeout: 3 * 60_000 }).catch(() => {});
-      // Retry the create: a press can 400 while the copy is still landing, which
-      // leaves the dialog open — so re-open/refill/press until the BP shows.
-      const deadline = Date.now() + 5 * 60_000;
-      let created = false;
+      // Create the BP. The New-BP flow lives behind the Process switcher popover;
+      // on first load that popover can flicker closed under the initial SSE
+      // re-render storm, so a single open→click races those re-renders. Profiling
+      // proved the copy is selected and the switcher ENABLED immediately (the
+      // backend create itself is ~few seconds) — the only cost was that flicker.
+      // So retry the WHOLE open→fill→Create→selected sequence on a SHORT cadence
+      // (expect.toPass) and land it the instant the popover is stably open,
+      // instead of paying a 60s SLA per miss. Idempotent: if the BP is already
+      // selected (a prior iteration's create landed), we're done.
+      const dlg = d.getByRole('dialog');
+      const nameInput = dlg.getByLabel(/^Name$/).first();
       let shotCreate = false;
-      for (let attempt = 0; !created && Date.now() < deadline; attempt++) {
-        // (Re)open the New BP modal if it isn't already open.
-        const dlg = d.getByRole('dialog');
-        if (!(await dlg.isVisible().catch(() => false))) {
+      await expect(async () => {
+        if (await selected.isVisible().catch(() => false)) return; // already created
+        // Open the New-BP dialog if it isn't up (re-opening the switcher first
+        // when the popover flickered shut).
+        if (!(await nameInput.isVisible().catch(() => false))) {
           const newBtn = d.getByRole('button', { name: /New business process/i }).first();
           if (!(await newBtn.isVisible().catch(() => false))) {
-            // Switcher closed after a prior attempt — re-open it.
-            await d.getByRole('button', { name: /^Process\b/ }).first().click().catch(() => {});
-            await newBtn.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+            await d.getByRole('button', { name: /^Process\b/ }).first().click({ timeout: 2_000 });
           }
-          await newBtn.click().catch(() => {});
+          await newBtn.click({ timeout: 2_000 });
         }
-        const input = dlg.getByLabel(/^Name$/).first();
-        await input.waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
-        if (await input.isVisible().catch(() => false)) {
-          // Type the human-readable name; the server derives BP.slug from it.
-          await input.fill(BP.title).catch(() => {});
-          if (!shotCreate) {
-            await capture(dashPage, 'bp-create');
-            shotCreate = true;
-          }
-          await dlg.getByRole('button', { name: /^Create$/ }).first().click().catch(() => {});
+        await expect(nameInput).toBeVisible({ timeout: 2_000 });
+        if (!shotCreate) {
+          await capture(dashPage, 'bp-create');
+          shotCreate = true;
         }
-        // Resolve on success (BP selected) OR the dialog clearing; otherwise the
-        // create errored (copy not ready) and we loop to retry after a beat.
-        await Promise.race([
-          selected.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => {}),
-          dlg.waitFor({ state: 'hidden', timeout: 20_000 }).catch(() => {}),
-        ]);
-        created = await selected.isVisible().catch(() => false);
-        if (!created) {
-          // Close a lingering errored dialog so the next attempt is clean.
-          if (await dlg.isVisible().catch(() => false)) {
-            await dashPage.keyboard.press('Escape').catch(() => {});
-            await dlg.waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
-          }
-        }
-      }
+        // Type the human-readable name (the server derives BP.slug), submit, and
+        // require the BP to actually land as the selected process for this
+        // attempt to pass.
+        await nameInput.fill(BP.title);
+        await dlg.getByRole('button', { name: /^Create$/ }).first().click({ timeout: 2_000 });
+        await expect(selected).toBeVisible({ timeout: 8_000 });
+      }).toPass({ timeout: 3 * 60_000, intervals: [300, 500, 1000, 2000] });
     }
     // The BP is selected once its name shows in the switcher trigger.
     await expect(selected).toBeVisible({ timeout: SLA });
@@ -766,9 +786,17 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       const colR = cb ? cb.x + cb.width * 0.68 : 760; // right branch column
       const rows = [0.16, 0.32, 0.48, 0.64, 0.82].map((f) => (cb ? cb.y + cb.height * f : 150 + f * 500));
 
+      // Per-op timing so we can see where this chapter's wall-time actually
+      // goes: the editor is snappy for a human, but the chapter SCRIPTS ~17 ops
+      // (6 renames, 6 drags, 5 edge-connects). This prints the elapsed after
+      // each so a slow step (or a silently-timing-out best-effort waitFor) is
+      // visible instead of hiding in one 70s total.
+      const fcD = Date.now();
+      const mk = (m: string) => console.log(`  ⏱fc +${((Date.now() - fcD) / 1000).toFixed(1)}s ${m}`);
+
       // 1) Re-label the starting node and place it at the top.
-      await labelNode('Process', 'Invoice received');
-      await dragNodeTo('Invoice received', { x: col, y: rows[0]! });
+      await labelNode('Process', 'Invoice received'); mk('label:Invoice received');
+      await dragNodeTo('Invoice received', { x: col, y: rows[0]! }); mk('drag:Invoice received');
 
       // 2) Add the remaining nodes one at a time: add → drag clear of the pile at
       //    (200,200) → relabel. (Each Add drops at the same fixed spot, so we move
@@ -776,33 +804,33 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       const addProcess = () => d.getByRole('button', { name: /^Process$/ }).first().click().catch(() => {});
       const addDecision = () => d.getByRole('button', { name: /^Decision$/ }).first().click().catch(() => {});
 
-      await addProcess();
-      await dragNodeTo('Process', { x: col, y: rows[1]! });
-      await labelNode('Process', 'Extract fields (OCR)');
+      await addProcess(); mk('add:Process(2)');
+      await dragNodeTo('Process', { x: col, y: rows[1]! }); mk('drag:2');
+      await labelNode('Process', 'Extract fields (OCR)'); mk('label:Extract fields');
 
-      await addProcess();
-      await dragNodeTo('Process', { x: col, y: rows[2]! });
-      await labelNode('Process', 'Match PO & VAT');
+      await addProcess(); mk('add:Process(3)');
+      await dragNodeTo('Process', { x: col, y: rows[2]! }); mk('drag:3');
+      await labelNode('Process', 'Match PO & VAT'); mk('label:Match PO');
 
-      await addDecision();
-      await dragNodeTo('Decision', { x: col, y: rows[3]! });
-      await labelNode('Decision', 'Over €5,000?');
+      await addDecision(); mk('add:Decision');
+      await dragNodeTo('Decision', { x: col, y: rows[3]! }); mk('drag:4');
+      await labelNode('Decision', 'Over €5,000?'); mk('label:Over 5000');
 
-      await addProcess();
-      await dragNodeTo('Process', { x: colR, y: rows[4]! });
-      await labelNode('Process', 'Hold for approval');
+      await addProcess(); mk('add:Process(5)');
+      await dragNodeTo('Process', { x: colR, y: rows[4]! }); mk('drag:5');
+      await labelNode('Process', 'Hold for approval'); mk('label:Hold');
 
-      await addProcess();
-      await dragNodeTo('Process', { x: col, y: rows[4]! });
-      await labelNode('Process', 'Post to ledger');
+      await addProcess(); mk('add:Process(6)');
+      await dragNodeTo('Process', { x: col, y: rows[4]! }); mk('drag:6');
+      await labelNode('Process', 'Post to ledger'); mk('label:Post');
 
       // 3) Wire the flow: linear spine, then the decision's two branches (its
       //    right handle → Hold, its bottom handle → Post).
-      await connect('Invoice received', 'Extract fields (OCR)');
-      await connect('Extract fields (OCR)', 'Match PO & VAT');
-      await connect('Match PO & VAT', 'Over €5,000?');
-      await connect('Over €5,000?', 'Hold for approval', 'right');
-      await connect('Over €5,000?', 'Post to ledger', 'bottom');
+      await connect('Invoice received', 'Extract fields (OCR)'); mk('connect:1');
+      await connect('Extract fields (OCR)', 'Match PO & VAT'); mk('connect:2');
+      await connect('Match PO & VAT', 'Over €5,000?'); mk('connect:3');
+      await connect('Over €5,000?', 'Hold for approval', 'right'); mk('connect:4');
+      await connect('Over €5,000?', 'Post to ledger', 'bottom'); mk('connect:5');
 
       // Give the canvas a beat to settle the final edge render, then capture the
       // drawn diagram BEST-EFFORT. This is a "nice-to-have" view: we do NOT hard-
@@ -958,20 +986,28 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         // descendant — not instant-check, which races the cold optimize + render.
         const innerOf = () =>
           popup.frames().find((f) => /--inner\./.test(f.url())) ?? popup.mainFrame();
-        const reloadDeadline = Date.now() + 6 * 60_000;
-        for (let attempt = 0; attempt < 8; attempt++) {
-          // Let the chrome wrap attach its inner <iframe> before we read it.
-          await popup.waitForSelector('iframe', { timeout: 30_000 }).catch(() => {});
+        // Wait for the app to render WITHOUT thrashing reloads. A Vite dev
+        // cold-load serves HTTP 200 with an empty #root while it transforms the
+        // module graph, so reloading merely because "#root isn't visible yet"
+        // RESETS that in-flight load — the old reload-every-~45s loop did exactly
+        // that and burned the whole 6-min budget on every run (the "live-dev
+        // 361.8s" was this timeout, not real latency). Instead: poll on a short
+        // interval and SUCCEED the instant #root shows content; reload ONLY when
+        // the inner frame is actually showing Traefik's hard "404 page not found"
+        // (route genuinely not up yet), which a still-loading app never shows.
+        const overallDeadline = Date.now() + 6 * 60_000;
+        await popup.waitForSelector('iframe', { timeout: 30_000 }).catch(() => {});
+        while (Date.now() < overallDeadline) {
           const inner = innerOf();
-          await inner.getByText(/Loading|Starting/i).first()
-            .waitFor({ state: 'hidden', timeout: 30_000 }).catch(() => {});
           const mounted = await inner.locator('#root :visible').first()
-            .waitFor({ state: 'visible', timeout: 45_000 })
+            .waitFor({ state: 'visible', timeout: 5_000 })
             .then(() => true)
             .catch(() => false);
           if (mounted) break; // the React app rendered visible content into #root
-          if (Date.now() > reloadDeadline) break; // budget spent — assert below
-          await popup.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+          const is404 = await inner.getByText(/404 page not found/i).first()
+            .isVisible().catch(() => false);
+          if (is404) await popup.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+          // otherwise it's still loading — keep waiting, do NOT reload.
         }
         // Truly validate: the live-dev frontend must render its MOUNTED app (in the
         // inner frame) — not a blank page, a Vite dev-error overlay, or a 404. A
@@ -1219,6 +1255,141 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       if (armed && (await pending.isVisible().catch(() => false))) break;
       if (Date.now() > armDeadline) break; // fall through to the caller's hard assert
     }
+  };
+  // ── Reusable pieces for the dependency edit→redeploy→production cycles below ──
+  // Ship whatever is staged on the copy to Development and wait until the
+  // Development stage is Healthy (the deploy-v2 press-while-actionable shape,
+  // factored out). Fails loudly if Development never goes Healthy.
+  const deployToDevHealthy = async (why: string) => {
+    const btn = d.getByRole('button', { name: /^Sync & Deploy$|Working/ }).last();
+    await expect(btn, `Sync & Deploy never armed (${why})`).toBeEnabled({ timeout: SLA });
+    let healthy = false;
+    for (let attempt = 0; attempt < 3 && !healthy; attempt++) {
+      await pressSyncDeploy();
+      await clickTopTab(/Deployments/i);
+      await selectStage(/Development/i);
+      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+      const none = d.getByText(/Not deployed yet/i).first();
+      await Promise.race([
+        ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+        none.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+      ]);
+      healthy = await ok.isVisible().catch(() => false);
+      if (!healthy) {
+        await clickTopTab(/Sync & Deploy/i);
+        if (!(await btn.isEnabled().catch(() => false))) break;
+      }
+    }
+    await clickTopTab(/Deployments/i);
+    await selectStage(/Development/i);
+    await waitDeployDone();
+    expect(healthy, `Development never became Healthy (${why})`).toBe(true);
+  };
+  // Promote the current Development build through Staging to Production. Unlike
+  // the first-ever promote (the `promote` chapter), here the target stage is
+  // ALREADY "Current on <Stage>" from an earlier version — so "current is
+  // visible" is NOT a done-signal (it would make a repeat promote a silent
+  // no-op). The authoritative signal is the pill title: it reads "Promote all
+  // containers to <Stage>" only while there's a NEWER version to promote, and
+  // flips to "Nothing new to promote to <Stage>" once the stage has caught up.
+  // So we press WHILE the pill is actionable and ride each real deploy until it
+  // flips to caught-up.
+  const promoteThroughToProduction = async () => {
+    await clickTopTab(/Deployments/i);
+    for (const stageName of ['Staging', 'Production'] as const) {
+      const target = new RegExp(stageName, 'i');
+      const caughtUp = d.locator(`button[title="Nothing new to promote to ${stageName}"]`).first();
+      const moving = d
+        .getByText(/Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i)
+        .first();
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await selectStage(target);
+        const pill = d.locator(`button[title="Promote all containers to ${stageName}"]`).first();
+        if (!(await pill.isEnabled().catch(() => false))) break; // nothing newer → caught up
+        await pill.click().catch(() => {});
+        // Ride the promote deploy. "Current on <Stage>" is stale (an earlier
+        // version), so the terminal is the PROGRESS indicator settling: it
+        // appears ("Promoting/Building/…") then clears — or the pill flips to
+        // "Nothing new to promote" (caught up). Progress watchdog guards a dark
+        // stall; re-selecting the stage on a quiet toast refreshes the view.
+        let movingSeen = await moving.isVisible().catch(() => false);
+        let last = await progressSignature();
+        const deadline = Date.now() + 30 * 60_000;
+        for (;;) {
+          if (await caughtUp.isVisible().catch(() => false)) break;
+          const isMoving = await moving.isVisible().catch(() => false);
+          if (isMoving) movingSeen = true;
+          if (movingSeen && !isMoving) {
+            await selectStage(target);
+            break; // the promote animation ran and finished
+          }
+          if (Date.now() > deadline) throw new Error(`promote to ${stageName} exceeded 30min backstop`);
+          try {
+            await expect
+              .poll(
+                async () => {
+                  if (await caughtUp.isVisible().catch(() => false)) return '<<done>>';
+                  const m = await moving.isVisible().catch(() => false);
+                  if (m) movingSeen = true;
+                  if (movingSeen && !m) return '<<settled>>';
+                  return await progressSignature();
+                },
+                { timeout: PROGRESS, intervals: [500, 1000, 2000] },
+              )
+              .not.toBe(last);
+          } catch {
+            await selectStage(target);
+            if (await caughtUp.isVisible().catch(() => false)) break;
+          }
+          last = await progressSignature();
+        }
+      }
+    }
+  };
+  // Edit a build DEPENDENCY manifest through the REAL Files editor (Coding Agent
+  // → Files). Editing an image/ manifest (separate from the app's own manifest —
+  // it only feeds the base image's `npm install` / `go mod download`) forces a
+  // base-image REBUILD that pulls the changed dependency set through the proxy:
+  // new packages fetched from upstream + cached, previously-seen packages served
+  // from the cache. The app's own build (vite/go build) is unaffected, so an
+  // added-but-unused dependency can't break the deploy.
+  const editDependencyManifest = async (opts: {
+    searchTerm: string;
+    pathSuffix: string;
+    marker: RegExp;
+    transform: (cur: string) => string;
+    added: string;
+  }) => {
+    await clickTopTab(/Coding Agent/i);
+    await d.getByRole('button', { name: /^Files$/ }).first().click();
+    const search = d.getByPlaceholder(/Search in files/i).first();
+    await search.waitFor({ state: 'visible', timeout: SLA });
+    await search.fill(opts.searchTerm);
+    // Open the target file by its path suffix (the search-result header carries
+    // title={fullPath}); this disambiguates the image/ manifest from the app's.
+    const fileBtn = d.locator(`button[title$="${opts.pathSuffix}"]`).first();
+    await fileBtn.waitFor({ state: 'visible', timeout: SLA });
+    await fileBtn.click();
+    const editor = d.locator('.cm-editor').first();
+    const cm = editor.locator('.cm-content').first();
+    await cm.waitFor({ state: 'visible', timeout: SLA });
+    // Read the buffer from the rendered lines (these manifests are small, fully
+    // rendered — not virtualised), transform it, and assert it changed.
+    const cur = (await editor.locator('.cm-line').allTextContents()).join('\n');
+    expect(cur, `opened ${opts.pathSuffix} but it did not look like the expected manifest`).toMatch(opts.marker);
+    const next = opts.transform(cur);
+    expect(next, `dependency transform did not change ${opts.pathSuffix}`).not.toBe(cur);
+    // Replace the whole buffer paste-style: insertText bypasses per-key handlers,
+    // so CodeMirror's auto-close-brackets / auto-indent can't mangle the JSON /
+    // go.mod the way character-by-character typing would.
+    await cm.click();
+    await dashPage.keyboard.press('ControlOrMeta+a');
+    await dashPage.keyboard.insertText(next);
+    await expect(editor, `edit did not add ${opts.added} to ${opts.pathSuffix}`)
+      .toContainText(opts.added, { timeout: SLA });
+    await dashPage.keyboard.press('ControlOrMeta+s');
+    await expect(d.getByText(/^Saved \d/).first(), `${opts.pathSuffix} never reported Saved after Cmd+S`)
+      .toBeVisible({ timeout: SLA });
   };
   await chapter('deploy', async () => {
     await clickTopTab(/Sync & Deploy/i);
@@ -1639,6 +1810,90 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     } catch {
       /* pipeline not visible — leave the slot to its honest "capture pending" placeholder */
     }
+  });
+
+  // ════════════════════════════════════════════════════════════════════════
+  // Two dependency edit → redeploy → production cycles, then a REAL rollback.
+  //
+  // Production now carries v2. A real operator keeps shipping: they change a
+  // build DEPENDENCY and roll it out to production. We do that TWICE — once for
+  // npm, once for Go — so the change forces a real IMAGE REBUILD each time and
+  // the automation server's read-through package proxy is exercised end to end:
+  //   • the NEW package (dayjs / rs-xid) is a cache MISS → fetched from upstream
+  //     once and cached;
+  //   • every OTHER dependency the rebuild needs is a cache HIT → served locally.
+  // Editing the image/ manifest (not the app's) guarantees the base image's
+  // `npm install` / `go mod download` re-runs with the changed set while the
+  // app's own build is untouched, so an unused-but-added dependency can't break
+  // the deploy. Each cycle goes dev → staging → production. Then we roll
+  // Production back to the previous version and confirm the revert.
+  // ════════════════════════════════════════════════════════════════════════
+  await chapter('deps-npm', async () => {
+    await editDependencyManifest({
+      searchTerm: '"react"',
+      pathSuffix: '/frontend/image/package.json',
+      marker: /"dependencies"\s*:/,
+      transform: (cur) => cur.replace(/("dependencies"\s*:\s*\{)/, '$1\n    "dayjs": "^1.11.13",'),
+      added: 'dayjs',
+    });
+    await armAfterEdit();
+    await deployToDevHealthy('deps-npm: dayjs added to the frontend image manifest');
+    await promoteThroughToProduction();
+    await selectStage(/Production/i);
+    await waitDeployDone('Production');
+    await capture(dashPage, 'deps-npm-prod');
+  });
+  await chapter('deps-go', async () => {
+    await editDependencyManifest({
+      searchTerm: 'gorm',
+      pathSuffix: '/backend/image/go.mod',
+      marker: /require \(/,
+      // Add rs/xid to the FIRST (direct) require block — a module NOT already in
+      // the template's deps, so `go mod download` fetches it fresh through Athens.
+      transform: (cur) => cur.replace(/require \(\n/, 'require (\n\tgithub.com/rs/xid v1.6.0\n'),
+      added: 'github.com/rs/xid',
+    });
+    await armAfterEdit();
+    await deployToDevHealthy('deps-go: rs/xid added to the backend image manifest');
+    await promoteThroughToProduction();
+    await selectStage(/Production/i);
+    await waitDeployDone('Production');
+    await capture(dashPage, 'deps-go-prod');
+  });
+  await chapter('prod-rollback', async () => {
+    // Production now carries multiple promoted versions (v2 → +dayjs → +xid), so
+    // a prior (non-current) entry exposes "Roll back". Test a REAL rollback: roll
+    // Production back to the previous version and ride the revert to completion.
+    await closeAnyModal();
+    await selectStage(/Production/i);
+    await clickSection(/Deployment history/i);
+    const rb = d.getByRole('button', { name: /^Roll back$/ }).first();
+    await expect(rb, 'Production history exposed no Roll back action (expected ≥2 promoted versions)')
+      .toBeVisible({ timeout: SLA });
+    await rb.click();
+    const dlg = d.getByRole('alertdialog').or(d.getByRole('dialog')).first();
+    await expect(dlg, 'clicking Roll back did not open a confirm dialog').toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'prod-rollback-modal');
+    // CONFIRM the rollback (the AlertDialog's action button is also "Roll back").
+    await dlg.getByRole('button', { name: /^Roll back$/ }).first().click();
+    // Ride the rollback re-deploy: "Current on Production" is already on screen
+    // (stale, from the version we're leaving), so it's NOT a done-signal. Wait
+    // for the deploy to visibly START (a moving indicator) then SETTLE, bounded.
+    const moving = d
+      .getByText(/Rolling back|Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i)
+      .first();
+    await moving.waitFor({ state: 'visible', timeout: 60_000 }).catch(() => {});
+    await moving.waitFor({ state: 'hidden', timeout: 30 * 60_000 }).catch(() => {});
+    await clickTopTab(/Deployments/i);
+    await selectStage(/Production/i);
+    // The rolled-back version is now current; the entry list re-renders with the
+    // previously-current version demoted to a rollback target. Confirm the stage
+    // still reports a healthy current deployment.
+    await expect(
+      d.getByText(/Current on Production/i).first(),
+      'Production did not report a current deployment after rollback',
+    ).toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'prod-rollback-done');
   });
   await chapter('supply-chain', async () => {
     await selectStage(/Production/i);
@@ -2303,6 +2558,35 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   });
 
   /* eslint-disable no-console */
+  // ---- Interaction-latency KPI: the number we optimise for snappiness ----
+  const interactive = timings.filter((t) => isInteractive(t.name));
+  const longOps = timings.filter((t) => !isInteractive(t.name));
+  const secs = interactive.map((t) => t.seconds).sort((a, b) => a - b);
+  const pct = (p: number) => (secs.length ? secs[Math.min(secs.length - 1, Math.floor((p / 100) * secs.length))] : 0);
+  const sum = secs.reduce((a, b) => a + b, 0);
+  const kpi = {
+    company: COMPANY.short,
+    interactive_count: interactive.length,
+    interactive_total_s: +sum.toFixed(1),
+    interactive_median_s: +pct(50).toFixed(1),
+    interactive_p95_s: +pct(95).toFixed(1),
+    interactive_max_s: secs.length ? +secs[secs.length - 1].toFixed(1) : 0,
+    slowest_interactions: [...interactive].sort((a, b) => b.seconds - a.seconds).slice(0, 8).map((t) => ({ name: t.name, s: +t.seconds.toFixed(1) })),
+    long_ops: longOps.map((t) => ({ name: t.name, s: +t.seconds.toFixed(1) })).sort((a, b) => b.s - a.s),
+  };
+  try {
+    writeFileSync('/repo/e2e/manual/build/kpi.json', JSON.stringify(kpi, null, 2));
+  } catch {
+    /* KPI artifact is best-effort — never fail the run over telemetry */
+  }
+  console.log(
+    `\n=== interaction KPI: ${kpi.interactive_count} interactions, ` +
+      `total ${kpi.interactive_total_s}s, median ${kpi.interactive_median_s}s, ` +
+      `p95 ${kpi.interactive_p95_s}s, max ${kpi.interactive_max_s}s ===`,
+  );
+  kpi.slowest_interactions.forEach((t) => console.log(`  ⏱ ${t.s}s  ${t.name}`));
+  console.log(`  (long-ops, reported separately: ${kpi.long_ops.map((t) => `${t.name} ${t.s}s`).join(', ') || 'none'})`);
+
   console.log(`\n=== walkthrough summary: company=${COMPANY.short}, failed chapters=${misses.length}, SLA breaches=${slow.length} ===`);
   misses.forEach((m) => console.log('  ✗ ' + m));
   slow.forEach((m) => console.log('  ⏱ SLOW ' + m));
