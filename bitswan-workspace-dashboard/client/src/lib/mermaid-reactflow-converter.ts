@@ -80,6 +80,14 @@ export function textColorForBg(hex?: string): string | undefined {
 
 interface DiagramMeta {
   positions?: Record<string, { x?: number; y?: number }>;
+  /**
+   * Per-edge handle assignments, keyed by edge index (edges serialize and
+   * parse in the same order). Mermaid edge syntax cannot express which side
+   * handle a connection uses, so we persist it here — otherwise a connection
+   * drawn to a decision node's side handle snaps back to the default
+   * bottom/top handle on reload (#97).
+   */
+  edgeHandles?: Record<string, { source?: string; target?: string }>;
 }
 
 function parseMetaComment(lines: string[]): DiagramMeta {
@@ -97,7 +105,7 @@ function parseMetaComment(lines: string[]): DiagramMeta {
   return {};
 }
 
-function buildMetaComment(nodes: FlowchartNode[]): string {
+function buildMetaComment(nodes: FlowchartNode[], edges: Edge[]): string {
   const positions: Record<string, { x: number; y: number }> = {};
   for (const n of nodes) {
     positions[n.id] = {
@@ -105,7 +113,16 @@ function buildMetaComment(nodes: FlowchartNode[]): string {
       y: Math.round(n.position.y),
     };
   }
-  return `%% meta: ${JSON.stringify({ positions })}`;
+  const edgeHandles: Record<string, { source?: string; target?: string }> = {};
+  edges.forEach((e, idx) => {
+    const entry: { source?: string; target?: string } = {};
+    if (e.sourceHandle) entry.source = e.sourceHandle;
+    if (e.targetHandle) entry.target = e.targetHandle;
+    if (entry.source || entry.target) edgeHandles[String(idx)] = entry;
+  });
+  const meta: DiagramMeta = { positions };
+  if (Object.keys(edgeHandles).length > 0) meta.edgeHandles = edgeHandles;
+  return `%% meta: ${JSON.stringify(meta)}`;
 }
 
 // ---------- Mermaid → React Flow ----------
@@ -281,13 +298,18 @@ export function parseMermaidToReactFlow(mermaid: string): {
     };
   });
 
-  const edges: Edge[] = parsedEdges.map((e, idx) => ({
-    id: `e-${idx}`,
-    source: e.source,
-    target: e.target,
-    ...(e.label ? { label: e.label } : {}),
-    type: 'smoothstep',
-  }));
+  const edges: Edge[] = parsedEdges.map((e, idx) => {
+    const handles = meta.edgeHandles?.[String(idx)];
+    return {
+      id: `e-${idx}`,
+      source: e.source,
+      target: e.target,
+      ...(e.label ? { label: e.label } : {}),
+      ...(handles?.source ? { sourceHandle: handles.source } : {}),
+      ...(handles?.target ? { targetHandle: handles.target } : {}),
+      type: 'smoothstep',
+    };
+  });
 
   return { nodes, edges };
 }
@@ -334,6 +356,6 @@ export function reactFlowToMermaid(nodes: FlowchartNode[], edges: Edge[]): strin
     }
   }
 
-  lines.push(`    ${buildMetaComment(nodes)}`);
+  lines.push(`    ${buildMetaComment(nodes, edges)}`);
   return lines.join('\n');
 }
