@@ -1766,81 +1766,155 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     ).toBeVisible({ timeout: SLA });
   });
 
-  // ---- Promote dev → staging → production, waiting for each to be Healthy ----
+  // ---- Promote dev → staging, FREEZE + AUDIT, then staging → production -------
+  // One promote hop: press the stage-specific promote pill ("Promote all
+  // containers to <Stage>", so the dev→staging pill is never confused with the
+  // staging→production one), confirm THIS stage actually starts, then ride the
+  // deploy watchdog until it is current. A click that doesn't land (a re-render
+  // detaches the pill) is re-pressed so the target never sits static long enough
+  // to trip the went-dark watchdog as a false stall.
+  const promoteHop = async (stageName: 'Staging' | 'Production') => {
+    const target = new RegExp(stageName, 'i');
+    await selectStage(target);
+    const promotePill = d
+      .locator(`button[title="Promote all containers to ${stageName}"]`)
+      .first();
+    const targetCurrent = d.getByText(new RegExp(`Current on ${stageName}`, 'i')).first();
+    const moving = d
+      .getByText(/Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i)
+      .first();
+    let started = false;
+    for (let attempt = 0; attempt < 6 && !started; attempt++) {
+      if (await targetCurrent.isVisible().catch(() => false)) {
+        started = true;
+        break;
+      }
+      if (await promotePill.isEnabled().catch(() => false)) {
+        await promotePill.click().catch(() => {});
+      }
+      started = await Promise.race([
+        moving.waitFor({ state: 'visible', timeout: 12_000 }).then(() => true).catch(() => false),
+        targetCurrent
+          .waitFor({ state: 'visible', timeout: 12_000 })
+          .then(() => true)
+          .catch(() => false),
+      ]);
+    }
+    await selectStage(target);
+    await waitDeployDone(stageName); // THIS stage reaches "Current on <Stage>"
+  };
+
+  await chapter('share-endpoint', async () => {
+    await clickTopTab(/Deployments/i);
+    // Open + share a DEPLOYED FRONTEND. The Deployments stage card renders an
+    // "Open app" section (DeploymentsTab.tsx) ONLY when the stage has ≥1 frontend
+    // whose live-display status is "running" with a URL; each such frontend is an
+    // external-link anchor (<a href={url} target="_blank" rel="noreferrer">, no
+    // title attr) whose text is the automation name + host. Development is the
+    // stage that reliably carries a running, openable frontend (its live-dev /
+    // first dev deploy is up); a promoted Production stage may not expose the
+    // same openable app — so we share off Development, the reliably-openable one.
+    await selectStage(/Development/i);
+    // The "Open app" anchor: scope to the section by its heading and take the
+    // first deployed frontend's external-link card. (A previous `.or(first
+    // https link on the page)` fallback matched a DIFFERENT element than the
+    // scoped one, so the combined locator resolved to 2 nodes → strict-mode
+    // violation. The scoped section reliably contains the link — see
+    // DeploymentsTab "Open app".)
+    const openApp = d
+      .getByText(/^Open app$/i)
+      .locator('..')
+      .locator('a[target="_blank"][href^="https://"]')
+      .first();
+    await expect(openApp, 'no deployed frontend to open + share under Development → Open app')
+      .toBeVisible({ timeout: SLA });
+    const popupP = dashPage.context().waitForEvent('page', { timeout: 30_000 }).catch(() => null);
+    await openApp.click();
+    const fe = await popupP;
+    expect(fe, 'opening the deployed frontend did not spawn a tab').not.toBeNull();
+    const frontend = fe!;
+    await frontend.waitForLoadState('domcontentloaded').catch(() => {});
+    await frontend.locator('body').waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+    // The frontend is wrapped in Bailey chrome (a footer pinned to the bottom of
+    // every protected endpoint). Because the operator owns this frontend, the
+    // chrome footer shows a "Share" button — proving operator-created frontends
+    // are Bailey-protected. Open it and share THIS frontend.
+    const shareBtn = frontend.getByRole('link', { name: /^Share$/ })
+      .or(frontend.getByRole('button', { name: /^Share$/ }))
+      .first();
+    await expect(shareBtn, "the frontend's Bailey chrome exposed no Share affordance (is it owner-fronted?)")
+      .toBeVisible({ timeout: SLA });
+    await shareBtn.click();
+    // The chrome share modal: add input + role select + Add (ids set by the
+    // daemon's share_modal.go).
+    const input = frontend.locator('#bailey-share-input');
+    await input.waitFor({ state: 'visible', timeout: SLA });
+    await input.fill(ENV.teammateEmail);
+    // Grant at User level (default option value "access").
+    await frontend.locator('#bailey-share-role').selectOption('access').catch(() => {});
+    await capture(frontend, 'share-modal');
+    await frontend.locator('#bailey-share-add-btn').click();
+    // The grant lands in the "People with access" list; hard-assert + capture it.
+    await expect(
+      frontend.getByText(new RegExp(ENV.teammateEmail.replace(/[.@]/g, '\\$&'), 'i')).first(),
+      'the teammate grant did not land in the People with access list',
+    ).toBeVisible({ timeout: SLA });
+    await capture(frontend, 'share-modal');
+    // Close the modal (its footer Done button), then close the popup.
+    await frontend.getByRole('button', { name: /^Done$/ }).first().click().catch(() => {});
+    await frontend.close().catch(() => {});
+  });
+
   await chapter('promote', async () => {
     await clickTopTab(/Deployments/i);
-    // Two hops. For each, press the promote pill that targets THIS stage and
-    // CONFIRM this stage actually starts before riding the deploy watchdog.
-    // Robustness the dind timing demands:
-    //  - The pill is selected by its stage-specific title ("Promote all
-    //    containers to <Stage>"), so the dev→staging pill is never confused with
-    //    the staging→production one (both render as "Promote").
-    //  - "started"/"done" are scoped to THIS stage ("Current on <Stage>"): a
-    //    prior stage's lingering Healthy / "Current on …" must NOT count, or the
-    //    hop looks done while the target sits at "never deployed".
-    //  - A click that doesn't land (a re-render detaches the pill) is re-pressed,
-    //    so the target never sits static long enough for waitDeployDone to read a
-    //    dead screen and trip the went-dark watchdog as a false stall.
-    let shotStaging = false;
-    let shotProd = false;
-    for (const stageName of ['Staging', 'Production'] as const) {
-      const isProd = stageName === 'Production';
-      const target = new RegExp(stageName, 'i');
-      await selectStage(target);
-      // Title is present only while the pill is actionable (canPromote); when
-      // there's nothing to promote it reads "Nothing new to promote to <Stage>".
-      const promotePill = d
-        .locator(`button[title="Promote all containers to ${stageName}"]`)
-        .first();
-      const targetCurrent = d
-        .getByText(new RegExp(`Current on ${stageName}`, 'i'))
-        .first();
-      const moving = d
-        .getByText(/Promoting|Starting|Building|Pulling|Working|Preparing|Deploying/i)
-        .first();
-      let started = false;
-      for (let attempt = 0; attempt < 6 && !started; attempt++) {
-        if (await targetCurrent.isVisible().catch(() => false)) {
-          started = true;
-          break;
-        }
-        if (await promotePill.isEnabled().catch(() => false)) {
-          await promotePill.click().catch(() => {});
-        }
-        // Bounded wait (well under the 30-min deploy backstop) for THIS stage to
-        // start moving or land. If nothing moves, the click missed — press again.
-        started = await Promise.race([
-          moving
-            .waitFor({ state: 'visible', timeout: 12_000 })
-            .then(() => true)
-            .catch(() => false),
-          targetCurrent
-            .waitFor({ state: 'visible', timeout: 12_000 })
-            .then(() => true)
-            .catch(() => false),
-        ]);
-      }
-      // Capture the promotion IN PROGRESS on BOTH hops (the live step beat):
-      // dev→staging as `promote-progress`, staging→production as
-      // `promote-progress-prod`, so the manual documents both cutovers. The
-      // staging hop's waitDeployDone('Staging') already gated staging current
-      // before the production iteration, so the prod shot reflects a pipeline
-      // where staging is deployed (the meaningful blue-green state).
-      if (isProd && !shotProd) {
-        await targetCurrent
-          .or(moving)
-          .first()
-          .waitFor({ state: 'visible', timeout: SLA })
-          .catch(() => {});
-        await capture(dashPage, 'promote-progress-prod');
-        shotProd = true;
-      } else if (!isProd && !shotStaging) {
-        await capture(dashPage, 'promote-progress');
-        shotStaging = true;
-      }
-      await selectStage(target);
-      await waitDeployDone(stageName); // THIS stage reaches "Current on <Stage>"
-    }
+    await promoteHop('Staging');
+    await capture(dashPage, 'promote-progress');
+  });
+
+  // Production is GATED: an auditor/admin must freeze staging (locking the image
+  // under review) and collect the required audit sign-offs before the Production
+  // promote unlocks. Freezing also closes dev→staging. The walkthrough runs as an
+  // admin (who holds auditor rights), exercising the full gate as a real user —
+  // no bypass. A normal member would see the Production promote locked and would
+  // have to ask an auditor, exactly as intended.
+  await chapter('freeze-and-audit', async () => {
+    await clickTopTab(/Deployments/i);
+    // Freeze staging — the Freeze pill lives on the Staging node in the pipeline.
+    const freeze = d.getByRole('button', { name: /^Freeze$/ }).first();
+    await freeze.waitFor({ state: 'visible', timeout: SLA });
+    await freeze.click().catch(() => {});
+    // It flips to "Unfreeze" once the gate state comes back (frozen).
+    await d
+      .getByRole('button', { name: /^Unfreeze$/ })
+      .first()
+      .waitFor({ state: 'visible', timeout: SLA });
+    await capture(dashPage, 'freeze-staging');
+    // Open the Audits sub-tab via its pipeline badge and sign off an approval
+    // (admin has auditor rights). The badge reads "Audits <done>/<required>".
+    await d
+      .getByRole('button', { name: /Audits (off|\d+\/\d+)/i })
+      .first()
+      .click()
+      .catch(() => {});
+    const noteBox = d.getByPlaceholder(/Audit note/i).first();
+    await noteBox.waitFor({ state: 'visible', timeout: SLA });
+    await noteBox.fill(
+      'Reviewed the frozen staging image — migrations additive, no PII change. Approved for Production.',
+    );
+    await capture(dashPage, 'audit-signoff');
+    await d.getByRole('button', { name: /^Approve$/ }).first().click();
+    // The sign-off lands in the audit log, and the policy (1 sign-off) is met.
+    await d
+      .getByText(/Approved/i)
+      .first()
+      .waitFor({ state: 'visible', timeout: SLA });
+    await capture(dashPage, 'audit-log');
+  });
+
+  await chapter('promote-prod', async () => {
+    await clickTopTab(/Deployments/i);
+    await promoteHop('Production');
+    await capture(dashPage, 'promote-progress-prod');
   });
 
   // ---- Deployment sections; the cover hero is the live Production view ----
@@ -1881,6 +1955,59 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // the deploy. Each cycle goes dev → staging → production. Then we roll
   // Production back to the previous version and confirm the revert.
   // ════════════════════════════════════════════════════════════════════════
+  // Inspect Production's live containers RIGHT AFTER promotion, while the stage
+  // is freshly deployed and healthy — before the memory-heavy tail (deps-npm /
+  // deps-go rebuild+re-promote, prod-rollback, the long CVE scan) churns the
+  // blue-green slots and, on a memory-starved runner, can leave Production
+  // between deployments. This is also when an operator naturally looks. The
+  // handbook chapter order is unaffected (it's driven by content.mjs slots, not
+  // capture order).
+  await chapter('containers', async () => {
+    // Defensive: clear any overlay a prior chapter may have left open before our
+    // first click.
+    await closeAnyModal();
+    await selectStage(/Production/i);
+    // The Containers tab carries a count pill ("Containers 2"), so match the
+    // label as a prefix — an anchored /^Containers$/ would miss it.
+    await clickSection(/Containers/i);
+    // The live container roster for the current deployment. Each container card
+    // carries inline Logs / Inspect expanders and start/stop controls.
+    await capture(dashPage, 'containers');
+    // Inspect a RUNNING container — not blindly the first card. Production shows
+    // one card per member (the always-on worker AND the on-demand frontend); a
+    // member whose container isn't running still shows a card, so Logs would only
+    // ever say "Waiting for logs…" and Inspect would have nothing to render.
+    // Target a running card via its status marker (the always-on worker is a
+    // guaranteed running card).
+    const runningCard = d
+      .locator('[data-testid="container-card"][data-container-status="running"]')
+      .first();
+    await expect(
+      runningCard,
+      'no running container in Production to inspect',
+    ).toBeVisible({ timeout: SLA });
+    // Open the running container's LOGS view: its "Logs" button expands an inline
+    // LogsPane that streams real container output. Hard-assert it opened.
+    await runningCard.getByRole('button', { name: /^Logs$/ }).click();
+    await expect(
+      runningCard
+        .locator('.font-mono')
+        .filter({ hasText: /\S/ })
+        .or(runningCard.getByText(/Waiting for logs…|\[stream ended\]|Log stream disconnected/i))
+        .first(),
+      'container Logs view never opened',
+    ).toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'container-logs');
+    // Open the running container's INSPECT view: its "Inspect" button expands an
+    // inline OverviewPane with the container's configuration (Identity / Image /
+    // Network groups). Hard-assert a config group rendered before shooting.
+    await runningCard.getByRole('button', { name: /^Inspect$/ }).click();
+    await expect(
+      runningCard.getByText(/^Identity$|^Image$|^Network$/).first(),
+      'container Inspect view never opened',
+    ).toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'container-inspect');
+  });
   await chapter('deps-npm', async () => {
     await editDependencyManifest({
       searchTerm: '"react"',
@@ -1995,40 +2122,6 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       // chapter's first click (it blocked `containers` and aborted the run).
       await closeAnyModal();
     }
-  });
-  await chapter('containers', async () => {
-    // Defensive: clear any overlay a prior chapter may have left open before our
-    // first click (the supply-chain CVE detail did exactly this).
-    await closeAnyModal();
-    await selectStage(/Production/i);
-    // The Containers tab carries a count pill ("Containers 2"), so match the
-    // label as a prefix — an anchored /^Containers$/ would miss it.
-    await clickSection(/Containers/i);
-    // The live container roster for the current deployment. Each container card
-    // carries inline Logs / Inspect expanders and start/stop controls.
-    await capture(dashPage, 'containers');
-    // Open a container's LOGS view: the card's "Logs" button expands an inline
-    // LogsPane that streams real container output (or "Waiting for logs…" until
-    // the first line / "[stream ended]"). Hard-assert it opened before shooting.
-    const logsBtn = d.getByRole('button', { name: /^Logs$/ }).first();
-    await logsBtn.click();
-    await expect(
-      d.getByText(/Waiting for logs…|\[stream ended\]|Log stream disconnected/i)
-        .or(d.locator('.font-mono').filter({ hasText: /\S/ }))
-        .first(),
-      'container Logs view never opened',
-    ).toBeVisible({ timeout: SLA });
-    await capture(dashPage, 'container-logs');
-    // Open the container's INSPECT view: the card's "Inspect" button expands an
-    // inline OverviewPane with the container's configuration (Identity / Image /
-    // Network groups). Hard-assert a config group rendered before shooting.
-    const inspectBtn = d.getByRole('button', { name: /^Inspect$/ }).first();
-    await inspectBtn.click();
-    await expect(
-      d.getByText(/^Identity$|^Image$|^Network$/).first(),
-      'container Inspect view never opened',
-    ).toBeVisible({ timeout: SLA });
-    await capture(dashPage, 'container-inspect');
   });
   await chapter('secrets', async () => {
     await selectStage(/Production/i);
@@ -2179,67 +2272,6 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // then on THAT frontend's own chrome we Share it with a teammate at User
   // level. The chrome footer + share modal are rendered by the daemon on the
   // popup's TOP page (not inside any iframe), so we drive the popup directly.
-  await chapter('share-endpoint', async () => {
-    await clickTopTab(/Deployments/i);
-    // Open + share a DEPLOYED FRONTEND. The Deployments stage card renders an
-    // "Open app" section (DeploymentsTab.tsx) ONLY when the stage has ≥1 frontend
-    // whose live-display status is "running" with a URL; each such frontend is an
-    // external-link anchor (<a href={url} target="_blank" rel="noreferrer">, no
-    // title attr) whose text is the automation name + host. Development is the
-    // stage that reliably carries a running, openable frontend (its live-dev /
-    // first dev deploy is up); a promoted Production stage may not expose the
-    // same openable app — so we share off Development, the reliably-openable one.
-    await selectStage(/Development/i);
-    // The "Open app" anchor: scope to the section by its heading and take the
-    // first deployed frontend's external-link card. (A previous `.or(first
-    // https link on the page)` fallback matched a DIFFERENT element than the
-    // scoped one, so the combined locator resolved to 2 nodes → strict-mode
-    // violation. The scoped section reliably contains the link — see
-    // DeploymentsTab "Open app".)
-    const openApp = d
-      .getByText(/^Open app$/i)
-      .locator('..')
-      .locator('a[target="_blank"][href^="https://"]')
-      .first();
-    await expect(openApp, 'no deployed frontend to open + share under Development → Open app')
-      .toBeVisible({ timeout: SLA });
-    const popupP = dashPage.context().waitForEvent('page', { timeout: 30_000 }).catch(() => null);
-    await openApp.click();
-    const fe = await popupP;
-    expect(fe, 'opening the deployed frontend did not spawn a tab').not.toBeNull();
-    const frontend = fe!;
-    await frontend.waitForLoadState('domcontentloaded').catch(() => {});
-    await frontend.locator('body').waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
-    // The frontend is wrapped in Bailey chrome (a footer pinned to the bottom of
-    // every protected endpoint). Because the operator owns this frontend, the
-    // chrome footer shows a "Share" button — proving operator-created frontends
-    // are Bailey-protected. Open it and share THIS frontend.
-    const shareBtn = frontend.getByRole('link', { name: /^Share$/ })
-      .or(frontend.getByRole('button', { name: /^Share$/ }))
-      .first();
-    await expect(shareBtn, "the frontend's Bailey chrome exposed no Share affordance (is it owner-fronted?)")
-      .toBeVisible({ timeout: SLA });
-    await shareBtn.click();
-    // The chrome share modal: add input + role select + Add (ids set by the
-    // daemon's share_modal.go).
-    const input = frontend.locator('#bailey-share-input');
-    await input.waitFor({ state: 'visible', timeout: SLA });
-    await input.fill(ENV.teammateEmail);
-    // Grant at User level (default option value "access").
-    await frontend.locator('#bailey-share-role').selectOption('access').catch(() => {});
-    await capture(frontend, 'share-modal');
-    await frontend.locator('#bailey-share-add-btn').click();
-    // The grant lands in the "People with access" list; hard-assert + capture it.
-    await expect(
-      frontend.getByText(new RegExp(ENV.teammateEmail.replace(/[.@]/g, '\\$&'), 'i')).first(),
-      'the teammate grant did not land in the People with access list',
-    ).toBeVisible({ timeout: SLA });
-    await capture(frontend, 'share-modal');
-    // Close the modal (its footer Done button), then close the popup.
-    await frontend.getByRole('button', { name: /^Done$/ }).first().click().catch(() => {});
-    await frontend.close().catch(() => {});
-  });
-
   // ---- Backups: take a real production snapshot, wait for it to appear ----
   await chapter('backups', async () => {
     await selectStage(/Production/i);

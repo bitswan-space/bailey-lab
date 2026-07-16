@@ -359,6 +359,152 @@ export function registerAutomationRoutes(
     }
   });
 
+  // Workspace auditors → the admin/auditor users a member can ask to review a
+  // production promotion (Audits panel). Read-only, no role gate.
+  app.get('/api/automations/workspace-auditors', async (_req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    try {
+      const r = await gitops.workspaceAuditors();
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err }, 'workspace auditors read failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Staging gate → read the BP's freeze state + audit policy + audit log.
+  app.get<{ Params: { bp: string } }>(
+    '/api/automations/business-processes/:bp/staging-gate',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.stagingGate(req.params.bp);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'bp staging-gate read failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  // Staging gate → freeze / unfreeze staging. Freezing locks the staging image
+  // for audit and closes dev→staging. Admin/auditor only.
+  app.put<{
+    Params: { bp: string };
+    Body: { frozen?: boolean };
+  }>('/api/automations/business-processes/:bp/staging-gate/freeze', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { frozen } = req.body ?? {};
+    if (typeof frozen !== 'boolean') {
+      return reply.code(400).send({ error: 'frozen (boolean) is required' });
+    }
+    // Freezing staging is a compliance control — resolve the role from the
+    // validated token (never trust the client) and reject everyone else.
+    const role = await fwRoleFromRequest(req, gitops, app.log);
+    if (role !== 'admin' && role !== 'auditor') {
+      return reply
+        .code(403)
+        .send({ error: 'Freezing or unfreezing staging requires an admin or auditor role.' });
+    }
+    const by = (await emailFromRequest(req, app.log)) || undefined;
+    try {
+      const r = await gitops.setStagingFreeze(req.params.bp, frozen, by);
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp staging freeze failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Staging gate → set how many auditor sign-offs a frozen image needs before it
+  // can be promoted to Production (0 = gating off). Admin/auditor only.
+  app.put<{
+    Params: { bp: string };
+    Body: { required?: number };
+  }>('/api/automations/business-processes/:bp/staging-gate/policy', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { required } = req.body ?? {};
+    if (typeof required !== 'number' || !Number.isInteger(required) || required < 1) {
+      return reply.code(400).send({ error: 'required must be an integer >= 1' });
+    }
+    const role = await fwRoleFromRequest(req, gitops, app.log);
+    if (role !== 'admin' && role !== 'auditor') {
+      return reply
+        .code(403)
+        .send({ error: 'Changing the audit policy requires an admin or auditor role.' });
+    }
+    const by = (await emailFromRequest(req, app.log)) || undefined;
+    try {
+      const r = await gitops.setAuditPolicy(req.params.bp, required, by);
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp audit policy write failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Staging gate → record one audit sign-off (approve / request changes) on the
+  // frozen staging image. Admin/auditor only; appended to the audit log.
+  app.post<{
+    Params: { bp: string };
+    Body: { verdict?: string; note?: string };
+  }>('/api/automations/business-processes/:bp/staging-gate/audits', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const { verdict, note } = req.body ?? {};
+    if (verdict !== 'approve' && verdict !== 'reject') {
+      return reply.code(400).send({ error: "verdict must be 'approve' or 'reject'" });
+    }
+    const role = await fwRoleFromRequest(req, gitops, app.log);
+    if (role !== 'admin' && role !== 'auditor') {
+      return reply
+        .code(403)
+        .send({ error: 'Signing off an audit requires an admin or auditor role.' });
+    }
+    // Attribute the sign-off to the signed-in user (the client never sends `by`).
+    const by = (await emailFromRequest(req, app.log)) || undefined;
+    try {
+      const r = await gitops.recordAudit(req.params.bp, {
+        verdict,
+        ...(note ? { note } : {}),
+        ...(by ? { by } : {}),
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp: req.params.bp }, 'bp audit sign-off failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   // Backups → blue-green slot state (live vs standby/DR), retention, audit log.
   app.get<{ Params: { bp: string } }>(
     '/api/automations/business-processes/:bp/backups',

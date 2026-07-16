@@ -173,6 +173,11 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// re-deriving it from SSO groups. Read-only, keyed by email.
 	mux.HandleFunc("/bailey/role", s.authMiddleware(s.handleUserRole))
 
+	// Bailey auditor/admin roster (authenticated; socket-trusted). Lets gitops
+	// (for the dashboard's Audits panel) list the users a normal member can ask
+	// to review a production promotion. Read-only.
+	mux.HandleFunc("/bailey/auditors", s.authMiddleware(s.handleWorkspaceAuditors))
+
 	// Memory admission (trusted, socket-auth): gitops calls this to gate a
 	// promote against the reserved budget before deploying.
 	mux.HandleFunc("/memory/admit", s.authMiddleware(s.handleMemoryAdmit))

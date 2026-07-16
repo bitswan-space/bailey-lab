@@ -231,8 +231,10 @@ docker pull "$OTEL_COLLECTOR_IMAGE" >/dev/null 2>&1 || true
 docker run -d --name "$OTEL_CTR" --network bitswan_network \
   -v "$REPO_ROOT/e2e/otel/collector-config.yaml:/etc/otelcol/config.yaml:ro" \
   "$OTEL_COLLECTOR_IMAGE" --config /etc/otelcol/config.yaml
-sleep 3
-docker ps | grep -q "$OTEL_CTR" || { echo "ERROR: otel-collector not running"; docker logs --tail 50 "$OTEL_CTR"; exit 1; }
+# SIGPIPE-safe readiness poll — no `docker ps | grep` under pipefail (that's the
+# false-negative the traefik check above was fixed for; same trap here).
+for i in $(seq 1 15); do if [ -n "$(docker ps -q -f name="^${OTEL_CTR}$")" ]; then break; fi; sleep 2; done
+[ -n "$(docker ps -q -f name="^${OTEL_CTR}$")" ] || { echo "ERROR: otel-collector not running"; docker logs --tail 50 "$OTEL_CTR"; exit 1; }
 
 mark "[3b/7] otel-collector (SIEM target)"
 echo "=== [4/7] bitswan-protected-proxy (oauth2-proxy) in front of the gate ==="
@@ -267,8 +269,9 @@ docker run -d --name bitswan-protected-proxy --network bitswan_network \
   -e OAUTH2_PROXY_COOKIE_CSRF_EXPIRE=1h \
   -e OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL=true \
   quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
-sleep 3
-docker ps | grep -q bitswan-protected-proxy || { echo "ERROR: protected proxy not running"; docker logs --tail 50 bitswan-protected-proxy; exit 1; }
+# SIGPIPE-safe readiness poll (see the traefik/otel checks above).
+for i in $(seq 1 15); do if [ -n "$(docker ps -q -f name='^bitswan-protected-proxy$')" ]; then break; fi; sleep 2; done
+[ -n "$(docker ps -q -f name='^bitswan-protected-proxy$')" ] || { echo "ERROR: protected proxy not running"; docker logs --tail 50 bitswan-protected-proxy; exit 1; }
 
 mark "[4/7] protected-proxy (oauth2-proxy)"
 echo "=== [5/7] Point Bailey at this domain + register the gate routes ==="

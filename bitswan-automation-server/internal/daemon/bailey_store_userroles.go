@@ -33,6 +33,47 @@ func dbGetUserRole(email string) (string, error) {
 	return role, nil
 }
 
+// dbListUsersByRoles returns the emails explicitly assigned any of the given
+// roles in user_roles, each with its role, sorted by email. (Does NOT include
+// the bootstrap root admin, who may have no explicit row — callers that want
+// the full auditor/admin set add serverRootAdmin themselves.)
+func dbListUsersByRoles(roles ...string) ([]userRole, error) {
+	if len(roles) == 0 {
+		return nil, nil
+	}
+	db, err := openBaileyDB()
+	if err != nil {
+		return nil, err
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(roles)), ",")
+	args := make([]any, len(roles))
+	for i, r := range roles {
+		args[i] = r
+	}
+	rows, err := db.Query(
+		`SELECT email, role FROM user_roles WHERE role IN (`+placeholders+
+			`) ORDER BY email COLLATE NOCASE`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list users by roles: %w", err)
+	}
+	defer rows.Close()
+	var out []userRole
+	for rows.Next() {
+		var ur userRole
+		if err := rows.Scan(&ur.Email, &ur.Role); err != nil {
+			return nil, fmt.Errorf("scan user role: %w", err)
+		}
+		out = append(out, ur)
+	}
+	return out, rows.Err()
+}
+
+// userRole is one {email, role} pair from the user_roles store.
+type userRole struct {
+	Email string `json:"email"`
+	Role  string `json:"role"`
+}
+
 // dbSetUserRole upserts a user's role.
 func dbSetUserRole(email, role, by string) error {
 	email = strings.TrimSpace(email)

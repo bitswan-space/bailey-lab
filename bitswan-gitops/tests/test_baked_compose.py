@@ -4,6 +4,7 @@ Its config (expose/port) must therefore resolve from the workspace source —
 otherwise a frontend silently loses `expose` (no ingress URL → "Not deployed").
 (The compose compilation itself now lives in the Go infra-driver.)"""
 
+import asyncio
 import os
 
 import pytest
@@ -43,6 +44,9 @@ def test_resolve_config_falls_back_to_workspace_for_baked(svc, tmp_path):
         "stage": "dev",
         "checksum": "0" * 40,  # no blob dir on disk
         "relative_path": "copies/main/bp/frontend",
+        # No source_commit → the legacy fallback (workspace source). A deploy that
+        # DOES record source_commit resolves from that commit instead (see
+        # test_resolve_config_at_commit).
     }
-    cfg = svc.resolve_automation_config(conf)
+    cfg = asyncio.run(svc.resolve_automation_config(conf))
     assert cfg.expose is True

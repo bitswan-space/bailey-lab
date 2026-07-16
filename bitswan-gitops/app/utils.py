@@ -375,7 +375,19 @@ def dump_bitswan_yaml(bs_yaml: dict, f) -> None:
 _BP_KEY = "business_processes"
 # Every top-level bitswan.yaml map that is keyed by business process. A per-BP
 # file holds only its BP's entry in each; a whole-workspace read unions them.
-_WS_MERGE_KEYS = (_BP_KEY, "firewall", "backups", "secrets", "disaster_recovery")
+_WS_MERGE_KEYS = (
+    _BP_KEY,
+    "firewall",
+    "backups",
+    "secrets",
+    "disaster_recovery",
+    "staging_gate",
+    # Image audit sign-offs, keyed per BP then by the image CONTENT HASH (not by
+    # stage) — audits[bp][content_sha] = [sign-off records]. A single store the
+    # promotion gate and the deployment-history badge both read; an audit on an
+    # image applies wherever that image is deployed (dev/staging/production).
+    "audits",
+)
 
 
 def bp_state_dir(gitops_dir: str) -> str:
@@ -614,6 +626,22 @@ def daemon_user_role(email: str) -> str:
         resp = client.get(f"{base}/bailey/role", params={"email": email})
         resp.raise_for_status()
         return (resp.json() or {}).get("role") or ""
+    finally:
+        client.close()
+
+
+def daemon_auditors() -> list[dict]:
+    """Every user who can audit — holds the admin or auditor role — as
+    [{email, role}], read from the automation-server daemon over the trusted
+    local socket. Used by the dashboard's Audits panel to tell a normal member
+    which auditors/admins they can ask to review a production promotion. Raises
+    on transport failure so the caller can surface an honest error rather than a
+    fabricated roster."""
+    client, base = _ingress_client_and_base()
+    try:
+        resp = client.get(f"{base}/bailey/auditors")
+        resp.raise_for_status()
+        return (resp.json() or {}).get("users") or []
     finally:
         client.close()
 

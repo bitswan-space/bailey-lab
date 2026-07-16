@@ -156,6 +156,16 @@ class DrTestRequest(BaseModel):
     deployed_by: str | None = None
 
 
+@router.get("/workspace-auditors")
+async def get_workspace_auditors_route():
+    """Every user in the workspace who can audit (admin or auditor role), as
+    [{email, role}]. Backs the dashboard Audits panel's "ask an auditor" list.
+    Resolved from the automation-server daemon (never SSO groups)."""
+    from app.utils import daemon_auditors
+
+    return {"users": daemon_auditors()}
+
+
 @router.get("/user-role")
 async def get_user_role_route(email: str):
     """The authoritative Bailey role for an email, resolved from the
@@ -206,6 +216,78 @@ async def post_bp_dr_test_route(
     try:
         return await automation_service.record_dr_test(
             bp, body.by, body.note, body.snapshot, body.deployed_by
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class StagingFreezeRequest(BaseModel):
+    frozen: bool
+    by: str | None = None
+
+
+class AuditPolicyRequest(BaseModel):
+    required: int
+    by: str | None = None
+
+
+class AuditSignoffRequest(BaseModel):
+    verdict: str  # "approve" | "reject"
+    note: str | None = None
+    by: str | None = None
+
+
+@router.get("/business-processes/{bp}/staging-gate")
+async def get_bp_staging_gate_route(
+    bp: str,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """A BP's staging freeze + production-promotion audit state: frozen flag +
+    who/when/which image, the audit policy (required sign-offs), the audit log
+    (newest-first), and the derived `promotable` flag."""
+    return automation_service.read_staging_gate(bp)
+
+
+@router.put("/business-processes/{bp}/staging-gate/freeze")
+async def put_bp_staging_freeze_route(
+    bp: str,
+    body: StagingFreezeRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Freeze/unfreeze staging (admin/auditor only, versioned in bitswan.yaml).
+    Freezing locks the staging image for audit and closes dev→staging."""
+    try:
+        return await automation_service.set_staging_freeze(bp, body.frozen, body.by)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.put("/business-processes/{bp}/staging-gate/policy")
+async def put_bp_audit_policy_route(
+    bp: str,
+    body: AuditPolicyRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Set how many auditor sign-offs a frozen staging image needs before it can
+    be promoted to Production (admin/auditor only; 0 = gating off)."""
+    try:
+        return await automation_service.set_audit_policy(bp, body.required, body.by)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/business-processes/{bp}/staging-gate/audits")
+async def post_bp_audit_route(
+    bp: str,
+    body: AuditSignoffRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Record one audit sign-off (approve / request changes) on the frozen
+    staging image (admin/auditor only, appended to the audit log in
+    bitswan.yaml)."""
+    try:
+        return await automation_service.record_audit(
+            bp, body.verdict, body.note, body.by
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -784,6 +866,10 @@ async def promote_bp(
             status_code=400,
             detail="Stage must be one of: staging, production",
         )
+
+    # Freeze + audit gate — fail synchronously (403/409) before reserving any
+    # deployment. Re-enforced authoritatively inside promote_business_process.
+    automation_service._assert_promotable(body.bp, body.stage, body.deployed_by)
 
     members = automation_service.promotable_bp_members(body.bp, body.stage)
     if not members:

@@ -227,27 +227,52 @@ export const MANUAL = {
       ],
     },
     {
-      num: '11', eyebrow: 'Promote with confidence', title: 'Blue-green production',
-      lede: 'Three app slots over two persistent databases. The live slot owns production; the standby owns DR; the third is your zero-downtime buffer.',
+      num: '11', eyebrow: 'Promote with confidence', title: 'Staged deployment',
+      lede: 'A change moves forward one stage at a time — dev → staging → production — and each hop is a blue-green cutover: the idle slot comes up on the live database, ingress repoints, the old slot retires. Three app slots over two persistent databases mean the live slot never blinks and the standby is always one cutover away.',
       slots: [
         { id: 'promote-progress', label: 'Live capture', caption: 'Promotion in flight (dev → staging) · the idle slot coming up, the live step streaming, before the cutover' },
         { id: 'promote-progress-prod', label: 'Live capture', caption: 'Promotion in flight (staging → production) · the standby slot building on the live database before the production cutover' },
-        { id: 'deployments-prod', label: 'Live capture', caption: 'Deployments · Production Healthy after promote, every stage green' },
+        { id: 'deployments-prod', label: 'Live capture', caption: 'Deployments · Production Healthy after promotion, every stage green' },
       ],
       sell: [
-        'Promote dev → staging → production and the idle slot comes up on the live database, ingress repoints, the old slot retires. The pipeline tells you what it’s doing the whole way — the stage card streams its live step as the standby slot builds and starts. Promotion re-deploys the source stage’s recorded image verbatim — what reaches production is exactly what you tested, even if the workspace source has moved on. Users never see a gap.',
-        'Production is a state you can read at a glance: which slot is live, which is standby, what’s <strong>Healthy</strong>, and the version each stage is current on.',
+        'Promote a stage and the idle slot comes up on that stage’s live database, ingress repoints to it, and the old slot retires. The pipeline streams its live step the whole way as the standby slot builds and starts, so a promotion is never a black box — and users never see a gap.',
+        'What promotes is the <strong>image, verbatim</strong>: promotion re-deploys the exact bytes that were built and reviewed, even if the workspace source has moved on since. So what runs in production is precisely what was exercised in staging, not a fresh rebuild that might drift.',
+        'Anyone on the team can promote <strong>dev → staging</strong>. Production is different: it is a <strong>gated</strong> step that opens only once staging has been frozen and audited — that is the next chapter. Either way, the pipeline is a state you can read at a glance: which slot is live, which is standby, what is <strong>Healthy</strong>, and the version each stage is current on.',
       ],
-      steps: ['Open <b>Deployments → Development</b>.', 'Press <b>Promote</b> to staging, then to production.', 'Watch each stage report <b>Healthy</b> on screen.', 'Confirm Production shows the version you shipped.'],
-      specs: [{ v: '3 slots', l: 'a / b / c app slots' }, { v: '2 DBs', l: 'persistent, slot-aware' }, { v: '0 s', l: 'downtime on promote' }],
+      steps: ['Open <b>Deployments</b>.', 'Press <b>Promote all to Staging</b> and watch the blue-green cutover come up <b>Healthy</b>.', 'Exercise the app on staging — its own data, never production’s.', 'Production is gated — freeze &amp; audit it first (next chapter), then <b>Promote to Production</b>.'],
+      specs: [{ v: '3 slots', l: 'blue-green over 2 DBs' }, { v: '0 s', l: 'downtime on promote' }, { v: 'verbatim', l: 'the reviewed image ships' }],
+      callout: { kind: 'Why it matters', text: 'Every promotion is a zero-downtime blue-green cutover of the exact reviewed image. You can promote in the middle of the day and roll back to the standby slot just as fast — the live slot never blinks.' },
       standards: [
-        { code: 'ISO/IEC 27001', clause: 'A.8.32', demand: '<b>Change management.</b> Production changes follow a controlled, reversible promotion path.' },
-        { code: 'ISO/IEC 27001', clause: 'A.8.31', demand: '<b>Separation of development, test and production.</b> The dev / staging / production stages keep environments cleanly separated within a process.' },
-        { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> Minimise the impact of changes on the availability of critical functions.' },
+        { code: 'ISO/IEC 27001', clause: 'A.8.31', demand: '<b>Separation of development, test and production.</b> A change is deployed through isolated stages, each on its own database and network.' },
+        { code: 'SOC 2', clause: 'CC8.1', demand: '<b>Change management.</b> Changes reach production only through a deliberate, observable promotion of the reviewed image.' },
+        { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> Zero-downtime cutovers minimise the impact of changes on the availability of critical functions.' },
       ],
     },
     {
-      num: '12', eyebrow: 'Show your work', title: 'Deployment history & inspect',
+      num: '12', eyebrow: 'Four eyes on production', title: 'Freeze & audit',
+      lede: 'Production is gated by four eyes, not two. An auditor freezes staging to lock the exact image under review, signs off against a policy you set, and only then does the Production promote unlock — with every freeze, policy change and sign-off recorded in bitswan.yaml.',
+      slots: [
+        { id: 'freeze-staging', label: 'Live capture', caption: 'Freeze staging · an auditor locks the staging image for review — dev → staging is closed until it is unfrozen' },
+        { id: 'audit-signoff', label: 'Live capture', caption: 'Audit sign-off · an auditor reviews the frozen image and approves (or requests changes) with a note' },
+        { id: 'audit-log', label: 'Live capture', caption: 'Audit log · every sign-off recorded with who, when and their verdict — persisted in bitswan.yaml' },
+      ],
+      sell: [
+        '<strong>No one promotes straight to production.</strong> First an auditor or admin <strong>freezes staging</strong> — that locks the exact image under review (a fixed tag) and closes dev → staging, so the thing being audited can’t change underneath the review. A normal member never sees a Production promote button they can click; they hand off to an auditor, exactly as segregation-of-duties demands.',
+        'You set the bar with an <strong>audit policy</strong>: how many auditor sign-offs (at least one) a frozen image needs before it may reach production. Each auditor reviews the frozen image and records a verdict — <strong>Approve</strong> or <strong>Request changes</strong> — with a note. Only when the policy is met does the Production promote unlock; a single “request changes” holds the line.',
+        'Every change to the gate — the freeze, each policy change, and each sign-off — is written into <code>bitswan.yaml</code> and versioned in git, attributed to the acting auditor and appended to a fast-forward-only history. The audit record is not a screenshot in a ticket; it is a versioned artefact you can hand an auditor. Once the audited image reaches production, staging <strong>unfreezes automatically</strong> — no point holding the lock after release.',
+      ],
+      steps: ['As an auditor, press <b>Freeze</b> on the Staging node to lock the image under review.', 'Open the <b>Audits</b> tab, review the frozen image and <b>Approve</b> (or <b>Request changes</b>) with a note.', 'Once the sign-off policy is met, the <b>Promote to Production</b> button unlocks.', 'Promote — staging unfreezes automatically once production is live.'],
+      specs: [{ v: '4 eyes', l: 'auditor sign-off to prod' }, { v: 'N sign-offs', l: 'policy you set' }, { v: 'append-only', l: 'audit log in git' }],
+      callout: { kind: 'Who audited what, in bitswan.yaml', text: 'Every freeze, policy change and sign-off is committed to <code>bitswan.yaml</code> in the process’s own git repo — attributed to the acting auditor and appended to an immutable, fast-forward-only history. The audit log isn’t a promise; it’s a versioned record you can hand an auditor.' },
+      standards: [
+        { code: 'ISO/IEC 27001', clause: 'A.5.3', demand: '<b>Segregation of duties.</b> The person who builds a change cannot unilaterally release it to production — an independent auditor must sign off.' },
+        { code: 'ISO/IEC 27001', clause: 'A.8.32', demand: '<b>Change management.</b> Production changes are reviewed and approved against a policy before release, then promoted verbatim.' },
+        { code: 'SOC 2', clause: 'CC8.1', demand: '<b>Change approval.</b> Changes are authorised by required sign-offs recorded in a tamper-evident log before deployment.' },
+        { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> An independent sign-off gate limits the risk a change poses to critical functions.' },
+      ],
+    },
+    {
+      num: '13', eyebrow: 'Show your work', title: 'Deployment history & inspect',
       lede: 'A versioned, immutable audit log: every deploy, promotion, swap, backup and firewall change — and a per-deployment Inspect with the files, diff and secrets in force at the time.',
       slots: [
         { id: 'history', label: 'Live capture', caption: 'Deployment history · the audit trail of every event, with Inspect and Roll back per entry' },
@@ -271,7 +296,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '13', eyebrow: 'Keep secrets secret', title: 'Secrets',
+      num: '14', eyebrow: 'Keep secrets secret', title: 'Secrets',
       lede: 'Per-stage environment secrets, write-gated by role, injected at deploy and snapshotted with every deployment.',
       slots: [
         { id: 'secrets', label: 'Live capture', caption: 'Production · environment secrets, role-gated' },
@@ -289,7 +314,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '14', eyebrow: 'See what’s running', title: 'Containers',
+      num: '15', eyebrow: 'See what’s running', title: 'Containers',
       lede: 'The live container roster for a stage — every service of the deployment, its health, and per-container Logs, Inspect, and start/stop controls.',
       slots: [
         { id: 'containers', label: 'Live capture', caption: 'Production · the live containers of the current deployment' },
@@ -308,7 +333,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '15', eyebrow: 'Capture the truth', title: 'Backups & retention',
+      num: '16', eyebrow: 'Capture the truth', title: 'Backups & retention',
       lede: 'Point-in-time snapshots of the live database and object storage, with a retention policy and an audit trail.',
       slots: [
         { id: 'snapshot-create', label: 'Live capture', caption: 'Create snapshot · label and stage, before it runs' },
@@ -326,7 +351,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '16', eyebrow: 'Sleep at night', title: 'Rehearse & restore (DR)',
+      num: '17', eyebrow: 'Sleep at night', title: 'Rehearse & restore (DR)',
       lede: 'A backup you’ve never restored is a rumor. Bitswan makes the rehearsal a routine, the architecture legible, and the real cutover a single click.',
       slots: [
         { id: 'dr-rehearse', label: 'Live capture', caption: 'Disaster Recovery · backup loaded into DR, recovery-tested' },
@@ -346,7 +371,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '17', eyebrow: 'Control the edges', title: 'Firewall & data processing',
+      num: '18', eyebrow: 'Control the edges', title: 'Firewall & data processing',
       lede: 'An egress allow-list with a GDPR data-processing record for every external host — approval workflow, versioning and the DPA on file.',
       slots: [
         { id: 'firewall', label: 'Live capture', caption: 'Firewall · the egress allow-list and its posture (Monitoring in dev, Enforcing in production)' },
@@ -366,7 +391,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '18', eyebrow: 'Know your ingredients', title: 'Supply chain',
+      num: '19', eyebrow: 'Know your ingredients', title: 'Supply chain',
       lede: 'A full software bill of materials for what you run — vulnerabilities ranked, advisories one click away, accepted risks recorded.',
       slots: [
         { id: 'supply-chain', label: 'Live capture', caption: 'Supply chain · the SBOM/CVE panel for the deployed image' },
@@ -384,7 +409,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '19', eyebrow: 'Right people, right rights', title: 'People & roles',
+      num: '20', eyebrow: 'Right people, right rights', title: 'People & roles',
       lede: 'A roster with explicit roles — operator, auditor, member — and per-person trusted devices you can approve or revoke.',
       slots: [{ id: 'people-roles', label: 'Live capture', caption: 'People & roles · the Meridian Foods roster' }],
       sell: [
@@ -401,7 +426,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '20', eyebrow: 'Let the right people in', title: 'Sharing an endpoint',
+      num: '21', eyebrow: 'Let the right people in', title: 'Sharing an endpoint',
       lede: 'Every protected app the gate fronts — including the frontends your operators build and deploy — can be shared, by its owner, with named people or groups, at view or owner level, without touching anyone else’s access.',
       slots: [
         { id: 'share-modal', label: 'Live capture', caption: 'Share endpoint · sharing a deployed automation’s own frontend (a Bailey-protected endpoint) with a teammate at User level' },
@@ -420,7 +445,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '21', eyebrow: 'Feed the watchtower', title: 'SIEM export & monitoring',
+      num: '22', eyebrow: 'Feed the watchtower', title: 'SIEM export & monitoring',
       lede: 'Stream the server’s security audit log — access approvals, role and device changes, workspace events — to your SIEM over OpenTelemetry, as it happens.',
       slots: [
         { id: 'siem-form', label: 'Live capture', caption: 'SIEM forwarding · the config form — the OTLP endpoint base URL and the protocol, filled in before Save & connect' },
@@ -446,7 +471,7 @@ export const MANUAL = {
     // Horváth) arriving on a new device, and the admin (Tomáš) deciding —
     // deliberately, in the open — whether he and his device get in.
     {
-      num: '22', eyebrow: 'Deny by default', title: 'A teammate’s first login',
+      num: '23', eyebrow: 'Deny by default', title: 'A teammate’s first login',
       lede: 'A new teammate signs in through your identity provider from their own laptop — and gets nothing. Identity alone is not access: Bailey is deny-by-default, and an unknown device waits at the gate.',
       slots: [{ id: 'onboard-newuser-pending', label: 'Live capture', caption: 'New device · Marek is signed in, but the device isn’t trusted — a 6-digit code and “Waiting for an admin…”' }],
       sell: [
@@ -463,7 +488,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '23', eyebrow: 'You decide who gets in', title: 'Approve the person & trust the device',
+      num: '24', eyebrow: 'You decide who gets in', title: 'Approve the person & trust the device',
       lede: 'Approval is a deliberate, present-tense act. The admin sees the pending device in People & roles, confirms the person is really there by the code on their screen, and trusts the device — admitting the user in one move.',
       slots: [
         { id: 'onboard-admin-approve', label: 'Live capture', caption: 'People & roles · Marek’s “Device awaiting approval” bar — the admin types the code from his screen' },
@@ -483,7 +508,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '24', eyebrow: 'In, on a trusted device', title: 'Access granted',
+      num: '25', eyebrow: 'In, on a trusted device', title: 'Access granted',
       lede: 'The moment the admin trusts it, the teammate’s device is let through — no re-login, no second step. And the same console that admitted the device is where you cut it, the instant a laptop is lost or a person leaves.',
       slots: [{ id: 'onboard-newuser-granted', label: 'Live capture', caption: 'New device · approved and redirected through the gate — access now granted on Marek’s laptop' }],
       sell: [
@@ -500,7 +525,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '25', eyebrow: 'Make a mess safely', title: 'Memory governance & the on-demand pool',
+      num: '26', eyebrow: 'Make a mess safely', title: 'Memory governance & the on-demand pool',
       lede: 'Users spin up as many previews and processes as they like without starving the workloads that matter. Bailey reserves memory for the services that must stay up and lets everything else scale to zero — under pressure automatically, or on demand with a button — waking the moment someone touches it, whether it’s a dev preview or a production service.',
       slots: [
         { id: 'resource-management', label: 'Live capture', caption: 'Server Console · Resource management — the memory budget and per-process usage grouped by process and stage (asleep processes shown too), each with a Sleep control' },
@@ -541,17 +566,18 @@ export const MANUAL = {
       rows: [
         { control: 'A.5.9', req: 'Inventory of assets', status: 'provided', bailey: 'Workspaces, endpoints and processes enumerated from live state', ch: '03 · 06', yours: 'Asset classification policy' },
         { control: 'A.5.15 / A.8.5', req: 'Access control & secure authentication', status: 'provided', bailey: 'Device-trust gate + OIDC at the platform edge', ch: '01 · 04', yours: 'Your IdP, joiner/leaver process' },
-        { control: 'A.5.18', req: 'Access rights (least privilege, review)', status: 'provided', bailey: 'Operator / auditor / member roles, server-enforced', ch: '19', yours: 'Periodic access reviews' },
-        { control: 'A.8.8', req: 'Management of technical vulnerabilities', status: 'provided', bailey: 'Pre-deploy CVE scan + in-tree waivers', ch: '10 · 18', yours: 'Triage & remediation SLAs' },
-        { control: 'A.8.9', req: 'Configuration management', status: 'partial', bailey: 'bitswan.yaml as declarative source of truth', ch: '11', yours: 'Baseline definition & review' },
-        { control: 'A.8.13', req: 'Information backup', status: 'provided', bailey: 'Per-stage snapshots + retention policy', ch: '15', yours: 'Offsite copy & retention targets' },
-        { control: 'A.8.15 / A.8.16', req: 'Logging & monitoring', status: 'provided', bailey: 'Versioned deploy/event history, live container health, real-time SIEM export (OTLP)', ch: '12 · 14 · 21', yours: 'SIEM correlation rules, alerting' },
-        { control: 'A.8.20 / A.8.21', req: 'Network & network-services security', status: 'provided', bailey: 'Default-deny egress allow-list per service', ch: '17', yours: 'Perimeter & internal segmentation policy' },
-        { control: 'A.8.24', req: 'Use of cryptography & secrets', status: 'provided', bailey: 'Stage secrets, injected not committed; TLS at edge', ch: '13', yours: 'Key-management policy' },
+        { control: 'A.5.18', req: 'Access rights (least privilege, review)', status: 'provided', bailey: 'Operator / auditor / member roles, server-enforced', ch: '20', yours: 'Periodic access reviews' },
+        { control: 'A.5.3', req: 'Segregation of duties', status: 'provided', bailey: 'Build vs release split: a member ships to staging; an independent auditor freezes, signs off and promotes to production', ch: '12', yours: 'Duty-conflict matrix' },
+        { control: 'A.8.8', req: 'Management of technical vulnerabilities', status: 'provided', bailey: 'Pre-deploy CVE scan + in-tree waivers', ch: '10 · 19', yours: 'Triage & remediation SLAs' },
+        { control: 'A.8.9', req: 'Configuration management', status: 'partial', bailey: 'bitswan.yaml is the declarative source of truth — freeze state, audit policy and sign-offs versioned in git', ch: '11 · 12', yours: 'Baseline definition & review' },
+        { control: 'A.8.13', req: 'Information backup', status: 'provided', bailey: 'Per-stage snapshots + retention policy', ch: '16', yours: 'Offsite copy & retention targets' },
+        { control: 'A.8.15 / A.8.16', req: 'Logging & monitoring', status: 'provided', bailey: 'Versioned deploy/event history, live container health, real-time SIEM export (OTLP)', ch: '13 · 15 · 22', yours: 'SIEM correlation rules, alerting' },
+        { control: 'A.8.20 / A.8.21', req: 'Network & network-services security', status: 'provided', bailey: 'Default-deny egress allow-list per service', ch: '18', yours: 'Perimeter & internal segmentation policy' },
+        { control: 'A.8.24', req: 'Use of cryptography & secrets', status: 'provided', bailey: 'Stage secrets, injected not committed; TLS at edge', ch: '14', yours: 'Key-management policy' },
         { control: 'A.8.31', req: 'Separation of dev/test/production', status: 'provided', bailey: 'Isolated copies + dev / staging / production stages', ch: '05 · 09 · 11', yours: '—' },
-        { control: 'A.8.3', req: 'Information access restriction', status: 'provided', bailey: 'Workspaces scope access per tenancy + role; per-endpoint owner-managed sharing', ch: '02 · 20', yours: 'Membership reviews' },
-        { control: 'A.8.32', req: 'Change management', status: 'provided', bailey: 'Reversible blue-green promotion path + immutable history', ch: '11 · 12', yours: 'Change approval workflow' },
-        { control: 'A.5.30', req: 'ICT readiness for business continuity', status: 'provided', bailey: 'DR slot + rehearsed, recorded recovery tests', ch: '16', yours: 'BCP/DR plan & RTO/RPO targets' },
+        { control: 'A.8.3', req: 'Information access restriction', status: 'provided', bailey: 'Workspaces scope access per tenancy + role; per-endpoint owner-managed sharing', ch: '02 · 21', yours: 'Membership reviews' },
+        { control: 'A.8.32', req: 'Change management', status: 'provided', bailey: 'Reversible blue-green promotion + four-eyes freeze/audit gate + immutable history', ch: '11 · 12 · 13', yours: 'Change approval workflow' },
+        { control: 'A.5.30', req: 'ICT readiness for business continuity', status: 'provided', bailey: 'DR slot + rehearsed, recorded recovery tests', ch: '17', yours: 'BCP/DR plan & RTO/RPO targets' },
       ],
     },
     {
@@ -559,41 +585,41 @@ export const MANUAL = {
       blurb: 'The common-criteria and availability TSCs Bailey supports as a service component. Your audit still covers the organizational criteria (CC1–CC5), risk assessment and vendor management.',
       rows: [
         { control: 'CC6.1', req: 'Logical access security', status: 'provided', bailey: 'Device-trust gate fronting every endpoint', ch: '01 · 03', yours: 'Access policy & ownership' },
-        { control: 'CC6.2 / CC6.3', req: 'Access provisioning & removal', status: 'provided', bailey: 'Central role + device grant/revoke', ch: '04 · 19', yours: 'Timely de-provisioning process' },
-        { control: 'CC6.6', req: 'Boundary protection', status: 'provided', bailey: 'Default-deny egress allow-list', ch: '17', yours: 'Network perimeter design' },
-        { control: 'CC6.7', req: 'Data in transit & at rest', status: 'provided', bailey: 'TLS at the edge (traefik) with managed cert lifecycle; backups encrypted', ch: '01 · 15', yours: 'Disk encryption on the Bailey host (at rest)' },
-        { control: 'CC7.1', req: 'Vulnerability detection', status: 'provided', bailey: 'SBOM + CVE scan on the image that ships', ch: '18', yours: 'Remediation tracking' },
-        { control: 'CC7.2', req: 'System monitoring', status: 'provided', bailey: 'Container health + event history + real-time SIEM export', ch: '12 · 14 · 21', yours: 'Alerting & on-call' },
-        { control: 'CC8.1', req: 'Change management', status: 'provided', bailey: 'Promotion pipeline + immutable deploy history', ch: '10 · 11 · 12', yours: 'Change authorization' },
-        { control: 'A1.2', req: 'Backup & environmental protection', status: 'provided', bailey: 'Snapshots + standby DR slot', ch: '15 · 16', yours: 'Backup off-platform' },
-        { control: 'A1.3', req: 'Recovery testing', status: 'provided', bailey: 'Rehearse-into-DR + recorded recovery tests', ch: '16', yours: 'Test cadence sign-off' },
+        { control: 'CC6.2 / CC6.3', req: 'Access provisioning & removal', status: 'provided', bailey: 'Central role + device grant/revoke', ch: '04 · 20', yours: 'Timely de-provisioning process' },
+        { control: 'CC6.6', req: 'Boundary protection', status: 'provided', bailey: 'Default-deny egress allow-list', ch: '18', yours: 'Network perimeter design' },
+        { control: 'CC6.7', req: 'Data in transit & at rest', status: 'provided', bailey: 'TLS at the edge (traefik) with managed cert lifecycle; backups encrypted', ch: '01 · 16', yours: 'Disk encryption on the Bailey host (at rest)' },
+        { control: 'CC7.1', req: 'Vulnerability detection', status: 'provided', bailey: 'SBOM + CVE scan on the image that ships', ch: '19', yours: 'Remediation tracking' },
+        { control: 'CC7.2', req: 'System monitoring', status: 'provided', bailey: 'Container health + event history + real-time SIEM export', ch: '13 · 15 · 22', yours: 'Alerting & on-call' },
+        { control: 'CC8.1', req: 'Change management', status: 'provided', bailey: 'Promotion pipeline + freeze/audit sign-off gate + immutable deploy history', ch: '10 · 11 · 12 · 13', yours: 'Change authorization' },
+        { control: 'A1.2', req: 'Backup & environmental protection', status: 'provided', bailey: 'Snapshots + standby DR slot', ch: '16 · 17', yours: 'Backup off-platform' },
+        { control: 'A1.3', req: 'Recovery testing', status: 'provided', bailey: 'Rehearse-into-DR + recorded recovery tests', ch: '17', yours: 'Test cadence sign-off' },
       ],
     },
     {
       standard: 'DORA (Regulation (EU) 2022/2554)',
       blurb: 'The ICT risk-management articles Bailey operationalizes for financial entities. Governance, incident reporting to authorities, and third-party registers remain your obligation.',
       rows: [
-        { control: 'Art. 8', req: 'Identification of ICT risk', status: 'provided', bailey: 'Pre-deploy supply-chain / CVE identification', ch: '18', yours: 'Risk register & classification' },
+        { control: 'Art. 8', req: 'Identification of ICT risk', status: 'provided', bailey: 'Pre-deploy supply-chain / CVE identification', ch: '19', yours: 'Risk register & classification' },
         { control: 'Art. 9(3)', req: 'Strong authentication & protection', status: 'provided', bailey: 'Device-trust gate', ch: '01', yours: 'Identity governance' },
-        { control: 'Art. 9', req: 'Protection & prevention (change impact)', status: 'provided', bailey: 'Zero-downtime blue-green change path', ch: '11', yours: 'Segregation policy' },
-        { control: 'Art. 10', req: 'Detection of anomalous activity', status: 'provided', bailey: 'Container health + deploy/event history + real-time SIEM export', ch: '12 · 14 · 21', yours: 'Detection thresholds & alerting' },
-        { control: 'Art. 11', req: 'Response & recovery', status: 'provided', bailey: 'One-cutover DR swap, no data move', ch: '16', yours: 'Crisis-management plan' },
-        { control: 'Art. 12', req: 'Backup, restoration & testing', status: 'provided', bailey: 'Snapshots + rehearsed DR restores', ch: '15 · 16', yours: 'RTO/RPO & offsite policy' },
-        { control: 'Art. 13', req: 'Learning & evolving', status: 'provided', bailey: 'Complete, inspectable deploy audit trail', ch: '12', yours: 'Post-incident review process' },
-        { control: 'Art. 24–26', req: 'Resilience testing programme', status: 'partial', bailey: 'Runnable requirement tests + DR rehearsals', ch: '08 · 16', yours: 'TLPT for significant entities' },
+        { control: 'Art. 9', req: 'Protection & prevention (change impact)', status: 'provided', bailey: 'Zero-downtime blue-green change path + independent sign-off gate', ch: '11 · 12', yours: 'Segregation policy' },
+        { control: 'Art. 10', req: 'Detection of anomalous activity', status: 'provided', bailey: 'Container health + deploy/event history + real-time SIEM export', ch: '13 · 15 · 22', yours: 'Detection thresholds & alerting' },
+        { control: 'Art. 11', req: 'Response & recovery', status: 'provided', bailey: 'One-cutover DR swap, no data move', ch: '17', yours: 'Crisis-management plan' },
+        { control: 'Art. 12', req: 'Backup, restoration & testing', status: 'provided', bailey: 'Snapshots + rehearsed DR restores', ch: '16 · 17', yours: 'RTO/RPO & offsite policy' },
+        { control: 'Art. 13', req: 'Learning & evolving', status: 'provided', bailey: 'Complete, inspectable deploy audit trail', ch: '13', yours: 'Post-incident review process' },
+        { control: 'Art. 24–26', req: 'Resilience testing programme', status: 'partial', bailey: 'Runnable requirement tests + DR rehearsals', ch: '08 · 17', yours: 'TLPT for significant entities' },
       ],
     },
     {
       standard: 'NIS2 (Directive (EU) 2022/2555)',
       blurb: 'The Article 21(2) cybersecurity-risk-management measures Bailey delivers technically. Governance, training and incident notification to your CSIRT stay with you.',
       rows: [
-        { control: 'Art. 21(2)(a)', req: 'Risk analysis & network security', status: 'partial', bailey: 'Default-deny egress with reviewed exceptions', ch: '17', yours: 'Risk-analysis methodology' },
-        { control: 'Art. 21(2)(b)', req: 'Incident handling', status: 'partial', bailey: 'Reconstruct events from the audit trail', ch: '12', yours: 'Incident response & notification' },
-        { control: 'Art. 21(2)(c)', req: 'Business continuity & backups', status: 'provided', bailey: 'Backups + zero-downtime DR swap', ch: '15 · 16', yours: 'BCP & crisis comms' },
-        { control: 'Art. 21(2)(d)', req: 'Supply-chain security', status: 'provided', bailey: 'SBOM + CVE visibility per image', ch: '18', yours: 'Supplier assessment' },
+        { control: 'Art. 21(2)(a)', req: 'Risk analysis & network security', status: 'partial', bailey: 'Default-deny egress with reviewed exceptions', ch: '18', yours: 'Risk-analysis methodology' },
+        { control: 'Art. 21(2)(b)', req: 'Incident handling', status: 'partial', bailey: 'Reconstruct events from the audit trail', ch: '13', yours: 'Incident response & notification' },
+        { control: 'Art. 21(2)(c)', req: 'Business continuity & backups', status: 'provided', bailey: 'Backups + zero-downtime DR swap', ch: '16 · 17', yours: 'BCP & crisis comms' },
+        { control: 'Art. 21(2)(d)', req: 'Supply-chain security', status: 'provided', bailey: 'SBOM + CVE visibility per image', ch: '19', yours: 'Supplier assessment' },
         { control: 'Art. 21(2)(e)', req: 'Secure development & vuln handling', status: 'provided', bailey: 'Pre-deploy checks + versioned waivers', ch: '10', yours: 'SDLC policy' },
-        { control: 'Art. 21(2)(h)', req: 'Cryptography', status: 'provided', bailey: 'Secret handling + TLS at the edge', ch: '13', yours: 'Crypto policy' },
-        { control: 'Art. 21(2)(i)', req: 'Access control & asset management', status: 'provided', bailey: 'Roles + workspace/endpoint inventory + per-endpoint sharing', ch: '02 · 03 · 19 · 20', yours: 'Asset ownership' },
+        { control: 'Art. 21(2)(h)', req: 'Cryptography', status: 'provided', bailey: 'Secret handling + TLS at the edge', ch: '14', yours: 'Crypto policy' },
+        { control: 'Art. 21(2)(i)', req: 'Access control & asset management', status: 'provided', bailey: 'Roles + workspace/endpoint inventory + per-endpoint sharing', ch: '02 · 03 · 20 · 21', yours: 'Asset ownership' },
         { control: 'Art. 21(2)(j)', req: 'Multi-factor authentication', status: 'provided', bailey: 'Hardware-bound device trust', ch: '01 · 04', yours: 'Enrolment policy' },
       ],
     },
@@ -601,11 +627,11 @@ export const MANUAL = {
       standard: 'GDPR (Regulation (EU) 2016/679)',
       blurb: 'The security-of-processing and accountability articles Bailey supports. Lawful basis, data-subject rights, DPIAs and breach notification remain controller obligations.',
       rows: [
-        { control: 'Art. 30', req: 'Records of processing activities', status: 'provided', bailey: 'Per-egress data-processing record, auto-maintained', ch: '17', yours: 'Controller-level register' },
-        { control: 'Art. 28', req: 'Processor obligations / DPAs', status: 'provided', bailey: 'DPA stored before egress is allowed', ch: '17', yours: 'Contract terms & due diligence' },
-        { control: 'Art. 32', req: 'Security of processing', status: 'provided', bailey: 'Access control, secrets, backup & resilience', ch: '13 · 15 · 16', yours: 'Risk-based measures & review' },
-        { control: 'Art. 5(1)(f)', req: 'Integrity & confidentiality', status: 'provided', bailey: 'Gated access + default-deny egress', ch: '01 · 17', yours: 'Data-handling policy' },
-        { control: 'Art. 33', req: 'Breach notification', status: 'partial', bailey: 'Audit trail to reconstruct what happened', ch: '12', yours: '72-hour notification process' },
+        { control: 'Art. 30', req: 'Records of processing activities', status: 'provided', bailey: 'Per-egress data-processing record, auto-maintained', ch: '18', yours: 'Controller-level register' },
+        { control: 'Art. 28', req: 'Processor obligations / DPAs', status: 'provided', bailey: 'DPA stored before egress is allowed', ch: '18', yours: 'Contract terms & due diligence' },
+        { control: 'Art. 32', req: 'Security of processing', status: 'provided', bailey: 'Access control, secrets, backup & resilience', ch: '14 · 16 · 17', yours: 'Risk-based measures & review' },
+        { control: 'Art. 5(1)(f)', req: 'Integrity & confidentiality', status: 'provided', bailey: 'Gated access + default-deny egress', ch: '01 · 18', yours: 'Data-handling policy' },
+        { control: 'Art. 33', req: 'Breach notification', status: 'partial', bailey: 'Audit trail to reconstruct what happened', ch: '13', yours: '72-hour notification process' },
       ],
     },
   ],

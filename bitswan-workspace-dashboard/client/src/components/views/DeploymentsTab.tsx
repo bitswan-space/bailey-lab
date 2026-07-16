@@ -1,4 +1,5 @@
 import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   Archive,
   ArrowRight,
@@ -16,6 +17,7 @@ import {
   FileText,
   FlaskConical,
   Folder,
+  Gavel,
   GitCompare,
   GitMerge,
   Globe,
@@ -23,18 +25,22 @@ import {
   KeyRound,
   Layers,
   MemoryStick,
+  Minus,
   Moon,
   Power,
   LifeBuoy,
   Loader2,
   Lock,
   Play,
+  Plus,
   RotateCcw,
   Rocket,
   Scaling,
   Search,
   Shield,
+  ShieldAlert,
   ShieldCheck,
+  Snowflake,
   Square,
   Terminal,
   Undo2,
@@ -53,7 +59,7 @@ import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
 import { FirewallPanel } from '@/components/firewall/FirewallPanel';
 import { LogsPane } from '@/components/automations/inspect/LogsPane';
 import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
-import type { ServiceType } from '@/lib/api';
+import type { ServiceType, StagingGate, StagingLogEntry, StagingSignoff } from '@/lib/api';
 import { promoteBpWithToast } from '@/lib/deployBp';
 import { STATUS_META, stateToDisplay, type DisplayStatus } from '@/lib/status';
 import {
@@ -148,6 +154,7 @@ type Section =
   | 'backups'
   | 'firewall'
   | 'supply'
+  | 'audits'
   | 'recovery'
   | 'architecture';
 
@@ -159,6 +166,7 @@ const SECTION_IDS: Section[] = [
   'backups',
   'firewall',
   'supply',
+  'audits',
   'recovery',
   'architecture',
 ];
@@ -272,9 +280,6 @@ function StageNode({
           </span>
         </span>
       </span>
-      {active && (
-        <span className="absolute top-full h-[22px] w-0.5 bg-primary" aria-hidden />
-      )}
     </button>
   );
 }
@@ -285,18 +290,24 @@ function PromoteButton({
   label,
   busy,
   onClick,
+  blockedTitle,
 }: {
   canPromote: boolean;
   label: string;
   busy: boolean;
   onClick: () => void;
+  blockedTitle?: string;
 }) {
   return (
     <button
       type="button"
       disabled={!canPromote || busy}
       onClick={onClick}
-      title={canPromote ? `Promote all containers to ${label}` : `Nothing new to promote to ${label}`}
+      title={
+        canPromote
+          ? `Promote all containers to ${label}`
+          : blockedTitle || `Nothing new to promote to ${label}`
+      }
       className={cn(
         'inline-flex h-[30px] items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold uppercase tracking-[0.03em] transition-colors',
         canPromote
@@ -307,6 +318,544 @@ function PromoteButton({
       Promote
       <ArrowRight className="size-3.5" aria-hidden />
     </button>
+  );
+}
+
+// ── Freeze staging + production-promotion audit gate ───────────────────────
+
+/** Whether a role may freeze staging, edit the audit policy, and sign off. */
+function isAuditor(role: string | null): boolean {
+  return role === 'admin' || role === 'auditor';
+}
+
+/** Freeze / Frozen pill hanging off the Staging node, with a quarter-circle arc
+ *  (arrowhead curling toward the promote-to-production side) linking the node to
+ *  the pill — mirrors the wireframe. Absolutely positioned so its origin sits at
+ *  the node's centre; the parent staging cell is `relative`. Freezing (admin/
+ *  auditor only) locks the staging image for audit and closes dev→staging. */
+function FreezeControl({
+  gate,
+  canManage,
+  busy,
+  onToggle,
+}: {
+  // eslint-disable-next-line no-restricted-syntax -- null = gate not loaded yet
+  gate: StagingGate | null;
+  canManage: boolean;
+  busy: boolean;
+  onToggle: (frozen: boolean) => void;
+}) {
+  if (!gate) return null;
+  const frozen = gate.frozen;
+  const stroke = frozen ? '#0284c7' : '#a1a1aa';
+  const R = 34; // arc radius — same centre as the staging circle, just outside it
+  const p = R * 0.707; // 45° offset
+  const title = frozen
+    ? `Staging frozen${gate.frozen_by ? ` by ${gate.frozen_by}` : ''}${gate.frozen_at ? ` · ${gate.frozen_at}` : ''}${canManage ? ' — click to unfreeze (re-opens promotion from Development)' : ''}`
+    : canManage
+      ? 'Freeze staging — locks the image for audit and enables promotion to Production'
+      : 'Only admins and auditors can freeze staging';
+  return (
+    <div className="pointer-events-none absolute left-1/2 top-[26px] size-0" style={{ zIndex: 2 }}>
+      {/* Quarter circle hugging the node's bottom (7:30 → 4:30) with an arrowhead
+          curling toward the promote-to-prod side. */}
+      <svg width="1" height="1" style={{ position: 'absolute', left: 0, top: 0, overflow: 'visible' }} aria-hidden>
+        <path
+          d={`M ${-p} ${p} A ${R} ${R} 0 0 0 ${p} ${p}`}
+          fill="none"
+          stroke={stroke}
+          strokeWidth="1.6"
+          strokeLinecap="round"
+        />
+        <path
+          d={`M ${p - 1.7} ${p + 6.8} L ${p} ${p} L ${p - 6.8} ${p + 1.7}`}
+          fill="none"
+          stroke={stroke}
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <button
+        type="button"
+        disabled={!canManage || busy}
+        onClick={() => onToggle(!frozen)}
+        title={title}
+        style={{ top: R + 8, left: 0 }}
+        className={cn(
+          'pointer-events-auto absolute flex h-[26px] -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 text-[10px] font-bold uppercase tracking-[0.05em] shadow-sm transition-colors',
+          frozen
+            ? 'border-sky-300 bg-sky-50 text-sky-700'
+            : 'border-border bg-background text-muted-foreground',
+          canManage && !busy ? 'cursor-pointer hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed',
+        )}
+      >
+        <Snowflake className="size-3" aria-hidden />
+        {frozen ? 'Unfreeze' : 'Freeze'}
+      </button>
+    </div>
+  );
+}
+
+/** Dashed "locked" pill that REPLACES a promote button — the freeze toggle
+ *  decides which stage can be promoted, so the button is removed (not merely
+ *  disabled) to make that obvious. */
+function LockedStep({ label, title }: { label: string; title: string }) {
+  return (
+    <span
+      title={title}
+      className="inline-flex h-[30px] items-center gap-1.5 rounded-full border border-dashed border-border bg-muted/40 px-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-muted-foreground"
+    >
+      <Lock className="size-3.5" aria-hidden />
+      {label}
+    </span>
+  );
+}
+
+/** "Audits N/M" step in the pipeline BETWEEN Staging and the promote-to-prod
+ *  button (its own node, with connector lines on each side — wireframe). Opens
+ *  the Audits sub-tab. Neutral when nothing is on staging, green when the policy
+ *  is met, amber when sign-offs are still outstanding. */
+function AuditsBadge({ gate, onClick }: { gate: StagingGate; onClick: () => void }) {
+  const hasStaging = !!gate.current_sha;
+  const met = gate.audits_met && gate.rejections === 0;
+  const cls = !hasStaging
+    ? 'border-border bg-background text-muted-foreground'
+    : met
+      ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+      : 'border-amber-300 bg-amber-50 text-amber-700';
+  return (
+    <button
+      type="button"
+      onClick={hasStaging ? onClick : undefined}
+      disabled={!hasStaging}
+      title={
+        !hasStaging
+          ? 'Nothing deployed to Staging yet'
+          : `${gate.approvals} of ${gate.required} required audit sign-offs on the staging image — click to review or add yours`
+      }
+      className={cn(
+        'inline-flex h-[30px] shrink-0 items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold uppercase tracking-[0.03em] transition-colors',
+        cls,
+        hasStaging ? 'cursor-pointer' : 'cursor-not-allowed',
+      )}
+    >
+      <Gavel className="size-3.5" aria-hidden />
+      Audits {gate.approvals}/{gate.required}
+    </button>
+  );
+}
+
+/** One freeze / unfreeze / policy-change event in the gate's governance log. */
+function LogRow({ e }: { e: StagingLogEntry }) {
+  const icon =
+    e.event === 'policy' ? (
+      <Gavel className="size-3.5" aria-hidden />
+    ) : (
+      <Snowflake className="size-3.5" aria-hidden />
+    );
+  const tone = e.event === 'policy' ? 'bg-violet-100 text-violet-700' : 'bg-sky-100 text-sky-700';
+  return (
+    <div className="flex items-start gap-3 border-b border-border/60 py-2.5 last:border-b-0">
+      <span
+        className={cn('mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full', tone)}
+        aria-hidden
+      >
+        {icon}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-[13px] font-semibold text-foreground">{e.who}</span>
+          {e.role ? <span className="text-[12px] text-muted-foreground">· {e.role}</span> : null}
+          <span className="text-[12px] text-muted-foreground">· {e.at}</span>
+        </div>
+        <div className="mt-0.5 text-[13px] text-foreground">{e.detail}</div>
+      </div>
+    </div>
+  );
+}
+
+/** One audit sign-off (approve / request changes) on the staging image. */
+function SignoffRow({ a }: { a: StagingSignoff }) {
+  const ok = a.verdict === 'approve';
+  return (
+    <div className="flex items-start gap-3 border-b border-border/60 py-2.5 last:border-b-0">
+      <span
+        className={cn(
+          'mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full',
+          ok ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700',
+        )}
+        aria-hidden
+      >
+        {ok ? <Check className="size-3.5" aria-hidden /> : <X className="size-3.5" aria-hidden />}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-[13px] font-semibold text-foreground">{a.who}</span>
+          {a.role ? <span className="text-[12px] text-muted-foreground">· {a.role}</span> : null}
+          <span
+            className={cn(
+              'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold',
+              ok ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700',
+            )}
+          >
+            {ok ? 'Approved' : 'Changes requested'}
+          </span>
+          <span className="text-[12px] text-muted-foreground">· {a.at}</span>
+        </div>
+        {a.note ? (
+          <div className="mt-1 rounded-md border-l-2 border-border bg-muted/40 px-2.5 py-1.5 text-[12px] text-muted-foreground">
+            {a.note}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** The Audits sub-tab: audit policy (editable by admin/auditor), freeze status,
+ *  the audit log (from bitswan.yaml), and the sign-off form. */
+function AuditsPanel({
+  bp,
+  gate,
+  role,
+  meEmail,
+  onChange,
+}: {
+  bp: string;
+  // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
+  gate: StagingGate | null;
+  // eslint-disable-next-line no-restricted-syntax -- null = unknown role
+  role: string | null;
+  meEmail: string;
+  onChange: () => void;
+}) {
+  const canAudit = isAuditor(role);
+  const roleKnown = role !== null;
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [editPolicy, setEditPolicy] = useState(false);
+  const [draft, setDraft] = useState(gate?.required ?? 1);
+  // The workspace's auditor/admin roster — shown to a member so they know who to
+  // ask. null = loading; [] with error flag = load failed (honest, not faked).
+  // eslint-disable-next-line no-restricted-syntax -- null = loading
+  const [auditors, setAuditors] = useState<{ email: string; role: string }[] | null>(null);
+  const [auditorsError, setAuditorsError] = useState(false);
+  useEffect(() => {
+    setDraft(gate?.required ?? 1);
+  }, [gate?.required]);
+  useEffect(() => {
+    // Only a non-auditor needs the "ask one of these people" list.
+    if (!roleKnown || canAudit) return;
+    let alive = true;
+    api
+      .workspaceAuditors()
+      .then((r) => {
+        if (alive) setAuditors(r.users ?? []);
+      })
+      .catch(() => {
+        if (alive) {
+          setAuditors([]);
+          setAuditorsError(true);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [roleKnown, canAudit]);
+
+  if (!gate) {
+    return (
+      <div className="px-3 py-12 text-center text-[13px] text-muted-foreground">Loading…</div>
+    );
+  }
+
+  // My most-recent sign-off on the frozen image (signoffs are newest-first), so
+  // I can see my current verdict and change it — reject → approve or back.
+  const myLatest = meEmail ? gate.signoffs.find((a) => a.who === meEmail) : undefined;
+
+  const doAudit = async (verdict: 'approve' | 'reject') => {
+    setBusy(true);
+    const work = api.recordAudit(bp, verdict, note.trim() || undefined);
+    toast.promise(work, {
+      loading: verdict === 'approve' ? 'Recording approval…' : 'Requesting changes…',
+      success: verdict === 'approve' ? 'Audit approved' : 'Changes requested',
+      error: (e: unknown) => `Audit failed: ${String(e)}`,
+    });
+    try {
+      await work;
+      setNote('');
+      onChange();
+    } catch {
+      /* toast handled */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const savePolicy = async () => {
+    setBusy(true);
+    const work = api.setAuditPolicy(bp, draft);
+    toast.promise(work, {
+      loading: 'Saving audit policy…',
+      success: 'Audit policy saved',
+      error: (e: unknown) => `Save failed: ${String(e)}`,
+    });
+    try {
+      await work;
+      setEditPolicy(false);
+      onChange();
+    } catch {
+      /* toast handled */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-4 px-1 py-1">
+      {/* Policy + freeze status + sign-off are auditor/admin surface. A member
+          sees only the audit log plus the "ask an auditor" coverage below. */}
+      {canAudit ? (
+      <>
+      {/* Audit policy */}
+      <div className="rounded-lg border border-border bg-muted/30 px-3.5 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-2">
+            {gate.audits_met && gate.rejections === 0 ? (
+              <ShieldCheck className="mt-0.5 size-4 shrink-0 text-emerald-600" aria-hidden />
+            ) : (
+              <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600" aria-hidden />
+            )}
+            <div className="text-[13px] text-foreground">
+              <strong>Audit policy:</strong> this image must be signed off by {gate.required}{' '}
+              auditor{gate.required === 1 ? '' : 's'} before Staging can be promoted to Production.{' '}
+              <strong>{gate.approvals}</strong> of {gate.required} complete.
+            </div>
+          </div>
+          {!editPolicy ? (
+            <button
+              type="button"
+              onClick={() => setEditPolicy(true)}
+              className="shrink-0 rounded-md border border-border bg-background px-2 py-1 text-[11px] font-semibold text-muted-foreground hover:text-foreground"
+            >
+              Edit policy
+            </button>
+          ) : null}
+        </div>
+        {editPolicy ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <span className="text-[12px] font-semibold text-foreground">Audits required</span>
+            <div className="inline-flex items-center gap-1">
+              <button
+                type="button"
+                aria-label="decrease"
+                onClick={() => setDraft((n) => Math.max(1, n - 1))}
+                className="inline-flex size-6 items-center justify-center rounded-md border border-border bg-background hover:bg-muted"
+              >
+                <Minus className="size-3" aria-hidden />
+              </button>
+              <span className="w-6 text-center text-[13px] font-semibold text-foreground">
+                {draft}
+              </span>
+              <button
+                type="button"
+                aria-label="increase"
+                onClick={() => setDraft((n) => Math.min(5, n + 1))}
+                className="inline-flex size-6 items-center justify-center rounded-md border border-border bg-background hover:bg-muted"
+              >
+                <Plus className="size-3" aria-hidden />
+              </button>
+            </div>
+            <span className="text-[11px] text-muted-foreground">at least 1 · up to 5</span>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setEditPolicy(false);
+                  setDraft(gate.required);
+                }}
+                className="rounded-md border border-border bg-background px-2.5 py-1 text-[12px] font-semibold text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void savePolicy()}
+                className="rounded-md border border-primary bg-primary px-2.5 py-1 text-[12px] font-semibold text-primary-foreground hover:bg-primary/90"
+              >
+                Save policy
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      {/* Freeze status */}
+      <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+        {gate.frozen ? (
+          <>
+            <Snowflake className="size-3.5 text-sky-600" aria-hidden />
+            <span>
+              Staging is <strong className="text-foreground">frozen</strong>
+              {gate.frozen_by ? ` by ${gate.frozen_by}` : ''}
+              {gate.frozen_at ? ` · ${gate.frozen_at}` : ''}. Audits below apply to the frozen
+              image
+              {gate.frozen_sha ? ` (${gate.frozen_sha.slice(0, 12)})` : ''}.
+            </span>
+          </>
+        ) : (
+          <>
+            <Snowflake className="size-3.5" aria-hidden />
+            <span>
+              Staging is not frozen. Freeze it (on the Staging node) to lock the image and collect
+              audits before promoting to Production.
+            </span>
+          </>
+        )}
+      </div>
+      </>
+      ) : null}
+
+      {/* Audit sign-offs on the staging image (from the content-hash-keyed
+          store — these travel with the image into Production). */}
+      <div>
+        <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Audit sign-offs {gate.frozen_sha ? `· image ${gate.frozen_sha.slice(0, 12)}` : ''}
+        </div>
+        {gate.signoffs.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-[13px] text-muted-foreground">
+            No sign-offs on this image yet.
+          </div>
+        ) : (
+          <div className="rounded-lg border border-border bg-background px-3.5">
+            {gate.signoffs.map((a) => (
+              <SignoffRow key={a.id} a={a} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Freeze & policy governance history. */}
+      {gate.log.length > 0 && (
+        <div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Freeze &amp; policy history
+          </div>
+          <div className="rounded-lg border border-border bg-background px-3.5">
+            {gate.log.map((e) => (
+              <LogRow key={e.id} e={e} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Action area: member coverage / freeze-first / sign-off form */}
+      {!roleKnown ? null : !canAudit ? (
+        // A normal member: everything but the log is covered by an explainer +
+        // the list of auditors/admins they can ask.
+        <div className="order-first rounded-lg border border-border bg-muted/30 px-3.5 py-3">
+          <div className="flex items-start gap-2">
+            <Lock className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <div className="text-[13px] text-foreground">
+              Only <strong>admins and auditors</strong> can freeze staging, set the audit policy and
+              sign off. You can promote to Staging, but promoting to Production must be done by an
+              auditor. Ask one of them to review this image:
+            </div>
+          </div>
+          <div className="mt-2.5 pl-6">
+            {auditors === null ? (
+              <div className="text-[12px] text-muted-foreground">Loading auditors…</div>
+            ) : auditorsError ? (
+              <div className="text-[12px] text-amber-700">
+                Couldn’t load the auditor list. Please try again.
+              </div>
+            ) : auditors.length === 0 ? (
+              <div className="text-[12px] text-muted-foreground">
+                No auditors or admins are configured in this workspace yet.
+              </div>
+            ) : (
+              <ul className="space-y-1">
+                {auditors.map((a) => (
+                  <li key={a.email} className="flex items-center gap-2 text-[13px] text-foreground">
+                    <User className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                    <span className="font-medium">{a.email}</span>
+                    <span className="rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {a.role}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      ) : !gate.frozen ? (
+        // Auditor/admin, but nothing to audit yet — must freeze first.
+        <div className="order-first flex items-center gap-2 rounded-lg border border-dashed border-border bg-muted/30 px-3.5 py-3 text-[13px] text-foreground">
+          <Snowflake className="size-4 shrink-0 text-sky-600" aria-hidden />
+          <span>
+            You must <strong>freeze staging</strong> before auditing — freeze it on the Staging node
+            above to lock the image, then sign off here.
+          </span>
+        </div>
+      ) : (
+        <div className="order-first rounded-lg border border-border bg-muted/30 px-3.5 py-3">
+          {myLatest ? (
+            <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[12px] text-muted-foreground">
+              <span>Your current sign-off:</span>
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold',
+                  myLatest.verdict === 'approve'
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : 'bg-red-100 text-red-700',
+                )}
+              >
+                {myLatest.verdict === 'approve' ? (
+                  <Check className="size-3" aria-hidden />
+                ) : (
+                  <X className="size-3" aria-hidden />
+                )}
+                {myLatest.verdict === 'approve' ? 'Approved' : 'Changes requested'}
+              </span>
+              <span>— you can change it below.</span>
+            </div>
+          ) : null}
+          <div className="mb-2 text-[13px] font-semibold text-foreground">
+            {myLatest ? 'Update your audit' : 'Add your audit'}
+          </div>
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            rows={3}
+            placeholder="Audit note — what did you review? (supports multiple lines)"
+            className="mb-2 w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-[13px] outline-none focus:border-primary"
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void doAudit('approve')}
+              className="inline-flex items-center gap-1.5 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-[12px] font-semibold text-emerald-700 hover:bg-emerald-100"
+            >
+              <Check className="size-3.5" aria-hidden />
+              Approve
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void doAudit('reject')}
+              className="inline-flex items-center gap-1.5 rounded-md border border-red-300 bg-red-50 px-3 py-1.5 text-[12px] font-semibold text-red-700 hover:bg-red-100"
+            >
+              <X className="size-3.5" aria-hidden />
+              Request changes
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -455,7 +1004,11 @@ function ContainerCard({
   const KindIcon = m.expose ? Globe : Boxes;
   const toggle = (p: 'logs' | 'inspect') => setOpen((cur) => (cur === p ? null : p));
   return (
-    <div className="overflow-hidden rounded-[10px] border border-border bg-background">
+    <div
+      data-testid="container-card"
+      data-container-status={m.display}
+      className="overflow-hidden rounded-[10px] border border-border bg-background"
+    >
       <div className="flex flex-wrap items-center gap-2.5 px-4 py-3">
         <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
           <KindIcon className="size-3.5 text-muted-foreground" aria-hidden />
@@ -1114,6 +1667,9 @@ function DeploymentCard({
   const tone = entryTone(entry, isCurrent);
   const isFw = entry.source === 'firewall';
   const isBackup = entry.source === 'backup';
+  const audits = entry.audit ?? [];
+  // Which auditors' notes are expanded (badge is clickable to reveal the note).
+  const [openNotes, setOpenNotes] = useState<Record<string, boolean>>({});
   const ver = entry.source_commit ?? entry.commit;
   const members = Object.entries(entry.members ?? {});
   const firstImg = members.find(([, m]) => m.image_id)?.[1]?.image_id;
@@ -1206,6 +1762,47 @@ function DeploymentCard({
           </>
         )}
       </div>
+      {/* Audited-by badges (production promotes): the auditor(s) who signed off
+          this image; each chip is clickable to reveal their note. */}
+      {audits.length > 0 && (
+        <div className="flex flex-col gap-1.5 border-t border-border/60 pt-2.5">
+          <div className="flex flex-wrap items-center gap-1.5 text-[12px]">
+            <span className="inline-flex items-center gap-1 text-muted-foreground">
+              <ShieldCheck className="size-3.5 text-emerald-600" aria-hidden />
+              Audited by
+            </span>
+            {audits.map((a) => (
+              <button
+                key={a.who}
+                type="button"
+                onClick={() => setOpenNotes((o) => ({ ...o, [a.who]: !o[a.who] }))}
+                title="Show this auditor's note"
+                aria-expanded={!!openNotes[a.who]}
+                className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100"
+              >
+                <User className="size-3" aria-hidden />
+                {a.who}
+              </button>
+            ))}
+          </div>
+          {audits
+            .filter((a) => openNotes[a.who])
+            .map((a) => (
+              <div
+                key={a.who}
+                className="rounded-md border-l-2 border-emerald-300 bg-emerald-50/50 px-2.5 py-1.5 text-[12px]"
+              >
+                <div className="text-[11px] font-medium text-foreground">
+                  {a.who}
+                  {a.at ? <span className="font-normal text-muted-foreground"> · {a.at}</span> : null}
+                </div>
+                <div className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">
+                  {a.note || 'Approved (no note left).'}
+                </div>
+              </div>
+            ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1233,6 +1830,14 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   // the entry itself is resolved from the loaded history below.
   const [inspectCommit, setInspectCommit] = useUrlParam('inspect');
   const [rollbackCommit, setRollbackCommit] = useUrlParam('rollback');
+  // Freeze + audit gate: who I am (role gates Freeze / audit sign-off / policy),
+  // and this BP's staging-gate state (frozen flag, audit policy, audit log).
+  // eslint-disable-next-line no-restricted-syntax -- null = role not resolved yet
+  const [role, setRole] = useState<'admin' | 'auditor' | 'member' | null>(null);
+  const [meEmail, setMeEmail] = useState('');
+  // eslint-disable-next-line no-restricted-syntax -- null = gate not loaded yet
+  const [gate, setGate] = useState<StagingGate | null>(null);
+  const [freezeBusy, setFreezeBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -1249,6 +1854,41 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
       setByStage(Object.fromEntries(pairs));
       setLoaded(true);
     });
+    return () => {
+      alive = false;
+    };
+  }, [bp.name, reloadKey]);
+
+  // My identity/role — gates the Freeze control, policy editing and audit
+  // sign-off (fails closed to 'member' on error).
+  useEffect(() => {
+    let alive = true;
+    api
+      .getMe()
+      .then((m) => {
+        if (!alive) return;
+        setRole(m.role ?? 'member');
+        setMeEmail(m.email ?? '');
+      })
+      .catch(() => {
+        if (alive) setRole('member');
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // This BP's staging freeze + audit gate.
+  useEffect(() => {
+    let alive = true;
+    api
+      .stagingGate(bp.name)
+      .then((g) => {
+        if (alive) setGate(g);
+      })
+      .catch(() => {
+        if (alive) setGate(null);
+      });
     return () => {
       alive = false;
     };
@@ -1439,6 +2079,29 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     [bp.name, refresh],
   );
 
+  const runFreeze = useCallback(
+    async (frozen: boolean) => {
+      setFreezeBusy(true);
+      const work = api.setStagingFreeze(bp.name, frozen);
+      toast.promise(work, {
+        loading: frozen ? 'Freezing staging for audit…' : 'Unfreezing staging…',
+        success: frozen
+          ? 'Staging frozen — promotion from Development is closed until you unfreeze'
+          : 'Staging unfrozen — promotion from Development re-opened',
+        error: (e: unknown) => `${frozen ? 'Freeze' : 'Unfreeze'} failed: ${String(e)}`,
+      });
+      try {
+        await work;
+        refresh();
+      } catch {
+        /* toast handled */
+      } finally {
+        setFreezeBusy(false);
+      }
+    },
+    [bp.name, refresh],
+  );
+
   const runContainer = useCallback(
     async (action: 'start' | 'stop' | 'restart', id: string, name: string) => {
       const verb = { start: 'Starting', stop: 'Stopping', restart: 'Restarting' }[action];
@@ -1552,6 +2215,19 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     };
   }, [bp.name, activeStage, isDr, reloadKey]);
 
+  // Audits tab badge: while staging is frozen, surface outstanding sign-offs
+  // (red on a requested-change, amber on remaining approvals) so the tab that
+  // gates production is visible.
+  const auditBadge = useMemo<{ n: number; cls: string; title: string }[]>(() => {
+    if (!gate || !gate.frozen) return [];
+    if (gate.rejections > 0)
+      return [{ n: gate.rejections, cls: 'bg-red-600', title: 'Changes requested on the frozen image' }];
+    const remaining = Math.max(0, gate.required - gate.approvals);
+    return remaining
+      ? [{ n: remaining, cls: 'bg-amber-500', title: `${remaining} more audit sign-off(s) required` }]
+      : [];
+  }, [gate]);
+
   // DR's tabs: its own Recovery-tests + Containers, then a "Mirrored from
   // Production" group (read-only) for the data it shares. Other stages keep the
   // full set.
@@ -1579,6 +2255,11 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         { id: 'backups', icon: Archive, label: 'Backups' },
         { id: 'firewall', icon: Shield, label: 'Firewall', badges: firewallBadge },
         { id: 'supply', icon: Boxes, label: 'Supply chain', badges: supplyBadges },
+        // Audits live on Staging only — the gate is about freezing the staging
+        // image and signing it off before it can be promoted to Production.
+        ...(activeStage === 'staging'
+          ? [{ id: 'audits' as Section, icon: Gavel, label: 'Audits', badges: auditBadge }]
+          : []),
       ];
   // The section that's actually shown — falls back to the stage's first tab when
   // the URL section isn't valid here (e.g. 'backups' isn't a DR tab, 'recovery'
@@ -1606,8 +2287,10 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
           </div>
         </div>
 
-        {/* Stage pipeline — a bare stepper above the card (wireframe) */}
-        <div className="flex items-center gap-2 px-11 pt-7">
+        {/* Stage pipeline — a bare stepper above the card (wireframe). Extra
+            bottom padding leaves room for the Freeze pill that hangs below the
+            Staging node. */}
+        <div className="flex items-center gap-2 px-11 pb-12 pt-7">
           {STAGES.map((s, i) => {
             const sHist = byStage[stageDataId(s.id)];
             // "Deployed" needs a real deployment (an entry with a source
@@ -1624,40 +2307,148 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             const srcKey = deployedContentKey(sHist);
             const tgtKey = next ? deployedContentKey(byStage[next.id]) : null;
             const canPromote = deployed && !!next && srcKey !== tgtKey;
-            return (
-              <Fragment key={s.id}>
+            const auditor = isAuditor(role);
+
+            // Each node sits in a `relative` cell so the active-stage vertical
+            // connector (and, for staging, the Freeze control that hangs off the
+            // node via an arc) can be absolutely positioned. The connector drops
+            // to the card below; for the Staging stage it is a SHORT segment in
+            // the lower section BELOW the Freeze pill, so it neither collides
+            // with the pill nor gets clipped by the extra room the pill needs.
+            const isActive = s.id === activeStage;
+            const node = (
+              <div className="relative flex shrink-0 flex-col items-center">
                 <StageNode
                   stage={s}
                   deployed={deployed}
-                  active={s.id === activeStage}
+                  active={isActive}
                   onClick={() => setActiveStage(s.id)}
                 />
+                {s.id === 'staging' && (
+                  <FreezeControl
+                    gate={gate}
+                    canManage={auditor}
+                    busy={freezeBusy}
+                    onToggle={(f) => {
+                      // Freezing locks the image for review — jump straight to
+                      // the staging Audits tab so the auditor can sign off.
+                      if (f) {
+                        setActiveStage('staging');
+                        setSection('audits');
+                      }
+                      void runFreeze(f);
+                    }}
+                  />
+                )}
+                {isActive && (
+                  <span
+                    aria-hidden
+                    className={cn(
+                      'absolute left-1/2 w-0.5 -translate-x-1/2 bg-primary',
+                      s.id === 'staging' ? 'top-[102px] h-[18px]' : 'top-full h-[68px]',
+                    )}
+                  />
+                )}
+              </div>
+            );
+
+            // The inter-stage control encodes the freeze + audit gate:
+            //   dev→staging   — a normal promote, but CLOSED while frozen.
+            //   staging→prod   — needs freeze (locked otherwise), then the audit
+            //                    policy met + an admin/auditor to click promote.
+            let control: ReactNode = null;
+            if (next?.id === 'dr') {
+              // "Restore" = go live on the recovered environment (ingress cutover
+              // + state flip, no data move). View/verify DR via its stage button.
+              control = (
+                <button
+                  type="button"
+                  onClick={() => setSwapConfirm(true)}
+                  title="Restore: make Disaster Recovery the live Production (ingress cutover, no data moved)"
+                  className="inline-flex h-[30px] items-center gap-1.5 rounded-full border border-dashed border-border bg-background px-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-muted-foreground hover:border-primary/40 hover:text-foreground"
+                >
+                  <RotateCcw className="size-3.5" aria-hidden />
+                  Restore
+                </button>
+              );
+            } else if (next && s.id === 'dev') {
+              control = gate?.frozen ? (
+                <LockedStep
+                  label="Frozen"
+                  title="Staging is frozen for audit — unfreeze it to promote from Development"
+                />
+              ) : (
+                <PromoteButton
+                  canPromote={canPromote}
+                  label={next.label}
+                  busy={busy}
+                  onClick={() => void runPromote('staging')}
+                />
+              );
+            } else if (next && s.id === 'staging') {
+              // The Audits step is emitted separately (below) as its own pipeline
+              // node BEFORE this promote control — wireframe ordering.
+              if (!gate?.frozen) {
+                control = (
+                  <LockedStep
+                    label="Freeze to unlock"
+                    title="Freeze staging to enable promotion to Production"
+                  />
+                );
+              } else {
+                const promotable = canPromote && gate.promotable && auditor;
+                const reason = !auditor
+                  ? 'Only admins and auditors can promote to Production — ask an auditor to review the frozen image'
+                  : gate.stale
+                    ? 'The staging image changed since it was frozen — re-freeze staging before promoting'
+                    : gate.rejections > 0
+                      ? 'An auditor requested changes on the frozen image — address them and re-freeze'
+                      : !gate.audits_met
+                        ? `Audits incomplete — ${gate.approvals} of ${gate.required} sign-offs on the frozen staging image`
+                        : !canPromote
+                          ? 'Production already matches the frozen Staging image'
+                          : `Promote the frozen staging image to ${next.label}`;
+                control = (
+                  <PromoteButton
+                    canPromote={promotable}
+                    label={next.label}
+                    busy={busy}
+                    blockedTitle={reason}
+                    onClick={() => void runPromote('production')}
+                  />
+                );
+              }
+            } else if (next) {
+              control = (
+                <PromoteButton
+                  canPromote={canPromote}
+                  label={next.label}
+                  busy={busy}
+                  onClick={() => void runPromote(next.id as 'staging' | 'production')}
+                />
+              );
+            }
+
+            return (
+              <Fragment key={s.id}>
+                {node}
                 {next && (
                   <>
                     <div className="h-0.5 flex-1 bg-border" aria-hidden />
-                    <div className="shrink-0">
-                      {next.id === 'dr' ? (
-                        // "Restore" = go live on the recovered environment: swap
-                        // which slot is Production vs DR (ingress cutover + state
-                        // flip, no data move). View/verify DR via its stage button.
-                        <button
-                          type="button"
-                          onClick={() => setSwapConfirm(true)}
-                          title="Restore: make Disaster Recovery the live Production (ingress cutover, no data moved)"
-                          className="inline-flex h-[30px] items-center gap-1.5 rounded-full border border-dashed border-border bg-background px-3 text-[11px] font-semibold uppercase tracking-[0.03em] text-muted-foreground hover:border-primary/40 hover:text-foreground"
-                        >
-                          <RotateCcw className="size-3.5" aria-hidden />
-                          Restore
-                        </button>
-                      ) : (
-                        <PromoteButton
-                          canPromote={canPromote}
-                          label={next.label}
-                          busy={busy}
-                          onClick={() => void runPromote(next.id as 'staging' | 'production')}
+                    {/* staging → production runs through an Audits step first */}
+                    {s.id === 'staging' && gate && (
+                      <>
+                        <AuditsBadge
+                          gate={gate}
+                          onClick={() => {
+                            setActiveStage('staging');
+                            setSection('audits');
+                          }}
                         />
-                      )}
-                    </div>
+                        <div className="h-0.5 flex-1 bg-border" aria-hidden />
+                      </>
+                    )}
+                    <div className="shrink-0">{control}</div>
                     <div className="h-0.5 flex-1 bg-border" aria-hidden />
                   </>
                 )}
@@ -1879,6 +2670,14 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   activeStage === 'staging' ? 'dev' : activeStage === 'production' ? 'staging' : undefined
                 }
                 readOnly={isDr}
+                onChange={refresh}
+              />
+            ) : visibleSection === 'audits' ? (
+              <AuditsPanel
+                bp={bp.name}
+                gate={gate}
+                role={role}
+                meEmail={meEmail}
                 onChange={refresh}
               />
             ) : (
