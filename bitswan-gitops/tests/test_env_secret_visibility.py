@@ -59,7 +59,7 @@ def _patch(
     stage,
     role=None,
     raise_role=False,
-    secret_keys=frozenset({"API_KEY"})
+    secret_keys=frozenset({"API_KEY"}),
 ):
     realm = bp_secrets.realm_for_stage(stage)
     bs = {
