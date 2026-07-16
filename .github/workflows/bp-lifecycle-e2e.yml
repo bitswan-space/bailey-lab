@@ -5,7 +5,7 @@ name: BP lifecycle E2E (real stack)
 # restore into DR -> record recovery test -> swap -> rollback -> re-apply.
 #
 # Everything is real docker (daemon, gitops, traefik, the dashboard, postgres,
-# minio, real deploys/snapshots/blue-green slots/ingress reconcile). The ONLY
+# garage, real deploys/snapshots/blue-green slots/ingress reconcile). The ONLY
 # thing swapped out is the identity provider: a disposable Keycloak with a
 # seeded realm (e2e/keycloak/realm-export.json).
 #

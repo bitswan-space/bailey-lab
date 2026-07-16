@@ -27,7 +27,7 @@ var stderrMutex sync.Mutex
 
 // ServiceEnableRequest represents the request to enable a service
 type ServiceEnableRequest struct {
-	ServiceType      string `json:"service_type"` // "kafka", "couchdb", "postgres", "minio"
+	ServiceType      string `json:"service_type"` // "kafka", "couchdb", "postgres", "garage"
 	Workspace        string `json:"workspace"`
 	Stage            string `json:"stage,omitempty"`
 	DashboardImage   string `json:"dashboard_image,omitempty"`
@@ -37,8 +37,6 @@ type ServiceEnableRequest struct {
 	ZookeeperImage   string `json:"zookeeper_image,omitempty"`
 	CouchDBImage     string `json:"couchdb_image,omitempty"`
 	PostgresImage    string `json:"postgres_image,omitempty"`
-	PgAdminImage     string `json:"pgadmin_image,omitempty"`
-	MinioImage       string `json:"minio_image,omitempty"`
 	CodingAgentImage string `json:"coding_agent_image,omitempty"`
 	Staging          bool   `json:"staging,omitempty"`
 	DevMode          bool   `json:"dev_mode,omitempty"`
@@ -85,8 +83,6 @@ type ServiceUpdateRequest struct {
 	ZookeeperImage     string `json:"zookeeper_image,omitempty"`
 	CouchDBImage       string `json:"couchdb_image,omitempty"`
 	PostgresImage      string `json:"postgres_image,omitempty"`
-	PgAdminImage       string `json:"pgadmin_image,omitempty"`
-	MinioImage         string `json:"minio_image,omitempty"`
 	CodingAgentImage   string `json:"coding_agent_image,omitempty"`
 	InfraDriverImage   string `json:"infra_driver_image,omitempty"`
 	EgressGatewayImage string `json:"egress_gateway_image,omitempty"`
@@ -128,8 +124,6 @@ type gitopsServiceRequest struct {
 	KafkaImage    string `json:"kafka_image,omitempty"`
 	UIImage       string `json:"ui_image,omitempty"`
 	PostgresImage string `json:"postgres_image,omitempty"`
-	PgAdminImage  string `json:"pgadmin_image,omitempty"`
-	MinioImage    string `json:"minio_image,omitempty"`
 	BackupPath    string `json:"backup_path,omitempty"`
 	Force         bool   `json:"force,omitempty"`
 }
@@ -252,16 +246,16 @@ func (s *Server) handleService(w http.ResponseWriter, r *http.Request) {
 	case "update":
 		s.handleServiceUpdate(w, r, serviceType)
 	case "backup":
-		if serviceType == "couchdb" || serviceType == "postgres" || serviceType == "minio" {
+		if serviceType == "couchdb" || serviceType == "postgres" || serviceType == "garage" {
 			s.handleServiceBackup(w, r, serviceType)
 		} else {
-			writeJSONError(w, "backup only available for couchdb, postgres, and minio", http.StatusBadRequest)
+			writeJSONError(w, "backup only available for couchdb, postgres, and garage", http.StatusBadRequest)
 		}
 	case "restore":
-		if serviceType == "couchdb" || serviceType == "postgres" || serviceType == "minio" {
+		if serviceType == "couchdb" || serviceType == "postgres" || serviceType == "garage" {
 			s.handleServiceRestore(w, r, serviceType)
 		} else {
-			writeJSONError(w, "restore only available for couchdb, postgres, and minio", http.StatusBadRequest)
+			writeJSONError(w, "restore only available for couchdb, postgres, and garage", http.StatusBadRequest)
 		}
 	case "clear":
 		if serviceType == "postgres" {
@@ -298,7 +292,7 @@ func (s *Server) handleServiceEnable(w http.ResponseWriter, r *http.Request, ser
 		s.handleDashboardEnableLocal(w, req)
 	case "coding-agent":
 		s.handleCodingAgentEnableLocal(w, req)
-	case "kafka", "couchdb", "postgres", "minio":
+	case "kafka", "couchdb", "postgres", "garage":
 		// Proxy to gitops
 		gitopsBody := gitopsServiceRequest{
 			Stage:         req.Stage,
@@ -306,8 +300,6 @@ func (s *Server) handleServiceEnable(w http.ResponseWriter, r *http.Request, ser
 			KafkaImage:    req.KafkaImage,
 			UIImage:       req.UIImage,
 			PostgresImage: req.PostgresImage,
-			PgAdminImage:  req.PgAdminImage,
-			MinioImage:    req.MinioImage,
 		}
 		proxyToGitops(w, "POST", req.Workspace, fmt.Sprintf("/services/%s/enable", serviceType), gitopsBody)
 	default:
@@ -358,7 +350,7 @@ func (s *Server) handleServiceDisable(w http.ResponseWriter, r *http.Request, se
 			Success: true,
 			Message: "coding-agent service disabled successfully",
 		})
-	case "kafka", "couchdb", "postgres", "minio":
+	case "kafka", "couchdb", "postgres", "garage":
 		gitopsBody := gitopsServiceRequest{Stage: req.Stage}
 		proxyToGitops(w, "POST", req.Workspace, fmt.Sprintf("/services/%s/disable", serviceType), gitopsBody)
 	default:
@@ -419,7 +411,7 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request, ser
 			Success: true,
 			Data:    statusData,
 		})
-	case "kafka", "couchdb", "postgres", "minio":
+	case "kafka", "couchdb", "postgres", "garage":
 		// Build query string for gitops
 		gitopsPath := fmt.Sprintf("/services/%s/status?stage=%s&show_passwords=%v", serviceType, stage, showPasswords)
 		proxyToGitops(w, "GET", workspace, gitopsPath, nil)
@@ -471,7 +463,7 @@ func (s *Server) handleServiceStart(w http.ResponseWriter, r *http.Request, serv
 			Success: true,
 			Message: "coding-agent service started successfully",
 		})
-	case "kafka", "couchdb", "postgres", "minio":
+	case "kafka", "couchdb", "postgres", "garage":
 		gitopsBody := gitopsServiceRequest{Stage: req.Stage}
 		proxyToGitops(w, "POST", req.Workspace, fmt.Sprintf("/services/%s/start", serviceType), gitopsBody)
 	default:
@@ -522,7 +514,7 @@ func (s *Server) handleServiceStop(w http.ResponseWriter, r *http.Request, servi
 			Success: true,
 			Message: "coding-agent service stopped successfully",
 		})
-	case "kafka", "couchdb", "postgres", "minio":
+	case "kafka", "couchdb", "postgres", "garage":
 		gitopsBody := gitopsServiceRequest{Stage: req.Stage}
 		proxyToGitops(w, "POST", req.Workspace, fmt.Sprintf("/services/%s/stop", serviceType), gitopsBody)
 	default:
@@ -584,14 +576,12 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request, ser
 			Success: true,
 			Message: serviceType + " service updated successfully",
 		})
-	case "kafka", "couchdb", "postgres", "minio":
+	case "kafka", "couchdb", "postgres", "garage":
 		gitopsBody := gitopsServiceRequest{
 			Stage:         req.Stage,
 			Image:         req.CouchDBImage,
 			KafkaImage:    req.KafkaImage,
 			PostgresImage: req.PostgresImage,
-			PgAdminImage:  req.PgAdminImage,
-			MinioImage:    req.MinioImage,
 		}
 		proxyToGitops(w, "POST", req.Workspace, fmt.Sprintf("/services/%s/update", serviceType), gitopsBody)
 	default:
@@ -686,10 +676,10 @@ func (s *Server) proxyPostgresRestore(workspace, stage, backupPath string) error
 	return s.proxyServiceRestore(workspace, "postgres", stage, backupPath)
 }
 
-// proxyMinioRestore sends a MinIO restore request to gitops and returns any error.
+// proxyGarageRestore sends a Garage restore request to gitops and returns any error.
 // Used by the interactive job runner in jobs.go.
-func (s *Server) proxyMinioRestore(workspace, stage, backupPath string) error {
-	return s.proxyServiceRestore(workspace, "minio", stage, backupPath)
+func (s *Server) proxyGarageRestore(workspace, stage, backupPath string) error {
+	return s.proxyServiceRestore(workspace, "garage", stage, backupPath)
 }
 
 // proxyServiceRestore sends a service restore request to gitops and returns any error.

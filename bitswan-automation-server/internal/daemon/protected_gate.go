@@ -194,12 +194,12 @@ func gateDirector(r *http.Request) {
 	// The platform terminates TLS at the edge (platform-traefik →
 	// oauth2-proxy); every leg from here on is plain HTTP on the
 	// internal network. Tell the upstream the original scheme was
-	// HTTPS so apps behind a TLS-terminating proxy (e.g. pgAdmin's
-	// Flask/ProxyFix) emit https:// URLs instead of http:// ones —
-	// the latter get blocked as mixed content / by the https-only
-	// inner CSP (strictInnerCSP), which renders pgAdmin as a blank
-	// page. The oauth2-proxy hop already sets this; fill it in only
-	// if it's somehow absent so we never downgrade a real value.
+	// HTTPS so apps behind a TLS-terminating proxy (Flask/ProxyFix
+	// style) emit https:// URLs instead of http:// ones — the latter
+	// get blocked as mixed content / by the https-only inner CSP
+	// (strictInnerCSP), rendering such an app as a blank page. The
+	// oauth2-proxy hop already sets this; fill it in only if it's
+	// somehow absent so we never downgrade a real value.
 	if r.Header.Get("X-Forwarded-Proto") == "" {
 		r.Header.Set("X-Forwarded-Proto", "https")
 	}

@@ -2,14 +2,14 @@
 Per-BP stage-snapshot engine.
 
 A snapshot captures one business process's DATA (its per-BP Postgres
-database, CouchDB databases under the BP prefix, and MinIO bucket — see
+database, CouchDB databases under the BP prefix, and Garage bucket — see
 `bp_databases.py`) at one stage, as local files on the gitops server:
 
     {BITSWAN_GITOPS_DIR}/snapshots/{bp_slug}/{stage}/{snapshot_id}/
         manifest.json
         postgres.sql         (pg_dump of the per-BP database)
         couchdb.tar          ({db}.json per prefixed database + manifest)
-        minio.tar            (bucket contents via mc mirror)
+        garage.tar           (bucket contents via rclone sync in the toolbox)
 
 Artifacts are stored uncompressed: manual snapshots are mirrored off-site
 into the restic repo (see `snapshot_offsite.py`), and restic deduplicates
@@ -42,19 +42,22 @@ import uuid
 from datetime import datetime, timezone
 
 from app.services.bp_databases import (
+    _create_garage_bucket,
+    _garage_creds,
     bp_resource_names,
     get_bp_entry,
     get_service_secrets,
     load_registry,
     validate_bp_slug,
 )
+from app.services.garage_util import garage_rclone_argv
 from app.services.infra_service import get_service
 from app.utils import SERVICE_REALMS
 
 logger = logging.getLogger(__name__)
 
 MANIFEST_VERSION = 1
-SNAPSHOT_DATA_SERVICES = ("postgres", "couchdb", "minio")
+SNAPSHOT_DATA_SERVICES = ("postgres", "couchdb", "garage")
 AUTO_SNAPSHOTS_KEEP = 5
 
 _SNAPSHOT_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{8}$")
@@ -62,7 +65,7 @@ _SNAPSHOT_ID_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{8}$")
 _SERVICE_FILES = {
     "postgres": "postgres.sql",
     "couchdb": "couchdb.tar",
-    "minio": "minio.tar",
+    "garage": "garage.tar",
 }
 
 
@@ -433,7 +436,7 @@ class SnapshotService:
                 elif svc_type == "couchdb":
                     extra = await self._dump_couchdb(stage, names, out_file)
                 else:
-                    extra = await self._dump_minio(stage, names, out_file)
+                    extra = await self._dump_garage(stage, names, out_file)
                 services_meta[svc_type] = {
                     "included": True,
                     "file": _SERVICE_FILES[svc_type],
@@ -491,7 +494,7 @@ class SnapshotService:
 
         Order: validate (nothing destructive yet) → auto-snapshot the target
         → prune auto-snapshots → clear+load per service (PG → CouchDB →
-        MinIO). On a mid-restore failure the raised error names the
+        Garage). On a mid-restore failure the raised error names the
         pre-restore snapshot so the user can roll back.
         """
 
@@ -566,14 +569,14 @@ class SnapshotService:
                 elif svc_type == "couchdb":
                     await self._restore_couchdb(target_stage, names, in_file)
                 else:
-                    # The minio archive is rooted at the bucket it was taken
+                    # The garage archive is rooted at the bucket it was taken
                     # FROM; for a blue-green DR restore that source bucket (live
                     # db) differs from the target bucket (standby db), so pass
                     # it through rather than assuming it matches the target.
-                    src_bucket = (manifest["services"].get("minio") or {}).get(
+                    src_bucket = (manifest["services"].get("garage") or {}).get(
                         "bucket"
-                    ) or names["minio_bucket"]
-                    await self._restore_minio(target_stage, names, in_file, src_bucket)
+                    ) or names["s3_bucket"]
+                    await self._restore_garage(target_stage, names, in_file, src_bucket)
         except Exception as e:
             hint = (
                 f" The target's pre-restore state was saved as snapshot "
@@ -609,7 +612,15 @@ class SnapshotService:
                 f"Snapshot {snapshot_id} not found for BP '{bp_slug}' at {stage}"
             )
         with open(manifest_path) as f:
-            return json.load(f)
+            manifest = json.load(f)
+        # Legacy manifests (pre-Garage) keyed the object store "minio".
+        # Normalize at this single choke point so every consumer sees
+        # "garage"; the entry's file value (minio.tar[.gz]) is kept verbatim
+        # — the archive format is identical.
+        services = manifest.get("services") or {}
+        if "minio" in services and "garage" not in services:
+            services["garage"] = services.pop("minio")
+        return manifest
 
     def list_snapshots(self, bp_slug: str) -> list[dict]:
         """All snapshots of one BP across stages, newest first."""
@@ -924,98 +935,107 @@ class SnapshotService:
         finally:
             shutil.rmtree(extract_dir, ignore_errors=True)
 
-    # minio --------------------------------------------------------------------
+    # garage ---------------------------------------------------------------------
 
-    async def _mc_alias(self, container: str, stage: str) -> None:
-        secrets = self._secrets("minio", stage)
-        _, stderr, rc = await run_docker_command(
-            "docker",
-            "exec",
-            container,
-            "mc",
-            "alias",
-            "set",
-            "local",
-            "http://localhost:9000",
-            secrets.get("MINIO_ROOT_USER", "admin"),
-            secrets.get("MINIO_ROOT_PASSWORD", ""),
+    def _garage_rclone(self, stage: str, *verb: str) -> list[str]:
+        """rclone argv (flags only — the driver exec can't set env) using the
+        `_system` full-access key. Data-plane work runs in the toolbox; the
+        garage container is the bare static binary."""
+        creds = _garage_creds(stage, "_system")
+        if creds is None:
+            raise RuntimeError(f"No _system Garage key for stage {stage}")
+        secrets = self._secrets("garage", stage)
+        return garage_rclone_argv(
+            secrets.get("S3_HOST", ""),
+            secrets.get("S3_PORT", "9000"),
+            creds[0],
+            creds[1],
+            *verb,
         )
-        if rc != 0:
-            raise RuntimeError(f"mc alias set failed: {stderr.strip()}")
 
-    async def _dump_minio(self, stage: str, names: dict, out_file: str) -> dict:
-        container = self._container("minio", stage)
-        bucket = names["minio_bucket"]
-        await self._mc_alias(container, stage)
+    def _garage_toolbox(self, stage: str) -> str:
+        return f"{self._container('garage', stage)}-toolbox"
+
+    async def _dump_garage(self, stage: str, names: dict, out_file: str) -> dict:
+        toolbox = self._garage_toolbox(stage)
+        bucket = names["s3_bucket"]
         # Per-bucket scratch dir so concurrent dump/restore of different BPs on
-        # the same minio container can't clobber each other.
+        # the same toolbox can't clobber each other.
         scratch = f"/tmp/bpsnap-{bucket}"
         try:
             _, stderr, rc = await run_docker_command(
                 "docker",
                 "exec",
-                container,
+                toolbox,
                 "sh",
                 "-c",
-                f"rm -rf {scratch} && mkdir -p {scratch} && "
-                f"mc mb --ignore-existing local/{bucket} && "
-                f"mc mirror local/{bucket} {scratch}",
+                f"rm -rf {scratch} && mkdir -p {scratch}",
             )
             if rc != 0:
-                raise RuntimeError(f"mc mirror of {bucket} failed: {stderr.strip()}")
-            # Stream the mirrored objects out as a tar via `docker cp`. The
-            # archiving is done by the docker daemon, so this works even
-            # though the minio image (UBI-micro) ships no `tar`.
-            # The archive is rooted at the scratch dir's basename.
+                raise RuntimeError(
+                    f"scratch setup for {bucket} failed: {stderr.strip()}"
+                )
+            _, stderr, rc = await run_docker_command(
+                "docker",
+                "exec",
+                toolbox,
+                *self._garage_rclone(stage, "sync", f":s3:{bucket}", scratch),
+            )
+            # A never-provisioned bucket dumps empty (the scratch dir already
+            # exists) — matching the old `mc mb --ignore-existing` semantics.
+            if rc != 0 and "directory not found" not in (stderr or ""):
+                raise RuntimeError(f"rclone sync of {bucket} failed: {stderr.strip()}")
+            # Stream the synced objects out as a tar via `docker cp` (the
+            # archiving is done by the docker daemon). The archive is rooted
+            # at the scratch dir's basename.
             stderr, rc = await run_docker_command_to_file(
-                ["docker", "cp", f"{container}:{scratch}", "-"],
+                ["docker", "cp", f"{toolbox}:{scratch}", "-"],
                 out_file,
             )
             if rc != 0:
                 raise RuntimeError(f"docker cp of {bucket} failed: {stderr.strip()}")
             return {"bucket": bucket}
         finally:
-            await run_docker_command("docker", "exec", container, "rm", "-rf", scratch)
+            await run_docker_command("docker", "exec", toolbox, "rm", "-rf", scratch)
 
-    async def _restore_minio(
+    async def _restore_garage(
         self, stage: str, names: dict, in_file: str, src_bucket: str
     ) -> None:
-        container = self._container("minio", stage)
-        bucket = names["minio_bucket"]
-        await self._mc_alias(container, stage)
+        toolbox = self._garage_toolbox(stage)
+        bucket = names["s3_bucket"]
         # The dump archive is rooted at `bpsnap-{src_bucket}` (the bucket it was
         # taken from), which `docker cp - :/tmp` recreates under /tmp. That
         # source bucket may differ from the target `bucket` (blue-green DR
         # restores load the live db's snapshot into the standby db's bucket), so
-        # mirror FROM the archive's own root dir INTO the target bucket.
+        # sync FROM the archive's own root dir INTO the target bucket.
         scratch = f"/tmp/bpsnap-{src_bucket}"
         try:
-            await run_docker_command("docker", "exec", container, "rm", "-rf", scratch)
+            await run_docker_command("docker", "exec", toolbox, "rm", "-rf", scratch)
             # Stream the tar in via `docker cp` (gunzipped on our end for
             # legacy gzipped snapshots; extraction is done by the docker
-            # daemon, so no `tar` is needed in the image).
+            # daemon).
             _, stderr, rc = await run_docker_command_from_file(
-                ["docker", "cp", "-", f"{container}:/tmp"],
+                ["docker", "cp", "-", f"{toolbox}:/tmp"],
                 in_file,
                 gunzip_input=_is_gzip(in_file),
             )
             if rc != 0:
                 raise RuntimeError(f"docker cp into {bucket} failed: {stderr.strip()}")
-            # Replace semantics: recreate the bucket empty, then mirror in.
+            # Replace semantics: sync is delete-extraneous, so the bucket ends
+            # up exactly as the archive left it (an empty archive empties it).
+            await _create_garage_bucket(self._container("garage", stage), stage, bucket)
             _, stderr, rc = await run_docker_command(
                 "docker",
                 "exec",
-                container,
-                "sh",
-                "-c",
-                f"mc mb --ignore-existing local/{bucket} && "
-                f"mc rm --recursive --force local/{bucket} ; "
-                f"mc mirror --overwrite {scratch} local/{bucket}",
+                toolbox,
+                *self._garage_rclone(stage, "sync", scratch, f":s3:{bucket}"),
             )
             if rc != 0:
-                raise RuntimeError(f"mc mirror into {bucket} failed: {stderr.strip()}")
+                raise RuntimeError(
+                    f"rclone sync into {bucket} failed: {stderr.strip()}"
+                )
         finally:
-            await run_docker_command("docker", "exec", container, "rm", "-rf", scratch)
+            await run_docker_command("docker", "exec", toolbox, "rm", "-rf", scratch)
 
 
 # Singleton (constructed lazily so env vars are read at first use).

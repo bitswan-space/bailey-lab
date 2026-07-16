@@ -4,11 +4,14 @@ networks:
     ws3-staging:
         external: true
 services:
-    minio-staging:
-        command: server /data --console-address :9001
-        container_name: ws3__minio-staging
+    garage-staging:
+        command:
+            - /garage
+            - server
+            - --single-node
+        container_name: ws3__garage-staging
         env_file:
-            - __ROOT__/secrets/minio-staging
+            - __ROOT__/secrets/garage-staging
         healthcheck:
             interval: 5s
             retries: 30
@@ -16,18 +19,33 @@ services:
             start_period: 15s
             test:
                 - CMD
-                - curl
-                - -f
-                - http://localhost:9000/minio/health/live
+                - /garage
+                - json-api
+                - GetClusterHealth
             timeout: 3s
-        image: minio/minio:latest
+        image: dxflrs/garage:v2.3.0
+        labels:
+            gitops.workspace: ws3
+        networks:
+            ws3-staging:
+                aliases:
+                    - ws3-garage-staging
+        restart: unless-stopped
+        volumes:
+            - ws3-garage-staging-meta:/meta
+            - ws3-garage-staging-data:/data
+            - __ROOT__/gitops/secrets/garage-staging.toml:/etc/garage.toml:ro
+    garage-staging-toolbox:
+        container_name: ws3__garage-staging-toolbox
+        entrypoint:
+            - sleep
+            - infinity
+        image: rclone/rclone:1.68
         labels:
             gitops.workspace: ws3
         networks:
             - ws3-staging
         restart: unless-stopped
-        volumes:
-            - ws3-minio-staging-data-data:/data
     postgres-staging:
         container_name: ws3__postgres-staging
         env_file:
@@ -39,7 +57,7 @@ services:
             start_period: 30s
             test:
                 - CMD-SHELL
-                - pg_isready -U "$POSTGRES_USER" -q
+                - pg_isready -U "$$POSTGRES_USER" -q
             timeout: 3s
         image: postgres:16
         labels:
@@ -49,21 +67,6 @@ services:
         restart: unless-stopped
         volumes:
             - ws3-postgres-staging-data-data:/var/lib/postgresql/data
-    postgres-staging-pgadmin:
-        container_name: ws3__postgres-staging-pgadmin
-        env_file:
-            - __ROOT__/secrets/postgres-staging
-        environment:
-            PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
-            PGADMIN_CONFIG_SERVER_MODE: "False"
-        image: dpage/pgadmin4:latest
-        labels:
-            gitops.workspace: ws3
-        networks:
-            - ws3-staging
-        restart: unless-stopped
-        volumes:
-            - __ROOT__/secrets/pgadmin-servers.json:/pgadmin4/servers.json:ro
     ws3-backend-822b-staging:
         cap_drop:
             - NET_ADMIN
@@ -75,7 +78,7 @@ services:
         env_file:
             - __ROOT__/secrets/bp/acme/staging
             - __ROOT__/secrets/postgres-staging
-            - __ROOT__/secrets/minio-staging
+            - __ROOT__/secrets/garagecreds/staging/_system
         environment:
             BITSWAN_ADMIN_GROUP: /Test Org/admin
             BITSWAN_ALLOWED_GROUP: /Test Org
@@ -122,7 +125,7 @@ services:
                 condition: service_healthy
         env_file:
             - __ROOT__/secrets/postgres-staging
-            - __ROOT__/secrets/minio-staging
+            - __ROOT__/secrets/garagecreds/staging/_system
         environment:
             BITSWAN_ADMIN_GROUP: /Test Org/admin
             BITSWAN_ALLOWED_GROUP: /Test Org
@@ -227,5 +230,6 @@ services:
             - __ROOT__/firewall:/firewall
 version: "3"
 volumes:
-    ws3-minio-staging-data-data: null
+    ws3-garage-staging-data: null
+    ws3-garage-staging-meta: null
     ws3-postgres-staging-data-data: null

@@ -186,7 +186,7 @@ func RunWorkspaceRemove(workspaceName string, writer io.Writer) error {
 	// 6. Ingress records — synchronously, from the daemon's OWN Bailey DB, so
 	// cleanup never depends on gitops. Candidates are the UNION of the
 	// endpoints table AND the protected_routes table: infra-service routes
-	// (minio/postgres admin UIs) and other site services are routes without
+	// (legacy infra admin UIs) and other site services are routes without
 	// owned endpoints and would be invisible to an endpoints-only sweep (see
 	// listProtectedRoutes). ALL of the workspace's hosts are removed
 	// regardless of source ('gitops' or 'manual'): the workspace is gone, so

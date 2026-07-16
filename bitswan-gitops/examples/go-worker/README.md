@@ -1,7 +1,7 @@
 # Go backend worker
 
 A Go HTTP backend that runs behind the Bitswan platform's ingress. It ships
-with a Postgres + MinIO example app (per-user counter, image gallery) and —
+with a Postgres + object storage example app (per-user counter, image gallery) and —
 more importantly — the platform's **identity & admin contract** wired up
 correctly, so role-gated features can be built on it without guesswork.
 

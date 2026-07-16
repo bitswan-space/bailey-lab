@@ -1655,6 +1655,32 @@ export class GitopsClient {
   }
 
   // ---------------------------------------------------------------------
+  // Read-only data explorer (`/data-explorer/*`) — backs the dashboard's
+  // Object Storage / SQL panels. GET-only; the route builds `qs` from a
+  // whitelist so nothing extra can be smuggled upstream.
+  // ---------------------------------------------------------------------
+
+  /** `GET /data-explorer/{bp}/{stage}{subpath}?{qs}` — JSON endpoints
+   * (overview, sql/tables, sql/columns, sql/rows, objects, objects/stat,
+   * objects/preview). `subpath` comes from the route's fixed set. */
+  dataExplorer(bp: string, stage: string, subpath: string, qs: string) {
+    return this.requestJson(
+      'GET',
+      `/data-explorer/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}${subpath}${qs ? `?${qs}` : ''}`,
+    );
+  }
+
+  /** `GET /data-explorer/{bp}/{stage}/objects/download?{qs}` — raw upstream
+   * Response so the route can stream the object body through (bpBundle
+   * pattern), preserving Content-Type/-Disposition. */
+  async dataExplorerDownload(bp: string, stage: string, qs: string): Promise<Response> {
+    return fetch(
+      `${this.baseUrl}/data-explorer/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}/objects/download?${qs}`,
+      { headers: { ...this.authHeaders() } },
+    );
+  }
+
+  // ---------------------------------------------------------------------
   // Workspace-level off-site backups (`/backups/*` — restic through the
   // AOC proxy). Config/status, manual runs, and encryption-key management.
   // ---------------------------------------------------------------------

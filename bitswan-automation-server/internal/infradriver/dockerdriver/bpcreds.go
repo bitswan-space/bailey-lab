@@ -12,18 +12,24 @@ import (
 )
 
 // Per-BP scoped service credentials. Each BP database gets its OWN Postgres
-// LOGIN role and each bucket its OWN MinIO user, so a backend can touch only its
-// own database/bucket — not every other BP's on the shared per-(workspace,realm)
-// server. The shared superuser/root is no longer attached to a scoped backend.
+// LOGIN role and each bucket its OWN Garage access key, so a backend can touch
+// only its own database/bucket — not every other BP's on the shared
+// per-(workspace,realm) server. No shared superuser/admin credential is ever
+// attached to a scoped backend.
 //
 // Credentials are keyed by (realm, resource-name) where resource-name is the
-// exact POSTGRES_DB / MINIO_BUCKET the compiler assigns the backend (so dev,
-// staging, each blue-green slot DB, and per-(copy×BP) live-dev DB each get their
-// own principal with no special-casing). The generated material is the single
-// source of truth, persisted 0600 on the shared secrets volume and read by BOTH
-// the compiler (to inject into the backend's env) and the provisioner (to CREATE
-// the role/user with the same password). The driver owns this end-to-end; gitops
-// is not involved.
+// exact POSTGRES_DB / S3_BUCKET the compiler assigns the backend (so dev,
+// staging, each blue-green slot DB, and per-(copy×BP) live-dev DB each get
+// their own principal with no special-casing), persisted 0600 on the shared
+// secrets volume.
+//
+// Postgres keeps the original flow: the driver GENERATES the password at
+// compile time and later imposes it server-side. Garage inverts it: access
+// keys can only be minted server-side (CreateKey; ImportKey with custom ids
+// is forbidden upstream), so the compiler only guarantees the env_file EXISTS
+// (empty placeholder on first-ever apply) and the key material is written by
+// ensureGarageKeysPrecompile / the post-up provisioner, which then re-ups any
+// backend that was compiled against a placeholder.
 
 // scopedPGRole is the Postgres LOGIN role name for a database: u_<db>, capped at
 // the 63-byte identifier limit (Postgres silently truncates longer names, which
@@ -33,13 +39,19 @@ func scopedPGRole(dbName string) string {
 	return truncate("u_"+dbName, maxLabelLen)
 }
 
-// scopedMinioUser is the MinIO access key (user) for a bucket: u-<bucket>.
-func scopedMinioUser(bucket string) string {
-	return "u-" + bucket
+// scopedROPGRole is the read-only explorer role for a database: ro_<db>, capped
+// like scopedPGRole. It has NO password and NO creds file: it is only ever used
+// via `docker exec psql -U ro_<db>` over the container's trust-authenticated
+// local socket, so a password would only add a network-usable credential that
+// shouldn't exist. Pathological case: for db names ≥61 bytes the blue-green
+// `_1`/`_2` suffix falls past the 63-byte cap and both slots truncate to the
+// same ro_ role — harmless (same BP, both its own DBs, SELECT-only).
+func scopedROPGRole(dbName string) string {
+	return truncate("ro_"+dbName, maxLabelLen)
 }
 
 // generatePassword returns a URL-safe random secret with no '=' padding (so it's
-// safe unquoted in SQL/env and as a MinIO secret key).
+// safe unquoted in SQL/env).
 func generatePassword() (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
@@ -56,8 +68,13 @@ func dbCredsPath(secretsDir, realm, dbName string) string {
 }
 
 func bucketCredsPath(secretsDir, realm, bucket string) string {
-	return filepath.Join(secretsDir, "miniocreds", realm, bucket)
+	return filepath.Join(secretsDir, "garagecreds", realm, bucket)
 }
+
+// systemKeyName is the pseudo-bucket the per-realm full-access Garage key is
+// stored under (backups/snapshots/explorer fallback; granted on every bucket
+// the provisioner ensures). Real bucket names start "bp-"/"copy-", never "_".
+const systemKeyName = "_system"
 
 // getOrCreateDBCreds returns the scoped Postgres role + password for a database,
 // generating and persisting them on first use and reusing them thereafter. The
@@ -84,27 +101,46 @@ func getOrCreateDBCreds(secretsDir, realm, dbName string) (user, password string
 	return user, password, nil
 }
 
-// getOrCreateBucketCreds returns the scoped MinIO access/secret key for a bucket,
-// generating and persisting them on first use and reusing them thereafter.
-func getOrCreateBucketCreds(secretsDir, realm, bucket string) (accessKey, secretKey string, err error) {
-	accessKey = scopedMinioUser(bucket)
+// readBucketCreds returns the Garage-issued (accessKey, secretKey) for a
+// bucket, or ("", "") when the file is absent or still a placeholder.
+func readBucketCreds(secretsDir, realm, bucket string) (accessKey, secretKey string) {
+	vals := readEnvFile(bucketCredsPath(secretsDir, realm, bucket))
+	if vals == nil || vals["S3_SECRET_KEY"] == "" {
+		return "", ""
+	}
+	return vals["S3_ACCESS_KEY"], vals["S3_SECRET_KEY"]
+}
+
+// writeBucketCreds persists key material Garage just minted (CreateKey).
+func writeBucketCreds(secretsDir, realm, bucket, accessKey, secretKey string) error {
 	path := bucketCredsPath(secretsDir, realm, bucket)
-	if vals := readEnvFile(path); vals != nil && vals["MINIO_SECRET_KEY"] != "" {
-		return accessKey, vals["MINIO_SECRET_KEY"], nil
-	}
-	secretKey, err = generatePassword()
-	if err != nil {
-		return "", "", err
-	}
 	if err := writeEnvFile(path, map[string]string{
-		"MINIO_ACCESS_KEY": accessKey,
-		"MINIO_SECRET_KEY": secretKey,
+		"S3_ACCESS_KEY": accessKey,
+		"S3_SECRET_KEY": secretKey,
 	}); err != nil {
-		return "", "", err
+		return err
 	}
-	// gitops (uid 1000) reads and rewrites these creds too — see ownForGitops.
-	ownForGitops(filepath.Join(secretsDir, "miniocreds"), filepath.Dir(path), path)
-	return accessKey, secretKey, nil
+	// gitops (uid 1000) reads these creds too — see ownForGitops.
+	ownForGitops(filepath.Join(secretsDir, "garagecreds"), filepath.Dir(path), path)
+	return nil
+}
+
+// ensureBucketCredsFile guarantees the creds env_file EXISTS at compile time:
+// on the first-ever apply the garage container isn't up yet, so no key can be
+// minted — an empty 0600 placeholder keeps `compose up` happy and the post-up
+// provisioner mints the real key, rewrites the file and re-ups the backend
+// (writeEnvFile drops empty values, so a placeholder is just an empty file;
+// readEnvFile returns nil for it, which is the placeholder test).
+func ensureBucketCredsFile(secretsDir, realm, bucket string) error {
+	path := bucketCredsPath(secretsDir, realm, bucket)
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if err := writeEnvFile(path, nil); err != nil {
+		return err
+	}
+	ownForGitops(filepath.Join(secretsDir, "garagecreds"), filepath.Dir(path), path)
+	return nil
 }
 
 // readEnvFile parses a KEY=VALUE file into a map, or returns nil if absent.

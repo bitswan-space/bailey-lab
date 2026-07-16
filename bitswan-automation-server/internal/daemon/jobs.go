@@ -305,11 +305,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		backupPath, _ := req.Params["backup_path"].(string)
 		stage, _ := req.Params["stage"].(string)
 		go s.runPostgresRestoreJob(job, workspace, stage, backupPath)
-	case "minio_restore":
+	case "garage_restore":
 		workspace := req.Workspace
 		backupPath, _ := req.Params["backup_path"].(string)
 		stage, _ := req.Params["stage"].(string)
-		go s.runMinioRestoreJob(job, workspace, stage, backupPath)
+		go s.runGarageRestoreJob(job, workspace, stage, backupPath)
 	default:
 		job.Complete(fmt.Errorf("unknown job type: %s", req.Type))
 	}
@@ -697,8 +697,8 @@ func (s *Server) runPostgresRestoreJob(job *Job, workspace, stage, backupPath st
 	job.Complete(err)
 }
 
-// runMinioRestoreJob runs the MinIO restore as an interactive job
-func (s *Server) runMinioRestoreJob(job *Job, workspace, stage, backupPath string) {
+// runGarageRestoreJob runs the Garage restore as an interactive job
+func (s *Server) runGarageRestoreJob(job *Job, workspace, stage, backupPath string) {
 	defer func() {
 		if r := recover(); r != nil {
 			job.Complete(fmt.Errorf("panic: %v", r))
@@ -787,7 +787,7 @@ func (s *Server) runMinioRestoreJob(job *Job, workspace, stage, backupPath strin
 	}()
 
 	// Proxy the restore to gitops
-	err := s.proxyMinioRestore(workspace, stage, backupPath)
+	err := s.proxyGarageRestore(workspace, stage, backupPath)
 
 	// Close write end first to signal EOF to reader
 	stdoutW.Close()

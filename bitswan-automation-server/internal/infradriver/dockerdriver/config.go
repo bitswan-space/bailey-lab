@@ -194,12 +194,12 @@ func bpResourceNames(bpSlug string, db int) map[string]string {
 		pg := truncate("bp_"+strings.ReplaceAll(bpSlug, "-", "_"), 61) + "_" + itoa(db)
 		bucket := strings.TrimRight(truncate("bp-"+bpSlug, 61), "-") + "-" + itoa(db)
 		couch := "bp-" + bpSlug + "-" + itoa(db) + "-"
-		return map[string]string{"postgres_db": pg, "couchdb_prefix": couch, "minio_bucket": bucket}
+		return map[string]string{"postgres_db": pg, "couchdb_prefix": couch, "s3_bucket": bucket}
 	}
 	pg := truncate("bp_"+strings.ReplaceAll(bpSlug, "-", "_"), 63)
 	bucket := strings.TrimRight(truncate("bp-"+bpSlug, 63), "-")
 	couch := "bp-" + bpSlug + "-"
-	return map[string]string{"postgres_db": pg, "couchdb_prefix": couch, "minio_bucket": bucket}
+	return map[string]string{"postgres_db": pg, "couchdb_prefix": couch, "s3_bucket": bucket}
 }
 
 func itoa(n int) string {
@@ -226,18 +226,18 @@ func itoa(n int) string {
 
 // copyBPResourceNames returns the per-(copy, BP) live-dev resource names. A
 // non-main copy is a developer's sandbox: each BP's live-dev backend gets its
-// OWN Postgres database, MinIO bucket and CouchDB prefix there — isolated from
+// OWN Postgres database, S3 bucket and CouchDB prefix there — isolated from
 // other BPs in the copy, from other copies, and from dev. Capped at the 63-byte
-// Postgres/MinIO limit (a truncation collision surfaces as a deploy error, not
+// Postgres/S3 limit (a truncation collision surfaces as a deploy error, not
 // silent data sharing). Mirrors bp_databases.copy_bp_resource_names.
 func copyBPResourceNames(copyName, bpSlug string) map[string]string {
 	cpU := copyDBRe.ReplaceAllString(strings.ToLower(copyName), "_") // [a-z0-9_] for pg
-	cpD := sanitizeAutomationName(copyName)                          // [a-z0-9-] for minio/couch
+	cpD := sanitizeAutomationName(copyName)                          // [a-z0-9-] for s3/couch
 	bpU := strings.ReplaceAll(bpSlug, "-", "_")
 	pg := truncate("copy_"+cpU+"_bp_"+bpU, maxLabelLen)
 	bucket := strings.TrimRight(truncate("copy-"+cpD+"-bp-"+bpSlug, maxLabelLen), "-")
 	couch := "copy-" + cpD + "-bp-" + bpSlug + "-"
-	return map[string]string{"postgres_db": pg, "couchdb_prefix": couch, "minio_bucket": bucket}
+	return map[string]string{"postgres_db": pg, "couchdb_prefix": couch, "s3_bucket": bucket}
 }
 
 // ---- automation.toml ----

@@ -2180,8 +2180,8 @@ func (c *Client) ClearPostgres(workspace, stage string) (*ServiceResponse, error
 	return &result, nil
 }
 
-// BackupMinio creates a backup of MinIO data
-func (c *Client) BackupMinio(workspace, stage, backupPath string) (*ServiceResponse, error) {
+// BackupGarage creates a backup of Garage data
+func (c *Client) BackupGarage(workspace, stage, backupPath string) (*ServiceResponse, error) {
 	reqBody := ServiceBackupRequest{
 		Workspace:  workspace,
 		BackupPath: backupPath,
@@ -2193,7 +2193,7 @@ func (c *Client) BackupMinio(workspace, stage, backupPath string) (*ServiceRespo
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "http://unix/service/minio/backup", strings.NewReader(string(bodyBytes)))
+	req, err := http.NewRequest("POST", "http://unix/service/garage/backup", strings.NewReader(string(bodyBytes)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -2231,15 +2231,15 @@ func (c *Client) BackupMinio(workspace, stage, backupPath string) (*ServiceRespo
 	return &result, nil
 }
 
-// RestoreMinioInteractive restores MinIO using the interactive job API
-func (c *Client) RestoreMinioInteractive(workspace, stage, backupPath string) error {
+// RestoreGarageInteractive restores Garage using the interactive job API
+func (c *Client) RestoreGarageInteractive(workspace, stage, backupPath string) error {
 	params := map[string]interface{}{
 		"backup_path": backupPath,
 	}
 	if stage != "" {
 		params["stage"] = stage
 	}
-	jobID, err := c.CreateJob("minio_restore", workspace, params)
+	jobID, err := c.CreateJob("garage_restore", workspace, params)
 	if err != nil {
 		return err
 	}

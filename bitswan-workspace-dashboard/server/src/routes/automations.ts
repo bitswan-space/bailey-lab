@@ -839,7 +839,7 @@ export function registerAutomationRoutes(
   );
 
   // Containers tab → "Stage services": status (incl. admin_ui URL) of an infra
-  // service (postgres/minio/couchdb) for a stage. Only enabled+running services
+  // service (postgres/garage/couchdb) for a stage. Only enabled+running services
   // are surfaced as links by the client.
   app.get<{ Params: { type: string }; Querystring: { stage?: string } }>(
     '/api/services/:type/status',

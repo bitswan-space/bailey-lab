@@ -104,9 +104,10 @@ async def run_docker_command(
         return "", "", 0
 
     if verb == "cp":
-        # `docker cp` is proxied through the driver's archive primitives (the
-        # infra images — minio UBI-micro — ship no tar/shell, so the daemon does
-        # the archiving). Exactly one operand is a `container:path` ref; the
+        # `docker cp` is proxied through the driver's archive primitives (some
+        # infra images — e.g. Garage's bare static binary — ship no tar/shell,
+        # so the daemon does the archiving). Exactly one operand is a
+        # `container:path` ref; the
         # other is a host path. We translate Docker's host<->container semantics
         # to the driver's pure-TAR copy_out/copy_in:
         #   docker cp <c>:<src> <host>  -> copy_out a TAR, extract it to <host>
@@ -269,11 +270,13 @@ class InfraService(ABC):
 
     @abstractmethod
     def _get_ingress_upstream(self) -> str:
-        """Return the upstream address for the ingress (e.g., 'container:5984')."""
+        """Return the upstream address for the ingress (e.g., 'container:5984'),
+        or '' for a headless service with no web UI (e.g. postgres, whose data
+        is browsed via the dashboard's explorer) — no route is registered."""
 
     async def _register_with_ingress(self) -> bool:
         """Register this service with the ingress daemon."""
-        from app.utils import add_route_to_ingress
+        from app.utils import add_route_to_ingress, remove_route_by_hostname
 
         if not self.gitops_domain:
             logger.warning(
@@ -283,6 +286,12 @@ class InfraService(ABC):
 
         hostname = self.ingress_hostname()
         upstream = self._get_ingress_upstream()
+        if not upstream:
+            # Headless service: register nothing, and best-effort clean any
+            # route a previous version registered for this hostname (e.g. the
+            # retired pgAdmin admin UI) whenever enable/update re-runs.
+            remove_route_by_hostname(hostname)
+            return True
 
         result = add_route_to_ingress(hostname, upstream, self.workspace_name)
         if result:
@@ -476,17 +485,12 @@ def get_service(
             workspace_name,
             stage,
             postgres_image=kwargs.get("postgres_image", ""),
-            pgadmin_image=kwargs.get("pgadmin_image", ""),
         )
-    elif service_type == "minio":
-        from app.services.minio_service import MinioService
+    elif service_type == "garage":
+        from app.services.garage_service import GarageService
 
-        return MinioService(
-            workspace_name,
-            stage,
-            minio_image=kwargs.get("minio_image", ""),
-        )
+        return GarageService(workspace_name, stage)
     else:
         raise ValueError(
-            f"Unknown service type: {service_type}. Supported: couchdb, kafka, postgres, minio"
+            f"Unknown service type: {service_type}. Supported: couchdb, kafka, postgres, garage"
         )

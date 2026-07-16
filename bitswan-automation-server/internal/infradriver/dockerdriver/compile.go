@@ -31,8 +31,8 @@ type compileState struct {
 	adminGroupPath string // BITSWAN_ADMIN_GROUP override; default derived from orgGroupPath
 	authMode       string // BITSWAN_AUTH_MODE ("aoc" on AOC-connected platforms)
 	volumeName     string // BITSWAN_VOLUME_NAME
-	gatewayImage string // BITSWAN_EGRESS_GATEWAY_IMAGE
-	firewallDir  string // <gitops_dir>/firewall (created when a gateway is active)
+	gatewayImage   string // BITSWAN_EGRESS_GATEWAY_IMAGE
+	firewallDir    string // <gitops_dir>/firewall (created when a gateway is active)
 
 	bs               *Bitswan
 	registry         bpRegistry
@@ -64,6 +64,14 @@ func (d *DockerDriver) Apply(ctx context.Context, req infradriver.ApplyRequest, 
 		return nil, err
 	}
 
+	// Garage access keys are server-minted (CreateKey), so on every apply
+	// after garage is up they are ensured BEFORE compile — the compiler then
+	// bakes real values into the backend env_files. On a first-ever apply
+	// (garage container doesn't exist yet) the compiler writes empty
+	// placeholder files instead and the post-up provisioner mints + re-ups.
+	report("provision", "Ensuring Garage access keys for scoped backends...")
+	ensureGarageKeysPrecompile(ctx, req.Ctx, bs, report)
+
 	report("compile", "Compiling bitswan.yaml to docker-compose...")
 	composeYAML, routes, _, err := compile(req.Ctx, bs)
 	if err != nil {
@@ -80,20 +88,20 @@ func (d *DockerDriver) Apply(ctx context.Context, req infradriver.ApplyRequest, 
 // process environment (the same os.environ keys gitops reads).
 func newCompileState(wctx infradriver.WorkspaceContext, bs *Bitswan) *compileState {
 	c := &compileState{
-		workspaceName: wctx.WorkspaceName,
-		gitopsDir:     wctx.GitopsDir,
-		gitopsDirHost: envOr("BITSWAN_GITOPS_DIR_HOST", wctx.GitopsDir),
-		workspaceDir:  envOr("BITSWAN_WORKSPACE_DIR_HOST", filepath.Join(wctx.GitopsDir, "..", "workspace")),
-		workspaceRepo: envOr("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo"),
-		secretsDir:    wctx.SecretsDir,
-		domain:        wctx.Domain,
-		certsDirHost:  os.Getenv("BITSWAN_CERTS_DIR"),
+		workspaceName:  wctx.WorkspaceName,
+		gitopsDir:      wctx.GitopsDir,
+		gitopsDirHost:  envOr("BITSWAN_GITOPS_DIR_HOST", wctx.GitopsDir),
+		workspaceDir:   envOr("BITSWAN_WORKSPACE_DIR_HOST", filepath.Join(wctx.GitopsDir, "..", "workspace")),
+		workspaceRepo:  envOr("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo"),
+		secretsDir:     wctx.SecretsDir,
+		domain:         wctx.Domain,
+		certsDirHost:   os.Getenv("BITSWAN_CERTS_DIR"),
 		keycloakURL:    os.Getenv("KEYCLOAK_URL"),
 		orgGroupPath:   os.Getenv("BITSWAN_ALLOWED_GROUP"),
 		adminGroupPath: os.Getenv("BITSWAN_ADMIN_GROUP"),
 		authMode:       os.Getenv("BITSWAN_AUTH_MODE"),
-		volumeName:    os.Getenv("BITSWAN_VOLUME_NAME"),
-		gatewayImage:  envOr("BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest"),
+		volumeName:     os.Getenv("BITSWAN_VOLUME_NAME"),
+		gatewayImage:   envOr("BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest"),
 
 		bs:               bs,
 		registry:         loadRegistry(wctx.SecretsDir),

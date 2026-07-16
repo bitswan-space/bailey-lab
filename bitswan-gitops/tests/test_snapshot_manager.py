@@ -136,7 +136,7 @@ class FakeSnapshotService:
         if progress:
             await progress("snapshot_postgres", "pg...")
             await progress("snapshot_couchdb", "couch...")
-            await progress("snapshot_minio", "minio...")
+            await progress("snapshot_garage", "garage...")
         manifest = {
             "id": f"20250101-00000{len(self.created)}-aabbccdd",
             "bp": bp,

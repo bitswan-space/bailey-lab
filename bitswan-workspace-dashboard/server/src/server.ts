@@ -12,6 +12,7 @@ import { registerEventRoutes } from './routes/events.js';
 import { registerTemplateRoutes } from './routes/templates.js';
 import { registerCodingAgentRoutes } from './routes/coding-agent.js';
 import { registerSnapshotRoutes } from './routes/snapshots.js';
+import { registerDataExplorerRoutes } from './routes/data-explorer.js';
 import { registerOffsiteBackupRoutes } from './routes/offsite-backups.js';
 import { registerCopyRoutes } from './routes/copies.js';
 import { registerCopyFilesRoutes } from './routes/copy-files.js';
@@ -77,6 +78,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerTemplateRoutes(app, { gitops });
   registerAutomationRoutes(app, { gitops });
   registerSnapshotRoutes(app, { gitops });
+  registerDataExplorerRoutes(app, { gitops });
   registerOffsiteBackupRoutes(app, { gitops });
   registerTaskRoutes(app, { gitops });
   registerEventRoutes(app, { gitops });

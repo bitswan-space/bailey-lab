@@ -27,12 +27,12 @@ package infradriver
 //
 // exec is the general escape hatch for imperative container operations that
 // aren't a state change and don't fit the narrower primitives — backups
-// (pg_dump), restores (psql < dump), MinIO mirrors. gitops orchestrates them;
+// (pg_dump), restores (psql < dump), S3 syncs. gitops orchestrates them;
 // the driver executes. Its wire shape is a binary multiplexed stream rather
 // than SSE because the payloads are binary and large (DB dumps).
 //
 // copy-out/copy-in mirror Docker's archive API (raw TAR streams) for the
-// tar-less infra images (minio UBI-micro, etc.) where exec'ing `tar` is
+// tar-less infra images (garage's bare static binary, etc.) where exec'ing `tar` is
 // impossible: the daemon does the archiving. copy-out's response body IS the
 // TAR; copy-in's request body IS the TAR (metadata rides X-Bitswan-Copy so the
 // body stays a pure stream, same as exec's stdin).

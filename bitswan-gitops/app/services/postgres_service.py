@@ -1,8 +1,9 @@
 """
 PostgreSQL infrastructure service management.
 
-Provides PostgreSQL database with pgAdmin web UI, following the same
-sidecar pattern as KafkaService (broker + UI containers).
+Runs headless — the former pgAdmin sidecar was replaced by the
+workspace-dashboard's read-only SQL explorer, so postgres has no web UI
+and registers no ingress route.
 """
 
 import asyncio
@@ -23,45 +24,37 @@ from app.services.infra_service import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_POSTGRES_IMAGE = "postgres:16"
-DEFAULT_PGADMIN_IMAGE = "dpage/pgadmin4:latest"
 
 
 class PostgresService(InfraService):
-    """Manages PostgreSQL service deployment (PostgreSQL + pgAdmin)."""
+    """Manages PostgreSQL service deployment."""
 
     def __init__(
         self,
         workspace_name: str,
         stage: str = "production",
         postgres_image: str = "",
-        pgadmin_image: str = "",
     ):
         super().__init__(workspace_name, stage)
         self.postgres_image = postgres_image or DEFAULT_POSTGRES_IMAGE
-        self.pgadmin_image = pgadmin_image or DEFAULT_PGADMIN_IMAGE
 
     @property
     def service_type(self) -> str:
         return "postgres"
 
-    @property
-    def pgadmin_container_name(self) -> str:
-        return f"{self.workspace_name}__postgres{self.service_suffix}-pgadmin"
-
     def _generate_secrets_content(self) -> str:
         pg_password = generate_password()
-        pgadmin_password = generate_password()
         return (
             f"POSTGRES_USER=admin\n"
             f"POSTGRES_PASSWORD={pg_password}\n"
             f"POSTGRES_HOST={self.container_name}\n"
             f"POSTGRES_DB=postgres\n"
-            f"PGADMIN_DEFAULT_EMAIL=admin@local.dev\n"
-            f"PGADMIN_DEFAULT_PASSWORD={pgadmin_password}\n"
         )
 
     def _get_ingress_upstream(self) -> str:
-        return f"{self.pgadmin_container_name}:80"
+        # No web UI (data is browsed via the dashboard's SQL explorer) —
+        # empty upstream tells the base class to register no ingress route.
+        return ""
 
     def _get_connection_info(self) -> dict:
         info = {}
@@ -88,45 +81,7 @@ class PostgresService(InfraService):
                 f"postgresql://{info['username']}:{info['password']}"
                 f"@{info['host']}:5432/{info['database']}"
             )
-        if self.gitops_domain:
-            info["admin_ui"] = f"https://{self.ingress_hostname()}"
         return info
-
-    async def _extra_enable_setup(self) -> None:
-        """Generate servers.json for pgAdmin auto-discovery."""
-        servers_json = {
-            "Servers": {
-                "1": {
-                    "Name": "PostgreSQL",
-                    "Group": "Servers",
-                    "Host": self.container_name,
-                    "Port": 5432,
-                    "Username": "admin",
-                    "MaintenanceDB": "postgres",
-                    "SSLMode": "prefer",
-                }
-            }
-        }
-        os.makedirs(self.secrets_dir, mode=0o700, exist_ok=True)
-        servers_file = os.path.join(self.secrets_dir, "pgadmin-servers.json")
-        with open(servers_file, "w") as f:
-            json.dump(servers_json, f, indent=2)
-        logger.info(f"pgAdmin servers.json saved to: {servers_file}")
-
-    async def start(self) -> dict:
-        """Bring PostgreSQL + pgAdmin up via the driver apply. The apply
-        reconciles both infra containers — gitops has no docker access of its
-        own."""
-        return await super().start()
-
-    async def stop(self) -> dict:
-        """Stop both PostgreSQL and pgAdmin containers."""
-        result = await super().stop()
-        try:
-            await run_docker_command("docker", "stop", self.pgadmin_container_name)
-        except Exception as e:
-            logger.warning(f"Failed to stop pgAdmin container: {e}")
-        return result
 
     async def backup(self, backup_path: str) -> dict:
         """Backup all PostgreSQL databases using pg_dumpall."""

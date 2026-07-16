@@ -9,35 +9,35 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// NewMinioCmd creates the MinIO service command
-func NewMinioCmd() *cobra.Command {
+// NewGarageCmd creates the Garage (object storage) service command
+func NewGarageCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "minio",
-		Short: "Manage MinIO service",
+		Use:   "garage",
+		Short: "Manage Garage service",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return cmd.Help()
 		},
 	}
 
-	cmd.AddCommand(newMinioEnableCmd())
-	cmd.AddCommand(newMinioDisableCmd())
-	cmd.AddCommand(newMinioStatusCmd())
-	cmd.AddCommand(newMinioStartCmd())
-	cmd.AddCommand(newMinioStopCmd())
-	cmd.AddCommand(newMinioUpdateCmd())
-	cmd.AddCommand(newMinioBackupCmd())
-	cmd.AddCommand(newMinioRestoreCmd())
+	cmd.AddCommand(newGarageEnableCmd())
+	cmd.AddCommand(newGarageDisableCmd())
+	cmd.AddCommand(newGarageStatusCmd())
+	cmd.AddCommand(newGarageStartCmd())
+	cmd.AddCommand(newGarageStopCmd())
+	cmd.AddCommand(newGarageUpdateCmd())
+	cmd.AddCommand(newGarageBackupCmd())
+	cmd.AddCommand(newGarageRestoreCmd())
 
 	return cmd
 }
 
-func newMinioEnableCmd() *cobra.Command {
+func newGarageEnableCmd() *cobra.Command {
 	var workspace string
 	var stage string
 
 	cmd := &cobra.Command{
 		Use:   "enable",
-		Short: "Enable MinIO service for the workspace",
+		Short: "Enable Garage service for the workspace",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := daemon.NewClient()
 			if err != nil {
@@ -57,7 +57,7 @@ func newMinioEnableCmd() *cobra.Command {
 				options["stage"] = stage
 			}
 
-			result, err := client.EnableService("minio", workspace, options)
+			result, err := client.EnableService("garage", workspace, options)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -76,13 +76,13 @@ func newMinioEnableCmd() *cobra.Command {
 	return cmd
 }
 
-func newMinioDisableCmd() *cobra.Command {
+func newGarageDisableCmd() *cobra.Command {
 	var workspace string
 	var stage string
 
 	cmd := &cobra.Command{
 		Use:   "disable",
-		Short: "Disable MinIO service for the workspace",
+		Short: "Disable Garage service for the workspace",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := daemon.NewClient()
 			if err != nil {
@@ -97,7 +97,7 @@ func newMinioDisableCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			result, err := client.DisableService("minio", workspace, stage)
+			result, err := client.DisableService("garage", workspace, stage)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -114,14 +114,14 @@ func newMinioDisableCmd() *cobra.Command {
 	return cmd
 }
 
-func newMinioStatusCmd() *cobra.Command {
+func newGarageStatusCmd() *cobra.Command {
 	var showPasswords bool
 	var workspace string
 	var stage string
 
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Check MinIO service status for the workspace",
+		Short: "Check Garage service status for the workspace",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := daemon.NewClient()
 			if err != nil {
@@ -136,7 +136,7 @@ func newMinioStatusCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			result, err := client.GetServiceStatus("minio", workspace, stage, showPasswords)
+			result, err := client.GetServiceStatus("garage", workspace, stage, showPasswords)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -145,7 +145,7 @@ func newMinioStatusCmd() *cobra.Command {
 			if statusData, ok := result.Data.(map[string]interface{}); ok {
 				if enabled, ok := statusData["enabled"].(bool); ok {
 					if enabled {
-						fmt.Printf("MinIO service is ENABLED for workspace '%s'\n", workspace)
+						fmt.Printf("Garage service is ENABLED for workspace '%s'\n", workspace)
 						if running, ok := statusData["running"].(bool); ok {
 							if running {
 								fmt.Println("Container status: RUNNING")
@@ -154,7 +154,7 @@ func newMinioStatusCmd() *cobra.Command {
 							}
 						}
 					} else {
-						fmt.Printf("MinIO service is DISABLED for workspace '%s'\n", workspace)
+						fmt.Printf("Garage service is DISABLED for workspace '%s'\n", workspace)
 					}
 				}
 			}
@@ -163,20 +163,20 @@ func newMinioStatusCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&showPasswords, "passwords", false, "Show MinIO credentials")
+	cmd.Flags().BoolVar(&showPasswords, "passwords", false, "Show Garage credentials")
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Workspace name (uses active workspace if not specified)")
 	cmd.Flags().StringVar(&stage, "stage", "production", "Service realm stage (dev, staging, production)")
 
 	return cmd
 }
 
-func newMinioStartCmd() *cobra.Command {
+func newGarageStartCmd() *cobra.Command {
 	var workspace string
 	var stage string
 
 	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "Start MinIO container for the workspace",
+		Short: "Start Garage container for the workspace",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := daemon.NewClient()
 			if err != nil {
@@ -191,7 +191,7 @@ func newMinioStartCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			result, err := client.StartService("minio", workspace, stage)
+			result, err := client.StartService("garage", workspace, stage)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -208,13 +208,13 @@ func newMinioStartCmd() *cobra.Command {
 	return cmd
 }
 
-func newMinioStopCmd() *cobra.Command {
+func newGarageStopCmd() *cobra.Command {
 	var workspace string
 	var stage string
 
 	cmd := &cobra.Command{
 		Use:   "stop",
-		Short: "Stop MinIO container for the workspace",
+		Short: "Stop Garage container for the workspace",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := daemon.NewClient()
 			if err != nil {
@@ -229,7 +229,7 @@ func newMinioStopCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			result, err := client.StopService("minio", workspace, stage)
+			result, err := client.StopService("garage", workspace, stage)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -246,14 +246,14 @@ func newMinioStopCmd() *cobra.Command {
 	return cmd
 }
 
-func newMinioUpdateCmd() *cobra.Command {
-	var minioImage string
+func newGarageUpdateCmd() *cobra.Command {
+	var garageImage string
 	var workspace string
 	var stage string
 
 	cmd := &cobra.Command{
 		Use:   "update",
-		Short: "Update MinIO service with new image",
+		Short: "Update Garage service with new image",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := daemon.NewClient()
 			if err != nil {
@@ -272,11 +272,11 @@ func newMinioUpdateCmd() *cobra.Command {
 			if stage != "" {
 				options["stage"] = stage
 			}
-			if minioImage != "" {
-				options["minio_image"] = minioImage
+			if garageImage != "" {
+				options["garage_image"] = garageImage
 			}
 
-			result, err := client.UpdateService("minio", workspace, options)
+			result, err := client.UpdateService("garage", workspace, options)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -287,22 +287,22 @@ func newMinioUpdateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&minioImage, "minio-image", "", "Custom image for MinIO")
+	cmd.Flags().StringVar(&garageImage, "garage-image", "", "Custom image for Garage")
 	cmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Workspace name (uses active workspace if not specified)")
 	cmd.Flags().StringVar(&stage, "stage", "production", "Service realm stage (dev, staging, production)")
 
 	return cmd
 }
 
-func newMinioBackupCmd() *cobra.Command {
+func newGarageBackupCmd() *cobra.Command {
 	var backupPath string
 	var workspace string
 	var stage string
 
 	cmd := &cobra.Command{
 		Use:   "backup",
-		Short: "Create a backup of all MinIO buckets",
-		Long:  "Creates a backup of all buckets in MinIO. The backup will be saved as a tarball with automatic date/time naming (format: minio-backup-YYYYMMDD-HHMMSS.tar.gz) in the specified directory.",
+		Short: "Create a backup of all Garage buckets",
+		Long:  "Creates a backup of all buckets in Garage. The backup will be saved as a tarball with automatic date/time naming (format: garage-backup-YYYYMMDD-HHMMSS.tar) in the specified directory.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if backupPath == "" {
 				fmt.Fprintf(os.Stderr, "Error: backup path is required. Use --path to specify the backup location\n")
@@ -328,7 +328,7 @@ func newMinioBackupCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			result, err := client.BackupMinio(workspace, stage, absBackupPath)
+			result, err := client.BackupGarage(workspace, stage, absBackupPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
@@ -349,15 +349,15 @@ func newMinioBackupCmd() *cobra.Command {
 	return cmd
 }
 
-func newMinioRestoreCmd() *cobra.Command {
+func newGarageRestoreCmd() *cobra.Command {
 	var backupPath string
 	var workspace string
 	var stage string
 
 	cmd := &cobra.Command{
 		Use:   "restore",
-		Short: "Restore MinIO buckets from a backup",
-		Long:  "Restores MinIO buckets from a backup tarball (.tar.gz) or directory. Buckets will be created if they don't exist.",
+		Short: "Restore Garage buckets from a backup",
+		Long:  "Restores Garage buckets from a backup tarball (.tar.gz) or directory. Buckets will be created if they don't exist.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if backupPath == "" {
 				fmt.Fprintf(os.Stderr, "Error: backup path is required. Use --path to specify the backup location\n")
@@ -383,7 +383,7 @@ func newMinioRestoreCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			err = client.RestoreMinioInteractive(workspace, stage, absBackupPath)
+			err = client.RestoreGarageInteractive(workspace, stage, absBackupPath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)

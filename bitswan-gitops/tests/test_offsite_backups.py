@@ -311,9 +311,9 @@ async def test_run_backup_is_stage_aware(aoc_env, monkeypatch, tmp_path):
     gitops_worktree.mkdir()
     (gitops_worktree / "bitswan.yaml").write_text("deployments: {}\n")
 
-    # postgres + minio enabled on dev only; couchdb nowhere (like the
+    # postgres + garage enabled on dev only; couchdb nowhere (like the
     # on-demand dev workspace that motivated this).
-    enabled = {("postgres", "dev"), ("minio", "dev")}
+    enabled = {("postgres", "dev"), ("garage", "dev")}
     import app.services.infra_service as infra_mod
 
     monkeypatch.setattr(
@@ -353,14 +353,14 @@ async def test_run_backup_is_stage_aware(aoc_env, monkeypatch, tmp_path):
     assert driver.execs and driver.execs[0].cmd == ["pg_dumpall", "-U", "pguser"]
     assert any("--tag postgres" in j and "--tag stage:dev" in j for j in joined_all)
 
-    # dev-stage minio tarball; couchdb skipped everywhere
-    assert any("--tag minio" in j and "--tag stage:dev" in j for j in joined_all)
+    # dev-stage garage tarball; couchdb skipped everywhere
+    assert any("--tag garage" in j and "--tag stage:dev" in j for j in joined_all)
     assert not any("--tag couchdb" in j for j in joined_all)
 
     assert results["postgres"]["success"] is True
     assert "dev:" in results["postgres"]["output"]
     assert results["couchdb"]["output"] == "CouchDB not enabled on any stage, skipped"
-    assert results["minio"]["success"] is True
+    assert results["garage"]["success"] is True
     assert results["workspace"]["success"] is True
     assert results["gitops"]["success"] is True
     assert backup_service.get_last_run()["ok"] is True
@@ -375,12 +375,12 @@ async def test_run_backup_stage_failure_is_isolated(aoc_env, monkeypatch, tmp_pa
     monkeypatch.setenv("BITSWAN_WORKSPACE_REPO_DIR", str(tmp_path / "nope"))
     monkeypatch.setenv("BITSWAN_WORKSPACE_NAME", "dev")
 
-    enabled = {("minio", "dev"), ("minio", "production")}
+    enabled = {("garage", "dev"), ("garage", "production")}
 
     class _ExplodingService(_FakeService):
         async def backup(self, backup_dir):
             if self._stage == "dev":
-                raise RuntimeError("mc mirror blew up")
+                raise RuntimeError("rclone sync blew up")
             return await super().backup(backup_dir)
 
     import app.services.infra_service as infra_mod
@@ -403,12 +403,12 @@ async def test_run_backup_stage_failure_is_isolated(aoc_env, monkeypatch, tmp_pa
 
     results = await backup_service.run_backup({"enabled": True, "retention": {}})
 
-    assert results["minio"]["success"] is False
-    assert "dev: mc mirror blew up" in results["minio"]["output"]
-    assert "production: ok" in results["minio"]["output"]
-    # production minio still got backed up despite the dev failure
+    assert results["garage"]["success"] is False
+    assert "dev: rclone sync blew up" in results["garage"]["output"]
+    assert "production: ok" in results["garage"]["output"]
+    # production garage still got backed up despite the dev failure
     assert any(
-        "--tag minio" in " ".join(c) and "--tag stage:production" in " ".join(c)
+        "--tag garage" in " ".join(c) and "--tag stage:production" in " ".join(c)
         for c in restic_calls
         if c[0] == "backup"
     )

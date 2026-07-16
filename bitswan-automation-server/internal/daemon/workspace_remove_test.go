@@ -91,7 +91,7 @@ func TestWorkspaceHostsToRemove(t *testing.T) {
 			}
 		}
 	}
-	// A route WITHOUT an owned endpoint (infra admin UIs like minio/postgres
+	// A route WITHOUT an owned endpoint (infra admin UIs
 	// register only a protected_routes row) — the leak the union fixes.
 	if err := saveProtectedRoute(ws+"-postgres-dev."+domain, "http://proxy:80"); err != nil {
 		t.Fatalf("saveProtectedRoute: %v", err)

@@ -59,8 +59,6 @@ class ServiceEnableRequest(BaseModel):
     kafka_image: str = ""
     ui_image: str = ""
     postgres_image: str = ""
-    pgadmin_image: str = ""
-    minio_image: str = ""
 
 
 class ServiceDisableRequest(BaseModel):

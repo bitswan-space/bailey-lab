@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -131,11 +132,28 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		return err
 	}
 
-	// 4b. Best-effort per-BP namespaces: MinIO buckets + the standby blue-green
-	//     Postgres DB (bp_databases.provision_for_deployments). Never fails the
-	//     deploy — these back snapshots/restore, not the live path.
+	// 4b. Best-effort per-BP namespaces: Garage buckets/keys + the standby
+	//     blue-green Postgres DB (bp_databases.provision_for_deployments). Never
+	//     fails the deploy — these back snapshots/restore, not the live path.
 	report("provision", "Provisioning per-BP namespaces...")
-	provisionForDeployments(ctx, wctx, bs, report)
+	if changed := provisionForDeployments(ctx, wctx, bs, report); len(changed) > 0 {
+		// First-ever-apply convergence: those backends were compiled against
+		// EMPTY placeholder creds files (garage wasn't up yet to mint keys —
+		// see bpcreds.go). The files now hold real key material, and compose
+		// recreates a service whose resolved env_file content changed, so one
+		// targeted up gives exactly those backends their working credentials.
+		// Recreating them is strictly an improvement (they never had working
+		// S3 creds), including a "live" production slot on its first apply.
+		// An affected network_mode:service worker is recreated with its
+		// backend here too — acceptable in this one-shot bootstrap case.
+		affected := servicesUsingEnvFiles(composePath, changed)
+		if len(affected) > 0 {
+			report("compose_up", "Re-creating backends whose S3 credentials were just issued...")
+			if err := composeUpServices(ctx, wctx, composePath, affected, false /*removeOrphans*/, true /*noDeps*/, report); err != nil {
+				report("compose_up", fmt.Sprintf("credential convergence up failed: %v", err))
+			}
+		}
+	}
 
 	// 5. Zero-downtime gate: never hand a production host to an upstream that
 	//    isn't ready. A promote brought the target slot up in step 3; wait for
@@ -247,6 +265,39 @@ func composeServiceNames(composePath string) map[string]bool {
 		set[name] = true
 	}
 	return set
+}
+
+// servicesUsingEnvFiles returns the (sorted) compose service names whose
+// env_file list references any of the given paths — the recreate set for the
+// credential-convergence up after placeholder creds gain real values.
+func servicesUsingEnvFiles(composePath string, paths []string) []string {
+	raw, err := os.ReadFile(composePath)
+	if err != nil {
+		return nil
+	}
+	var doc struct {
+		Services map[string]struct {
+			EnvFile []string `yaml:"env_file"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	wanted := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		wanted[p] = true
+	}
+	var out []string
+	for name, svc := range doc.Services {
+		for _, ef := range svc.EnvFile {
+			if wanted[ef] {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // composeUpServices runs `docker compose -p <ws> -f <file> up -d [flags]

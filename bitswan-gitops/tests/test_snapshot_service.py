@@ -33,15 +33,20 @@ def gitops_home(tmp_path, monkeypatch):
     secrets.mkdir()
     for stage in ("dev", "staging", ""):
         suffix = f"-{stage}" if stage else ""
+        realm = stage or "production"
         (secrets / f"postgres{suffix}").write_text(
             "POSTGRES_USER=admin\nPOSTGRES_PASSWORD=pw\nPOSTGRES_HOST=h\nPOSTGRES_DB=postgres\n"
         )
         (secrets / f"couchdb{suffix}").write_text(
             "COUCHDB_USER=admin\nCOUCHDB_PASSWORD=pw\n"
         )
-        (secrets / f"minio{suffix}").write_text(
-            "MINIO_ROOT_USER=admin\nMINIO_ROOT_PASSWORD=pw\n"
+        (secrets / f"garage{suffix}").write_text(
+            f"GARAGE_ADMIN_TOKEN=t\nGARAGE_RPC_SECRET=r\n"
+            f"S3_HOST=ws-test-garage{suffix}\nS3_PORT=9000\n"
         )
+        creds_dir = secrets / "garagecreds" / realm
+        creds_dir.mkdir(parents=True)
+        (creds_dir / "_system").write_text("S3_ACCESS_KEY=GKsys\nS3_SECRET_KEY=sksys\n")
     reg = load_registry()
     register_bp_stage(reg, "my-bp", "My BP", "dev")
     register_bp_stage(reg, "my-bp", "My BP", "staging")
@@ -75,7 +80,7 @@ def service(gitops_home, monkeypatch):
 def fake_docker(monkeypatch):
     """Fake all three docker helpers with a tiny in-memory 'cluster'.
 
-    State: per-stage postgres dump content, couch dbs, minio tar bytes —
+    State: per-stage postgres dump content, couch dbs, garage tar bytes —
     enough to verify dump→clear→load plumbing end to end.
     """
     state = {
@@ -96,7 +101,7 @@ def fake_docker(monkeypatch):
         "couch_created": [],
         "couch_deleted": [],
         "couch_bulk": {},
-        "minio_tar": {},  # stage -> tar bytes piped in on restore
+        "garage_tar": {},  # stage -> tar bytes piped in on restore
     }
 
     def _stage_of(args_or_container) -> str:
@@ -107,9 +112,12 @@ def fake_docker(monkeypatch):
         else:
             container = args_or_container
         # `docker cp` fuses the container with a path (container:/tmp/...);
-        # drop the path before deriving the stage suffix.
+        # drop the path before deriving the stage suffix. The garage toolbox
+        # sidecar shares its garage container's stage.
         container = container.split(":", 1)[0]
         tail = container.split("__", 1)[1]
+        if tail.endswith("-toolbox"):
+            tail = tail[: -len("-toolbox")]
         parts = tail.split("-", 1)
         return parts[1] if len(parts) > 1 else "production"
 
@@ -137,7 +145,7 @@ def fake_docker(monkeypatch):
             state["couch_created"].append((stage, db))
             state["couch_dbs"].setdefault(stage, []).append(db)
             return "{}", "", 0
-        if "mc" in joined or "alias" in joined:
+        if "rclone" in args:
             return "", "", 0
         if args[-2:] == ["rm", "-rf"] or "rm" in args:
             return "", "", 0
@@ -155,14 +163,13 @@ def fake_docker(monkeypatch):
             db = url.split("5984/", 1)[1].split("/_all_docs", 1)[0]
             data = json.dumps(state["couch_docs"].get(db, {"rows": []})).encode()
         elif args[:2] == ["docker", "cp"]:
-            # minio dump: `docker cp container:scratch -` emits a plain tar;
-            # the helper gzips it (gzip_output=True), so produce uncompressed.
+            # garage dump: `docker cp toolbox:scratch -` emits a plain tar.
             import io
 
             buf = io.BytesIO()
             with tarfile.open(fileobj=buf, mode="w") as tar:
                 ti = tarfile.TarInfo("obj.txt")
-                content = f"minio-{stage}".encode()
+                content = f"garage-{stage}".encode()
                 ti.size = len(content)
                 tar.addfile(ti, io.BytesIO(content))
             data = buf.getvalue()
@@ -186,19 +193,21 @@ def fake_docker(monkeypatch):
             db = joined.split("5984/", 1)[1].split("/_bulk_docs", 1)[0]
             state["couch_bulk"][(stage, db)] = json.loads(data)
         elif args[:2] == ["docker", "cp"]:
-            # minio restore: `docker cp - container:/tmp` (gunzip_input=True).
-            state["minio_tar"][stage] = data
+            # garage restore: `docker cp - toolbox:/tmp`.
+            state["garage_tar"][stage] = data
         return "", "", 0
 
     monkeypatch.setattr(snap_mod, "run_docker_command", fake_run)
     monkeypatch.setattr(snap_mod, "run_docker_command_to_file", fake_to_file)
     monkeypatch.setattr(snap_mod, "run_docker_command_from_file", fake_from_file)
-    # restore_snapshot provisions the target via bp_databases — keep that
-    # off real docker too.
+    # restore_snapshot provisions the target via bp_databases (incl. the
+    # json-api CreateBucket/GetBucketInfo flow) — keep that off real docker.
     from app.services import bp_databases
 
     async def fake_bp_run(*args, cwd=None):
         state["calls"].append(list(args))
+        if "GetBucketInfo" in args:
+            return '{"id":"bkt1"}', "", 0
         return "", "", 0
 
     monkeypatch.setattr(bp_databases, "_driver_exec", fake_bp_run)
@@ -243,18 +252,26 @@ async def test_create_snapshot_writes_manifest_and_files(service, fake_docker):
     assert manifest["stage"] == "dev"
     assert manifest["kind"] == "manual"
     assert manifest["label"] == "before-release"
-    for svc_type in ("postgres", "couchdb", "minio"):
+    for svc_type in ("postgres", "couchdb", "garage"):
         assert manifest["services"][svc_type]["included"] is True
     assert manifest["total_size_bytes"] > 0
-    assert steps == ["snapshot_postgres", "snapshot_couchdb", "snapshot_minio"]
+    assert steps == ["snapshot_postgres", "snapshot_couchdb", "snapshot_garage"]
 
     snap_dir = service._snapshot_dir("my-bp", "dev", manifest["id"])
     assert os.path.isdir(snap_dir)
     # Artifacts are stored uncompressed (restic off-site mirroring dedups
     # and compresses; gzip would defeat both).
-    for fname in ("manifest.json", "postgres.sql", "couchdb.tar", "minio.tar"):
+    for fname in ("manifest.json", "postgres.sql", "couchdb.tar", "garage.tar"):
         assert os.path.exists(os.path.join(snap_dir, fname))
     assert manifest["services"]["postgres"]["file"] == "postgres.sql"
+
+    # The garage dump ran in the TOOLBOX sidecar (the garage container is a
+    # bare static binary), against the per-BP bucket.
+    joined = [" ".join(c) for c in fake_docker["calls"]]
+    assert any(
+        "ws-test__garage-dev-toolbox" in j and ":s3:bp-my-bp" in j and "sync" in j
+        for j in joined
+    ), joined
 
     with open(os.path.join(snap_dir, "postgres.sql"), "rb") as f:
         assert f.read() == b"-- sql dump dev\n"
@@ -358,7 +375,7 @@ async def test_restore_cross_stage_with_auto_snapshot(service, fake_docker):
     assert steps[0] == "validating"
     assert "pre_restore_snapshot" in steps
     assert steps.index("restore_postgres") < steps.index("restore_couchdb")
-    assert steps.index("restore_couchdb") < steps.index("restore_minio")
+    assert steps.index("restore_couchdb") < steps.index("restore_garage")
 
     # The auto-snapshot of staging exists, marked kind=auto with provenance.
     autos = [
@@ -381,8 +398,16 @@ async def test_restore_cross_stage_with_auto_snapshot(service, fake_docker):
     assert bulk["docs"][0]["_id"] == "o1"
     assert "_rev" not in bulk["docs"][0]
 
-    # MinIO tarball was streamed into staging.
-    assert "staging" in fake_docker["minio_tar"]
+    # Garage tarball was streamed into staging's toolbox and synced into the
+    # target bucket.
+    assert "staging" in fake_docker["garage_tar"]
+    joined = [" ".join(c) for c in fake_docker["calls"]]
+    assert any(
+        "ws-test__garage-staging-toolbox" in j
+        and "sync" in j
+        and j.strip().endswith(":s3:bp-my-bp")
+        for j in joined
+    ), joined
 
     # Target stage got registered/provisioned in the registry by the restore.
     reg = load_registry()
@@ -415,7 +440,9 @@ async def test_restore_unknown_snapshot(service, fake_docker):
 
 async def test_restore_legacy_gzipped_snapshot(service, fake_docker):
     """Snapshots taken before the uncompressed-artifact change carry gzipped
-    files (postgres.sql.gz etc.); restores must detect and gunzip them."""
+    files (postgres.sql.gz etc.) AND key the object store "minio" — restores
+    must gunzip them and get_snapshot() must normalize services.minio to
+    services.garage (the archive format is identical)."""
     import io
 
     snapshot_id = new_snapshot_id()
@@ -472,11 +499,16 @@ async def test_restore_legacy_gzipped_snapshot(service, fake_docker):
     with open(os.path.join(snap_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f)
 
+    # The legacy manifest is normalized at the read choke point.
+    normalized = service.get_snapshot("my-bp", "dev", snapshot_id)
+    assert "minio" not in normalized["services"]
+    assert normalized["services"]["garage"]["file"] == "minio.tar.gz"
+
     await service.restore_snapshot("my-bp", snapshot_id, "dev", "staging")
 
     # Each artifact was gunzipped on the way in.
     assert fake_docker["pg_loaded"]["staging"] == b"-- legacy sql\n"
     bulk = fake_docker["couch_bulk"][("staging", "bp-my-bp-orders")]
     assert bulk["docs"][0]["_id"] == "l1"
-    with tarfile.open(fileobj=io.BytesIO(fake_docker["minio_tar"]["staging"])) as tar:
+    with tarfile.open(fileobj=io.BytesIO(fake_docker["garage_tar"]["staging"])) as tar:
         assert "obj.txt" in tar.getnames()

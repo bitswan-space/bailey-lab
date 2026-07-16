@@ -369,7 +369,7 @@ func TestContainerCopyOutRoundTrip(t *testing.T) {
 	defer closeFn()
 
 	rc, err := client.ContainerCopyOut(context.Background(),
-		WorkspaceContext{WorkspaceName: "acme"}, "acme-minio", "/tmp/bpsnap-bkt")
+		WorkspaceContext{WorkspaceName: "acme"}, "acme-store", "/tmp/bpsnap-bkt")
 	if err != nil {
 		t.Fatalf("ContainerCopyOut: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestContainerCopyOutRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(got, fd.copyOutTar) {
 		t.Errorf("tar = %v, want %v (binary must round-trip)", got, fd.copyOutTar)
 	}
-	if fd.gotCopyOutCont != "acme-minio" || fd.gotCopyOutPath != "/tmp/bpsnap-bkt" {
+	if fd.gotCopyOutCont != "acme-store" || fd.gotCopyOutPath != "/tmp/bpsnap-bkt" {
 		t.Errorf("copy-out target = %q:%q", fd.gotCopyOutCont, fd.gotCopyOutPath)
 	}
 }
@@ -393,13 +393,13 @@ func TestContainerCopyInRoundTrip(t *testing.T) {
 
 	tar := []byte{0x00, 'u', 's', 't', 'a', 'r', 0xfe}
 	if err := client.ContainerCopyIn(context.Background(),
-		WorkspaceContext{WorkspaceName: "acme"}, "acme-minio", "/tmp", bytes.NewReader(tar)); err != nil {
+		WorkspaceContext{WorkspaceName: "acme"}, "acme-store", "/tmp", bytes.NewReader(tar)); err != nil {
 		t.Fatalf("ContainerCopyIn: %v", err)
 	}
 	if !reflect.DeepEqual(fd.copyInTar, tar) {
 		t.Errorf("streamed tar = %v, want %v", fd.copyInTar, tar)
 	}
-	if fd.gotCopyInCont != "acme-minio" || fd.gotCopyInPath != "/tmp" {
+	if fd.gotCopyInCont != "acme-store" || fd.gotCopyInPath != "/tmp" {
 		t.Errorf("copy-in target = %q:%q", fd.gotCopyInCont, fd.gotCopyInPath)
 	}
 }

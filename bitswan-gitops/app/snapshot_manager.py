@@ -34,12 +34,12 @@ class SnapshotStep(str, Enum):
     FETCH_OFFSITE = "fetch_offsite"
     SNAPSHOT_POSTGRES = "snapshot_postgres"
     SNAPSHOT_COUCHDB = "snapshot_couchdb"
-    SNAPSHOT_MINIO = "snapshot_minio"
+    SNAPSHOT_GARAGE = "snapshot_garage"
     PRE_RESTORE_SNAPSHOT = "pre_restore_snapshot"
     PRUNING = "pruning"
     RESTORE_POSTGRES = "restore_postgres"
     RESTORE_COUCHDB = "restore_couchdb"
-    RESTORE_MINIO = "restore_minio"
+    RESTORE_GARAGE = "restore_garage"
     DONE = "done"
 
 
@@ -50,7 +50,7 @@ OPERATION_STEPS: dict[str, list[str]] = {
         SnapshotStep.VALIDATING.value,
         SnapshotStep.SNAPSHOT_POSTGRES.value,
         SnapshotStep.SNAPSHOT_COUCHDB.value,
-        SnapshotStep.SNAPSHOT_MINIO.value,
+        SnapshotStep.SNAPSHOT_GARAGE.value,
         SnapshotStep.DONE.value,
     ],
     "restore": [
@@ -59,23 +59,23 @@ OPERATION_STEPS: dict[str, list[str]] = {
         SnapshotStep.PRE_RESTORE_SNAPSHOT.value,
         SnapshotStep.SNAPSHOT_POSTGRES.value,
         SnapshotStep.SNAPSHOT_COUCHDB.value,
-        SnapshotStep.SNAPSHOT_MINIO.value,
+        SnapshotStep.SNAPSHOT_GARAGE.value,
         SnapshotStep.PRUNING.value,
         SnapshotStep.RESTORE_POSTGRES.value,
         SnapshotStep.RESTORE_COUCHDB.value,
-        SnapshotStep.RESTORE_MINIO.value,
+        SnapshotStep.RESTORE_GARAGE.value,
         SnapshotStep.DONE.value,
     ],
     "clone": [
         SnapshotStep.VALIDATING.value,
         SnapshotStep.SNAPSHOT_POSTGRES.value,
         SnapshotStep.SNAPSHOT_COUCHDB.value,
-        SnapshotStep.SNAPSHOT_MINIO.value,
+        SnapshotStep.SNAPSHOT_GARAGE.value,
         SnapshotStep.PRE_RESTORE_SNAPSHOT.value,
         SnapshotStep.PRUNING.value,
         SnapshotStep.RESTORE_POSTGRES.value,
         SnapshotStep.RESTORE_COUCHDB.value,
-        SnapshotStep.RESTORE_MINIO.value,
+        SnapshotStep.RESTORE_GARAGE.value,
         SnapshotStep.DONE.value,
     ],
     "fetch": [

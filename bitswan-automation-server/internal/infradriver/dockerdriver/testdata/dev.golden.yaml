@@ -4,11 +4,14 @@ networks:
     ws1-dev:
         external: true
 services:
-    minio-dev:
-        command: server /data --console-address :9001
-        container_name: ws1__minio-dev
+    garage-dev:
+        command:
+            - /garage
+            - server
+            - --single-node
+        container_name: ws1__garage-dev
         env_file:
-            - __ROOT__/secrets/minio-dev
+            - __ROOT__/secrets/garage-dev
         healthcheck:
             interval: 5s
             retries: 30
@@ -16,18 +19,33 @@ services:
             start_period: 15s
             test:
                 - CMD
-                - curl
-                - -f
-                - http://localhost:9000/minio/health/live
+                - /garage
+                - json-api
+                - GetClusterHealth
             timeout: 3s
-        image: minio/minio:latest
+        image: dxflrs/garage:v2.3.0
+        labels:
+            gitops.workspace: ws1
+        networks:
+            ws1-dev:
+                aliases:
+                    - ws1-garage-dev
+        restart: unless-stopped
+        volumes:
+            - ws1-garage-dev-meta:/meta
+            - ws1-garage-dev-data:/data
+            - __ROOT__/gitops/secrets/garage-dev.toml:/etc/garage.toml:ro
+    garage-dev-toolbox:
+        container_name: ws1__garage-dev-toolbox
+        entrypoint:
+            - sleep
+            - infinity
+        image: rclone/rclone:1.68
         labels:
             gitops.workspace: ws1
         networks:
             - ws1-dev
         restart: unless-stopped
-        volumes:
-            - ws1-minio-dev-data-data:/data
     postgres-dev:
         container_name: ws1__postgres-dev
         env_file:
@@ -39,7 +57,7 @@ services:
             start_period: 30s
             test:
                 - CMD-SHELL
-                - pg_isready -U "$POSTGRES_USER" -q
+                - pg_isready -U "$$POSTGRES_USER" -q
             timeout: 3s
         image: postgres:16
         labels:
@@ -49,21 +67,6 @@ services:
         restart: unless-stopped
         volumes:
             - ws1-postgres-dev-data-data:/var/lib/postgresql/data
-    postgres-dev-pgadmin:
-        container_name: ws1__postgres-dev-pgadmin
-        env_file:
-            - __ROOT__/secrets/postgres-dev
-        environment:
-            PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
-            PGADMIN_CONFIG_SERVER_MODE: "False"
-        image: dpage/pgadmin4:latest
-        labels:
-            gitops.workspace: ws1
-        networks:
-            - ws1-dev
-        restart: unless-stopped
-        volumes:
-            - __ROOT__/secrets/pgadmin-servers.json:/pgadmin4/servers.json:ro
     ws1-backend-822b-dev:
         cap_drop:
             - NET_ADMIN
@@ -75,7 +78,7 @@ services:
         env_file:
             - __ROOT__/secrets/bp/acme/dev
             - __ROOT__/secrets/postgres-dev
-            - __ROOT__/secrets/minio-dev
+            - __ROOT__/secrets/garagecreds/dev/_system
         environment:
             BITSWAN_ADMIN_GROUP: /Test Org/admin
             BITSWAN_ALLOWED_GROUP: /Test Org
@@ -117,7 +120,7 @@ services:
         container_name: ws1-frontend-822b-dev
         env_file:
             - __ROOT__/secrets/postgres-dev
-            - __ROOT__/secrets/minio-dev
+            - __ROOT__/secrets/garagecreds/dev/_system
         environment:
             BITSWAN_ADMIN_GROUP: /Test Org/admin
             BITSWAN_ALLOWED_GROUP: /Test Org
@@ -226,5 +229,6 @@ services:
             - __ROOT__/firewall:/firewall
 version: "3"
 volumes:
-    ws1-minio-dev-data-data: null
+    ws1-garage-dev-data: null
+    ws1-garage-dev-meta: null
     ws1-postgres-dev-data-data: null

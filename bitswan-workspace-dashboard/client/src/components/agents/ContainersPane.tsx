@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Cog, Globe, Hammer, Loader2, Play, RotateCcw, Square } from 'lucide-react';
+import {
+  Cog,
+  Database,
+  Globe,
+  Hammer,
+  HardDrive,
+  Loader2,
+  Play,
+  RotateCcw,
+  Square,
+} from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { api } from '@/lib/api';
 import { deployBpWithToast } from '@/lib/deployBp';
@@ -7,6 +17,9 @@ import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import { LogsPane } from '@/components/automations/inspect/LogsPane';
 import { BuildLogsPane } from '@/components/automations/inspect/BuildLogsPane';
+import { ObjectBrowser } from '@/components/data-explorer/ObjectBrowser';
+import { SqlExplorer } from '@/components/data-explorer/SqlExplorer';
+import { setUrlParams, useUrlParam } from '@/lib/urlState';
 import { cn } from '@/lib/utils';
 
 /**
@@ -33,6 +46,21 @@ interface Container {
 }
 
 type Detail = 'overview' | 'logs' | 'build';
+
+// Sidebar pseudo-entries below the container list: the copy's live-dev data.
+// `~` can't appear in automation dir names, so they never collide with a
+// container name in the shared `ct` URL param.
+const PSEUDO_OBJECTS = '~objects';
+const PSEUDO_SQL = '~sql';
+// Explorer deep-link params to clear when the sidebar selection changes.
+const EXPLORER_PARAMS = {
+  table: null,
+  page: null,
+  sort: null,
+  dir: null,
+  prefix: null,
+  obj: null,
+} as const;
 
 export function ContainersPane({ bp, copy, active }: Props) {
   const { automations } = useAutomations();
@@ -62,8 +90,13 @@ export function ContainersPane({ bp, copy, active }: Props) {
     return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
   }, [automations, bp, copy]);
 
-  // eslint-disable-next-line no-restricted-syntax -- null = nothing selected
-  const [selectedName, setSelectedName] = useState<string | null>(null);
+  // Selection lives in the URL (`ct`) so container/data views deep-link;
+  // `~objects` / `~sql` select the data explorers instead of a container.
+  const [selectedName] = useUrlParam('ct');
+  // eslint-disable-next-line no-restricted-syntax -- null clears the URL param
+  const setSelectedName = (name: string | null) =>
+    setUrlParams({ ct: name, ...EXPLORER_PARAMS });
+  const isPseudo = selectedName === PSEUDO_OBJECTS || selectedName === PSEUDO_SQL;
   const [detail, setDetail] = useState<Detail>('overview');
   const [busy, setBusy] = useState(false);
   const [deploying, setDeploying] = useState(false);
@@ -87,15 +120,17 @@ export function ContainersPane({ bp, copy, active }: Props) {
     }
   };
 
-  // Keep a valid selection as the list changes.
+  // Keep a valid selection as the list changes (data pseudo-entries are
+  // always valid — they don't depend on the container list).
   useEffect(() => {
+    if (!active || isPseudo) return;
     const first = containers[0];
     if (!first) {
-      setSelectedName(null);
+      if (selectedName) setSelectedName(null);
     } else if (!containers.some((c) => c.name === selectedName)) {
       setSelectedName(first.name);
     }
-  }, [containers, selectedName]);
+  }, [containers, selectedName, isPseudo, active]);
 
   const selected = containers.find((c) => c.name === selectedName) ?? null;
 
@@ -205,12 +240,36 @@ export function ContainersPane({ bp, copy, active }: Props) {
               </button>
             ))
           )}
+
+          {/* The copy's live-dev data — always offered, even with no
+              containers (the BP's database/bucket can exist regardless). */}
+          <div className="mt-1 border-t border-border px-3.5 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Data
+          </div>
+          <DataEntry
+            icon={<HardDrive className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
+            label="Object Storage"
+            selected={selectedName === PSEUDO_OBJECTS}
+            onClick={() => setSelectedName(PSEUDO_OBJECTS)}
+          />
+          <DataEntry
+            icon={<Database className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
+            label="SQL"
+            selected={selectedName === PSEUDO_SQL}
+            onClick={() => setSelectedName(PSEUDO_SQL)}
+          />
         </div>
       </aside>
 
-      {/* Right: inspect detail */}
+      {/* Right: inspect detail (or the copy's data explorers) */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-        {!selected ? (
+        {selectedName === PSEUDO_OBJECTS ? (
+          // Live-dev data rides the dev realm; the copy narrows to this
+          // sandbox's per-(copy, BP) resources server-side.
+          <ObjectBrowser scope={{ bp, stage: 'dev', copy }} active={active} />
+        ) : selectedName === PSEUDO_SQL ? (
+          <SqlExplorer scope={{ bp, stage: 'dev', copy }} active={active} />
+        ) : !selected ? (
           <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
             Select a container to inspect.
           </div>
@@ -286,6 +345,31 @@ export function ContainersPane({ bp, copy, active }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+function DataEntry({
+  icon,
+  label,
+  selected,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'flex w-full items-center gap-2.5 border-l-2 px-3 py-2.5 text-left',
+        selected ? 'border-foreground bg-muted/60' : 'border-transparent hover:bg-muted/40',
+      )}
+    >
+      {icon}
+      <span className="flex-1 truncate text-xs font-medium text-foreground">{label}</span>
+    </button>
   );
 }
 

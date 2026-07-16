@@ -273,12 +273,39 @@ EOF
   mark "guest: configure docker egress proxy"
 fi
 
-# Seed the guest's docker with the base images the bringup builds FROM, if a
-# host-side seed tarball exists. The guest is a fresh VM whose anonymous Docker
-# Hub pulls are easily rate-limited (HTTP 429) on a busy host — seeding the
-# common base images (python/golang/node/alpine/debian/ubuntu) from the host
-# (which can pull them) makes the build hermetic and 429-proof. Best-effort: a
-# missing/partial tarball just falls back to pulling.
+# Seed the guest's docker with the images the bringup would otherwise pull.
+# The guest is a fresh VM whose anonymous Docker Hub pulls are easily
+# rate-limited (HTTP 429) on a busy host — seeding them from the host (which
+# can pull them) makes the run hermetic and 429-proof. Best-effort throughout:
+# a missing/partial tarball just falls back to pulling in the guest.
+#
+# SEED_IMAGES is the canonical list; extend it when bringup.sh gains a new
+# registry-pulled image (the walkthrough goes dark mid-chapter when the guest
+# stalls on a rate-limited pull instead). The tarball is built here when
+# absent; delete it (or set BITSWAN_E2E_RESEED=1) after changing the list.
+SEED_IMAGES=(
+  # infra services a BP enables + the app-image bases (bringup.sh pre-pull)
+  postgres:16
+  dxflrs/garage:v2.3.0
+  rclone/rclone:1.68
+  couchdb:3.3
+  node:24-alpine
+  golang:1.25-alpine
+  # SIEM target — registry-only, historically the 429 canary (see bringup.sh)
+  otel/opentelemetry-collector:0.115.1
+)
+if [ ! -f "$WORK/base-images.tar" ] || [ "${BITSWAN_E2E_RESEED:-}" = "1" ]; then
+  echo "--- building base-image seed tarball (${#SEED_IMAGES[@]} images) ---"
+  seed_ok=1
+  for img in "${SEED_IMAGES[@]}"; do
+    docker pull "$img" >/dev/null 2>&1 || { echo "--- seed pull failed: $img (skipping tarball rebuild) ---"; seed_ok=0; break; }
+  done
+  if [ "$seed_ok" = "1" ]; then
+    docker save -o "$WORK/base-images.tar" "${SEED_IMAGES[@]}" \
+      || { echo "--- docker save failed (continuing; guest will pull) ---"; rm -f "$WORK/base-images.tar"; }
+  fi
+  mark "host: build base-image seed tarball"
+fi
 if [ -f "$WORK/base-images.tar" ]; then
   echo "--- seeding guest docker with base images ($WORK/base-images.tar) ---"
   scp -i "$WORK/id_ed25519" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
