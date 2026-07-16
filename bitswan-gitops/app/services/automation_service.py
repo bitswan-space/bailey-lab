@@ -1072,6 +1072,52 @@ class AutomationService:
             return source["deployment_id"].removesuffix("-live-dev") + "-dev"
         return source["deployment_id"]
 
+    def _contained_under(self, root: str, rel: str) -> bool:
+        """True iff joining `rel` onto `root` still lands inside `root` once
+        `..` segments and symlinks are resolved (realpath) — the same
+        containment rule `prep_deploy_source` enforces on scanned sources."""
+        root_real = os.path.realpath(root)
+        target = os.path.realpath(os.path.join(root, rel))
+        return target == root_real or target.startswith(root_real + os.sep)
+
+    def validate_deploy_source_refs(
+        self,
+        checksum: str | None = None,
+        relative_path: str | None = None,
+    ) -> None:
+        """Containment guard for tenant-supplied deploy source refs (#134).
+
+        `POST /automations/{id}/deploy` accepts `checksum` / `relative_path`
+        verbatim and `deploy_automation` persists them into bitswan.yaml —
+        bypassing the realpath containment `prep_deploy_source` applies on
+        the scanned-source path. The infra driver later joins these strings
+        onto its gitops / workspace roots to build read-only bind-mount
+        SOURCES, so an uncontained `../..` value would make the driver
+        (which holds the docker socket) mount an arbitrary host path into a
+        driver-managed container. Reject anything that escapes:
+
+          * `checksum` must resolve STRICTLY below the gitops dir (the root
+            itself holds every other deployment's tree — never a valid
+            mount source);
+          * `relative_path` must stay inside the workspace repo, mirroring
+            `prep_deploy_source`'s "Source escapes workspace" check.
+
+        The driver re-checks the same invariant when it compiles the mount
+        (defense in depth); this is the write-time gate.
+        """
+        if checksum:
+            gitops_real = os.path.realpath(self.gitops_dir)
+            target = os.path.realpath(os.path.join(self.gitops_dir, checksum))
+            if not target.startswith(gitops_real + os.sep):
+                raise HTTPException(
+                    status_code=400,
+                    detail="checksum escapes the gitops directory",
+                )
+        if relative_path and not self._contained_under(
+            self.workspace_repo_dir, relative_path
+        ):
+            raise HTTPException(status_code=400, detail="Source escapes workspace")
+
     async def prep_deploy_source(
         self,
         relative_path: str,
@@ -4397,6 +4443,13 @@ class AutomationService:
         async def _report(step: str, message: str):
             if progress_callback is not None:
                 await progress_callback(step, message)
+
+        # Containment guard (#134): checksum / relative_path are persisted
+        # verbatim into bitswan.yaml below and later joined onto trusted
+        # roots by the infra driver to build mount sources. Validate here —
+        # not only in the HTTP route — so every caller (deploy route, agent
+        # routes) is covered before anything is written.
+        self.validate_deploy_source_refs(checksum=checksum, relative_path=relative_path)
 
         os.environ["COMPOSE_PROJECT_NAME"] = self.workspace_name
         bs_yaml = read_bitswan_yaml(self.gitops_dir)

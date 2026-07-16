@@ -1183,6 +1183,14 @@ async def deploy_automation(
             detail="Stage must be one of: dev, staging, production, live-dev",
         )
 
+    # Containment guard (#134): checksum / relative_path are written verbatim
+    # into bitswan.yaml and later joined onto the gitops / workspace roots by
+    # the infra driver to build bind-mount sources. Reject escaping values
+    # here so the caller gets a synchronous 400 instead of a failed task.
+    automation_service.validate_deploy_source_refs(
+        checksum=checksum, relative_path=relative_path
+    )
+
     replicas_int = int(replicas) if replicas else None
 
     services_dict = None
