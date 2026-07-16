@@ -1483,6 +1483,7 @@ class AutomationService:
         shows up here and is a rollback point too. Newest-first; `current` = the
         newest *deploy* entry's commit (the live version — firewall events never
         change which version is live)."""
+        validate_bp_name(bp)
         stage_key = "production" if stage in ("", "production") else stage
         realm = bp_secrets.realm_for_stage(stage_key)
         # History is the git log of this BP's OWN deploy repo (one bitswan.yaml
@@ -1697,6 +1698,7 @@ class AutomationService:
         is the history entry's commit sha; the restore's own commit ("rollback …")
         becomes the new history entry, and the driver re-applies (recreating
         containers, re-deriving the backend's secret env, reloading firewall)."""
+        validate_bp_name(bp)
         stage_key = "production" if stage in ("", "production") else stage
         bp_dir = bp_state_path(self.gitops_dir, bp)
         content, _, rc = await call_git_command_with_output(
@@ -2738,6 +2740,7 @@ class AutomationService:
         reloads the egress gateway for any deployed members so enforcement
         immediately reflects the restored allow-list. Production rollbacks
         require an admin/auditor role (same gate as live edits)."""
+        validate_bp_name(bp)
         self._require_fw_role(stage, role)
         realm = bp_secrets.realm_for_stage(stage)
         # Fail loudly if the revision does not exist (rather than silently
@@ -2800,6 +2803,7 @@ class AutomationService:
         """Absolute path of the stored DPA PDF for a BP host, or None. Stored in
         the BP's own deploy repo (gitops/bp/<bp>/firewall-dpa/), versioned with
         its firewall rules."""
+        validate_bp_name(bp)
         p = os.path.join(
             bp_state_path(self.gitops_dir, bp), self._dpa_rel(bp, host.strip().lower())
         )
@@ -2817,6 +2821,7 @@ class AutomationService:
     ) -> dict:
         """Store a host's DPA PDF in the gitops repo (firewall-dpa/<bp>/) and
         version it. Production needs admin/auditor, same as a rule change."""
+        validate_bp_name(bp)
         self._require_fw_role(stage, role)
         if not content:
             raise HTTPException(status_code=400, detail="empty DPA upload")

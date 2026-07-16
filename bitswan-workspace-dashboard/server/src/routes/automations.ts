@@ -2,6 +2,7 @@ import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { openSse } from '../lib/sse.js';
 import { emailFromRequest, fwRoleFromRequest } from '../lib/user.js';
+import { isValidBpId } from '../services/workspace.js';
 import type { GitopsClient } from '../services/gitops.js';
 
 export interface AutomationRoutesOptions {
@@ -18,6 +19,22 @@ export function registerAutomationRoutes(
   app: FastifyInstance,
   { gitops }: AutomationRoutesOptions,
 ): void {
+  // Reject a malformed `:bp` path param before it can be forwarded to gitops
+  // and reach a filesystem path / git cwd there (#130). Mirrors the isValidBpId
+  // guard the business-processes/templates/coding-agent routes already apply.
+  // Scoped by URL prefix so it only vets `/api/automations/*` routes even
+  // though it is installed on the root instance; covers every current and
+  // future `:bp` route without per-handler duplication.
+  app.addHook('preHandler', async (req, reply) => {
+    if (!req.url.startsWith('/api/automations/')) return;
+    const bp = (req.params as { bp?: unknown } | undefined)?.bp;
+    if (typeof bp === 'string' && !isValidBpId(bp)) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid business process id' });
+    }
+  });
+
   // Deploy from the bind-mounted workspace (no asset upload).
   app.post<{
     Body: { relative_path?: string; stage?: string; copy?: string };
@@ -60,6 +77,9 @@ export function registerAutomationRoutes(
     const { bp, stage, copy } = req.body ?? {};
     if (!bp || typeof bp !== 'string') {
       return reply.code(400).send({ error: 'bp is required' });
+    }
+    if (!isValidBpId(bp)) {
+      return reply.code(400).send({ error: 'invalid business process id' });
     }
     if (stage !== 'dev' && stage !== 'live-dev') {
       return reply
@@ -143,6 +163,9 @@ export function registerAutomationRoutes(
     const { bp, stage } = req.body ?? {};
     if (!bp || typeof bp !== 'string') {
       return reply.code(400).send({ error: 'bp is required' });
+    }
+    if (!isValidBpId(bp)) {
+      return reply.code(400).send({ error: 'invalid business process id' });
     }
     if (stage !== 'staging' && stage !== 'production') {
       return reply
