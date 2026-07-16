@@ -39,7 +39,7 @@ services:
             start_period: 30s
             test:
                 - CMD-SHELL
-                - pg_isready -U "$POSTGRES_USER" -q
+                - pg_isready -U "$$POSTGRES_USER" -q
             timeout: 3s
         image: postgres:16
         labels:

@@ -175,8 +175,12 @@ func postgresCompose(secretsDir string, n infraNames) map[string]interface{} {
 				// Readiness SIGNAL the driver waits on (docker health events),
 				// not a poll. start_interval probes every 250ms during startup
 				// so "healthy" fires ~250ms after Postgres accepts connections.
+				// $$ so compose leaves the expansion to the CONTAINER shell
+				// (which has POSTGRES_USER from the env_file) — a single $ is
+				// interpolated at compose-parse time from the driver's env,
+				// where it's unset, warning on every build/up.
 				"healthcheck": map[string]interface{}{
-					"test":           []interface{}{"CMD-SHELL", `pg_isready -U "$POSTGRES_USER" -q`},
+					"test":           []interface{}{"CMD-SHELL", `pg_isready -U "$$POSTGRES_USER" -q`},
 					"interval":       "5s",
 					"timeout":        "3s",
 					"retries":        30,
