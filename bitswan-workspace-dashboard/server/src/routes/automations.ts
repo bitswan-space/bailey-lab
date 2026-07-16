@@ -983,12 +983,16 @@ export function registerAutomationRoutes(
     );
   }
 
-  // Container metadata (`docker inspect`) per deployment.
+  // Container metadata (`docker inspect`) per deployment, including its env.
+  // The gate-verified email is passed so gitops can authoritatively decide
+  // which secret env values to reveal (production: admin/auditor only) — the
+  // masking is done server-side in gitops, never in the UI.
   app.get<{ Params: { id: string } }>('/api/automations/:id/inspect', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return [];
     try {
-      return await gitops.inspectAutomation(req.params.id);
+      const email = await emailFromRequest(req, app.log);
+      return await gitops.inspectAutomation(req.params.id, email ?? undefined);
     } catch (err) {
       app.log.warn({ err, id: req.params.id }, 'inspect failed');
       return reply.code(502).send({ error: 'gitops unreachable' });

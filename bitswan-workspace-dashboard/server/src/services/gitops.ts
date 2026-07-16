@@ -1369,9 +1369,13 @@ export class GitopsClient {
    * `GET /automations/{id}/inspect` — array of Docker inspect dicts, one per
    * replica.
    */
-  async inspectAutomation(deploymentId: string): Promise<DockerInspect[]> {
+  async inspectAutomation(deploymentId: string, by?: string): Promise<DockerInspect[]> {
+    // `by` is the gate-verified caller email; gitops masks secret env values
+    // server-side unless the daemon's role store allows revealing them
+    // (production: admin/auditor only). Same contract as bpSecrets.
+    const q = by ? `?by=${encodeURIComponent(by)}` : '';
     const r = await fetch(
-      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/inspect`,
+      `${this.baseUrl}/automations/${encodeURIComponent(deploymentId)}/inspect${q}`,
       { headers: { ...this.authHeaders() } },
     );
     if (!r.ok) {

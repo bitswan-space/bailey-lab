@@ -1191,9 +1191,14 @@ async def stream_automation_logs(
 @router.get("/{deployment_id}/inspect")
 async def inspect_automation(
     deployment_id: str,
+    by: str | None = None,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    return await automation_service.inspect_automation(deployment_id)
+    """The deployment's containers with their env. Secret env values are masked
+    server-side unless `by` (a shim-verified email, same contract as the
+    secrets routes) resolves to a role allowed to see them: production secrets
+    need admin/auditor, other stages any known role. Fails closed."""
+    return await automation_service.inspect_automation(deployment_id, by=by)
 
 
 @router.delete("/{deployment_id}")

@@ -42,4 +42,15 @@ export interface DockerInspect {
     Mode?: string;
     RW?: boolean;
   }>;
+  /**
+   * Container env, pre-masked SERVER-SIDE by gitops: `value` is already
+   * `****` when the viewer's role may not see a secret (production secrets
+   * are admin/auditor-only). The client only renders what it receives.
+   */
+  Env?: Array<{
+    name?: string;
+    value?: string;
+    secret?: boolean;
+    masked?: boolean;
+  }>;
 }
