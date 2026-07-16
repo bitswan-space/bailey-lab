@@ -44,8 +44,6 @@ function copyRoot(opts: { workspaceRoot: string; copy: string }): string {
   if (!isValidCopyName(opts.copy)) {
     throw new Error('invalid copy name');
   }
-  // Always realpath the root so the containment check below works even
-  // when symlinks are in play.
   return path.join(opts.workspaceRoot, 'copies', opts.copy);
 }
 
@@ -54,6 +52,11 @@ function copyRoot(opts: { workspaceRoot: string; copy: string }): string {
  * pass `path` through their route-layer validator, but a service-level
  * check means a future caller forgetting that doesn't get to escape the
  * copy.
+ *
+ * Lexical only (`../` games). Anything that goes on to touch the
+ * filesystem must use {@link resolveInsideCopyReal}, which additionally
+ * resolves symlinks — a symlink planted inside the copy can otherwise
+ * point (or route a directory component) outside it.
  */
 function resolveInsideCopy(root: string, relPath: string): string {
   const resolved = path.resolve(root, relPath);
@@ -62,6 +65,46 @@ function resolveInsideCopy(root: string, relPath: string): string {
     throw new Error('path escapes copy');
   }
   return resolved;
+}
+
+/**
+ * Symlink-aware containment: lexical check first (cheap, and gives the
+ * same error for plain `../` escapes), then `realpath` the target — or,
+ * when the target doesn't exist yet, its deepest existing ancestor — and
+ * re-check containment against the realpath'd copy root. Comparing
+ * realpath-to-realpath keeps workspaces that are themselves reached via
+ * a symlink working.
+ *
+ * Throws on escape (any flavour) and propagates ENOENT when the copy
+ * root itself is missing; callers already map both to their existing
+ * `not-found` shapes. Returns the fully resolved (real) absolute path.
+ */
+async function resolveInsideCopyReal(root: string, relPath: string): Promise<string> {
+  const abs = resolveInsideCopy(root, relPath);
+  const rootReal = await fs.realpath(root);
+  // realpath the deepest existing ancestor, then re-append the missing
+  // suffix — components that don't exist can't be symlinks, so the
+  // suffix is safe to keep lexical.
+  let existing = abs;
+  const suffix: string[] = [];
+  let real: string;
+  for (;;) {
+    try {
+      real = await fs.realpath(existing);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      const parent = path.dirname(existing);
+      if (parent === existing) throw err; // hit the fs root — give up
+      suffix.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+  const realAbs = suffix.length > 0 ? path.join(real, ...suffix) : real;
+  if (realAbs !== rootReal && !realAbs.startsWith(rootReal + path.sep)) {
+    throw new Error('path escapes copy');
+  }
+  return realAbs;
 }
 
 export async function readCopyTree(opts: {
@@ -160,10 +203,20 @@ export async function searchCopyFiles(opts: {
   const max = opts.maxMatches ?? 300;
   const matches: SearchMatch[] = [];
 
-  let startDir = root;
+  // Walk from the realpath'd root so symlink containment checks (and the
+  // relative paths reported in matches) are consistent even when the
+  // workspace itself is reached via a symlink.
+  let rootReal: string;
+  try {
+    rootReal = await fs.realpath(root);
+  } catch {
+    return { matches: [], truncated: false };
+  }
+
+  let startDir = rootReal;
   if (opts.scope) {
     try {
-      startDir = resolveInsideCopy(root, opts.scope);
+      startDir = await resolveInsideCopyReal(root, opts.scope);
     } catch {
       return { matches: [], truncated: false };
     }
@@ -186,6 +239,17 @@ export async function searchCopyFiles(opts: {
         continue;
       }
       if (!(e.isFile() || e.isSymbolicLink())) continue;
+      if (e.isSymbolicLink()) {
+        // stat/readFile below follow symlinks — make sure the link
+        // resolves back inside the copy before touching it.
+        let real: string;
+        try {
+          real = await fs.realpath(full);
+        } catch {
+          continue;
+        }
+        if (real !== rootReal && !real.startsWith(rootReal + path.sep)) continue;
+      }
       let st: import('node:fs').Stats;
       try {
         st = await fs.stat(full);
@@ -201,7 +265,7 @@ export async function searchCopyFiles(opts: {
       }
       // Skip binaries by the same NUL-probe heuristic as readCopyFile.
       if (buf.subarray(0, BINARY_PROBE_BYTES).includes(0)) continue;
-      const rel = path.relative(root, full).split(path.sep).join('/');
+      const rel = path.relative(rootReal, full).split(path.sep).join('/');
       const lines = buf.toString('utf8').split('\n');
       for (let i = 0; i < lines.length; i++) {
         const ln = lines[i] ?? '';
@@ -229,7 +293,7 @@ export async function readCopyFile(opts: {
   const root = copyRoot(opts);
   let abs: string;
   try {
-    abs = resolveInsideCopy(root, opts.path);
+    abs = await resolveInsideCopyReal(root, opts.path);
   } catch {
     return { error: 'not-found' };
   }
@@ -300,7 +364,7 @@ export async function writeCopyFile(opts: {
   const root = copyRoot(opts);
   let abs: string;
   try {
-    abs = resolveInsideCopy(root, opts.path);
+    abs = await resolveInsideCopyReal(root, opts.path);
   } catch {
     return { error: 'not-found' };
   }
@@ -374,7 +438,7 @@ export async function deleteCopyFile(opts: {
   const root = copyRoot(opts);
   let abs: string;
   try {
-    abs = resolveInsideCopy(root, opts.path);
+    abs = await resolveInsideCopyReal(root, opts.path);
   } catch {
     return { error: 'not-found' };
   }
@@ -409,7 +473,7 @@ export async function statCopyFile(opts: {
   const root = copyRoot(opts);
   let abs: string;
   try {
-    abs = resolveInsideCopy(root, opts.path);
+    abs = await resolveInsideCopyReal(root, opts.path);
   } catch {
     return { error: 'not-found' };
   }
@@ -438,7 +502,7 @@ export async function ensureCopyDir(opts: {
 }): Promise<string> {
   const root = copyRoot(opts);
   const rel = opts.path && opts.path !== '/' ? opts.path : '';
-  const abs = rel ? resolveInsideCopy(root, rel) : root;
+  const abs = rel ? await resolveInsideCopyReal(root, rel) : root;
   await fs.mkdir(abs, { recursive: true });
   return abs;
 }
