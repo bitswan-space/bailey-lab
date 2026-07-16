@@ -939,7 +939,9 @@ async def _drop_garage_bucket(container: str, realm: str, bucket: str) -> None:
 
     scoped = _garage_creds(realm, bucket)
     if scoped is not None:
-        _, stderr, rc = await _garage_json_api(container, "DeleteKey", {"id": scoped[0]})
+        _, stderr, rc = await _garage_json_api(
+            container, "DeleteKey", {"id": scoped[0]}
+        )
         if rc != 0:
             logger.warning("DeleteKey for %s failed: %s", bucket, stderr.strip())
     creds_path = os.path.join(
@@ -1018,9 +1020,7 @@ async def _drop_names_at_realm(
                 user = secrets.get("POSTGRES_USER", "admin")
                 await _drop_postgres_db(svc.container_name, user, names["postgres_db"])
             elif svc_type == "garage":
-                await _drop_garage_bucket(
-                    svc.container_name, realm, names["s3_bucket"]
-                )
+                await _drop_garage_bucket(svc.container_name, realm, names["s3_bucket"])
             elif svc_type == "couchdb":
                 secrets = get_service_secrets("couchdb", realm) or {}
                 await _drop_couchdb_prefix(

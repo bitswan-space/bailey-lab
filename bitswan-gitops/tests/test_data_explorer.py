@@ -60,8 +60,7 @@ def services_up(monkeypatch):
 TABLES_JSON = json.dumps(
     [
         {"name": "orders", "kind": "table", "row_estimate": 42, "total_bytes": 8192},
-        {"name": 'we"ird.tbl', "kind": "table", "row_estimate": -1,
-         "total_bytes": 0},
+        {"name": 'we"ird.tbl', "kind": "table", "row_estimate": -1, "total_bytes": 0},
     ]
 )
 COLUMNS_JSON = json.dumps(
@@ -280,9 +279,7 @@ async def test_rows_weird_table_name_roundtrips(registered, services_up, fake_ex
     page = await data_explorer.table_rows(t, 'we"ird.tbl')
     assert page["rows"] == []
     # The listed name was quoted with doubled double-quotes, byte-for-byte.
-    assert any(
-        'FROM "we""ird.tbl"' in c[-1] for c in _psql_calls(fake_exec.calls)
-    )
+    assert any('FROM "we""ird.tbl"' in c[-1] for c in _psql_calls(fake_exec.calls))
 
 
 async def test_rows_rejects_unlisted_identifiers(registered, services_up, fake_exec):
@@ -402,9 +399,7 @@ async def test_list_objects_parses_and_sorts(
     registered, services_up, fake_exec, gitops_home
 ):
     _write_scoped_creds(gitops_home)
-    fake_exec.handlers.append(
-        (lambda argv: "lsjson" in argv, (RCLONE_LS, "", 0))
-    )
+    fake_exec.handlers.append((lambda argv: "lsjson" in argv, (RCLONE_LS, "", 0)))
     t = resolve_target("my-bp", "dev")
     out = await data_explorer.list_objects(t, "")
     assert out["bucket"] == "bp-my-bp"
@@ -463,9 +458,7 @@ async def test_list_objects_malformed_json(
     registered, services_up, fake_exec, gitops_home
 ):
     _write_scoped_creds(gitops_home)
-    fake_exec.handlers.append(
-        (lambda argv: "lsjson" in argv, ("{not json", "", 0))
-    )
+    fake_exec.handlers.append((lambda argv: "lsjson" in argv, ("{not json", "", 0)))
     t = resolve_target("my-bp", "dev")
     with pytest.raises(RuntimeError):
         await data_explorer.list_objects(t, "")

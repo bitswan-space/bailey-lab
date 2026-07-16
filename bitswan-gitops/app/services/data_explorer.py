@@ -142,8 +142,7 @@ def resolve_target(
         if db is not None:
             raise ValueError("Blue-green db selection is production-only")
         names = copy_bp_resource_names(copy, slug)
-        return Target(slug, stage, copy, None, names["postgres_db"],
-                      names["s3_bucket"])
+        return Target(slug, stage, copy, None, names["postgres_db"], names["s3_bucket"])
 
     if stage == "production":
         if db is None:
@@ -156,9 +155,7 @@ def resolve_target(
         raise ValueError("Blue-green db selection is production-only")
 
     if not is_registered(load_registry(), slug, stage):
-        raise LookupError(
-            f"BP '{slug}' has no per-BP databases at stage '{stage}'"
-        )
+        raise LookupError(f"BP '{slug}' has no per-BP databases at stage '{stage}'")
     names = bp_resource_names(slug, db)
     return Target(slug, stage, "", db, names["postgres_db"], names["s3_bucket"])
 
@@ -222,11 +219,7 @@ _CTRL_RE = re.compile(r"[\x00-\x1f]")
 
 
 def _validate_ident(name: str, what: str) -> None:
-    if (
-        not name
-        or len(name.encode("utf-8", "replace")) > 63
-        or _CTRL_RE.search(name)
-    ):
+    if not name or len(name.encode("utf-8", "replace")) > 63 or _CTRL_RE.search(name):
         raise ValueError(f"Invalid {what}: {name!r}")
 
 
@@ -299,18 +292,24 @@ async def _ensure_ro_role(target: Target) -> None:
         f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO {_qident(ro)}; "
         f"DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = "
         f"{_qlit(u)}) THEN EXECUTE 'ALTER DEFAULT PRIVILEGES FOR ROLE "
-        f'{_qident(u)} IN SCHEMA public GRANT SELECT ON TABLES TO '
+        f"{_qident(u)} IN SCHEMA public GRANT SELECT ON TABLES TO "
         f"{_qident(ro)}'; END IF; END $$;"
     )
     for dbname, sql in (("postgres", ensure), (db, grants)):
         _, stderr, rc = await _exec(
-            "docker", "exec", target.pg_container,
-            "psql", "-U", admin, "-d", dbname, "-c", sql,
+            "docker",
+            "exec",
+            target.pg_container,
+            "psql",
+            "-U",
+            admin,
+            "-d",
+            dbname,
+            "-c",
+            sql,
         )
         if rc != 0:
-            raise RuntimeError(
-                f"ensure ro role {ro} failed: {(stderr or '').strip()}"
-            )
+            raise RuntimeError(f"ensure ro role {ro} failed: {(stderr or '').strip()}")
 
 
 def _parse_json_agg(stdout: str, what: str) -> list:
@@ -480,9 +479,7 @@ async def _rclone(target: Target, *verb: str) -> tuple[str, str, int]:
     argv = garage_rclone_argv(
         svc.get("S3_HOST", ""), svc.get("S3_PORT", "9000"), ak, sk, *verb
     )
-    stdout, stderr, rc = await _exec(
-        "docker", "exec", target.toolbox_container, *argv
-    )
+    stdout, stderr, rc = await _exec("docker", "exec", target.toolbox_container, *argv)
     if rc != 0 and (
         "connection refused" in (stderr or "").lower()
         or "no such host" in (stderr or "").lower()
@@ -540,9 +537,7 @@ async def list_objects(target: Target, prefix: str = "") -> dict:
 async def stat_object(target: Target, key: str) -> dict:
     await _require_service("garage", target.realm)
     _validate_key(key, is_prefix=False)
-    stdout, stderr, rc = await _rclone(
-        target, "lsjson", "--stat", _ref(target, key)
-    )
+    stdout, stderr, rc = await _rclone(target, "lsjson", "--stat", _ref(target, key))
     if rc != 0:
         err = (stderr or "") + (stdout or "")
         if "not found" in err or "directory not found" in err:
@@ -644,6 +639,4 @@ async def _fetch_object(target: Target, key: str) -> tuple[str, str]:
         shutil.rmtree(tmpdir, ignore_errors=True)
         raise
     finally:
-        await _exec(
-            "docker", "exec", target.toolbox_container, "rm", "-rf", scratch
-        )
+        await _exec("docker", "exec", target.toolbox_container, "rm", "-rf", scratch)

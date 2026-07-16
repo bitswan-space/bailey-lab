@@ -972,7 +972,9 @@ class SnapshotService:
                 f"rm -rf {scratch} && mkdir -p {scratch}",
             )
             if rc != 0:
-                raise RuntimeError(f"scratch setup for {bucket} failed: {stderr.strip()}")
+                raise RuntimeError(
+                    f"scratch setup for {bucket} failed: {stderr.strip()}"
+                )
             _, stderr, rc = await run_docker_command(
                 "docker",
                 "exec",
@@ -1029,7 +1031,9 @@ class SnapshotService:
                 *self._garage_rclone(stage, "sync", scratch, f":s3:{bucket}"),
             )
             if rc != 0:
-                raise RuntimeError(f"rclone sync into {bucket} failed: {stderr.strip()}")
+                raise RuntimeError(
+                    f"rclone sync into {bucket} failed: {stderr.strip()}"
+                )
         finally:
             await run_docker_command("docker", "exec", toolbox, "rm", "-rf", scratch)
 

@@ -231,9 +231,7 @@ async def test_ensure_provisions_all_services(gitops_home, monkeypatch, fake_doc
     # Garage: bucket created via json-api and the _system key granted access.
     joined = ["\x00".join(c) for c in fake_docker]
     assert any("CreateBucket" in j and '"globalAlias":"bp-my-bp"' in j for j in joined)
-    assert any(
-        "AllowBucketKey" in j and '"accessKeyId":"GKsys"' in j for j in joined
-    )
+    assert any("AllowBucketKey" in j and '"accessKeyId":"GKsys"' in j for j in joined)
 
     # Second run: already provisioned, no further docker calls.
     fake_docker.clear()
@@ -348,7 +346,9 @@ async def test_create_garage_bucket_waits_for_health_and_tolerates_exists(
     await bp_databases._create_garage_bucket("ws-test__garage-dev", "dev", "bp-my-bp")
     assert health_calls == 3  # retried until healthy
     grants = ["\x00".join(c) for c in calls if "AllowBucketKey" in c]
-    assert any('"accessKeyId":"GKsys"' in g and '"bucketId":"bkt1"' in g for g in grants)
+    assert any(
+        '"accessKeyId":"GKsys"' in g and '"bucketId":"bkt1"' in g for g in grants
+    )
     assert any('"accessKeyId":"GKbp"' in g for g in grants)
     assert all('"owner":true' in g for g in grants)
 
