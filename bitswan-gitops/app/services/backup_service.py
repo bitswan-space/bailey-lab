@@ -5,7 +5,7 @@ Backs up:
 - The gitops worktree (bitswan.yaml, deployment state, its git history)
 - Postgres databases (pg_dumpall), per enabled stage
 - CouchDB databases (JSON export), per enabled stage
-- MinIO buckets, per enabled stage
+- Garage buckets, per enabled stage
 
 restic talks to AOC's restic REST-server endpoints
 (/api/automation_server/workspaces/{id}/backups/repo/), which proxy
@@ -345,7 +345,7 @@ async def run_backup(config: dict) -> dict:
 
     Covers: the workspace repo (BP source + copies, incl. their git
     history), the gitops worktree (bitswan.yaml, deployment state, its
-    git history), and every data service (Postgres/CouchDB/MinIO) on
+    git history), and every data service (Postgres/CouchDB/Garage) on
     EVERY stage where it is enabled — dev/staging services provisioned
     on demand are covered, not just production."""
     workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
@@ -375,7 +375,9 @@ async def run_backup(config: dict) -> dict:
         results["couchdb"] = await _backup_service_stages(
             config, workspace_name, "couchdb"
         )
-        results["minio"] = await _backup_service_stages(config, workspace_name, "minio")
+        results["garage"] = await _backup_service_stages(
+            config, workspace_name, "garage"
+        )
 
         # Apply retention policy
         await _apply_retention(config)
@@ -505,11 +507,11 @@ async def _backup_postgres_stage(
 async def _backup_service_stages(
     config: dict, workspace_name: str, service_type: str
 ) -> dict:
-    """Backup couchdb/minio via the service's own backup(), per enabled stage."""
+    """Backup couchdb/garage via the service's own backup(), per enabled stage."""
     from app.services.infra_service import get_service
     from app.utils import SERVICE_REALMS
 
-    label = {"couchdb": "CouchDB", "minio": "MinIO"}.get(service_type, service_type)
+    label = {"couchdb": "CouchDB", "garage": "Garage"}.get(service_type, service_type)
     per_stage: dict[str, dict] = {}
     for stage in sorted(SERVICE_REALMS):
         try:
@@ -565,10 +567,11 @@ async def _apply_retention(config: dict) -> None:
     never prune the per-BP snapshot mirrors, which follow their own
     per-BP retention (snapshot_offsite.apply_offsite_retention).
 
-    Grouped by host,tags — NOT the default host,paths: the couch/minio
+    Grouped by host,tags — NOT the default host,paths: the couch/garage
     tarballs (and historically the pg dumps) carry timestamped paths, so
     path grouping made every snapshot a singleton that --keep-* never
-    pruned. Tag sets are stable per (service, stage) series."""
+    pruned. Tag sets are stable per (service, stage) series. The retired
+    "minio" tag stays listed so the old restic series keeps pruning down."""
     retention = config.get("retention", {})
     daily = retention.get("daily", 30)
     monthly = retention.get("monthly", 12)
@@ -585,6 +588,8 @@ async def _apply_retention(config: dict) -> None:
             "postgres",
             "--tag",
             "couchdb",
+            "--tag",
+            "garage",
             "--tag",
             "minio",
             "--group-by",

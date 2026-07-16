@@ -2,9 +2,9 @@
 Per-business-process logical databases inside the shared per-stage servers.
 
 Snapshot-eligible BPs get their own Postgres database, CouchDB database
-prefix and MinIO bucket — all named after the BP slug only (no stage in the
-name), so a snapshot taken at one stage restores into any other stage without
-rewriting anything. The shared Postgres/CouchDB/MinIO *servers* stay
+prefix and Garage (S3) bucket — all named after the BP slug only (no stage in
+the name), so a snapshot taken at one stage restores into any other stage
+without rewriting anything. The shared Postgres/CouchDB/Garage *servers* stay
 per-(workspace, stage); this module only carves per-BP namespaces inside
 them.
 
@@ -36,8 +36,9 @@ Two-phase lifecycle per BP×realm:
      their data on the shared default DB and are never auto-migrated. Env
      injection in `generate_docker_compose` is gated on registration so the
      very first compose of a fresh BP already points at the per-BP names.
-  2. *Provisioning* creates the actual objects (CREATE DATABASE / mc mb)
-     after `docker compose up`, when the stage's service containers exist.
+  2. *Provisioning* creates the actual objects (CREATE DATABASE /
+     CreateBucket) after `docker compose up`, when the stage's service
+     containers exist.
      CouchDB is lazy — automations create `{prefix}*` databases themselves —
      so its registration alone marks it provisioned.
 
@@ -53,6 +54,7 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
+from app.services.garage_util import garage_json_api_argv, garage_rclone_argv
 from app.services.infra_service import stage_for_deployment
 from app.utils import SERVICE_REALMS, sanitize_automation_name
 
@@ -60,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 # The data services a BP namespace spans. Kafka is intentionally absent —
 # topics are transient transport, not snapshot-able state.
-BP_DATA_SERVICES = ("postgres", "couchdb", "minio")
+BP_DATA_SERVICES = ("postgres", "couchdb", "garage")
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
@@ -78,7 +80,7 @@ def validate_bp_slug(slug: str) -> None:
 def bp_resource_names(bp_slug: str, db: int | None = None) -> dict:
     """Stage-independent per-BP resource names.
 
-    Postgres identifiers are capped at 63 bytes; MinIO bucket names at 63
+    Postgres identifiers are capped at 63 bytes; S3 bucket names at 63
     chars. Slugs come from directory names so they're rarely near the limit,
     but truncate defensively (collisions after truncation surface as a
     registry slug conflict, not silent data sharing).
@@ -105,28 +107,28 @@ def bp_resource_names(bp_slug: str, db: int | None = None) -> dict:
     return {
         "postgres_db": pg,
         "couchdb_prefix": couch,
-        "minio_bucket": bucket,
+        "s3_bucket": bucket,
     }
 
 
 def copy_bp_resource_names(copy_name: str, bp_slug: str) -> dict:
     """Per-(copy, BP) live-dev resource names. A non-main copy is a developer's
-    sandbox: each BP's live-dev backend gets its OWN database, MinIO bucket and
+    sandbox: each BP's live-dev backend gets its OWN database, S3 bucket and
     CouchDB prefix there — isolated from other BPs in the copy, from other
-    copies, and from dev. Capped at the 63-byte Postgres/MinIO limit (a
+    copies, and from dev. Capped at the 63-byte Postgres/S3 limit (a
     truncation collision surfaces as a deploy error, not silent data sharing).
 
     Single source of truth shared by the deploy-time ensure guard and the
-    POSTGRES_DB/MINIO_BUCKET/COUCHDB_DB_PREFIX env injection — they MUST agree,
+    POSTGRES_DB/S3_BUCKET/COUCHDB_DB_PREFIX env injection — they MUST agree,
     or a backend connects to a namespace nobody created.
     """
     cp_u = re.sub(r"[^a-z0-9_]", "_", copy_name.lower())  # [a-z0-9_] for pg
-    cp_d = re.sub(r"[^a-z0-9-]", "-", copy_name.lower()).strip("-")  # for minio/couch
+    cp_d = re.sub(r"[^a-z0-9-]", "-", copy_name.lower()).strip("-")  # for s3/couch
     bp_u = bp_slug.replace("-", "_")
     pg = f"copy_{cp_u}_bp_{bp_u}"[:63]
     bucket = f"copy-{cp_d}-bp-{bp_slug}"[:63].rstrip("-")
     couch = f"copy-{cp_d}-bp-{bp_slug}-"
-    return {"postgres_db": pg, "couchdb_prefix": couch, "minio_bucket": bucket}
+    return {"postgres_db": pg, "couchdb_prefix": couch, "s3_bucket": bucket}
 
 
 def derive_bp_and_copy(relative_path: str | None) -> tuple[str, str]:
@@ -179,6 +181,31 @@ def get_service_secrets(service_type: str, stage: str) -> dict | None:
                 key, _, value = line.partition("=")
                 info[key] = value
     return info or None
+
+
+def _garage_creds(realm: str, name: str) -> tuple[str, str] | None:
+    """Read a Garage-issued S3 key from `secrets/garagecreds/<realm>/<name>`.
+
+    `name` is a bucket name or `_system` (the full-access key the driver's
+    provisioner maintains for backups/snapshots/explorer-fallback). Returns
+    (access_key, secret_key), or None when the file is missing or is still
+    the empty placeholder the driver writes before `CreateKey` runs.
+    """
+    bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
+    path = os.path.join(bs_home, "secrets", "garagecreds", realm, name)
+    if not os.path.exists(path):
+        return None
+    info = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                key, _, value = line.partition("=")
+                info[key] = value
+    ak, sk = info.get("S3_ACCESS_KEY"), info.get("S3_SECRET_KEY")
+    if not ak or not sk:
+        return None
+    return ak, sk
 
 
 # =============================================================================
@@ -448,44 +475,75 @@ async def clone_postgres_db_as(
     logger.info("Cloned Postgres '%s' -> '%s'", source_db, target_db)
 
 
-async def _create_minio_bucket(
-    container: str, access_key: str, secret_key: str, bucket: str
-) -> None:
-    # Like Postgres, the MinIO server may have only just come up — retry the
-    # alias set (its readiness probe) so a cold start doesn't silently lose
-    # the bucket to best-effort error-swallowing.
+async def _garage_json_api(
+    container: str, endpoint: str, body: dict | None = None
+) -> tuple[str, str, int]:
+    """One `/garage json-api` admin call inside the garage container. The
+    JSON result comes back on stdout; logs go to stderr."""
+    return await _driver_exec(
+        "docker", "exec", container, *garage_json_api_argv(endpoint, body)
+    )
+
+
+async def _create_garage_bucket(container: str, realm: str, bucket: str) -> None:
+    """Idempotently create `bucket` and grant the `_system` key (and the
+    BP's scoped key, when the driver has issued one) full access to it.
+
+    A missing `_system` key is a RuntimeError — provisioning is best-effort
+    at the call sites, so the next deploy retries once the driver's
+    provisioner has written it."""
+    # Like Postgres, the Garage server may have only just come up — retry
+    # the health probe so a cold start doesn't silently lose the bucket to
+    # best-effort error-swallowing.
     loop = asyncio.get_event_loop()
     deadline = loop.time() + 60.0
-    stderr = ""
     while True:
-        _, stderr, rc = await _driver_exec(
-            "docker",
-            "exec",
-            container,
-            "mc",
-            "alias",
-            "set",
-            "local",
-            "http://localhost:9000",
-            access_key,
-            secret_key,
-        )
+        _, stderr, rc = await _garage_json_api(container, "GetClusterHealth")
         if rc == 0:
             break
         if loop.time() >= deadline:
-            raise RuntimeError(f"mc alias set failed: {stderr.strip()}")
+            raise RuntimeError(f"Garage not healthy: {stderr.strip()}")
         await asyncio.sleep(2.0)
-    _, stderr, rc = await _driver_exec(
-        "docker",
-        "exec",
-        container,
-        "mc",
-        "mb",
-        "--ignore-existing",
-        f"local/{bucket}",
+
+    _, stderr, rc = await _garage_json_api(
+        container, "CreateBucket", {"globalAlias": bucket}
+    )
+    if rc != 0 and "BucketAlreadyExists" not in (stderr or ""):
+        raise RuntimeError(f"CreateBucket {bucket} failed: {stderr.strip()}")
+
+    stdout, stderr, rc = await _garage_json_api(
+        container, "GetBucketInfo", {"globalAlias": bucket}
     )
     if rc != 0:
-        raise RuntimeError(f"mc mb {bucket} failed: {stderr.strip()}")
+        raise RuntimeError(f"GetBucketInfo {bucket} failed: {stderr.strip()}")
+    try:
+        bucket_id = json.loads(stdout)["id"]
+    except (json.JSONDecodeError, KeyError):
+        raise RuntimeError(f"GetBucketInfo {bucket} returned no id: {stdout[:200]}")
+
+    system_creds = _garage_creds(realm, "_system")
+    if system_creds is None:
+        raise RuntimeError(
+            f"No _system Garage key at {realm} yet — bucket grant retried later"
+        )
+    grants = [system_creds]
+    scoped = _garage_creds(realm, bucket)
+    if scoped is not None:
+        grants.append(scoped)
+    for access_key, _sk in grants:
+        _, stderr, rc = await _garage_json_api(
+            container,
+            "AllowBucketKey",
+            {
+                "bucketId": bucket_id,
+                "accessKeyId": access_key,
+                "permissions": {"read": True, "write": True, "owner": True},
+            },
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"AllowBucketKey {bucket}/{access_key} failed: {stderr.strip()}"
+            )
 
 
 async def ensure_bp_databases(
@@ -552,13 +610,9 @@ async def ensure_bp_databases(
                 await _create_postgres_db(
                     svc.container_name, user, names["postgres_db"]
                 )
-            elif svc_type == "minio":
-                secrets = get_service_secrets("minio", realm) or {}
-                await _create_minio_bucket(
-                    svc.container_name,
-                    secrets.get("MINIO_ROOT_USER", "admin"),
-                    secrets.get("MINIO_ROOT_PASSWORD", ""),
-                    names["minio_bucket"],
+            elif svc_type == "garage":
+                await _create_garage_bucket(
+                    svc.container_name, realm, names["s3_bucket"]
                 )
             # couchdb: lazy — automations create `{prefix}*` DBs themselves;
             # registering the prefix is all the provisioning there is.
@@ -695,7 +749,7 @@ async def ensure_live_postgres_dbs(
                                   for each blue-green db a production BP's slots use
       - otherwise (shared default DB) -> nothing to create
 
-    Unlike `provision_for_deployments` (best-effort; covers couch/minio + the
+    Unlike `provision_for_deployments` (best-effort; covers couch/garage + the
     standby blue-green db), this owns ONLY the live Postgres DB and **raises**
     when Postgres is enabled but the DB can't be created — so the deploy fails
     with a clear error instead of leaving the backend crash-looping on a missing
@@ -833,29 +887,70 @@ async def _drop_postgres_db(container: str, user: str, db_name: str) -> None:
             )
 
 
-async def _drop_minio_bucket(
-    container: str, access_key: str, secret_key: str, bucket: str
-) -> None:
-    """Remove a bucket and everything in it. Missing bucket = no-op."""
-    _, stderr, rc = await _driver_exec(
-        "docker",
-        "exec",
-        container,
-        "mc",
-        "alias",
-        "set",
-        "local",
-        "http://localhost:9000",
-        access_key,
-        secret_key,
+async def _drop_garage_bucket(container: str, realm: str, bucket: str) -> None:
+    """Remove a bucket, its contents, the BP's scoped key and its creds
+    file. Missing bucket = no-op; every step past it is best-effort (a
+    half-deleted bucket must not block BP deletion — log and move on).
+
+    `rclone purge` on Garage deletes the bucket itself (S3 DeleteBucket
+    after emptying), so the admin DeleteBucket after it is the tolerated
+    no-op that also covers a purge-less path (e.g. no `_system` key).
+    """
+    stdout, stderr, rc = await _garage_json_api(
+        container, "GetBucketInfo", {"globalAlias": bucket}
     )
-    if rc != 0:
-        raise RuntimeError(f"mc alias set failed: {stderr.strip()}")
-    _, stderr, rc = await _driver_exec(
-        "docker", "exec", container, "mc", "rb", "--force", f"local/{bucket}"
+    bucket_id = None
+    if rc == 0:
+        try:
+            bucket_id = json.loads(stdout).get("id")
+        except json.JSONDecodeError:
+            logger.warning("GetBucketInfo %s returned non-JSON: %s", bucket, stdout)
+    elif "NoSuchBucket" not in (stderr or ""):
+        logger.warning("GetBucketInfo %s failed: %s", bucket, stderr.strip())
+
+    if bucket_id:
+        system_creds = _garage_creds(realm, "_system")
+        if system_creds:
+            secrets = get_service_secrets("garage", realm) or {}
+            _, stderr, rc = await _driver_exec(
+                "docker",
+                "exec",
+                f"{container}-toolbox",
+                *garage_rclone_argv(
+                    secrets.get("S3_HOST", ""),
+                    secrets.get("S3_PORT", "9000"),
+                    system_creds[0],
+                    system_creds[1],
+                    "purge",
+                    f":s3:{bucket}",
+                ),
+            )
+            if rc != 0 and "directory not found" not in (stderr or ""):
+                logger.warning("rclone purge %s failed: %s", bucket, stderr.strip())
+        else:
+            logger.warning(
+                "No _system Garage key at %s; skipping purge of %s", realm, bucket
+            )
+        _, stderr, rc = await _garage_json_api(
+            container, "DeleteBucket", {"id": bucket_id}
+        )
+        if rc != 0 and "NoSuchBucket" not in (stderr or ""):
+            logger.warning("DeleteBucket %s failed: %s", bucket, stderr.strip())
+
+    scoped = _garage_creds(realm, bucket)
+    if scoped is not None:
+        _, stderr, rc = await _garage_json_api(container, "DeleteKey", {"id": scoped[0]})
+        if rc != 0:
+            logger.warning("DeleteKey for %s failed: %s", bucket, stderr.strip())
+    creds_path = os.path.join(
+        os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline"),
+        "secrets",
+        "garagecreds",
+        realm,
+        bucket,
     )
-    if rc != 0 and "does not exist" not in (stderr or ""):
-        raise RuntimeError(f"mc rb {bucket} failed: {stderr.strip()}")
+    if os.path.exists(creds_path):
+        os.remove(creds_path)
 
 
 async def _drop_couchdb_prefix(
@@ -901,7 +996,7 @@ async def _drop_couchdb_prefix(
 async def _drop_names_at_realm(
     workspace: str, realm: str, names: dict, results: dict[str, str], key_prefix: str
 ) -> None:
-    """Drop one {postgres_db, minio_bucket, couchdb_prefix} name set at one
+    """Drop one {postgres_db, s3_bucket, couchdb_prefix} name set at one
     realm. Per-service outcome goes into `results` under `<key_prefix>:<svc>`:
     "ok" | "skipped: not enabled" | "error: …". A service that is enabled but
     not running is an ERROR (its data would silently survive), unlike the
@@ -922,13 +1017,9 @@ async def _drop_names_at_realm(
                 secrets = get_service_secrets("postgres", realm) or {}
                 user = secrets.get("POSTGRES_USER", "admin")
                 await _drop_postgres_db(svc.container_name, user, names["postgres_db"])
-            elif svc_type == "minio":
-                secrets = get_service_secrets("minio", realm) or {}
-                await _drop_minio_bucket(
-                    svc.container_name,
-                    secrets.get("MINIO_ROOT_USER", "admin"),
-                    secrets.get("MINIO_ROOT_PASSWORD", ""),
-                    names["minio_bucket"],
+            elif svc_type == "garage":
+                await _drop_garage_bucket(
+                    svc.container_name, realm, names["s3_bucket"]
                 )
             elif svc_type == "couchdb":
                 secrets = get_service_secrets("couchdb", realm) or {}

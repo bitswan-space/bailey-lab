@@ -22,7 +22,7 @@ from app.services.infra_service import get_service
 
 router = APIRouter(prefix="/services", tags=["services"])
 
-SUPPORTED_SERVICES = ("couchdb", "kafka", "postgres", "minio")
+SUPPORTED_SERVICES = ("couchdb", "kafka", "postgres", "garage")
 
 
 def _get_workspace_name() -> str:
@@ -52,7 +52,6 @@ async def enable_service(service_type: str, request: ServiceEnableRequest):
             kafka_image=request.kafka_image,
             ui_image=request.ui_image,
             postgres_image=request.postgres_image,
-            minio_image=request.minio_image,
         )
         result = await svc.enable()
 
@@ -241,15 +240,15 @@ async def clear_postgres(request: ServiceClearRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/minio/backup")
-async def backup_minio(request: ServiceBackupRequest):
-    """Backup MinIO data to a tarball."""
+@router.post("/garage/backup")
+async def backup_garage(request: ServiceBackupRequest):
+    """Backup Garage bucket data to a tarball."""
     workspace = _get_workspace_name()
 
     try:
-        from app.services.minio_service import MinioService
+        from app.services.garage_service import GarageService
 
-        svc = MinioService(workspace, stage=request.stage)
+        svc = GarageService(workspace, stage=request.stage)
         result = await svc.backup(backup_path=request.backup_path)
         return result
     except ValueError as e:
@@ -258,15 +257,15 @@ async def backup_minio(request: ServiceBackupRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/minio/restore")
-async def restore_minio(request: ServiceRestoreRequest):
-    """Restore MinIO data from a backup."""
+@router.post("/garage/restore")
+async def restore_garage(request: ServiceRestoreRequest):
+    """Restore Garage bucket data from a backup."""
     workspace = _get_workspace_name()
 
     try:
-        from app.services.minio_service import MinioService
+        from app.services.garage_service import GarageService
 
-        svc = MinioService(workspace, stage=request.stage)
+        svc = GarageService(workspace, stage=request.stage)
         result = await svc.restore(backup_path=request.backup_path, force=request.force)
         return result
     except ValueError as e:

@@ -3,12 +3,13 @@ Read-only data explorer backing the workspace-dashboard's "Object Storage"
 and "SQL" panels.
 
 Scope: given a (BP, stage[, copy][, blue-green db]) the module resolves the
-deployment's concrete per-BP Postgres database / MinIO bucket (reusing the
-canonical name derivation in `bp_databases`) and serves read-only browse
+deployment's concrete per-BP Postgres database / Garage S3 bucket (reusing
+the canonical name derivation in `bp_databases`) and serves read-only browse
 operations against them. gitops has no TCP route to the data services (they
 live on the per-stage docker networks, gitops doesn't) and no psycopg/boto3,
-so — exactly like snapshots/backups — everything runs as `docker exec` of the
-in-container CLIs (`psql`, `mc`) through the infra-driver.
+so — exactly like snapshots/backups — everything runs as `docker exec`
+through the infra-driver: `psql` in the postgres container, `rclone` in the
+garage toolbox sidecar (the garage image itself is a bare static binary).
 
 Read-only guarantees:
   - SQL runs as the passwordless `ro_<db>` role (SELECT-only, provisioned by
@@ -93,7 +94,7 @@ class Target:
         copy: str,
         db: int | None,
         postgres_db: str,
-        minio_bucket: str,
+        s3_bucket: str,
     ):
         self.bp = bp
         self.stage = stage
@@ -101,10 +102,13 @@ class Target:
         self.copy = copy
         self.db = db
         self.postgres_db = postgres_db
-        self.minio_bucket = minio_bucket
+        self.s3_bucket = s3_bucket
         ws = _workspace()
         self.pg_container = bp_databases._container_name(ws, "postgres", self.realm)
-        self.minio_container = bp_databases._container_name(ws, "minio", self.realm)
+        self.garage_container = bp_databases._container_name(ws, "garage", self.realm)
+        # The garage image is a single static binary; all S3 data-plane work
+        # (rclone) execs into its toolbox sidecar instead.
+        self.toolbox_container = self.garage_container + "-toolbox"
 
 
 _COPY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -139,7 +143,7 @@ def resolve_target(
             raise ValueError("Blue-green db selection is production-only")
         names = copy_bp_resource_names(copy, slug)
         return Target(slug, stage, copy, None, names["postgres_db"],
-                      names["minio_bucket"])
+                      names["s3_bucket"])
 
     if stage == "production":
         if db is None:
@@ -156,7 +160,7 @@ def resolve_target(
             f"BP '{slug}' has no per-BP databases at stage '{stage}'"
         )
     names = bp_resource_names(slug, db)
-    return Target(slug, stage, "", db, names["postgres_db"], names["minio_bucket"])
+    return Target(slug, stage, "", db, names["postgres_db"], names["s3_bucket"])
 
 
 def _service_state(service_type: str, realm: str):
@@ -194,7 +198,7 @@ async def overview(bp: str, stage: str, copy: str = "", db: int | None = None) -
     }
     for kind, resource in (
         ("postgres", "database"),
-        ("minio", "bucket"),
+        ("garage", "bucket"),
     ):
         svc = _service_state(kind, stage)
         enabled = svc.is_enabled()
@@ -202,7 +206,7 @@ async def overview(bp: str, stage: str, copy: str = "", db: int | None = None) -
         entry = {"enabled": enabled, "running": running}
         if target is not None:
             entry[resource] = (
-                target.postgres_db if kind == "postgres" else target.minio_bucket
+                target.postgres_db if kind == "postgres" else target.s3_bucket
             )
         out[kind] = entry
     if target is not None:
@@ -424,7 +428,7 @@ async def table_rows(
 
 
 # =============================================================================
-# Object storage explorer (mc inside the minio container)
+# Object storage explorer (rclone inside the garage toolbox sidecar)
 # =============================================================================
 
 _KEY_MAX_LEN = 1024
@@ -449,113 +453,112 @@ def _validate_key(value: str, *, is_prefix: bool) -> None:
 
 
 def _bucket_creds(realm: str, bucket: str) -> tuple[str, str]:
-    """Scoped per-bucket key from secrets/miniocreds, falling back to the root
-    service creds for buckets that predate scoped creds. Every command issued
-    with them is read-only by construction, so the fallback loses no guarantee
-    we actually enforce."""
-    bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
-    path = os.path.join(bs_home, "secrets", "miniocreds", realm, bucket)
-    if os.path.exists(path):
-        info: dict[str, str] = {}
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if "=" in line and not line.startswith("#"):
-                    key, _, value = line.partition("=")
-                    info[key] = value
-        if info.get("MINIO_ACCESS_KEY") and info.get("MINIO_SECRET_KEY"):
-            return info["MINIO_ACCESS_KEY"], info["MINIO_SECRET_KEY"]
-    secrets = get_service_secrets("minio", realm)
-    if not secrets or not secrets.get("MINIO_ROOT_USER"):
-        raise LookupError(f"minio is not enabled at stage '{realm}'")
-    return secrets["MINIO_ROOT_USER"], secrets["MINIO_ROOT_PASSWORD"]
-
-
-def _alias(target: Target) -> str:
-    # Per-bucket alias so concurrent explorer requests and the snapshot code's
-    # root `local` alias never clobber each other's credentials mid-command.
-    return f"exp-{target.minio_bucket}"
-
-
-async def _mc(target: Target, *cmd: str) -> tuple[str, str, int]:
-    """Run one mc command, (re)setting the per-bucket alias first — the alias
-    set doubles as the server-readiness probe."""
-    ak, sk = _bucket_creds(target.realm, target.minio_bucket)
-    _, stderr, rc = await _exec(
-        "docker", "exec", target.minio_container,
-        "mc", "alias", "set", _alias(target), "http://localhost:9000", ak, sk,
-    )
-    if rc != 0:
-        raise ExplorerUnavailableError(
-            f"minio not ready: {(stderr or '').strip()}"
+    """Scoped per-bucket Garage key from secrets/garagecreds, falling back to
+    the realm's _system key for buckets whose scoped key isn't minted yet.
+    Every command issued with them is read-only by construction, so the
+    fallback loses no guarantee we actually enforce."""
+    creds = bp_databases._garage_creds(realm, bucket)
+    if creds is None:
+        creds = bp_databases._garage_creds(realm, "_system")
+    if creds is None:
+        if get_service_secrets("garage", realm) is None:
+            raise LookupError(f"garage is not enabled at stage '{realm}'")
+        raise LookupError(
+            f"No S3 credentials provisioned yet for '{bucket}' at '{realm}'"
         )
-    return await _exec("docker", "exec", target.minio_container, "mc", *cmd)
+    return creds
+
+
+async def _rclone(target: Target, *verb: str) -> tuple[str, str, int]:
+    """Run one rclone S3 command in the toolbox sidecar. Flags-only (the
+    driver exec API can't set env vars); connection-refused maps to 503 —
+    the garage node is still booting or gone."""
+    from app.services.garage_util import garage_rclone_argv
+
+    ak, sk = _bucket_creds(target.realm, target.s3_bucket)
+    svc = get_service_secrets("garage", target.realm) or {}
+    argv = garage_rclone_argv(
+        svc.get("S3_HOST", ""), svc.get("S3_PORT", "9000"), ak, sk, *verb
+    )
+    stdout, stderr, rc = await _exec(
+        "docker", "exec", target.toolbox_container, *argv
+    )
+    if rc != 0 and (
+        "connection refused" in (stderr or "").lower()
+        or "no such host" in (stderr or "").lower()
+    ):
+        raise ExplorerUnavailableError(
+            f"object storage not ready: {(stderr or '').strip()[:200]}"
+        )
+    return stdout, stderr, rc
+
+
+def _ref(target: Target, path: str) -> str:
+    return f":s3:{target.s3_bucket}/{path}"
 
 
 async def list_objects(target: Target, prefix: str = "") -> dict:
-    await _require_service("minio", target.realm)
+    await _require_service("garage", target.realm)
     _validate_key(prefix, is_prefix=True)
-    ref = f"{_alias(target)}/{target.minio_bucket}/{prefix}"
-    stdout, stderr, rc = await _mc(target, "ls", "--json", ref)
+    stdout, stderr, rc = await _rclone(
+        target, "lsjson", "--max-depth", "1", _ref(target, prefix)
+    )
     if rc != 0:
         err = (stderr or "") + (stdout or "")
-        if prefix and ("does not exist" in err or "Object does not exist" in err):
-            # Virtual folders vanish with their last object — treat as empty.
-            return {"bucket": target.minio_bucket, "prefix": prefix, "entries": []}
-        if "does not exist" in err:
-            raise LookupError(f"Bucket '{target.minio_bucket}' does not exist")
-        raise RuntimeError(f"mc ls failed: {err.strip()}")
+        # A missing BUCKET is rc 3 "directory not found" at the root; a
+        # missing (virtual) folder inside an existing bucket reports the
+        # same, so only the root case is a 404.
+        if "directory not found" in err:
+            if prefix:
+                return {"bucket": target.s3_bucket, "prefix": prefix, "entries": []}
+            raise LookupError(f"Bucket '{target.s3_bucket}' does not exist")
+        raise RuntimeError(f"rclone lsjson failed: {err.strip()[:300]}")
+    try:
+        items = json.loads(stdout or "[]")
+    except json.JSONDecodeError:
+        raise RuntimeError(f"unexpected rclone output: {stdout[:200]}")
     entries = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
+    for item in items:
+        name = item.get("Name") or ""
+        if not name:
             continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue  # defensive: skip non-JSON noise
-        if item.get("status") == "error":
-            continue
-        key = item.get("key") or ""
-        if not key:
-            continue
-        is_folder = item.get("type") == "folder" or key.endswith("/")
+        is_dir = bool(item.get("IsDir"))
         entries.append(
             {
-                "key": key,
-                "type": "folder" if is_folder else "file",
-                "size": item.get("size"),
-                "last_modified": item.get("lastModified"),
-                "etag": item.get("etag"),
+                # Prefix-relative, trailing slash on folders — the dashboard
+                # joins `prefix + key` (same contract as the old mc listing).
+                "key": name + "/" if is_dir else name,
+                "type": "folder" if is_dir else "file",
+                "size": None if is_dir else item.get("Size"),
+                "last_modified": None if is_dir else item.get("ModTime"),
             }
         )
     entries.sort(key=lambda e: (e["type"] != "folder", e["key"]))
-    return {"bucket": target.minio_bucket, "prefix": prefix, "entries": entries}
+    return {"bucket": target.s3_bucket, "prefix": prefix, "entries": entries}
 
 
 async def stat_object(target: Target, key: str) -> dict:
-    await _require_service("minio", target.realm)
+    await _require_service("garage", target.realm)
     _validate_key(key, is_prefix=False)
-    ref = f"{_alias(target)}/{target.minio_bucket}/{key}"
-    stdout, stderr, rc = await _mc(target, "stat", "--json", ref)
+    stdout, stderr, rc = await _rclone(
+        target, "lsjson", "--stat", _ref(target, key)
+    )
     if rc != 0:
         err = (stderr or "") + (stdout or "")
-        if "does not exist" in err:
+        if "not found" in err or "directory not found" in err:
             raise LookupError(f"Object '{key}' does not exist")
-        raise RuntimeError(f"mc stat failed: {err.strip()}")
+        raise RuntimeError(f"rclone stat failed: {err.strip()[:300]}")
     try:
-        item = json.loads(stdout.strip().splitlines()[0])
-    except (json.JSONDecodeError, IndexError):
-        raise RuntimeError(f"unexpected mc stat output: {stdout[:200]}")
-    metadata = item.get("metadata") or {}
+        item = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"unexpected rclone stat output: {stdout[:200]}")
+    if not item or item.get("IsDir"):
+        raise LookupError(f"Object '{key}' does not exist")
     return {
         "key": key,
-        "size": item.get("size"),
-        "last_modified": item.get("lastModified"),
-        "etag": item.get("etag"),
-        "content_type": metadata.get("Content-Type")
-        or metadata.get("content-type")
-        or "application/octet-stream",
+        "size": item.get("Size"),
+        "last_modified": item.get("ModTime"),
+        "content_type": item.get("MimeType") or "application/octet-stream",
     }
 
 
@@ -597,31 +600,32 @@ async def download_object(target: Target, key: str) -> tuple[str, str, dict]:
 
 
 async def _fetch_object(target: Target, key: str) -> tuple[str, str]:
-    """Copy one object out of the minio container, binary-safely: mc cp to a
-    random in-container scratch dir, then the driver's copy-out TAR stream
-    (the `_dump_minio` precedent — no tar/head/base64 in the minio image)."""
+    """Copy one object out via the toolbox, binary-safely: rclone copyto into
+    a random scratch dir, then the driver's copy-out TAR stream (the snapshot
+    precedent — bytes never pass through an exec's text plumbing)."""
     from app.services.snapshot_service import run_docker_command_to_file
 
-    await _require_service("minio", target.realm)
+    await _require_service("garage", target.realm)
     _validate_key(key, is_prefix=False)
     scratch = f"/tmp/bpexp-{uuid.uuid4().hex}"
     _, stderr, rc = await _exec(
-        "docker", "exec", target.minio_container, "mkdir", "-p", scratch
+        "docker", "exec", target.toolbox_container, "mkdir", "-p", scratch
     )
     if rc != 0:
         raise RuntimeError(f"scratch mkdir failed: {(stderr or '').strip()}")
     tmpdir = tempfile.mkdtemp(prefix="bpexp-")
     try:
-        ref = f"{_alias(target)}/{target.minio_bucket}/{key}"
-        _, stderr, rc = await _mc(target, "cp", ref, f"{scratch}/obj")
+        _, stderr, rc = await _rclone(
+            target, "copyto", _ref(target, key), f"{scratch}/obj"
+        )
         if rc != 0:
             err = (stderr or "").strip()
-            if "does not exist" in err:
+            if "not found" in err:
                 raise LookupError(f"Object '{key}' does not exist")
-            raise RuntimeError(f"mc cp failed: {err}")
+            raise RuntimeError(f"rclone copyto failed: {err[:300]}")
         tar_path = os.path.join(tmpdir, "obj.tar")
         stderr, rc = await run_docker_command_to_file(
-            ["docker", "cp", f"{target.minio_container}:{scratch}/obj", "-"],
+            ["docker", "cp", f"{target.toolbox_container}:{scratch}/obj", "-"],
             tar_path,
         )
         if rc != 0:
@@ -641,5 +645,5 @@ async def _fetch_object(target: Target, key: str) -> tuple[str, str]:
         raise
     finally:
         await _exec(
-            "docker", "exec", target.minio_container, "rm", "-rf", scratch
+            "docker", "exec", target.toolbox_container, "rm", "-rf", scratch
         )

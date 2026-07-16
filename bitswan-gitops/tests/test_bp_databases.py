@@ -43,7 +43,7 @@ def test_bp_resource_names_basic():
     assert names == {
         "postgres_db": "bp_my_bp",
         "couchdb_prefix": "bp-my-bp-",
-        "minio_bucket": "bp-my-bp",
+        "s3_bucket": "bp-my-bp",
     }
 
 
@@ -51,8 +51,8 @@ def test_bp_resource_names_truncates_long_slugs():
     slug = "a" * 99 + "b"
     names = bp_resource_names(slug)
     assert len(names["postgres_db"]) == 63
-    assert len(names["minio_bucket"]) <= 63
-    assert not names["minio_bucket"].endswith("-")
+    assert len(names["s3_bucket"]) <= 63
+    assert not names["s3_bucket"].endswith("-")
 
 
 @pytest.mark.parametrize(
@@ -135,7 +135,7 @@ def test_get_service_secrets(gitops_home):
     (secrets_dir / "postgres-dev").write_text(
         "POSTGRES_USER=admin\nPOSTGRES_PASSWORD=pw\n# comment\nPOSTGRES_HOST=h\n"
     )
-    (secrets_dir / "minio").write_text("MINIO_ROOT_USER=admin\n")
+    (secrets_dir / "garage").write_text("S3_HOST=ws-garage\n")
 
     assert get_service_secrets("postgres", "dev") == {
         "POSTGRES_USER": "admin",
@@ -143,8 +143,24 @@ def test_get_service_secrets(gitops_home):
         "POSTGRES_HOST": "h",
     }
     # production has no suffix
-    assert get_service_secrets("minio", "production") == {"MINIO_ROOT_USER": "admin"}
+    assert get_service_secrets("garage", "production") == {"S3_HOST": "ws-garage"}
     assert get_service_secrets("couchdb", "dev") is None
+
+
+def _write_garage_creds(gitops_home, realm, name, ak="GKsys", sk="sksys"):
+    creds_dir = gitops_home / "secrets" / "garagecreds" / realm
+    creds_dir.mkdir(parents=True, exist_ok=True)
+    (creds_dir / name).write_text(f"S3_ACCESS_KEY={ak}\nS3_SECRET_KEY={sk}\n")
+
+
+def test_garage_creds_reader(gitops_home):
+    # Missing file → None.
+    assert bp_databases._garage_creds("dev", "_system") is None
+    _write_garage_creds(gitops_home, "dev", "_system")
+    assert bp_databases._garage_creds("dev", "_system") == ("GKsys", "sksys")
+    # A placeholder (empty file the driver writes before CreateKey) → None.
+    (gitops_home / "secrets" / "garagecreds" / "dev" / "bp-my-bp").write_text("")
+    assert bp_databases._garage_creds("dev", "bp-my-bp") is None
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +191,8 @@ def fake_docker(monkeypatch):
         joined = " ".join(args)
         if "pg_database WHERE datname" in joined:
             return "", "", 0  # DB does not exist yet
+        if "GetBucketInfo" in args:
+            return '{"id":"bkt1"}', "", 0
         return "", "", 0
 
     monkeypatch.setattr(bp_databases, "_driver_exec", fake_run)
@@ -187,12 +205,13 @@ async def test_ensure_provisions_all_services(gitops_home, monkeypatch, fake_doc
     (secrets_dir / "postgres-dev").write_text(
         "POSTGRES_USER=admin\nPOSTGRES_PASSWORD=pw\nPOSTGRES_HOST=h\n"
     )
-    (secrets_dir / "minio-dev").write_text(
-        "MINIO_ROOT_USER=admin\nMINIO_ROOT_PASSWORD=pw\n"
+    (secrets_dir / "garage-dev").write_text(
+        "GARAGE_ADMIN_TOKEN=t\nGARAGE_RPC_SECRET=r\nS3_HOST=ws-test-garage-dev\nS3_PORT=9000\n"
     )
     (secrets_dir / "couchdb-dev").write_text(
         "COUCHDB_USER=admin\nCOUCHDB_PASSWORD=pw\n"
     )
+    _write_garage_creds(gitops_home, "dev", "_system")
 
     def fake_get_service(svc_type, workspace, stage="production", **kw):
         return FakeService(f"{workspace}__{svc_type}-{stage}")
@@ -200,23 +219,26 @@ async def test_ensure_provisions_all_services(gitops_home, monkeypatch, fake_doc
     monkeypatch.setattr("app.services.infra_service.get_service", fake_get_service)
 
     results = await ensure_bp_databases("ws-test", "my-bp", "My BP", "dev")
-    assert results == {"postgres": "ok", "couchdb": "ok", "minio": "ok"}
+    assert results == {"postgres": "ok", "couchdb": "ok", "garage": "ok"}
 
     reg = load_registry()
     svc_state = reg["bps"]["my-bp"]["stages"]["dev"]["services"]
-    assert all(svc_state[s]["provisioned"] for s in ("postgres", "couchdb", "minio"))
+    assert all(svc_state[s]["provisioned"] for s in ("postgres", "couchdb", "garage"))
 
     # Postgres: existence check then CREATE DATABASE
     pg_calls = [c for c in fake_docker if "psql" in c]
     assert any('CREATE DATABASE "bp_my_bp";' in " ".join(c) for c in pg_calls)
-    # MinIO: bucket created idempotently
-    mc_calls = [c for c in fake_docker if "mc" in c]
-    assert any("local/bp-my-bp" in " ".join(c) for c in mc_calls)
+    # Garage: bucket created via json-api and the _system key granted access.
+    joined = ["\x00".join(c) for c in fake_docker]
+    assert any("CreateBucket" in j and '"globalAlias":"bp-my-bp"' in j for j in joined)
+    assert any(
+        "AllowBucketKey" in j and '"accessKeyId":"GKsys"' in j for j in joined
+    )
 
     # Second run: already provisioned, no further docker calls.
     fake_docker.clear()
     results = await ensure_bp_databases("ws-test", "my-bp", "My BP", "dev")
-    assert results == {"postgres": "ok", "couchdb": "ok", "minio": "ok"}
+    assert results == {"postgres": "ok", "couchdb": "ok", "garage": "ok"}
     assert fake_docker == []
 
 
@@ -231,7 +253,7 @@ async def test_ensure_skips_disabled_and_stopped(gitops_home, monkeypatch, fake_
     results = await ensure_bp_databases("ws-test", "my-bp", "My BP", "dev")
     assert results["postgres"] == "skipped: not running"
     assert results["couchdb"] == "skipped: not enabled"
-    assert results["minio"] == "skipped: not enabled"
+    assert results["garage"] == "skipped: not enabled"
 
     # Stage is registered but nothing is provisioned — next deploy retries.
     reg = load_registry()
@@ -288,6 +310,56 @@ async def test_ensure_waits_for_cold_postgres(gitops_home, monkeypatch):
     assert load_registry()["bps"]["my-bp"]["stages"]["staging"]["services"]["postgres"][
         "provisioned"
     ]
+
+
+async def test_create_garage_bucket_waits_for_health_and_tolerates_exists(
+    gitops_home, monkeypatch
+):
+    """A just-started Garage (GetClusterHealth failing) is waited on, an
+    already-existing bucket is tolerated, and BOTH the _system key and the
+    BP's scoped key get read+write+owner on the bucket."""
+    (gitops_home / "secrets").mkdir(exist_ok=True)
+    _write_garage_creds(gitops_home, "dev", "_system", ak="GKsys", sk="sksys")
+    _write_garage_creds(gitops_home, "dev", "bp-my-bp", ak="GKbp", sk="skbp")
+
+    health_calls = 0
+    calls = []
+
+    async def fake_run(*args, cwd=None):
+        nonlocal health_calls
+        calls.append(list(args))
+        if "GetClusterHealth" in args:
+            health_calls += 1
+            if health_calls < 3:
+                return "", "Could not reach quorum", 1
+            return '{"status":"healthy"}', "", 0
+        if "CreateBucket" in args:
+            return "", "Error: BucketAlreadyExists (409)", 1  # tolerated
+        if "GetBucketInfo" in args:
+            return '{"id":"bkt1"}', "", 0
+        return "", "", 0
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(bp_databases, "_driver_exec", fake_run)
+    monkeypatch.setattr("asyncio.sleep", no_sleep)
+
+    await bp_databases._create_garage_bucket("ws-test__garage-dev", "dev", "bp-my-bp")
+    assert health_calls == 3  # retried until healthy
+    grants = ["\x00".join(c) for c in calls if "AllowBucketKey" in c]
+    assert any('"accessKeyId":"GKsys"' in g and '"bucketId":"bkt1"' in g for g in grants)
+    assert any('"accessKeyId":"GKbp"' in g for g in grants)
+    assert all('"owner":true' in g for g in grants)
+
+
+async def test_create_garage_bucket_requires_system_key(gitops_home, fake_docker):
+    """No _system key yet (the driver's provisioner hasn't run) → RuntimeError,
+    so best-effort call sites record an error and the next deploy retries."""
+    with pytest.raises(RuntimeError, match="_system"):
+        await bp_databases._create_garage_bucket(
+            "ws-test__garage-dev", "dev", "bp-my-bp"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -414,11 +486,11 @@ def _write_pg_secrets(gitops_home, stage="dev"):
 
 
 def test_copy_bp_resource_names_per_copy_and_bp():
-    # Per-(copy, BP): postgres uses underscores, minio/couch use hyphens, all
+    # Per-(copy, BP): postgres uses underscores, s3/couch use hyphens, all
     # encode BOTH the copy and the BP so distinct (copy, BP) pairs never collide.
     names = bp_databases.copy_bp_resource_names("alice", "my-bp")
     assert names["postgres_db"] == "copy_alice_bp_my_bp"
-    assert names["minio_bucket"] == "copy-alice-bp-my-bp"
+    assert names["s3_bucket"] == "copy-alice-bp-my-bp"
     assert names["couchdb_prefix"] == "copy-alice-bp-my-bp-"
     # Different BP in the same copy → different names (isolation).
     other = bp_databases.copy_bp_resource_names("alice", "shop")
@@ -614,12 +686,14 @@ def test_drop_copy_bp_databases_names_and_commands(tmp_path, monkeypatch):
         "get_service_secrets",
         lambda t, realm: {
             "POSTGRES_USER": "admin",
-            "MINIO_ROOT_USER": "mk",
-            "MINIO_ROOT_PASSWORD": "ms",
+            "S3_HOST": "ws-garage-dev",
+            "S3_PORT": "9000",
             "COUCHDB_USER": "cu",
             "COUCHDB_PASSWORD": "cp",
         },
     )
+    _write_garage_creds(tmp_path, "dev", "_system", ak="GKsys", sk="sksys")
+    _write_garage_creds(tmp_path, "dev", "copy-alice-bp-letsgo", ak="GKbp", sk="skbp")
 
     cmds: list[tuple[str, ...]] = []
 
@@ -627,6 +701,8 @@ def test_drop_copy_bp_databases_names_and_commands(tmp_path, monkeypatch):
         cmds.append(args)
         if "curl" in args and "_all_dbs" in args[-1]:
             return '["copy-alice-bp-letsgo-x", "unrelated"]', "", 0
+        if "GetBucketInfo" in args:
+            return '{"id":"bkt1"}', "", 0
         return "", "", 0
 
     monkeypatch.setattr(bpdb, "_driver_exec", _exec)
@@ -635,7 +711,20 @@ def test_drop_copy_bp_databases_names_and_commands(tmp_path, monkeypatch):
 
     flat = ["\x00".join(c) for c in cmds]
     assert any('DROP DATABASE IF EXISTS "copy_alice_bp_letsgo";' in f for f in flat)
-    assert any("local/copy-alice-bp-letsgo" in f and "rb" in f for f in flat)
+    # Bucket contents purged via rclone in the TOOLBOX (purge also deletes
+    # the bucket on Garage), then the admin DeleteBucket no-op + key cleanup.
+    assert any(
+        "c-garage-toolbox" in f and "purge" in f and ":s3:copy-alice-bp-letsgo" in f
+        for f in flat
+    )
+    assert any("DeleteBucket" in f and '"id":"bkt1"' in f for f in flat)
+    assert any("DeleteKey" in f and '"id":"GKbp"' in f for f in flat)
+    # The scoped creds file is gone.
+    assert not (
+        tmp_path / "secrets" / "garagecreds" / "dev" / "copy-alice-bp-letsgo"
+    ).exists()
     # Only the prefixed couch db is DELETEd, not the unrelated one.
-    assert any("DELETE" in f and "copy-alice-bp-letsgo-x" in f for f in flat)
-    assert not any("DELETE" in f and "unrelated" in f for f in flat)
+    assert any(
+        "curl" in f and "DELETE" in f and "copy-alice-bp-letsgo-x" in f for f in flat
+    )
+    assert not any("curl" in f and "DELETE" in f and "unrelated" in f for f in flat)

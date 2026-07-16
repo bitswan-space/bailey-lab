@@ -123,9 +123,10 @@ def test_ro_role_mirrors_go_derivation():
 
 def test_resolve_dev_and_staging(registered):
     t = resolve_target("My BP", "dev")
-    assert (t.postgres_db, t.minio_bucket, t.db) == ("bp_my_bp", "bp-my-bp", None)
+    assert (t.postgres_db, t.s3_bucket, t.db) == ("bp_my_bp", "bp-my-bp", None)
     assert t.pg_container == "ws-test__postgres-dev"
-    assert t.minio_container == "ws-test__minio-dev"
+    assert t.garage_container == "ws-test__garage-dev"
+    assert t.toolbox_container == "ws-test__garage-dev-toolbox"
     # Staging not registered -> 404-shaped error.
     with pytest.raises(LookupError):
         resolve_target("My BP", "staging")
@@ -141,7 +142,7 @@ def test_resolve_production_defaults_to_live_db(registered, monkeypatch):
         "app.dependencies.get_automation_service", lambda: FakeAutomationService()
     )
     t = resolve_target("my-bp", "production")
-    assert (t.postgres_db, t.minio_bucket, t.db) == ("bp_my_bp_2", "bp-my-bp-2", 2)
+    assert (t.postgres_db, t.s3_bucket, t.db) == ("bp_my_bp_2", "bp-my-bp-2", 2)
     assert t.pg_container == "ws-test__postgres"  # production: no suffix
     # Explicit override skips live_db.
     t = resolve_target("my-bp", "production", db=1)
@@ -153,7 +154,7 @@ def test_resolve_production_defaults_to_live_db(registered, monkeypatch):
 def test_resolve_copy_scope(registered):
     t = resolve_target("my-bp", "dev", copy="bar")
     assert t.postgres_db == "copy_bar_bp_my_bp"
-    assert t.minio_bucket == "copy-bar-bp-my-bp"
+    assert t.s3_bucket == "copy-bar-bp-my-bp"
     # main copy == plain dev names (and doesn't need its own registration).
     t = resolve_target("my-bp", "dev", copy="main")
     assert t.postgres_db == "bp_my_bp"
@@ -201,7 +202,7 @@ async def test_overview_reports_flags(registered, services_up):
         "running": True,
         "database": "bp_my_bp",
     }
-    assert out["minio"]["bucket"] == "bp-my-bp"
+    assert out["garage"]["bucket"] == "bp-my-bp"
     # Unregistered BP: flags still reported, no resource names, no raise.
     out = await data_explorer.overview("ghost-bp", "dev")
     assert out["registered"] is False
@@ -356,28 +357,45 @@ async def test_self_heal_gives_up_after_one_retry(
 # object storage explorer
 # ---------------------------------------------------------------------------
 
-MC_LS_OUT = "\n".join(
+RCLONE_LS = json.dumps(
     [
-        json.dumps(
-            {
-                "status": "success",
-                "type": "file",
-                "lastModified": "2026-07-16T10:00:00Z",
-                "size": 123,
-                "key": "report.pdf",
-                "etag": "abc",
-            }
-        ),
-        json.dumps({"status": "success", "type": "folder", "key": "sub/", "size": 0}),
-        "not-json garbage line",
+        {
+            "Path": "report.pdf",
+            "Name": "report.pdf",
+            "Size": 123,
+            "MimeType": "application/pdf",
+            "ModTime": "2026-07-16T10:00:00.000000000Z",
+            "IsDir": False,
+        },
+        {
+            "Path": "sub",
+            "Name": "sub",
+            "Size": 0,
+            "MimeType": "inode/directory",
+            "ModTime": "2000-01-01T00:00:00.000000000Z",
+            "IsDir": True,
+        },
     ]
 )
 
 
+def _write_garage_secrets(gitops_home, realm="dev"):
+    d = gitops_home / "secrets"
+    d.mkdir(exist_ok=True)
+    (d / f"garage-{realm}").write_text(
+        "GARAGE_ADMIN_TOKEN=tok\nS3_HOST=ws-test-garage-dev\nS3_PORT=9000\n"
+    )
+
+
 def _write_scoped_creds(gitops_home, realm="dev", bucket="bp-my-bp"):
-    d = gitops_home / "secrets" / "miniocreds" / realm
+    _write_garage_secrets(gitops_home, realm)
+    d = gitops_home / "secrets" / "garagecreds" / realm
     d.mkdir(parents=True, exist_ok=True)
-    (d / bucket).write_text("MINIO_ACCESS_KEY=u-bp-my-bp\nMINIO_SECRET_KEY=sk\n")
+    (d / bucket).write_text("S3_ACCESS_KEY=GKscoped\nS3_SECRET_KEY=sk\n")
+
+
+def _rclone_calls(calls):
+    return [c for c in calls if "rclone" in c]
 
 
 async def test_list_objects_parses_and_sorts(
@@ -385,34 +403,42 @@ async def test_list_objects_parses_and_sorts(
 ):
     _write_scoped_creds(gitops_home)
     fake_exec.handlers.append(
-        (lambda argv: "ls" in argv and "--json" in argv, (MC_LS_OUT, "", 0))
+        (lambda argv: "lsjson" in argv, (RCLONE_LS, "", 0))
     )
     t = resolve_target("my-bp", "dev")
     out = await data_explorer.list_objects(t, "")
     assert out["bucket"] == "bp-my-bp"
-    # Folders first, garbage line skipped.
-    assert [(e["type"], e["key"]) for e in out["entries"]] == [
-        ("folder", "sub/"),
-        ("file", "report.pdf"),
+    # Folders first, trailing slash appended, dir size/mtime suppressed.
+    assert [(e["type"], e["key"], e["size"]) for e in out["entries"]] == [
+        ("folder", "sub/", None),
+        ("file", "report.pdf", 123),
     ]
-    # Scoped creds were used for the alias, with a per-bucket alias name.
-    alias_call = next(c for c in fake_exec.calls if "alias" in c)
-    assert "exp-bp-my-bp" in alias_call
-    assert "u-bp-my-bp" in alias_call
+    # Exec went to the TOOLBOX with the scoped key as rclone flags.
+    (call,) = _rclone_calls(fake_exec.calls)
+    assert call[2] == "ws-test__garage-dev-toolbox"
+    assert "GKscoped" in call
+    assert "http://ws-test-garage-dev:9000" in call
+    assert ":s3:bp-my-bp/" in call
 
 
-async def test_list_objects_root_creds_fallback(
+async def test_list_objects_system_key_fallback(
     registered, services_up, fake_exec, gitops_home
 ):
-    (gitops_home / "secrets").mkdir(exist_ok=True)
-    (gitops_home / "secrets" / "minio-dev").write_text(
-        "MINIO_ROOT_USER=admin\nMINIO_ROOT_PASSWORD=rootpw\n"
-    )
+    # No scoped creds file — the realm _system key carries the request.
+    _write_garage_secrets(gitops_home)
+    d = gitops_home / "secrets" / "garagecreds" / "dev"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "_system").write_text("S3_ACCESS_KEY=GKsystem\nS3_SECRET_KEY=ssk\n")
+    fake_exec.handlers.append((lambda argv: "lsjson" in argv, ("[]", "", 0)))
     t = resolve_target("my-bp", "dev")
     out = await data_explorer.list_objects(t, "")
     assert out["entries"] == []
-    alias_call = next(c for c in fake_exec.calls if "alias" in c)
-    assert "admin" in alias_call and "rootpw" in alias_call
+    (call,) = _rclone_calls(fake_exec.calls)
+    assert "GKsystem" in call
+    # Neither key provisioned -> 404-shaped error, not a crash.
+    (d / "_system").unlink()
+    with pytest.raises(LookupError):
+        await data_explorer.list_objects(t, "")
 
 
 async def test_list_objects_missing_prefix_is_empty(
@@ -421,8 +447,8 @@ async def test_list_objects_missing_prefix_is_empty(
     _write_scoped_creds(gitops_home)
     fake_exec.handlers.append(
         (
-            lambda argv: "ls" in argv,
-            ("", "mc: <ERROR> Object does not exist", 1),
+            lambda argv: "lsjson" in argv,
+            ("", "ERROR : : error listing: directory not found", 3),
         )
     )
     t = resolve_target("my-bp", "dev")
@@ -430,6 +456,33 @@ async def test_list_objects_missing_prefix_is_empty(
     assert out["entries"] == []
     # But a missing BUCKET (prefix="") is a 404-shaped error.
     with pytest.raises(LookupError):
+        await data_explorer.list_objects(t, "")
+
+
+async def test_list_objects_malformed_json(
+    registered, services_up, fake_exec, gitops_home
+):
+    _write_scoped_creds(gitops_home)
+    fake_exec.handlers.append(
+        (lambda argv: "lsjson" in argv, ("{not json", "", 0))
+    )
+    t = resolve_target("my-bp", "dev")
+    with pytest.raises(RuntimeError):
+        await data_explorer.list_objects(t, "")
+
+
+async def test_rclone_connection_refused_is_503(
+    registered, services_up, fake_exec, gitops_home
+):
+    _write_scoped_creds(gitops_home)
+    fake_exec.handlers.append(
+        (
+            lambda argv: "lsjson" in argv,
+            ("", "Failed to lsjson: connection refused", 1),
+        )
+    )
+    t = resolve_target("my-bp", "dev")
+    with pytest.raises(data_explorer.ExplorerUnavailableError):
         await data_explorer.list_objects(t, "")
 
 
@@ -452,19 +505,23 @@ async def test_preview_size_gate_skips_copy(
 ):
     _write_scoped_creds(gitops_home)
     big_stat = json.dumps(
-        {"size": 10_000_000, "lastModified": "x", "etag": "e",
-         "metadata": {"Content-Type": "video/mp4"}}
+        {
+            "Path": "big.mp4",
+            "Name": "big.mp4",
+            "Size": 10_000_000,
+            "MimeType": "video/mp4",
+            "ModTime": "2026-07-16T10:00:00Z",
+            "IsDir": False,
+        }
     )
-    fake_exec.handlers.append(
-        (lambda argv: "stat" in argv, (big_stat, "", 0))
-    )
+    fake_exec.handlers.append((lambda argv: "--stat" in argv, (big_stat, "", 0)))
     t = resolve_target("my-bp", "dev")
     out = await data_explorer.preview_object(t, "big.mp4")
     assert out["truncated"] is True
     assert "content_base64" not in out
     assert out["content_type"] == "video/mp4"
-    # No mc cp / copy-out happened.
-    assert not any("cp" in c for c in fake_exec.calls if "mc" in c)
+    # No copyto / copy-out happened.
+    assert not any("copyto" in c for c in fake_exec.calls)
 
 
 async def test_preview_and_download_roundtrip(
@@ -472,17 +529,25 @@ async def test_preview_and_download_roundtrip(
 ):
     _write_scoped_creds(gitops_home)
     small_stat = json.dumps(
-        {"size": 5, "lastModified": "x", "etag": "e",
-         "metadata": {"Content-Type": "text/plain"}}
+        {
+            "Path": "notes.txt",
+            "Name": "notes.txt",
+            "Size": 5,
+            "MimeType": "text/plain; charset=utf-8",
+            "ModTime": "2026-07-16T10:00:00Z",
+            "IsDir": False,
+        }
     )
-    fake_exec.handlers.append((lambda argv: "stat" in argv, (small_stat, "", 0)))
+    fake_exec.handlers.append((lambda argv: "--stat" in argv, (small_stat, "", 0)))
 
     import io
     import tarfile as tarfile_mod
 
     async def fake_to_file(args, out_path, gzip_output=False):
-        # Emit a one-member TAR, like the driver's copy-out.
+        # Emit a one-member TAR like the driver's copy-out — and prove the cp
+        # ref targets the TOOLBOX container.
         assert args[:2] == ["docker", "cp"] and args[-1] == "-"
+        assert args[2].startswith("ws-test__garage-dev-toolbox:")
         buf = io.BytesIO()
         with tarfile_mod.open(fileobj=buf, mode="w") as tf:
             data = b"hello"
@@ -500,7 +565,7 @@ async def test_preview_and_download_roundtrip(
     out = await data_explorer.preview_object(t, "notes.txt")
     assert out["truncated"] is False
     assert base64.b64decode(out["content_base64"]) == b"hello"
-    # In-container scratch dir was cleaned up.
+    # In-container scratch dir was cleaned up (in the toolbox).
     assert any(
         "rm" in c and "-rf" in c and any(a.startswith("/tmp/bpexp-") for a in c)
         for c in fake_exec.calls
@@ -510,7 +575,7 @@ async def test_preview_and_download_roundtrip(
     try:
         with open(path, "rb") as f:
             assert f.read() == b"hello"
-        assert stat["content_type"] == "text/plain"
+        assert stat["content_type"] == "text/plain; charset=utf-8"
     finally:
         import shutil
 
@@ -519,8 +584,14 @@ async def test_preview_and_download_roundtrip(
 
 async def test_download_size_gate(registered, services_up, fake_exec, gitops_home):
     _write_scoped_creds(gitops_home)
-    huge = json.dumps({"size": data_explorer.DOWNLOAD_MAX_BYTES + 1, "metadata": {}})
-    fake_exec.handlers.append((lambda argv: "stat" in argv, (huge, "", 0)))
+    huge = json.dumps(
+        {
+            "Name": "huge.bin",
+            "Size": data_explorer.DOWNLOAD_MAX_BYTES + 1,
+            "IsDir": False,
+        }
+    )
+    fake_exec.handlers.append((lambda argv: "--stat" in argv, (huge, "", 0)))
     t = resolve_target("my-bp", "dev")
     with pytest.raises(ValueError):
         await data_explorer.download_object(t, "huge.bin")

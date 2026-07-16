@@ -512,6 +512,40 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Stale postgres ingress-route cleanup failed: %s", e)
 
+    # One-time migration: MinIO (archived upstream) was replaced by Garage —
+    # fresh start, no data migration. Per realm where the legacy minio secrets
+    # file exists: drop its stale console ingress route, enable garage
+    # (headless; writes the garage secrets + toml), and rename the legacy file
+    # to `.retired` — the idempotence marker. The driver no longer composes
+    # minio, so the orphaned container is retired on the next whole-workspace
+    # apply; the old miniocreds dir is deliberately left in place.
+    try:
+        from app.services.infra_service import get_service
+        from app.utils import SERVICE_REALMS, remove_route_by_hostname
+
+        _ws = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+        _domain = os.environ.get("BITSWAN_GITOPS_DOMAIN", "")
+        _secrets_dir = os.path.join(
+            os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline"), "secrets"
+        )
+        for _realm in SERVICE_REALMS:
+            _suffix = "" if _realm == "production" else f"-{_realm}"
+            _legacy = os.path.join(_secrets_dir, f"minio{_suffix}")
+            if not os.path.exists(_legacy):
+                continue
+            try:
+                if _domain:
+                    remove_route_by_hostname(f"{_ws}-minio{_suffix}.{_domain}")
+                _garage = get_service("garage", _ws, stage=_realm)
+                if not _garage.is_enabled():
+                    await _garage.enable()
+                os.replace(_legacy, _legacy + ".retired")
+                logger.info("Migrated minio → garage at %s", _realm)
+            except Exception as e:
+                logger.warning("minio → garage migration failed at %s: %s", _realm, e)
+    except Exception as e:
+        logger.warning("minio → garage migration failed: %s", e)
+
     # Warm the ProcessService cache so the first `_broadcast_processes`
     # (SSE) read finds it populated.
     process_service.refresh_all()

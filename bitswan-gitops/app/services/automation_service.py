@@ -1341,7 +1341,7 @@ class AutomationService:
             # Persist the deployment's declared infra services INTO the entry.
             # The infra driver compiles this bitswan.yaml without access to the
             # baked image's automation.toml, so it can only merge infra services
-            # (postgres/minio/…) that are explicit here. Prefer an explicit
+            # (postgres/garage/…) that are explicit here. Prefer an explicit
             # member `services`, else resolve them from the automation config
             # now (relative_path/checksum/stage are already set on `dep`). The
             # old in-process Python compiler backfilled this at compile time;

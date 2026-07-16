@@ -44,7 +44,7 @@ def _resolve(bp: str, stage: str, copy: str, db: int | None):
 
 @router.get("/{bp}/{stage}")
 async def data_overview(bp: str, stage: str, copy: str = "", db: int | None = None):
-    """Capability probe: which of postgres/minio are enabled+running and which
+    """Capability probe: which of postgres/garage are enabled+running and which
     concrete resources this deployment maps to. Reports flags instead of
     raising for disabled services / unregistered BPs."""
     try:
