@@ -116,7 +116,7 @@ type Driver interface {
 
 	// ContainerCopyOut archives srcPath from a container and streams the TAR
 	// back (the daemon-side archive — `docker cp <container>:<srcPath> -`). Used
-	// where exec'ing `tar` is impossible: the infra images (minio UBI-micro,
+	// where exec'ing `tar` is impossible: the infra images (garage's bare static binary,
 	// etc.) ship no tar/shell, so the docker daemon does the archiving. The
 	// returned reader is a TAR stream the caller must Close; chunks flow as they
 	// arrive (constant memory — a bucket mirror is not buffered whole).

@@ -18,11 +18,11 @@ func NewServiceCmd() *cobra.Command {
 	cmd.AddCommand(NewCouchDBCmd())
 	cmd.AddCommand(NewKafkaCmd())
 	cmd.AddCommand(NewPostgresCmd())
-	cmd.AddCommand(NewMinioCmd())
+	cmd.AddCommand(NewGarageCmd())
 	cmd.AddCommand(NewDashboardCmd())
 	cmd.AddCommand(NewCodingAgentCmd())
 	cmd.AddCommand(NewInfraDriverCmd())
 	cmd.AddCommand(NewEgressGatewayCmd())
 
 	return cmd
-} 
+}

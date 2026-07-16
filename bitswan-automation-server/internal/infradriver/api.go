@@ -32,7 +32,7 @@ package infradriver
 // than SSE because the payloads are binary and large (DB dumps).
 //
 // copy-out/copy-in mirror Docker's archive API (raw TAR streams) for the
-// tar-less infra images (minio UBI-micro, etc.) where exec'ing `tar` is
+// tar-less infra images (garage's bare static binary, etc.) where exec'ing `tar` is
 // impossible: the daemon does the archiving. copy-out's response body IS the
 // TAR; copy-in's request body IS the TAR (metadata rides X-Bitswan-Copy so the
 // body stays a pure stream, same as exec's stdin).
