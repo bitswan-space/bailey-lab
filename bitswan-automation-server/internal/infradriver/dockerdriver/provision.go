@@ -30,14 +30,14 @@ const bpPostgresROConnLimit = 3
 
 // Port of gitops bp_databases.py's deploy-time provisioning, run after
 // compose-up (gitops's _provision_bp_databases). gitops loses docker.sock, so
-// the per-BP Postgres DBs / MinIO buckets the backends need are created here, by
+// the per-BP Postgres DBs / Garage buckets the backends need are created here, by
 // the driver, via `docker exec` into the running service containers.
 //
 // Two layers, matching the Python:
 //   - ensureLivePostgresDBs: FAIL-FAST guard for the live Postgres DB each
 //     backend connects to (per-copy clone / per-BP / blue-green). Raises so a
 //     deploy reports a clear error instead of crash-looping on a missing DB.
-//   - provisionForDeployments: best-effort namespaces (MinIO bucket + the
+//   - provisionForDeployments: best-effort namespaces (Garage bucket + the
 //     standby blue-green DB); never fails a deploy.
 //
 // _post_deploy_infra_services is intentionally NOT ported: no concrete infra
@@ -127,7 +127,7 @@ func waitForHealthy(ctx context.Context, container string, timeout time.Duration
 	// Fast path: already healthy (the common warm-service case) → skip the
 	// `docker events` subscription entirely. Forking + connecting a `docker
 	// events` stream is real overhead on a busy daemon, and provisioning waits
-	// on already-running Postgres/MinIO several times per deploy. If NOT yet
+	// on already-running Postgres/Garage several times per deploy. If NOT yet
 	// healthy we fall through to the race-safe subscribe-first-then-inspect path
 	// below (an event could fire between this check and the subscription).
 	if containerHealth(ctx, container) == "healthy" {

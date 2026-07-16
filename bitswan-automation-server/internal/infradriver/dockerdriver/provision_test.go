@@ -11,7 +11,7 @@ func TestServiceContainerName(t *testing.T) {
 	cases := []struct{ ws, svc, realm, want string }{
 		{"acme", "postgres", "production", "acme__postgres"},
 		{"acme", "postgres", "dev", "acme__postgres-dev"},
-		{"acme", "minio", "staging", "acme__minio-staging"},
+		{"acme", "garage", "staging", "acme__garage-staging"},
 	}
 	for _, c := range cases {
 		if got := serviceContainerName(c.ws, c.svc, c.realm); got != c.want {

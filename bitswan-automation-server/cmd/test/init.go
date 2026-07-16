@@ -168,7 +168,7 @@ func runTestInit(noRemove bool, gitopsImage, codingAgentImage string, dev bool) 
 
 	// Step 4: Wait for the BP deploy pipeline to finish. This builds the
 	// frontend + backend images from their image/Dockerfiles, provisions the
-	// backend's Postgres + MinIO, and runs compose up.
+	// backend's Postgres + Garage bucket, and runs compose up.
 	fmt.Println("\n[4/7] Waiting for business-process deploy to complete...")
 	if err := waitForDeployTask(metadata.GitopsURL, metadata.GitopsSecret, workspaceName, deployTaskID); err != nil {
 		cleanupOnFailure()

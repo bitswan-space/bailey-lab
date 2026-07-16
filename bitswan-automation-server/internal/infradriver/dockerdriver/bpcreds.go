@@ -51,7 +51,7 @@ func scopedROPGRole(dbName string) string {
 }
 
 // generatePassword returns a URL-safe random secret with no '=' padding (so it's
-// safe unquoted in SQL/env and as a MinIO secret key).
+// safe unquoted in SQL/env).
 func generatePassword() (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {

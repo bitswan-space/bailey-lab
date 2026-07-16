@@ -226,9 +226,9 @@ func itoa(n int) string {
 
 // copyBPResourceNames returns the per-(copy, BP) live-dev resource names. A
 // non-main copy is a developer's sandbox: each BP's live-dev backend gets its
-// OWN Postgres database, MinIO bucket and CouchDB prefix there — isolated from
+// OWN Postgres database, S3 bucket and CouchDB prefix there — isolated from
 // other BPs in the copy, from other copies, and from dev. Capped at the 63-byte
-// Postgres/MinIO limit (a truncation collision surfaces as a deploy error, not
+// Postgres/S3 limit (a truncation collision surfaces as a deploy error, not
 // silent data sharing). Mirrors bp_databases.copy_bp_resource_names.
 func copyBPResourceNames(copyName, bpSlug string) map[string]string {
 	cpU := copyDBRe.ReplaceAllString(strings.ToLower(copyName), "_") // [a-z0-9_] for pg

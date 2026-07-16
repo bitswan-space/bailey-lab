@@ -27,7 +27,7 @@ package infradriver
 //
 // exec is the general escape hatch for imperative container operations that
 // aren't a state change and don't fit the narrower primitives — backups
-// (pg_dump), restores (psql < dump), MinIO mirrors. gitops orchestrates them;
+// (pg_dump), restores (psql < dump), S3 syncs. gitops orchestrates them;
 // the driver executes. Its wire shape is a binary multiplexed stream rather
 // than SSE because the payloads are binary and large (DB dumps).
 //

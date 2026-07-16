@@ -302,7 +302,7 @@ func newGarageBackupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "backup",
 		Short: "Create a backup of all Garage buckets",
-		Long:  "Creates a backup of all buckets in Garage. The backup will be saved as a tarball with automatic date/time naming (format: minio-backup-YYYYMMDD-HHMMSS.tar.gz) in the specified directory.",
+		Long:  "Creates a backup of all buckets in Garage. The backup will be saved as a tarball with automatic date/time naming (format: garage-backup-YYYYMMDD-HHMMSS.tar) in the specified directory.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if backupPath == "" {
 				fmt.Fprintf(os.Stderr, "Error: backup path is required. Use --path to specify the backup location\n")

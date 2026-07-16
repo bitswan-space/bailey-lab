@@ -10,7 +10,7 @@
 // is adding a stage's deployment+Apply, swap is flipping the live slot/db+Apply,
 // scale is changing replicas+Apply, rollback is pinning the version+Apply. The
 // imperative, artifact-producing operations that are genuinely NOT desired state
-// — backups (pg_dump), restores, MinIO mirrors — run through exec, which gitops
+// — backups (pg_dump), restores, S3 syncs — run through exec, which gitops
 // orchestrates (a snapshot is a point-in-time event, not state the compiler
 // converges to). For anything else, the fix is to make bitswan.yaml more
 // expressive — NOT to add a bespoke driver command. Image building folds into
@@ -108,7 +108,7 @@ type Driver interface {
 	// ContainerExec runs a command in a container — the general escape hatch for
 	// imperative container operations that aren't a state change and don't fit
 	// the narrower primitives: backups (pg_dump | gzip), restores (psql < dump),
-	// MinIO mirrors, ad-hoc maintenance. gitops orchestrates the flow; the driver
+	// S3 syncs, ad-hoc maintenance. gitops orchestrates the flow; the driver
 	// (which holds docker.sock) executes. stdin is streamed from in (nil for
 	// none); stdout/stderr chunks are delivered to out as raw bytes (binary-safe
 	// — DB dumps are not text). Returns the command's exit code.
