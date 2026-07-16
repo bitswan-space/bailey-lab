@@ -195,11 +195,14 @@ func garageCompose(c *compileState, n infraNames) map[string]interface{} {
 // garageConfigMount mounts the gitops-written garage<suffix>.toml (rpc secret,
 // admin token, ports) at /etc/garage.toml — dual-mode like app source mounts
 // (see the volume/bind switch in buildServiceEntry): volume subpath on
-// shared-volume platforms, host bind otherwise.
+// shared-volume platforms, host bind otherwise. On the shared volume the
+// workspace root is workspaces/<ws>/ and `secrets` is a SIBLING of `gitops`
+// (workspaces/<ws>/{gitops,secrets,...}); BITSWAN_GITOPS_DIR_HOST points at
+// that same workspace root in bind mode.
 func (c *compileState) garageConfigMount(n infraNames) interface{} {
 	file := n.secretsName + ".toml"
 	if c.volumeName != "" {
-		subpath := normalizeSubpath("workspaces/" + c.workspaceName + "/gitops/secrets/" + file)
+		subpath := normalizeSubpath("workspaces/" + c.workspaceName + "/secrets/" + file)
 		return map[string]interface{}{
 			"type":      "volume",
 			"source":    c.volumeName,

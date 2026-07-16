@@ -191,6 +191,32 @@ func garageFakeExec(t *testing.T, buckets map[string]string, keys []string) (*[]
 	return &calls, func() { dockerExec = orig }
 }
 
+// TestGarageConfigMountVolumeMode pins the shared-volume subpath of the
+// garage.toml mount: on the volume the workspace root is workspaces/<ws>/ and
+// `secrets` is a SIBLING of `gitops` — mounting workspaces/<ws>/gitops/secrets
+// left the container un-startable (lstat: no such file or directory).
+func TestGarageConfigMountVolumeMode(t *testing.T) {
+	c := &compileState{workspaceName: "dev", volumeName: "bitswan", secretsDir: "/gitops/secrets"}
+	n := infraNamesFor(c.secretsDir, c.workspaceName, "garage", "dev")
+	m, ok := c.garageConfigMount(n).(map[string]interface{})
+	if !ok {
+		t.Fatalf("volume mode must produce a long-syntax mount, got %T", c.garageConfigMount(n))
+	}
+	vol, _ := m["volume"].(map[string]interface{})
+	if got, want := vol["subpath"], "workspaces/dev/secrets/garage-dev.toml"; got != want {
+		t.Errorf("subpath = %v, want %v", got, want)
+	}
+	if m["source"] != "bitswan" || m["target"] != "/etc/garage.toml" {
+		t.Errorf("mount = %v", m)
+	}
+	// Bind mode: host path is <workspace-root-host>/secrets/<file>.
+	c.volumeName = ""
+	c.gitopsDirHost = "/host/workspaces/dev"
+	if got, want := c.garageConfigMount(n), "/host/workspaces/dev/secrets/garage-dev.toml:/etc/garage.toml:ro"; got != want {
+		t.Errorf("bind mount = %v, want %v", got, want)
+	}
+}
+
 func TestReconcileGarageBuckets(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "garage-dev"),
