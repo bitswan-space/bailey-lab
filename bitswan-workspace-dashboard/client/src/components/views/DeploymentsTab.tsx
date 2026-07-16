@@ -85,6 +85,8 @@ import { cn } from '@/lib/utils';
 import { setUrlParams, useUrlEnum, useUrlParam } from '@/lib/urlState';
 import type { BusinessProcess, SnapshotStage } from '@/types';
 import { StageSnapshotsSection } from '@/components/views/StageSnapshotsSection';
+import { ObjectBrowser } from '@/components/data-explorer/ObjectBrowser';
+import { SqlExplorer } from '@/components/data-explorer/SqlExplorer';
 
 // The same CodeMirror viewer the copy file browser uses — lazy-loaded so the
 // editor bundle only lands when someone actually opens a file in Inspect.
@@ -935,14 +937,17 @@ function realmForStage(stage: StageId): string {
 }
 
 /** "Stage services" row — links to the real admin consoles of the infra
- *  services (Postgres/MinIO/CouchDB) that are actually enabled+running for this
- *  stage. Renders nothing when none are — no fabricated links. */
-function StageServicesRow({ stage }: { stage: StageId }) {
+ *  services that are actually enabled+running for this stage. Renders nothing
+ *  when none are — no fabricated links. Since the in-dashboard data explorers
+ *  replaced the Postgres/MinIO console links, the Automation tab narrows this
+ *  to CouchDB via `only` (the pgAdmin/MinIO links live in the explorer
+ *  headers now, slated for removal with those consoles). */
+function StageServicesRow({ stage, only }: { stage: StageId; only?: ServiceType[] }) {
   const [links, setLinks] = useState<{ type: ServiceType; url: string }[]>([]);
   useEffect(() => {
     let alive = true;
     const realm = realmForStage(stage);
-    const types: ServiceType[] = ['postgres', 'minio', 'couchdb'];
+    const types: ServiceType[] = only ?? ['postgres', 'minio', 'couchdb'];
     Promise.all(
       types.map((t) =>
         api
@@ -961,7 +966,8 @@ function StageServicesRow({ stage }: { stage: StageId }) {
     return () => {
       alive = false;
     };
-  }, [stage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `only` callers pass literals
+  }, [stage, only?.join(',')]);
 
   if (links.length === 0) return null;
   return (
@@ -1114,6 +1120,25 @@ function ContainersSection({
   onAction: (action: 'start' | 'stop' | 'restart', id: string, name: string) => void;
   onRefresh: () => void;
 }) {
+  // Sub-tab: the stage's containers vs its data (read-only explorers scoped
+  // to this BP's per-stage bucket/database). Deep-linked via `?csub=`.
+  const [csub] = useUrlEnum('csub', ['automation', 'objects', 'sql'] as const, 'automation');
+  const switchSub = (v: 'automation' | 'objects' | 'sql') =>
+    setUrlParams({
+      csub: v === 'automation' ? null : v,
+      // Clear the explorers' deep-link params when leaving them.
+      table: null,
+      page: null,
+      sort: null,
+      dir: null,
+      prefix: null,
+      obj: null,
+    });
+  // DR mirrors production's data; live explorer scope is always a real realm.
+  const dataScope = {
+    bp,
+    stage: (stage === 'dr' ? 'production' : stage) as 'dev' | 'staging' | 'production',
+  };
   const [busy, setBusy] = useState(false);
   // "Running" is the live container state, NOT whether a deploy record exists —
   // an asleep stage still has its records (present=true) but no running container.
@@ -1151,6 +1176,27 @@ function ContainersSection({
 
   return (
     <div className="flex flex-col gap-2">
+      {/* Automation | Object Storage | SQL — replaces the old full
+          "Stage services" console-link row. */}
+      <div className="flex items-center gap-4 border-b border-border px-1">
+        <ContainersSubTab active={csub === 'automation'} onClick={() => switchSub('automation')} label="Automation" />
+        <ContainersSubTab active={csub === 'objects'} onClick={() => switchSub('objects')} label="Object Storage" />
+        <ContainersSubTab active={csub === 'sql'} onClick={() => switchSub('sql')} label="SQL" />
+      </div>
+
+      {csub !== 'automation' ? (
+        <>
+          {stage === 'dr' && <MirrorBanner />}
+          <div className="flex h-[560px] flex-col overflow-hidden rounded-[10px] border border-border bg-background">
+            {csub === 'objects' ? (
+              <ObjectBrowser scope={dataScope} active />
+            ) : (
+              <SqlExplorer scope={dataScope} active />
+            )}
+          </div>
+        </>
+      ) : (
+        <>
       {canPower && (members.length > 0 || asleep) && (
         <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
@@ -1176,7 +1222,8 @@ function ContainersSection({
           )}
         </div>
       )}
-      <StageServicesRow stage={stage} />
+      {/* CouchDB keeps its console link here — it has no explorer replacement. */}
+      <StageServicesRow stage={stage} only={['couchdb']} />
       {members.length === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-muted-foreground">
           No containers in {stageLabel}.
@@ -1184,7 +1231,35 @@ function ContainersSection({
       ) : (
         members.map((m) => <ContainerCard key={m.id} m={m} onAction={onAction} />)
       )}
+        </>
+      )}
     </div>
+  );
+}
+
+/** Underlined sub-tab of the Containers section (Automation | Object Storage | SQL). */
+function ContainersSubTab({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'flex h-10 items-center border-b-2 text-[13px] transition-colors',
+        active
+          ? 'border-foreground font-semibold text-foreground'
+          : 'border-transparent font-medium text-muted-foreground hover:text-foreground',
+      )}
+    >
+      {label}
+    </button>
   );
 }
 

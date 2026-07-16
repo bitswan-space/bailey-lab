@@ -47,6 +47,26 @@ async function getJson<T>(url: string): Promise<T> {
   return (await r.json()) as T;
 }
 
+/**
+ * getJson that returns null on 404 instead of throwing — for endpoints where
+ * "not found" is a typed state, not a failure (e.g. the data explorer's
+ * "this BP has no database/bucket yet").
+ */
+async function getJsonOr404<T>(url: string): Promise<T | null> {
+  let r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
+  if (isSessionGone(r)) {
+    clearAccessToken();
+    r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
+  }
+  if (isSessionGone(r)) {
+    notifySessionExpired();
+    throw new SessionExpiredError();
+  }
+  if (r.status === 404) return null;
+  if (!r.ok) await throwHttpError(url, r);
+  return (await r.json()) as T;
+}
+
 // Turn a non-2xx response into an Error that carries the server's own message
 // (the dashboard proxy forwards gitops errors as `{error, status, body:{detail}}`;
 // gitops itself uses `{detail}`), so callers can surface the REAL failure — e.g.
@@ -627,6 +647,80 @@ export interface ServiceStatus {
   running: boolean;
   // eslint-disable-next-line no-restricted-syntax -- nullable upstream field
   connection_info?: { admin_ui?: string | null } | null;
+}
+
+// ---------------------------------------------------------------------------
+// Read-only data explorer (Object Storage / SQL panels)
+// ---------------------------------------------------------------------------
+
+/** What one explorer instance looks at: a BP at a stage, optionally narrowed
+ *  to a live-dev copy sandbox (copy implies stage 'dev'). Callers map the DR
+ *  stage to 'production' (DR mirrors production's data). */
+export interface DataScope {
+  bp: string;
+  stage: 'dev' | 'staging' | 'production';
+  copy?: string;
+}
+
+export interface DataOverview {
+  bp: string;
+  stage: string;
+  copy: string;
+  registered: boolean;
+  postgres: { enabled: boolean; running: boolean; database?: string };
+  minio: { enabled: boolean; running: boolean; bucket?: string };
+  // eslint-disable-next-line no-restricted-syntax -- null = not blue-green
+  db?: number | null;
+}
+
+export interface SqlTable {
+  name: string;
+  kind: 'table' | 'view' | 'matview';
+  /** Planner estimate; -1 = never analyzed (render as unknown). */
+  row_estimate: number;
+  total_bytes: number;
+}
+
+export interface SqlColumn {
+  name: string;
+  type: string;
+  nullable: boolean;
+  position: number;
+}
+
+/** One page of rows. Cells arrive text-cast and server-truncated (2 KiB). */
+export interface SqlRowsPage {
+  table: string;
+  columns: SqlColumn[];
+  rows: Record<string, string | null>[];
+  limit: number;
+  offset: number;
+  has_more: boolean;
+  row_estimate: number;
+}
+
+export interface ObjectEntry {
+  key: string;
+  type: 'file' | 'folder';
+  // eslint-disable-next-line no-restricted-syntax -- folders have no size
+  size?: number | null;
+  // eslint-disable-next-line no-restricted-syntax -- nullable upstream field
+  last_modified?: string | null;
+}
+
+export interface ObjectListing {
+  bucket: string;
+  prefix: string;
+  entries: ObjectEntry[];
+}
+
+export interface ObjectPreview {
+  key: string;
+  size: number;
+  content_type: string;
+  /** true = too large for inline preview; offer download instead. */
+  truncated: boolean;
+  content_base64?: string;
 }
 
 /** A file's content from a BP's source at a commit (Inspect → Files). */
@@ -1311,7 +1405,53 @@ export const api = {
   /** Admin-only: cancel all queued/running git tasks (gitops 403s non-admins,
    *  and the server route gates it too). Returns the cancelled count. */
   clearTasks: () => postJson<{ cancelled: number }>('/api/tasks/clear', {}),
+
+  /** Read-only data explorer (Object Storage / SQL panels). List endpoints
+   *  return null on 404 = "this BP has no database/bucket at this scope". */
+  data: {
+    overview: (scope: DataScope) =>
+      getJsonOr404<DataOverview>(dataUrl(scope, '')),
+    sqlTables: (scope: DataScope) =>
+      getJsonOr404<{ database: string; tables: SqlTable[] }>(
+        dataUrl(scope, '/sql/tables'),
+      ),
+    sqlRows: (
+      scope: DataScope,
+      table: string,
+      opts: { limit: number; offset: number; sort?: string; order?: 'asc' | 'desc' },
+    ) =>
+      getJsonOr404<SqlRowsPage>(
+        dataUrl(scope, '/sql/rows', {
+          table,
+          limit: String(opts.limit),
+          offset: String(opts.offset),
+          ...(opts.sort ? { sort: opts.sort, order: opts.order ?? 'asc' } : {}),
+        }),
+      ),
+    objects: (scope: DataScope, prefix: string) =>
+      getJsonOr404<ObjectListing>(
+        dataUrl(scope, '/objects', prefix ? { prefix } : {}),
+      ),
+    objectPreview: (scope: DataScope, key: string) =>
+      getJsonOr404<ObjectPreview>(dataUrl(scope, '/objects/preview', { key })),
+    /** Direct <a href> download URL (cookie-authed, like bpBundleUrl). */
+    objectDownloadUrl: (scope: DataScope, key: string) =>
+      dataUrl(scope, '/objects/download', { key }),
+  },
 };
+
+/** Build a `/api/data-explorer/{bp}/{stage}{sub}?copy=…&…` URL. */
+function dataUrl(
+  scope: DataScope,
+  sub: string,
+  params: Record<string, string> = {},
+): string {
+  const qs = new URLSearchParams();
+  if (scope.copy) qs.set('copy', scope.copy);
+  for (const [k, v] of Object.entries(params)) qs.set(k, v);
+  const q = qs.toString();
+  return `/api/data-explorer/${encodeURIComponent(scope.bp)}/${encodeURIComponent(scope.stage)}${sub}${q ? `?${q}` : ''}`;
+}
 
 export interface FileTreeNode {
   name: string;
