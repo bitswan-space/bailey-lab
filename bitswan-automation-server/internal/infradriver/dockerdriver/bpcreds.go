@@ -33,6 +33,17 @@ func scopedPGRole(dbName string) string {
 	return truncate("u_"+dbName, maxLabelLen)
 }
 
+// scopedROPGRole is the read-only explorer role for a database: ro_<db>, capped
+// like scopedPGRole. It has NO password and NO creds file: it is only ever used
+// via `docker exec psql -U ro_<db>` over the container's trust-authenticated
+// local socket, so a password would only add a network-usable credential that
+// shouldn't exist. Pathological case: for db names ≥61 bytes the blue-green
+// `_1`/`_2` suffix falls past the 63-byte cap and both slots truncate to the
+// same ro_ role — harmless (same BP, both its own DBs, SELECT-only).
+func scopedROPGRole(dbName string) string {
+	return truncate("ro_"+dbName, maxLabelLen)
+}
+
 // scopedMinioUser is the MinIO access key (user) for a bucket: u-<bucket>.
 func scopedMinioUser(bucket string) string {
 	return "u-" + bucket

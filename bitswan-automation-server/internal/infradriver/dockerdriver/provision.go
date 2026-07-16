@@ -22,6 +22,12 @@ import (
 // (SetMaxOpenConns(5)) to allow a couple of replicas; the superuser bypasses it.
 const bpPostgresConnLimit = 10
 
+// bpPostgresROConnLimit caps the SELECT-only ro_<db> explorer role. The role
+// serves the workspace-dashboard's read-only SQL explorer (one short-lived
+// in-container psql per request), so a handful of slots is plenty and a stuck
+// explorer can never crowd out the backend's own connections.
+const bpPostgresROConnLimit = 3
+
 // Port of gitops bp_databases.py's deploy-time provisioning, run after
 // compose-up (gitops's _provision_bp_databases). gitops loses docker.sock, so
 // the per-BP Postgres DBs / MinIO buckets the backends need are created here, by
@@ -328,6 +334,29 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 	lock := fmt.Sprintf("REVOKE CONNECT ON DATABASE %q FROM PUBLIC; GRANT CONNECT ON DATABASE %q TO %q;", dbName, dbName, role)
 	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", lock); rc != 0 {
 		return fmt.Errorf("lock connect on %s: %s", dbName, strings.TrimSpace(stderr))
+	}
+	// Read-only explorer role: SELECT-only twin of the backend role, used by the
+	// workspace-dashboard's data explorer via in-container psql. Passwordless on
+	// purpose (local-socket trust auth only; PASSWORD NULL also strips anything a
+	// previous version may have set), so it cannot be used over TCP at all.
+	// gitops mirrors this name derivation in app/services/data_explorer.py.
+	ro := scopedROPGRole(dbName)
+	ensureRO := fmt.Sprintf(
+		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %q LOGIN CONNECTION LIMIT %d; ELSE ALTER ROLE %q WITH LOGIN CONNECTION LIMIT %d PASSWORD NULL; END IF; END $$; GRANT CONNECT ON DATABASE %q TO %q;",
+		ro, ro, bpPostgresROConnLimit, ro, bpPostgresROConnLimit, dbName, ro)
+	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", ensureRO); rc != 0 {
+		return fmt.Errorf("ensure ro role %s: %s", ro, strings.TrimSpace(stderr))
+	}
+	// SELECT on everything in public, now and in the future. Future objects are
+	// covered via u_<db>'s default privileges — the ownership reassignment above
+	// guarantees every table the backend migrates/creates is owned by u_<db>.
+	roGrants := strings.Join([]string{
+		fmt.Sprintf("GRANT USAGE ON SCHEMA public TO %q;", ro),
+		fmt.Sprintf("GRANT SELECT ON ALL TABLES IN SCHEMA public TO %q;", ro),
+		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %q IN SCHEMA public GRANT SELECT ON TABLES TO %q;", role, ro),
+	}, " ")
+	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", roGrants); rc != 0 {
+		return fmt.Errorf("grant read-only on %s to %s: %s", dbName, ro, strings.TrimSpace(stderr))
 	}
 	return nil
 }

@@ -17,11 +17,22 @@ func TestScopedNames(t *testing.T) {
 	if got := scopedMinioUser("bp-acme"); got != "u-bp-acme" {
 		t.Errorf("scopedMinioUser = %q, want u-bp-acme", got)
 	}
+	if got := scopedROPGRole("bp_acme"); got != "ro_bp_acme" {
+		t.Errorf("scopedROPGRole = %q, want ro_bp_acme", got)
+	}
 	// Capped at the 63-byte identifier limit (else Postgres would silently
 	// truncate, desyncing the role we CREATE from the one the backend logs in as).
 	long := strings.Repeat("a", 70)
 	if got := scopedPGRole(long); len(got) != maxLabelLen {
 		t.Errorf("scopedPGRole(len 70) = %d bytes, want %d", len(got), maxLabelLen)
+	}
+	if got := scopedROPGRole(long); len(got) != maxLabelLen {
+		t.Errorf("scopedROPGRole(len 70) = %d bytes, want %d", len(got), maxLabelLen)
+	}
+	// gitops mirrors this derivation as ("ro_"+db)[:63] in data_explorer.py —
+	// the truncation point must stay in sync on both sides.
+	if got, want := scopedROPGRole(long), ("ro_" + long)[:maxLabelLen]; got != want {
+		t.Errorf("scopedROPGRole(len 70) = %q, want prefix-truncated %q", got, want)
 	}
 }
 
@@ -103,6 +114,14 @@ func TestEnsureBPRoleCommands(t *testing.T) {
 		`ALTER SEQUENCE public.%I OWNER TO "u_bp_acme"`,
 		`REVOKE CONNECT ON DATABASE "bp_acme" FROM PUBLIC`,
 		`GRANT CONNECT ON DATABASE "bp_acme" TO "u_bp_acme"`,
+		// Read-only explorer twin: passwordless (local-socket exec only), capped,
+		// SELECT-only — including future tables u_<db> creates.
+		`CREATE ROLE "ro_bp_acme" LOGIN CONNECTION LIMIT 3`,
+		`ALTER ROLE "ro_bp_acme" WITH LOGIN CONNECTION LIMIT 3 PASSWORD NULL`,
+		`GRANT CONNECT ON DATABASE "bp_acme" TO "ro_bp_acme"`,
+		`GRANT USAGE ON SCHEMA public TO "ro_bp_acme"`,
+		`GRANT SELECT ON ALL TABLES IN SCHEMA public TO "ro_bp_acme"`,
+		`ALTER DEFAULT PRIVILEGES FOR ROLE "u_bp_acme" IN SCHEMA public GRANT SELECT ON TABLES TO "ro_bp_acme"`,
 		"\x00-d\x00bp_acme\x00", // grants run connected to the BP's own database
 		"\x00admin\x00",         // connects as the shared superuser
 	} {
