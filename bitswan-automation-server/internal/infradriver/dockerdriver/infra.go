@@ -6,8 +6,8 @@ import (
 	"sort"
 )
 
-// Infra-service compose generation — port of the four
-// {postgres,minio,couchdb,kafka}_service.py `_generate_compose_dict` methods
+// Infra-service compose generation — port of the
+// {postgres,garage,couchdb,kafka}_service.py `_generate_compose_dict` methods
 // plus the InfraService base name computation and `_merge_infra_services`.
 //
 // Each service's names derive from (workspace_name, service_type, stage):
@@ -67,21 +67,31 @@ func infraServiceSecretsName(svcType, stage string) string {
 	return svcType + serviceSuffix(stage)
 }
 
+// isKnownInfraType reports whether svcType is a service the driver can
+// generate compose for (the set generateInfraCompose dispatches on).
+func isKnownInfraType(svcType string) bool {
+	switch svcType {
+	case "couchdb", "garage", "postgres", "kafka":
+		return true
+	}
+	return false
+}
+
 // generateInfraCompose returns the {services, volumes, networks} compose dict
 // for one (svc_type, stage) infra service. networks are left as the template's
-// `["bitswan_network"]` — _merge_infra_services rewrites them to the stage net.
-// Returns nil for an unknown service type.
-func generateInfraCompose(secretsDir, workspaceName, svcType, stage string) map[string]interface{} {
-	n := infraNamesFor(secretsDir, workspaceName, svcType, stage)
+// `["bitswan_network"]` (or a map carrying aliases) — _merge_infra_services
+// rewrites them to the stage net. Returns nil for an unknown service type.
+func generateInfraCompose(c *compileState, svcType, stage string) map[string]interface{} {
+	n := infraNamesFor(c.secretsDir, c.workspaceName, svcType, stage)
 	switch svcType {
 	case "couchdb":
 		return couchdbCompose(n)
-	case "minio":
-		return minioCompose(n)
+	case "garage":
+		return garageCompose(c, n)
 	case "postgres":
 		return postgresCompose(n)
 	case "kafka":
-		return kafkaCompose(secretsDir, n)
+		return kafkaCompose(c.secretsDir, n)
 	default:
 		return nil
 	}
@@ -107,22 +117,51 @@ func couchdbCompose(n infraNames) map[string]interface{} {
 	}
 }
 
-func minioCompose(n infraNames) map[string]interface{} {
-	entry := map[string]interface{}{
-		"image":          "minio/minio:latest",
+const (
+	garageImage        = "dxflrs/garage:v2.3.0"
+	garageToolboxImage = "rclone/rclone:1.68"
+)
+
+// garageAlias is the underscore-free DNS alias S3 clients address the garage
+// node by (`__` container names are invalid HTTP Host headers). It is the
+// S3_HOST value gitops writes into the service secrets.
+func garageAlias(n infraNames) string {
+	return n.workspaceName + "-garage" + n.suffix
+}
+
+// garageCompose emits the object store (Garage — headless, no web console;
+// the dashboard's Object Storage explorer is the UI) plus an rclone toolbox
+// sidecar. The garage image is a single static binary, so ALL S3 data-plane
+// work (snapshots, backups, explorer) execs into the toolbox instead.
+func garageCompose(c *compileState, n infraNames) map[string]interface{} {
+	metaVol := n.volumeName[:len(n.volumeName)-len("-data")] + "-meta"
+	garage := map[string]interface{}{
+		"image":          garageImage,
 		"container_name": n.containerName,
 		"restart":        "unless-stopped",
-		"command":        "server /data --console-address :9001",
-		"env_file":       []interface{}{n.secretsPath},
-		"volumes":        []interface{}{n.volumeName + "-data:/data"},
-		"networks":       []interface{}{"bitswan_network"},
-		"labels":         n.infraLabels(),
+		// --single-node (v2.3+) auto-creates the one-node cluster layout on
+		// first boot — no manual `garage layout assign/apply` bootstrap. The
+		// image's Entrypoint is null, so the command must be the full argv.
+		"command":  []interface{}{"/garage", "server", "--single-node"},
+		"env_file": []interface{}{n.secretsPath},
+		"volumes": []interface{}{
+			metaVol + ":/meta",
+			n.volumeName + ":/data",
+			c.garageConfigMount(n),
+		},
+		// Map form so mergeInfraServices carries the alias onto the stage net.
+		"networks": map[string]interface{}{
+			"bitswan_network": map[string]interface{}{
+				"aliases": []interface{}{garageAlias(n)},
+			},
+		},
+		"labels": n.infraLabels(),
 		// Health is the readiness SIGNAL the driver waits on (docker health
-		// events), not a poll. start_interval makes Docker probe every 250ms
-		// during startup, so "healthy" fires within ~250ms of MinIO actually
-		// serving — no fixed sleep, no app-side poll loop.
+		// events), not a poll. json-api runs the admin call in-process (no
+		// shell/curl exists in the image); it exits nonzero until the node
+		// serves, 0 once healthy.
 		"healthcheck": map[string]interface{}{
-			"test":           []interface{}{"CMD", "curl", "-f", "http://localhost:9000/minio/health/live"},
+			"test":           []interface{}{"CMD", "/garage", "json-api", "GetClusterHealth"},
 			"interval":       "5s",
 			"timeout":        "3s",
 			"retries":        30,
@@ -130,13 +169,46 @@ func minioCompose(n infraNames) map[string]interface{} {
 			"start_interval": "250ms",
 		},
 	}
+	toolbox := map[string]interface{}{
+		"image":          garageToolboxImage,
+		"container_name": n.containerName + "-toolbox",
+		"restart":        "unless-stopped",
+		// Idle by default; the driver/gitops exec rclone (and sh for scratch
+		// dirs) into it on demand. The rclone image's entrypoint is rclone
+		// itself, so it must be overridden to something that just waits.
+		"entrypoint": []interface{}{"sleep", "infinity"},
+		"networks":   []interface{}{"bitswan_network"},
+		"labels":     n.infraLabels(),
+	}
 	return map[string]interface{}{
-		"services": map[string]interface{}{"minio" + n.suffix: entry},
-		"volumes":  map[string]interface{}{n.volumeName + "-data": nil},
+		"services": map[string]interface{}{
+			"garage" + n.suffix:              garage,
+			"garage" + n.suffix + "-toolbox": toolbox,
+		},
+		"volumes": map[string]interface{}{metaVol: nil, n.volumeName: nil},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{"external": true},
 		},
 	}
+}
+
+// garageConfigMount mounts the gitops-written garage<suffix>.toml (rpc secret,
+// admin token, ports) at /etc/garage.toml — dual-mode like app source mounts
+// (see the volume/bind switch in buildServiceEntry): volume subpath on
+// shared-volume platforms, host bind otherwise.
+func (c *compileState) garageConfigMount(n infraNames) interface{} {
+	file := n.secretsName + ".toml"
+	if c.volumeName != "" {
+		subpath := normalizeSubpath("workspaces/" + c.workspaceName + "/gitops/secrets/" + file)
+		return map[string]interface{}{
+			"type":      "volume",
+			"source":    c.volumeName,
+			"target":    "/etc/garage.toml",
+			"read_only": true,
+			"volume":    map[string]interface{}{"subpath": subpath},
+		}
+	}
+	return filepath.Join(c.gitopsDirHost, "secrets", file) + ":/etc/garage.toml:ro"
 }
 
 // Postgres runs headless: its former pgAdmin sidecar was replaced by the
@@ -313,13 +385,13 @@ func mergeInfraServices(c *compileState, services map[string]interface{}, deploy
 	})
 
 	for _, p := range seen {
-		if generateInfraCompose(c.secretsDir, c.workspaceName, p.svc, p.stage) == nil {
+		if !isKnownInfraType(p.svc) {
 			continue // unknown service type
 		}
 		if !infraEnabled(c.secretsDir, p.svc, p.stage) {
 			continue // declared but secrets file missing → not enabled
 		}
-		svcCompose := generateInfraCompose(c.secretsDir, c.workspaceName, p.svc, p.stage)
+		svcCompose := generateInfraCompose(c, p.svc, p.stage)
 		stageNet := c.stageNetwork(realmForStage(p.stage))
 
 		svcServices, _ := svcCompose["services"].(map[string]interface{})

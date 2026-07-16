@@ -26,7 +26,7 @@ func TestServiceSecrets(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "postgres"), []byte("# header\nPOSTGRES_USER=admin\n\nPOSTGRES_DB=main\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "minio-dev"), []byte("MINIO_ROOT_USER=root\nMINIO_ROOT_PASSWORD=sekret\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "garage-dev"), []byte("GARAGE_ADMIN_TOKEN=tok\nS3_HOST=ws-garage-dev\nS3_PORT=9000\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -34,9 +34,9 @@ func TestServiceSecrets(t *testing.T) {
 	if pg["POSTGRES_USER"] != "admin" || pg["POSTGRES_DB"] != "main" {
 		t.Fatalf("postgres secrets = %v", pg)
 	}
-	mn := serviceSecrets(dir, "minio", "dev")
-	if mn["MINIO_ROOT_USER"] != "root" || mn["MINIO_ROOT_PASSWORD"] != "sekret" {
-		t.Fatalf("minio-dev secrets = %v", mn)
+	mn := serviceSecrets(dir, "garage", "dev")
+	if mn["GARAGE_ADMIN_TOKEN"] != "tok" || mn["S3_HOST"] != "ws-garage-dev" {
+		t.Fatalf("garage-dev secrets = %v", mn)
 	}
 	// Missing file → nil (service not enabled).
 	if serviceSecrets(dir, "couchdb", "production") != nil {

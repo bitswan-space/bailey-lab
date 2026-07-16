@@ -15,7 +15,7 @@ services:
         env_file:
             - __ROOT__/secrets/bp/acme/dev
             - __ROOT__/secrets/dbcreds/dev/copy_bar_bp_acme
-            - __ROOT__/secrets/miniocreds/dev/copy-bar-bp-acme
+            - __ROOT__/secrets/garagecreds/dev/copy-bar-bp-acme
         environment:
             BITSWAN_ADMIN_GROUP: /Test Org/admin
             BITSWAN_ALLOWED_GROUP: /Test Org
@@ -33,9 +33,9 @@ services:
             KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
             KEYCLOAK_REALM: testrealm
             KEYCLOAK_URL: https://keycloak.example.com
-            MINIO_BUCKET: copy-bar-bp-acme
             PORT: "8080"
             POSTGRES_DB: copy_bar_bp_acme
+            S3_BUCKET: copy-bar-bp-acme
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: backend
@@ -60,7 +60,7 @@ services:
         container_name: ws4-frontend-4337-live-dev
         env_file:
             - __ROOT__/secrets/dbcreds/dev/copy_bar_bp_acme
-            - __ROOT__/secrets/miniocreds/dev/copy-bar-bp-acme
+            - __ROOT__/secrets/garagecreds/dev/copy-bar-bp-acme
         environment:
             BITSWAN_ADMIN_GROUP: /Test Org/admin
             BITSWAN_ALLOWED_GROUP: /Test Org
@@ -81,8 +81,8 @@ services:
             KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
             KEYCLOAK_REALM: testrealm
             KEYCLOAK_URL: https://keycloak.example.com
-            MINIO_BUCKET: copy-bar-bp-acme
             POSTGRES_DB: copy_bar_bp_acme
+            S3_BUCKET: copy-bar-bp-acme
         image: bitswan/pipeline-runtime-environment:latest
         labels:
             gitops.automation_name: frontend

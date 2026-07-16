@@ -397,7 +397,7 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		names := bpResourceNames(bpSanitized, db)
 		env["POSTGRES_DB"] = names["postgres_db"]
 		env["COUCHDB_DB_PREFIX"] = names["couchdb_prefix"]
-		env["MINIO_BUCKET"] = names["minio_bucket"]
+		env["S3_BUCKET"] = names["s3_bucket"]
 	}
 	// A non-main copy's live-dev backend gets its OWN per-(copy, BP) namespaces
 	// (database + bucket + couch prefix), isolated from other BPs in the copy and
@@ -407,7 +407,7 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		names := copyBPResourceNames(wtName, bpSanitized)
 		env["POSTGRES_DB"] = names["postgres_db"]
 		env["COUCHDB_DB_PREFIX"] = names["couchdb_prefix"]
-		env["MINIO_BUCKET"] = names["minio_bucket"]
+		env["S3_BUCKET"] = names["s3_bucket"]
 	}
 
 	if c.workspaceName != "" && c.domain != "" {
@@ -508,19 +508,25 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	}
 
 	// ---- scoped per-BP database / bucket credentials ----
-	// A scoped backend authenticates as its OWN Postgres role / MinIO user
-	// (limited to its own database / bucket), generated and persisted by the
-	// driver. The creds live in a per-resource env_file (only its path lands in
-	// the compose; the values stay 0600 on the secrets volume). When scoped, the
-	// shared postgres*/minio* service secrets are NOT attached below, so the
-	// superuser/root never reaches the backend. A BP gets a per-resource name
-	// (and thus scoping) either by being registered (per-stage) or by being a
-	// non-main copy's live-dev backend — both set POSTGRES_DB / MINIO_BUCKET above.
+	// A scoped backend authenticates as its OWN Postgres role / Garage access
+	// key (limited to its own database / bucket). The creds live in a
+	// per-resource env_file (only its path lands in the compose; the values
+	// stay 0600 on the secrets volume). When scoped, the shared postgres*
+	// service secret is NOT attached below, so the superuser never reaches the
+	// backend — and the garage service secret is NEVER attached to any backend
+	// (it carries GARAGE_ADMIN_TOKEN; see the dependency loop). A BP gets a
+	// per-resource name (and thus scoping) either by being registered
+	// (per-stage) or by being a non-main copy's live-dev backend — both set
+	// POSTGRES_DB / S3_BUCKET above.
+	//
+	// Postgres creds are driver-generated at compile time; Garage keys are
+	// server-minted (see bpcreds.go), so the compiler only guarantees the
+	// env_file exists — possibly as an empty placeholder on first apply.
 	credRealm := realmForStage(stage)
 	pgDB, _ := env["POSTGRES_DB"].(string)
-	minioBucket, _ := env["MINIO_BUCKET"].(string)
+	s3Bucket, _ := env["S3_BUCKET"].(string)
 	scopedPG := pgDB != ""
-	scopedMinio := minioBucket != ""
+	scopedS3 := s3Bucket != ""
 	if scopedPG {
 		if _, _, err := getOrCreateDBCreds(c.secretsDir, credRealm, pgDB); err != nil {
 			return nil, "", nil, false, err
@@ -536,28 +542,33 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 			}
 		}
 	}
-	if scopedMinio {
-		if _, _, err := getOrCreateBucketCreds(c.secretsDir, credRealm, minioBucket); err != nil {
+	if scopedS3 {
+		if err := ensureBucketCredsFile(c.secretsDir, credRealm, s3Bucket); err != nil {
 			return nil, "", nil, false, err
 		}
-		appendEnvFile(entry, bucketCredsPath(c.secretsDir, credRealm, minioBucket))
-		if mn := serviceSecrets(c.secretsDir, "minio", credRealm); mn != nil {
-			for _, k := range []string{"MINIO_HOST", "MINIO_PORT"} {
-				if v := mn[k]; v != "" {
-					env[k] = v
-				}
-			}
-		}
+		appendEnvFile(entry, bucketCredsPath(c.secretsDir, credRealm, s3Bucket))
+		c.copyS3Coordinates(env, credRealm)
 	}
 
 	// ---- service dependency secrets ----
 	for _, secretName := range c.resolveServiceSecrets(cfg, stage) {
-		// A scoped backend has its own postgres/minio principal (above); never
-		// attach the shared superuser/root service secret to it.
+		// A scoped backend has its own postgres principal (above); never
+		// attach the shared superuser service secret to it.
 		if scopedPG && strings.HasPrefix(secretName, "postgres") {
 			continue
 		}
-		if scopedMinio && strings.HasPrefix(secretName, "minio") {
+		// The garage service secret carries GARAGE_ADMIN_TOKEN (admin-plane
+		// power) and must never reach a backend. An UNREGISTERED BP that
+		// declares the service gets the shared full-access _system key
+		// instead — the moral equivalent of the root creds it used to get.
+		if strings.HasPrefix(secretName, "garage") {
+			if !scopedS3 {
+				if err := ensureBucketCredsFile(c.secretsDir, credRealm, systemKeyName); err != nil {
+					return nil, "", nil, false, err
+				}
+				appendEnvFile(entry, bucketCredsPath(c.secretsDir, credRealm, systemKeyName))
+				c.copyS3Coordinates(env, credRealm)
+			}
 			continue
 		}
 		p := filepath.Join(c.secretsDir, secretName)
@@ -775,6 +786,19 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	return entry, serviceName, route, emit, nil
 }
 
+// copyS3Coordinates carries the non-secret S3 connection coordinates from the
+// garage service secret into a backend's environment (the secret file itself
+// is never attached — it holds GARAGE_ADMIN_TOKEN).
+func (c *compileState) copyS3Coordinates(env map[string]interface{}, realm string) {
+	if g := serviceSecrets(c.secretsDir, "garage", realm); g != nil {
+		for _, k := range []string{"S3_HOST", "S3_PORT"} {
+			if v := g[k]; v != "" {
+				env[k] = v
+			}
+		}
+	}
+}
+
 // resolveServiceSecrets ports _resolve_service_secrets. Preserves TOML
 // declaration order — the env_file order it produces is observable.
 func (c *compileState) resolveServiceSecrets(cfg automationConfig, stage string) []string {
@@ -787,7 +811,7 @@ func (c *compileState) resolveServiceSecrets(cfg automationConfig, stage string)
 		if !svc.Enabled {
 			continue
 		}
-		if generateInfraCompose(c.secretsDir, c.workspaceName, svc.Type, mapped) == nil {
+		if !isKnownInfraType(svc.Type) {
 			continue // unknown service type
 		}
 		out = append(out, infraServiceSecretsName(svc.Type, mapped))

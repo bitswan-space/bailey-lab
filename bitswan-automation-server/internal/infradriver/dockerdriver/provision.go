@@ -67,7 +67,8 @@ var dockerExec = func(ctx context.Context, container string, args ...string) (st
 }
 
 // containerRunning reports whether a container exists and is running.
-func containerRunning(ctx context.Context, name string) bool {
+// Package var (like dockerExec) so provisioner tests can stub it.
+var containerRunning = func(ctx context.Context, name string) bool {
 	out, err := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}", name).Output()
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
@@ -361,42 +362,6 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 	return nil
 }
 
-// ensureBPMinioUser creates (idempotently) the scoped MinIO user a BP backend
-// authenticates as, and attaches a policy granting it full access to exactly its
-// own bucket (and its objects) — nothing else. rootAK/rootSK are the MinIO root
-// the driver administers as; the scoped secret comes from the per-resource cred
-// store (the same value the compiler injected).
-func ensureBPMinioUser(ctx context.Context, container, rootAK, rootSK, secretsDir, realm, bucket string) error {
-	ak, sk, err := getOrCreateBucketCreds(secretsDir, realm, bucket)
-	if err != nil {
-		return err
-	}
-	if _, e, rc := dockerExec(ctx, container, "mc", "alias", "set", "local", "http://localhost:9000", rootAK, rootSK); rc != 0 {
-		return fmt.Errorf("mc alias set: %s", strings.TrimSpace(e))
-	}
-	// User add — tolerate already-exists (creds are stable, so no re-sync needed).
-	if _, e, rc := dockerExec(ctx, container, "mc", "admin", "user", "add", "local", ak, sk); rc != 0 && !strings.Contains(strings.ToLower(e), "already") {
-		return fmt.Errorf("mc admin user add %s: %s", ak, strings.TrimSpace(e))
-	}
-	// Policy: s3:* on this bucket + its objects only. Write the doc into the
-	// container (heredoc, no shell interpolation), then create + attach it.
-	policy := fmt.Sprintf(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"]}]}`, bucket, bucket)
-	polPath := "/tmp/" + ak + ".json"
-	if _, e, rc := dockerExec(ctx, container, "sh", "-c", fmt.Sprintf("cat > %s <<'POLICYEOF'\n%s\nPOLICYEOF", polPath, policy)); rc != 0 {
-		return fmt.Errorf("write minio policy for %s: %s", ak, strings.TrimSpace(e))
-	}
-	if _, e, rc := dockerExec(ctx, container, "mc", "admin", "policy", "create", "local", ak, polPath); rc != 0 && !strings.Contains(strings.ToLower(e), "already exists") {
-		return fmt.Errorf("mc admin policy create %s: %s", ak, strings.TrimSpace(e))
-	}
-	if _, e, rc := dockerExec(ctx, container, "mc", "admin", "policy", "attach", "local", ak, "--user", ak); rc != 0 {
-		le := strings.ToLower(e)
-		if !strings.Contains(le, "already") && !strings.Contains(le, "attached") {
-			return fmt.Errorf("mc admin policy attach %s: %s", ak, strings.TrimSpace(e))
-		}
-	}
-	return nil
-}
-
 // productionDBNumbers is the blue-green db numbers a production BP's slots use
 // (default [1,2]). Port of bp_databases._production_db_numbers.
 func productionDBNumbers(bs *Bitswan, bpSlug string) []int {
@@ -555,21 +520,15 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 	return nil
 }
 
-// provisionForDeployments creates the best-effort per-BP namespaces (MinIO
-// bucket + standby blue-green Postgres DB) for registered BP×realm touched by
-// the deployments. Never fails the deploy — errors are reported and skipped.
-// Port of bp_databases.provision_for_deployments + ensure_bp_databases'
-// minio/standby-db creation (the provisioned-flag bookkeeping is dropped: the
-// creates are idempotent, so re-attempting per deploy is correct, just not
-// optimized).
-func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) {
+// wantedBPResources collects the DESIRED per-BP resource names grouped by
+// realm — the single source of truth shared by the post-up provisioner and
+// the pre-compile Garage key minting (ensureGarageKeysPrecompile), so "which
+// buckets should exist" can never diverge between the two.
+func wantedBPResources(wctx infradriver.WorkspaceContext, bs *Bitswan) (pgWant, s3Want map[string]map[string]bool) {
 	reg := loadRegistry(wctx.SecretsDir)
 	seen := map[string]bool{}
-
-	// Collect the DESIRED resource names grouped by realm, so each shared
-	// postgres/minio container is touched ONCE — not once per business process.
-	pgWant := map[string]map[string]bool{}    // realm -> set(db name)
-	minioWant := map[string]map[string]bool{} // realm -> set(bucket name)
+	pgWant = map[string]map[string]bool{} // realm -> set(db name)
+	s3Want = map[string]map[string]bool{} // realm -> set(bucket name)
 	for _, depID := range sortedDepIDs(bs.Deployments) {
 		conf := bs.Deployments[depID]
 		if conf == nil {
@@ -584,19 +543,19 @@ func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceCont
 			continue
 		}
 
-		// A non-main copy's live-dev backend gets its own per-(copy, BP) MinIO
-		// bucket (its Postgres DB is created fail-fast in ensureLivePostgresDBs).
+		// A non-main copy's live-dev backend gets its own per-(copy, BP) bucket
+		// (its Postgres DB is created fail-fast in ensureLivePostgresDBs).
 		// Unconditional — every BP in the copy is isolated.
 		if conf.StageOrProduction() == "live-dev" && copyName != "" {
-			bucket := copyBPResourceNames(copyName, bpSlug)["minio_bucket"]
+			bucket := copyBPResourceNames(copyName, bpSlug)["s3_bucket"]
 			if seen["copybucket:"+bucket] {
 				continue
 			}
 			seen["copybucket:"+bucket] = true
-			if minioWant[realm] == nil {
-				minioWant[realm] = map[string]bool{}
+			if s3Want[realm] == nil {
+				s3Want[realm] = map[string]bool{}
 			}
-			minioWant[realm][bucket] = true
+			s3Want[realm][bucket] = true
 			continue
 		}
 		if copyName != "" {
@@ -618,18 +577,63 @@ func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceCont
 				pgWant[realm] = map[string]bool{}
 			}
 			pgWant[realm][names["postgres_db"]] = true
-			if minioWant[realm] == nil {
-				minioWant[realm] = map[string]bool{}
+			if s3Want[realm] == nil {
+				s3Want[realm] = map[string]bool{}
 			}
-			minioWant[realm][names["minio_bucket"]] = true
+			s3Want[realm][names["s3_bucket"]] = true
 		}
 	}
+	return pgWant, s3Want
+}
+
+// ensureGarageKeysPrecompile mints Garage access keys BEFORE compile for every
+// wanted bucket whose creds file is absent/placeholder, so the compiler bakes
+// real values into the backend env_files. Only possible when the realm's
+// garage container is already RUNNING (i.e. every apply after the first) —
+// on a first-ever apply the compiler writes placeholders and the post-up
+// provisioner mints + converges instead. Best-effort: never fails the apply.
+func ensureGarageKeysPrecompile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) {
+	_, s3Want := wantedBPResources(wctx, bs)
+	for realm, want := range s3Want {
+		if serviceSecrets(wctx.SecretsDir, "garage", realm) == nil {
+			continue // service not enabled at this realm
+		}
+		container := serviceContainerName(wctx.WorkspaceName, "garage", realm)
+		if !containerRunning(ctx, container) {
+			continue
+		}
+		for _, bucket := range sortedKeys(want) {
+			if ak, _ := readBucketCreds(wctx.SecretsDir, realm, bucket); ak != "" {
+				continue
+			}
+			ak, sk, err := garageCreateKey(ctx, container, "bp-"+bucket)
+			if err != nil {
+				report("provision", fmt.Sprintf("mint garage key for %s deferred: %v", bucket, err))
+				continue
+			}
+			if err := writeBucketCreds(wctx.SecretsDir, realm, bucket, ak, sk); err != nil {
+				report("provision", fmt.Sprintf("persist garage key for %s failed: %v", bucket, err))
+			}
+		}
+	}
+}
+
+// provisionForDeployments creates the best-effort per-BP namespaces (Garage
+// bucket+key grants + standby blue-green Postgres DB) for registered BP×realm
+// touched by the deployments. Never fails the deploy — errors are reported
+// and skipped. Returns the creds-file paths whose key material was minted
+// HERE (i.e. backends compiled against a placeholder), so reconcile can
+// re-up exactly those services with their real credentials.
+func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) []string {
+	pgWant, s3Want := wantedBPResources(wctx, bs)
 
 	// One reconcile unit per (realm, service) — a handful at most. Each issues a
 	// single list query that BOTH confirms the service is up and reveals what
 	// already exists, then creates only the missing names. A normal redeploy
 	// (everything already there) lists once per service and creates nothing.
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var changedCreds []string
 	for realm, want := range pgWant {
 		wg.Add(1)
 		go func(realm string, want map[string]bool) {
@@ -637,14 +641,29 @@ func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceCont
 			reconcilePostgresDBs(ctx, wctx, realm, want, report)
 		}(realm, want)
 	}
-	for realm, want := range minioWant {
+	for realm, want := range s3Want {
 		wg.Add(1)
 		go func(realm string, want map[string]bool) {
 			defer wg.Done()
-			reconcileMinioBuckets(ctx, wctx, realm, want, report)
+			changed := reconcileGarageBuckets(ctx, wctx, realm, want, report)
+			mu.Lock()
+			changedCreds = append(changedCreds, changed...)
+			mu.Unlock()
 		}(realm, want)
 	}
 	wg.Wait()
+	return changedCreds
+}
+
+// sortedKeys returns a set's keys in stable order (deterministic exec order
+// makes provisioning logs and tests reproducible).
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // reconcilePostgresDBs ensures every desired database exists in the realm's
@@ -716,97 +735,95 @@ func listPostgresDBs(ctx context.Context, container, user string) (map[string]bo
 	return set, nil
 }
 
-// reconcileMinioBuckets ensures every desired bucket exists in the realm's
-// minio: ONE `mc ls` lists what's there (and proves minio answers), then it
-// creates only the missing ones. Same cold-path-only health wait as postgres.
-func reconcileMinioBuckets(ctx context.Context, wctx infradriver.WorkspaceContext, realm string, want map[string]bool, report func(step, msg string)) {
-	secrets := serviceSecrets(wctx.SecretsDir, "minio", realm)
-	if secrets == nil || !containerRunning(ctx, serviceContainerName(wctx.WorkspaceName, "minio", realm)) {
-		return
+// reconcileGarageBuckets ensures every desired bucket exists in the realm's
+// garage with grants for both its scoped key and the realm's _system key:
+// ONE ListBuckets lists what's there (and proves the node answers — same
+// cold-path-only health wait as postgres), then it creates only the missing
+// pieces. Returns the creds-file paths it minted key material into (backends
+// compiled against a placeholder → reconcile re-ups them).
+func reconcileGarageBuckets(ctx context.Context, wctx infradriver.WorkspaceContext, realm string, want map[string]bool, report func(step, msg string)) []string {
+	if serviceSecrets(wctx.SecretsDir, "garage", realm) == nil {
+		return nil
 	}
-	container := serviceContainerName(wctx.WorkspaceName, "minio", realm)
-	ak, sk := secrets["MINIO_ROOT_USER"], secrets["MINIO_ROOT_PASSWORD"]
-	existing, err := listMinioBuckets(ctx, container, ak, sk)
+	container := serviceContainerName(wctx.WorkspaceName, "garage", realm)
+	if !containerRunning(ctx, container) {
+		return nil
+	}
+	existing, err := garageListBuckets(ctx, container)
 	if err != nil {
 		if werr := waitForHealthy(ctx, container, 60*time.Second); werr != nil {
-			report("provision", fmt.Sprintf("minio %s not ready: %v", realm, werr))
-			return
+			report("provision", fmt.Sprintf("garage %s not ready: %v", realm, werr))
+			return nil
 		}
-		if existing, err = listMinioBuckets(ctx, container, ak, sk); err != nil {
-			report("provision", fmt.Sprintf("minio %s list buckets deferred: %v", realm, err))
-			return
+		if existing, err = garageListBuckets(ctx, container); err != nil {
+			report("provision", fmt.Sprintf("garage %s list buckets deferred: %v", realm, err))
+			return nil
 		}
 	}
-	// One `mc admin user list` (cheap) so we can skip a bucket only when it is
-	// FULLY provisioned. Gating the skip on bucket-existence alone was wrong: the
-	// bucket and its scoped user/policy are created in separate steps, so if
-	// ensureBPMinioUser failed AFTER the bucket was made (a transient mc hiccup),
-	// every later apply saw the bucket and skipped — leaving the backend's creds
-	// permanently "Access Denied". Skip only bucket-AND-user; else (re)provision.
-	// ensureBPMinioUser is idempotent, so re-running it to heal is safe.
-	existingUsers, _ := listMinioUsers(ctx, container, ak, sk)
-	for b := range want {
-		if existing[b] && existingUsers[scopedMinioUser(b)] {
-			// Fully provisioned (bucket + scoped user) by an earlier apply — skip
-			// the several mc execs (a dominant deploy cost when re-run every time).
+	// One ListKeys (cheap) so a bucket is skipped only when FULLY provisioned
+	// (bucket AND its scoped key exist server-side). Bucket-existence alone
+	// would leave a backend permanently unauthorized after a transient failure
+	// between bucket creation and key grant — the grants are idempotent, so
+	// re-running to heal is safe.
+	keys, _ := garageListKeys(ctx, container)
+
+	// The realm's _system key (backups/snapshots/explorer fallback) is granted
+	// on every bucket. When it was just minted, no existing bucket can be
+	// skipped — each needs the new key's grant.
+	sysAK, _ := readBucketCreds(wctx.SecretsDir, realm, systemKeyName)
+	sysFresh := false
+	if sysAK == "" || !keys[sysAK] {
+		ak, sk, err := garageCreateKey(ctx, container, systemKeyName)
+		if err != nil {
+			report("provision", fmt.Sprintf("mint garage _system key (%s) deferred: %v", realm, err))
+		} else if err := writeBucketCreds(wctx.SecretsDir, realm, systemKeyName, ak, sk); err != nil {
+			report("provision", fmt.Sprintf("persist garage _system key (%s) failed: %v", realm, err))
+		} else {
+			sysAK = ak
+			sysFresh = true
+		}
+	}
+
+	var changed []string
+	for _, b := range sortedKeys(want) {
+		bpAK, _ := readBucketCreds(wctx.SecretsDir, realm, b)
+		if existing[b] != "" && bpAK != "" && keys[bpAK] && !sysFresh {
+			// Fully provisioned by an earlier apply — skip the execs (a dominant
+			// deploy cost when re-run every time).
 			continue
 		}
-		if !existing[b] {
-			if _, e, rc := dockerExec(ctx, container, "mc", "mb", "--ignore-existing", "local/"+b); rc != 0 {
-				report("provision", fmt.Sprintf("create bucket %s deferred: %s", b, strings.TrimSpace(e)))
+		if bpAK == "" {
+			// Backend was compiled against a placeholder (first-ever apply):
+			// mint now, record for the convergence re-up.
+			ak, sk, err := garageCreateKey(ctx, container, "bp-"+b)
+			if err != nil {
+				report("provision", fmt.Sprintf("mint garage key for %s deferred: %v", b, err))
 				continue
 			}
+			if err := writeBucketCreds(wctx.SecretsDir, realm, b, ak, sk); err != nil {
+				report("provision", fmt.Sprintf("persist garage key for %s failed: %v", b, err))
+				continue
+			}
+			bpAK = ak
+			changed = append(changed, bucketCredsPath(wctx.SecretsDir, realm, b))
 		}
-		// Scope (or heal) the per-bucket MinIO user+policy so the backend reaches
-		// only its own bucket. Runs when the user is missing even if the bucket
-		// already exists — the self-heal for the split-provision race above.
-		if err := ensureBPMinioUser(ctx, container, ak, sk, wctx.SecretsDir, realm, b); err != nil {
-			report("provision", fmt.Sprintf("scope minio user for %s deferred: %v", b, err))
+		bucketID := existing[b]
+		if bucketID == "" {
+			id, err := garageCreateBucket(ctx, container, b)
+			if err != nil {
+				report("provision", fmt.Sprintf("create bucket %s deferred: %v", b, err))
+				continue
+			}
+			bucketID = id
 		}
-	}
-}
-
-// listMinioBuckets sets the mc alias (which fails if minio isn't answering) and
-// returns the set of existing bucket names.
-func listMinioBuckets(ctx context.Context, container, accessKey, secretKey string) (map[string]bool, error) {
-	if _, e, rc := dockerExec(ctx, container, "mc", "alias", "set", "local", "http://localhost:9000", accessKey, secretKey); rc != 0 {
-		return nil, fmt.Errorf("mc alias set: %s", strings.TrimSpace(e))
-	}
-	stdout, e, rc := dockerExec(ctx, container, "mc", "ls", "local")
-	if rc != 0 {
-		return nil, fmt.Errorf("mc ls: %s", strings.TrimSpace(e))
-	}
-	set := map[string]bool{}
-	for _, line := range strings.Split(stdout, "\n") {
-		// `mc ls local` rows end with the bucket name (with a trailing slash).
-		if f := strings.Fields(strings.TrimSpace(line)); len(f) > 0 {
-			set[strings.TrimRight(f[len(f)-1], "/")] = true
+		if err := garageAllowBucketKey(ctx, container, bucketID, bpAK); err != nil {
+			report("provision", fmt.Sprintf("grant %s on %s deferred: %v", bpAK, b, err))
+		}
+		if sysAK != "" {
+			if err := garageAllowBucketKey(ctx, container, bucketID, sysAK); err != nil {
+				report("provision", fmt.Sprintf("grant _system on %s deferred: %v", b, err))
+			}
 		}
 	}
-	return set, nil
-}
-
-// listMinioUsers returns the set of existing MinIO access keys (usernames). Used
-// to detect a bucket whose scoped user was never created, so provisioning can
-// heal it. The alias is assumed already set (listMinioBuckets ran first); a probe
-// failure returns an empty set + error so the caller re-provisions rather than
-// wrongly skipping. `mc admin user list` rows are: STATUS  ACCESSKEY  [policy…].
-func listMinioUsers(ctx context.Context, container, accessKey, secretKey string) (map[string]bool, error) {
-	if _, e, rc := dockerExec(ctx, container, "mc", "alias", "set", "local", "http://localhost:9000", accessKey, secretKey); rc != 0 {
-		return map[string]bool{}, fmt.Errorf("mc alias set: %s", strings.TrimSpace(e))
-	}
-	stdout, e, rc := dockerExec(ctx, container, "mc", "admin", "user", "list", "local")
-	if rc != 0 {
-		return map[string]bool{}, fmt.Errorf("mc admin user list: %s", strings.TrimSpace(e))
-	}
-	set := map[string]bool{}
-	for _, line := range strings.Split(stdout, "\n") {
-		f := strings.Fields(strings.TrimSpace(line))
-		// A user row is "<enabled|disabled> <accessKey> …"; the access key is the
-		// field after the status.
-		if len(f) >= 2 && (f[0] == "enabled" || f[0] == "disabled") {
-			set[f[1]] = true
-		}
-	}
-	return set, nil
+	return changed
 }
