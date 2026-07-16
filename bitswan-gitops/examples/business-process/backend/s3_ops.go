@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"log"
-	"net"
 	"time"
 
 	"github.com/minio/minio-go/v7"
