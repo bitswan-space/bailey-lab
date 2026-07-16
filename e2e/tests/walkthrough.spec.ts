@@ -1804,6 +1804,67 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await waitDeployDone(stageName); // THIS stage reaches "Current on <Stage>"
   };
 
+  await chapter('share-endpoint', async () => {
+    await clickTopTab(/Deployments/i);
+    // Open + share a DEPLOYED FRONTEND. The Deployments stage card renders an
+    // "Open app" section (DeploymentsTab.tsx) ONLY when the stage has ≥1 frontend
+    // whose live-display status is "running" with a URL; each such frontend is an
+    // external-link anchor (<a href={url} target="_blank" rel="noreferrer">, no
+    // title attr) whose text is the automation name + host. Development is the
+    // stage that reliably carries a running, openable frontend (its live-dev /
+    // first dev deploy is up); a promoted Production stage may not expose the
+    // same openable app — so we share off Development, the reliably-openable one.
+    await selectStage(/Development/i);
+    // The "Open app" anchor: scope to the section by its heading and take the
+    // first deployed frontend's external-link card. (A previous `.or(first
+    // https link on the page)` fallback matched a DIFFERENT element than the
+    // scoped one, so the combined locator resolved to 2 nodes → strict-mode
+    // violation. The scoped section reliably contains the link — see
+    // DeploymentsTab "Open app".)
+    const openApp = d
+      .getByText(/^Open app$/i)
+      .locator('..')
+      .locator('a[target="_blank"][href^="https://"]')
+      .first();
+    await expect(openApp, 'no deployed frontend to open + share under Development → Open app')
+      .toBeVisible({ timeout: SLA });
+    const popupP = dashPage.context().waitForEvent('page', { timeout: 30_000 }).catch(() => null);
+    await openApp.click();
+    const fe = await popupP;
+    expect(fe, 'opening the deployed frontend did not spawn a tab').not.toBeNull();
+    const frontend = fe!;
+    await frontend.waitForLoadState('domcontentloaded').catch(() => {});
+    await frontend.locator('body').waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
+    // The frontend is wrapped in Bailey chrome (a footer pinned to the bottom of
+    // every protected endpoint). Because the operator owns this frontend, the
+    // chrome footer shows a "Share" button — proving operator-created frontends
+    // are Bailey-protected. Open it and share THIS frontend.
+    const shareBtn = frontend.getByRole('link', { name: /^Share$/ })
+      .or(frontend.getByRole('button', { name: /^Share$/ }))
+      .first();
+    await expect(shareBtn, "the frontend's Bailey chrome exposed no Share affordance (is it owner-fronted?)")
+      .toBeVisible({ timeout: SLA });
+    await shareBtn.click();
+    // The chrome share modal: add input + role select + Add (ids set by the
+    // daemon's share_modal.go).
+    const input = frontend.locator('#bailey-share-input');
+    await input.waitFor({ state: 'visible', timeout: SLA });
+    await input.fill(ENV.teammateEmail);
+    // Grant at User level (default option value "access").
+    await frontend.locator('#bailey-share-role').selectOption('access').catch(() => {});
+    await capture(frontend, 'share-modal');
+    await frontend.locator('#bailey-share-add-btn').click();
+    // The grant lands in the "People with access" list; hard-assert + capture it.
+    await expect(
+      frontend.getByText(new RegExp(ENV.teammateEmail.replace(/[.@]/g, '\\$&'), 'i')).first(),
+      'the teammate grant did not land in the People with access list',
+    ).toBeVisible({ timeout: SLA });
+    await capture(frontend, 'share-modal');
+    // Close the modal (its footer Done button), then close the popup.
+    await frontend.getByRole('button', { name: /^Done$/ }).first().click().catch(() => {});
+    await frontend.close().catch(() => {});
+  });
+
   await chapter('promote', async () => {
     await clickTopTab(/Deployments/i);
     await promoteHop('Staging');
@@ -2211,67 +2272,6 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // then on THAT frontend's own chrome we Share it with a teammate at User
   // level. The chrome footer + share modal are rendered by the daemon on the
   // popup's TOP page (not inside any iframe), so we drive the popup directly.
-  await chapter('share-endpoint', async () => {
-    await clickTopTab(/Deployments/i);
-    // Open + share a DEPLOYED FRONTEND. The Deployments stage card renders an
-    // "Open app" section (DeploymentsTab.tsx) ONLY when the stage has ≥1 frontend
-    // whose live-display status is "running" with a URL; each such frontend is an
-    // external-link anchor (<a href={url} target="_blank" rel="noreferrer">, no
-    // title attr) whose text is the automation name + host. Development is the
-    // stage that reliably carries a running, openable frontend (its live-dev /
-    // first dev deploy is up); a promoted Production stage may not expose the
-    // same openable app — so we share off Development, the reliably-openable one.
-    await selectStage(/Development/i);
-    // The "Open app" anchor: scope to the section by its heading and take the
-    // first deployed frontend's external-link card. (A previous `.or(first
-    // https link on the page)` fallback matched a DIFFERENT element than the
-    // scoped one, so the combined locator resolved to 2 nodes → strict-mode
-    // violation. The scoped section reliably contains the link — see
-    // DeploymentsTab "Open app".)
-    const openApp = d
-      .getByText(/^Open app$/i)
-      .locator('..')
-      .locator('a[target="_blank"][href^="https://"]')
-      .first();
-    await expect(openApp, 'no deployed frontend to open + share under Development → Open app')
-      .toBeVisible({ timeout: SLA });
-    const popupP = dashPage.context().waitForEvent('page', { timeout: 30_000 }).catch(() => null);
-    await openApp.click();
-    const fe = await popupP;
-    expect(fe, 'opening the deployed frontend did not spawn a tab').not.toBeNull();
-    const frontend = fe!;
-    await frontend.waitForLoadState('domcontentloaded').catch(() => {});
-    await frontend.locator('body').waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
-    // The frontend is wrapped in Bailey chrome (a footer pinned to the bottom of
-    // every protected endpoint). Because the operator owns this frontend, the
-    // chrome footer shows a "Share" button — proving operator-created frontends
-    // are Bailey-protected. Open it and share THIS frontend.
-    const shareBtn = frontend.getByRole('link', { name: /^Share$/ })
-      .or(frontend.getByRole('button', { name: /^Share$/ }))
-      .first();
-    await expect(shareBtn, "the frontend's Bailey chrome exposed no Share affordance (is it owner-fronted?)")
-      .toBeVisible({ timeout: SLA });
-    await shareBtn.click();
-    // The chrome share modal: add input + role select + Add (ids set by the
-    // daemon's share_modal.go).
-    const input = frontend.locator('#bailey-share-input');
-    await input.waitFor({ state: 'visible', timeout: SLA });
-    await input.fill(ENV.teammateEmail);
-    // Grant at User level (default option value "access").
-    await frontend.locator('#bailey-share-role').selectOption('access').catch(() => {});
-    await capture(frontend, 'share-modal');
-    await frontend.locator('#bailey-share-add-btn').click();
-    // The grant lands in the "People with access" list; hard-assert + capture it.
-    await expect(
-      frontend.getByText(new RegExp(ENV.teammateEmail.replace(/[.@]/g, '\\$&'), 'i')).first(),
-      'the teammate grant did not land in the People with access list',
-    ).toBeVisible({ timeout: SLA });
-    await capture(frontend, 'share-modal');
-    // Close the modal (its footer Done button), then close the popup.
-    await frontend.getByRole('button', { name: /^Done$/ }).first().click().catch(() => {});
-    await frontend.close().catch(() => {});
-  });
-
   // ---- Backups: take a real production snapshot, wait for it to appear ----
   await chapter('backups', async () => {
     await selectStage(/Production/i);
