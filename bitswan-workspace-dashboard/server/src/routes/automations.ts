@@ -1024,12 +1024,11 @@ export function registerAutomationRoutes(
       stage?: string;
       checksum?: string;
       relative_path?: string;
-      deployed_by?: string;
     };
   }>('/api/automations/promote', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-    const { automation_name, context, stage, checksum, relative_path, deployed_by } =
+    const { automation_name, context, stage, checksum, relative_path } =
       req.body ?? {};
     if (!automation_name || typeof automation_name !== 'string') {
       return reply.code(400).send({ error: 'automation_name is required' });
@@ -1061,6 +1060,9 @@ export function registerAutomationRoutes(
         ? `${src}-${bp || 'production'}`
         : `${src}-${bpPrefix}${stage}`;
 
+    // Attribution comes from the authenticated token, never the request body
+    // (a client-supplied value would let members forge the deploy audit trail).
+    const deployed_by = (await emailFromRequest(req, app.log)) || undefined;
     try {
       const r = await gitops.promoteDeploy(targetDeploymentId, {
         checksum,
