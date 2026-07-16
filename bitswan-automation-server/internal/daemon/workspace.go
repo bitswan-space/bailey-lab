@@ -329,6 +329,20 @@ func (s *Server) handleWorkspaceList(w http.ResponseWriter, r *http.Request) {
 	long := r.URL.Query().Get("long") == "true"
 	showPasswords := r.URL.Query().Get("passwords") == "true"
 
+	// SECURITY (#128): passwords=true returns every workspace's
+	// BITSWAN_GITOPS_SECRET (full gitops admin per workspace). The socket
+	// this handler is served on is deliberately open (0666, bind-mounted
+	// into every workspace's gitops + infra-driver container for ingress/
+	// memory/role calls), so socket trust alone must never expose secrets —
+	// that would turn any single workspace-container compromise into an
+	// all-workspace takeover. Require a verified admin bearer token (the
+	// daemon's own token, or the host CLI's token checked via the /host
+	// mount) before including secrets.
+	if showPasswords && !s.callerHasAdminToken(r) {
+		writeJSONError(w, "passwords=true requires the automation-server admin token (run the bitswan CLI on the host, or pass the daemon token as a bearer token)", http.StatusForbidden)
+		return
+	}
+
 	result, err := GetWorkspaceList(long, showPasswords)
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)

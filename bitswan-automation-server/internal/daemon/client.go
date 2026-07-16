@@ -47,6 +47,10 @@ func NewClientWithSocket(socketPath string) (*Client, error) {
 	// socket skip token verification (see server.authMiddleware). The daemon's
 	// config now lives in a Docker volume the host CLI can't read, so a missing
 	// token is no longer fatal — fall back to empty and rely on socket trust.
+	// Exception: secret-bearing responses (workspace list with passwords=true)
+	// additionally require this token to verify — the daemon checks it against
+	// the host config through its /host mount (see server.callerHasAdminToken),
+	// so on the host it MUST be sent even though ordinary calls work without it.
 	token, _ := LoadToken()
 
 	client := &Client{

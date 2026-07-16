@@ -353,9 +353,30 @@ func getOpenAPISpec() string {
 			"/workspace/list": {
 				"get": {
 					"summary": "List workspaces",
+					"parameters": [
+						{
+							"name": "long",
+							"in": "query",
+							"schema": {
+								"type": "boolean"
+							},
+							"description": "Include domain, gitops URL and SSH public key"
+						},
+						{
+							"name": "passwords",
+							"in": "query",
+							"schema": {
+								"type": "boolean"
+							},
+							"description": "Include each workspace's gitops secret. Requires a valid admin bearer token even over the unix socket."
+						}
+					],
 					"responses": {
 						"200": {
 							"description": "List of workspaces"
+						},
+						"403": {
+							"description": "passwords=true requested without a valid admin bearer token"
 						}
 					}
 				}
