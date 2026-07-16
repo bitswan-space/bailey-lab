@@ -911,7 +911,7 @@ export const api = {
   /** Disaster Recovery: record a hand-performed recovery test (versioned). */
   recordDrTest: (
     bp: string,
-    body: { by?: string; note?: string; snapshot?: string },
+    body: { note?: string; snapshot?: string },
   ) =>
     postJson<DrStatus>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/dr/tests`,
