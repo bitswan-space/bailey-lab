@@ -261,11 +261,21 @@ func TestStripForwardedIdentityHeaders(t *testing.T) {
 	for _, h := range forwardedIdentityHeaders {
 		r.Header.Set(h, "forged")
 	}
+	// Issue #127: the access-token headers are credentials, stripped by
+	// the same function so no call site can forget them.
+	for _, h := range forwardedTokenHeaders {
+		r.Header.Set(h, "stolen-token")
+	}
 	r.Header.Set("X-Other", "keep")
 	stripForwardedIdentityHeaders(r)
 	for _, h := range forwardedIdentityHeaders {
 		if r.Header.Get(h) != "" {
 			t.Errorf("identity header %q not stripped", h)
+		}
+	}
+	for _, h := range forwardedTokenHeaders {
+		if r.Header.Get(h) != "" {
+			t.Errorf("access-token header %q not stripped", h)
 		}
 	}
 	if r.Header.Get("X-Other") != "keep" {
