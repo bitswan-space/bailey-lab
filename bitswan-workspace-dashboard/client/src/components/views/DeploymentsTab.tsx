@@ -1004,7 +1004,11 @@ function ContainerCard({
   const KindIcon = m.expose ? Globe : Boxes;
   const toggle = (p: 'logs' | 'inspect') => setOpen((cur) => (cur === p ? null : p));
   return (
-    <div className="overflow-hidden rounded-[10px] border border-border bg-background">
+    <div
+      data-testid="container-card"
+      data-container-status={m.display}
+      className="overflow-hidden rounded-[10px] border border-border bg-background"
+    >
       <div className="flex flex-wrap items-center gap-2.5 px-4 py-3">
         <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
           <KindIcon className="size-3.5 text-muted-foreground" aria-hidden />
