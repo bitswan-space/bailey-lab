@@ -79,14 +79,14 @@ export function snapshotStepLabel(step: string | null): string {
       return 'Snapshotting Postgres…';
     case 'snapshot_couchdb':
       return 'Snapshotting CouchDB…';
-    case 'snapshot_minio':
-      return 'Snapshotting MinIO…';
+    case 'snapshot_garage':
+      return 'Snapshotting object storage…';
     case 'restore_postgres':
       return 'Restoring Postgres…';
     case 'restore_couchdb':
       return 'Restoring CouchDB…';
-    case 'restore_minio':
-      return 'Restoring MinIO…';
+    case 'restore_garage':
+      return 'Restoring object storage…';
     case 'done':
       return 'Done';
     default:

@@ -68,12 +68,12 @@ function formatWhen(iso: string): string {
   });
 }
 
-/** The services captured in a snapshot, e.g. "Postgres + MinIO". */
+/** The services captured in a snapshot, e.g. "Postgres + Object storage". */
 function servicesLabel(s: Snapshot): string {
   const names: Record<string, string> = {
     postgres: 'Postgres',
     couchdb: 'CouchDB',
-    minio: 'MinIO',
+    garage: 'Object storage',
   };
   const included = Object.entries(s.services)
     .filter(([, meta]) => meta?.included)
@@ -309,7 +309,7 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
       <div className="flex flex-wrap items-start gap-3">
         <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-muted-foreground">
           Point-in-time backups of <strong className="text-foreground">{meta.label}</strong>
-          &apos;s data (Postgres, CouchDB, MinIO). To recover, restore one into the isolated{' '}
+          &apos;s data (Postgres, CouchDB, object storage). To recover, restore one into the isolated{' '}
           <strong className="text-foreground">Disaster Recovery</strong> slot and verify it before
           going live — restoring directly onto live Production is not allowed. Code and deployments
           are never touched.
@@ -350,7 +350,7 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
         <div className="rounded-xl border border-border bg-background p-4 shadow-sm">
           <p className="text-[13px] leading-relaxed text-muted-foreground">
             Snapshots need <strong className="text-foreground">{meta.label}</strong> to
-            use its own databases inside the shared Postgres/CouchDB/MinIO
+            use its own databases inside the shared Postgres/CouchDB/object-storage
             servers. New processes get them on their first deploy; existing ones
             opt in here.{' '}
             <strong>Enabling starts with empty per-process databases</strong> —

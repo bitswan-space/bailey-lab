@@ -637,7 +637,7 @@ export interface FirewallReport {
 }
 
 /** Infra services shown in the Containers tab's "Stage services" row. */
-export type ServiceType = 'postgres' | 'minio' | 'couchdb';
+export type ServiceType = 'postgres' | 'garage' | 'couchdb';
 
 /** Status of one infra service at a stage (subset we use — gitops returns more
  *  when show_passwords=true). `connection_info.admin_ui` is the admin console. */
@@ -668,7 +668,7 @@ export interface DataOverview {
   copy: string;
   registered: boolean;
   postgres: { enabled: boolean; running: boolean; database?: string };
-  minio: { enabled: boolean; running: boolean; bucket?: string };
+  garage: { enabled: boolean; running: boolean; bucket?: string };
   // eslint-disable-next-line no-restricted-syntax -- null = not blue-green
   db?: number | null;
 }

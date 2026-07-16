@@ -11,7 +11,7 @@ import { api, type DataOverview, type DataScope, type ObjectListing } from '@/li
 import { setUrlParams, useUrlParam } from '@/lib/urlState';
 import { EmptyState } from '@/components/shared/EmptyState';
 import { cn } from '@/lib/utils';
-import { ConsoleLink, explorerGate } from './SqlExplorer';
+import { explorerGate } from './SqlExplorer';
 import { ObjectPreviewPane } from './ObjectPreviewPane';
 import { fmtBytes, fmtDate } from './format';
 
@@ -50,7 +50,7 @@ export function ObjectBrowser({ scope, active }: Props) {
         const ov = await api.data.overview(scope);
         if (!alive) return;
         setOverview(ov ?? 'missing');
-        if (!ov?.minio.enabled || !ov.minio.running || !ov.registered) return;
+        if (!ov?.garage.enabled || !ov.garage.running || !ov.registered) return;
         const r = await api.data.objects(scope, prefix);
         if (!alive) return;
         setListing(r ?? 'missing');
@@ -69,11 +69,11 @@ export function ObjectBrowser({ scope, active }: Props) {
 
   const crumbs = prefix.split('/').filter(Boolean);
 
-  const gate = explorerGate(overview, 'minio', error, () => setReload((n) => n + 1));
+  const gate = explorerGate(overview, 'garage', error, () => setReload((n) => n + 1));
   if (gate) return gate;
 
   const bucket =
-    overview && overview !== 'missing' ? (overview.minio.bucket ?? '') : '';
+    overview && overview !== 'missing' ? (overview.garage.bucket ?? '') : '';
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
@@ -113,7 +113,6 @@ export function ObjectBrowser({ scope, active }: Props) {
           );
         })}
         <div className="ml-auto flex shrink-0 items-center gap-2 pl-3">
-          <ConsoleLink scope={scope} kind="minio" label="Open console" />
           <button
             type="button"
             onClick={() => setReload((n) => n + 1)}

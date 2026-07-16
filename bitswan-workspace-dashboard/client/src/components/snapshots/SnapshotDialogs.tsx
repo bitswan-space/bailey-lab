@@ -75,8 +75,8 @@ export function CreateSnapshotDialog({
           <DialogTitle>Create snapshot</DialogTitle>
           <DialogDescription>
             {fixedStage
-              ? `Capture ${STAGE_META[fixedStage].label}'s data (Postgres, CouchDB, MinIO). Manual snapshots are kept until you delete them.`
-              : "Capture this business process's data (Postgres, CouchDB, MinIO) at one stage. Manual snapshots are kept until you delete them."}
+              ? `Capture ${STAGE_META[fixedStage].label}'s data (Postgres, CouchDB, object storage). Manual snapshots are kept until you delete them.`
+              : "Capture this business process's data (Postgres, CouchDB, object storage) at one stage. Manual snapshots are kept until you delete them."}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">

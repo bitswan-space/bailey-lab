@@ -925,7 +925,7 @@ interface Member {
 
 const SERVICE_META: Record<ServiceType, { label: string; icon: LucideIcon }> = {
   postgres: { label: 'Postgres', icon: Database },
-  minio: { label: 'MinIO', icon: HardDrive },
+  garage: { label: 'Object Storage', icon: HardDrive },
   couchdb: { label: 'CouchDB', icon: Database },
 };
 
@@ -940,14 +940,14 @@ function realmForStage(stage: StageId): string {
  *  services that are actually enabled+running for this stage. Renders nothing
  *  when none are — no fabricated links. Since the in-dashboard data explorers
  *  replaced the service consoles, the Automation tab narrows this to CouchDB
- *  via `only` (pgAdmin is gone; the MinIO console link lives in the Object
- *  Storage explorer header until the Garage migration retires it too). */
+ *  via `only` (pgAdmin and the MinIO console are gone — Garage is headless;
+ *  the explorers are the data UI). */
 function StageServicesRow({ stage, only }: { stage: StageId; only?: ServiceType[] }) {
   const [links, setLinks] = useState<{ type: ServiceType; url: string }[]>([]);
   useEffect(() => {
     let alive = true;
     const realm = realmForStage(stage);
-    const types: ServiceType[] = only ?? ['postgres', 'minio', 'couchdb'];
+    const types: ServiceType[] = only ?? ['postgres', 'garage', 'couchdb'];
     Promise.all(
       types.map((t) =>
         api

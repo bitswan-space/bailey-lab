@@ -33,7 +33,7 @@ export interface Snapshot {
   kind: SnapshotKind;
   created_at: string;
   workspace?: string;
-  services: Partial<Record<'postgres' | 'couchdb' | 'minio', SnapshotServiceMeta>>;
+  services: Partial<Record<'postgres' | 'couchdb' | 'garage', SnapshotServiceMeta>>;
   total_size_bytes: number;
   /** Provenance for auto-snapshots (pre-restore / clone source). */
   source?: {
