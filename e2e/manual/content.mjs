@@ -340,7 +340,7 @@ export const MANUAL = {
         { id: 'backups', label: 'Live capture', caption: 'Production · snapshot captured from the live DB' },
       ],
       sell: [
-        'The <strong>Create snapshot</strong> dialog lets you label a snapshot and pick its stage; confirm and a task captures the <strong>live blue-green database</strong> — not a stale name — plus object storage, streaming its progress per store (Postgres, CouchDB, MinIO) so it never goes dark.',
+        'The <strong>Create snapshot</strong> dialog lets you label a snapshot and pick its stage; confirm and a task captures the <strong>live blue-green database</strong> — not a stale name — plus object storage, streaming its progress per store (Postgres, CouchDB, Garage) so it never goes dark.',
         'The result is a snapshot you can see, size, restore and clone between stages. Retention is a policy, not a cron job someone half-remembers.',
       ],
       steps: ['Open <b>Production → Backups</b>.', 'Press <b>Create snapshot</b>; label it.', 'Watch it run; it lists with size and contents.', 'Set the retention policy.'],

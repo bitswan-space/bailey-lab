@@ -44,7 +44,7 @@ const SLA = 60_000; // short-interaction SLA: nothing quick should wait longer
 // long-op rule: the screen must move within this window or the product is
 // considered "gone dark". Promote shows a single coarse "Promoting to <stage>…"
 // status (not the deploy's granular steps), and a promote now stands up
-// per-(workspace,stage) infra (postgres/minio fresh per stage) — so that one
+// per-(workspace,stage) infra (postgres/garage fresh per stage) — so that one
 // status can legitimately hold for a while on CI dind. Crucially, promote builds
 // a FRESH per-stage image (unlike the dev deploy, which rides the cached live-dev
 // image), and that build's final `RUN … build.sh` layer runs a SILENT compile
@@ -2296,7 +2296,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // The snapshot runs as a task (progress card), then a snapshot row with a
     // "manual" badge + a Restore button appears. This is a LONG op — watch it
     // with the progress rule: the snapshot task streams step labels (Restoring
-    // Postgres…/CouchDB…/MinIO…) and must not go dark >PROGRESS.
+    // Postgres…/CouchDB…/object storage…) and must not go dark >PROGRESS.
     const restoreRow = d.getByRole('button', { name: /^Restore$/ }).first();
     let last = await progressSignature();
     const deadline = Date.now() + 30 * 60_000;
@@ -2341,7 +2341,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const restore = d.getByRole('button', { name: /Restore into DR/i }).first();
     if (await restore.isVisible().catch(() => false)) {
       await restore.click();
-      // Restoring into DR is a LONG op (Postgres/CouchDB/MinIO restore) that
+      // Restoring into DR is a LONG op (Postgres/CouchDB/object-storage restore) that
       // streams per-store step labels. Watch it with the progress rule.
       const inDr = d.getByText(/In DR now/i).first();
       let last = await progressSignature();

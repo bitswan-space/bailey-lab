@@ -125,7 +125,7 @@ func main() {
 	sqlDB, _ := db.DB()
 	defer sqlDB.Close()
 
-	mc := mustInitMinio()
+	mc := mustInitS3()
 	ensureBucket(mc)
 
 	// Auth posture (see README.md, "Identity & admin contract"): with

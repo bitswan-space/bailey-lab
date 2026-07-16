@@ -11,38 +11,34 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// galleryBucket is the per-BP bucket injected by gitops as MINIO_BUCKET — no
+// galleryBucket is the per-BP bucket injected by gitops as S3_BUCKET — no
 // hardcoded bucket name. Empty (unset) is caught at startup in ensureBucket.
-var galleryBucket = envOr("MINIO_BUCKET", "")
+var galleryBucket = envOr("S3_BUCKET", "")
 
-func mustInitMinio() *minio.Client {
-	host := envOr("MINIO_HOST", "localhost")
+func mustInitS3() *minio.Client {
+	host := envOr("S3_HOST", "localhost")
+	endpoint := host + ":" + envOr("S3_PORT", "9000")
+	// Scoped per-BP credentials (limited to this BP's bucket), Garage-issued
+	// and injected by the driver; dev defaults for standalone runs.
+	accessKey := envOr("S3_ACCESS_KEY", "minioadmin")
+	secretKey := envOr("S3_SECRET_KEY", "minioadmin")
 
-	// Docker hostnames with "__" are invalid per HTTP RFC, causing MinIO server
-	// to reject the Host header. Resolve to IP to avoid this.
-	if addrs, err := net.LookupHost(host); err == nil && len(addrs) > 0 {
-		host = addrs[0]
-	}
-
-	endpoint := host + ":9000"
-	// Scoped per-BP credentials (limited to this BP's bucket) — not the MinIO
-	// root. gitops injects these; falls back to dev defaults for standalone runs.
-	accessKey := envOr("MINIO_ACCESS_KEY", "minioadmin")
-	secretKey := envOr("MINIO_SECRET_KEY", "minioadmin")
-
+	// minio-go is used purely as an S3 client — the server is Garage, which
+	// speaks S3 with s3_region us-east-1 (minio-go's default) and a clean
+	// hyphenated hostname alias, so no region or Host workarounds are needed.
 	mc, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
 		Secure: false,
 	})
 	if err != nil {
-		log.Fatalf("failed to create MinIO client: %v", err)
+		log.Fatalf("failed to create S3 client: %v", err)
 	}
 	return mc
 }
 
 func ensureBucket(mc *minio.Client) {
 	if galleryBucket == "" {
-		log.Fatal("MINIO_BUCKET is not set")
+		log.Fatal("S3_BUCKET is not set")
 	}
 	ctx := context.Background()
 	exists, err := mc.BucketExists(ctx, galleryBucket)

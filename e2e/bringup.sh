@@ -152,13 +152,13 @@ mark "[2/7] daemon + traefik ingress"
 
 # Prewarm every image the INTERACTIVE workspace-create + first-deploy would
 # otherwise pull at click-time: the infra services a BP enables (postgres,
-# minio, couchdb) and node:24-alpine (the app-image base the driver
+# garage + its rclone toolbox, couchdb) and node:24-alpine (the app-image base the driver
 # bakes the frontend/backend onto). Runs in the BACKGROUND so it overlaps the
 # Keycloak/otel bring-up below and adds ~no serial setup time; we `wait` on it
 # before handing off to the walkthrough. Moving these pulls into the
 # non-interactive setup keeps the first deploy from stalling a user on a
 # registry pull. Best-effort — a miss just falls back to a click-time pull.
-( for img in postgres:16 minio/minio:latest couchdb:3.3 node:24-alpine golang:1.25-alpine; do
+( for img in postgres:16 dxflrs/garage:v2.3.0 rclone/rclone:1.68 couchdb:3.3 node:24-alpine golang:1.25-alpine; do
     docker pull "$img" >/dev/null 2>&1 || true
   done
   # Prebuild the BP-template frontend + backend base images so their EXPENSIVE

@@ -5,7 +5,7 @@ network: the frontend shim proxies `/api/*` here with the `/api` prefix
 stripped, so a frontend request to `/api/hello` arrives as `/hello`.
 
 This is deliberately the smallest useful starting point — one health endpoint
-and one greeting. Add routers, models, and infra dependencies (Postgres/MinIO
+and one greeting. Add routers, models, and infra dependencies (Postgres/object storage
 via `[services.*]` in automation.toml) as the workload grows. Because it's
 Python-native, it's a good base for ML / data workloads.
 """

@@ -2,7 +2,7 @@ name = "Internal app"
 short_description = """
 A starter internal business app: one frontend exposed through Bailey, plus a
 private high-performance Go backend worker it talks to over the Docker network
-(with Postgres + MinIO provisioned per business process). Access is controlled
+(with Postgres + object storage provisioned per business process). Access is controlled
 by the share button — add more frontends or workers from the dashboard.
 """
 icon = """

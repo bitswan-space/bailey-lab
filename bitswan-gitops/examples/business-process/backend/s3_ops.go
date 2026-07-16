@@ -12,54 +12,50 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// minioInitDeadline bounds the startup wait for this BP's MinIO bucket + scoped
-// user. Like the database, they are provisioned by the driver around the same
+// s3InitDeadline bounds the startup wait for this BP's S3 bucket + scoped
+// key. Like the database, they are provisioned by the driver around the same
 // time the worker starts — provisioning runs AFTER `docker compose up`, so the
 // backend's first BucketExists legitimately fails with "Access Denied" until
 // the scoped user exists. We retry until reachable instead of crash-exiting: a
 // clean os.Exit(1) is NOT restarted by Air (live-dev), so a one-shot failure
 // would leave the backend dead forever even though the user appears seconds
 // later. Only after the deadline do we fail loudly. Mirrors dbInitDeadline.
-const minioInitDeadline = 3 * time.Minute
+const s3InitDeadline = 3 * time.Minute
 
-// galleryBucket is the per-BP bucket injected by gitops as MINIO_BUCKET — no
+// galleryBucket is the per-BP bucket injected by gitops as S3_BUCKET — no
 // hardcoded bucket name. Empty (unset) is caught at startup in ensureBucket.
-var galleryBucket = envOr("MINIO_BUCKET", "")
+var galleryBucket = envOr("S3_BUCKET", "")
 
-func mustInitMinio() *minio.Client {
-	host := envOr("MINIO_HOST", "localhost")
+func mustInitS3() *minio.Client {
+	host := envOr("S3_HOST", "localhost")
+	endpoint := host + ":" + envOr("S3_PORT", "9000")
+	// Scoped per-BP credentials (limited to this BP's bucket), Garage-issued
+	// and injected by the driver; dev defaults for standalone runs.
+	accessKey := envOr("S3_ACCESS_KEY", "minioadmin")
+	secretKey := envOr("S3_SECRET_KEY", "minioadmin")
 
-	// Docker hostnames with "__" are invalid per HTTP RFC, causing MinIO server
-	// to reject the Host header. Resolve to IP to avoid this.
-	if addrs, err := net.LookupHost(host); err == nil && len(addrs) > 0 {
-		host = addrs[0]
-	}
-
-	endpoint := host + ":9000"
-	// Scoped per-BP credentials (limited to this BP's bucket) — not the MinIO
-	// root. gitops injects these; falls back to dev defaults for standalone runs.
-	accessKey := envOr("MINIO_ACCESS_KEY", "minioadmin")
-	secretKey := envOr("MINIO_SECRET_KEY", "minioadmin")
-
+	// minio-go is used purely as an S3 client — the server is Garage, which
+	// speaks S3 with s3_region us-east-1 (minio-go's default) and a clean
+	// hyphenated hostname alias, so no region or Host workarounds are needed.
 	mc, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
 		Secure: false,
 	})
 	if err != nil {
-		log.Fatalf("failed to create MinIO client: %v", err)
+		log.Fatalf("failed to create S3 client: %v", err)
 	}
 	return mc
 }
 
 func ensureBucket(mc *minio.Client) {
 	if galleryBucket == "" {
-		log.Fatal("MINIO_BUCKET is not set")
+		log.Fatal("S3_BUCKET is not set")
 	}
 	ctx := context.Background()
-	// Retry BucketExists through the provisioning window (see minioInitDeadline).
+	// Retry BucketExists through the provisioning window (see s3InitDeadline).
 	// "Access Denied" while the scoped user isn't created yet is the transient
 	// error we ride out; a persistent one fails loudly after the deadline.
-	deadline := time.Now().Add(minioInitDeadline)
+	deadline := time.Now().Add(s3InitDeadline)
 	for attempt := 1; ; attempt++ {
 		exists, err := mc.BucketExists(ctx, galleryBucket)
 		if err == nil {
@@ -75,9 +71,9 @@ func ensureBucket(mc *minio.Client) {
 			return
 		}
 		if time.Now().After(deadline) {
-			log.Fatalf("minio bucket %s not reachable after retrying for %s: %v", galleryBucket, minioInitDeadline, err)
+			log.Fatalf("s3 bucket %s not reachable after retrying for %s: %v", galleryBucket, s3InitDeadline, err)
 		}
-		log.Printf("minio not ready (attempt %d): %v — retrying in 2s…", attempt, err)
+		log.Printf("object storage not ready (attempt %d): %v — retrying in 2s…", attempt, err)
 		time.Sleep(2 * time.Second)
 	}
 }

@@ -1,6 +1,6 @@
 # The Go backend is a private worker: never exposed to the internet, reached
 # only by the frontend's shim over the Docker network (and by peer workers).
-# Its postgres + minio dependencies are provisioned per business process.
+# Its postgres + garage (S3) dependencies are provisioned per business process.
 [deployment]
 expose = false
 # Memory budget for this container. Tune memory-reservation to just above real
@@ -14,5 +14,5 @@ memory_reservation_policy = "on-demand"
 [services.postgres]
 enabled = true
 
-[services.minio]
+[services.garage]
 enabled = true
