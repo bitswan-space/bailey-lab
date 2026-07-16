@@ -28,8 +28,9 @@ type Delta = { ahead: number; behind: number };
  * ahead (changes here not yet published — via Sync & Deploy), `↓N` behind
  * (changes on main not yet pulled). The ↓ chip is the only actionable one —
  * clicking it pulls main into the WHOLE copy (the pull is copy-wide; it's just
- * surfaced against the BP in view). In step with main → a check; not-yet-loaded
- * counts reserve their space silently.
+ * surfaced against the BP in view). In step with main → an "in sync" label (NOT
+ * a check — the check is reserved for the selected copy); not-yet-loaded counts
+ * reserve their space silently.
  */
 function CopyDelta({
   d,
@@ -46,7 +47,17 @@ function CopyDelta({
   const ahead = d?.ahead ?? 0;
   const behind = d?.behind ?? 0;
   if (!ahead && !behind) {
-    return <Check className="size-3 shrink-0 text-emerald-500" aria-hidden />;
+    // A text label, not a checkmark: the checkmark means "selected copy", and a
+    // second tick here read as a second selection (issue #159). Matches the
+    // sibling "+ from main" text state and the ↑/↓ divergence chips.
+    return (
+      <span
+        title="In step with main"
+        className="text-[10px] font-medium text-emerald-600"
+      >
+        in sync
+      </span>
+    );
   }
   return (
     <span className="flex shrink-0 items-center gap-1 text-[10px] font-semibold tabular-nums">
