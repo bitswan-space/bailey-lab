@@ -1894,6 +1894,59 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // the deploy. Each cycle goes dev → staging → production. Then we roll
   // Production back to the previous version and confirm the revert.
   // ════════════════════════════════════════════════════════════════════════
+  // Inspect Production's live containers RIGHT AFTER promotion, while the stage
+  // is freshly deployed and healthy — before the memory-heavy tail (deps-npm /
+  // deps-go rebuild+re-promote, prod-rollback, the long CVE scan) churns the
+  // blue-green slots and, on a memory-starved runner, can leave Production
+  // between deployments. This is also when an operator naturally looks. The
+  // handbook chapter order is unaffected (it's driven by content.mjs slots, not
+  // capture order).
+  await chapter('containers', async () => {
+    // Defensive: clear any overlay a prior chapter may have left open before our
+    // first click.
+    await closeAnyModal();
+    await selectStage(/Production/i);
+    // The Containers tab carries a count pill ("Containers 2"), so match the
+    // label as a prefix — an anchored /^Containers$/ would miss it.
+    await clickSection(/Containers/i);
+    // The live container roster for the current deployment. Each container card
+    // carries inline Logs / Inspect expanders and start/stop controls.
+    await capture(dashPage, 'containers');
+    // Inspect a RUNNING container — not blindly the first card. Production shows
+    // one card per member (the always-on worker AND the on-demand frontend); a
+    // member whose container isn't running still shows a card, so Logs would only
+    // ever say "Waiting for logs…" and Inspect would have nothing to render.
+    // Target a running card via its status marker (the always-on worker is a
+    // guaranteed running card).
+    const runningCard = d
+      .locator('[data-testid="container-card"][data-container-status="running"]')
+      .first();
+    await expect(
+      runningCard,
+      'no running container in Production to inspect',
+    ).toBeVisible({ timeout: SLA });
+    // Open the running container's LOGS view: its "Logs" button expands an inline
+    // LogsPane that streams real container output. Hard-assert it opened.
+    await runningCard.getByRole('button', { name: /^Logs$/ }).click();
+    await expect(
+      runningCard
+        .locator('.font-mono')
+        .filter({ hasText: /\S/ })
+        .or(runningCard.getByText(/Waiting for logs…|\[stream ended\]|Log stream disconnected/i))
+        .first(),
+      'container Logs view never opened',
+    ).toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'container-logs');
+    // Open the running container's INSPECT view: its "Inspect" button expands an
+    // inline OverviewPane with the container's configuration (Identity / Image /
+    // Network groups). Hard-assert a config group rendered before shooting.
+    await runningCard.getByRole('button', { name: /^Inspect$/ }).click();
+    await expect(
+      runningCard.getByText(/^Identity$|^Image$|^Network$/).first(),
+      'container Inspect view never opened',
+    ).toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'container-inspect');
+  });
   await chapter('deps-npm', async () => {
     await editDependencyManifest({
       searchTerm: '"react"',
@@ -2008,53 +2061,6 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       // chapter's first click (it blocked `containers` and aborted the run).
       await closeAnyModal();
     }
-  });
-  await chapter('containers', async () => {
-    // Defensive: clear any overlay a prior chapter may have left open before our
-    // first click (the supply-chain CVE detail did exactly this).
-    await closeAnyModal();
-    await selectStage(/Production/i);
-    // The Containers tab carries a count pill ("Containers 2"), so match the
-    // label as a prefix — an anchored /^Containers$/ would miss it.
-    await clickSection(/Containers/i);
-    // The live container roster for the current deployment. Each container card
-    // carries inline Logs / Inspect expanders and start/stop controls.
-    await capture(dashPage, 'containers');
-    // Inspect a RUNNING container — not blindly the first card. Production shows
-    // one card per member (the always-on worker AND the on-demand frontend);
-    // an on-demand frontend that has been shed under memory pressure still shows
-    // a card but has no running container behind it, so Logs would only ever say
-    // "Waiting for logs…" and Inspect would have nothing to render. The worker is
-    // always-on, so a running card is guaranteed. Target it via the card's
-    // status marker.
-    const runningCard = d
-      .locator('[data-testid="container-card"][data-container-status="running"]')
-      .first();
-    await expect(
-      runningCard,
-      'no running container in Production to inspect',
-    ).toBeVisible({ timeout: SLA });
-    // Open the running container's LOGS view: its "Logs" button expands an inline
-    // LogsPane that streams real container output. Hard-assert it opened.
-    await runningCard.getByRole('button', { name: /^Logs$/ }).click();
-    await expect(
-      runningCard
-        .locator('.font-mono')
-        .filter({ hasText: /\S/ })
-        .or(runningCard.getByText(/Waiting for logs…|\[stream ended\]|Log stream disconnected/i))
-        .first(),
-      'container Logs view never opened',
-    ).toBeVisible({ timeout: SLA });
-    await capture(dashPage, 'container-logs');
-    // Open the running container's INSPECT view: its "Inspect" button expands an
-    // inline OverviewPane with the container's configuration (Identity / Image /
-    // Network groups). Hard-assert a config group rendered before shooting.
-    await runningCard.getByRole('button', { name: /^Inspect$/ }).click();
-    await expect(
-      runningCard.getByText(/^Identity$|^Image$|^Network$/).first(),
-      'container Inspect view never opened',
-    ).toBeVisible({ timeout: SLA });
-    await capture(dashPage, 'container-inspect');
   });
   await chapter('secrets', async () => {
     await selectStage(/Production/i);
