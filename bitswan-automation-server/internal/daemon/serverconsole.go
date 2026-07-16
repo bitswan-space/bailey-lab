@@ -78,8 +78,13 @@ func serveServerConsole(w http.ResponseWriter, r *http.Request) {
 	serve := r.URL.Path
 	if p == "" || p == "index.html" {
 		serve = "/"
-	} else if _, err := fs.Stat(serverConsoleRoot, p); err != nil {
-		serve = "/" // SPA fallback → index.html
+	} else if st, err := fs.Stat(serverConsoleRoot, p); err != nil || st.IsDir() {
+		// SPA fallback → index.html. Directories must fall back too: a
+		// client-side route can shadow a real asset directory (e.g.
+		// /handbook is both a console route and the dist's handbook/
+		// bundle dir), and letting FileServer see the directory path
+		// would render its file listing on reload (#150).
+		serve = "/"
 	}
 
 	// The console is a self-contained bundle: same-origin scripts/fonts, with

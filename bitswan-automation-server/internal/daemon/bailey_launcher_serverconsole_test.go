@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // --- chrome_launcher.go -------------------------------------------------
@@ -134,6 +135,66 @@ func TestIsServerConsoleHost(t *testing.T) {
 	if !isServerConsoleHost("BAILEY." + strings.ToUpper(domain)) {
 		// EqualFold should accept different casing.
 		t.Error("case-insensitive console host match failed")
+	}
+}
+
+// Regression test for #150: reloading a client-side console route whose
+// path is ALSO a real directory in the dist (e.g. /handbook — a console
+// route AND the handbook/ asset dir) must serve the SPA shell, never a
+// FileServer directory listing.
+func TestServeServerConsole_SPAFallbackNeverListsDirectories(t *testing.T) {
+	writeTestConfig(t)
+	saved := serverConsoleRoot
+	serverConsoleRoot = fstest.MapFS{
+		"index.html":             {Data: []byte("<html><body>console-shell</body></html>")},
+		"assets/app.js":          {Data: []byte("console.log('bundle')")},
+		"handbook/handbook.html": {Data: []byte("<html><body>handbook doc</body></html>")},
+		"handbook/handbook.pdf":  {Data: []byte("%PDF-fake")},
+	}
+	t.Cleanup(func() { serverConsoleRoot = saved })
+
+	get := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, "https://bailey.test.example.com"+path, nil)
+		r.Host = "bailey.test.example.com"
+		w := httptest.NewRecorder()
+		serveServerConsole(w, r)
+		return w
+	}
+
+	// (a) A real static asset is served as-is.
+	if w := get("/assets/app.js"); w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), "console.log('bundle')") {
+		t.Errorf("/assets/app.js: code=%d body=%q, want the asset bytes", w.Code, w.Body.String())
+	}
+	// A real file inside the shadowed directory is still served as-is.
+	if w := get("/handbook/handbook.html"); w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), "handbook doc") {
+		t.Errorf("/handbook/handbook.html: code=%d body=%q, want the file", w.Code, w.Body.String())
+	}
+
+	// (b) A client-route-looking path with no matching file falls back to
+	// the SPA shell with 200.
+	if w := get("/users"); w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), "console-shell") {
+		t.Errorf("/users: code=%d body=%q, want index.html shell", w.Code, w.Body.String())
+	}
+
+	// (c) A path that names a real DIRECTORY must serve the shell too,
+	// never a directory listing (#150).
+	for _, path := range []string{"/handbook", "/handbook/", "/assets"} {
+		w := get(path)
+		if w.Code != http.StatusOK {
+			t.Errorf("%s: code=%d, want 200", path, w.Code)
+			continue
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "console-shell") {
+			t.Errorf("%s: body=%q, want index.html shell", path, body)
+		}
+		if strings.Contains(body, "handbook.pdf") || strings.Contains(body, "<pre>") {
+			t.Errorf("%s: served a directory listing: %q", path, body)
+		}
 	}
 }
 
