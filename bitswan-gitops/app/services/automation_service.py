@@ -1018,7 +1018,12 @@ class AutomationService:
         entries = existing.split()
         missing = [
             e
-            for e in (".builds/", ".live-dev-access/", ".sleep-state/")
+            for e in (
+                ".builds/",
+                ".live-dev-access/",
+                ".sleep-state/",
+                ".live-dev-src/",
+            )
             if e not in entries
         ]
         if missing:
@@ -3126,6 +3131,17 @@ class AutomationService:
         # unrelated event refreshes it.
         await self.refresh_all()
 
+        # Pin each live-dev member's source-dir inode per container (#123): a
+        # volume-subpath mount resolves the directory inode at container START,
+        # so a later delete+recreate of the copy/BP/automation dir leaves a
+        # running container serving the old, deleted inode ("Up" but blank).
+        # Recording what each container started with is what lets
+        # wake_live_dev detect the replacement and recycle the instance.
+        try:
+            await self.record_live_dev_source_inodes(deployment_ids)
+        except Exception:  # noqa: BLE001 — bookkeeping must never fail a deploy
+            logger.warning("recording live-dev source inodes failed", exc_info=True)
+
         return {"deployment_ids": list(deployment_ids)}
 
     async def deploy_source_set(
@@ -4299,6 +4315,120 @@ class AutomationService:
         except OSError:
             logger.debug("touch live-dev access failed for %s", context, exc_info=True)
 
+    # ── Stale source-mount detection (#123) ─────────────────────────────────
+    # Live-dev containers mount their source as a volume SUBPATH; docker
+    # resolves the subpath to a directory inode when the container starts.
+    # When that directory is later deleted + recreated at the same path (git
+    # rebase/reset in the copy clone, an agent's rm -rf + re-checkout, copy or
+    # automation re-materialization), the running container keeps the old
+    # deleted inode: /app is empty, the frontend serves a blank 404, `docker
+    # exec` fails — while everything on disk looks correct and the container
+    # is "Up". We therefore record, per container, the source-dir inode at
+    # deploy time (right after the compose apply that created it) in a
+    # non-committed marker dir (mirrors .live-dev-access), and the wake path —
+    # which fires on every BP load — compares it against the dir's current
+    # inode. A mismatch means "the dir was replaced under the container": the
+    # instance is recycled (containers removed + redeployed) so the subpath
+    # mount re-resolves.
+
+    def _live_dev_src_dir(self) -> str:
+        return os.path.join(self.gitops_dir, ".live-dev-src")
+
+    def _source_dir_inode(self, conf: dict) -> int | None:
+        """Current inode of a live-dev deployment's mounted source dir, or None
+        when the deployment has no source mount (not live-dev / no
+        relative_path) or the dir is missing (recycling can't help then)."""
+        conf = conf or {}
+        if (conf.get("stage") or "") != "live-dev":
+            return None
+        rel = conf.get("relative_path") or ""
+        if not rel:
+            return None
+        try:
+            return os.stat(os.path.join(self.workspace_repo_dir, rel)).st_ino
+        except OSError:
+            return None
+
+    def _read_live_dev_src_markers(self, deployment_id: str) -> dict[str, int]:
+        """{container_id: inode-at-start} recorded for a deployment. Missing or
+        unreadable marker = empty (detection then abstains — never a recycle)."""
+        try:
+            with open(
+                os.path.join(
+                    self._live_dev_src_dir(), sanitize_automation_name(deployment_id)
+                )
+            ) as f:
+                data = json.load(f)
+            return (
+                {k: int(v) for k, v in data.items()} if isinstance(data, dict) else {}
+            )
+        except (OSError, ValueError):
+            return {}
+
+    def _write_live_dev_src_markers(
+        self, deployment_id: str, markers: dict[str, int]
+    ) -> None:
+        try:
+            d = self._live_dev_src_dir()
+            os.makedirs(d, exist_ok=True)
+            with open(
+                os.path.join(d, sanitize_automation_name(deployment_id)), "w"
+            ) as f:
+                json.dump(markers, f)
+        except OSError:
+            logger.debug(
+                "write live-dev src marker failed for %s", deployment_id, exc_info=True
+            )
+
+    async def record_live_dev_source_inodes(self, deployment_ids: list[str]) -> None:
+        """After a compose apply: pin the source-dir inode per container for
+        each live-dev member. A container id already recorded KEEPS its
+        original inode — `docker compose up` leaves an unchanged running
+        container alone, so a surviving container still holds whatever it
+        mounted at its start and re-recording the current inode would paper
+        over exactly the staleness we detect. New ids get the current inode
+        (they just started against it); vanished ids are dropped."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        flat = bs.get("deployments") or {}
+        for dep in deployment_ids:
+            ino = self._source_dir_inode(flat.get(dep) or {})
+            if ino is None:
+                continue
+            try:
+                old = self._read_live_dev_src_markers(dep)
+                cur: dict[str, int] = {}
+                for c in await self.get_container(dep):
+                    cid = c.get("Id")
+                    if cid:
+                        cur[cid] = old.get(cid, ino)
+                self._write_live_dev_src_markers(dep, cur)
+            except Exception:  # noqa: BLE001 — bookkeeping only
+                logger.debug(
+                    "record live-dev source inode failed for %s", dep, exc_info=True
+                )
+
+    async def _stale_live_dev_members(self, deployment_ids: list[str]) -> list[str]:
+        """Members whose recorded container inode no longer matches the source
+        dir on disk — i.e. the dir was replaced under a live container. Members
+        without a marker (e.g. the container came up outside our apply spine)
+        are never flagged: detection abstains rather than guesses."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        flat = bs.get("deployments") or {}
+        stale: list[str] = []
+        for dep in deployment_ids:
+            ino = self._source_dir_inode(flat.get(dep) or {})
+            if ino is None:
+                continue
+            markers = self._read_live_dev_src_markers(dep)
+            if not markers:
+                continue
+            for c in await self.get_container(dep):
+                rec = markers.get(c.get("Id"))
+                if rec is not None and rec != ino:
+                    stale.append(dep)
+                    break
+        return stale
+
     # ── Sleep-reason tracking ────────────────────────────────────────────────
     # WHY a deployment is asleep — "memory-pressure" (the automatic budget/LRU
     # sweep) or "manual" (an operator's Sleep action). Persisted as a
@@ -4519,7 +4649,11 @@ class AutomationService:
         ALWAYS stamps last-activity (so opening a BP keeps it hot / makes this a
         true-LRU touch). If the instance is already running or mid-startup it's a
         no-op beyond that touch (we never disturb a healthy instance, and the
-        loading page / dashboard fire this repeatedly). Otherwise it re-activates
+        loading page / dashboard fire this repeatedly) — UNLESS a member's source
+        dir was replaced under its running container (stale subpath mount, #123):
+        then the instance is recycled (containers removed + redeployed) so the
+        mount re-resolves, because a "healthy" container pinned to a deleted
+        inode serves a blank page forever. Otherwise it re-activates
         the members (so the compiler includes them again) and redeploys to
         recreate the removed containers, then re-enforces the cap. Returns the
         deployment_ids so a caller can poll health / show a loading screen."""
@@ -4527,7 +4661,44 @@ class AutomationService:
         instances = await self._live_dev_instances()
         inst = instances.get(context)
         if inst and inst["hydrating"]:
-            return {"context": context, "deployment_ids": [], "already_running": True}
+            deps = sorted(inst["deployment_ids"])
+            stale = await self._stale_live_dev_members(deps)
+            if not stale:
+                return {
+                    "context": context,
+                    "deployment_ids": [],
+                    "already_running": True,
+                }
+            # Stale subpath mount: the copy dir was deleted + recreated while the
+            # container ran, so its mount points at the old deleted inode. A plain
+            # redeploy would NOT fix it (unchanged compose config → docker compose
+            # leaves the running container alone), so remove the whole instance's
+            # containers first — recreating the full instance keeps its members'
+            # mounts consistent — then redeploy; compose recreates them and the
+            # subpath re-resolves to the new directory.
+            logger.warning(
+                "RECYCLE live-dev %s: stale source mount detected on %s "
+                "(source dir replaced under the running container, #123)",
+                context,
+                ", ".join(stale),
+            )
+            ctx = self._workspace_ctx()
+            for dep in deps:
+                for c in await self.get_container(dep):
+                    cid = c.get("Id")
+                    if cid:
+                        try:
+                            await self.infra_driver.container_remove(ctx, cid)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(
+                                "stale-mount recycle: removing %s failed: %s", cid, e
+                            )
+            try:
+                await self.apply_compose_for_deployments(deps, report=None)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("live-dev recycle redeploy of %s failed: %s", context, e)
+            await self.enforce_live_dev_cap()
+            return {"context": context, "deployment_ids": deps, "recycled": stale}
 
         # Members of this instance: from live containers if any survive, else
         # from the (inactive) deploy entries left behind by eviction.
