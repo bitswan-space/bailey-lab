@@ -801,8 +801,7 @@ function App() {
         onClaim={() => { showToast('Server claimed — you are the root admin', 'success'); reloadGate(); }} />}
       {scene === 'approval' && <ApprovalScene
         gateState={gate.state}
-        onApproved={() => { showToast('Device approved — welcome in', 'success'); reloadGate(); }}
-        goConsole={reloadGate} />}
+        onApproved={() => { showToast('Device approved — welcome in', 'success'); reloadGate(); }} />}
       {scene === 'recovery' && <RecoveryScene
         gateState={gate.state}
         onRecovered={() => { showToast('Recovered — this device is now trusted', 'success'); reloadGate(); }}
