@@ -354,6 +354,13 @@ function Shell() {
 
   const isLoading = processes === null;
 
+  // A copy name is selected but the copies snapshot doesn't carry it yet:
+  // it's still being created server-side (the personal copy on first login
+  // via /api/me, or a copy just created in the dialog — both select the name
+  // optimistically before the SSE feed delivers it). WorkspaceView shows
+  // "Creating copy…" instead of "No copy yet" while this holds (#160).
+  const copyCreating = copy !== null && wt === null;
+
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
       <TopNav
@@ -381,6 +388,7 @@ function Shell() {
         <WorkspaceView
           bp={bp}
           wt={wt}
+          copyCreating={copyCreating}
           tab={tab}
           onTab={handleTab}
           onNewBp={() => setNewBpOpen(true)}
