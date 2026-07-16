@@ -807,6 +807,30 @@ async def _drop_postgres_db(container: str, user: str, db_name: str) -> None:
     )
     if rc != 0:
         raise RuntimeError(f"DROP DATABASE {db_name} failed: {stderr.strip()}")
+    # Best-effort cleanup of the database's scoped roles (the driver's
+    # u_<db> backend role and the ro_<db> explorer twin — see bpcreds.go).
+    # They own nothing once the DB is gone, but a role that still has
+    # dependencies elsewhere must not block BP deletion — log and move on.
+    for role in (("u_" + db_name)[:63], ("ro_" + db_name)[:63]):
+        _, stderr, rc = await _driver_exec(
+            "docker",
+            "exec",
+            container,
+            "psql",
+            "-U",
+            user,
+            "-d",
+            "postgres",
+            "-c",
+            f'DROP ROLE IF EXISTS "{role}";',
+        )
+        if rc != 0:
+            logger.warning(
+                "DROP ROLE %s after dropping %s failed: %s",
+                role,
+                db_name,
+                stderr.strip(),
+            )
 
 
 async def _drop_minio_bucket(
