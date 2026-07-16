@@ -27,6 +27,7 @@ from app.utils import (
     read_bitswan_yaml,
     load_yaml,
     read_automation_config,
+    parse_automation_toml,
     sanitize_automation_name,
     update_bp_git,
     write_bp_bitswan,
@@ -1348,7 +1349,7 @@ class AutomationService:
             # as explicit data — never leave the driver to infer it.
             svcs = m.get("services")
             if svcs is None:
-                auto_conf = self.resolve_automation_config(dep)
+                auto_conf = await self.resolve_automation_config(dep)
                 if auto_conf.services:
                     svcs = {
                         name: {"enabled": dep_svc.enabled}
@@ -1365,7 +1366,7 @@ class AutomationService:
             mem_res = m.get("memory_reservation")
             mem_pol = m.get("memory_reservation_policy")
             if mem_res is None or mem_pol is None:
-                mem_conf = self.resolve_automation_config(dep)
+                mem_conf = await self.resolve_automation_config(dep)
                 if mem_res is None:
                     mem_res = mem_conf.memory_reservation
                 if mem_pol is None:
@@ -1425,7 +1426,7 @@ class AutomationService:
             if deploy_stage == "":
                 deploy_stage = "production"
             if not deploy_services:
-                auto_conf = self.resolve_automation_config(dep_conf)
+                auto_conf = await self.resolve_automation_config(dep_conf)
                 if auto_conf.services:
                     deploy_services = {
                         svc_name: {"enabled": svc_dep.enabled}
@@ -3866,7 +3867,7 @@ class AutomationService:
         always_on_add = 0
         ondemand_add: list[int] = []
         for m in members:
-            conf = self.resolve_automation_config(m)
+            conf = await self.resolve_automation_config(m)
             if conf.memory_reservation is None:
                 missing.append(m.get("display_name") or m["deployment_id"])
                 res_mb = _default_mem_reservation_mb()
@@ -4276,41 +4277,92 @@ class AutomationService:
             "source_removed": source_removed,
         }
 
-    def resolve_automation_config(self, deployment_conf: dict) -> "AutomationConfig":
-        """Resolve AutomationConfig for a deployment from the canonical source.
+    async def resolve_automation_config(
+        self, deployment_conf: dict
+    ) -> "AutomationConfig":
+        """Resolve AutomationConfig for a deployment from the version of
+        automation.toml that ACTUALLY SHIPPED.
 
-        For live-dev: reads automation.toml from the workspace source directory.
-        For promoted stages: reads from the gitops checksum directory, falling
-        back to the workspace source when that blob tree is absent.
-        Single source of truth — used by both deploy_automation (service auto-enable)
-        and generate_docker_compose (container config).
+        A promoted deployment runs a baked image built from a specific commit,
+        so its config — ``expose``, ``port``, ``services`` AND
+        ``memory_reservation_policy`` — must come from automation.toml at THAT
+        commit, which is immutable. Reading the current workspace HEAD instead
+        would let a later edit silently reinterpret an already-deployed (and, for
+        an audit-gated promote, already-audited) image. Resolution order:
+
+        * live-dev — read the live workspace source (live-dev IS the working copy).
+        * promoted, blob tree present — read the ``<gitops_dir>/<checksum>``
+          content snapshot (an immutable copy of exactly what was deployed).
+        * promoted, blob tree gone (image-baked) — read automation.toml at the
+          deployment's recorded ``source_commit`` from the per-BP repo.
+        * only when no commit was recorded (legacy, pre commit-pinning) fall back
+          to the workspace source.
+
+        Single source of truth — used by both deploy_automation (service
+        auto-enable) and generate_docker_compose (container config).
         """
         stage = deployment_conf.get("stage", "production") or "production"
         relative_path = deployment_conf.get("relative_path", "")
 
         if stage == "live-dev" and relative_path:
             source_dir = os.path.join(self.workspace_repo_dir, relative_path)
-        else:
-            source = (
-                deployment_conf.get("source") or deployment_conf.get("checksum") or ""
-            )
-            source_dir = os.path.join(self.gitops_dir, source) if source else ""
+            if os.path.exists(source_dir):
+                return read_automation_config(source_dir)
+            return AutomationConfig()
 
-        if source_dir and os.path.exists(source_dir):
-            return read_automation_config(source_dir)
+        source = deployment_conf.get("source") or deployment_conf.get("checksum") or ""
+        if source and source != "live-dev":
+            source_dir = os.path.join(self.gitops_dir, source)
+            if os.path.exists(source_dir):
+                return read_automation_config(source_dir)
 
-        # Image-baked deploys carry the source INSIDE the image, so the
-        # <gitops_dir>/<checksum>/ blob tree no longer exists. Config like
-        # `expose`, `port` and `services` is stable across the bake, so read it
-        # from the automation's workspace source rather than silently defaulting
-        # to AutomationConfig() — which would un-expose frontends (no ingress
-        # route, no automation_url → the dashboard shows a running frontend as
-        # "Not deployed").
+        # Image-baked: the <gitops_dir>/<checksum> blob tree is gone (the source
+        # lives inside the image). Read automation.toml at the commit the
+        # deployment was built from — the immutable source of truth for what
+        # shipped — NOT the current workspace HEAD.
+        commit = deployment_conf.get("source_commit")
+        if commit:
+            cfg = await self._automation_config_at_commit(relative_path, commit)
+            if cfg is not None:
+                return cfg
+
+        # Legacy deploys predate commit pinning (no source_commit). Best-effort:
+        # read the workspace source so a frontend still exposes rather than
+        # silently defaulting. New deploys always carry source_commit and take
+        # the commit-pinned path above.
         if relative_path:
             ws_dir = os.path.join(self.workspace_repo_dir, relative_path)
             if os.path.exists(ws_dir):
                 return read_automation_config(ws_dir)
         return AutomationConfig()
+
+    async def _automation_config_at_commit(
+        self, relative_path: str, commit: str
+    ) -> "AutomationConfig | None":
+        """automation.toml as it was at `commit`, read from the per-BP repo.
+
+        `relative_path` is workspace-repo-relative (``copies/<scope>/<bp>/<auto>``);
+        the per-BP repo is cloned at ``copies/main/<bp>`` with BP-relative paths
+        (``<auto>/automation.toml``), so we strip the ``copies/<scope>/<bp>/``
+        prefix to address the file inside the repo. Returns None when the path
+        can't be derived or the commit/blob isn't found (caller then decides).
+        """
+        parts = [p for p in (relative_path or "").replace("\\", "/").split("/") if p]
+        # Expect copies/<scope>/<bp>/<automation...>; anything else isn't a
+        # commit-addressable promoted source.
+        if len(parts) < 4 or parts[0] != "copies":
+            return None
+        bp = parts[2]
+        auto_rel = "/".join(parts[3:])
+        clone = os.path.join(_copies_dir(), "main", bp)
+        if not os.path.isdir(os.path.join(clone, ".git")):
+            return None
+        content, _, rc = await call_git_command_with_output(
+            "git", "show", f"{commit}:{auto_rel}/automation.toml", cwd=clone
+        )
+        if rc != 0:
+            return None
+        return parse_automation_toml(content) or AutomationConfig()
 
     async def deploy_automation(
         self,
@@ -4418,7 +4470,7 @@ class AutomationService:
             # logic in write_deployment_entries.
             svcs = services
             if svcs is None:
-                auto_conf = self.resolve_automation_config(deployment_config)
+                auto_conf = await self.resolve_automation_config(deployment_config)
                 if auto_conf.services:
                     svcs = {
                         name: {"enabled": dep_svc.enabled}
@@ -4453,7 +4505,7 @@ class AutomationService:
             deploy_stage = "production"
 
         if not deploy_services:
-            auto_conf = self.resolve_automation_config(deployment_conf)
+            auto_conf = await self.resolve_automation_config(deployment_conf)
             if auto_conf.services:
                 deploy_services = {
                     svc_name: {"enabled": svc_dep.enabled}
