@@ -98,6 +98,14 @@ func NewAutomationServerConfig() *AutomationServerConfig {
 	}
 }
 
+// NewAutomationServerConfigWithDir returns a config manager rooted at an
+// explicit config directory instead of the current user's home. The daemon
+// uses this to read the HOST-side CLI config through its /host mount (the
+// daemon's own config lives in a Docker volume, so the two stores differ).
+func NewAutomationServerConfigWithDir(configDir string) *AutomationServerConfig {
+	return &AutomationServerConfig{configDir: configDir}
+}
+
 // LoadConfig loads the configuration from the TOML file
 func (m *AutomationServerConfig) LoadConfig() (*Config, error) {
 	tomlConfigPath := filepath.Join(m.configDir, "automation_server_config.toml")

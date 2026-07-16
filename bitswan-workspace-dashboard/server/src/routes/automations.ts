@@ -2,6 +2,7 @@ import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { openSse } from '../lib/sse.js';
 import { emailFromRequest, fwRoleFromRequest } from '../lib/user.js';
+import { isValidBpId } from '../services/workspace.js';
 import type { GitopsClient } from '../services/gitops.js';
 
 export interface AutomationRoutesOptions {
@@ -18,6 +19,22 @@ export function registerAutomationRoutes(
   app: FastifyInstance,
   { gitops }: AutomationRoutesOptions,
 ): void {
+  // Reject a malformed `:bp` path param before it can be forwarded to gitops
+  // and reach a filesystem path / git cwd there (#130). Mirrors the isValidBpId
+  // guard the business-processes/templates/coding-agent routes already apply.
+  // Scoped by URL prefix so it only vets `/api/automations/*` routes even
+  // though it is installed on the root instance; covers every current and
+  // future `:bp` route without per-handler duplication.
+  app.addHook('preHandler', async (req, reply) => {
+    if (!req.url.startsWith('/api/automations/')) return;
+    const bp = (req.params as { bp?: unknown } | undefined)?.bp;
+    if (typeof bp === 'string' && !isValidBpId(bp)) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid business process id' });
+    }
+  });
+
   // Deploy from the bind-mounted workspace (no asset upload).
   app.post<{
     Body: { relative_path?: string; stage?: string; copy?: string };
@@ -60,6 +77,9 @@ export function registerAutomationRoutes(
     const { bp, stage, copy } = req.body ?? {};
     if (!bp || typeof bp !== 'string') {
       return reply.code(400).send({ error: 'bp is required' });
+    }
+    if (!isValidBpId(bp)) {
+      return reply.code(400).send({ error: 'invalid business process id' });
     }
     if (stage !== 'dev' && stage !== 'live-dev') {
       return reply
@@ -143,6 +163,9 @@ export function registerAutomationRoutes(
     const { bp, stage } = req.body ?? {};
     if (!bp || typeof bp !== 'string') {
       return reply.code(400).send({ error: 'bp is required' });
+    }
+    if (!isValidBpId(bp)) {
+      return reply.code(400).send({ error: 'invalid business process id' });
     }
     if (stage !== 'staging' && stage !== 'production') {
       return reply
@@ -334,16 +357,26 @@ export function registerAutomationRoutes(
   // Disaster Recovery → record a hand-performed recovery test (versioned).
   app.post<{
     Params: { bp: string };
-    Body: { by?: string; note?: string; snapshot?: string };
+    Body: { note?: string; snapshot?: string };
   }>('/api/automations/business-processes/:bp/dr/tests', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-    const { by, note, snapshot } = req.body ?? {};
-    // Attribute the test to the signed-in user (the client doesn't send `by`).
-    const author = by || (await emailFromRequest(req, app.log)) || undefined;
+    const { note, snapshot } = req.body ?? {};
+    // Recovery-test entries are compliance evidence — only admins/auditors may
+    // record one (same gate as the cadence policy above). Resolve the role from
+    // the validated token (never trust the client) and reject everyone else.
+    const role = await fwRoleFromRequest(req, gitops, app.log);
+    if (role !== 'admin' && role !== 'auditor') {
+      return reply
+        .code(403)
+        .send({ error: 'Recording a recovery test requires an admin or auditor role.' });
+    }
+    // Attribution comes from the validated token, never the client (a
+    // client-supplied `by` would be forged compliance evidence).
+    const by = (await emailFromRequest(req, app.log)) || undefined;
     try {
       const r = await gitops.recordDrTest(req.params.bp, {
-        ...(author ? { by: author } : {}),
+        ...(by ? { by } : {}),
         ...(note ? { note } : {}),
         ...(snapshot ? { snapshot } : {}),
       });
@@ -1024,12 +1057,11 @@ export function registerAutomationRoutes(
       stage?: string;
       checksum?: string;
       relative_path?: string;
-      deployed_by?: string;
     };
   }>('/api/automations/promote', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-    const { automation_name, context, stage, checksum, relative_path, deployed_by } =
+    const { automation_name, context, stage, checksum, relative_path } =
       req.body ?? {};
     if (!automation_name || typeof automation_name !== 'string') {
       return reply.code(400).send({ error: 'automation_name is required' });
@@ -1061,6 +1093,9 @@ export function registerAutomationRoutes(
         ? `${src}-${bp || 'production'}`
         : `${src}-${bpPrefix}${stage}`;
 
+    // Attribution comes from the authenticated token, never the request body
+    // (a client-supplied value would let members forge the deploy audit trail).
+    const deployed_by = (await emailFromRequest(req, app.log)) || undefined;
     try {
       const r = await gitops.promoteDeploy(targetDeploymentId, {
         checksum,
@@ -1129,12 +1164,16 @@ export function registerAutomationRoutes(
     );
   }
 
-  // Container metadata (`docker inspect`) per deployment.
+  // Container metadata (`docker inspect`) per deployment, including its env.
+  // The gate-verified email is passed so gitops can authoritatively decide
+  // which secret env values to reveal (production: admin/auditor only) — the
+  // masking is done server-side in gitops, never in the UI.
   app.get<{ Params: { id: string } }>('/api/automations/:id/inspect', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return [];
     try {
-      return await gitops.inspectAutomation(req.params.id);
+      const email = await emailFromRequest(req, app.log);
+      return await gitops.inspectAutomation(req.params.id, email ?? undefined);
     } catch (err) {
       app.log.warn({ err, id: req.params.id }, 'inspect failed');
       return reply.code(502).send({ error: 'gitops unreachable' });

@@ -17,6 +17,14 @@ function followRedirect(redirectPath) {
   else window.location.reload();
 }
 
+// goSignout is the ONE sign-out path for every gate scene. The backend route
+// ends the oauth2-proxy session and then bounces through Keycloak's
+// end-session endpoint, so the user really lands back on the Keycloak login
+// screen (a bare reload would just re-enter the gate with the same account).
+function goSignout() {
+  window.location.assign('/bailey/signout');
+}
+
 // ─── "Why so complicated?" explainer ────────────────────────────────────────
 // Shared across the device-trust scenes (bootstrap · approval · recovery).
 // A small help link that opens the end-to-end access-control explainer in the
@@ -161,7 +169,7 @@ function BootstrapScene({ onClaim }) {
 //                  then poll GET /pending-pair/poll until {approved:true}.
 //   • Authenticator tab — POST /self-trust {totp} to trust this browser now.
 //                  Shown only when gateState.totp_enrolled.
-function ApprovalScene({ onApproved, goConsole, gateState }) {
+function ApprovalScene({ onApproved, gateState }) {
   // The authenticator tab appears only when this user actually has TOTP
   // enrolled (per the real gate-state).
   const showTotpTab = !!(gateState && gateState.totp_enrolled);
@@ -220,7 +228,7 @@ function ApprovalScene({ onApproved, goConsole, gateState }) {
   };
 
   return (
-    <SceneShell footerNote={<>Wrong account? <button onClick={goConsole} style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Sign out</button></>}>
+    <SceneShell footerNote={<>Wrong account? <button onClick={goSignout} style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Sign out</button></>}>
       <div style={{ padding: '26px 28px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '10px 12px', background: SC.surface, borderRadius: 10, marginBottom: 20 }}>
           <SAvatar user={{ name: email || 'Signed-in user', color: '#2a9d90' }} size={32} />
@@ -466,7 +474,7 @@ function InviteScene({ token, gateState, clearToken, onFallback }) {
     <SceneShell badge={<SPill tone="info" size="xs">Invited</SPill>}
       footerNote={phase === 'error' && err && err.code === 'wrong_account'
         ? undefined
-        : <>Wrong account? <button onClick={() => window.location.assign('/bailey/signout')} style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Sign out</button></>}>
+        : <>Wrong account? <button onClick={goSignout} style={{ border: 0, background: 'transparent', color: SC.primary, cursor: 'pointer', font: 'inherit', fontWeight: 600 }}>Sign out</button></>}>
       <div style={{ padding: '28px 30px 24px' }}>
         {/* signed-in identity card (same chrome as ApprovalScene) */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '10px 12px', background: SC.surface, borderRadius: 10, marginBottom: 20 }}>
@@ -497,7 +505,7 @@ function InviteScene({ token, gateState, clearToken, onFallback }) {
             <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: SC.fg, letterSpacing: '-0.3px' }}>{fail.title}</h1>
             <p style={{ margin: '8px auto 18px', fontSize: 13, color: SC.muted, lineHeight: '19px', maxWidth: 350 }}>{fail.text}</p>
             {err.code === 'wrong_account' ? (
-              <SBtn variant="primary" leftIcon="log-out" onClick={() => window.location.assign('/bailey/signout')} style={{ width: '100%' }}>
+              <SBtn variant="primary" leftIcon="log-out" onClick={goSignout} style={{ width: '100%' }}>
                 Sign out
               </SBtn>
             ) : (

@@ -14,6 +14,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -136,6 +137,22 @@ func (g *gateway) logAttempt(host, proto string, allowed bool) {
 	f.Write(append(line, '\n'))
 }
 
+// dialUpstream connects to an allow-listed host with the destination IP
+// vetted and pinned (see dial.go): the name is resolved once, non-public
+// addresses are rejected in enforce mode, and the connection goes to the
+// exact IP that passed the check. The allow-list alone is not enough — it
+// matches the *name*, and a tenant-controlled name can be re-pointed at the
+// cloud metadata IP or RFC1918 space between check and dial (#131). A
+// non-public rejection is logged as a blocked attempt; plain network/DNS
+// failures stay silent as before.
+func (g *gateway) dialUpstream(host, port, proto string) (net.Conn, error) {
+	conn, err := dialPinned(host, port, g.mode == "enforce", 10*time.Second)
+	if err != nil && errors.Is(err, errNonPublic) {
+		g.logAttempt(host, proto, false)
+	}
+	return conn, err
+}
+
 // handleTLS peeks the ClientHello SNI, then splices to <sni>:443.
 func (g *gateway) handleTLS(c net.Conn) {
 	defer c.Close()
@@ -149,7 +166,7 @@ func (g *gateway) handleTLS(c net.Conn) {
 	if !g.decide(sni, "tls") {
 		return
 	}
-	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(sni, "443"), 10*time.Second)
+	upstream, err := g.dialUpstream(sni, "443", "tls")
 	if err != nil {
 		return
 	}
@@ -176,7 +193,7 @@ func (g *gateway) handleHTTP(c net.Conn) {
 	if !g.decide(host, "http") {
 		return
 	}
-	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(normalizeHost(host), "80"), 10*time.Second)
+	upstream, err := g.dialUpstream(host, "80", "http")
 	if err != nil {
 		return
 	}

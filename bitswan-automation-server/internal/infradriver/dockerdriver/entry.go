@@ -215,13 +215,17 @@ func (c *compileState) resolveAutomationConfig(conf *Deployment) automationConfi
 	stage := conf.StageOrProduction()
 	rel := conf.RelativePath
 
+	// Tenant-supplied path elements are containment-checked before use (#134):
+	// an uncontained join would read automation.toml from an arbitrary host
+	// path. An escaping element behaves like a missing source dir here; the
+	// hard rejection happens in buildServiceEntry.
 	var sourceDir string
 	if stage == "live-dev" && rel != "" {
-		sourceDir = filepath.Join(c.workspaceRepo, rel)
+		sourceDir, _ = containedJoin(c.workspaceRepo, rel)
 	} else {
 		src := firstNonEmpty(conf.Source, conf.Checksum)
 		if src != "" {
-			sourceDir = filepath.Join(c.gitopsDir, src)
+			sourceDir, _ = containedJoin(c.gitopsDir, src)
 		}
 	}
 	if sourceDir != "" {
@@ -230,9 +234,10 @@ func (c *compileState) resolveAutomationConfig(conf *Deployment) automationConfi
 		}
 	}
 	if rel != "" {
-		wsDir := filepath.Join(c.workspaceRepo, rel)
-		if _, err := os.Stat(wsDir); err == nil {
-			return readAutomationConfig(wsDir)
+		if wsDir, err := containedJoin(c.workspaceRepo, rel); err == nil {
+			if _, err := os.Stat(wsDir); err == nil {
+				return readAutomationConfig(wsDir)
+			}
 		}
 	}
 	return defaultAutomationConfig()
@@ -274,14 +279,29 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		slotDeploymentID = depID + "@" + slot
 	}
 
+	// CONTAINMENT (#134): source/checksum and relative_path come from the
+	// tenant-writable deployment record and are joined onto trusted roots
+	// below to build bind-mount SOURCES. Reject any element whose join
+	// escapes its root — otherwise a crafted `../..` checksum/relative_path
+	// makes the driver (which holds the docker socket) mount an arbitrary
+	// host path into a driver-managed container. Mirrors the containment
+	// check gitops applies in prep_deploy_source.
 	source := firstNonEmpty(firstNonEmpty(conf.Source, conf.Checksum), depID)
-	sourceDir := filepath.Join(c.gitopsDir, source)
+	sourceDir, err := containedJoin(c.gitopsDir, source)
+	if err != nil {
+		return nil, "", nil, false, fmt.Errorf("deployment %s: %w", depID, err)
+	}
 
 	stage := conf.Stage
 	if stage == "" {
 		stage = "production"
 	}
 	rel := conf.RelativePath
+	if rel != "" {
+		if _, err := containedJoin(c.workspaceRepo, rel); err != nil {
+			return nil, "", nil, false, fmt.Errorf("deployment %s: %w", depID, err)
+		}
+	}
 
 	cfg := c.resolveAutomationConfig(conf)
 
@@ -632,7 +652,13 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	// service gets are the named-volume subpaths the compiler constructs below;
 	// container_name is the compiler-derived serviceName set earlier.
 
-	deploymentDirHost := filepath.Join(c.gitopsDirHost, source)
+	// Same containment against the HOST root the mount string is built from
+	// (#134). `source` already passed the gitopsDir check above; this keeps
+	// the invariant local to the join that actually reaches docker.
+	deploymentDirHost, err := containedJoin(c.gitopsDirHost, source)
+	if err != nil {
+		return nil, "", nil, false, fmt.Errorf("deployment %s: %w", depID, err)
+	}
 
 	// ---- image ----
 	entry["image"] = cfg.Image
@@ -761,7 +787,17 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 				"volume":    map[string]interface{}{"subpath": subpath},
 			})
 		} else {
-			sourceMountPath := filepath.Join(c.workspaceDir, rel)
+			sourceMountPath, err := containedJoin(c.workspaceDir, rel)
+			if err != nil {
+				return nil, "", nil, false, fmt.Errorf("deployment %s: %w", depID, err)
+			}
+			// Realpath re-check (#134) through the container-visible workspace
+			// repo (the twin of the host-side workspaceDir): a symlink committed
+			// at rel would make the host bind resolve outside the workspace even
+			// though the lexical join above is contained.
+			if err := assertRealUnder(c.workspaceRepo, filepath.Join(c.workspaceRepo, rel)); err != nil {
+				return nil, "", nil, false, fmt.Errorf("deployment %s: %w", depID, err)
+			}
 			vols = append(vols, sourceMountPath+":"+cfg.MountPath+":ro")
 		}
 	case conf.Image != "":
@@ -777,6 +813,12 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 				"volume":    map[string]interface{}{"subpath": subpath},
 			})
 		} else {
+			// Realpath re-check (#134) through the container-visible gitops dir
+			// (the twin of gitopsDirHost): the lexical containment above cannot
+			// see a symlinked <checksum> entry pointing outside the gitops tree.
+			if err := assertRealUnder(c.gitopsDir, sourceDir); err != nil {
+				return nil, "", nil, false, fmt.Errorf("deployment %s: %w", depID, err)
+			}
 			vols = append(vols, deploymentDirHost+":"+cfg.MountPath+":ro")
 		}
 	}

@@ -47,6 +47,31 @@ from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
+# Placeholder returned instead of a secret env value the caller may not see
+# (Inspect → env view). Masking happens HERE, server-side — the real value
+# never leaves gitops for an unprivileged caller.
+SECRET_MASK = "****"
+
+
+def _mask_env(env_list: list, secret_keys: set, reveal: bool) -> list[dict]:
+    """Parse docker-inspect `Config.Env` ("KEY=VALUE" strings) into
+    [{name, value, secret, masked}] rows, replacing secret values with
+    SECRET_MASK unless `reveal`. Names are always shown."""
+    out: list[dict] = []
+    for entry in env_list:
+        name, _, value = str(entry).partition("=")
+        is_secret = name in secret_keys
+        masked = is_secret and not reveal
+        out.append(
+            {
+                "name": name,
+                "value": SECRET_MASK if masked else value,
+                "secret": is_secret,
+                "masked": masked,
+            }
+        )
+    return out
+
 
 @lru_cache(maxsize=2048)
 def _parse_revision_bitswan(gitops_dir: str, sha: str) -> dict:
@@ -415,11 +440,80 @@ class AutomationService:
         )
         return [c.to_docker_dict() for c in containers]
 
-    async def inspect_automation(self, deployment_id: str) -> list[dict]:
-        """The deployment's containers (the driver-derived dict). The full raw
-        `docker inspect` is no longer exposed to gitops; callers that needed
-        identity/state read it off these fields."""
-        return await self.get_container(deployment_id)
+    async def inspect_automation(
+        self, deployment_id: str, by: str | None = None
+    ) -> list[dict]:
+        """The deployment's containers (the driver-derived dict), each enriched
+        with its environment (`Env`: [{name, value, secret, masked}]) read from
+        the driver's raw `docker inspect`.
+
+        Secret env values (names in the BP's secret set for the deployment's
+        realm) are MASKED here, server-side — a masked value never leaves
+        gitops. `by` is a shim-verified email; visibility follows the secrets
+        RBAC: production secrets are admin/auditor-only, non-production secrets
+        are visible to any known Bailey role. Missing identity or a role-lookup
+        failure fails CLOSED (all secret values masked). Names are always
+        shown."""
+        containers = await self.get_container(deployment_id)
+        if not containers:
+            return containers
+        secret_keys, reveal = self._env_secret_visibility(deployment_id, by)
+        for c in containers:
+            cid = c.get("Id")
+            if not cid:
+                continue
+            try:
+                info = await self.infra_driver.container_inspect(
+                    self._workspace_ctx(), cid
+                )
+                env_list = ((info or {}).get("Config") or {}).get("Env") or []
+            except Exception:
+                logger.warning(
+                    "container_inspect failed for %s; omitting env", cid[:12]
+                )
+                continue
+            c["Env"] = _mask_env(env_list, secret_keys, reveal)
+        return containers
+
+    # Roles allowed to see NON-production secret values in the env view: any
+    # role the daemon's authoritative store knows ("normal users"). Production
+    # values stay behind _FW_ROLES (admin/auditor). An unknown email resolves
+    # to "" and is never in either set — fail closed.
+    _ENV_REVEAL_ROLES = ("admin", "auditor", "member", "user")
+
+    def _env_secret_visibility(
+        self, deployment_id: str, by: str | None
+    ) -> tuple[set[str], bool]:
+        """(secret_keys, reveal) for a deployment's env view. `secret_keys` are
+        the env var NAMES provisioned from the BP's secret set for the
+        deployment's realm (dev covers live-dev); `reveal` says whether `by`
+        may see their values. The role comes from the daemon's authoritative
+        store — never the caller — and any lookup failure fails CLOSED."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        conf = (bs.get("deployments") or {}).get(deployment_id) or {}
+        bp = deployment_bp(conf, conf.get("context") or "")
+        realm = bp_secrets.realm_for_stage(conf.get("stage") or "production")
+        secret_keys: set[str] = set()
+        if bp:
+            blob = ((bs.get("secrets") or {}).get(bp) or {}).get(realm)
+            if blob:
+                secret_keys = set(bp_secrets.decrypt_secrets(self.secrets_dir, blob))
+        if not secret_keys:
+            return secret_keys, False
+        role = ""
+        if by:
+            try:
+                role = daemon_user_role(by)
+            except Exception:
+                logger.warning(
+                    "role lookup failed for %s; masking secret env values", by
+                )
+                role = ""
+        if realm == "production":
+            reveal = role in self._FW_ROLES
+        else:
+            reveal = role in self._ENV_REVEAL_ROLES
+        return secret_keys, reveal
 
     async def get_containers(self) -> list[dict]:
         """All of the workspace's deployment containers, via the driver. The
@@ -1019,7 +1113,12 @@ class AutomationService:
         entries = existing.split()
         missing = [
             e
-            for e in (".builds/", ".live-dev-access/", ".sleep-state/")
+            for e in (
+                ".builds/",
+                ".live-dev-access/",
+                ".sleep-state/",
+                ".live-dev-src/",
+            )
             if e not in entries
         ]
         if missing:
@@ -1066,6 +1165,52 @@ class AutomationService:
         if stage == "dev":
             return source["deployment_id"].removesuffix("-live-dev") + "-dev"
         return source["deployment_id"]
+
+    def _contained_under(self, root: str, rel: str) -> bool:
+        """True iff joining `rel` onto `root` still lands inside `root` once
+        `..` segments and symlinks are resolved (realpath) — the same
+        containment rule `prep_deploy_source` enforces on scanned sources."""
+        root_real = os.path.realpath(root)
+        target = os.path.realpath(os.path.join(root, rel))
+        return target == root_real or target.startswith(root_real + os.sep)
+
+    def validate_deploy_source_refs(
+        self,
+        checksum: str | None = None,
+        relative_path: str | None = None,
+    ) -> None:
+        """Containment guard for tenant-supplied deploy source refs (#134).
+
+        `POST /automations/{id}/deploy` accepts `checksum` / `relative_path`
+        verbatim and `deploy_automation` persists them into bitswan.yaml —
+        bypassing the realpath containment `prep_deploy_source` applies on
+        the scanned-source path. The infra driver later joins these strings
+        onto its gitops / workspace roots to build read-only bind-mount
+        SOURCES, so an uncontained `../..` value would make the driver
+        (which holds the docker socket) mount an arbitrary host path into a
+        driver-managed container. Reject anything that escapes:
+
+          * `checksum` must resolve STRICTLY below the gitops dir (the root
+            itself holds every other deployment's tree — never a valid
+            mount source);
+          * `relative_path` must stay inside the workspace repo, mirroring
+            `prep_deploy_source`'s "Source escapes workspace" check.
+
+        The driver re-checks the same invariant when it compiles the mount
+        (defense in depth); this is the write-time gate.
+        """
+        if checksum:
+            gitops_real = os.path.realpath(self.gitops_dir)
+            target = os.path.realpath(os.path.join(self.gitops_dir, checksum))
+            if not target.startswith(gitops_real + os.sep):
+                raise HTTPException(
+                    status_code=400,
+                    detail="checksum escapes the gitops directory",
+                )
+        if relative_path and not self._contained_under(
+            self.workspace_repo_dir, relative_path
+        ):
+            raise HTTPException(status_code=400, detail="Source escapes workspace")
 
     async def prep_deploy_source(
         self,
@@ -1486,6 +1631,7 @@ class AutomationService:
         shows up here and is a rollback point too. Newest-first; `current` = the
         newest *deploy* entry's commit (the live version — firewall events never
         change which version is live)."""
+        validate_bp_name(bp)
         stage_key = "production" if stage in ("", "production") else stage
         realm = bp_secrets.realm_for_stage(stage_key)
         # History is the git log of this BP's OWN deploy repo (one bitswan.yaml
@@ -1723,6 +1869,7 @@ class AutomationService:
         is the history entry's commit sha; the restore's own commit ("rollback …")
         becomes the new history entry, and the driver re-applies (recreating
         containers, re-deriving the backend's secret env, reloading firewall)."""
+        validate_bp_name(bp)
         stage_key = "production" if stage in ("", "production") else stage
         bp_dir = bp_state_path(self.gitops_dir, bp)
         content, _, rc = await call_git_command_with_output(
@@ -3150,6 +3297,7 @@ class AutomationService:
         reloads the egress gateway for any deployed members so enforcement
         immediately reflects the restored allow-list. Production rollbacks
         require an admin/auditor role (same gate as live edits)."""
+        validate_bp_name(bp)
         self._require_fw_role(stage, role)
         realm = bp_secrets.realm_for_stage(stage)
         # Fail loudly if the revision does not exist (rather than silently
@@ -3212,6 +3360,7 @@ class AutomationService:
         """Absolute path of the stored DPA PDF for a BP host, or None. Stored in
         the BP's own deploy repo (gitops/bp/<bp>/firewall-dpa/), versioned with
         its firewall rules."""
+        validate_bp_name(bp)
         p = os.path.join(
             bp_state_path(self.gitops_dir, bp), self._dpa_rel(bp, host.strip().lower())
         )
@@ -3229,6 +3378,7 @@ class AutomationService:
     ) -> dict:
         """Store a host's DPA PDF in the gitops repo (firewall-dpa/<bp>/) and
         version it. Production needs admin/auditor, same as a rule change."""
+        validate_bp_name(bp)
         self._require_fw_role(stage, role)
         if not content:
             raise HTTPException(status_code=400, detail="empty DPA upload")
@@ -3537,6 +3687,17 @@ class AutomationService:
         # after a set-deploy or promote sees "No container found" until an
         # unrelated event refreshes it.
         await self.refresh_all()
+
+        # Pin each live-dev member's source-dir inode per container (#123): a
+        # volume-subpath mount resolves the directory inode at container START,
+        # so a later delete+recreate of the copy/BP/automation dir leaves a
+        # running container serving the old, deleted inode ("Up" but blank).
+        # Recording what each container started with is what lets
+        # wake_live_dev detect the replacement and recycle the instance.
+        try:
+            await self.record_live_dev_source_inodes(deployment_ids)
+        except Exception:  # noqa: BLE001 — bookkeeping must never fail a deploy
+            logger.warning("recording live-dev source inodes failed", exc_info=True)
 
         return {"deployment_ids": list(deployment_ids)}
 
@@ -4382,6 +4543,13 @@ class AutomationService:
             if progress_callback is not None:
                 await progress_callback(step, message)
 
+        # Containment guard (#134): checksum / relative_path are persisted
+        # verbatim into bitswan.yaml below and later joined onto trusted
+        # roots by the infra driver to build mount sources. Validate here —
+        # not only in the HTTP route — so every caller (deploy route, agent
+        # routes) is covered before anything is written.
+        self.validate_deploy_source_refs(checksum=checksum, relative_path=relative_path)
+
         os.environ["COMPOSE_PROJECT_NAME"] = self.workspace_name
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
 
@@ -4781,6 +4949,120 @@ class AutomationService:
         except OSError:
             logger.debug("touch live-dev access failed for %s", context, exc_info=True)
 
+    # ── Stale source-mount detection (#123) ─────────────────────────────────
+    # Live-dev containers mount their source as a volume SUBPATH; docker
+    # resolves the subpath to a directory inode when the container starts.
+    # When that directory is later deleted + recreated at the same path (git
+    # rebase/reset in the copy clone, an agent's rm -rf + re-checkout, copy or
+    # automation re-materialization), the running container keeps the old
+    # deleted inode: /app is empty, the frontend serves a blank 404, `docker
+    # exec` fails — while everything on disk looks correct and the container
+    # is "Up". We therefore record, per container, the source-dir inode at
+    # deploy time (right after the compose apply that created it) in a
+    # non-committed marker dir (mirrors .live-dev-access), and the wake path —
+    # which fires on every BP load — compares it against the dir's current
+    # inode. A mismatch means "the dir was replaced under the container": the
+    # instance is recycled (containers removed + redeployed) so the subpath
+    # mount re-resolves.
+
+    def _live_dev_src_dir(self) -> str:
+        return os.path.join(self.gitops_dir, ".live-dev-src")
+
+    def _source_dir_inode(self, conf: dict) -> int | None:
+        """Current inode of a live-dev deployment's mounted source dir, or None
+        when the deployment has no source mount (not live-dev / no
+        relative_path) or the dir is missing (recycling can't help then)."""
+        conf = conf or {}
+        if (conf.get("stage") or "") != "live-dev":
+            return None
+        rel = conf.get("relative_path") or ""
+        if not rel:
+            return None
+        try:
+            return os.stat(os.path.join(self.workspace_repo_dir, rel)).st_ino
+        except OSError:
+            return None
+
+    def _read_live_dev_src_markers(self, deployment_id: str) -> dict[str, int]:
+        """{container_id: inode-at-start} recorded for a deployment. Missing or
+        unreadable marker = empty (detection then abstains — never a recycle)."""
+        try:
+            with open(
+                os.path.join(
+                    self._live_dev_src_dir(), sanitize_automation_name(deployment_id)
+                )
+            ) as f:
+                data = json.load(f)
+            return (
+                {k: int(v) for k, v in data.items()} if isinstance(data, dict) else {}
+            )
+        except (OSError, ValueError):
+            return {}
+
+    def _write_live_dev_src_markers(
+        self, deployment_id: str, markers: dict[str, int]
+    ) -> None:
+        try:
+            d = self._live_dev_src_dir()
+            os.makedirs(d, exist_ok=True)
+            with open(
+                os.path.join(d, sanitize_automation_name(deployment_id)), "w"
+            ) as f:
+                json.dump(markers, f)
+        except OSError:
+            logger.debug(
+                "write live-dev src marker failed for %s", deployment_id, exc_info=True
+            )
+
+    async def record_live_dev_source_inodes(self, deployment_ids: list[str]) -> None:
+        """After a compose apply: pin the source-dir inode per container for
+        each live-dev member. A container id already recorded KEEPS its
+        original inode — `docker compose up` leaves an unchanged running
+        container alone, so a surviving container still holds whatever it
+        mounted at its start and re-recording the current inode would paper
+        over exactly the staleness we detect. New ids get the current inode
+        (they just started against it); vanished ids are dropped."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        flat = bs.get("deployments") or {}
+        for dep in deployment_ids:
+            ino = self._source_dir_inode(flat.get(dep) or {})
+            if ino is None:
+                continue
+            try:
+                old = self._read_live_dev_src_markers(dep)
+                cur: dict[str, int] = {}
+                for c in await self.get_container(dep):
+                    cid = c.get("Id")
+                    if cid:
+                        cur[cid] = old.get(cid, ino)
+                self._write_live_dev_src_markers(dep, cur)
+            except Exception:  # noqa: BLE001 — bookkeeping only
+                logger.debug(
+                    "record live-dev source inode failed for %s", dep, exc_info=True
+                )
+
+    async def _stale_live_dev_members(self, deployment_ids: list[str]) -> list[str]:
+        """Members whose recorded container inode no longer matches the source
+        dir on disk — i.e. the dir was replaced under a live container. Members
+        without a marker (e.g. the container came up outside our apply spine)
+        are never flagged: detection abstains rather than guesses."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        flat = bs.get("deployments") or {}
+        stale: list[str] = []
+        for dep in deployment_ids:
+            ino = self._source_dir_inode(flat.get(dep) or {})
+            if ino is None:
+                continue
+            markers = self._read_live_dev_src_markers(dep)
+            if not markers:
+                continue
+            for c in await self.get_container(dep):
+                rec = markers.get(c.get("Id"))
+                if rec is not None and rec != ino:
+                    stale.append(dep)
+                    break
+        return stale
+
     # ── Sleep-reason tracking ────────────────────────────────────────────────
     # WHY a deployment is asleep — "memory-pressure" (the automatic budget/LRU
     # sweep) or "manual" (an operator's Sleep action). Persisted as a
@@ -5001,7 +5283,11 @@ class AutomationService:
         ALWAYS stamps last-activity (so opening a BP keeps it hot / makes this a
         true-LRU touch). If the instance is already running or mid-startup it's a
         no-op beyond that touch (we never disturb a healthy instance, and the
-        loading page / dashboard fire this repeatedly). Otherwise it re-activates
+        loading page / dashboard fire this repeatedly) — UNLESS a member's source
+        dir was replaced under its running container (stale subpath mount, #123):
+        then the instance is recycled (containers removed + redeployed) so the
+        mount re-resolves, because a "healthy" container pinned to a deleted
+        inode serves a blank page forever. Otherwise it re-activates
         the members (so the compiler includes them again) and redeploys to
         recreate the removed containers, then re-enforces the cap. Returns the
         deployment_ids so a caller can poll health / show a loading screen."""
@@ -5009,7 +5295,44 @@ class AutomationService:
         instances = await self._live_dev_instances()
         inst = instances.get(context)
         if inst and inst["hydrating"]:
-            return {"context": context, "deployment_ids": [], "already_running": True}
+            deps = sorted(inst["deployment_ids"])
+            stale = await self._stale_live_dev_members(deps)
+            if not stale:
+                return {
+                    "context": context,
+                    "deployment_ids": [],
+                    "already_running": True,
+                }
+            # Stale subpath mount: the copy dir was deleted + recreated while the
+            # container ran, so its mount points at the old deleted inode. A plain
+            # redeploy would NOT fix it (unchanged compose config → docker compose
+            # leaves the running container alone), so remove the whole instance's
+            # containers first — recreating the full instance keeps its members'
+            # mounts consistent — then redeploy; compose recreates them and the
+            # subpath re-resolves to the new directory.
+            logger.warning(
+                "RECYCLE live-dev %s: stale source mount detected on %s "
+                "(source dir replaced under the running container, #123)",
+                context,
+                ", ".join(stale),
+            )
+            ctx = self._workspace_ctx()
+            for dep in deps:
+                for c in await self.get_container(dep):
+                    cid = c.get("Id")
+                    if cid:
+                        try:
+                            await self.infra_driver.container_remove(ctx, cid)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(
+                                "stale-mount recycle: removing %s failed: %s", cid, e
+                            )
+            try:
+                await self.apply_compose_for_deployments(deps, report=None)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("live-dev recycle redeploy of %s failed: %s", context, e)
+            await self.enforce_live_dev_cap()
+            return {"context": context, "deployment_ids": deps, "recycled": stale}
 
         # Members of this instance: from live containers if any survive, else
         # from the (inactive) deploy entries left behind by eviction.

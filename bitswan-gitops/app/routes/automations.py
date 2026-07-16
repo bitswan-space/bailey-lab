@@ -2,6 +2,7 @@ import asyncio
 import json as _json
 import logging
 import os
+from typing import Annotated
 
 from fastapi import (
     APIRouter,
@@ -20,11 +21,32 @@ from pydantic import BaseModel
 from app.deploy_manager import DeployStatus, DeployStep, deploy_manager
 from app.event_broadcaster import event_broadcaster
 from app.services.automation_service import AutomationService, make_hostname_label
+from app.services.git_server import validate_bp_name
 from app.dependencies import get_automation_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/automations", tags=["automations"])
+
+
+def _require_valid_bp(bp: str) -> None:
+    """Boundary guard for business-process names (#130): every route that takes
+    a `bp` rejects unsafe names (path separators, `..`, leading `-`/`.`) BEFORE
+    the name can reach a filesystem path or a git cwd."""
+    try:
+        validate_bp_name(bp)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _validated_bp(bp: str) -> str:
+    """FastAPI dependency form of `_require_valid_bp` for `{bp}` path params."""
+    _require_valid_bp(bp)
+    return bp
+
+
+# Annotate a route's `bp` path param with this to get the #130 guard.
+ValidBp = Annotated[str, Depends(_validated_bp)]
 
 # Strong references to background deploy tasks — prevents GC before completion
 _bg_tasks: set[asyncio.Task] = set()
@@ -74,7 +96,7 @@ class RollbackBPRequest(BaseModel):
 
 @router.get("/business-processes/{bp}/history")
 async def get_bp_history(
-    bp: str,
+    bp: ValidBp,
     stage: str = Query("dev"),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -85,7 +107,7 @@ async def get_bp_history(
 
 @router.get("/business-processes/{bp}/diff")
 async def get_bp_diff(
-    bp: str,
+    bp: ValidBp,
     from_sha: str = Query(..., alias="from"),
     to: str = Query(...),
     automation_service: AutomationService = Depends(get_automation_service),
@@ -101,7 +123,7 @@ class ScaleBPRequest(BaseModel):
 
 @router.post("/business-processes/{bp}/scale")
 async def scale_bp(
-    bp: str,
+    bp: ValidBp,
     body: ScaleBPRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -122,7 +144,7 @@ class BpSecretsRequest(BaseModel):
 
 @router.get("/business-processes/{bp}/secrets")
 async def get_bp_secrets_route(
-    bp: str,
+    bp: ValidBp,
     by: str | None = None,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -134,7 +156,7 @@ async def get_bp_secrets_route(
 
 @router.put("/business-processes/{bp}/secrets")
 async def put_bp_secrets_route(
-    bp: str,
+    bp: ValidBp,
     body: BpSecretsRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -181,7 +203,7 @@ async def get_user_role_route(email: str):
 
 @router.get("/business-processes/{bp}/dr")
 async def get_bp_dr_route(
-    bp: str,
+    bp: ValidBp,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """A BP's disaster-recovery status: test cadence policy, the manual
@@ -191,7 +213,7 @@ async def get_bp_dr_route(
 
 @router.put("/business-processes/{bp}/dr/policy")
 async def put_bp_dr_policy_route(
-    bp: str,
+    bp: ValidBp,
     body: DrPolicyRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -206,7 +228,7 @@ async def put_bp_dr_policy_route(
 
 @router.post("/business-processes/{bp}/dr/tests")
 async def post_bp_dr_test_route(
-    bp: str,
+    bp: ValidBp,
     body: DrTestRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -307,7 +329,7 @@ class BackupSwapRequest(BaseModel):
 
 @router.get("/business-processes/{bp}/backups")
 async def get_bp_backups_route(
-    bp: str,
+    bp: ValidBp,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """A BP's backup state: which production slot is live (Production) vs standby
@@ -317,7 +339,7 @@ async def get_bp_backups_route(
 
 @router.put("/business-processes/{bp}/backups/retention")
 async def put_bp_backup_retention_route(
-    bp: str,
+    bp: ValidBp,
     body: BackupRetentionRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -331,7 +353,7 @@ async def put_bp_backup_retention_route(
 
 @router.post("/business-processes/{bp}/backups/swap")
 async def post_bp_backup_swap_route(
-    bp: str,
+    bp: ValidBp,
     body: BackupSwapRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -345,7 +367,7 @@ async def post_bp_backup_swap_route(
 
 @router.post("/business-processes/{bp}/backups/promote")
 async def post_bp_zero_downtime_promote_route(
-    bp: str,
+    bp: ValidBp,
     body: BackupSwapRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -370,7 +392,7 @@ class SupplyChainWaiverRequest(BaseModel):
 
 @router.get("/business-processes/{bp}/supply-chain")
 async def get_bp_supply_chain(
-    bp: str,
+    bp: ValidBp,
     stage: str = Query("dev"),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -381,7 +403,7 @@ async def get_bp_supply_chain(
 
 @router.get("/business-processes/{bp}/supply-chain/preview")
 async def get_bp_supply_chain_preview(
-    bp: str,
+    bp: ValidBp,
     copy: str | None = Query(None),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -394,7 +416,7 @@ async def get_bp_supply_chain_preview(
 
 @router.post("/business-processes/{bp}/supply-chain/waivers")
 async def post_bp_supply_chain_waiver(
-    bp: str,
+    bp: ValidBp,
     body: SupplyChainWaiverRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -407,7 +429,7 @@ async def post_bp_supply_chain_waiver(
 
 @router.delete("/business-processes/{bp}/supply-chain/waivers")
 async def delete_bp_supply_chain_waiver(
-    bp: str,
+    bp: ValidBp,
     body: SupplyChainWaiverRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -443,7 +465,7 @@ class FirewallPromoteRequest(BaseModel):
 
 @router.get("/business-processes/{bp}/firewall")
 async def get_bp_firewall(
-    bp: str,
+    bp: ValidBp,
     stage: str = Query("dev"),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -453,7 +475,7 @@ async def get_bp_firewall(
 
 @router.put("/business-processes/{bp}/firewall/rules")
 async def put_bp_firewall_rule(
-    bp: str,
+    bp: ValidBp,
     body: FirewallRuleRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -473,7 +495,7 @@ async def put_bp_firewall_rule(
 
 @router.delete("/business-processes/{bp}/firewall/rules")
 async def delete_bp_firewall_rule(
-    bp: str,
+    bp: ValidBp,
     body: FirewallDeleteRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -485,7 +507,7 @@ async def delete_bp_firewall_rule(
 
 @router.post("/business-processes/{bp}/firewall/promote")
 async def promote_bp_firewall(
-    bp: str,
+    bp: ValidBp,
     body: FirewallPromoteRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -497,7 +519,7 @@ async def promote_bp_firewall(
 
 @router.post("/business-processes/{bp}/firewall/dpa")
 async def upload_bp_firewall_dpa(
-    bp: str,
+    bp: ValidBp,
     stage: str = Form(...),
     host: str = Form(...),
     by: str | None = Form(None),
@@ -515,7 +537,7 @@ async def upload_bp_firewall_dpa(
 
 @router.get("/business-processes/{bp}/firewall/dpa")
 async def get_bp_firewall_dpa(
-    bp: str,
+    bp: ValidBp,
     host: str = Query(...),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -528,7 +550,7 @@ async def get_bp_firewall_dpa(
 
 @router.get("/business-processes/{bp}/files")
 async def get_bp_files(
-    bp: str,
+    bp: ValidBp,
     commit: str = Query(...),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -538,7 +560,7 @@ async def get_bp_files(
 
 @router.get("/business-processes/{bp}/file-content")
 async def get_bp_file_content(
-    bp: str,
+    bp: ValidBp,
     commit: str = Query(...),
     path: str = Query(...),
     automation_service: AutomationService = Depends(get_automation_service),
@@ -549,7 +571,7 @@ async def get_bp_file_content(
 
 @router.get("/business-processes/{bp}/bundle")
 async def get_bp_bundle(
-    bp: str,
+    bp: ValidBp,
     stage: str = Query(...),
     commit: str = Query(...),
     automation_service: AutomationService = Depends(get_automation_service),
@@ -568,7 +590,7 @@ async def get_bp_bundle(
 
 @router.get("/business-processes/{bp}/secrets-snapshot")
 async def get_bp_secrets_snapshot(
-    bp: str,
+    bp: ValidBp,
     commit: str = Query(...),
     stage: str = Query(...),
     by: str | None = None,
@@ -583,7 +605,7 @@ async def get_bp_secrets_snapshot(
 
 @router.post("/business-processes/{bp}/rollback")
 async def rollback_bp(
-    bp: str,
+    bp: ValidBp,
     body: RollbackBPRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -676,6 +698,7 @@ async def deploy_bp(
     tracked under a single BP-level task broadcast over the `deploy_progress`
     SSE event and pollable via `/automations/deploy-status/{task_id}`.
     """
+    _require_valid_bp(body.bp)
     if body.stage not in ("dev", "live-dev"):
         raise HTTPException(
             status_code=400,
@@ -734,7 +757,7 @@ class WakeLiveDevRequest(BaseModel):
 
 @router.post("/business-processes/{bp}/wake-live-dev")
 async def wake_live_dev_route(
-    bp: str,
+    bp: ValidBp,
     body: WakeLiveDevRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -760,7 +783,7 @@ def _context_for(bp: str, copy: str | None) -> str:
 
 @router.post("/business-processes/{bp}/sleep")
 async def sleep_bp_stage(
-    bp: str,
+    bp: ValidBp,
     body: StageActionRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -775,7 +798,7 @@ async def sleep_bp_stage(
 
 @router.post("/business-processes/{bp}/wake")
 async def wake_bp_stage(
-    bp: str,
+    bp: ValidBp,
     body: StageActionRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -861,6 +884,7 @@ async def promote_bp(
     `deploy_progress` SSE event and pollable via
     `/automations/deploy-status/{task_id}`.
     """
+    _require_valid_bp(body.bp)
     if body.stage not in ("staging", "production"):
         raise HTTPException(
             status_code=400,
@@ -1183,6 +1207,14 @@ async def deploy_automation(
             detail="Stage must be one of: dev, staging, production, live-dev",
         )
 
+    # Containment guard (#134): checksum / relative_path are written verbatim
+    # into bitswan.yaml and later joined onto the gitops / workspace roots by
+    # the infra driver to build bind-mount sources. Reject escaping values
+    # here so the caller gets a synchronous 400 instead of a failed task.
+    automation_service.validate_deploy_source_refs(
+        checksum=checksum, relative_path=relative_path
+    )
+
     replicas_int = int(replicas) if replicas else None
 
     services_dict = None
@@ -1277,9 +1309,14 @@ async def stream_automation_logs(
 @router.get("/{deployment_id}/inspect")
 async def inspect_automation(
     deployment_id: str,
+    by: str | None = None,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    return await automation_service.inspect_automation(deployment_id)
+    """The deployment's containers with their env. Secret env values are masked
+    server-side unless `by` (a shim-verified email, same contract as the
+    secrets routes) resolves to a role allowed to see them: production secrets
+    need admin/auditor, other stages any known role. Fails closed."""
+    return await automation_service.inspect_automation(deployment_id, by=by)
 
 
 @router.delete("/{deployment_id}")

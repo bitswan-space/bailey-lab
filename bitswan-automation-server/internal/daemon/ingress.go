@@ -737,8 +737,10 @@ func addRouteToIngress(req IngressAddRouteRequest, jwtToken string) error {
 	//
 	// Parent linkage: workspace-spawned routes (gitops deploying
 	// automations / business processes / live-dev services) delegate
-	// membership to the workspace's dashboard endpoint, so everyone in
-	// the workspace can share what they deploy there (see roleFor). The
+	// membership to the workspace's dashboard endpoint, so every member
+	// of the workspace can reach what is deployed there at the role they
+	// hold on the dashboard — owners own it, access members can open it
+	// (see roleFor; delegation never upgrades access→owner). The
 	// association is explicit data: the caller states it via
 	// req.ParentEndpoint, or the daemon reads the dashboard hostname
 	// recorded in the workspace's own metadata.

@@ -1,4 +1,4 @@
-import { GitBranch, GitMerge, Plus, Rocket } from 'lucide-react';
+import { GitBranch, GitMerge, Loader2, Plus, Rocket } from 'lucide-react';
 import { AgentFilesTab } from '@/components/views/AgentFilesTab';
 import { EnvironmentPanel } from '@/components/agents/EnvironmentPanel';
 import { DeploymentsTab } from '@/components/views/DeploymentsTab';
@@ -15,6 +15,11 @@ interface WorkspaceViewProps {
   bp: BusinessProcess | null;
   // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
   wt: Copy | null;
+  /** A copy is selected but hasn't arrived in the copies snapshot yet — it's
+   *  still being created (first-login personal copy, or one just created via
+   *  the dialog). Copy-scoped empty states show "Creating copy…" instead of
+   *  "No copy yet" while this is true (#160). */
+  copyCreating?: boolean;
   tab: FlowTab;
   onTab: (t: FlowTab) => void;
   /** Open the "new business process" flow (the dialog lives in TopNav). */
@@ -26,7 +31,14 @@ interface WorkspaceViewProps {
  * without a copy (Deployments is always main-scoped); Coding Agent,
  * Requirements and Sync & Deploy follow the selected copy.
  */
-export function WorkspaceView({ bp, wt, tab, onTab, onNewBp }: WorkspaceViewProps) {
+export function WorkspaceView({
+  bp,
+  wt,
+  copyCreating = false,
+  tab,
+  onTab,
+  onNewBp,
+}: WorkspaceViewProps) {
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
 
   if (!bp) {
@@ -69,7 +81,7 @@ export function WorkspaceView({ bp, wt, tab, onTab, onNewBp }: WorkspaceViewProp
       )}
 
       {tab === 'agent' && !agentMounted && (
-        <CopyGate bp={bp} wt={wt} what="run coding agents" />
+        <CopyGate bp={bp} wt={wt} creating={copyCreating} what="run coding agents" />
       )}
 
       {tab === 'description' &&
@@ -93,7 +105,7 @@ export function WorkspaceView({ bp, wt, tab, onTab, onNewBp }: WorkspaceViewProp
             onShowAgents={() => onTab('agent')}
           />
         ) : (
-          <CopyGate bp={bp} wt={wt} what="manage requirements" />
+          <CopyGate bp={bp} wt={wt} creating={copyCreating} what="manage requirements" />
         ))}
 
       {tab === 'sync-deploy' &&
@@ -106,7 +118,7 @@ export function WorkspaceView({ bp, wt, tab, onTab, onNewBp }: WorkspaceViewProp
             onManageDeployments={() => onTab('deployments')}
           />
         ) : (
-          <CopyGate bp={bp} wt={wt} what="sync and deploy" />
+          <CopyGate bp={bp} wt={wt} creating={copyCreating} what="sync and deploy" />
         ))}
 
       {tab === 'deployments' &&
@@ -135,14 +147,29 @@ export function WorkspaceView({ bp, wt, tab, onTab, onNewBp }: WorkspaceViewProp
 function CopyGate({
   bp,
   wt,
+  creating,
   what,
 }: {
   bp: BusinessProcess;
   // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
   wt: Copy | null;
+  /** The selected copy is still being created (not in the snapshot yet). */
+  creating?: boolean;
   what: string;
 }) {
   if (!wt) {
+    // A copy IS on its way — it just hasn't landed in the copies snapshot
+    // yet. Saying "No copy yet" here reads like the creation didn't take
+    // (#160), so show an in-progress note instead.
+    if (creating) {
+      return (
+        <CenteredNote
+          icon={<Loader2 className="size-5 animate-spin text-primary" aria-hidden />}
+          title="Creating copy…"
+          body={`Your copy is being set up — you'll be able to ${what} in a moment.`}
+        />
+      );
+    }
     return (
       <CenteredNote
         icon={<GitBranch className="size-5 text-primary" aria-hidden />}

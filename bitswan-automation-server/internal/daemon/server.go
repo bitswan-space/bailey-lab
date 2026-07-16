@@ -66,6 +66,14 @@ func NewServer(version string) *Server {
 // Requests arriving over the Unix socket (RemoteAddr is empty or "@")
 // are trusted and skip token verification — access is gated by the
 // socket file permissions.
+//
+// CAUTION: that trust is coarse. The socket dir is bind-mounted into every
+// workspace's gitops and infra-driver container (they call /ingress/*,
+// /memory/admit, /bailey/role over it), so "came in via the socket" only
+// means "some workspace container or host process" — NOT "host admin".
+// Handlers that return secrets must therefore add their own proof on top;
+// see callerHasAdminToken (workspace_secrets_auth.go) and its use in
+// handleWorkspaceList for passwords=true (#128).
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Unix socket connections have an empty or "@" RemoteAddr

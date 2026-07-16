@@ -275,12 +275,18 @@ func listGrants(hostname string) ([]endpointGrant, error) {
 // roleFor includes parent delegation: an endpoint registered with a
 // parent endpoint (the workspace dashboard, recorded explicitly at
 // registration time — see addRouteToIngress) inherits membership from
-// it, and ANY member of the parent counts as an OWNER of the child.
-// The dashboard is the workspace's membership surface; everyone
-// working in a workspace must be able to share the automations they
-// create there, not just open them. The parent's own ACL is unchanged
-// — an access-role member does not become owner of the dashboard
-// itself.
+// it AT THE ROLE the caller holds on the parent, never higher. An
+// owner of the dashboard is owner of everything spawned under the
+// workspace (they administer it); an access-role member can OPEN those
+// endpoints but does not own them — sharing a child requires an
+// explicit owner grant on the child (or owner on the dashboard).
+//
+// SECURITY (#129): delegation must never upgrade access→owner. The
+// dashboard `access` grant is the routine way to let a teammate into a
+// workspace; promoting it to owner of every child endpoint would let
+// any member share (re-grant, including to arbitrary external emails)
+// the automations and frontends other members created. The parent's
+// own ACL is unchanged either way — delegation only flows parent→child.
 func roleFor(hostname, email string, groups []string) (endpointRole, error) {
 	role, err := directRoleFor(hostname, email, groups)
 	if err != nil || role == roleOwner {
@@ -295,8 +301,12 @@ func roleFor(hostname, email string, groups []string) (endpointRole, error) {
 		if err != nil {
 			return role, err
 		}
+		// The direct role here is at most `access` (owner short-circuited
+		// above), so taking the parent's role can only widen, never
+		// downgrade: owner on the parent ⇒ owner of the child; access on
+		// the parent ⇒ access on the child.
 		if parentRole != roleNone {
-			return roleOwner, nil
+			return parentRole, nil
 		}
 	}
 	return role, nil
