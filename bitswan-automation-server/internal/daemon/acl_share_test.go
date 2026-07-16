@@ -246,6 +246,68 @@ func TestShareEndpoint_FormWriteRequiresTrustedDevice(t *testing.T) {
 	}
 }
 
+// TestShareAPI_ParentAccessMemberCannotShareChild pins the #129 fix:
+// a member holding only `access` on the workspace dashboard (the
+// parent endpoint) must NOT be treated as owner of a child endpoint
+// another member created — the share API refuses their writes, and no
+// grant materializes. An owner on the dashboard still owns the child
+// via delegation and can share it.
+func TestShareAPI_ParentAccessMemberCannotShareChild(t *testing.T) {
+	dashboard := "share-deleg-dashboard.example.com"
+	child := "share-deleg-child.example.com"
+	if _, err := registerEndpoint(dashboard, "wsowner@example.com", "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	// The child was created by ANOTHER member — the attack in #129 is a
+	// low-privilege member sharing endpoints they did not create.
+	if _, err := registerEndpoint(child, "creator@example.com", "BP frontend", dashboard, endpointKindFrontend, "production"); err != nil {
+		t.Fatal(err)
+	}
+	if err := addGrant(dashboard, "email", "member@example.com", string(roleAccess), "wsowner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The access member resolves to non-owner on the child.
+	if role, _ := roleFor(child, "member@example.com", nil); role == roleOwner {
+		t.Fatalf("access member resolved to owner of child (escalation), role = %q", role)
+	}
+
+	exfil := url.Values{
+		"principal_type":  {"email"},
+		"principal_value": {"outsider@evil.example"},
+		"role":            {"owner"},
+	}
+	// Share WRITE from the access member is refused — even from a
+	// trusted device — and must not mutate the child's ACL.
+	if w := shareAPIRequest(t, http.MethodPost, child, "member@example.com", exfil, true); w.Code != http.StatusForbidden {
+		t.Fatalf("access member share write status = %d, want 403: %s", w.Code, w.Body.String())
+	}
+	if role, _ := roleFor(child, "outsider@evil.example", nil); role != roleNone {
+		t.Fatalf("access member's grant took effect (role=%q) — #129 escalation", role)
+	}
+	// The share READ (grant listing) is owner-only too.
+	if w := shareAPIRequest(t, http.MethodGet, child, "member@example.com", nil, false); w.Code != http.StatusForbidden {
+		t.Errorf("access member share read status = %d, want 403", w.Code)
+	}
+
+	// The workspace owner does not own the child directly (creator does)
+	// but still owns it via parent delegation — and can share it.
+	if role, _ := directRoleFor(child, "wsowner@example.com", nil); role != roleNone {
+		t.Fatalf("test setup: wsowner should have no direct role on child, got %q", role)
+	}
+	w := shareAPIRequest(t, http.MethodPost, child, "wsowner@example.com", url.Values{
+		"principal_type":  {"email"},
+		"principal_value": {"teammate@example.com"},
+		"role":            {"access"},
+	}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("workspace owner share write status = %d: %s", w.Code, w.Body.String())
+	}
+	if role, _ := roleFor(child, "teammate@example.com", nil); role != roleAccess {
+		t.Errorf("owner's grant not effective, role = %q", role)
+	}
+}
+
 func TestHandleRequestAccess(t *testing.T) {
 	host := "share-reqaccess.example.com"
 	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {

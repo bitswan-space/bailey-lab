@@ -169,9 +169,10 @@ func TestDeleteEndpoint_Cascades(t *testing.T) {
 
 func TestRoleFor_ParentDelegation(t *testing.T) {
 	// The workspace dashboard is the membership surface; endpoints
-	// registered with it as parent treat every dashboard member —
-	// owner OR access — as an owner, so workspace members can share
-	// the automations they deploy.
+	// registered with it as parent inherit each member's DASHBOARD role
+	// — owner delegates owner, access delegates access. Delegation must
+	// never upgrade access→owner (#129): a mere member must not be able
+	// to share other members' automations.
 	dashboard := "delegate-dashboard.example.com"
 	child := "delegate-bp-frontend.example.com"
 	if _, err := registerEndpoint(dashboard, "wsowner@example.com", "", "", "", ""); err != nil {
@@ -180,10 +181,21 @@ func TestRoleFor_ParentDelegation(t *testing.T) {
 	if err := addGrant(dashboard, "email", "member@example.com", "access", "wsowner@example.com"); err != nil {
 		t.Fatal(err)
 	}
+	if err := addGrant(dashboard, "email", "coowner@example.com", "owner", "wsowner@example.com"); err != nil {
+		t.Fatal(err)
+	}
 	if err := addGrant(dashboard, "group", "/Acme/devs", "access", "wsowner@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := registerEndpoint(child, "wsowner@example.com", "BP frontend", dashboard, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// An explicit owner grant on the CHILD outranks the access-level
+	// delegation from the parent.
+	if err := addGrant(child, "email", "member2@example.com", "owner", "wsowner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := addGrant(dashboard, "email", "member2@example.com", "access", "wsowner@example.com"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -195,8 +207,10 @@ func TestRoleFor_ParentDelegation(t *testing.T) {
 		want   endpointRole
 	}{
 		{"dashboard owner owns child", "wsowner@example.com", nil, child, roleOwner},
-		{"access member owns child", "member@example.com", nil, child, roleOwner},
-		{"group member owns child", "dev@example.com", []string{"/Acme/devs"}, child, roleOwner},
+		{"dashboard owner-grant owns child", "coowner@example.com", nil, child, roleOwner},
+		{"access member gets access on child, not owner", "member@example.com", nil, child, roleAccess},
+		{"group access member gets access on child, not owner", "dev@example.com", []string{"/Acme/devs"}, child, roleAccess},
+		{"explicit owner grant on child wins over access delegation", "member2@example.com", nil, child, roleOwner},
 		{"stranger has nothing on child", "stranger@example.com", nil, child, roleNone},
 		// Delegation must not leak back: an access member stays
 		// access on the dashboard itself.

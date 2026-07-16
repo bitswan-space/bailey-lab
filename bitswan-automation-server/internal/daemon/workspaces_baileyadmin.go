@@ -430,16 +430,15 @@ func recordWorkspaceOwnership(name, domain, email string) []string {
 //
 // SECURITY (parent-delegation escalation): we resolve the gitops role
 // with directRoleFor, NOT roleFor. roleFor applies parent delegation —
-// the gitops endpoint's parent is the workspace dashboard, and ANY
-// direct role on the dashboard (including a routine `access` grant) is
-// promoted to OWNER of the child gitops endpoint. Granting a teammate
-// `access` to the dashboard is the normal way to let them into a
-// workspace, so using roleFor here would let any access-role member
-// trash/permanently-delete the whole workspace. Parent delegation is
-// for "can share what I deploy", never for destroying the workspace.
-// directRoleFor reads only the gitops endpoint's own rows (original
-// owner or a direct grant on gitops itself), so a dashboard access
-// member is correctly denied.
+// the gitops endpoint's parent is the workspace dashboard, so a role
+// on the dashboard carries over to the child (since #129 at the SAME
+// role, never upgraded — but a dashboard owner still resolves as owner
+// of gitops via delegation). Destructive workspace operations are
+// deliberately stricter than that: they require ownership recorded on
+// the gitops endpoint itself. directRoleFor reads only the gitops
+// endpoint's own rows (original owner or a direct grant on gitops
+// itself), so any dashboard-only member — access OR owner-by-
+// delegation — is denied here.
 func callerOwnsWorkspace(callerEmail string, callerGroups []string, isServerOwner bool, workspaceName string) bool {
 	if isServerOwner {
 		return true

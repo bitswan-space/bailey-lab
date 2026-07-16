@@ -217,10 +217,10 @@ func EmptyTrashFor(callerEmail string, callerGroups []string, isServerOwner bool
 			// gitops endpoint is the workspace's owner of record.
 			//
 			// SECURITY: use directRoleFor, NOT roleFor — see
-			// callerOwnsWorkspace. roleFor would promote a mere `access`
-			// grant on the workspace dashboard (the parent endpoint) to
-			// OWNER of the gitops endpoint, letting a non-owner
-			// collaborator permanently destroy the workspace's volumes.
+			// callerOwnsWorkspace. roleFor applies parent delegation
+			// from the workspace dashboard; destroying volumes must
+			// require ownership recorded on the gitops endpoint itself,
+			// not a role inherited from the dashboard.
 			gitopsHost := name + "-gitops." + domain
 			role, _ := directRoleFor(gitopsHost, callerEmail, callerGroups)
 			if role != roleOwner {

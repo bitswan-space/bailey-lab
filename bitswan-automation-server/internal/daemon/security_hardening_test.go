@@ -68,10 +68,10 @@ func TestCallerOwnsWorkspace_DashboardAccessIsNotOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Sanity: roleFor (the OLD, vulnerable resolver) WOULD promote the
-	// access member to owner of gitops via parent delegation.
-	if role, _ := roleFor(gitopsHost, "collab@example.com", nil); role != roleOwner {
-		t.Fatalf("precondition: roleFor should delegate access→owner, got %q", role)
+	// roleFor delegates the PARENT role (#129): the dashboard access
+	// member resolves to access on gitops — reachable, never owner.
+	if role, _ := roleFor(gitopsHost, "collab@example.com", nil); role != roleAccess {
+		t.Fatalf("roleFor should delegate access→access, got %q", role)
 	}
 
 	// The fix: callerOwnsWorkspace must deny the access-only member.
