@@ -251,9 +251,13 @@ def _build_git_command(*command, cwd=None):
     # If all host environment variables are set, use nsenter to run git command on host
     if cwd and host_path and host_home and host_user:
         formatted_command = " ".join(shlex.quote(arg) for arg in command)
+        # Quote cwd exactly like the command args: it is interpolated into the
+        # `su -c` shell string, and an unquoted cwd is a shell-injection sink.
+        # In nsenter/host mode a member-controlled `bp` that reaches cwd (via
+        # bp_state_path) would otherwise become host command execution (#130).
         host_command = (
             f"PATH={host_path} su - {host_user} -c "
-            f'"cd {cwd} && PATH={host_path} HOME={host_home} {formatted_command}"'
+            f'"cd {shlex.quote(cwd)} && PATH={host_path} HOME={host_home} {formatted_command}"'
         )
         exec_command = [
             "nsenter",
