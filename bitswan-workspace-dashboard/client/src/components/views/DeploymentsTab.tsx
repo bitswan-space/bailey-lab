@@ -939,9 +939,9 @@ function realmForStage(stage: StageId): string {
 /** "Stage services" row — links to the real admin consoles of the infra
  *  services that are actually enabled+running for this stage. Renders nothing
  *  when none are — no fabricated links. Since the in-dashboard data explorers
- *  replaced the Postgres/MinIO console links, the Automation tab narrows this
- *  to CouchDB via `only` (the pgAdmin/MinIO links live in the explorer
- *  headers now, slated for removal with those consoles). */
+ *  replaced the service consoles, the Automation tab narrows this to CouchDB
+ *  via `only` (pgAdmin is gone; the MinIO console link lives in the Object
+ *  Storage explorer header until the Garage migration retires it too). */
 function StageServicesRow({ stage, only }: { stage: StageId; only?: ServiceType[] }) {
   const [links, setLinks] = useState<{ type: ServiceType; url: string }[]>([]);
   useEffect(() => {

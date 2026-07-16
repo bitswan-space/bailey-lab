@@ -49,21 +49,6 @@ services:
         restart: unless-stopped
         volumes:
             - ws1-postgres-dev-data-data:/var/lib/postgresql/data
-    postgres-dev-pgadmin:
-        container_name: ws1__postgres-dev-pgadmin
-        env_file:
-            - __ROOT__/secrets/postgres-dev
-        environment:
-            PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
-            PGADMIN_CONFIG_SERVER_MODE: "False"
-        image: dpage/pgadmin4:latest
-        labels:
-            gitops.workspace: ws1
-        networks:
-            - ws1-dev
-        restart: unless-stopped
-        volumes:
-            - __ROOT__/secrets/pgadmin-servers.json:/pgadmin4/servers.json:ro
     ws1-backend-822b-dev:
         cap_drop:
             - NET_ADMIN

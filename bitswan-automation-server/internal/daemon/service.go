@@ -37,7 +37,6 @@ type ServiceEnableRequest struct {
 	ZookeeperImage   string `json:"zookeeper_image,omitempty"`
 	CouchDBImage     string `json:"couchdb_image,omitempty"`
 	PostgresImage    string `json:"postgres_image,omitempty"`
-	PgAdminImage     string `json:"pgadmin_image,omitempty"`
 	MinioImage       string `json:"minio_image,omitempty"`
 	CodingAgentImage string `json:"coding_agent_image,omitempty"`
 	Staging          bool   `json:"staging,omitempty"`
@@ -85,7 +84,6 @@ type ServiceUpdateRequest struct {
 	ZookeeperImage     string `json:"zookeeper_image,omitempty"`
 	CouchDBImage       string `json:"couchdb_image,omitempty"`
 	PostgresImage      string `json:"postgres_image,omitempty"`
-	PgAdminImage       string `json:"pgadmin_image,omitempty"`
 	MinioImage         string `json:"minio_image,omitempty"`
 	CodingAgentImage   string `json:"coding_agent_image,omitempty"`
 	InfraDriverImage   string `json:"infra_driver_image,omitempty"`
@@ -128,7 +126,6 @@ type gitopsServiceRequest struct {
 	KafkaImage    string `json:"kafka_image,omitempty"`
 	UIImage       string `json:"ui_image,omitempty"`
 	PostgresImage string `json:"postgres_image,omitempty"`
-	PgAdminImage  string `json:"pgadmin_image,omitempty"`
 	MinioImage    string `json:"minio_image,omitempty"`
 	BackupPath    string `json:"backup_path,omitempty"`
 	Force         bool   `json:"force,omitempty"`
@@ -306,7 +303,6 @@ func (s *Server) handleServiceEnable(w http.ResponseWriter, r *http.Request, ser
 			KafkaImage:    req.KafkaImage,
 			UIImage:       req.UIImage,
 			PostgresImage: req.PostgresImage,
-			PgAdminImage:  req.PgAdminImage,
 			MinioImage:    req.MinioImage,
 		}
 		proxyToGitops(w, "POST", req.Workspace, fmt.Sprintf("/services/%s/enable", serviceType), gitopsBody)
@@ -590,7 +586,6 @@ func (s *Server) handleServiceUpdate(w http.ResponseWriter, r *http.Request, ser
 			Image:         req.CouchDBImage,
 			KafkaImage:    req.KafkaImage,
 			PostgresImage: req.PostgresImage,
-			PgAdminImage:  req.PgAdminImage,
 			MinioImage:    req.MinioImage,
 		}
 		proxyToGitops(w, "POST", req.Workspace, fmt.Sprintf("/services/%s/update", serviceType), gitopsBody)

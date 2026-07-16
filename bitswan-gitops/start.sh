@@ -89,7 +89,7 @@ chown -R 1000 /gitops/gitops/
 mkdir -p /gitops/snapshots
 chown 1000 /gitops/snapshots
 
-# Service secrets (postgres/minio env files, pgadmin config) are written here
+# Service secrets (postgres/minio env files) are written here
 # by the gitops process when it auto-enables a BP's declared infra services.
 # The host dir is created by the daemon as root and bind-mounted in, so the
 # user1000 process can't write into it — auto-enable then fails with EACCES on

@@ -52,7 +52,6 @@ async def enable_service(service_type: str, request: ServiceEnableRequest):
             kafka_image=request.kafka_image,
             ui_image=request.ui_image,
             postgres_image=request.postgres_image,
-            pgadmin_image=request.pgadmin_image,
             minio_image=request.minio_image,
         )
         result = await svc.enable()

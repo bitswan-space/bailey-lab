@@ -494,6 +494,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Failed to refresh main-copy checkouts: %s", e)
 
+    # One-time migration: postgres is now headless (its pgAdmin sidecar was
+    # replaced by the dashboard's SQL explorer), but the admin-UI ingress
+    # route existing workspaces registered on enable lingers — nothing prunes
+    # infra-service routes automatically. Best-effort remove it for every
+    # stage where postgres is enabled. Idempotent; cheap; tolerates a missing
+    # route or an unreachable ingress daemon.
+    try:
+        from app.services.infra_service import get_service
+        from app.utils import SERVICE_REALMS, remove_route_by_hostname
+
+        _ws = os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+        for _realm in SERVICE_REALMS:
+            _svc = get_service("postgres", _ws, stage=_realm)
+            if _svc.is_enabled() and _svc.gitops_domain:
+                remove_route_by_hostname(_svc.ingress_hostname())
+    except Exception as e:
+        logger.warning("Stale postgres ingress-route cleanup failed: %s", e)
+
     # Warm the ProcessService cache so the first `_broadcast_processes`
     # (SSE) read finds it populated.
     process_service.refresh_all()

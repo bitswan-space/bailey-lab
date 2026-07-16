@@ -79,7 +79,7 @@ func generateInfraCompose(secretsDir, workspaceName, svcType, stage string) map[
 	case "minio":
 		return minioCompose(n)
 	case "postgres":
-		return postgresCompose(secretsDir, n)
+		return postgresCompose(n)
 	case "kafka":
 		return kafkaCompose(secretsDir, n)
 	default:
@@ -139,29 +139,11 @@ func minioCompose(n infraNames) map[string]interface{} {
 	}
 }
 
-func postgresCompose(secretsDir string, n infraNames) map[string]interface{} {
-	pgadmin := map[string]interface{}{
-		"container_name": n.containerName + "-pgadmin",
-		"restart":        "unless-stopped",
-		"image":          "dpage/pgadmin4:latest",
-		"env_file":       []interface{}{n.secretsPath},
-		// Run pgAdmin in single-user desktop mode so it presents NO login of its
-		// own: the endpoint is already gated by bitswan-protected-proxy + the
-		// Bailey device-trust gate, which is the sole auth. SERVER_MODE=False
-		// drops the email/password login; MASTER_PASSWORD_REQUIRED=False drops
-		// the follow-up master-password prompt that would otherwise still block
-		// the UI. (PGADMIN_DEFAULT_EMAIL/PASSWORD in the env_file are ignored in
-		// desktop mode.)
-		"environment": map[string]interface{}{
-			"PGADMIN_CONFIG_SERVER_MODE":              "False",
-			"PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED": "False",
-		},
-		"volumes": []interface{}{
-			filepath.Join(secretsDir, "pgadmin-servers.json") + ":/pgadmin4/servers.json:ro",
-		},
-		"networks": []interface{}{"bitswan_network"},
-		"labels":   n.infraLabels(),
-	}
+// Postgres runs headless: its former pgAdmin sidecar was replaced by the
+// workspace-dashboard's read-only SQL explorer, so no admin-UI container and
+// no ingress upstream exist for this service. Existing pgadmin containers are
+// retired automatically by retireOrphanedContainers on the next apply.
+func postgresCompose(n infraNames) map[string]interface{} {
 	return map[string]interface{}{
 		"services": map[string]interface{}{
 			"postgres" + n.suffix: map[string]interface{}{
@@ -188,7 +170,6 @@ func postgresCompose(secretsDir string, n infraNames) map[string]interface{} {
 					"start_interval": "250ms",
 				},
 			},
-			"postgres" + n.suffix + "-pgadmin": pgadmin,
 		},
 		"volumes": map[string]interface{}{n.volumeName + "-data": nil},
 		"networks": map[string]interface{}{
