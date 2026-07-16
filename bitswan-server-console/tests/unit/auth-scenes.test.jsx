@@ -50,7 +50,7 @@ describe('ApprovalScene', () => {
       '/bailey/api/pending-pair': { json: { code: '4821-7K39' } },
       '/bailey/api/pending-pair/poll': { json: {} },
     });
-    render(<ApprovalScene gateState={{ email: 'a@b' }} onApproved={vi.fn()} goConsole={vi.fn()} />);
+    render(<ApprovalScene gateState={{ email: 'a@b' }} onApproved={vi.fn()} />);
     await act(async () => { await Promise.resolve(); });
     expect(screen.getByText('4821-7K39')).toBeTruthy();
     expect(screen.getByText(/Waiting for an admin/)).toBeTruthy();
@@ -62,7 +62,7 @@ describe('ApprovalScene', () => {
       '/bailey/api/pending-pair': { json: { code: 'X' } },
       '/bailey/api/pending-pair/poll': { json: {} },
     });
-    render(<ApprovalScene gateState={{ totp_enrolled: true }} onApproved={vi.fn()} goConsole={vi.fn()} />);
+    render(<ApprovalScene gateState={{ totp_enrolled: true }} onApproved={vi.fn()} />);
     fireEvent.click(screen.getByText('Authenticator'));
     // footer offers a way back to the admin-approval method
     fireEvent.click(screen.getByText('Ask an admin instead'));
@@ -74,7 +74,7 @@ describe('ApprovalScene', () => {
       '/bailey/api/pending-pair': { json: { code: '4821-7K39' } },
       '/bailey/api/pending-pair/poll': { json: { approved: true, redirect_path: '/back' } },
     });
-    render(<ApprovalScene gateState={{ email: 'a@b' }} onApproved={vi.fn()} goConsole={vi.fn()} />);
+    render(<ApprovalScene gateState={{ email: 'a@b' }} onApproved={vi.fn()} />);
     await act(async () => { await Promise.resolve(); });
     expect(screen.getByText('4821-7K39')).toBeTruthy();
     await act(async () => { vi.advanceTimersByTime(2600); await Promise.resolve(); await Promise.resolve(); });
@@ -86,7 +86,7 @@ describe('ApprovalScene', () => {
       '/bailey/api/pending-pair': { status: 500, json: { error: 'no code' } },
       '/bailey/api/pending-pair/poll': { json: {} },
     });
-    render(<ApprovalScene gateState={{ email: 'a@b' }} onApproved={vi.fn()} goConsole={vi.fn()} />);
+    render(<ApprovalScene gateState={{ email: 'a@b' }} onApproved={vi.fn()} />);
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(screen.getByText('no code')).toBeTruthy();
   });
@@ -96,7 +96,7 @@ describe('ApprovalScene', () => {
       '/bailey/api/pending-pair/poll': { json: {} },
       '/bailey/api/self-trust': { json: { redirect_path: '/in' } },
     });
-    render(<ApprovalScene gateState={{ email: 'a@b', totp_enrolled: true }} onApproved={vi.fn()} goConsole={vi.fn()} />);
+    render(<ApprovalScene gateState={{ email: 'a@b', totp_enrolled: true }} onApproved={vi.fn()} />);
     fireEvent.click(screen.getByText('Authenticator'));
     type(document.querySelector('input'), '654321');
     fireEvent.click(screen.getByText('Verify & trust this device'));
@@ -108,21 +108,21 @@ describe('ApprovalScene', () => {
       '/bailey/api/pending-pair/poll': { json: {} },
       '/bailey/api/self-trust': { status: 401, json: { error: 'bad' } },
     });
-    render(<ApprovalScene gateState={{ totp_enrolled: true }} onApproved={vi.fn()} goConsole={vi.fn()} />);
+    render(<ApprovalScene gateState={{ totp_enrolled: true }} onApproved={vi.fn()} />);
     fireEvent.click(screen.getByText('Authenticator'));
     type(document.querySelector('input'), '654321');
     fireEvent.click(screen.getByText('Verify & trust this device'));
     await waitFor(() => expect(screen.getByText(/didn't match/)).toBeTruthy());
   });
-  it('goConsole sign-out link fires', () => {
+  it('sign-out link navigates to the real signout route (#43)', () => {
     installFetch({
       '/bailey/api/pending-pair': { json: { code: 'X' } },
       '/bailey/api/pending-pair/poll': { json: {} },
     });
-    const goConsole = vi.fn();
-    render(<ApprovalScene onApproved={vi.fn()} goConsole={goConsole} />);
+    render(<ApprovalScene onApproved={vi.fn()} />);
     fireEvent.click(screen.getByText('Sign out'));
-    expect(goConsole).toHaveBeenCalled();
+    expect(window.location.assign).toHaveBeenCalledWith('/bailey/signout');
+    expect(window.location.reload).not.toHaveBeenCalled();
   });
 });
 
