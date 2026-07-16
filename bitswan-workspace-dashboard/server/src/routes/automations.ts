@@ -334,16 +334,26 @@ export function registerAutomationRoutes(
   // Disaster Recovery → record a hand-performed recovery test (versioned).
   app.post<{
     Params: { bp: string };
-    Body: { by?: string; note?: string; snapshot?: string };
+    Body: { note?: string; snapshot?: string };
   }>('/api/automations/business-processes/:bp/dr/tests', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-    const { by, note, snapshot } = req.body ?? {};
-    // Attribute the test to the signed-in user (the client doesn't send `by`).
-    const author = by || (await emailFromRequest(req, app.log)) || undefined;
+    const { note, snapshot } = req.body ?? {};
+    // Recovery-test entries are compliance evidence — only admins/auditors may
+    // record one (same gate as the cadence policy above). Resolve the role from
+    // the validated token (never trust the client) and reject everyone else.
+    const role = await fwRoleFromRequest(req, gitops, app.log);
+    if (role !== 'admin' && role !== 'auditor') {
+      return reply
+        .code(403)
+        .send({ error: 'Recording a recovery test requires an admin or auditor role.' });
+    }
+    // Attribution comes from the validated token, never the client (a
+    // client-supplied `by` would be forged compliance evidence).
+    const by = (await emailFromRequest(req, app.log)) || undefined;
     try {
       const r = await gitops.recordDrTest(req.params.bp, {
-        ...(author ? { by: author } : {}),
+        ...(by ? { by } : {}),
         ...(note ? { note } : {}),
         ...(snapshot ? { snapshot } : {}),
       });
