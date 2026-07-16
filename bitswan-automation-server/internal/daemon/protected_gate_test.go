@@ -222,6 +222,124 @@ func TestUpstreamForHost_ProtectedRouteRecord(t *testing.T) {
 	}
 }
 
+// --- Issue #127: the visitor's live Keycloak access token must never
+// reach a tenant-code upstream ---------------------------------------
+
+// directorRequest builds a request as the gate's proxy Director sees it:
+// oauth2-proxy has authenticated the visitor and injected identity plus
+// the live access token (OAUTH2_PROXY_PASS_ACCESS_TOKEN=true). The
+// X-Auth-Request-Access-Token twin is never proxy-injected on the
+// request leg, so a value there models a client forgery. Authorization
+// models the documented BP pattern: frontend JS fetched the token from
+// /oauth2/auth and sends it as a Bearer header to its own backend.
+func directorRequest(t *testing.T, host string) *http.Request {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, "https://"+host+"/", nil)
+	r.Host = host
+	r.Header.Set("X-Forwarded-Email", "visitor@example.com")
+	r.Header.Set("X-Forwarded-Groups", "/Acme/devs")
+	r.Header.Set("X-Forwarded-Access-Token", "kc-live-token")
+	r.Header.Set("X-Auth-Request-Access-Token", "forged-xar-token")
+	r.Header.Set("Authorization", "Bearer client-sent-token")
+	return r
+}
+
+func TestGateDirector_TokenStrippedFromTenantUpstreams(t *testing.T) {
+	for _, kind := range []string{endpointKindFrontend, endpointKindService} {
+		t.Run(kind, func(t *testing.T) {
+			outer := "gatetoken-" + kind + ".example.com"
+			if _, err := registerEndpoint(outer, "owner@example.com", "", "", kind, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := saveProtectedRoute(outer, "bp-upstream:3000"); err != nil {
+				t.Fatal(err)
+			}
+			r := directorRequest(t, toInnerHost(outer))
+			gateDirector(r)
+			if r.URL.Host != "bp-upstream:3000" {
+				t.Fatalf("upstream = %q, want bp-upstream:3000", r.URL.Host)
+			}
+			// The visitor's token — replayable to impersonate them — must
+			// never reach tenant code.
+			for _, h := range forwardedTokenHeaders {
+				if v := r.Header.Get(h); v != "" {
+					t.Errorf("token header %q = %q reached a tenant upstream", h, v)
+				}
+			}
+			for _, h := range forwardedIdentityHeaders {
+				if v := r.Header.Get(h); v != "" {
+					t.Errorf("identity header %q = %q reached a tenant upstream", h, v)
+				}
+			}
+			// Client-SENT credentials pass through: the BP pattern has the
+			// frontend send its /oauth2/auth-fetched token as a Bearer
+			// header to its own backend via this gate. oauth2-proxy never
+			// injects Authorization in our config, so this is not a leak.
+			if got := r.Header.Get("Authorization"); got != "Bearer client-sent-token" {
+				t.Errorf("client-sent Authorization = %q, want it preserved", got)
+			}
+		})
+	}
+}
+
+func TestGateDirector_TokenStrippedFromUnknownHost(t *testing.T) {
+	// No registered endpoint/route at all → sentinel 502 upstream. The
+	// strip must already have happened — an unknown host is untrusted.
+	r := directorRequest(t, "gatetoken-unknown--inner.example.com")
+	gateDirector(r)
+	if r.URL.Host != "no-upstream.invalid" {
+		t.Fatalf("unknown host resolved to %q", r.URL.Host)
+	}
+	for _, h := range forwardedTokenHeaders {
+		if r.Header.Get(h) != "" {
+			t.Errorf("token header %q survived on the unknown-host path", h)
+		}
+	}
+}
+
+func TestGateDirector_TokenPreservedForBaileyUpstream(t *testing.T) {
+	r := directorRequest(t, "bailey--inner.example.com")
+	gateDirector(r)
+	if r.URL.Host != "localhost:8080" {
+		t.Fatalf("bailey upstream = %q, want localhost:8080", r.URL.Host)
+	}
+	if got := r.Header.Get("X-Forwarded-Access-Token"); got != "kc-live-token" {
+		t.Errorf("X-Forwarded-Access-Token = %q, want the gate-captured token re-applied", got)
+	}
+	// Only the canonical header is re-applied; the request-leg
+	// X-Auth-Request- twin is always a forgery and stays stripped.
+	if got := r.Header.Get("X-Auth-Request-Access-Token"); got != "" {
+		t.Errorf("forged X-Auth-Request-Access-Token = %q survived", got)
+	}
+	if got := r.Header.Get("X-Forwarded-Email"); got != "visitor@example.com" {
+		t.Errorf("X-Forwarded-Email = %q, want re-applied identity", got)
+	}
+}
+
+func TestGateDirector_TokenPreservedForTrustedWorkspaceApp(t *testing.T) {
+	outer := "gatetoken-dash.example.com"
+	if _, err := registerEndpoint(outer, "owner@example.com", "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveProtectedRoute(outer, "dash-upstream:3000"); err != nil {
+		t.Fatal(err)
+	}
+	r := directorRequest(t, toInnerHost(outer))
+	gateDirector(r)
+	if r.URL.Host != "dash-upstream:3000" {
+		t.Fatalf("upstream = %q, want dash-upstream:3000", r.URL.Host)
+	}
+	if got := r.Header.Get("X-Forwarded-Access-Token"); got != "kc-live-token" {
+		t.Errorf("X-Forwarded-Access-Token = %q, want it re-applied to the first-party dashboard", got)
+	}
+	if got := r.Header.Get("X-Auth-Request-Access-Token"); got != "" {
+		t.Errorf("forged X-Auth-Request-Access-Token = %q survived", got)
+	}
+	if got := r.Header.Get("X-Forwarded-Email"); got != "visitor@example.com" {
+		t.Errorf("X-Forwarded-Email = %q, want re-applied identity", got)
+	}
+}
+
 func TestIsAdminGroups(t *testing.T) {
 	cases := []struct {
 		groups []string

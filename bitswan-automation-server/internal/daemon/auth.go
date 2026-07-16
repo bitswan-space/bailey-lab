@@ -54,13 +54,37 @@ var forwardedIdentityHeaders = []string{
 	"X-Auth-Request-Preferred-Username",
 }
 
+// forwardedTokenHeaders carry the visitor's LIVE Keycloak access token.
+// bitswan-protected-proxy runs oauth2-proxy with
+// OAUTH2_PROXY_PASS_ACCESS_TOKEN=true, so every request it proxies to the
+// gate arrives with X-Forwarded-Access-Token set to the visitor's real
+// token (the X-Auth-Request-* twin is only ever set by oauth2-proxy on
+// /oauth2/auth RESPONSES; on the request leg it can only be a client
+// forgery, so it is stripped for the same reason the identity twins are).
+// The token is strictly more powerful than the identity headers next to
+// it: an upstream that sees it can log it and REPLAY it to impersonate
+// the visitor against any Keycloak-protected service (issue #127). The
+// gate's Director strips these for every upstream and re-applies the
+// token only on the legs to trusted first-party upstreams, exactly
+// mirroring the identity headers above.
+var forwardedTokenHeaders = []string{
+	"X-Forwarded-Access-Token",
+	"X-Auth-Request-Access-Token",
+}
+
 // stripForwardedIdentityHeaders removes all client-supplied
-// forwarded-identity headers from a request. Used by the gate before it
-// reverse-proxies to an upstream so a forged identity can never reach
-// (or be injected through) a downstream app. Covers the X-Auth-Request-*
+// forwarded-identity headers — and the forwarded access-token headers,
+// which are outright credentials and therefore even more sensitive —
+// from a request. Used by the gate before it reverse-proxies to an
+// upstream so a forged identity can never reach (or be injected through)
+// a downstream app, and so the visitor's live access token never reaches
+// a tenant-controlled one (issue #127). Covers the X-Auth-Request-*
 // family too, since identityFromHeaders falls back to those.
 func stripForwardedIdentityHeaders(r *http.Request) {
 	for _, h := range forwardedIdentityHeaders {
+		r.Header.Del(h)
+	}
+	for _, h := range forwardedTokenHeaders {
 		r.Header.Del(h)
 	}
 }

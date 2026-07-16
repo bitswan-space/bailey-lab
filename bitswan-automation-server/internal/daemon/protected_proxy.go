@@ -132,6 +132,18 @@ func protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSec
 		"OAUTH2_PROXY_COOKIE_REFRESH":       "4m",
 		"OAUTH2_PROXY_SET_XAUTHREQUEST":     "true",
 		"OAUTH2_PROXY_PASS_ACCESS_TOKEN":    "true",
+		// SECURITY (issue #127): the gate strips the proxy-injected
+		// X-Forwarded-Access-Token from tenant-code upstreams but
+		// deliberately passes the Authorization header through (it carries
+		// the Bearer token BP frontends fetch from /oauth2/auth and send to
+		// their own backends). That pass-through is safe only while
+		// oauth2-proxy never injects an Authorization header of its own.
+		// pass_basic_auth defaults to TRUE upstream; today it is inert
+		// because basic_auth_password is unset (the legacy-header conversion
+		// requires both), but pin it off so the invariant survives config
+		// drift. PASS_AUTHORIZATION_HEADER must likewise stay unset — see
+		// gateDirector before enabling either.
+		"OAUTH2_PROXY_PASS_BASIC_AUTH": "false",
 		// Without per-request CSRF cookies every in-flight login shares ONE
 		// state cookie across the whole cookie_domains family — a second tab
 		// (or a second *.domain host) starting its own handshake clobbers the

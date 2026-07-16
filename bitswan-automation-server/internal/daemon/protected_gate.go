@@ -140,91 +140,126 @@ func isTrustedWorkspaceAppHost(endpointHost string) bool {
 	return err == nil && ep != nil && ep.Kind == endpointKindWorkspace
 }
 
+// gateDirector is the gate proxy's per-request Director — picks the
+// upstream by hostname and re-anchors every trust-bearing header.
+//
+// SECURITY (defence-in-depth, identity header injection):
+// Re-anchor the forwarded-identity headers before proxying.
+// We (1) capture the identity — and the visitor's access token — as
+// resolved from the request the gate received (set by the trusted
+// oauth2-proxy hop, bitswan-protected-proxy, in FRONT of this
+// listener), (2) strip every client-supplied identity and access-token
+// header, then (3) only re-apply the trusted values on the legs to the
+// first-party upstreams. For all other upstreams (the user-controlled
+// workspace apps) the identity and token headers stay stripped, so a
+// malicious/compromised upstream can never see the visitor's live
+// Keycloak access token (issue #127) or have injected a forged
+// X-Forwarded-Email/-Groups, and a client talking straight to :9080
+// (bypassing oauth2-proxy) cannot inject identity that flows
+// downstream.
+//
+// NOTE: this does not by itself close the stage-4 gap — the
+// daemon's :8080 listener still trusts X-Forwarded-* with no
+// proof the request came through the gate (see the comment at
+// identityFromHeaders and at the docsServer wiring in
+// server.go). The full fix is the stage-4 proxy split that
+// makes :8080 reachable only via the gate. This strip is the
+// conservative, non-breaking mitigation against identity
+// injection into/through upstream apps.
+func gateDirector(r *http.Request) {
+	endpointHost := requestEndpointHost(r)
+	email, groups := identityFromHeaders(r)
+	// Capture the oauth2-proxy-injected access token BEFORE the strip so
+	// it can be re-applied to trusted first-party upstreams only. Only
+	// the canonical X-Forwarded- form is captured/re-applied; on the
+	// request leg the X-Auth-Request- twin is never set by oauth2-proxy,
+	// so a non-empty value there is a forgery and stays stripped.
+	accessToken := r.Header.Get("X-Forwarded-Access-Token")
+	stripForwardedIdentityHeaders(r)
+
+	up := upstreamForHost(endpointHost)
+	if up == nil {
+		// Force a 502 by pointing the request at an unreachable
+		// sentinel — the simplest way to surface "no upstream
+		// matches" without a separate code path.
+		r.URL.Scheme = "http"
+		r.URL.Host = "no-upstream.invalid"
+		return
+	}
+	r.URL.Scheme = up.Scheme
+	r.URL.Host = up.Host
+	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+		r.Host = h
+	}
+	// The platform terminates TLS at the edge (platform-traefik →
+	// oauth2-proxy); every leg from here on is plain HTTP on the
+	// internal network. Tell the upstream the original scheme was
+	// HTTPS so apps behind a TLS-terminating proxy (e.g. pgAdmin's
+	// Flask/ProxyFix) emit https:// URLs instead of http:// ones —
+	// the latter get blocked as mixed content / by the https-only
+	// inner CSP (strictInnerCSP), which renders pgAdmin as a blank
+	// page. The oauth2-proxy hop already sets this; fill it in only
+	// if it's somehow absent so we never downgrade a real value.
+	if r.Header.Get("X-Forwarded-Proto") == "" {
+		r.Header.Set("X-Forwarded-Proto", "https")
+	}
+	// Re-apply the gate-trusted identity to the upstreams that
+	// legitimately consume it: the Bailey daemon upstream AND the
+	// first-party workspace dashboard (endpoint kind "workspace"),
+	// which is BitSwan code, not user-deployed automations. The
+	// dashboard relies solely on this header for identity — it does
+	// no OIDC of its own. User-deployed business-process apps
+	// (kind "frontend"/"service") are NOT trusted and never receive
+	// forwarded identity.
+	isBailey := isBaileyHost(toOuterHost(endpointHost))
+	trusted := isBailey
+	if !trusted && (email != "" || accessToken != "") {
+		trusted = isTrustedWorkspaceAppHost(endpointHost)
+	}
+	if email != "" && trusted {
+		r.Header.Set("X-Forwarded-Email", email)
+		if len(groups) > 0 {
+			r.Header.Set("X-Forwarded-Groups", strings.Join(groups, ","))
+		}
+	}
+	// SECURITY (issue #127): the visitor's live Keycloak access token
+	// follows the same trust rule as identity — first-party upstreams
+	// only. A tenant-code upstream (kind "frontend"/"service") that
+	// received it could log and replay it to impersonate the visitor,
+	// which is strictly worse than the identity leak the strip above
+	// already prevents.
+	//
+	// The Authorization header is deliberately NOT stripped here: our
+	// oauth2-proxy config never injects one (OAUTH2_PROXY_PASS_BASIC_AUTH
+	// is off and PASS_AUTHORIZATION_HEADER is unset — see
+	// protectedProxyOAuthEnv), so any Authorization on the request was
+	// placed there deliberately by the visitor's own client. The
+	// documented business-process pattern depends on that pass-through:
+	// frontend JS fetches the token from /oauth2/auth and sends it as a
+	// Bearer header to the BP's own backend through this gate (see
+	// bitswan-gitops/examples/*/frontend/src/api.ts and the dashboard's
+	// client/src/lib/auth-token.ts).
+	if accessToken != "" && trusted {
+		r.Header.Set("X-Forwarded-Access-Token", accessToken)
+	}
+	if !isBailey {
+		// App upstream (including the first-party dashboard). Strip
+		// Bailey's auth cookies so an upstream can never read — and then
+		// replay — the device-trust credential. The browser sends
+		// _bailey_device to the gate so the gate can enforce trust on
+		// every protected host, but it MUST NOT reach an upstream: the
+		// gate has already enforced trust by this point, so the app needs
+		// the request, never the credential. This keeps the cookie
+		// un-stealable by the apps running behind Bailey.
+		stripBaileyAuthCookies(r)
+	}
+}
+
 // startProtectedGate boots the gate's HTTP listener. Called from
 // Server.Run once at startup.
 func startProtectedGate() error {
-	// Per-request Director — picks the upstream by hostname.
 	proxy := &httputil.ReverseProxy{
-		Director: func(r *http.Request) {
-			// SECURITY (defence-in-depth, identity header injection):
-			// Re-anchor the forwarded-identity headers before proxying.
-			// We (1) capture the identity as resolved from the request
-			// the gate received (set by the trusted oauth2-proxy hop,
-			// bitswan-protected-proxy, in FRONT of this listener), (2)
-			// strip every client-supplied identity header, then (3) only
-			// re-apply the trusted identity on the leg to the daemon's
-			// own :8080 Bailey upstream. For all other upstreams (the
-			// user-controlled workspace apps) the identity headers stay
-			// stripped, so a malicious/compromised upstream can never see
-			// or have injected a forged X-Forwarded-Email/-Groups, and a
-			// client talking straight to :9080 (bypassing oauth2-proxy)
-			// cannot inject identity that flows downstream.
-			//
-			// NOTE: this does not by itself close the stage-4 gap — the
-			// daemon's :8080 listener still trusts X-Forwarded-* with no
-			// proof the request came through the gate (see the comment at
-			// identityFromHeaders and at the docsServer wiring in
-			// server.go). The full fix is the stage-4 proxy split that
-			// makes :8080 reachable only via the gate. This strip is the
-			// conservative, non-breaking mitigation against identity
-			// injection into/through upstream apps.
-			endpointHost := requestEndpointHost(r)
-			email, groups := identityFromHeaders(r)
-			stripForwardedIdentityHeaders(r)
-
-			up := upstreamForHost(endpointHost)
-			if up == nil {
-				// Force a 502 by pointing the request at an unreachable
-				// sentinel — the simplest way to surface "no upstream
-				// matches" without a separate code path.
-				r.URL.Scheme = "http"
-				r.URL.Host = "no-upstream.invalid"
-				return
-			}
-			r.URL.Scheme = up.Scheme
-			r.URL.Host = up.Host
-			if h := r.Header.Get("X-Forwarded-Host"); h != "" {
-				r.Host = h
-			}
-			// The platform terminates TLS at the edge (platform-traefik →
-			// oauth2-proxy); every leg from here on is plain HTTP on the
-			// internal network. Tell the upstream the original scheme was
-			// HTTPS so apps behind a TLS-terminating proxy (e.g. pgAdmin's
-			// Flask/ProxyFix) emit https:// URLs instead of http:// ones —
-			// the latter get blocked as mixed content / by the https-only
-			// inner CSP (strictInnerCSP), which renders pgAdmin as a blank
-			// page. The oauth2-proxy hop already sets this; fill it in only
-			// if it's somehow absent so we never downgrade a real value.
-			if r.Header.Get("X-Forwarded-Proto") == "" {
-				r.Header.Set("X-Forwarded-Proto", "https")
-			}
-			// Re-apply the gate-trusted identity to the upstreams that
-			// legitimately consume it: the Bailey daemon upstream AND the
-			// first-party workspace dashboard (endpoint kind "workspace"),
-			// which is BitSwan code, not user-deployed automations. The
-			// dashboard relies solely on this header for identity — it does
-			// no OIDC of its own. User-deployed business-process apps
-			// (kind "frontend"/"service") are NOT trusted and never receive
-			// forwarded identity.
-			isBailey := isBaileyHost(toOuterHost(endpointHost))
-			if email != "" && (isBailey || isTrustedWorkspaceAppHost(endpointHost)) {
-				r.Header.Set("X-Forwarded-Email", email)
-				if len(groups) > 0 {
-					r.Header.Set("X-Forwarded-Groups", strings.Join(groups, ","))
-				}
-			}
-			if !isBailey {
-				// App upstream (including the first-party dashboard). Strip
-				// Bailey's auth cookies so an upstream can never read — and then
-				// replay — the device-trust credential. The browser sends
-				// _bailey_device to the gate so the gate can enforce trust on
-				// every protected host, but it MUST NOT reach an upstream: the
-				// gate has already enforced trust by this point, so the app needs
-				// the request, never the credential. This keeps the cookie
-				// un-stealable by the apps running behind Bailey.
-				stripBaileyAuthCookies(r)
-			}
-		},
+		Director: gateDirector,
 		// Flush immediately after every chunk so streaming upstream
 		// responses (SSE, NDJSON) reach the client incrementally
 		// instead of being buffered until the upstream closes.
