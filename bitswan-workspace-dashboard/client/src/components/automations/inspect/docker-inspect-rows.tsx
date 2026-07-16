@@ -81,6 +81,30 @@ export function mountRows(c: DockerInspect): Row[] {
   ]);
 }
 
+export function envRows(c: DockerInspect): Row[] {
+  // Values arrive pre-masked from the server (secret values are `****` unless
+  // the viewer's role may see them) — this only renders what was sent.
+  const env = c.Env ?? [];
+  if (env.length === 0) {
+    return [['Environment', <span key="e" className="text-muted-foreground">none</span>]];
+  }
+  return env.map((v, i): Row => [
+    v.name ?? '?',
+    <span key={i} className="inline-flex items-center gap-2">
+      {v.masked ? (
+        <span className="font-mono text-xs text-muted-foreground">{v.value ?? '****'}</span>
+      ) : (
+        mono(v.value ?? '')
+      )}
+      {v.secret && (
+        <Badge variant="outline" className="border-transparent bg-amber-100 text-amber-700">
+          secret
+        </Badge>
+      )}
+    </span>,
+  ]);
+}
+
 export function healthRows(c: DockerInspect): Row[] {
   const hc = c.Config?.Healthcheck;
   if (!hc) return [];

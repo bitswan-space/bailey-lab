@@ -47,6 +47,31 @@ from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
+# Placeholder returned instead of a secret env value the caller may not see
+# (Inspect → env view). Masking happens HERE, server-side — the real value
+# never leaves gitops for an unprivileged caller.
+SECRET_MASK = "****"
+
+
+def _mask_env(env_list: list, secret_keys: set, reveal: bool) -> list[dict]:
+    """Parse docker-inspect `Config.Env` ("KEY=VALUE" strings) into
+    [{name, value, secret, masked}] rows, replacing secret values with
+    SECRET_MASK unless `reveal`. Names are always shown."""
+    out: list[dict] = []
+    for entry in env_list:
+        name, _, value = str(entry).partition("=")
+        is_secret = name in secret_keys
+        masked = is_secret and not reveal
+        out.append(
+            {
+                "name": name,
+                "value": SECRET_MASK if masked else value,
+                "secret": is_secret,
+                "masked": masked,
+            }
+        )
+    return out
+
 
 @lru_cache(maxsize=2048)
 def _parse_revision_bitswan(gitops_dir: str, sha: str) -> dict:
@@ -415,11 +440,80 @@ class AutomationService:
         )
         return [c.to_docker_dict() for c in containers]
 
-    async def inspect_automation(self, deployment_id: str) -> list[dict]:
-        """The deployment's containers (the driver-derived dict). The full raw
-        `docker inspect` is no longer exposed to gitops; callers that needed
-        identity/state read it off these fields."""
-        return await self.get_container(deployment_id)
+    async def inspect_automation(
+        self, deployment_id: str, by: str | None = None
+    ) -> list[dict]:
+        """The deployment's containers (the driver-derived dict), each enriched
+        with its environment (`Env`: [{name, value, secret, masked}]) read from
+        the driver's raw `docker inspect`.
+
+        Secret env values (names in the BP's secret set for the deployment's
+        realm) are MASKED here, server-side — a masked value never leaves
+        gitops. `by` is a shim-verified email; visibility follows the secrets
+        RBAC: production secrets are admin/auditor-only, non-production secrets
+        are visible to any known Bailey role. Missing identity or a role-lookup
+        failure fails CLOSED (all secret values masked). Names are always
+        shown."""
+        containers = await self.get_container(deployment_id)
+        if not containers:
+            return containers
+        secret_keys, reveal = self._env_secret_visibility(deployment_id, by)
+        for c in containers:
+            cid = c.get("Id")
+            if not cid:
+                continue
+            try:
+                info = await self.infra_driver.container_inspect(
+                    self._workspace_ctx(), cid
+                )
+                env_list = ((info or {}).get("Config") or {}).get("Env") or []
+            except Exception:
+                logger.warning(
+                    "container_inspect failed for %s; omitting env", cid[:12]
+                )
+                continue
+            c["Env"] = _mask_env(env_list, secret_keys, reveal)
+        return containers
+
+    # Roles allowed to see NON-production secret values in the env view: any
+    # role the daemon's authoritative store knows ("normal users"). Production
+    # values stay behind _FW_ROLES (admin/auditor). An unknown email resolves
+    # to "" and is never in either set — fail closed.
+    _ENV_REVEAL_ROLES = ("admin", "auditor", "member", "user")
+
+    def _env_secret_visibility(
+        self, deployment_id: str, by: str | None
+    ) -> tuple[set[str], bool]:
+        """(secret_keys, reveal) for a deployment's env view. `secret_keys` are
+        the env var NAMES provisioned from the BP's secret set for the
+        deployment's realm (dev covers live-dev); `reveal` says whether `by`
+        may see their values. The role comes from the daemon's authoritative
+        store — never the caller — and any lookup failure fails CLOSED."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        conf = (bs.get("deployments") or {}).get(deployment_id) or {}
+        bp = deployment_bp(conf, conf.get("context") or "")
+        realm = bp_secrets.realm_for_stage(conf.get("stage") or "production")
+        secret_keys: set[str] = set()
+        if bp:
+            blob = ((bs.get("secrets") or {}).get(bp) or {}).get(realm)
+            if blob:
+                secret_keys = set(bp_secrets.decrypt_secrets(self.secrets_dir, blob))
+        if not secret_keys:
+            return secret_keys, False
+        role = ""
+        if by:
+            try:
+                role = daemon_user_role(by)
+            except Exception:
+                logger.warning(
+                    "role lookup failed for %s; masking secret env values", by
+                )
+                role = ""
+        if realm == "production":
+            reveal = role in self._FW_ROLES
+        else:
+            reveal = role in self._ENV_REVEAL_ROLES
+        return secret_keys, reveal
 
     async def get_containers(self) -> list[dict]:
         """All of the workspace's deployment containers, via the driver. The

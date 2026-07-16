@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import type { DockerInspect } from '@/types';
 import { InspectGroup } from './InspectGroup';
 import {
+  envRows,
   healthRows,
   identityRows,
   imageRows,
@@ -99,6 +100,13 @@ export function OverviewPane({ deploymentId }: OverviewPaneProps) {
         />
         {c.Config?.Healthcheck && (
           <InspectGroup heading="Health check" rows={healthRows(c)} />
+        )}
+        {c.Env && (
+          <InspectGroup
+            heading="Environment"
+            rows={envRows(c)}
+            fullSpan={c.Env.length > 4}
+          />
         )}
       </div>
     </div>
