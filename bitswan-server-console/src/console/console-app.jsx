@@ -2,7 +2,7 @@ import React from 'react';
 // console-app.jsx — server console shell: nav, router, scene switching, state
 
 const { C: AC, Icon: AIcon, Btn: ABtn, Pill: APill, useLucide: useALucide } = window.WD_SHELL;
-const { Avatar: AAvatar, Toast: AToast } = window.SC_UI;
+const { Avatar: AAvatar, UserChip: AUserChip, Toast: AToast } = window.SC_UI;
 const { OverviewView, WorkspacesView } = window.SC_WORKSPACES;
 const { UsersView, EndpointAccessView } = window.SC_PEOPLE;
 const { DevicesView, SecurityView } = window.SC_DEVICES;
@@ -385,6 +385,12 @@ function Console({ data, setData, toast, refresh }) {
           ))}
         </div>
 
+        {/* Signed-in user */}
+        {data.me && data.me.email && (
+          <div style={{ borderTop: `1px solid ${AC.border}`, padding: '10px 12px' }}>
+            <AUserChip user={currentUser} size={30} sub={currentUser.isAdmin ? 'Administrator' : 'Member'} />
+          </div>
+        )}
       </aside>
 
       {/* Main */}
