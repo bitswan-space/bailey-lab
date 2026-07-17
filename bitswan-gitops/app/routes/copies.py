@@ -315,16 +315,77 @@ def _ident_args(deployer: str | None) -> list[str]:
     return ["-c", f"user.name={who}", "-c", f"user.email={who}"] if who else []
 
 
+# How many changed filenames to name in an auto-commit subject before summarizing
+# the rest as "(+N more)" — enough to be useful, short enough to stay one line.
+_WIP_SUMMARY_MAX = 3
+
+
+async def _staged_change_summary(clone_path: str) -> str:
+    """A short, human-readable phrase describing the staged changes, e.g.
+    ``edit config.yaml, main.py`` or ``add handler.py; delete old.py (+2 more)``.
+
+    Derived from ``git diff --cached --name-status`` so the history view shows
+    what actually changed rather than a boilerplate "work in progress" line
+    (#83). Returns "" when nothing is staged or the diff can't be read, so the
+    caller can fall back to a static message."""
+    out, _, rc = await call_git_command_with_output(
+        "git", "diff", "--cached", "--name-status", cwd=clone_path
+    )
+    if rc != 0:
+        return ""
+    # Status letter → verb. Rename/copy report the destination path last.
+    verbs = {
+        "A": "add",
+        "M": "edit",
+        "D": "delete",
+        "R": "rename",
+        "C": "add",
+        "T": "edit",
+    }
+    order = ["edit", "add", "delete", "rename"]
+    groups: dict[str, list[str]] = {}
+    total = 0
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        verb = verbs.get(parts[0][0], "edit")
+        groups.setdefault(verb, []).append(os.path.basename(parts[-1]))
+        total += 1
+    if total == 0:
+        return ""
+    shown = 0
+    phrases: list[str] = []
+    for verb in order:
+        names = groups.get(verb)
+        if not names or shown >= _WIP_SUMMARY_MAX:
+            continue
+        take = sorted(names)[: _WIP_SUMMARY_MAX - shown]
+        shown += len(take)
+        phrases.append(f"{verb} {', '.join(take)}")
+    summary = "; ".join(phrases)
+    remaining = total - shown
+    if remaining > 0:
+        summary += f" (+{remaining} more)"
+    return summary
+
+
 async def _wip_commit(
-    clone_path: str, deployer: str | None, add_args: list[str], message: str
+    clone_path: str, deployer: str | None, add_args: list[str], bp: str, fallback: str
 ) -> None:
-    """Stage ``add_args`` and commit if anything was staged (no-op otherwise)."""
+    """Stage ``add_args`` and commit if anything was staged (no-op otherwise).
+
+    The commit subject names what changed (``edit config.yaml (bp)``) so the
+    history view is readable (#83); ``fallback`` is used only if the staged
+    diff can't be summarized."""
     await call_git_command("git", "add", *add_args, cwd=clone_path)
     _, _, clean_rc = await call_git_command_with_output(
         "git", "diff", "--cached", "--quiet", cwd=clone_path
     )
     if clean_rc == 0:
         return  # nothing staged
+    summary = await _staged_change_summary(clone_path)
+    message = f"{summary} ({bp})" if summary else fallback
     _, c_err, c_rc = await call_git_command_with_output(
         "git", *_ident_args(deployer), "commit", "-m", message, cwd=clone_path
     )
@@ -446,7 +507,9 @@ async def _sync_one_bp(
             status_code=404, detail=f"'{bp}' is not checked out in copy '{name}'"
         )
 
-    await _wip_commit(clone, deployer, ["-A"], f"Sync: commit work in progress ({bp})")
+    await _wip_commit(
+        clone, deployer, ["-A"], bp, f"Sync: commit work in progress ({bp})"
+    )
     await fetch_main(clone, bp)
 
     ahead_out, _, _ = await call_git_command_with_output(
@@ -670,6 +733,7 @@ async def _rebase_one_bp(
         clone,
         deployer,
         ["-A"],
+        bp,
         f"Pull: commit work in progress before rebasing {bp} onto main",
     )
     await fetch_main(clone, bp)

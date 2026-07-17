@@ -128,6 +128,50 @@ def test_per_bp_sync_touches_only_that_bp(env):
     assert not _git("-C", bpb_bare, "tag", "-l", "deploy/*").stdout.strip()
 
 
+def test_sync_wip_commit_subject_names_changed_files(env):
+    """Uncommitted edits the dashboard wrote to the working tree get a readable
+    commit subject naming what changed — not an opaque "work in progress" line
+    (#83). The dashboard writes files straight to disk without committing, so
+    these accumulate into the WIP commit sync makes."""
+    copy = env["make_copy"]("u1")
+    clone = os.path.join(copy, "bpa")
+    # Edit an existing file and add a new one, WITHOUT committing (mirrors how
+    # PUT .../files/content writes straight to the bind-mounted working tree).
+    with open(os.path.join(clone, "file.txt"), "w") as f:
+        f.write("a1\n")
+    with open(os.path.join(clone, "handler.py"), "w") as f:
+        f.write("print('x')\n")
+
+    res = asyncio.run(sync_copy("u1", SyncCopyRequest(deployer="dev@x", bp="bpa")))
+    assert res.status == "success"
+
+    # The tip of bpa's main is the auto-captured WIP commit; its subject names
+    # the files instead of the old boilerplate.
+    subject = _branch_subjects(env["bares"]["bpa"], "main")[0]
+    assert "work in progress" not in subject
+    assert "file.txt" in subject
+    assert "handler.py" in subject
+    assert "edit" in subject and "add" in subject
+    assert "(bpa)" in subject
+
+
+def test_sync_wip_commit_summary_truncates_many_files(env):
+    """A large change lists a few files then summarizes the rest as '(+N more)'
+    so the subject stays a single readable line (#83)."""
+    copy = env["make_copy"]("u1")
+    clone = os.path.join(copy, "bpa")
+    for i in range(6):
+        with open(os.path.join(clone, f"new{i}.txt"), "w") as f:
+            f.write(f"{i}\n")
+
+    res = asyncio.run(sync_copy("u1", SyncCopyRequest(deployer="dev@x", bp="bpa")))
+    assert res.status == "success"
+
+    subject = _branch_subjects(env["bares"]["bpa"], "main")[0]
+    assert "(+3 more)" in subject  # 6 added, 3 named, 3 summarized
+    assert subject.count(".txt") == 3
+
+
 def test_per_bp_sync_conflict_leaves_main_untouched(env):
     """When the BP's main has advanced divergently, sync returns needs_rebase
     and does NOT touch that repo's main."""
