@@ -148,10 +148,86 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 @media screen{ .toc .toc-dots, .toc .toc-pg{ display:none } }
 
 @media print{
-  body{ background:#fff }
-  .page{ box-shadow:none; border-radius:0; margin:0; width:auto; min-height:auto; break-after:page; overflow:visible }
-  .page:last-child{ break-after:auto }
-  .pad{ min-height:auto }
+  /* Paint the whole sheet — including the @page margin band — in the paper
+     colour so there is no jarring white frame around the cream page (that frame
+     was the "whitespace around the edges" the PDF was reported for). */
+  html, body{ background:var(--paper) }
+  /* Break BEFORE each top-level section (so every chapter still opens on a fresh
+     sheet) rather than AFTER — a forced break-after stranded a blank tail sheet
+     whenever a section ended right at a page boundary (that was the empty page
+     after the table of contents). Back-matter reference tables (the control
+     guides) flow continuously instead, packing densely rather than each wasting
+     the tail of its own sheet. */
+  .page{ box-shadow:none; border-radius:0; margin:0; width:auto; min-height:auto; break-before:page; break-after:auto; overflow:visible }
+  /* Each compliance reference (matrix, at-a-glance, and every control guide)
+     opens at the TOP of its own sheet — its heading is never stranded mid-page
+     or, worse, alone on a page. Costs a few pages; reads far cleaner. */
+  .guide{ break-before:page }
+  .guide .ghead, .guide h2, .guide .gblurb, .guide table thead{ break-after:avoid }
+  .matrix table thead, .matrix tr, .guide tr{ break-inside:avoid }
+  /* One inset owns the page margin: the @page rule below already reserves a band
+     for the running footer, so .pad only needs a modest content inset — not the
+     22/20mm screen inset stacked on top of it (that double margin squeezed the
+     text column and helped push chapters past the sheet). */
+  .pad{ min-height:auto; padding:9mm 7mm }
+  /* The manifesto sheet itself is painted dark (see .pagedjs_manifesto_page);
+     keep the section transparent so there is no offset seam between the section
+     gradient and the sheet gradient. */
+  .manifesto{ background:transparent }
+
+  /* A chapter must fit ONE A4 sheet. The screen sizes (46px titles, 40px grid
+     gaps, uncapped screenshots, a 46mm-margin runfoot) overflowed the sheet, so
+     Paged.js split each chapter and stranded the trailing footer band alone on
+     the next page. Tighten the print rhythm and, above all, bound figure height
+     so a tall screenshot can never blow past the page. */
+  .chapter-head{ margin-bottom:3px }
+  .chapter h2{ font-size:29px; line-height:1.04; margin-top:2px }
+  .lede{ font-size:14px; line-height:1.45; margin-top:10px; max-width:none }
+  .two{ gap:20px; margin-top:12px }
+  .selltext p{ font-size:12.5px; line-height:1.5; margin:0 0 10px }
+  .howto{ padding:15px 17px } .howto h4{ margin-bottom:11px }
+  .step{ margin-bottom:9px } .step .t{ font-size:12.5px }
+  .shot{ margin:12px 0 4px } .shotcap{ margin:0 0 11px }
+  /* Bound every screenshot by BOTH page width and a max height, preserving aspect
+     ratio (no crop): wide-short shots fill the column, tall shots scale down and
+     centre rather than running off the sheet. The cap is deliberately modest so a
+     complete chapter — narrative, how-to, screenshot AND its standards table —
+     fits ONE sheet instead of spilling the table onto a half-empty second page. */
+  .shot img{ display:block; margin:0 auto; max-width:100%; max-height:66mm; width:auto; height:auto }
+  .callout{ margin-top:14px; padding:11px 18px } .callout p{ font-size:12.5px }
+  .specs{ margin-top:14px } .spec{ padding:14px } .spec .v{ font-size:24px }
+  .std{ margin-top:14px } .std li{ padding:7px 18px } .std .demand{ font-size:12px; line-height:1.4 }
+  .std-h{ padding:10px 18px; font-size:12px } .std .code{ font-size:12px } .std .code em{ font-size:10.5px }
+  .runfoot{ margin-top:16px; padding-top:10px; font-size:11px }
+  .matrix td, .matrix th{ padding:9px 12px } .matrix table{ font-size:12.5px }
+  .guide h2{ font-size:28px } .guide table{ font-size:11.5px }
+
+  /* Keep composed blocks whole, and never break right before the runfoot — so if
+     a chapter does spill to a second sheet it carries real content with the
+     footer, instead of orphaning a lone footer band. The standards table is the
+     exception: it is allowed to split BETWEEN rows (each row stays whole, the
+     header stays with its first rows) so a long chapter fills the foot of its
+     page and continues, rather than jumping the whole card to a half-empty page. */
+  .shot, .two, .howto, .callout, .specs, .scorecard, .std li, .std-h, .guide table tr{ break-inside:avoid }
+  .std-h{ break-after:avoid }
+  .runfoot{ break-before:avoid }
+  p{ orphans:2; widows:2 }
+
+  /* The table of contents is long (25 chapters + a compliance reference), so it
+     spans two sheets. It used to split badly — a stranded blank sheet plus a
+     truncated re-render that never reached the last chapters. Compact, atomic
+     rows plus break-after:avoid on the heading give a clean two-page split: the
+     title always stays with the list it introduces, every row stays whole, and
+     the flow simply continues onto the second sheet. */
+  .toc h2{ font-size:22px; margin:2px 0 10px; break-after:avoid }
+  .toc .toc-h{ break-after:avoid }
+  .toc .toc-row{ padding:3px 0; break-inside:avoid }
+  .toc .toc-row.group{ margin-top:9px; padding-bottom:5px; break-after:avoid }
+  .toc .toc-title{ font-size:13px }
+  .toc .toc-sub{ font-size:11.5px }
+  .toc .toc-num{ font-size:11.5px; min-width:36px }
+  .toc .toc-pg{ font-size:12.5px }
+
   /* The cover is a single full-bleed sheet: tighten its rhythm and cap the hero
      screenshot so the whole composition fits one A4 page (no spill). */
   .cover .pad{ padding:18mm 16mm }
@@ -169,17 +245,23 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
    cover is its own named page with no footer; every other page shows the
    handbook footer on the left and the page number on the right. */
 @page{
-  size:A4; margin:14mm 13mm 16mm 13mm;
+  size:A4; margin:12mm 11mm 14mm 11mm;
   @bottom-left{ content:"Bitswan Bailey · The Operator's Handbook"; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; font-size:8.5pt; color:#8a93a0; }
   @bottom-right{ content:counter(page); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; font-size:9pt; font-weight:700; color:#0c1722; }
 }
 @page :first{ margin:0; @bottom-left{ content:none } @bottom-right{ content:none } }
 @page cover{ margin:0; @bottom-left{ content:none } @bottom-right{ content:none } }
+@page manifesto{ @bottom-left{ content:none } @bottom-right{ content:none } }
 .cover{ page:cover }
+.manifesto{ page:manifesto }
 /* Paged.js renders each sheet as .pagedjs_page; let full-bleed sections paint
    their dark backgrounds to the edge by neutralising the page margin visually
    on the cover/manifesto via their own padding (.pad). */
-.pagedjs_page{ background:#fff }
+.pagedjs_page{ background:var(--paper) }
+/* The manifesto is a full-bleed dark sheet: paint the whole page (margin band
+   included) with its gradient so it reads as edge-to-edge dark blue, not a dark
+   box floating on the paper colour. */
+.pagedjs_manifesto_page{ background:linear-gradient(165deg,#0c1f30,#0a1622) }
 `;
 
 function coverShot(shot) {
