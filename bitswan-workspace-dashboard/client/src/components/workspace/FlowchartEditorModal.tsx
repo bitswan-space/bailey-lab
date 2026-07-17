@@ -6,6 +6,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   addEdge,
+  reconnectEdge,
   useEdgesState,
   useNodesState,
   useReactFlow,
@@ -114,6 +115,15 @@ function FlowchartEditorInner({
     (connection: Connection) => {
       connectStartRef.current = undefined; // successful connection, don't spawn
       setEdges((eds) => addEdge({ ...connection, type: 'smoothstep' }, eds));
+    },
+    [setEdges],
+  );
+
+  // Dragging an edge endpoint onto a different node/handle reroutes it.
+  // Without this handler React Flow drops the drag and the edge is stuck (#97).
+  const onReconnect = useCallback(
+    (oldEdge: Edge, newConnection: Connection) => {
+      setEdges((eds) => reconnectEdge(oldEdge, newConnection, eds));
     },
     [setEdges],
   );
@@ -408,10 +418,12 @@ function FlowchartEditorInner({
             onConnectStart={onConnectStart}
             onConnect={onConnect}
             onConnectEnd={onConnectEnd}
+            onReconnect={onReconnect}
             onSelectionChange={onSelectionChange}
             nodeTypes={flowchartNodeTypes}
             fitView
-            deleteKeyCode="Delete"
+            fitViewOptions={{ padding: 0.2 }}
+            deleteKeyCode={['Delete', 'Backspace']}
             className="bg-background"
           >
             <Background gap={16} size={1} />
