@@ -116,6 +116,30 @@ export function Terminal({ wsUrl, onExit, onUploadFiles }: TerminalProps) {
     // does nothing on its own to copy, so wire the standard shortcuts:
     // Cmd+C (mac) or Ctrl+Shift+C (so plain Ctrl+C still sends SIGINT to the
     // process). Returning false stops xterm from also forwarding the keys.
+    // navigator.clipboard is absent in insecure contexts and rejects in
+    // cross-origin iframes that weren't granted clipboard-write (the AOC
+    // embeds this dashboard in one), so fall back to execCommand('copy')
+    // through an off-screen textarea — that path only needs the user
+    // gesture the keystroke already is. xterm renders to canvas, so the
+    // textarea must briefly take focus; hand it back afterwards.
+    const copySelection = (text: string) => {
+      const fallback = () => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        term.focus();
+      };
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).catch(fallback);
+      } else {
+        fallback();
+      }
+    };
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       const isCopy =
@@ -123,7 +147,7 @@ export function Terminal({ wsUrl, onExit, onUploadFiles }: TerminalProps) {
         (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'c');
       if (isCopy && term.hasSelection()) {
         const sel = term.getSelection();
-        if (sel) void navigator.clipboard?.writeText(sel);
+        if (sel) copySelection(sel);
         return false;
       }
       return true;
