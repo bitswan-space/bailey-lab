@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -97,5 +100,46 @@ func TestClaimGroups(t *testing.T) {
 	}
 	if g := claimGroups(nil); len(g) != 0 {
 		t.Errorf("claimGroups(nil) = %v, want empty", g)
+	}
+}
+
+// getUsername reads identity from the verified token claims that requireAuth
+// stored on the request — and from nowhere else. In particular the forwarded
+// identity headers (X-Forwarded-Email, X-Auth-Request-Email) must never be
+// trusted: the gate strips them for user-deployed apps by design, so any
+// value that does arrive is client-supplied and spoofable (#102, #178).
+
+func TestGetUsernameReadsVerifiedClaims(t *testing.T) {
+	claims := jwtv5.MapClaims{"preferred_username": "carol"}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r = r.WithContext(context.WithValue(r.Context(), claimsKey, claims))
+	if got := getUsername(r); got != "carol" {
+		t.Errorf("getUsername = %q, want %q", got, "carol")
+	}
+}
+
+func TestGetUsernameAnonymousWithoutClaims(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	if got := getUsername(r); got != "anonymous" {
+		t.Errorf("getUsername = %q, want %q", got, "anonymous")
+	}
+}
+
+func TestGetUsernameNeverTrustsForwardedHeaders(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("X-Forwarded-Email", "spoofed@evil.example")
+	r.Header.Set("X-Auth-Request-Email", "spoofed@evil.example")
+	if got := getUsername(r); got != "anonymous" {
+		t.Errorf("getUsername = %q, want %q (forwarded headers are untrusted)", got, "anonymous")
+	}
+}
+
+func TestGetUsernameEmptyClaimDoesNotFallBackToHeaders(t *testing.T) {
+	claims := jwtv5.MapClaims{"preferred_username": ""}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("X-Forwarded-Email", "spoofed@evil.example")
+	r = r.WithContext(context.WithValue(r.Context(), claimsKey, claims))
+	if got := getUsername(r); got != "anonymous" {
+		t.Errorf("getUsername = %q, want %q (no cross-source fallback)", got, "anonymous")
 	}
 }
