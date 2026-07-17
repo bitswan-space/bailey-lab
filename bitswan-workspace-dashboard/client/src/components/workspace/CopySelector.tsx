@@ -17,6 +17,8 @@ import {
 import { Input } from '@/components/ui/input';
 import { DeleteCopyDialog } from '@/components/workspace/DeleteCopyDialog';
 import { NewCopyDialog } from '@/components/workspace/NewCopyDialog';
+import { CopyIdentity } from '@/components/workspace/CopyIdentity';
+import { useCopyIdentities } from '@/lib/identity';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess, Copy } from '@/types';
@@ -173,6 +175,12 @@ export function CopySelector({
     ? bpCopies.filter((c) => c.name.toLowerCase().includes(q))
     : bpCopies;
 
+  // Resolve each copy's owner identity, then split per-user copies (slug matches
+  // a real user) from custom (manually named) copies. People come first.
+  const identities = useCopyIdentities(visible.map((c) => c.name));
+  const perUserCopies = visible.filter((c) => !!identities[c.name]?.email);
+  const customCopies = visible.filter((c) => !identities[c.name]?.email);
+
   useEffect(() => {
     if (open) setQuery('');
     else setDivergence({});
@@ -238,6 +246,74 @@ export function CopySelector({
   // snapshot), so "this copy has changes to pull" is visible without opening.
   const triggerBehind = activeCopy?.behind ?? 0;
 
+  const renderRow = (c: Copy) => {
+    const active = c.name === copy;
+    const fetched = divergence[c.name] !== undefined;
+    const hasBp = bpCopyNames.has(c.name);
+    const isMaterializing = materializing === c.name;
+    return (
+      <div
+        key={c.name}
+        className={cn(
+          'flex h-8 items-center rounded-md transition-colors',
+          active ? 'bg-muted' : 'hover:bg-muted/60',
+        )}
+      >
+        <button
+          type="button"
+          disabled={materializing !== null}
+          onClick={() => handleSelect(c.name)}
+          className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2.5 text-left disabled:opacity-60"
+        >
+          <CopyIdentity slug={c.name} className="min-w-0 flex-1" />
+        </button>
+        {/* Sibling of the select button (not nested) so the ↓ pull is a valid
+            standalone button; reserved check slot keeps the chips aligned. */}
+        <div className="flex shrink-0 items-center gap-1.5 pr-2.5 pl-1">
+          {active && (
+            <button
+              type="button"
+              title={`Delete copy "${c.name}"`}
+              onClick={() => {
+                setOpen(false);
+                setDeleteTarget(c);
+              }}
+              className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+            >
+              <Trash2 className="size-3.5" aria-hidden />
+            </button>
+          )}
+          {isMaterializing ? (
+            <span className="text-[10px] text-muted-foreground">adding…</span>
+          ) : !hasBp ? (
+            <span
+              title={`This process isn't in “${c.name}” yet — selecting it clones the process from main`}
+              className="text-[10px] font-medium text-muted-foreground"
+            >
+              + from main
+            </span>
+          ) : (
+            <CopyDelta
+              d={bpName ? divergence[c.name]?.[bpName] : undefined}
+              fetched={fetched}
+              pulling={pulling === c.name}
+              onPull={() => handlePull(c.name)}
+            />
+          )}
+          <span className="flex size-3.5 items-center justify-center">
+            {active && <Check className="size-3.5 text-primary" aria-hidden />}
+          </span>
+        </div>
+      </div>
+    );
+  };
+
+  const sectionLabel = (text: string) => (
+    <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+      {text}
+    </div>
+  );
+
   return (
     <>
       <Popover open={open} onOpenChange={setOpen}>
@@ -261,9 +337,15 @@ export function CopySelector({
             <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
               Copy
             </span>
-            <span className="max-w-40 truncate font-mono text-[13px] font-semibold text-foreground">
-              {activeCopy?.name ?? '—'}
-            </span>
+            {activeCopy ? (
+              <CopyIdentity
+                slug={activeCopy.name}
+                variant="name"
+                className="max-w-40 font-semibold"
+              />
+            ) : (
+              <span className="text-[13px] font-semibold text-muted-foreground">—</span>
+            )}
             {triggerBehind > 0 && (
               <span
                 title={`${triggerBehind} change(s) on main to pull into this copy`}
@@ -302,79 +384,20 @@ export function CopySelector({
                 No matches
               </div>
             ) : (
-              visible.map((c) => {
-                const active = c.name === copy;
-                const fetched = divergence[c.name] !== undefined;
-                const hasBp = bpCopyNames.has(c.name);
-                const isMaterializing = materializing === c.name;
-                return (
-                  <div
-                    key={c.name}
-                    className={cn(
-                      'flex h-8 items-center rounded-md transition-colors',
-                      active ? 'bg-muted' : 'hover:bg-muted/60',
-                    )}
-                  >
-                    <button
-                      type="button"
-                      disabled={materializing !== null}
-                      onClick={() => handleSelect(c.name)}
-                      className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2.5 text-left disabled:opacity-60"
-                    >
-                      <GitBranch
-                        className={cn(
-                          'size-3.5 shrink-0',
-                          active ? 'text-primary' : 'text-muted-foreground',
-                        )}
-                        aria-hidden
-                      />
-                      <span className="min-w-0 flex-1 truncate font-mono text-[13px]">
-                        {c.name}
-                      </span>
-                    </button>
-                    {/* Sibling of the select button (not nested) so the ↓ pull
-                        is a valid standalone button; reserved check slot keeps
-                        the chips aligned. */}
-                    <div className="flex shrink-0 items-center gap-1.5 pr-2.5 pl-1">
-                      {active && (
-                        <button
-                          type="button"
-                          title={`Delete copy "${c.name}"`}
-                          onClick={() => {
-                            setOpen(false);
-                            setDeleteTarget(c);
-                          }}
-                          className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
-                        >
-                          <Trash2 className="size-3.5" aria-hidden />
-                        </button>
-                      )}
-                      {isMaterializing ? (
-                        <span className="text-[10px] text-muted-foreground">adding…</span>
-                      ) : !hasBp ? (
-                        <span
-                          title={`This process isn't in “${c.name}” yet — selecting it clones the process from main`}
-                          className="text-[10px] font-medium text-muted-foreground"
-                        >
-                          + from main
-                        </span>
-                      ) : (
-                        <CopyDelta
-                          d={bpName ? divergence[c.name]?.[bpName] : undefined}
-                          fetched={fetched}
-                          pulling={pulling === c.name}
-                          onPull={() => handlePull(c.name)}
-                        />
-                      )}
-                      <span className="flex size-3.5 items-center justify-center">
-                        {active && (
-                          <Check className="size-3.5 text-primary" aria-hidden />
-                        )}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })
+              <>
+                {perUserCopies.length > 0 && (
+                  <>
+                    {customCopies.length > 0 && sectionLabel('People')}
+                    {perUserCopies.map(renderRow)}
+                  </>
+                )}
+                {customCopies.length > 0 && (
+                  <>
+                    {perUserCopies.length > 0 && sectionLabel('Custom copies')}
+                    {customCopies.map(renderRow)}
+                  </>
+                )}
+              </>
             )}
           </div>
           <div className="border-t border-border p-1.5">
