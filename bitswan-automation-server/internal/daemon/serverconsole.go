@@ -95,10 +95,19 @@ func serveServerConsole(w http.ResponseWriter, r *http.Request) {
 	// script-src stays 'self' (the SPA's hashed bundle) PLUS the sha256 of the
 	// injected nav-sync inline script — so the strict policy permits exactly
 	// that one inline script and nothing else (no blanket 'unsafe-inline').
-	outer := toOuterHost(requestEndpointHost(r))
+	host := requestEndpointHost(r)
+	outer := toOuterHost(host)
+	// The console renders each user's avatar as an <img> from the sibling AOC
+	// api host (api.<base>) and looks up display names there too. The SPA derives
+	// that host from its own window.location (first DNS label → "api."), so mirror
+	// the derivation here to keep img-src / connect-src in lockstep.
+	aocImg := ""
+	if i := strings.IndexByte(host, '.'); i >= 0 {
+		aocImg = " https://api." + host[i+1:]
+	}
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'self'; script-src 'self' "+navSyncCSPHash+"; style-src 'self' 'unsafe-inline'; "+
-			"img-src 'self' data:; font-src 'self' data:; connect-src 'self'; "+
+			"img-src 'self' data:"+aocImg+"; font-src 'self' data:; connect-src 'self'"+aocImg+"; "+
 			"frame-ancestors 'self' https://"+outer)
 	w.Header().Del("X-Frame-Options")
 	// The onboarding host can land with an invite token in the query

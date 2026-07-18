@@ -3,7 +3,7 @@ import React from 'react';
 
 const { C: WC, Icon: WIcon, Btn: WBtn, Pill: WPill } = window.WD_SHELL;
 const {
-  Avatar: WAvatar, Card: WCard, PageHeader: WPageHeader, Field: WField, TextInput: WTextInput,
+  Avatar: WAvatar, UserChip: WUserChip, Card: WCard, PageHeader: WPageHeader, Field: WField, TextInput: WTextInput,
   Modal: WModal, Toggle: WToggle, EmptyState: WEmpty, Stat: WStat, Drawer: WDrawer,
   Select: WSelect, AvatarStack: WAvatarStack, LiveState: WLiveState,
 } = window.SC_UI;
@@ -948,12 +948,17 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
       <div style={{ ...SECTION, marginBottom: 10 }}>Ownership</div>
       <div style={{ border: `1px solid ${WC.border}`, borderRadius: 10, padding: 14, marginBottom: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-          <WAvatar user={{ name: ownerEmail || ws.name }} size={36} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg, display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'Geist Mono, monospace' }}>
-              {ownerEmail || 'No owner recorded'} <WPill tone="primary" size="xs">Owner</WPill>
-            </div>
-          </div>
+          {ownerEmail ? (
+            <WUserChip user={{ email: ownerEmail }} size={36}
+              nameSuffix={<WPill tone="primary" size="xs">Owner</WPill>} />
+          ) : (
+            <>
+              <WAvatar user={{ name: ws.name }} size={36} />
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg }}>
+                No owner recorded <WPill tone="primary" size="xs">Owner</WPill>
+              </div>
+            </>
+          )}
         </div>
         {canManage && !transferOpen && (
           <div style={{ marginTop: 12 }}>
@@ -1005,10 +1010,10 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {members.map(g => (
           <div key={g.principal_value} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 6px', borderRadius: 8 }}>
-            <WAvatar user={{ name: g.principal_value }} size={30} />
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 500, color: WC.fg, fontFamily: 'Geist Mono, monospace' }}>{g.principal_value}</div>
-              <div style={{ fontSize: 11, color: WC.muted }}>{g.principal_type === 'group' ? 'Group' : 'Member'}</div>
+              <WUserChip user={{ email: g.principal_value, name: g.principal_type === 'group' ? g.principal_value : undefined }}
+                size={30}
+                nameSuffix={<WPill tone="neutral" size="xs">{g.principal_type === 'group' ? 'Group' : 'Member'}</WPill>} />
             </div>
             {canManage && (
               <button onClick={() => removeMember(g)} disabled={busy === g.principal_value} title="Remove from workspace" style={{

@@ -4,7 +4,7 @@ import React from 'react';
 
 const { C: PC, Icon: PIcon, Btn: PBtn, Pill: PPill } = window.WD_SHELL;
 const {
-  Avatar: PAvatar, Card: PCard, PageHeader: PPageHeader, Field: PField, TextInput: PTextInput,
+  Avatar: PAvatar, UserChip: PUserChip, Card: PCard, PageHeader: PPageHeader, Field: PField, TextInput: PTextInput,
   Modal: PModal, EmptyState: PEmpty, Drawer: PDrawer, CopyChip: PCopyChip,
   SegmentedCode: PSeg, DeviceIcon: PDeviceIcon, ProtoHint: PProtoHint, LiveState: PLiveState,
 } = window.SC_UI;
@@ -578,18 +578,11 @@ function UsersView({ ctx }) {
           <div key={u.id} style={{ borderBottom: `1px solid ${PC.surface2}`, boxShadow: hasPending ? `inset 3px 0 0 ${PC.primary}` : 'none' }}>
             <div style={{ display: 'grid', gridTemplateColumns: '2.2fr 1fr 1fr 1fr 0.9fr', gap: 12,
               padding: '12px 18px', alignItems: 'center', background: hasPending ? PC.primarySoft : 'transparent' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 11, minWidth: 0 }}>
-                <PAvatar user={u} size={32} />
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: PC.fg, display: 'flex', alignItems: 'center', gap: 7 }}>
-                    {u.name}
-                    {u.role === 'admin' && <span title="Administrator"><PIcon name="crown" size={13} color={PC.amber} /></span>}
-                    {u.isNewArrival && <PPill tone="info" size="xs">New</PPill>}
-                    {u.invited && <PPill tone="warning" size="xs">Invited</PPill>}
-                  </div>
-                  <div style={{ fontSize: 11.5, color: PC.muted, fontFamily: 'Geist Mono, monospace' }}>{u.email}</div>
-                </div>
-              </div>
+              <PUserChip user={u} size={32} nameSuffix={<>
+                {u.role === 'admin' && <span title="Administrator"><PIcon name="crown" size={13} color={PC.amber} /></span>}
+                {u.isNewArrival && <PPill tone="info" size="xs">New</PPill>}
+                {u.invited && <PPill tone="warning" size="xs">Invited</PPill>}
+              </>} />
               {/* Role is a styled dropdown; admins change roles here. The role is
                   stored locally (user_roles) and authoritative — not from SSO. */}
               <RoleSelect role={u.role} onPick={(role) => changeRole(u.email, role)} />

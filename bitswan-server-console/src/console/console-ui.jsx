@@ -16,22 +16,103 @@ function avatarColor(s) {
   return `hsl(${h % 360} 52% 45%)`;
 }
 
-function Avatar({ user, size = 28, ring }) {
+// aocApiBase / avatarUrlForEmail: identities are shared with the AOC via the
+// same Keycloak, and the AOC serves each user's avatar publicly keyed by email
+// (GET /api/frontend/avatars?email=…). The console lives at bailey[.--inner].<base>,
+// so the AOC API is the sibling api.<base>. This lets any UserChip render a real
+// avatar for any identity, falling back to initials when there's none.
+function aocApiBase() {
+  const host = window.location.hostname.replace(/^[^.]+\./, 'api.');
+  return `${window.location.protocol}//${host}`;
+}
+function avatarUrlForEmail(email) {
+  if (!email) return null;
+  return `${aocApiBase()}/api/frontend/avatars?email=${encodeURIComponent(email)}`;
+}
+
+function Avatar({ user, size = 28, ring, src }) {
+  const [imgOk, setImgOk] = useS(!!src);
+  useE(() => { setImgOk(!!src); }, [src]);
   if (!user) return null;
   const name = user.name || '';
   // Split on spaces AND email/handle separators so "jane@acme.com" → "JA".
   const initials = name.split(/[\s@._-]+/).filter(Boolean).map(w => w[0]).slice(0, 2).join('').toUpperCase()
     || (name[0] || '?').toUpperCase();
   const color = user.color || avatarColor(name);
+  const base = {
+    width: size, height: size, borderRadius: 9999, flex: '0 0 auto',
+    boxShadow: ring ? `0 0 0 2px #fff, 0 0 0 ${2 + (ring === true ? 1 : ring)}px ${color}55` : 'none',
+    userSelect: 'none',
+  };
+  if (src && imgOk) {
+    return (
+      <img src={src} alt="" draggable={false} onError={() => setImgOk(false)}
+        style={{ ...base, objectFit: 'cover', display: 'block', background: color }} />
+    );
+  }
   return (
     <span style={{
-      width: size, height: size, borderRadius: 9999, flex: '0 0 auto',
-      background: color, color: '#fff',
+      ...base, background: color, color: '#fff',
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
       fontSize: size * 0.4, fontWeight: 600, letterSpacing: 0.2,
-      boxShadow: ring ? `0 0 0 2px #fff, 0 0 0 ${2 + (ring === true ? 1 : ring)}px ${color}55` : 'none',
-      userSelect: 'none',
     }}>{initials}</span>
+  );
+}
+
+// ─── UserChip (avatar + name + email) ────────────────────────────────────────
+// The one DRY way to render an identity across the console: real avatar (by
+// email, initials fallback), a name line with an optional trailing slot for
+// badges, and a monospace email line. Replaces the avatar-plus-two-spans markup
+// that was hand-rolled in the people roster, workspace drawer and gate scenes.
+// Resolve a real display name (+ avatar) for an email from the AOC identity
+// directory (Keycloak-backed). Bailey itself only knows emails, so this is how
+// the console shows real names for any identity. Module-cached per email — one
+// fetch per unique person across the whole console.
+const _dirCache = {};
+function useDisplayInfo(email) {
+  const [info, setInfo] = useS(null);
+  useE(() => {
+    if (!email) { setInfo(null); return; }
+    const cached = _dirCache[email];
+    if (cached && typeof cached.then !== 'function') { setInfo(cached); return; }
+    let alive = true;
+    let p = cached;
+    if (!p) {
+      p = fetch(`${aocApiBase()}/api/frontend/directory?email=${encodeURIComponent(email)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null)
+        .then((d) => { _dirCache[email] = d || {}; return _dirCache[email]; });
+      _dirCache[email] = p;
+    }
+    p.then((d) => { if (alive) setInfo(d); });
+    return () => { alive = false; };
+  }, [email]);
+  return info && typeof info.then !== 'function' ? info : null;
+}
+
+function UserChip({ user, size = 32, showEmail = true, nameSuffix, sub, gap = 11 }) {
+  const info = useDisplayInfo(user && user.email);
+  if (!user) return null;
+  const displayName = (info && info.name) || user.name || user.email;
+  // Avoid a duplicate line when we only have the email (name === email).
+  const secondLine = sub != null ? sub : (displayName !== user.email ? user.email : null);
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap, minWidth: 0 }}>
+      <Avatar user={{ ...user, name: displayName }} size={size} src={avatarUrlForEmail(user.email)} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 600, color: C.fg, display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {displayName}
+          </span>
+          {nameSuffix}
+        </div>
+        {showEmail && secondLine && (
+          <div style={{ fontSize: 11.5, color: C.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {secondLine}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -462,7 +543,7 @@ function LiveState({ status, error, label, onRetry }) {
 }
 
 window.SC_UI = {
-  Avatar, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRImage,
+  Avatar, UserChip, avatarUrlForEmail, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRImage,
   Toggle, DeviceIcon, Toast, EmptyState, CopyChip, ProtoHint, Stat,
   Drawer, Select, AvatarStack, LoadBanner, ErrorBanner, LiveState,
 };
