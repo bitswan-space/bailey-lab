@@ -17,9 +17,10 @@ import shlex
 
 import pytest
 from fastapi import HTTPException
+from fastapi.routing import APIRoute
 
 from app.utils import _build_git_command
-from app.routes.automations import _require_valid_bp, _validated_bp
+from app.routes.automations import _require_valid_bp, _validated_bp, router
 from app.services.automation_service import AutomationService
 
 
@@ -82,6 +83,28 @@ def test_route_guard_rejects_unsafe_bp(bad):
 def test_route_guard_accepts_valid_bp():
     for good in ("invoice-processing", "bp_1.2", "AbC123", "a-b_c.d"):
         assert _validated_bp(good) == good
+
+
+# --- #194: every {bp} route must opt into the guard ------------------------
+
+
+def test_every_bp_route_uses_validated_bp():
+    """Wiring invariant: a `{bp}` path param must resolve through
+    `_validated_bp` (the `ValidBp` annotation), never as a bare `str`.
+
+    #194 found four staging-gate routes that skipped the annotation; this
+    fails for any route that forgets it, current or future.
+    """
+    bp_routes = [
+        r for r in router.routes if isinstance(r, APIRoute) and "{bp}" in r.path
+    ]
+    assert bp_routes, "expected {bp} routes on the automations router"
+    for route in bp_routes:
+        sub_dep_calls = [d.call for d in route.dependant.dependencies]
+        bare_params = [p.name for p in route.dependant.path_params]
+        assert (
+            _validated_bp in sub_dep_calls and "bp" not in bare_params
+        ), f"{sorted(route.methods)} {route.path} takes bp without ValidBp"
 
 
 # --- sink 1, defense in depth: the service layer also validates -----------
