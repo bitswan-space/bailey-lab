@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { Base64, ClipboardAddon, type IClipboardProvider } from '@xterm/addon-clipboard';
 
 type UploadStatus = 'uploading' | 'done' | 'failed';
 
@@ -152,6 +153,23 @@ export function Terminal({ wsUrl, onExit, onUploadFiles }: TerminalProps) {
       }
       return true;
     });
+
+    // Claude Code's TUI has its own selection layer (that's what the mouse
+    // tracking above is about): drag-select inside the TUI and it emits
+    // OSC 52 — the "terminal, set the system clipboard" escape sequence —
+    // then reports "copied". Stock xterm.js discards OSC 52; this addon
+    // parses it. The write is routed through copySelection so it shares the
+    // execCommand fallback; the keystroke that triggered the copy is recent
+    // enough to still count as the user gesture that fallback needs. Reads
+    // are denied — answering an OSC 52 read would let anything running in
+    // the PTY silently exfiltrate the user's clipboard.
+    const clipboardProvider: IClipboardProvider = {
+      readText: () => '',
+      writeText: (_selection, text) => {
+        copySelection(text);
+      },
+    };
+    term.loadAddon(new ClipboardAddon(new Base64(), clipboardProvider));
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${window.location.host}${wsUrl}`);
