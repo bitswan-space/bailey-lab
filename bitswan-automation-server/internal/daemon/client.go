@@ -1156,6 +1156,42 @@ func (c *Client) WorkspaceInit(req0 WorkspaceInitRequest) error {
 
 // WorkspaceUpdate runs `bitswan workspace update ...` via the daemon with
 // NDJSON streaming. Typed request — same single-parser rule as WorkspaceInit.
+// WorkspaceRollback restores a workspace's previous docker-compose snapshot and
+// re-deploys, streaming the daemon's progress to stdout.
+func (c *Client) WorkspaceRollback(workspaceName string) error {
+	bodyBytes, err := json.Marshal(map[string]string{"workspace": workspaceName})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "http://unix/workspace/rollback", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doStreamingRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	_, err = c.streamLogs(resp.Body, os.Stdout)
+	return err
+}
+
 func (c *Client) WorkspaceUpdate(req0 WorkspaceUpdateRequest) error {
 	bodyBytes, err := json.Marshal(req0)
 	if err != nil {

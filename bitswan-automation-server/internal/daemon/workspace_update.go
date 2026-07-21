@@ -125,6 +125,12 @@ func (s *Server) runWorkspaceUpdate(req WorkspaceUpdateRequest) error {
 	// too makes every update self-heal an already-migrated workspace.
 	ensureWorkspaceVolumeDirs(workspaceName)
 
+	// Snapshot the current compose as a rollback point BEFORE regenerating it, so
+	// `bitswan rollback <workspace>` can return to the exact pre-update image pins.
+	if err := workspace.SnapshotWorkspaceCompose(workspaceName); err != nil {
+		fmt.Printf("Warning: could not snapshot current deployment for rollback: %v\n", err)
+	}
+
 	// Update Docker images and docker-compose file
 	fmt.Println("Updating Docker images and docker-compose file...")
 	if err := workspace.UpdateWorkspaceDeployment(workspaceName, gitopsImage, "", "", staging, dev, trustCA); err != nil {

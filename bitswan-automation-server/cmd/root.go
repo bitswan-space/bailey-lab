@@ -55,6 +55,8 @@ func newRootCmd(version string) *cobra.Command {
 	cmd.AddCommand(newVersionCmd(version))                                // version subcommand
 	cmd.AddCommand(newWorkspaceCmd())                                     // workspace subcommand
 	cmd.AddCommand(newRegisterCmd())                                      // register subcommand
+	cmd.AddCommand(newRollbackCmd())                                      // rollback subcommand (CLI-only)
+	cmd.AddCommand(newSelfUpdateCmd())                                    // self-update subcommand (CLI-only)
 	cmd.AddCommand(newDisconnectFromAOCCmd())                             // disconnect-from-aoc subcommand
 	cmd.AddCommand(ingress.NewIngressCmd())                               // ingress subcommand
 	cmd.AddCommand(certauthority.NewCertAuthorityCmd())                   // certificate authority subcommand
