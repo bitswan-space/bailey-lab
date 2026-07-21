@@ -60,6 +60,13 @@ func getWildcardCertDomain() string {
 	if err != nil || settings.AccessToken == "" {
 		return ""
 	}
+	// A DNS-01 wildcard is only obtainable when the AOC controls the domain's
+	// DNS (it answers the challenge via Route53). For a bring-your-own domain
+	// the AOC can't, so report no wildcard domain — routes then fall back to
+	// per-host HTTP-01 (see certResolverForHostname).
+	if !settings.DNSManaged {
+		return ""
+	}
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(settings.Domain)), ".")
 }
 

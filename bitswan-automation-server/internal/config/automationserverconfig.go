@@ -56,6 +56,11 @@ type AutomationOperationsCenterSettings struct {
 	// (e.g. acme-prod.bswn.io). When set, the daemon configures Traefik to
 	// obtain a DNS-01 wildcard certificate for *.<domain> via the AOC.
 	Domain string `toml:"domain,omitempty"`
+	// DNSManaged reports whether the AOC manages this domain's DNS (i.e. it is
+	// under an AOC-controlled zone such as bswn.io). Only then can Traefik get a
+	// *.<domain> wildcard certificate via the DNS-01 challenge through the AOC;
+	// for a bring-your-own domain the daemon must fall back to per-host HTTP-01.
+	DNSManaged bool `toml:"dns_managed,omitempty"`
 }
 
 // GetRealUserHomeDir returns the home directory of the actual user,

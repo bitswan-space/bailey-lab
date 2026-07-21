@@ -23,6 +23,9 @@ type AOCConfigRequest struct {
 	AccessToken        string `json:"access_token"`
 	ExpiresAt          string `json:"expires_at,omitempty"`
 	Domain             string `json:"domain,omitempty"`
+	// DNSManaged reports whether the AOC controls this domain's DNS (bswn.io
+	// etc.) and can therefore satisfy a DNS-01 wildcard challenge for it.
+	DNSManaged bool `json:"dns_managed,omitempty"`
 	// Force overwrites an existing registration instead of failing with 409.
 	Force bool `json:"force,omitempty"`
 }
@@ -112,6 +115,7 @@ func (s *Server) handleAOCConfig(w http.ResponseWriter, r *http.Request) {
 		AccessToken:        req.AccessToken,
 		ExpiresAt:          req.ExpiresAt,
 		Domain:             req.Domain,
+		DNSManaged:         req.DNSManaged,
 	}); err != nil {
 		writeJSONError(w, "failed to persist AOC config: "+err.Error(), http.StatusInternalServerError)
 		return

@@ -36,6 +36,7 @@ type AutomationServerInfo struct {
 	KeycloakOrgId      string `json:"keycloak_org_id"`
 	IsConnected        bool   `json:"is_connected"`
 	Domain             string `json:"domain"`
+	DNSManaged         bool   `json:"dns_managed"`
 	CreatedAt          string `json:"created_at"`
 	UpdatedAt          string `json:"updated_at"`
 }

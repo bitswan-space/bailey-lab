@@ -18,10 +18,14 @@ function avatarColor(s) {
 
 // aocApiBase / avatarUrlForEmail: identities are shared with the AOC via the
 // same Keycloak, and the AOC serves each user's avatar publicly keyed by email
-// (GET /api/frontend/avatars?email=…). The console lives at bailey[.--inner].<base>,
-// so the AOC API is the sibling api.<base>. This lets any UserChip render a real
-// avatar for any identity, falling back to initials when there's none.
+// (GET /api/frontend/avatars?email=…). The daemon injects the AOC API base as a
+// <meta name="bitswan-aoc-api"> tag (it knows its aoc_url), because a Bailey
+// server can live on a different domain than its AOC — deriving api.<own-host>
+// only works for a same-domain single box. We fall back to that sibling
+// derivation when the meta tag is absent (older daemon / same-domain setups).
 function aocApiBase() {
+  const meta = document.querySelector('meta[name="bitswan-aoc-api"]');
+  if (meta && meta.content) return meta.content.replace(/\/+$/, '');
   const host = window.location.hostname.replace(/^[^.]+\./, 'api.');
   return `${window.location.protocol}//${host}`;
 }

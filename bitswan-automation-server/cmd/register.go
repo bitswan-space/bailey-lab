@@ -96,7 +96,7 @@ func newRegisterCmd() *cobra.Command {
 			// ingress, protected proxy, workspace connect).
 			if err := client.SetAOCConfig(
 				aocUrl, serverInfo.AutomationServerId, aocClient.GetAccessToken(),
-				aocClient.GetExpiresAt(), serverInfo.Domain,
+				aocClient.GetExpiresAt(), serverInfo.Domain, serverInfo.DNSManaged,
 			); err != nil {
 				return fmt.Errorf("failed to save AOC configuration to the daemon: %w", err)
 			}
@@ -109,15 +109,21 @@ func newRegisterCmd() *cobra.Command {
 			// workspace's routes register through the auth wrap rather than as
 			// bare single-tier routes (see addRouteTraefik).
 			if serverInfo.Domain != "" {
-				// Reconfigure the ingress so Traefik obtains a *.<domain>
-				// wildcard certificate via the DNS-01 challenge (through the
-				// AOC) instead of a separate HTTP-01 certificate per endpoint.
-				fmt.Printf("\n🔐 Configuring ingress for a *.%s wildcard certificate...\n", serverInfo.Domain)
-				if _, err := client.InitIngress(false); err != nil {
-					fmt.Printf("Warning: Failed to reconfigure ingress for wildcard certificates: %v\n", err)
-					fmt.Println("Run 'bitswan ingress init' to apply the wildcard certificate configuration.")
+				// Configure the ingress. When the AOC manages this domain's DNS
+				// (bswn.io etc.) Traefik obtains a single *.<domain> wildcard
+				// certificate via DNS-01 through the AOC; for a bring-your-own
+				// domain it falls back to per-host HTTP-01 certificates (the AOC
+				// can't answer a DNS-01 challenge for a domain it doesn't control).
+				if serverInfo.DNSManaged {
+					fmt.Printf("\n🔐 Configuring ingress for a *.%s wildcard certificate (DNS-01)...\n", serverInfo.Domain)
 				} else {
-					fmt.Println("Ingress configured to use a DNS-01 wildcard certificate.")
+					fmt.Printf("\n🔐 Configuring ingress for %s with per-host HTTP-01 certificates...\n", serverInfo.Domain)
+				}
+				if _, err := client.InitIngress(false); err != nil {
+					fmt.Printf("Warning: Failed to configure ingress: %v\n", err)
+					fmt.Println("Run 'bitswan ingress init' to (re)apply the certificate configuration.")
+				} else {
+					fmt.Println("Ingress configured.")
 				}
 
 				// Bring up the shared bitswan-protected-proxy (oauth2-proxy)

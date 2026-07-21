@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"embed"
 	"encoding/base64"
@@ -97,17 +98,21 @@ func serveServerConsole(w http.ResponseWriter, r *http.Request) {
 	// that one inline script and nothing else (no blanket 'unsafe-inline').
 	host := requestEndpointHost(r)
 	outer := toOuterHost(host)
-	// The console renders each user's avatar as an <img> from the sibling AOC
-	// api host (api.<base>) and looks up display names there too. The SPA derives
-	// that host from its own window.location (first DNS label → "api."), so mirror
-	// the derivation here to keep img-src / connect-src in lockstep.
-	aocImg := ""
-	if i := strings.IndexByte(host, '.'); i >= 0 {
-		aocImg = " https://api." + host[i+1:]
+	// The console renders each user's avatar as an <img> and looks up display
+	// names from the AOC. The AOC API base is the daemon's configured aoc_url —
+	// NOT a sibling of the console host: a Bailey server can live on a different
+	// domain than its AOC (e.g. bailey.sandbox.bitswan.ai served by an AOC at
+	// api.timssandbox2.bswn.io). We inject that base into the SPA (below) and
+	// mirror it into img-src/connect-src here so the fetches are permitted.
+	// Falls back to the sibling api.<base> only when no aoc_url is configured.
+	aocBase := consoleAOCAPIBase(host)
+	aocSrc := ""
+	if aocBase != "" {
+		aocSrc = " " + aocBase
 	}
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'self'; script-src 'self' "+navSyncCSPHash+"; style-src 'self' 'unsafe-inline'; "+
-			"img-src 'self' data:"+aocImg+"; font-src 'self' data:; connect-src 'self'"+aocImg+"; "+
+			"img-src 'self' data:"+aocSrc+"; font-src 'self' data:; connect-src 'self'"+aocSrc+"; "+
 			"frame-ancestors 'self' https://"+outer)
 	w.Header().Del("X-Frame-Options")
 	// The onboarding host can land with an invite token in the query
@@ -127,6 +132,7 @@ func serveServerConsole(w http.ResponseWriter, r *http.Request) {
 	if serve == "/" {
 		if raw, err := fs.ReadFile(serverConsoleRoot, "index.html"); err == nil {
 			body := appendNavSyncToHTML(raw)
+			body = injectAOCAPIBase(body, aocBase)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 			w.WriteHeader(http.StatusOK)
@@ -139,4 +145,47 @@ func serveServerConsole(w http.ResponseWriter, r *http.Request) {
 	r2 := r.Clone(r.Context())
 	r2.URL.Path = serve
 	http.FileServer(http.FS(serverConsoleRoot)).ServeHTTP(w, r2)
+}
+
+// consoleAOCAPIBase returns the base URL of the AOC API the console should call
+// for shared identity data (avatars, the directory). It is the daemon's
+// configured aoc_url — the AOC can live on a wholly different domain than this
+// Bailey server. Falls back to the sibling api.<base> of the console host only
+// when no AOC is configured yet (legacy / same-domain single-box setups).
+func consoleAOCAPIBase(host string) string {
+	cfg := config.NewAutomationServerConfig()
+	if settings, err := cfg.GetAutomationOperationsCenterSettings(); err == nil && settings.AOCUrl != "" {
+		return strings.TrimRight(settings.AOCUrl, "/")
+	}
+	if i := strings.IndexByte(host, '.'); i >= 0 {
+		return "https://api." + host[i+1:]
+	}
+	return ""
+}
+
+// injectAOCAPIBase adds a <meta name="bitswan-aoc-api"> tag carrying the AOC
+// API base so the SPA can read it (rather than guessing api.<own-host>). Using
+// a meta tag keeps the strict script-src CSP intact — no extra inline script to
+// hash. No-op when base is empty or there's no <head>.
+func injectAOCAPIBase(body []byte, base string) []byte {
+	if base == "" {
+		return body
+	}
+	meta := []byte(`<meta name="bitswan-aoc-api" content="` + htmlAttrEscape(base) + `">`)
+	if idx := bytes.Index(bytes.ToLower(body), []byte("<head>")); idx >= 0 {
+		at := idx + len("<head>")
+		out := make([]byte, 0, len(body)+len(meta))
+		out = append(out, body[:at]...)
+		out = append(out, meta...)
+		out = append(out, body[at:]...)
+		return out
+	}
+	return body
+}
+
+// htmlAttrEscape escapes the few characters that could break out of a
+// double-quoted HTML attribute value.
+func htmlAttrEscape(s string) string {
+	r := strings.NewReplacer(`&`, "&amp;", `"`, "&quot;", `<`, "&lt;", `>`, "&gt;")
+	return r.Replace(s)
 }

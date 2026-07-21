@@ -1264,13 +1264,14 @@ func (c *Client) DisconnectFromAOC() error {
 // the single owner of ~/.config/bitswan — register no longer writes it on the
 // host — so this is how a freshly obtained token reaches the daemon before it
 // talks to the AOC (wildcard ingress, protected proxy, workspace connect).
-func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string) error {
+func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string, dnsManaged bool) error {
 	reqBody := AOCConfigRequest{
 		AOCUrl:             aocUrl,
 		AutomationServerId: automationServerId,
 		AccessToken:        accessToken,
 		ExpiresAt:          expiresAt,
 		Domain:             domain,
+		DNSManaged:         dnsManaged,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
