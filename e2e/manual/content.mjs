@@ -552,6 +552,29 @@ export const MANUAL = {
         { code: 'DORA', clause: 'Art. 9', demand: '<b>Performance & capacity.</b> ICT resource limits are governed and monitored, with alerts when a workload exceeds its budget.' },
       ],
     },
+    {
+      num: '27', eyebrow: 'Stay current', title: 'Keeping Bailey up to date',
+      lede: 'Every component tells you when it’s behind, and moving to the latest is one click for a workspace and one command for the server itself — with a clean way back if an update misbehaves.',
+      slots: [{ id: 'updates', label: 'Live capture', caption: 'Server Console · Updates — the server’s running version and the workspaces on the latest track' }],
+      sell: [
+        'Bailey compares the image tags each workspace is actually running against the latest on its release track, and compares the running server binary against the latest published release. When something is behind it says so — a workspace <strong>owner</strong> sees an <em>Update available</em> badge on their workspace card in the Bailey admin, and an <strong>admin</strong> gets an <strong>Updates</strong> item in the nav that carries a small bubble the moment any component is out of date. Nothing is inferred from names or guessed: an update is only ever flagged when Bailey can read the deployed tag <em>and</em> resolve the latest one, so the badge always names the exact versions it’s comparing.',
+        'The <strong>Updates</strong> view is the single place to see and act on this. It shows the automation server’s current version alongside the latest release, and lists every workspace that has an update with a per-workspace <strong>Update</strong> button — press it and Bailey regenerates that workspace’s deployment on the latest tags and redeploys. The server’s own binary is different on purpose: the daemon runs from a read-only, bind-mounted copy of the host binary and cannot replace its own running process from a browser, so its card shows the exact host command to run rather than a button. That keeps a platform-wide change an explicit, host-level act.',
+        'Updating the server is a single host command — <code>bitswan self-update</code> — which fetches the official binary from the AOC this server is registered with (the same source the one-line installer uses, so “official” has one meaning), swaps it in atomically, and recreates the daemon on the new version. Every path is reversible: a workspace update saves a snapshot first, so <code>bitswan rollback &lt;workspace&gt;</code> returns it to the previous images, and <code>bitswan self-update --rollback</code> restores the previous binary. Rollback is deliberately CLI-only — reverting the platform should require host access, not a stray click.',
+      ],
+      steps: [
+        'Watch for the <b>Updates</b> nav bubble (admins) or an <b>Update available</b> badge on your workspace card (owners).',
+        'Open <b>Updates</b> to see the server’s current → latest version and the workspaces that are behind.',
+        'Press a workspace’s <b>Update</b> button to move it to the latest track and redeploy.',
+        'Update the server itself from its host: <code>bitswan self-update</code> (fetches the official binary from the AOC and recreates the daemon).',
+        'If an update misbehaves, roll back from the CLI: <code>bitswan rollback &lt;workspace&gt;</code> for a workspace, or <code>bitswan self-update --rollback</code> for the server.',
+      ],
+      callout: { kind: 'Reversible by design', text: 'A workspace update snapshots the previous deployment before it changes anything, and a self-update keeps the previous binary — so both roll back with one CLI command. The version you were on is never more than a command away.' },
+      standards: [
+        { code: 'ISO/IEC 27001', clause: 'A.8.8', demand: '<b>Management of technical vulnerabilities.</b> Out-of-date components are surfaced and patched to a known-good latest, with a controlled way back.' },
+        { code: 'SOC 2', clause: 'CC8.1', demand: '<b>Change management.</b> Version changes are visible, applied deliberately, and reversible.' },
+        { code: 'NIS2', clause: 'Art. 21(2)(e)', demand: '<b>Vulnerability handling & patching.</b> Components report when they are behind and are updated from an authoritative source.' },
+      ],
+    },
   ],
 
   // ----------------------------------------------------------------------------

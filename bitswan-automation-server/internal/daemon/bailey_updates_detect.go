@@ -105,21 +105,21 @@ func detectWorkspaceVersions(workspaceName string) workspaceVersions {
 	gitops := tagOf(deployedServiceImage(workspaceName, "docker-compose.yml", "bitswan-gitops"))
 	dashboard := tagOf(deployedServiceImage(workspaceName, "docker-compose-dashboard.yml", "bitswan-dashboard"))
 	lv := resolveLatestVersions()
-	wv := workspaceVersions{
+	return workspaceVersions{
 		Gitops:          gitops,
 		Dashboard:       dashboard,
 		LatestGitops:    lv.gitops,
 		LatestDashboard: lv.dashboard,
+		UpdateAvailable: tagBehind(gitops, lv.gitops) || tagBehind(dashboard, lv.dashboard),
 	}
-	// "behind" only when we successfully resolved a latest AND have a deployed
-	// tag to compare — never flag an update we can't name.
-	if lv.gitops != "" && gitops != "" && gitops != lv.gitops {
-		wv.UpdateAvailable = true
-	}
-	if lv.dashboard != "" && dashboard != "" && dashboard != lv.dashboard {
-		wv.UpdateAvailable = true
-	}
-	return wv
+}
+
+// tagBehind reports whether a deployed tag is behind the latest one. It is
+// deliberately conservative: we only claim an update when BOTH tags are known
+// and they differ — never flag an update we can't name (an unresolved latest,
+// or a workspace whose deployed tag we couldn't read).
+func tagBehind(deployed, latest string) bool {
+	return deployed != "" && latest != "" && deployed != latest
 }
 
 // serverVersionInfo reports the running daemon version and, if resolvable, the

@@ -262,6 +262,24 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     });
   }
 
+  // ---- Updates (admin): version visibility + update availability. The Updates
+  // nav item carries a bubble when any component is behind; the view names the
+  // server's running version (current → latest) with an "Up to date" / "Update
+  // available" pill, and lists the workspaces with updates plus a per-workspace
+  // Update button. On a FRESHLY onboarded server every component is on the latest
+  // track, so this captures the genuine "up to date" state (no fabricated
+  // update) — the server's real version and an all-current workspace list. The
+  // server's own binary updates host-side (`bitswan self-update`), so its card
+  // shows that command rather than a button; rollback is CLI-only.
+  await chapter('updates', async () => {
+    await page.getByRole('button', { name: /^Updates/i }).first().click();
+    await expect(page.getByRole('heading', { name: /Updates/i }).first()).toBeVisible({ timeout: SLA });
+    // The server card names the running version and its up-to-date / behind state.
+    await expect(page.getByText(/Automation server/i).first()).toBeVisible({ timeout: SLA });
+    await expect(page.getByText(/Up to date|Update available/).first()).toBeVisible({ timeout: SLA });
+    await capture(page, 'updates');
+  });
+
   // ---- SIEM export (L): on the Server overview, point Bailey at an external
   // OTLP ingestor so its security audit log streams to your SIEM. We open the
   // SIEM forwarding card's config form, fill it with the REAL OTLP/HTTP
