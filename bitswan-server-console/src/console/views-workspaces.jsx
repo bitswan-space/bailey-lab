@@ -460,6 +460,7 @@ function WorkspacesView({ ctx }) {
   const [trashTarget, setTrashTarget] = useWS(null);
   const [trashBusy, setTrashBusy] = useWS(false);
   const [restoreBusy, setRestoreBusy] = useWS('');
+  const [updateBusy, setUpdateBusy] = useWS('');
 
   // The managed workspace lives in the URL (/workspaces/:name) so the drawer
   // survives refresh and is shareable.
@@ -526,6 +527,19 @@ function WorkspacesView({ ctx }) {
     } catch (e) {
       toast(`Couldn't restore ${w.name}: ${e.message}`, 'danger');
     } finally { setRestoreBusy(''); }
+  };
+
+  // Owner-initiated workspace update: pulls the latest images and recreates the
+  // workspace's containers (streams progress). Rollback is intentionally CLI-only.
+  const doUpdate = async (w) => {
+    setUpdateBusy(w.id);
+    try {
+      await WApi.updateWorkspace(w.name, () => {});
+      toast(`${w.name} updated`, 'success');
+      await refresh('workspaces');
+    } catch (e) {
+      toast(`Couldn't update ${w.name}: ${e.message}`, 'danger');
+    } finally { setUpdateBusy(''); }
   };
 
   const matchesQuery = w =>
@@ -600,12 +614,27 @@ function WorkspacesView({ ctx }) {
                       {isOwner ? <WPill tone="primary" size="xs">Owner</WPill>
                         : <WPill tone="neutral" size="xs">Member</WPill>}
                       {archived && <WPill tone="neutral" size="xs">archived</WPill>}
+                      {w.updateAvailable && isOwner && !archived && (
+                        <WPill tone="warning" size="xs">Update available</WPill>
+                      )}
                     </div>
+                    {w.versions && (w.versions.gitops || w.versions.dashboard) && (
+                      <div style={{ fontSize: 11, color: WC.muted, fontFamily: 'monospace', marginTop: 3 }}>
+                        {w.versions.gitops ? `gitops ${w.versions.gitops}` : ''}
+                        {w.versions.gitops && w.versions.dashboard ? '  ·  ' : ''}
+                        {w.versions.dashboard ? `dashboard ${w.versions.dashboard}` : ''}
+                      </div>
+                    )}
                   </div>
                   {w.members && w.members.length > 0 && (
                     <WAvatarStack users={w.members.map(m => ({ id: m, name: m }))} size={26} />
                   )}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {!archived && isOwner && w.updateAvailable && (
+                      <WBtn variant="default" size="sm" leftIcon="arrow-up-circle" disabled={updateBusy === w.id} onClick={() => doUpdate(w)}>
+                        {updateBusy === w.id ? 'Updating…' : 'Update'}
+                      </WBtn>
+                    )}
                     {!archived && (
                       <WBtn variant="primary" size="sm" leftIcon="external-link" onClick={() => openUrl(w.dashboard || w.gitopsUrl, `${w.name} dashboard`)}>Open</WBtn>
                     )}

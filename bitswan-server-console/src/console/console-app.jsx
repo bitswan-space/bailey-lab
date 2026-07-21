@@ -128,6 +128,10 @@ function adaptWorkspace(w, callerEmail) {
     dashboardRole: w.dashboard_role || '',
     isOwner: !!w.is_owner,
     isTrashed: !!w.is_trashed,
+    // Deployed component versions + whether a newer image is available on the
+    // server's track (drives the "update available" badge + owner update button).
+    versions: w.versions || null,
+    updateAvailable: !!(w.versions && w.versions.update_available),
     apps: [],
     live: true,
   };
