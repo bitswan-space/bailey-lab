@@ -13,6 +13,7 @@ helper, or with an explicit ``Authorization: Bearer <secret>`` header.
 
 import asyncio
 import base64
+import hmac
 import logging
 import os
 import re
@@ -70,6 +71,13 @@ def _valid_secrets() -> set[str]:
     return secrets
 
 
+def _matches_any(candidate: str, secrets: set[str]) -> bool:
+    """Constant-time comparison of a candidate against each accepted secret."""
+    return any(
+        hmac.compare_digest(candidate.encode(), secret.encode()) for secret in secrets
+    )
+
+
 def _authorized(request: Request) -> bool:
     """True if the request carries an accepted secret (Basic password or Bearer)."""
     secrets = _valid_secrets()
@@ -81,7 +89,7 @@ def _authorized(request: Request) -> bool:
     scheme, _, value = header.partition(" ")
     scheme = scheme.lower()
     if scheme == "bearer":
-        return value in secrets
+        return _matches_any(value, secrets)
     if scheme == "basic":
         try:
             decoded = base64.b64decode(value).decode("utf-8", "replace")
@@ -89,7 +97,7 @@ def _authorized(request: Request) -> bool:
             return False
         # "<user>:<password>" — the password carries the secret.
         _, _, password = decoded.partition(":")
-        return password in secrets
+        return _matches_any(password, secrets)
     return False
 
 

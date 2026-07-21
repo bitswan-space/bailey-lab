@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import logging
 import os
 import re
@@ -95,7 +96,9 @@ def verify_agent_token(
     credentials: HTTPAuthorizationCredentials = Security(security),
 ):
     agent_secret = _resolve_agent_secret()
-    if not agent_secret or credentials.credentials != agent_secret:
+    if not agent_secret or not hmac.compare_digest(
+        credentials.credentials.encode(), agent_secret.encode()
+    ):
         raise HTTPException(status_code=401, detail="Invalid agent token")
 
 

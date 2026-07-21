@@ -1,3 +1,4 @@
+import hmac
 import os
 from fastapi import HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -7,7 +8,13 @@ from app.services.image_service import ImageService
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(HTTPBearer())):
     secret_token = os.environ.get("BITSWAN_GITOPS_SECRET")
-    if credentials.scheme != "Bearer" or credentials.credentials != secret_token:
+    if (
+        credentials.scheme != "Bearer"
+        or not secret_token
+        or not hmac.compare_digest(
+            credentials.credentials.encode(), secret_token.encode()
+        )
+    ):
         raise HTTPException(
             status_code=401,
             detail="Unauthorized: Invalid or missing token",
