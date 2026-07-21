@@ -11,6 +11,7 @@ import '../../src/console/views-workspaces.jsx';
 import '../../src/console/views-people.jsx';
 import '../../src/console/views-devices.jsx';
 import '../../src/console/views-resources.jsx';
+import '../../src/console/views-updates.jsx';
 import '../../src/console/auth-scenes.jsx';
 import '../../src/console/console-app.jsx';
 
@@ -20,6 +21,7 @@ export const SC_WORKSPACES = window.SC_WORKSPACES;
 export const SC_PEOPLE = window.SC_PEOPLE;
 export const SC_DEVICES = window.SC_DEVICES;
 export const SC_RESOURCES = window.SC_RESOURCES;
+export const SC_UPDATES = window.SC_UPDATES;
 export const SC_SCENES = window.SC_SCENES;
 export const SC_APP = window.SC_APP;
 
