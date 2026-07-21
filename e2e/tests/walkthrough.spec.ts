@@ -863,6 +863,35 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         await dashPage.mouse.move(tgt.x, tgt.y); // settle on the target handle
         await dashPage.mouse.up();
       };
+      // Label a decision-branch edge. Click just OUTSIDE the source handle along
+      // its outgoing direction (right handle → right, bottom handle → down) so we
+      // land ON the smoothstep edge path but clear of the 8px handle — clicking
+      // the handle itself would arm a new connection, and a release on empty
+      // canvas spawns a stray node (onConnectEnd). Selecting the edge mounts the
+      // side-panel "Edge properties" block; fill its Label <Input>, then deselect
+      // by clicking empty canvas. Best-effort + non-aborting, like the others.
+      const labelEdge = async (
+        sourceLabel: string,
+        sourceHandle: 'bottom' | 'left' | 'right',
+        text: string,
+      ) => {
+        const hb = await visibleBox(
+          nodeByLabel(sourceLabel).locator(`.react-flow__handle-${sourceHandle}`).first(),
+        );
+        if (!hb) return;
+        const h = centre(hb);
+        const pt =
+          sourceHandle === 'right'
+            ? { x: h.x + 18, y: h.y }
+            : sourceHandle === 'left'
+              ? { x: h.x - 18, y: h.y }
+              : { x: h.x, y: h.y + 18 };
+        await dashPage.mouse.click(pt.x, pt.y).catch(() => {});
+        const edgeInput = d.getByText(/^Edge properties$/i).locator('..').locator('input').first();
+        if (!(await edgeInput.waitFor({ state: 'visible', timeout: NAV }).then(() => true).catch(() => false))) return;
+        await edgeInput.fill(text).catch(() => {});
+        if (cb) await dashPage.mouse.click(cb.x + 20, cb.y + 20).catch(() => {});
+      };
 
       // The canvas mounts with one starting Process node ("Process"). Lay the flow
       // out top-to-bottom against the canvas box so nodes never overlap. Measure
@@ -883,6 +912,29 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       // visible instead of hiding in one 70s total.
       const fcD = Date.now();
       const mk = (m: string) => console.log(`  ⏱fc +${((Date.now() - fcD) / 1000).toFixed(1)}s ${m}`);
+
+      // 0) Zoom the canvas OUT before drawing. A fresh diagram fitView's on its
+      //    single start node and pins zoom at the 2x max, so page-pixel drags
+      //    land only HALF as far apart in canvas-space — tighter than the
+      //    decision diamond is tall (a fixed 120px node), which is what made the
+      //    old capture a pile-up (#149). Measure the start node's height
+      //    (intrinsic × current zoom) and click the "zoom out" control until it
+      //    has shrunk to ~1/3 of its 2x size (≈0.65x), so the fraction-based rows
+      //    below map to ~160px canvas-space gaps that clear the diamond. Then a
+      //    fit-view before the capture reframes everything cleanly. Best-effort:
+      //    if the control/node can't be measured we just draw at whatever zoom.
+      const zoomStart = await visibleBox(nodeByLabel('Process'));
+      const h2 = zoomStart ? zoomStart.height : 0;
+      if (h2 > 0) {
+        const zoomOutBtn = d.locator('.react-flow__controls-zoomout').first();
+        for (let i = 0; i < 12; i++) {
+          const b = await visibleBox(nodeByLabel('Process'));
+          if (b && b.height <= h2 * 0.34) break;
+          await zoomOutBtn.click().catch(() => {});
+          await dashPage.waitForTimeout(60);
+        }
+      }
+      mk('zoom-out');
 
       // 1) Re-label the starting node and place it at the top.
       await labelNode('Process', 'Invoice received'); mk('label:Invoice received');
@@ -922,6 +974,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await connect('Over €5,000?', 'Hold for approval', 'right'); mk('connect:4');
       await connect('Over €5,000?', 'Post to ledger', 'bottom'); mk('connect:5');
 
+      // 4) Label the decision's two branches so the flow reads unambiguously
+      //    (>€5,000 needs sign-off → Hold; otherwise straight to the ledger).
+      await labelEdge('Over €5,000?', 'right', 'Yes'); mk('label-edge:Yes');
+      await labelEdge('Over €5,000?', 'bottom', 'No'); mk('label-edge:No');
+
       // Give the canvas a beat to settle the final edge render, then capture the
       // drawn diagram BEST-EFFORT. This is a "nice-to-have" view: we do NOT hard-
       // assert the node/edge count (a cosmetic miss must never abort the run — the
@@ -937,6 +994,13 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       ] as const) {
         await nodeByLabel(label).waitFor({ state: 'visible', timeout: NAV }).catch(() => {});
       }
+      // Deselect the last-touched node (clears the side panel that used to be
+      // open in the shot) and fit the whole graph into view, so the capture is
+      // centered and padded no matter how the canvas panned while we dragged
+      // nodes around (#149). Both best-effort — a miss only costs us framing.
+      if (cb) await dashPage.mouse.click(cb.x + 20, cb.y + 20).catch(() => {});
+      await d.locator('.react-flow__controls-fitview').first().click().catch(() => {});
+      await dashPage.waitForTimeout(400);
       await capture(dashPage, 'flowchart-editor');
     } finally {
       // ALWAYS leave the editor closed — this is the chapter's must-have. Prefer
