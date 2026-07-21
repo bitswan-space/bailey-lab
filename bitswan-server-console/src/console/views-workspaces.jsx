@@ -534,7 +534,7 @@ function WorkspacesView({ ctx }) {
   const doUpdate = async (w) => {
     setUpdateBusy(w.id);
     try {
-      await WApi.updateWorkspace(w.name, () => {});
+      await WApi.upgradeWorkspace(w.name);
       toast(`${w.name} updated`, 'success');
       await refresh('workspaces');
     } catch (e) {

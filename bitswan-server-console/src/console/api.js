@@ -209,6 +209,14 @@ export const Api = {
   restoreWorkspace: (name) => postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/restore`),
   updateWorkspace: (name, onEvent) =>
     postNDJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/update`, {}, onEvent),
+  // Version BUMP: regenerate the workspace's compose with the latest images on
+  // the server's track and recreate its containers. Owner-only; clears the
+  // "update available" badge. Distinct from updateWorkspace (digest re-pull).
+  upgradeWorkspace: (name) =>
+    postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/upgrade`, {}),
+  // Admin: what's behind on this server (server binary + stale workspaces) +
+  // a count for the Updates nav bubble.
+  adminUpdates: () => getJSON('/bailey/api/admin/updates'),
   // Transfer workspace ownership to another user already on this server.
   // Strictly the recorded owner's call — the backend rejects even admins —
   // and the old owner is kept as a member (access grant).

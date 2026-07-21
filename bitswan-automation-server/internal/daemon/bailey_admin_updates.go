@@ -285,3 +285,30 @@ func (s *Server) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, e
 
 	writeEvent(map[string]any{"event": "done", "message": "Workspace updated."})
 }
+
+// handleUpgradeWorkspace performs a version BUMP: regenerate the workspace's
+// compose with the latest images on the server's track and recreate its
+// containers. This is what the console's "Update" button (shown when a newer
+// image is available) triggers, and what clears the update-available badge —
+// unlike handleUpdateWorkspace, which only re-pulls the pinned tags' digests.
+// Owner-only. Synchronous; progress goes to the daemon log.
+func (s *Server) handleUpgradeWorkspace(w http.ResponseWriter, r *http.Request, email, workspaceName string) {
+	if !nameRe.MatchString(workspaceName) {
+		writeJSONError(w, "invalid workspace name", http.StatusBadRequest)
+		return
+	}
+	_, groups := identityFromHeaders(r)
+	serverOwner, _ := callerIsServerOwner(email, r)
+	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
+		writeJSONError(w, "only the workspace owner can update it", http.StatusForbidden)
+		return
+	}
+	if err := s.runWorkspaceUpdate(WorkspaceUpdateRequest{
+		Workspace: workspaceName,
+		Staging:   useStagingTrack(),
+	}); err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"success": true})
+}

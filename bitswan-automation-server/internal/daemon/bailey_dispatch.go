@@ -209,6 +209,9 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			case "update":
 				s.handleUpdateWorkspace(w, r, email, workspaceName)
 				return
+			case "upgrade":
+				s.handleUpgradeWorkspace(w, r, email, workspaceName)
+				return
 			case "transfer-ownership":
 				handleTransferWorkspaceOwnership(w, r, email, workspaceName)
 				return
@@ -312,6 +315,13 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+	case "/bailey/api/admin/updates":
+		if r.Method == http.MethodGet {
+			s.handleAdminUpdates(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	case "/bailey/api/admin/resources":
 		if r.Method == http.MethodGet {
 			s.handleBaileyResources(w, r)
