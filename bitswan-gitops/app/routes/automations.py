@@ -261,7 +261,7 @@ class AuditSignoffRequest(BaseModel):
 
 @router.get("/business-processes/{bp}/staging-gate")
 async def get_bp_staging_gate_route(
-    bp: str,
+    bp: ValidBp,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """A BP's staging freeze + production-promotion audit state: frozen flag +
@@ -272,7 +272,7 @@ async def get_bp_staging_gate_route(
 
 @router.put("/business-processes/{bp}/staging-gate/freeze")
 async def put_bp_staging_freeze_route(
-    bp: str,
+    bp: ValidBp,
     body: StagingFreezeRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -286,7 +286,7 @@ async def put_bp_staging_freeze_route(
 
 @router.put("/business-processes/{bp}/staging-gate/policy")
 async def put_bp_audit_policy_route(
-    bp: str,
+    bp: ValidBp,
     body: AuditPolicyRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -300,7 +300,7 @@ async def put_bp_audit_policy_route(
 
 @router.post("/business-processes/{bp}/staging-gate/audits")
 async def post_bp_audit_route(
-    bp: str,
+    bp: ValidBp,
     body: AuditSignoffRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
