@@ -219,3 +219,39 @@ func ResolveInfraDriverImage(staging, dev bool) (string, error) {
 	}
 	return "bitswan/infra-driver:" + version, nil
 }
+
+// GetLatestGitHubRelease returns the tag_name of the latest published release
+// of the bitswan-automation-server CLI (e.g. "v2026.07.07.21"). Used to tell an
+// operator when the server binary is behind the latest release. Best-effort:
+// returns an error on any network/parse failure so callers can degrade to
+// "unknown" rather than nag.
+func GetLatestGitHubRelease() (string, error) {
+	const url = "https://api.github.com/repos/bitswan-space/bitswan-automation-server/releases/latest"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("github releases: status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	var data struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return "", err
+	}
+	if data.TagName == "" {
+		return "", errors.New("github releases: empty tag_name")
+	}
+	return data.TagName, nil
+}

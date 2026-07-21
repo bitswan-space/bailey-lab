@@ -31,6 +31,10 @@ type accessibleWorkspace struct {
 	IsTrashed     bool     `json:"is_trashed,omitempty"`
 	OwnerEmail    string   `json:"owner_email,omitempty"` // recorded owner of the dashboard (membership) endpoint
 	Members       []string `json:"members"`               // owner + access-grantee emails on the dashboard endpoint
+	// Deployed component versions + whether a newer image is available on the
+	// server's track. Drives the "update available" badge and the owner update
+	// button in the console.
+	Versions *workspaceVersions `json:"versions,omitempty"`
 }
 
 type listAccessibleResponse struct {
@@ -75,6 +79,7 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 			if dashboardRole == roleNone && gitopsRole == roleNone && !serverOwner {
 				continue
 			}
+			wv := detectWorkspaceVersions(name)
 			entry := accessibleWorkspace{
 				Name:          name,
 				DashboardURL:  "https://" + dashboardHost,
@@ -85,6 +90,7 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 				IsTrashed:     IsWorkspaceTrashed(name),
 				OwnerEmail:    workspaceOwnerEmail(dashboardHost, gitopsHost),
 				Members:       workspaceMemberEmails(dashboardHost),
+				Versions:      &wv,
 			}
 			out.Workspaces = append(out.Workspaces, entry)
 		}
