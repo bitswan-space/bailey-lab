@@ -1,13 +1,17 @@
 package daemon
 
 import (
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
 	"gopkg.in/yaml.v3"
 )
@@ -131,10 +135,60 @@ type serverVersionInfo struct {
 	UpdateAvailable bool   `json:"update_available"`
 }
 
+var (
+	serverLatestMu  sync.Mutex
+	serverLatestVal string
+	serverLatestAt  time.Time
+)
+
+// latestServerRelease returns the version the AOC serves for this server's
+// binary — the version the server-update button would install. The AOC is the
+// mirror/source of truth for the official binary (it proxies GitHub / accepts
+// uploads), so availability is decided against the AOC, NOT GitHub directly: a
+// GitHub outage or rate-limit must never affect this flow. Cached for
+// latestVerTTL; a transient failure keeps the last good value.
+func latestServerRelease() string {
+	serverLatestMu.Lock()
+	defer serverLatestMu.Unlock()
+	if serverLatestVal != "" && time.Since(serverLatestAt) < latestVerTTL {
+		return serverLatestVal
+	}
+	if v := fetchAOCBinaryVersion(); v != "" {
+		serverLatestVal = v
+		serverLatestAt = time.Now()
+	}
+	return serverLatestVal
+}
+
+// fetchAOCBinaryVersion asks the AOC which binary version it serves for this
+// server's architecture (GET /api/automation_server/bitswan/version).
+func fetchAOCBinaryVersion() string {
+	settings, err := config.NewAutomationServerConfig().GetAutomationOperationsCenterSettings()
+	if err != nil || settings.AOCUrl == "" {
+		return ""
+	}
+	url := strings.TrimRight(settings.AOCUrl, "/") + "/api/automation_server/bitswan/version?arch=" + runtime.GOARCH
+	resp, err := http.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var body struct {
+		Version string `json:"version"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&body) != nil {
+		return ""
+	}
+	return strings.TrimSpace(body.Version)
+}
+
 func detectServerVersion(current string) serverVersionInfo {
 	info := serverVersionInfo{Current: current}
-	latest, err := dockerhub.GetLatestGitHubRelease()
-	if err != nil || latest == "" {
+	latest := latestServerRelease()
+	if latest == "" {
 		return info
 	}
 	info.Latest = latest
