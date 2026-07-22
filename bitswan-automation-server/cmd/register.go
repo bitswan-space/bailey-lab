@@ -30,6 +30,9 @@ func newRegisterCmd() *cobra.Command {
 	var aocUrl string
 	var otp string
 	var automationServerId string
+	var forceProxy bool
+	var relayAddr string
+	var relayFingerprint string
 
 	cmd := &cobra.Command{
 		Use:          "register",
@@ -94,9 +97,21 @@ func newRegisterCmd() *cobra.Command {
 			// Persist the AOC connection into the daemon's config volume. From
 			// here on the daemon holds a valid token to talk to the AOC (wildcard
 			// ingress, protected proxy, workspace connect).
+			proxyCfg := daemon.ProxyConfig{}
+			if forceProxy {
+				if relayAddr == "" || relayFingerprint == "" {
+					return fmt.Errorf("--force-proxy requires --relay-addr and --relay-fingerprint (the AOC relay's tunnel endpoint and pinned cert fingerprint)")
+				}
+				proxyCfg = daemon.ProxyConfig{
+					Proxied:          true,
+					RelayAddr:        relayAddr,
+					RelayFingerprint: relayFingerprint,
+				}
+			}
+
 			if err := client.SetAOCConfig(
 				aocUrl, serverInfo.AutomationServerId, aocClient.GetAccessToken(),
-				aocClient.GetExpiresAt(), serverInfo.Domain,
+				aocClient.GetExpiresAt(), serverInfo.Domain, proxyCfg,
 			); err != nil {
 				return fmt.Errorf("failed to save AOC configuration to the daemon: %w", err)
 			}
@@ -109,6 +124,16 @@ func newRegisterCmd() *cobra.Command {
 			// workspace's routes register through the auth wrap rather than as
 			// bare single-tier routes (see addRouteTraefik).
 			if serverInfo.Domain != "" {
+				// --force-proxy exercises the reverse-proxy path on a server that
+				// actually has a public IP: the AOC points DNS at its relay and we
+				// tunnel out to it, instead of the AOC pointing an A record straight
+				// at us. (NAT'd servers take this path automatically once the AOC
+				// reports them unreachable.) The tunnel + TLS-passthrough relay are
+				// set up via the daemon below.
+				if forceProxy {
+					fmt.Println("\n🌐 --force-proxy: this server will be reached through the AOC reverse-proxy relay (end-to-end TLS passthrough).")
+				}
+
 				// Reconfigure the ingress so Traefik obtains a *.<domain>
 				// wildcard certificate via the DNS-01 challenge (through the
 				// AOC) instead of a separate HTTP-01 certificate per endpoint.
@@ -160,6 +185,9 @@ func newRegisterCmd() *cobra.Command {
 	cmd.Flags().StringVar(&aocUrl, "aoc-api", "https://api.bitswan.space", "Automation operation server URL")
 	cmd.Flags().StringVar(&otp, "otp", "", "One-time password from web interface (required)")
 	cmd.Flags().StringVar(&automationServerId, "server-id", "", "Automation server ID from web interface (required)")
+	cmd.Flags().BoolVar(&forceProxy, "force-proxy", false, "Reach this server through the AOC reverse-proxy relay even if it has a public IP (for testing the NAT path)")
+	cmd.Flags().StringVar(&relayAddr, "relay-addr", "", "Relay tunnel endpoint host:port to dial (required with --force-proxy)")
+	cmd.Flags().StringVar(&relayFingerprint, "relay-fingerprint", "", "Relay tunnel-cert sha256 fingerprint to pin (required with --force-proxy)")
 
 	cmd.MarkFlagRequired("name")
 	cmd.MarkFlagRequired("otp")

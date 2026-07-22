@@ -409,6 +409,17 @@ func (s *Server) Run() error {
 	// instead of the internet (see build_proxy.go). No-op if externally managed.
 	startBuildProxies()
 
+	// If this server is on the AOC reverse-proxy path (NAT'd or --force-proxy),
+	// keep an outbound tunnel to the relay so the public URL reaches us. No-op
+	// otherwise.
+	s.startRelayTunnel()
+
+	// Paranoid end-to-end-TLS self-check for EVERY server with a public domain
+	// (proxied or directly-addressed): confirm the certificate the world is
+	// served is our own, so any TLS interception in transit is caught and
+	// surfaced loudly. No-op on unregistered / domain-less servers.
+	s.startEndpointTLSSelfCheck()
+
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

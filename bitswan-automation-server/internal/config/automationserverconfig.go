@@ -56,6 +56,20 @@ type AutomationOperationsCenterSettings struct {
 	// (e.g. acme-prod.bswn.io). When set, the daemon configures Traefik to
 	// obtain a DNS-01 wildcard certificate for *.<domain> via the AOC.
 	Domain string `toml:"domain,omitempty"`
+
+	// Proxied means this server has no public inbound route (NAT) — or was
+	// forced onto the relay path with `register --force-proxy` — so instead of
+	// the AOC pointing an A record straight at us, the AOC points our wildcard
+	// record at its relay and the daemon keeps an outbound tunnel to it. When
+	// true the daemon runs the relay tunnel client at startup.
+	Proxied bool `toml:"proxied,omitempty"`
+	// RelayAddr is the relay's public tunnel endpoint (host:port) the daemon
+	// dials. Advertised by the AOC; overridable via a register flag for testing.
+	RelayAddr string `toml:"relay_addr,omitempty"`
+	// RelayFingerprint is the sha256 (hex) of the relay's tunnel-listener leaf
+	// certificate, pinned by the daemon so the AOC token in the tunnel handshake
+	// can't be intercepted.
+	RelayFingerprint string `toml:"relay_fingerprint,omitempty"`
 }
 
 // GetRealUserHomeDir returns the home directory of the actual user,

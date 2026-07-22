@@ -1304,13 +1304,24 @@ func (c *Client) DisconnectFromAOC() error {
 // the single owner of ~/.config/bitswan — register no longer writes it on the
 // host — so this is how a freshly obtained token reaches the daemon before it
 // talks to the AOC (wildcard ingress, protected proxy, workspace connect).
-func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string) error {
+// ProxyConfig carries the reverse-proxy relay settings for a NAT'd/--force-proxy
+// server. Zero value (Proxied=false) means the normal direct-A-record path.
+type ProxyConfig struct {
+	Proxied          bool
+	RelayAddr        string
+	RelayFingerprint string
+}
+
+func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string, proxy ProxyConfig) error {
 	reqBody := AOCConfigRequest{
 		AOCUrl:             aocUrl,
 		AutomationServerId: automationServerId,
 		AccessToken:        accessToken,
 		ExpiresAt:          expiresAt,
 		Domain:             domain,
+		Proxied:            proxy.Proxied,
+		RelayAddr:          proxy.RelayAddr,
+		RelayFingerprint:   proxy.RelayFingerprint,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {

@@ -269,12 +269,23 @@ certificatesResolvers:
 `, acmeEmail)
 
 	if dnsChallenge {
+		// disablePropagationCheck: lego's default pre-flight queries the zone's
+		// authoritative nameservers directly (UDP :53) to confirm the TXT is
+		// visible before asking Let's Encrypt to validate. A NAT'd / proxied
+		// server frequently CAN'T reach arbitrary external nameservers on :53
+		// (egress-filtered), so that self-check times out and the whole issuance
+		// fails — even though the AOC created the TXT correctly and Let's Encrypt
+		// itself can see it. We create the record synchronously via the AOC
+		// bridge, so skipping lego's own propagation poll is safe: LE performs the
+		// authoritative check regardless.
 		cfg += fmt.Sprintf(`  %s:
     acme:
       email: %s
       storage: /acme/acme-dns.json
       dnsChallenge:
         provider: httpreq
+        delayBeforeCheck: 120s
+        disablePropagationCheck: true
 `, dnsCertResolverName, acmeEmail)
 	}
 
