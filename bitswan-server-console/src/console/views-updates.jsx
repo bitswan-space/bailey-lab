@@ -15,6 +15,52 @@ function UpdatesView({ ctx }) {
   const upd = data.updates; // { server, workspaces, count, server_update_cmd }
   const [busy, setBusy] = useUS('');
   const [prog, setProg] = useUS(null); // { fraction, label } for the workspace being updated
+  const [srvBusy, setSrvBusy] = useUS(false);
+  const [srvProg, setSrvProg] = useUS(null);
+
+  // Update the automation-server binary itself from the browser: the daemon
+  // downloads the official binary from the AOC, swaps it on the host, and
+  // restarts its own container. The stream ends at the 'restarting' event (the
+  // connection drops with the daemon); we then poll until the version flips.
+  const doServerUpdate = async () => {
+    setSrvBusy(true);
+    setSrvProg({ fraction: 0, label: 'Starting…' });
+    const before = (upd && upd.server && upd.server.current) || '';
+    let restarting = false;
+    try {
+      await UApi.serverUpdate((ev) => {
+        if (!ev) return;
+        if (ev.event === 'restarting') restarting = true;
+        if (typeof ev.fraction === 'number') setSrvProg({ fraction: ev.fraction, label: ev.message || '' });
+        else if (ev.message) setSrvProg(p => ({ fraction: (p && p.fraction) || 0, label: ev.message }));
+      });
+    } catch (e) {
+      if (!restarting) {
+        toast(`Server update failed: ${e.message}`, 'danger');
+        setSrvBusy(false); setSrvProg(null);
+        return;
+      }
+      // else: expected — the daemon is being replaced and the stream dropped.
+    }
+    setSrvProg({ fraction: 0.96, label: 'Restarting server…' });
+    // Poll for the daemon to come back on the new version (bounded ~2 min).
+    // Can't subscribe to a server that's mid-restart, so polling is the only
+    // signal available to the browser here.
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      try {
+        const r2 = await UApi.adminUpdates();
+        if (r2 && r2.server && r2.server.current && r2.server.current !== before) {
+          toast('Server updated', 'success');
+          await refresh('updates');
+          setSrvBusy(false); setSrvProg(null);
+          return;
+        }
+      } catch (e) { /* still restarting — keep polling */ }
+    }
+    toast('Server is restarting — refresh in a moment.');
+    setSrvBusy(false); setSrvProg(null);
+  };
 
   const doUpgrade = async (name) => {
     setBusy(name);
@@ -53,21 +99,21 @@ function UpdatesView({ ctx }) {
                   {upd.server.current}{upd.server.latest ? `  →  ${upd.server.latest}` : ''}
                 </div>
               </div>
-              {upd.server.update_available
-                ? <WPill tone="warning" size="xs">Update available</WPill>
-                : <WPill tone="success" size="xs">Up to date</WPill>}
+              {upd.server.update_available ? (
+                srvBusy
+                  ? <WUpdateBar prog={srvProg} />
+                  : <WBtn variant="primary" size="sm" leftIcon="arrow-up-circle" onClick={doServerUpdate}>Update available</WBtn>
+              ) : (
+                <WPill tone="success" size="xs">Up to date</WPill>
+              )}
             </div>
-            {upd.server.update_available && (
-              <div style={{ marginTop: 12, fontSize: 13, color: WC.fg }}>
-                Update the server from its host — the daemon can&apos;t replace its own
-                running binary from the browser, so run:
-                <div style={{ display: 'flex', alignItems: 'stretch', marginTop: 8, border: `1px solid ${WC.border}`, borderRadius: 6, overflow: 'hidden' }}>
-                  <code style={{ flex: 1, padding: '8px 10px', fontFamily: 'monospace', fontSize: 13 }}>{upd.server_update_cmd}</code>
-                  <button onClick={() => copyCmd(upd.server_update_cmd)} title="Copy"
-                    style={{ width: 38, border: 'none', borderLeft: `1px solid ${WC.border}`, background: '#fff', cursor: 'pointer', color: WC.muted }}>
-                    <WIcon name="copy" size={15} />
-                  </button>
-                </div>
+            {upd.server.update_available && !srvBusy && (
+              <div style={{ marginTop: 10, fontSize: 12, color: WC.muted }}>
+                Downloads the official binary from the AOC, swaps it in on the host, and
+                restarts the server — the console will reconnect on the new version.
+                {upd.server_update_cmd ? (
+                  <> You can also run <code style={{ fontFamily: 'monospace' }}>{upd.server_update_cmd}</code> from the host.</>
+                ) : null}
               </div>
             )}
           </WCard>
