@@ -130,3 +130,25 @@ func TestSnapshotWorkspaceCompose(t *testing.T) {
 		t.Fatalf("expected a .rollback snapshot to exist: %v", err)
 	}
 }
+
+// TestVersionLess pins the release-version ordering used to decide server
+// update-availability: only genuinely-older → behind (a newer-than-latest
+// pre-release must read as up to date, never as a downgrade-update).
+func TestVersionLess(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"v2026.05.01.1", "v2026.06.02.81", true},   // older
+		{"v2026.07.07.21", "v2026.06.02.81", false}, // NEWER than latest → not behind
+		{"v2026.06.02.81", "v2026.06.02.81", false}, // equal
+		{"v2026.06.02.9", "v2026.06.02.10", true},   // unpadded build number (lexical would fail)
+		{"dev", "v2026.06.02.81", false},            // unparseable → never fabricate
+		{"v2026.06.02.81", "garbage", false},
+	}
+	for _, c := range cases {
+		if got := versionLess(c.a, c.b); got != c.want {
+			t.Errorf("versionLess(%q,%q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}

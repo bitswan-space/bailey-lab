@@ -26,21 +26,25 @@ function UpdatesView({ ctx }) {
     setSrvBusy(true);
     setSrvProg({ fraction: 0, label: 'Starting…' });
     const before = (upd && upd.server && upd.server.current) || '';
-    let restarting = false;
+    let sawError = false;
     try {
       await UApi.serverUpdate((ev) => {
         if (!ev) return;
-        if (ev.event === 'restarting') restarting = true;
+        if (ev.event === 'error') sawError = true;
         if (typeof ev.fraction === 'number') setSrvProg({ fraction: ev.fraction, label: ev.message || '' });
         else if (ev.message) setSrvProg(p => ({ fraction: (p && p.fraction) || 0, label: ev.message }));
       });
     } catch (e) {
-      if (!restarting) {
+      // An explicit in-stream error (download/verify failed — no swap, no
+      // restart) is a real failure. Any OTHER drop (a 502 / connection reset)
+      // is the daemon restarting itself onto the new binary after a successful
+      // swap: the proxy can't complete the request the daemon just killed. Fall
+      // through to version polling rather than reporting a false failure.
+      if (sawError) {
         toast(`Server update failed: ${e.message}`, 'danger');
         setSrvBusy(false); setSrvProg(null);
         return;
       }
-      // else: expected — the daemon is being replaced and the stream dropped.
     }
     setSrvProg({ fraction: 0.96, label: 'Restarting server…' });
     // Poll for the daemon to come back on the new version (bounded ~2 min).

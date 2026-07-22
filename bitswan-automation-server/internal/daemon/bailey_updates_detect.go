@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -137,12 +138,50 @@ func detectServerVersion(current string) serverVersionInfo {
 		return info
 	}
 	info.Latest = latest
-	// Compare loosely: only claim an update when both are real, tagged versions
-	// and differ. A "dev"/git-sha build never nags.
-	if isReleaseVersion(current) && current != latest {
+	// Only claim an update when current is genuinely OLDER than latest — not
+	// merely different. A server running a version NEWER than the latest
+	// published release (e.g. a pre-release build) is up to date, not "behind",
+	// and must not offer a downgrade-as-update. Dev/git-sha builds never nag.
+	if isReleaseVersion(current) && isReleaseVersion(latest) && versionLess(current, latest) {
 		info.UpdateAvailable = true
 	}
 	return info
+}
+
+// versionLess reports whether release version a is strictly older than b.
+// Versions look like vYYYY.MM.DD.N; compare component-by-component numerically
+// (lexical compare breaks on the unpadded build number, e.g. .9 vs .10). If
+// either can't be parsed, report false — never fabricate an update.
+func versionLess(a, b string) bool {
+	pa, oka := parseReleaseVersion(a)
+	pb, okb := parseReleaseVersion(b)
+	if !oka || !okb {
+		return false
+	}
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		if pa[i] != pb[i] {
+			return pa[i] < pb[i]
+		}
+	}
+	return len(pa) < len(pb)
+}
+
+func parseReleaseVersion(v string) ([]int, bool) {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "v")
+	parts := strings.Split(v, ".")
+	nums := make([]int, 0, len(parts))
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return nil, false
+		}
+		nums = append(nums, n)
+	}
+	if len(nums) == 0 {
+		return nil, false
+	}
+	return nums, true
 }
 
 // isReleaseVersion reports whether v looks like a published release tag
