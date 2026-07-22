@@ -33,6 +33,12 @@ type pairingEntry struct {
 
 const pairingTTL = 5 * time.Minute
 
+// pairingRefreshThreshold is how much life a pending code must have left to be
+// reused by generatePendingPairUA. Below it, a fetch mints a fresh code — so a
+// client that re-fetches near expiry (see the ApprovalScene auto-rotate timer)
+// always gets a live, approvable code instead of a stale one.
+const pairingRefreshThreshold = 90 * time.Second
+
 // Keeps mfa_pair.go compileable without removing its sync import
 // (it's still used by other handlers in this file).
 var _ = sync.Mutex{}
@@ -53,11 +59,23 @@ func generatePendingPairUA(email, userAgent string) (*pairingEntry, error) {
 	if err := dbPurgeExpiredPendingPairs(); err != nil {
 		return nil, err
 	}
+	now := time.Now()
+	// Reuse the existing, still-comfortably-live, unapproved code for this email
+	// instead of minting a new one on every fetch. Otherwise a page reload, a
+	// second tab, or the poll UI re-requesting would churn the code out from
+	// under an admin who's about to approve the one the user read to them (which
+	// is how a code the user reported "expired" before it could be approved).
+	// Once the code drops under pairingRefreshThreshold of life we DO mint a
+	// fresh one — that's what lets a long-open approval screen auto-rotate to a
+	// live code rather than sit on an expired one.
+	if e, err := dbLoadPendingPairByEmail(email); err == nil && e != nil &&
+		e.ApprovedBy == "" && e.ExpiresAt.Sub(now) > pairingRefreshThreshold {
+		return e, nil
+	}
 	codeInt, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
 	e := &pairingEntry{
 		Email:     email,
 		Code:      fmt.Sprintf("%06d", codeInt.Int64()),
