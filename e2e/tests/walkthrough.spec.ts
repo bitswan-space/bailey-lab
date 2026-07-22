@@ -165,6 +165,96 @@ async function chapter(name: string, fn: () => Promise<void>): Promise<void> {
   });
 }
 
+// ---- Editor-aware markdown typing ------------------------------------------
+// The Description editor is ProseMirror with markdown INPUT RULES (dashboard
+// client, spec-editor-commands.ts): typing '# ', '1. ', '- ' at line start
+// converts to real structure, and Enter inside a list AUTO-CONTINUES it
+// (splitListItem). Naively typing a raw markdown file therefore double-applies
+// list structure — the typed '2. ' prefix fires the ordered-list rule INSIDE
+// the already-auto-numbered item 2, nesting a fresh list one level deeper per
+// item (#148). And there are NO input rules for inline marks, so a typed
+// '**bold**' stays literal asterisks. So type like a human who knows the
+// editor: fire each block rule ONCE and let Enter continue lists (item
+// prefixes after the first are stripped), toggle inline marks through the
+// editor's own keymap (Mod-b/Mod-i/Mod-e — Control on the Linux CI guest),
+// and join soft-wrapped markdown lines into the single paragraph they are.
+// A TRAILING list is deliberately left open (no exit keystrokes): the readme
+// ends with bullets and the flowchart chapter breaks out itself (Enter×2).
+async function typeMarkdown(pg: import('@playwright/test').Page, md: string): Promise<void> {
+  const kb = pg.keyboard;
+  // Inline segments: **strong** / *em* / `code` via mark toggles, plain text
+  // in between typed as-is.
+  const typeInline = async (text: string) => {
+    for (const seg of text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/).filter(Boolean)) {
+      const m = /^(\*\*|\*|`)(.*)\1$/.exec(seg);
+      if (!m) {
+        await kb.type(seg);
+        continue;
+      }
+      if (m[1] === '`' && /^\S+$/.test(m[2]!)) {
+        // Inline code: type the word plainly, select it word-wise, mark the
+        // selection. Toggling code around typed text swallows the preceding
+        // space into the code span (Chrome contenteditable quirk), and unlike
+        // strong/em the markdown serializer does NOT clean code boundaries —
+        // the saved README would read `` ` approving_manager` ``. The pauses
+        // are required: ProseMirror syncs the native selection via an async
+        // selectionchange event, so a toggle fired back-to-back with the
+        // select keystroke sees a stale (collapsed) selection and no-ops.
+        await kb.type(m[2]!);
+        await kb.press('Control+Shift+ArrowLeft');
+        await pg.waitForTimeout(60);
+        await kb.press('Control+e');
+        await kb.press('ArrowRight');
+        await pg.waitForTimeout(60);
+        await kb.press('Control+e'); // code is inclusive: stop it continuing
+        continue;
+      }
+      const toggle = m[1] === '**' ? 'Control+b' : m[1] === '*' ? 'Control+i' : 'Control+e';
+      await kb.press(toggle);
+      await kb.type(m[2]!);
+      await kb.press(toggle);
+    }
+  };
+  // Blank-line-separated blocks; within a block, lines are soft-wrapped.
+  const blocks = md
+    .split(/\n{2,}/)
+    .map((b) => b.split('\n').filter((l) => l.trim() !== ''))
+    .filter((b) => b.length > 0);
+  let prev: 'list' | 'block' | null = null;
+  for (const lines of blocks) {
+    // Leave the previous block into a fresh empty paragraph: Enter after a
+    // heading/paragraph; Enter×2 after a list (Enter opens an empty item,
+    // the second Enter lifts it out of the list — splitListItem's behaviour).
+    if (prev === 'list') {
+      await kb.press('Enter');
+      await kb.press('Enter');
+    } else if (prev === 'block') {
+      await kb.press('Enter');
+    }
+    const heading = /^(#{1,4})\s+(.*)$/.exec(lines[0]!);
+    const isOl = /^\d+\.\s+/.test(lines[0]!);
+    const isUl = /^[-*]\s+/.test(lines[0]!);
+    if (heading) {
+      await kb.type(`${heading[1]} `); // fires the heading input rule
+      await typeInline(heading[2]!);
+      prev = 'block';
+    } else if (isOl || isUl) {
+      for (let j = 0; j < lines.length; j++) {
+        if (j === 0) await kb.type(isOl ? '1. ' : '- '); // fires the list rule ONCE
+        else await kb.press('Enter'); // splitListItem numbers the next item itself
+        await typeInline(lines[j]!.replace(/^(?:\d+\.|[-*])\s+/, ''));
+      }
+      prev = 'list';
+    } else {
+      for (let j = 0; j < lines.length; j++) {
+        if (j > 0) await kb.type(' '); // markdown soft-wrap: same paragraph
+        await typeInline(lines[j]!);
+      }
+      prev = 'block';
+    }
+  }
+}
+
 test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   test.setTimeout(60 * 60_000);
 
@@ -611,8 +701,8 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await d.locator('[data-sonner-toast]').first()
       .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
     // The ProseMirror editor surface mounts as a contenteditable. Click it and
-    // type; the editor's markdown input-rules turn '# ', '1. ' etc into real
-    // structure as a human would see while typing.
+    // type via typeMarkdown, which cooperates with the editor's input rules
+    // and mark keymap instead of fighting them (see its comment; #148).
     const editor = d.locator('.ProseMirror, [contenteditable="true"]').first();
     // Discrete pre-check with logging: BEFORE blocking on the editor, record the
     // tab's actual state (URL + iframe count + whether the BP shell is even
@@ -636,7 +726,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       throw e;
     }
     await editor.click();
-    await editor.pressSequentially(BP.readme, { delay: 0 });
+    await typeMarkdown(dashPage, BP.readme);
     // Force a save (Ctrl+S) and wait for it to settle (the Save button leaves
     // its 'Saving…' state and the indicator shows '· saved').
     await dashPage.keyboard.press('Control+s');
@@ -773,6 +863,35 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         await dashPage.mouse.move(tgt.x, tgt.y); // settle on the target handle
         await dashPage.mouse.up();
       };
+      // Label a decision-branch edge. Click just OUTSIDE the source handle along
+      // its outgoing direction (right handle → right, bottom handle → down) so we
+      // land ON the smoothstep edge path but clear of the 8px handle — clicking
+      // the handle itself would arm a new connection, and a release on empty
+      // canvas spawns a stray node (onConnectEnd). Selecting the edge mounts the
+      // side-panel "Edge properties" block; fill its Label <Input>, then deselect
+      // by clicking empty canvas. Best-effort + non-aborting, like the others.
+      const labelEdge = async (
+        sourceLabel: string,
+        sourceHandle: 'bottom' | 'left' | 'right',
+        text: string,
+      ) => {
+        const hb = await visibleBox(
+          nodeByLabel(sourceLabel).locator(`.react-flow__handle-${sourceHandle}`).first(),
+        );
+        if (!hb) return;
+        const h = centre(hb);
+        const pt =
+          sourceHandle === 'right'
+            ? { x: h.x + 18, y: h.y }
+            : sourceHandle === 'left'
+              ? { x: h.x - 18, y: h.y }
+              : { x: h.x, y: h.y + 18 };
+        await dashPage.mouse.click(pt.x, pt.y).catch(() => {});
+        const edgeInput = d.getByText(/^Edge properties$/i).locator('..').locator('input').first();
+        if (!(await edgeInput.waitFor({ state: 'visible', timeout: NAV }).then(() => true).catch(() => false))) return;
+        await edgeInput.fill(text).catch(() => {});
+        if (cb) await dashPage.mouse.click(cb.x + 20, cb.y + 20).catch(() => {});
+      };
 
       // The canvas mounts with one starting Process node ("Process"). Lay the flow
       // out top-to-bottom against the canvas box so nodes never overlap. Measure
@@ -793,6 +912,29 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       // visible instead of hiding in one 70s total.
       const fcD = Date.now();
       const mk = (m: string) => console.log(`  ⏱fc +${((Date.now() - fcD) / 1000).toFixed(1)}s ${m}`);
+
+      // 0) Zoom the canvas OUT before drawing. A fresh diagram fitView's on its
+      //    single start node and pins zoom at the 2x max, so page-pixel drags
+      //    land only HALF as far apart in canvas-space — tighter than the
+      //    decision diamond is tall (a fixed 120px node), which is what made the
+      //    old capture a pile-up (#149). Measure the start node's height
+      //    (intrinsic × current zoom) and click the "zoom out" control until it
+      //    has shrunk to ~1/3 of its 2x size (≈0.65x), so the fraction-based rows
+      //    below map to ~160px canvas-space gaps that clear the diamond. Then a
+      //    fit-view before the capture reframes everything cleanly. Best-effort:
+      //    if the control/node can't be measured we just draw at whatever zoom.
+      const zoomStart = await visibleBox(nodeByLabel('Process'));
+      const h2 = zoomStart ? zoomStart.height : 0;
+      if (h2 > 0) {
+        const zoomOutBtn = d.locator('.react-flow__controls-zoomout').first();
+        for (let i = 0; i < 12; i++) {
+          const b = await visibleBox(nodeByLabel('Process'));
+          if (b && b.height <= h2 * 0.34) break;
+          await zoomOutBtn.click().catch(() => {});
+          await dashPage.waitForTimeout(60);
+        }
+      }
+      mk('zoom-out');
 
       // 1) Re-label the starting node and place it at the top.
       await labelNode('Process', 'Invoice received'); mk('label:Invoice received');
@@ -832,6 +974,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await connect('Over €5,000?', 'Hold for approval', 'right'); mk('connect:4');
       await connect('Over €5,000?', 'Post to ledger', 'bottom'); mk('connect:5');
 
+      // 4) Label the decision's two branches so the flow reads unambiguously
+      //    (>€5,000 needs sign-off → Hold; otherwise straight to the ledger).
+      await labelEdge('Over €5,000?', 'right', 'Yes'); mk('label-edge:Yes');
+      await labelEdge('Over €5,000?', 'bottom', 'No'); mk('label-edge:No');
+
       // Give the canvas a beat to settle the final edge render, then capture the
       // drawn diagram BEST-EFFORT. This is a "nice-to-have" view: we do NOT hard-
       // assert the node/edge count (a cosmetic miss must never abort the run — the
@@ -847,6 +994,13 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       ] as const) {
         await nodeByLabel(label).waitFor({ state: 'visible', timeout: NAV }).catch(() => {});
       }
+      // Deselect the last-touched node (clears the side panel that used to be
+      // open in the shot) and fit the whole graph into view, so the capture is
+      // centered and padded no matter how the canvas panned while we dragged
+      // nodes around (#149). Both best-effort — a miss only costs us framing.
+      if (cb) await dashPage.mouse.click(cb.x + 20, cb.y + 20).catch(() => {});
+      await d.locator('.react-flow__controls-fitview').first().click().catch(() => {});
+      await dashPage.waitForTimeout(400);
       await capture(dashPage, 'flowchart-editor');
     } finally {
       // ALWAYS leave the editor closed — this is the chapter's must-have. Prefer
@@ -1688,11 +1842,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       // and bullets into that list/block, producing the garbled README in #94.
       // Break out into a clean empty paragraph FIRST (Enter twice exits the list),
       // so the appended "## Manager approval tier (v2)" block renders as a proper
-      // heading + list with correct spacing. (readmeV2Addition already leads with a
-      // blank line; the explicit Enters guarantee the markdown structure breaks.)
+      // heading + list with correct spacing. (typeMarkdown skips readmeV2Addition's
+      // leading blank line; these explicit Enters are what breaks the structure.)
       await dashPage.keyboard.press('Enter').catch(() => {});
       await dashPage.keyboard.press('Enter').catch(() => {});
-      await editor.pressSequentially(BP.readmeV2Addition, { delay: 0 });
+      await typeMarkdown(dashPage, BP.readmeV2Addition);
       await dashPage.keyboard.press('Control+s');
       await d.getByRole('button', { name: /Saving/i }).first()
         .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
