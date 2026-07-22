@@ -196,10 +196,16 @@ func TestUpgradeWorkspace_ValidationAndAuthz(t *testing.T) {
 	if _, err := registerEndpoint(wsOwned+"-gitops."+domain, "owner3@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
+	// The upgrade now streams a determinate progress bar as NDJSON, so a
+	// mid-run failure (missing deployment) is a 200 stream carrying an error
+	// event rather than a 500 status.
 	wErr := newRecorder()
 	srv.handleUpgradeWorkspace(wErr, baileyReq(http.MethodPost, "/x", "owner3@example.com"), "owner3@example.com", wsOwned)
-	if wErr.Code != http.StatusInternalServerError {
-		t.Errorf("owner upgrade w/ missing deployment = %d, want 500", wErr.Code)
+	if wErr.Code != http.StatusOK {
+		t.Fatalf("owner upgrade stream status = %d, want 200", wErr.Code)
+	}
+	if !strings.Contains(wErr.Body.String(), `"event":"error"`) {
+		t.Errorf("expected a streamed error event for a missing deployment; got: %s", wErr.Body.String())
 	}
 }
 

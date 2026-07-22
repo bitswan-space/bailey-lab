@@ -74,6 +74,15 @@ func (s *Server) runWorkspaceUpdate(req WorkspaceUpdateRequest) error {
 	if workspaceName == "" {
 		return fmt.Errorf("workspace name is required")
 	}
+	// report advances a caller-supplied determinate progress bar. Checkpoints
+	// are explicit phase boundaries (not parsed from log text), so the fraction
+	// always reflects real work done.
+	report := func(frac float64, label string) {
+		if req.Progress != nil {
+			req.Progress(frac, label)
+		}
+	}
+	report(0.05, "Preparing workspace…")
 	// Use HOME directly - inside container this is /root, on host it's the user's home
 	// The workspace files are mounted at /root/.config/bitswan in the container
 	homeDir := os.Getenv("HOME")
@@ -127,11 +136,13 @@ func (s *Server) runWorkspaceUpdate(req WorkspaceUpdateRequest) error {
 
 	// Snapshot the current compose as a rollback point BEFORE regenerating it, so
 	// `bitswan rollback <workspace>` can return to the exact pre-update image pins.
+	report(0.15, "Saving a rollback snapshot…")
 	if err := workspace.SnapshotWorkspaceCompose(workspaceName); err != nil {
 		fmt.Printf("Warning: could not snapshot current deployment for rollback: %v\n", err)
 	}
 
 	// Update Docker images and docker-compose file
+	report(0.30, "Regenerating deployment with the latest images…")
 	fmt.Println("Updating Docker images and docker-compose file...")
 	if err := workspace.UpdateWorkspaceDeployment(workspaceName, gitopsImage, "", "", staging, dev, trustCA); err != nil {
 		return fmt.Errorf("failed to update workspace deployment: %w", err)
@@ -139,11 +150,13 @@ func (s *Server) runWorkspaceUpdate(req WorkspaceUpdateRequest) error {
 	fmt.Println("Gitops service restarted!")
 
 	// 3. Update services if they are enabled
+	report(0.75, "Updating workspace services…")
 	fmt.Println("Checking for enabled services to update...")
 	if err := updateServices(workspaceName, dashboardImage, kafkaImage, zookeeperImage, couchdbImage, staging, dev, trustCA); err != nil {
 		fmt.Printf("Warning: some services failed to update: %v\n", err)
 	}
 
+	report(1.0, "Update complete")
 	fmt.Printf("Gitops %s updated successfully!\n", workspaceName)
 	return nil
 }

@@ -10,6 +10,25 @@ const {
 const { Api: WApi } = window.SC_API;
 const { useState: useWS } = React;
 
+// WUpdateBar — a determinate progress bar for a streaming update (workspace or
+// server). `prog` is { fraction: 0..1, label } fed from the NDJSON progress
+// events. Exposed on SC_UI so the Updates view reuses the exact same bar.
+function WUpdateBar({ prog }) {
+  const frac = Math.max(0, Math.min(1, (prog && prog.fraction) || 0));
+  const pct = Math.round(frac * 100);
+  return (
+    <div style={{ minWidth: 190 }}>
+      <div style={{ height: 6, borderRadius: 999, background: WC.border, overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: pct + '%', background: WC.primary, transition: 'width 300ms ease' }} />
+      </div>
+      <div style={{ marginTop: 4, fontSize: 11, color: WC.muted, whiteSpace: 'nowrap' }}>
+        {(prog && prog.label) || 'Updating…'} · {pct}%
+      </div>
+    </div>
+  );
+}
+if (window.SC_UI) window.SC_UI.UpdateBar = WUpdateBar;
+
 const ROLE_TONE = { admin: 'primary', auditor: 'info', member: 'neutral', viewer: 'outline' };
 
 // app kind → presentation
@@ -461,6 +480,7 @@ function WorkspacesView({ ctx }) {
   const [trashBusy, setTrashBusy] = useWS(false);
   const [restoreBusy, setRestoreBusy] = useWS('');
   const [updateBusy, setUpdateBusy] = useWS('');
+  const [updateProg, setUpdateProg] = useWS(null); // { fraction, label } for the workspace being updated
 
   // The managed workspace lives in the URL (/workspaces/:name) so the drawer
   // survives refresh and is shareable.
@@ -533,13 +553,18 @@ function WorkspacesView({ ctx }) {
   // workspace's containers (streams progress). Rollback is intentionally CLI-only.
   const doUpdate = async (w) => {
     setUpdateBusy(w.id);
+    setUpdateProg({ fraction: 0, label: 'Starting…' });
     try {
-      await WApi.upgradeWorkspace(w.name);
+      await WApi.upgradeWorkspace(w.name, (ev) => {
+        if (!ev) return;
+        if (typeof ev.fraction === 'number') setUpdateProg({ fraction: ev.fraction, label: ev.message || '' });
+        else if (ev.message) setUpdateProg(p => ({ fraction: (p && p.fraction) || 0, label: ev.message }));
+      });
       toast(`${w.name} updated`, 'success');
       await refresh('workspaces');
     } catch (e) {
       toast(`Couldn't update ${w.name}: ${e.message}`, 'danger');
-    } finally { setUpdateBusy(''); }
+    } finally { setUpdateBusy(''); setUpdateProg(null); }
   };
 
   const matchesQuery = w =>
@@ -614,9 +639,6 @@ function WorkspacesView({ ctx }) {
                       {isOwner ? <WPill tone="primary" size="xs">Owner</WPill>
                         : <WPill tone="neutral" size="xs">Member</WPill>}
                       {archived && <WPill tone="neutral" size="xs">archived</WPill>}
-                      {w.updateAvailable && isOwner && !archived && (
-                        <WPill tone="warning" size="xs">Update available</WPill>
-                      )}
                     </div>
                     {w.versions && (w.versions.gitops || w.versions.dashboard) && (
                       <div style={{ fontSize: 11, color: WC.muted, fontFamily: 'monospace', marginTop: 3 }}>
@@ -631,9 +653,13 @@ function WorkspacesView({ ctx }) {
                   )}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     {!archived && isOwner && w.updateAvailable && (
-                      <WBtn variant="default" size="sm" leftIcon="arrow-up-circle" disabled={updateBusy === w.id} onClick={() => doUpdate(w)}>
-                        {updateBusy === w.id ? 'Updating…' : 'Update'}
-                      </WBtn>
+                      updateBusy === w.id ? (
+                        <WUpdateBar prog={updateProg} />
+                      ) : (
+                        <WBtn variant="primary" size="sm" leftIcon="arrow-up-circle" onClick={() => doUpdate(w)}>
+                          Update available
+                        </WBtn>
+                      )
                     )}
                     {!archived && (
                       <WBtn variant="primary" size="sm" leftIcon="external-link" onClick={() => openUrl(w.dashboard || w.gitopsUrl, `${w.name} dashboard`)}>Open</WBtn>

@@ -126,6 +126,10 @@ type WorkspaceUpdateRequest struct {
 	DisableDevMode        bool   `json:"disable_dev_mode,omitempty"`
 	GitopsDevSourceDir    string `json:"gitops_dev_source_dir,omitempty"`
 	DashboardDevSourceDir string `json:"dashboard_dev_source_dir,omitempty"`
+	// Progress, when non-nil, is called at each phase of the update so a caller
+	// can render a determinate progress bar. In-process only — never serialized
+	// (the socket/CLI path leaves it nil and streams stdout logs instead).
+	Progress func(fraction float64, label string) `json:"-"`
 }
 
 // WorkspaceRemoveRequest represents the request body for removing a workspace

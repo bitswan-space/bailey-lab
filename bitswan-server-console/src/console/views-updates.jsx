@@ -6,7 +6,7 @@ import React from 'react';
 // that one is shown with the command, not a button. Rollback is CLI-only.
 
 const { C: WC, Icon: WIcon, Pill: WPill, Btn: WBtn } = window.WD_SHELL;
-const { Card: WCard, PageHeader: WPageHeader } = window.SC_UI;
+const { Card: WCard, PageHeader: WPageHeader, UpdateBar: WUpdateBar } = window.SC_UI;
 const { Api: UApi } = window.SC_API;
 const { useState: useUS } = React;
 
@@ -14,17 +14,23 @@ function UpdatesView({ ctx }) {
   const { data, toast, refresh } = ctx;
   const upd = data.updates; // { server, workspaces, count, server_update_cmd }
   const [busy, setBusy] = useUS('');
+  const [prog, setProg] = useUS(null); // { fraction, label } for the workspace being updated
 
   const doUpgrade = async (name) => {
     setBusy(name);
+    setProg({ fraction: 0, label: 'Starting…' });
     try {
-      await UApi.upgradeWorkspace(name);
+      await UApi.upgradeWorkspace(name, (ev) => {
+        if (!ev) return;
+        if (typeof ev.fraction === 'number') setProg({ fraction: ev.fraction, label: ev.message || '' });
+        else if (ev.message) setProg(p => ({ fraction: (p && p.fraction) || 0, label: ev.message }));
+      });
       toast(`${name} updated`, 'success');
       await refresh('updates');
       await refresh('workspaces');
     } catch (e) {
       toast(`Couldn't update ${name}: ${e.message}`, 'danger');
-    } finally { setBusy(''); }
+    } finally { setBusy(''); setProg(null); }
   };
 
   const copyCmd = (cmd) => {
@@ -80,9 +86,13 @@ function UpdatesView({ ctx }) {
                         {ws.versions.gitops ? `gitops ${ws.versions.gitops} → ${ws.versions.latest_gitops || '?'}` : ''}
                       </div>
                     </div>
-                    <WBtn variant="primary" size="sm" leftIcon="arrow-up-circle" disabled={busy === ws.name} onClick={() => doUpgrade(ws.name)}>
-                      {busy === ws.name ? 'Updating…' : 'Update'}
-                    </WBtn>
+                    {busy === ws.name ? (
+                      <WUpdateBar prog={prog} />
+                    ) : (
+                      <WBtn variant="primary" size="sm" leftIcon="arrow-up-circle" onClick={() => doUpgrade(ws.name)}>
+                        Update
+                      </WBtn>
+                    )}
                   </div>
                 ))}
               </div>

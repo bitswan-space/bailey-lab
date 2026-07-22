@@ -303,12 +303,37 @@ func (s *Server) handleUpgradeWorkspace(w http.ResponseWriter, r *http.Request, 
 		writeJSONError(w, "only the workspace owner can update it", http.StatusForbidden)
 		return
 	}
-	if err := s.runWorkspaceUpdate(WorkspaceUpdateRequest{
+
+	// Stream a determinate progress bar as NDJSON (same event shape as
+	// handleUpdateWorkspace / createWorkspace, consumed by the console's
+	// postNDJSON). runWorkspaceUpdate reports explicit phase fractions.
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	var writeMu sync.Mutex
+	writeEvent := func(payload map[string]any) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		line, _ := json.Marshal(payload)
+		_, _ = w.Write(append(line, '\n'))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	writeEvent(map[string]any{"event": "start", "message": "Updating " + workspaceName + "…", "fraction": 0})
+	err := s.runWorkspaceUpdate(WorkspaceUpdateRequest{
 		Workspace: workspaceName,
 		Staging:   useStagingTrack(),
-	}); err != nil {
-		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		Progress: func(fraction float64, label string) {
+			writeEvent(map[string]any{"event": "progress", "fraction": fraction, "message": label})
+		},
+	})
+	if err != nil {
+		writeEvent(map[string]any{"event": "error", "error": err.Error()})
 		return
 	}
-	writeJSON(w, map[string]any{"success": true})
+	writeEvent(map[string]any{"event": "done", "message": "Workspace updated.", "fraction": 1})
 }

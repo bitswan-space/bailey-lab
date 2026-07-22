@@ -212,8 +212,8 @@ export const Api = {
   // Version BUMP: regenerate the workspace's compose with the latest images on
   // the server's track and recreate its containers. Owner-only; clears the
   // "update available" badge. Distinct from updateWorkspace (digest re-pull).
-  upgradeWorkspace: (name) =>
-    postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/upgrade`, {}),
+  upgradeWorkspace: (name, onEvent) =>
+    postNDJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/upgrade`, {}, onEvent),
   // Admin: what's behind on this server (server binary + stale workspaces) +
   // a count for the Updates nav bubble.
   adminUpdates: () => getJSON('/bailey/api/admin/updates'),
