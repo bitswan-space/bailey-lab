@@ -830,7 +830,11 @@ func (c *Client) InitIngress(verbose bool) (*IngressInitResponse, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doRequest(req)
+	// Ingress init sets up Traefik and issues the wildcard cert (DNS-01), which
+	// takes well over the 10s default client timeout — use the long-running
+	// client so the CLI waits for the daemon instead of giving up with a
+	// "context deadline exceeded" while the work is still in progress.
+	resp, err := c.doLongRunningRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
 	}
