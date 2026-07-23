@@ -126,7 +126,7 @@ func (s *Server) verifyPublicEndpoint(domain string) verifyResult {
 	localLeaf, err := fetchServedLeaf(relayLocalTarget(), publicHost)
 	if err != nil {
 		// Local Traefik still coming up — expected right after bring-up.
-		return verifyResult{Pending: true, Error: fmt.Sprintf("local ingress not ready: %v", err)}
+		return verifyResult{Pending: true, Error: "waiting for local ingress to start"}
 	}
 
 	// Full verification against the system CA roots — this is the check a
@@ -134,8 +134,10 @@ func (s *Server) verifyPublicEndpoint(domain string) verifyResult {
 	d := &net.Dialer{Timeout: 15 * time.Second}
 	raw, err := d.Dial("tcp", dialAddr)
 	if err != nil {
-		// DNS still propagating / tunnel still settling — expected transient.
-		return verifyResult{Pending: true, Error: fmt.Sprintf("not reachable yet at %s: %v", dialAddr, err)}
+		// DNS still resolving / tunnel still settling — expected transient. Keep
+		// the message a clean stage label (the raw resolver error reads like a
+		// crash); it resolves within a poll or two.
+		return verifyResult{Pending: true, Error: "waiting for DNS to resolve"}
 	}
 	defer raw.Close()
 	conn := tls.Client(raw, &tls.Config{ServerName: publicHost}) // verifies chain + hostname
