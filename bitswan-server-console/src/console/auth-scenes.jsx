@@ -122,12 +122,8 @@ function BootstrapScene({ onClaim }) {
   const claim = async () => {
     setClaiming(true); setError('');
     try {
-      const r = await SApi.claim();
-      // Follow the backend's redirect_path to the CONSOLE host (or wherever we
-      // were headed before the gate). Claiming happens on the onboard host, so
-      // a bare reload would re-render the console THERE — the console must live
-      // on bailey.<domain>, never the device-trust-exempt onboard host.
-      followRedirect(r && r.redirect_path);
+      await SApi.claim();
+      followRedirect(null); // reload — now trusted, lands in console
     } catch (e) {
       setError(e.message || 'Could not claim this server.');
       setClaiming(false);
