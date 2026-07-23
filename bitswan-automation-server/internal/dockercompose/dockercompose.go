@@ -483,7 +483,7 @@ func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error
 	}
 
 	proxyService := map[string]interface{}{
-		"image":          "quay.io/oauth2-proxy/oauth2-proxy:v7.7.1",
+		"image":          "quay.io/oauth2-proxy/oauth2-proxy:v7.15.3",
 		"restart":        "always",
 		"container_name": "bitswan-protected-proxy",
 		"networks":       []string{"bitswan_network"},

@@ -172,10 +172,28 @@ func protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSec
 		// (or a second *.domain host) starting its own handshake clobbers the
 		// first flow's cookie and that flow 403s at /oauth2/callback right
 		// after the Keycloak login (issue #47). Per-request gives each flow
-		// its own cookie; 1h (default 15m) keeps a login form that sat open a
-		// while redeemable instead of 403ing the same way.
+		// its own cookie.
 		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST": "true",
-		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE":      "1h",
+		// But per-request cookies are UNIQUELY named (_oauth2_proxy_<nonce>_csrf)
+		// and scoped to the parent cookie_domain, so a handshake that never
+		// reaches /oauth2/callback (abandoned tab, prefetch, superseded redirect,
+		// a background *.domain host) orphans its cookie for the full expiry —
+		// and the browser then replays EVERY orphan to EVERY *.domain host on
+		// every request. Left unbounded they stack up until the request header
+		// blows past the ingress limit and the whole app starts returning
+		// 431 Request Header Fields Too Large (observed live). PER_REQUEST_LIMIT
+		// hard-caps how many CSRF cookies can exist at once: on each new
+		// handshake oauth2-proxy evicts the oldest beyond the cap, so the header
+		// contribution is bounded (~5 cookies) no matter how many logins churn
+		// through. This needs oauth2-proxy >= the version pinned in
+		// dockercompose.go (added mid-7.1x; earlier images silently ignore it).
+		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST_LIMIT": "5",
+		// A CSRF cookie only has to live for one /oauth2/start -> Keycloak ->
+		// /oauth2/callback round-trip, so keep it to the upstream default 15m
+		// rather than the previous 1h: shorter lifetime means an orphan clears
+		// on its own sooner, and the PER_REQUEST_LIMIT above already bounds the
+		// header regardless.
+		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE": "15m",
 	}
 }
 

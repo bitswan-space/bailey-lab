@@ -41,8 +41,8 @@ func TestCreateProtectedProxyDockerComposeFile(t *testing.T) {
 	if !ok {
 		t.Fatalf("compose missing bitswan-protected-proxy service:\n%s", out)
 	}
-	if svc.Image != "quay.io/oauth2-proxy/oauth2-proxy:v7.7.1" {
-		t.Errorf("image = %q, want pinned v7.7.1", svc.Image)
+	if svc.Image != "quay.io/oauth2-proxy/oauth2-proxy:v7.15.3" {
+		t.Errorf("image = %q, want pinned v7.15.3", svc.Image)
 	}
 	if svc.ContainerName != "bitswan-protected-proxy" {
 		t.Errorf("container_name = %q", svc.ContainerName)

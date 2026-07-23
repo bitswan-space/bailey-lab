@@ -63,9 +63,12 @@ func TestProtectedProxyOAuthEnv(t *testing.T) {
 		// injects an Authorization header of its own.
 		"OAUTH2_PROXY_PASS_BASIC_AUTH": "false",
 		"OAUTH2_PROXY_OIDC_GROUPS_CLAIM": "group_membership",
-		// Concurrent logins must not share one CSRF/state cookie (issue #47).
+		// Concurrent logins must not share one CSRF/state cookie (issue #47)...
 		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST": "true",
-		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE":      "1h",
+		// ...but per-request CSRF cookies must be count-capped so abandoned
+		// handshakes can't pile up parent-domain cookies into a 431.
+		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST_LIMIT": "5",
+		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE":            "15m",
 	}
 	for k, v := range want {
 		if env[k] != v {
