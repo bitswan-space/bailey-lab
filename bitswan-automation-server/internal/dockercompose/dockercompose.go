@@ -488,17 +488,39 @@ func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error
 		"container_name": "bitswan-protected-proxy",
 		"networks":       []string{"bitswan_network"},
 		"environment":    envList,
+		"depends_on":     []string{"bitswan-protected-proxy-redis"},
+	}
+
+	// Redis session store. oauth2-proxy holds a per-session refresh LOCK in
+	// redis, so concurrent requests can't refresh the same token at once — the
+	// first refreshes, the rest wait and use the rotated token. Without this,
+	// single-use refresh-token rotation (revokeRefreshToken) self-destructs: a
+	// browser's parallel requests each replay the pre-rotation token, Keycloak
+	// sees reuse and revokes the whole session (spurious logout). Persisted to a
+	// volume with AOF so a redis restart doesn't evict sessions and force
+	// re-login.
+	redisService := map[string]interface{}{
+		"image":          "redis:7-alpine",
+		"restart":        "always",
+		"container_name": "bitswan-protected-proxy-redis",
+		"networks":       []string{"bitswan_network"},
+		"command":        []string{"redis-server", "--appendonly", "yes"},
+		"volumes":        []string{"bitswan-protected-proxy-redis:/data"},
 	}
 
 	dockerCompose := map[string]interface{}{
 		"version": "3.8",
 		"services": map[string]interface{}{
-			"bitswan-protected-proxy": proxyService,
+			"bitswan-protected-proxy":       proxyService,
+			"bitswan-protected-proxy-redis": redisService,
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
 				"external": true,
 			},
+		},
+		"volumes": map[string]interface{}{
+			"bitswan-protected-proxy-redis": map[string]interface{}{},
 		},
 	}
 

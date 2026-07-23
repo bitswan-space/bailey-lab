@@ -136,6 +136,13 @@ func protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSec
 		"OAUTH2_PROXY_OIDC_GROUPS_CLAIM":    "group_membership",
 		"OAUTH2_PROXY_SKIP_PROVIDER_BUTTON": "true",
 		"OAUTH2_PROXY_COOKIE_SECURE":        "true",
+		// Server-side session store so oauth2-proxy can hold a per-session refresh
+		// lock: concurrent requests serialize on refresh (one rotates the token,
+		// the rest reuse the result), which is what makes single-use refresh-token
+		// rotation safe. Without it, parallel requests replay the pre-rotation
+		// token and Keycloak revokes the session (spurious logout).
+		"OAUTH2_PROXY_SESSION_STORE_TYPE":   "redis",
+		"OAUTH2_PROXY_REDIS_CONNECTION_URL": "redis://bitswan-protected-proxy-redis:6379",
 		// Refresh the token well before it expires (must stay < the realm's
 		// access-token lifespan). On each refresh oauth2-proxy re-issues the
 		// cookie with a fresh COOKIE_EXPIRE window, so an actively-used session
