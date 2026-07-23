@@ -173,6 +173,26 @@ func setDeviceCookie(w http.ResponseWriter, r *http.Request, email, deviceID str
 	return nil
 }
 
+// deviceCookieOlderThan reports whether the device cookie on r was issued more
+// than d ago (from the signed issuedAt timestamp). Used to roll the cookie's
+// browser expiry forward on active use so device trust never ages out. Returns
+// false when there's no parseable cookie (nothing to refresh).
+func deviceCookieOlderThan(r *http.Request, d time.Duration) bool {
+	c, err := r.Cookie(deviceCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	parts := strings.Split(c.Value, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	ts, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return false
+	}
+	return time.Since(time.Unix(ts, 0)) > d
+}
+
 func clearDeviceCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name: deviceCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
