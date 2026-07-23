@@ -202,3 +202,55 @@ func TestNavSyncInjection(t *testing.T) {
 		t.Error("nav-sync script not appended to tagless body")
 	}
 }
+
+// TestOnboardHost_TrustedDeviceRedirectedToConsole locks the invariant that the
+// public onboarding host only ever shows the device-trust gate. Once a device
+// is trusted it must be bounced to the console host, NOT served the console on
+// the onboard host (which used to happen on a bare post-claim reload — the
+// onboard host is the one device-trust-exempt host and must stay gate-only).
+func TestOnboardHost_TrustedDeviceRedirectedToConsole(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+	console := serverConsoleHost(domain)
+
+	w := httptest.NewRecorder()
+	// browserGet attaches a trusted-device cookie for the email.
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, onboard, "/security", "user@example.com"))
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("trusted device on the onboard host: status = %d, want 303 redirect (body: %s)", w.Code, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, "https://"+console+"/") {
+		t.Errorf("Location = %q, want redirect to the console host %q", loc, console)
+	}
+	if strings.Contains(loc, onboard) {
+		t.Errorf("Location = %q must not stay on the onboard host", loc)
+	}
+	if w.Header().Get("X-Test-Inner") == "1" {
+		t.Error("trusted device reached inner/console content on the onboard host")
+	}
+}
+
+// TestOnboardHost_UntrustedStillGetsGate ensures an UNtrusted device still gets
+// the onboarding gate SPA on the onboard host (so it can become trusted) rather
+// than being bounced away.
+func TestOnboardHost_UntrustedStillGetsGate(t *testing.T) {
+	resetClaimState(t)
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+
+	r := httptest.NewRequest(http.MethodGet, "https://"+onboard+"/", nil)
+	r.Host = onboard
+	r.Header.Set("Accept", "text/html")
+	r.Header.Set("X-Forwarded-Email", "newuser@example.com")
+	w := httptest.NewRecorder()
+	wrappedHandler(t).ServeHTTP(w, r)
+
+	if w.Code == http.StatusSeeOther {
+		t.Fatalf("untrusted device on the onboard host was redirected to %q; it must get the gate", w.Header().Get("Location"))
+	}
+	if !bodyLooksLikeSPA(w) {
+		t.Errorf("untrusted device did not get the onboarding SPA shell; body:\n%s", w.Body.String())
+	}
+}

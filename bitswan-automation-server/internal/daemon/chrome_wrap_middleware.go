@@ -54,6 +54,19 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 				inner.ServeHTTP(w, r)
 				return
 			}
+			// Invariant: the onboard host ONLY ever shows the device-trust gate.
+			// It is the one device-trust-EXEMPT host, so it must stay minimal —
+			// never the console. Once THIS device is trusted it has no business
+			// here (the console lives on bailey.<domain>, inside the chrome wrap):
+			// bounce it to where it was headed before the gate, or the console
+			// root. Enforced server-side on the top-level HTML navigation, so the
+			// rule holds no matter what the SPA would otherwise render (a bare
+			// post-claim reload used to re-render the whole console on this host).
+			if email, _ := identityFromHeaders(r); email != "" &&
+				isTopLevelHTMLGet(r) && currentDeviceForRequest(r, email) != nil {
+				http.Redirect(w, r, originRedirectPath(r), http.StatusSeeOther)
+				return
+			}
 			serveServerConsole(w, r)
 			return
 		}
