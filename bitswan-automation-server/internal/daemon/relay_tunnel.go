@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -92,6 +93,73 @@ func (s *Server) startRelayTunnel() {
 			fmt.Printf("relay: tunnel client exited: %v\n", err)
 		}
 	}()
+}
+
+// verifyResult is the outcome of verifying this server's own public endpoint.
+type verifyResult struct {
+	OK     bool   `json:"ok"`
+	Issuer string `json:"issuer,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// verifyPublicEndpoint fetches this server's OWN public Bailey URL and confirms
+// three things a human would otherwise discover only by loading it in a browser:
+//
+//  1. reachable — the URL actually answers on :443 (tunnel/DNS/ingress are up);
+//  2. trusted — the served certificate validates against the public CA roots
+//     for this hostname (no browser "not private" warning); this is what's
+//     still false while the Let's Encrypt wildcard is being issued;
+//  3. ours — the served leaf is byte-for-byte the cert our local Traefik holds,
+//     so a *trusted* cert that isn't ours (a MITM with its own valid cert) is
+//     still rejected.
+//
+// register polls this so it only prints the URL once it's genuinely usable.
+func (s *Server) verifyPublicEndpoint(domain string) verifyResult {
+	publicHost := "bailey." + domain
+	dialAddr := publicHost + ":443"
+
+	localLeaf, err := fetchServedLeaf(relayLocalTarget(), publicHost)
+	if err != nil {
+		return verifyResult{Error: fmt.Sprintf("cannot read our local certificate: %v", err)}
+	}
+
+	// Full verification against the system CA roots — this is the check a
+	// browser makes, so it fails exactly while the cert is still self-signed.
+	d := &net.Dialer{Timeout: 15 * time.Second}
+	raw, err := d.Dial("tcp", dialAddr)
+	if err != nil {
+		return verifyResult{Error: fmt.Sprintf("not reachable at %s: %v", dialAddr, err)}
+	}
+	defer raw.Close()
+	conn := tls.Client(raw, &tls.Config{ServerName: publicHost}) // verifies chain + hostname
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := conn.HandshakeContext(ctx); err != nil {
+		return verifyResult{Error: fmt.Sprintf("certificate not publicly trusted yet: %v", err)}
+	}
+	defer conn.Close()
+
+	served := conn.ConnectionState().PeerCertificates
+	if len(served) == 0 {
+		return verifyResult{Error: "no certificate served"}
+	}
+	if sha256.Sum256(served[0].Raw) != sha256.Sum256(localLeaf) {
+		return verifyResult{Error: "served certificate is not ours — TLS is being intercepted in transit"}
+	}
+	return verifyResult{OK: true, Issuer: served[0].Issuer.CommonName}
+}
+
+// handleRelayVerify runs verifyPublicEndpoint once and returns the result.
+func (s *Server) handleRelayVerify(w http.ResponseWriter, r *http.Request) {
+	cfg := config.NewAutomationServerConfig()
+	settings, err := cfg.GetAutomationOperationsCenterSettings()
+	if err != nil || settings == nil || settings.Domain == "" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(verifyResult{Error: "no domain configured"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.verifyPublicEndpoint(settings.Domain))
 }
 
 // handleRelayStart lets `register` kick the tunnel after the AOC has just

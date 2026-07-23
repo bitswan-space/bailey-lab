@@ -1324,6 +1324,36 @@ func (c *Client) StartRelayTunnel() error {
 	return nil
 }
 
+// EndpointVerifyResult mirrors the daemon's /relay/verify response.
+type EndpointVerifyResult struct {
+	OK     bool   `json:"ok"`
+	Issuer string `json:"issuer"`
+	Error  string `json:"error"`
+}
+
+// VerifyEndpoint asks the daemon to check that this server's public URL is
+// reachable, publicly trusted, and serving our own (un-intercepted) cert.
+func (c *Client) VerifyEndpoint() (EndpointVerifyResult, error) {
+	var out EndpointVerifyResult
+	req, err := http.NewRequest("GET", "http://unix/relay/verify", nil)
+	if err != nil {
+		return out, fmt.Errorf("failed to create request: %w", err)
+	}
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return out, fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return out, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return out, fmt.Errorf("failed to decode verify response: %w", err)
+	}
+	return out, nil
+}
+
 // ProxyConfig carries the reverse-proxy relay settings for a NAT'd/--force-proxy
 // server. Zero value (Proxied=false) means the normal direct-A-record path.
 type ProxyConfig struct {

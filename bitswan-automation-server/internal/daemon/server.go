@@ -171,6 +171,10 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// AOC has provisioned the proxy path).
 	mux.HandleFunc("/relay/start", s.authMiddleware(s.handleRelayStart))
 
+	// Verify the public endpoint is reachable, publicly trusted, and serving
+	// our own certificate (register polls this before printing the URL).
+	mux.HandleFunc("/relay/verify", s.authMiddleware(s.handleRelayVerify))
+
 	// Service endpoints (authenticated)
 	mux.HandleFunc("/service", s.authMiddleware(s.handleService))
 	mux.HandleFunc("/service/", s.authMiddleware(s.handleService))

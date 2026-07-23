@@ -193,6 +193,42 @@ func newRegisterCmd() *cobra.Command {
 				return err
 			}
 
+			// Final gate: don't tell the user their Bailey is ready until we've
+			// actually fetched its own public URL and confirmed it is reachable,
+			// serving a publicly-trusted certificate (no browser warning), and
+			// that the certificate is OURS (not intercepted). The wildcard cert
+			// is issued asynchronously (DNS-01), so poll for a few minutes.
+			if serverInfo.Domain != "" {
+				baileyURL := fmt.Sprintf("https://bailey.%s", serverInfo.Domain)
+				fmt.Printf("\n🔎 Verifying %s is live with a valid, un-intercepted certificate...\n", baileyURL)
+				fmt.Println("   (the TLS certificate is issued in the background; this can take a couple of minutes)")
+
+				deadline := time.Now().Add(5 * time.Minute)
+				var lastReason string
+				verified := false
+				for time.Now().Before(deadline) {
+					res, err := client.VerifyEndpoint()
+					if err != nil {
+						lastReason = err.Error()
+					} else if res.OK {
+						fmt.Printf("\n✅ %s is live — certificate issued by %q, verified end-to-end (not intercepted).\n", baileyURL, res.Issuer)
+						verified = true
+						break
+					} else {
+						lastReason = res.Error
+					}
+					fmt.Printf("   … not ready yet: %s\n", lastReason)
+					time.Sleep(10 * time.Second)
+				}
+				if !verified {
+					return fmt.Errorf(
+						"registered, but %s did not become verifiably live within 5 minutes (last check: %s).\n"+
+							"The certificate may still be issuing — re-check in a minute; if it persists, the DNS/relay path needs attention",
+						baileyURL, lastReason,
+					)
+				}
+			}
+
 			return nil
 		},
 	}
