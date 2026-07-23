@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/workspace"
 )
 
@@ -150,5 +153,44 @@ func TestVersionLess(t *testing.T) {
 		if got := versionLess(c.a, c.b); got != c.want {
 			t.Errorf("versionLess(%q,%q) = %v, want %v", c.a, c.b, got, c.want)
 		}
+	}
+}
+
+// fetchAOCBinaryVersion returns the version the AOC serves, "" on any failure.
+func TestFetchAOCBinaryVersion(t *testing.T) {
+	// No config → empty (nowhere to ask).
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SUDO_USER", "")
+	if got := fetchAOCBinaryVersion(); got != "" {
+		t.Errorf("no config: got %q, want empty", got)
+	}
+
+	// Configured AOC that reports a version → returned verbatim.
+	aoc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":"v2026.07.23.9"}`))
+	}))
+	defer aoc.Close()
+	if err := config.NewAutomationServerConfig().UpdateAutomationServer(
+		config.AutomationOperationsCenterSettings{AOCUrl: aoc.URL, AutomationServerId: "x", AccessToken: "t"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := fetchAOCBinaryVersion(); got != "v2026.07.23.9" {
+		t.Errorf("got %q, want v2026.07.23.9", got)
+	}
+
+	// AOC that errors → empty (never fabricate).
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	if err := config.NewAutomationServerConfig().UpdateAutomationServer(
+		config.AutomationOperationsCenterSettings{AOCUrl: bad.URL, AutomationServerId: "x", AccessToken: "t"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := fetchAOCBinaryVersion(); got != "" {
+		t.Errorf("AOC 500: got %q, want empty", got)
 	}
 }
