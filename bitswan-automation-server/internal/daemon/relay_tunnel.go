@@ -3,9 +3,12 @@ package daemon
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
@@ -24,31 +27,64 @@ func relayLocalTarget() string {
 }
 
 // startRelayTunnel launches the reverse-proxy tunnel client when this server is
-// on the relay path (Proxied=true in config). It is a no-op otherwise, so it is
-// always safe to call at daemon startup. Once the tunnel is up it runs the
-// paranoid end-to-end-TLS self-check in the background.
+// on the relay path (force-proxy config OR the AOC reports it proxied). It is a
+// no-op otherwise, and idempotent — safe to call both at daemon startup and
+// again from register once the AOC has provisioned the proxy path.
 func (s *Server) startRelayTunnel() {
+	s.relayMu.Lock()
+	if s.relayStarted {
+		s.relayMu.Unlock()
+		return // tunnel already running
+	}
 	cfg := config.NewAutomationServerConfig()
 	settings, err := cfg.GetAutomationOperationsCenterSettings()
-	if err != nil || settings == nil || !settings.Proxied {
-		return // not registered, or not on the relay path
+	if err != nil || settings == nil || settings.AccessToken == "" || settings.Domain == "" {
+		s.relayMu.Unlock()
+		return // not registered, or no domain
 	}
-	if settings.Domain == "" || settings.RelayAddr == "" || settings.RelayFingerprint == "" {
-		fmt.Printf("relay: Proxied is set but domain/relay_addr/relay_fingerprint are incomplete; not starting tunnel\n")
-		return
+
+	// Resolve the relay endpoint. Two sources, in order:
+	//   1. Local config set by `register --force-proxy` (--relay-addr /
+	//      --relay-fingerprint) — the testing path, forces the proxy on a
+	//      public-IP server.
+	//   2. The AOC, which is the source of truth for real deployments: it knows
+	//      whether this server is proxied (domain_status) and where the relay is.
+	// This means a NAT'd server needs NO hand-configuration — the AOC tells it.
+	relayAddr, relayFingerprint := settings.RelayAddr, settings.RelayFingerprint
+	forced := settings.Proxied && relayAddr != "" && relayFingerprint != ""
+	if !forced {
+		info, ierr := fetchRelayInfoFromAOC(settings.AOCUrl, settings.AccessToken)
+		if ierr != nil {
+			s.relayMu.Unlock()
+			fmt.Printf("relay: could not fetch relay info from AOC: %v\n", ierr)
+			return
+		}
+		if !info.Proxied {
+			s.relayMu.Unlock()
+			return // AOC says this server is directly addressed — no tunnel
+		}
+		if info.RelayAddr == "" || info.RelayFingerprint == "" {
+			s.relayMu.Unlock()
+			fmt.Printf("relay: AOC marks this server proxied but advertises no relay endpoint; cannot start tunnel\n")
+			return
+		}
+		relayAddr, relayFingerprint = info.RelayAddr, info.RelayFingerprint
 	}
 
 	client := relay.NewClient(relay.ClientConfig{
-		RelayAddr:        settings.RelayAddr,
-		RelayFingerprint: settings.RelayFingerprint,
+		RelayAddr:        relayAddr,
+		RelayFingerprint: relayFingerprint,
 		AOCApiURL:        settings.AOCUrl,
 		Token:            settings.AccessToken,
 		Subdomain:        settings.Domain,
 		LocalTarget:      relayLocalTarget(),
 	})
 
+	s.relayStarted = true
+	s.relayMu.Unlock()
+
 	fmt.Printf("relay: server is on the reverse-proxy path; dialing relay %s for %s\n",
-		settings.RelayAddr, settings.Domain)
+		relayAddr, settings.Domain)
 
 	ctx := context.Background()
 	go func() {
@@ -56,6 +92,19 @@ func (s *Server) startRelayTunnel() {
 			fmt.Printf("relay: tunnel client exited: %v\n", err)
 		}
 	}()
+}
+
+// handleRelayStart lets `register` kick the tunnel after the AOC has just
+// provisioned the proxy path — the daemon started before the AOC knew this
+// server was proxied, so its boot-time check found nothing. Idempotent.
+func (s *Server) handleRelayStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.startRelayTunnel()
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
 // startEndpointTLSSelfCheck runs the paranoid end-to-end-TLS self-check for ANY
@@ -146,6 +195,47 @@ func (s *Server) reportTLSSelfCheckFailure(domain string, proxied bool, err erro
 	// finding (it's already on stdout above).
 	_ = recordEvent("system", "tls_selfcheck_failed",
 		fmt.Sprintf("bailey.%s (%s): %v", domain, path, err))
+}
+
+// relayInfo mirrors the AOC's /api/automation_server/relay response.
+type relayInfo struct {
+	Proxied          bool   `json:"proxied"`
+	RelayAddr        string `json:"relay_addr"`
+	RelayFingerprint string `json:"relay_fingerprint"`
+}
+
+// fetchRelayInfoFromAOC asks the AOC whether this server is proxied and, if so,
+// where the relay is. The AOC authenticates us by our own bearer token, so we
+// only ever learn our own status.
+func fetchRelayInfoFromAOC(aocURL, token string) (relayInfo, error) {
+	var info relayInfo
+	base := strings.TrimRight(strings.TrimSpace(aocURL), "/")
+	if base == "" {
+		return info, fmt.Errorf("no AOC url configured")
+	}
+	req, err := http.NewRequest(http.MethodGet, base+"/api/automation_server/relay", nil)
+	if err != nil {
+		return info, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return info, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		// Older AOC without the relay endpoint: treat as "not proxied" rather
+		// than failing — a legacy AOC simply doesn't offer the proxy path.
+		return relayInfo{Proxied: false}, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return info, fmt.Errorf("AOC relay endpoint returned HTTP %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return info, fmt.Errorf("decode relay info: %w", err)
+	}
+	return info, nil
 }
 
 // fetchServedLeaf opens a TLS connection to addr with the given SNI and returns

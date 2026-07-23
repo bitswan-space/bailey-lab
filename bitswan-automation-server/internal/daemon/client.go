@@ -1304,6 +1304,26 @@ func (c *Client) DisconnectFromAOC() error {
 // the single owner of ~/.config/bitswan — register no longer writes it on the
 // host — so this is how a freshly obtained token reaches the daemon before it
 // talks to the AOC (wildcard ingress, protected proxy, workspace connect).
+// StartRelayTunnel asks the daemon to (idempotently) start the reverse-proxy
+// tunnel now. Used by register after the AOC provisions the proxy path, since
+// the daemon's boot-time check ran before the AOC knew the server was proxied.
+func (c *Client) StartRelayTunnel() error {
+	req, err := http.NewRequest("POST", "http://unix/relay/start", nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 // ProxyConfig carries the reverse-proxy relay settings for a NAT'd/--force-proxy
 // server. Zero value (Proxied=false) means the normal direct-A-record path.
 type ProxyConfig struct {

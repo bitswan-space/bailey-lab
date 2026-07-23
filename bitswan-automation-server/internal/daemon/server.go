@@ -38,6 +38,12 @@ type Server struct {
 	// during workspace init. The daemon blocks until a value is sent on this channel.
 	initConfirmMu sync.Mutex
 	initConfirmCh chan struct{}
+
+	// relayMu guards relayStarted so the reverse-proxy tunnel is launched at
+	// most once, whether triggered at daemon startup or by register after the
+	// AOC provisions the proxy path.
+	relayMu      sync.Mutex
+	relayStarted bool
 }
 
 // LoadToken reads the token from the config file
@@ -160,6 +166,10 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// obtained token here so the daemon (not the host) owns ~/.config/bitswan.
 	mux.HandleFunc("/aoc", s.authMiddleware(s.handleAOC))
 	mux.HandleFunc("/aoc/", s.authMiddleware(s.handleAOC))
+
+	// Start the reverse-proxy tunnel on demand (register calls this once the
+	// AOC has provisioned the proxy path).
+	mux.HandleFunc("/relay/start", s.authMiddleware(s.handleRelayStart))
 
 	// Service endpoints (authenticated)
 	mux.HandleFunc("/service", s.authMiddleware(s.handleService))

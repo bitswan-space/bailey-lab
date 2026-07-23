@@ -162,10 +162,26 @@ func newRegisterCmd() *cobra.Command {
 				// fail registration.
 				baileyURL := fmt.Sprintf("https://bailey.%s", serverInfo.Domain)
 				fmt.Printf("\n📓 Reporting Bailey console URL to the AOC: %s\n", baileyURL)
-				if err := aocClient.ReportBaileyURL(baileyURL); err != nil {
+				domainStatus, err := aocClient.ReportBaileyURL(baileyURL, forceProxy)
+				if err != nil {
 					fmt.Printf("Warning: Failed to report Bailey URL to the AOC: %v\n", err)
 				} else {
 					fmt.Println("Bailey console URL reported.")
+				}
+
+				// Reporting the Bailey URL makes the AOC provision this server's
+				// public DNS: if the world can't reach us directly (or --force-proxy
+				// was passed) it routes *.<domain> through the reverse-proxy relay
+				// and reports "proxied". The daemon started before this decision, so
+				// kick the tunnel now (idempotent).
+				if domainStatus == "proxied" || forceProxy {
+					fmt.Println("\n🌐 This server will be reached through the AOC reverse-proxy relay (no public inbound route).")
+					if err := client.StartRelayTunnel(); err != nil {
+						fmt.Printf("Warning: failed to start the reverse-proxy tunnel: %v\n", err)
+						fmt.Println("It will start automatically the next time the daemon restarts.")
+					} else {
+						fmt.Println("Reverse-proxy tunnel started.")
+					}
 				}
 			}
 

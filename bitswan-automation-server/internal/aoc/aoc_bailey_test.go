@@ -40,7 +40,7 @@ func TestReportBaileyURL(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	if err := newTestClient(ts.URL).ReportBaileyURL(want); err != nil {
+	if _, err := newTestClient(ts.URL).ReportBaileyURL(want, false); err != nil {
 		t.Fatalf("ReportBaileyURL returned error: %v", err)
 	}
 
@@ -65,7 +65,7 @@ func TestReportBaileyURLServerError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	if err := newTestClient(ts.URL).ReportBaileyURL("nope"); err == nil {
+	if _, err := newTestClient(ts.URL).ReportBaileyURL("nope", false); err == nil {
 		t.Fatal("expected an error on non-200 response, got nil")
 	}
 }
