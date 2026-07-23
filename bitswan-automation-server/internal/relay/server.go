@@ -214,31 +214,23 @@ func (s *Server) handleData(conn net.Conn, br *bufio.Reader, f frame) {
 // matching Bailey, asks it (over the control channel) to dial a data connection
 // back, then splices the two — replaying the peeked ClientHello untouched.
 func (s *Server) handlePassthroughConn(browser net.Conn) {
-	// Peek enough for the ClientHello. Read incrementally until parseSNI is
-	// satisfied or we give up.
+	// Peek exactly the ClientHello record to read its SNI without consuming it.
+	// The deadline only guards against a client that connects but never sends a
+	// hello; a well-behaved client's hello is already in the first packet, so
+	// this returns immediately (no per-connection stall).
 	br := bufio.NewReader(browser)
-	var sni string
-	deadline := time.Now().Add(10 * time.Second)
-	_ = browser.SetReadDeadline(deadline)
-	for {
-		// Peek grows the buffered window without consuming it.
-		buffered := br.Buffered()
-		peek, err := br.Peek(buffered + 1)
-		if len(peek) > 0 {
-			if name, perr := parseSNI(peek); perr == nil {
-				sni = name
-				break
-			} else if perr != errNotClientHello {
-				log.Printf("relay: passthrough SNI parse: %v", perr)
-				browser.Close()
-				return
-			}
-		}
-		if err != nil {
-			log.Printf("relay: passthrough read while peeking SNI: %v", err)
-			browser.Close()
-			return
-		}
+	_ = browser.SetReadDeadline(time.Now().Add(10 * time.Second))
+	hello, err := peekClientHello(br)
+	if err != nil {
+		log.Printf("relay: passthrough read while peeking ClientHello: %v", err)
+		browser.Close()
+		return
+	}
+	sni, err := parseSNI(hello)
+	if err != nil {
+		log.Printf("relay: passthrough SNI parse: %v", err)
+		browser.Close()
+		return
 	}
 	_ = browser.SetReadDeadline(time.Time{})
 
@@ -257,7 +249,7 @@ func (s *Server) handlePassthroughConn(browser net.Conn) {
 
 	// Ask the Bailey to dial back.
 	t.writeMu.Lock()
-	err := writeFrame(t.conn, frame{Type: frameOpen, ConnID: connID, SNI: sni})
+	err = writeFrame(t.conn, frame{Type: frameOpen, ConnID: connID, SNI: sni})
 	t.writeMu.Unlock()
 	if err != nil {
 		s.mu.Lock()

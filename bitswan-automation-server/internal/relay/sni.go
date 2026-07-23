@@ -16,9 +16,28 @@
 package relay
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 )
+
+// peekClientHello returns the bytes of the initial TLS handshake record from br
+// WITHOUT consuming them. It reads exactly the record framing (5-byte header →
+// record length → the record) so it never blocks waiting for bytes the client
+// won't send until it has seen a ServerHello. This is the whole ballgame for
+// latency: peeking "one more than buffered" instead would stall every
+// connection until the read deadline.
+func peekClientHello(br *bufio.Reader) ([]byte, error) {
+	hdr, err := br.Peek(5)
+	if err != nil {
+		return nil, err
+	}
+	if hdr[0] != 0x16 {
+		return nil, errors.New("relay: first record is not a TLS handshake")
+	}
+	recLen := int(binary.BigEndian.Uint16(hdr[3:5]))
+	return br.Peek(5 + recLen)
+}
 
 // errNotClientHello means the buffered bytes are not (yet) a TLS ClientHello we
 // can read an SNI out of. Callers should read more bytes and retry.
