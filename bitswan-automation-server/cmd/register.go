@@ -203,6 +203,14 @@ func newRegisterCmd() *cobra.Command {
 				fmt.Printf("\n🔎 Verifying %s is live with a valid, un-intercepted certificate...\n", baileyURL)
 				fmt.Println("   (the TLS certificate is issued in the background; this can take a couple of minutes)")
 
+				// The wildcard DNS record was just created by the AOC. Give it a
+				// head start to propagate before our first lookup: if we query too
+				// early we get NXDOMAIN, and the resolver caches that negative
+				// answer (for the zone's negative-cache TTL) — so a premature first
+				// check would make us wait that whole TTL out. A few seconds up
+				// front usually means the very first check already succeeds.
+				time.Sleep(8 * time.Second)
+
 				deadline := time.Now().Add(5 * time.Minute)
 				var lastReason string
 				verified := false
