@@ -210,7 +210,11 @@ func newRegisterCmd() *cobra.Command {
 				// resolves rather than racing propagation and caching an NXDOMAIN.
 
 				start := time.Now()
-				deadline := start.Add(5 * time.Minute)
+				// Generous ceiling: Let's Encrypt issuance is usually ~2 min but
+				// can occasionally run to ~4; the wait is calm progress now, so a
+				// higher ceiling costs nothing and avoids false-failing a
+				// slow-but-successful issuance.
+				deadline := start.Add(8 * time.Minute)
 				lastHeartbeat := time.Now()
 				lastStage := ""
 				var lastReason string
