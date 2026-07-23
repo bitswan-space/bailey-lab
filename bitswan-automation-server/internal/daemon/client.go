@@ -1326,9 +1326,10 @@ func (c *Client) StartRelayTunnel() error {
 
 // EndpointVerifyResult mirrors the daemon's /relay/verify response.
 type EndpointVerifyResult struct {
-	OK     bool   `json:"ok"`
-	Issuer string `json:"issuer"`
-	Error  string `json:"error"`
+	OK      bool   `json:"ok"`
+	Issuer  string `json:"issuer"`
+	Pending bool   `json:"pending"`
+	Error   string `json:"error"`
 }
 
 // VerifyEndpoint asks the daemon to check that this server's public URL is

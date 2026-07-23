@@ -200,37 +200,60 @@ func newRegisterCmd() *cobra.Command {
 			// is issued asynchronously (DNS-01), so poll for a few minutes.
 			if serverInfo.Domain != "" {
 				baileyURL := fmt.Sprintf("https://bailey.%s", serverInfo.Domain)
-				fmt.Printf("\n🔎 Verifying %s is live with a valid, un-intercepted certificate...\n", baileyURL)
-				fmt.Println("   (the TLS certificate is issued in the background; this can take a couple of minutes)")
+				fmt.Printf("\n🔎 Bringing %s online. Its TLS certificate is issued in the background\n", baileyURL)
+				fmt.Println("   (Let's Encrypt, DNS-01) — this usually takes 1–2 minutes. Waiting until it's")
+				fmt.Println("   reachable with a valid, un-intercepted certificate before handing it to you.")
 
-				// The wildcard DNS record was just created by the AOC. Give it a
-				// head start to propagate before our first lookup: if we query too
-				// early we get NXDOMAIN, and the resolver caches that negative
-				// answer (for the zone's negative-cache TTL) — so a premature first
-				// check would make us wait that whole TTL out. A few seconds up
-				// front usually means the very first check already succeeds.
-				time.Sleep(8 * time.Second)
+				// No blind head-start here: the AOC already waited for the DNS
+				// change to reach INSYNC (live on every Route53 nameserver) before
+				// returning from the Bailey-URL report above, so our first lookup
+				// resolves rather than racing propagation and caching an NXDOMAIN.
 
-				deadline := time.Now().Add(5 * time.Minute)
+				start := time.Now()
+				deadline := start.Add(5 * time.Minute)
+				lastHeartbeat := time.Now()
+				lastStage := ""
 				var lastReason string
 				verified := false
+				fmt.Print("   waiting")
 				for time.Now().Before(deadline) {
 					res, err := client.VerifyEndpoint()
-					if err != nil {
-						lastReason = err.Error()
-					} else if res.OK {
-						fmt.Printf("\n✅ %s is live — certificate issued by %q, verified end-to-end (not intercepted).\n", baileyURL, res.Issuer)
+					switch {
+					case err == nil && res.OK:
+						fmt.Printf("\n\n✅ %s is live — certificate issued by %q, verified end-to-end (not intercepted).\n", baileyURL, res.Issuer)
 						verified = true
-						break
-					} else {
+					case err != nil:
+						// Daemon/socket hiccup — transient; keep waiting quietly.
+						lastReason = err.Error()
+					case res.Pending:
+						// Expected while the cert issues / DNS settles. Show the
+						// human-readable stage once when it changes; otherwise just
+						// tick, so it reads as steady progress, not a failure loop.
 						lastReason = res.Error
+						if res.Error != lastStage {
+							fmt.Printf("\n   • %s", res.Error)
+							lastStage = res.Error
+						}
+					default:
+						// A hard problem (e.g. interception). Surface it clearly.
+						lastReason = res.Error
+						fmt.Printf("\n   ⚠️  %s", res.Error)
 					}
-					fmt.Printf("   … not ready yet: %s\n", lastReason)
-					time.Sleep(10 * time.Second)
+					if verified {
+						break
+					}
+					// Steady "still working" tick roughly every 15s, with elapsed
+					// time, so a long wait never looks stalled.
+					if time.Since(lastHeartbeat) >= 15*time.Second {
+						fmt.Printf(" (%ds)", int(time.Since(start).Seconds()))
+						lastHeartbeat = time.Now()
+					}
+					fmt.Print(".")
+					time.Sleep(5 * time.Second)
 				}
 				if !verified {
 					return fmt.Errorf(
-						"registered, but %s did not become verifiably live within 5 minutes (last check: %s).\n"+
+						"registered, but %s did not become verifiably live within 5 minutes (last status: %s).\n"+
 							"The certificate may still be issuing — re-check in a minute; if it persists, the DNS/relay path needs attention",
 						baileyURL, lastReason,
 					)

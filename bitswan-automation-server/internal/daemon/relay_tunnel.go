@@ -96,10 +96,15 @@ func (s *Server) startRelayTunnel() {
 }
 
 // verifyResult is the outcome of verifying this server's own public endpoint.
+// Pending distinguishes an EXPECTED transient (the cert is still being issued,
+// or DNS/tunnel are still settling) from a hard failure (the served cert isn't
+// ours — interception). Callers show the former as calm progress and the latter
+// loudly.
 type verifyResult struct {
-	OK     bool   `json:"ok"`
-	Issuer string `json:"issuer,omitempty"`
-	Error  string `json:"error,omitempty"`
+	OK      bool   `json:"ok"`
+	Issuer  string `json:"issuer,omitempty"`
+	Pending bool   `json:"pending,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // verifyPublicEndpoint fetches this server's OWN public Bailey URL and confirms
@@ -120,7 +125,8 @@ func (s *Server) verifyPublicEndpoint(domain string) verifyResult {
 
 	localLeaf, err := fetchServedLeaf(relayLocalTarget(), publicHost)
 	if err != nil {
-		return verifyResult{Error: fmt.Sprintf("cannot read our local certificate: %v", err)}
+		// Local Traefik still coming up — expected right after bring-up.
+		return verifyResult{Pending: true, Error: fmt.Sprintf("local ingress not ready: %v", err)}
 	}
 
 	// Full verification against the system CA roots — this is the check a
@@ -128,22 +134,26 @@ func (s *Server) verifyPublicEndpoint(domain string) verifyResult {
 	d := &net.Dialer{Timeout: 15 * time.Second}
 	raw, err := d.Dial("tcp", dialAddr)
 	if err != nil {
-		return verifyResult{Error: fmt.Sprintf("not reachable at %s: %v", dialAddr, err)}
+		// DNS still propagating / tunnel still settling — expected transient.
+		return verifyResult{Pending: true, Error: fmt.Sprintf("not reachable yet at %s: %v", dialAddr, err)}
 	}
 	defer raw.Close()
 	conn := tls.Client(raw, &tls.Config{ServerName: publicHost}) // verifies chain + hostname
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := conn.HandshakeContext(ctx); err != nil {
-		return verifyResult{Error: fmt.Sprintf("certificate not publicly trusted yet: %v", err)}
+		// The wildcard cert is still being issued (Traefik is serving its
+		// self-signed default until Let's Encrypt responds) — the common wait.
+		return verifyResult{Pending: true, Error: "waiting for the TLS certificate to be issued"}
 	}
 	defer conn.Close()
 
 	served := conn.ConnectionState().PeerCertificates
 	if len(served) == 0 {
-		return verifyResult{Error: "no certificate served"}
+		return verifyResult{Pending: true, Error: "no certificate served yet"}
 	}
 	if sha256.Sum256(served[0].Raw) != sha256.Sum256(localLeaf) {
+		// HARD failure — a valid-but-not-ours cert means interception. Not pending.
 		return verifyResult{Error: "served certificate is not ours — TLS is being intercepted in transit"}
 	}
 	return verifyResult{OK: true, Issuer: served[0].Issuer.CommonName}
