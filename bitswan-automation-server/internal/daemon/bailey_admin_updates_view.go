@@ -9,10 +9,11 @@ import (
 // bubble: which components on this server are behind the latest on their track.
 // Admin-only (gated by the dispatcher).
 //
-// Workspace updates are appliable from the GUI (the daemon can pull those
-// containers). The server's own binary is NOT — the daemon runs from a
-// read-only bind-mount of the host binary and can't replace itself — so we
-// report availability + the host-side CLI to apply it (`bitswan self-update`).
+// Both workspace updates and the server's own binary are appliable from the
+// GUI: workspace updates pull new containers, and the server self-update writes
+// the new binary to the host and recreates the daemon container (POST
+// /bailey/api/admin/server-update). We also surface the host-side
+// `bitswan self-update` command as an alternative for operators.
 func (s *Server) handleAdminUpdates(w http.ResponseWriter, r *http.Request) {
 	server := detectServerVersion(s.version)
 

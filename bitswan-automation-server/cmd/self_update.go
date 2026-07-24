@@ -18,13 +18,14 @@ import (
 // newSelfUpdateCmd creates the top-level `bitswan self-update` command.
 //
 // The daemon runs from a read-only bind-mount of the host binary and cannot
-// replace its own running process, so updating the server is host-side and
-// CLI-only (the Bailey admin Updates view shows this command rather than a
-// button). The new binary is fetched from the AOC this server is registered
-// with — the same endpoint the install one-liner uses — so the AOC stays the
-// single source of the "official" binary. `--rollback` restores the binary saved
-// before the last self-update; both directions recreate the daemon container so
-// it picks up the swapped binary.
+// truncate its own running file in place; both this command and the browser
+// "Update" button in the Bailey admin Updates view work around that the same
+// way — write the new binary to the host and recreate the daemon container so it
+// re-resolves the bind-mount. The new binary is fetched from the AOC this server
+// is registered with — the same endpoint the install one-liner uses — so the AOC
+// stays the single source of the "official" binary. `--rollback` restores the
+// binary saved before the last self-update; both directions recreate the daemon
+// container so it picks up the swapped binary.
 func newSelfUpdateCmd() *cobra.Command {
 	var rollback bool
 	cmd := &cobra.Command{

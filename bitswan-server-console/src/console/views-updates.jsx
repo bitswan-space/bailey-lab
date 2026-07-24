@@ -1,9 +1,10 @@
 import React from 'react';
-// views-updates.jsx — admin "Updates": what's behind on this server. Workspace
-// updates apply from here (the daemon can pull those containers); the server's
-// own binary is updated host-side (`bitswan self-update`) since the daemon runs
-// from a read-only bind-mount of the host binary and can't replace itself — so
-// that one is shown with the command, not a button. Rollback is CLI-only.
+// views-updates.jsx — admin "Updates": what's behind on this server. Both
+// workspace updates and the server binary apply from here: workspace updates
+// pull new containers, and the server self-update writes the new binary to the
+// host and recreates the daemon container (the console reconnects on the new
+// version). The host-side `bitswan self-update` command is offered as an
+// alternative. Rollback is CLI-only.
 
 const { C: WC, Icon: WIcon, Pill: WPill, Btn: WBtn } = window.WD_SHELL;
 const { Card: WCard, PageHeader: WPageHeader, UpdateBar: WUpdateBar } = window.SC_UI;

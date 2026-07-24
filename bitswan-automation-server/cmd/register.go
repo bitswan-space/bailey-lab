@@ -257,7 +257,7 @@ func newRegisterCmd() *cobra.Command {
 				}
 				if !verified {
 					return fmt.Errorf(
-						"registered, but %s did not become verifiably live within 5 minutes (last status: %s).\n"+
+						"registered, but %s did not become verifiably live within 8 minutes (last status: %s).\n"+
 							"The certificate may still be issuing — re-check in a minute; if it persists, the DNS/relay path needs attention",
 						baileyURL, lastReason,
 					)

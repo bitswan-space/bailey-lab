@@ -207,7 +207,7 @@ func VerifyEndToEndTLS(ctx context.Context, publicHost, dialAddr string, localLe
 	wantFP := sha256.Sum256(localLeaf)
 	if gotFP != wantFP {
 		return fmt.Errorf(
-			"relay self-check FAILED for %s: served leaf %s != our leaf %s — TLS is being terminated in the middle (MITM/interception); refusing to proxy",
+			"relay self-check FAILED for %s: served leaf %s != our leaf %s — TLS is being terminated in the middle (MITM/interception)",
 			publicHost, hex.EncodeToString(gotFP[:]), hex.EncodeToString(wantFP[:]),
 		)
 	}

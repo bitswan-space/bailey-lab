@@ -36,7 +36,7 @@ func SnapshotWorkspaceCompose(workspaceName string) error {
 		}
 		return fmt.Errorf("failed to read docker-compose.yml for snapshot: %w", err)
 	}
-	if err := os.WriteFile(composePath+composeRollbackSuffix, data, 0755); err != nil {
+	if err := os.WriteFile(composePath+composeRollbackSuffix, data, 0644); err != nil {
 		return fmt.Errorf("failed to write rollback snapshot: %w", err)
 	}
 	return nil
@@ -64,12 +64,12 @@ func RollbackWorkspaceDeployment(workspaceName string) error {
 		return fmt.Errorf("failed to read current docker-compose.yml: %w", err)
 	}
 
-	if err := os.WriteFile(composePath, snapshot, 0755); err != nil {
+	if err := os.WriteFile(composePath, snapshot, 0644); err != nil {
 		return fmt.Errorf("failed to restore rollback snapshot: %w", err)
 	}
 	// Keep the just-replaced version as the new rollback target so rollback is
 	// reversible rather than one-way.
-	if err := os.WriteFile(backupPath, current, 0755); err != nil {
+	if err := os.WriteFile(backupPath, current, 0644); err != nil {
 		return fmt.Errorf("failed to update rollback snapshot: %w", err)
 	}
 

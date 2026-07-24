@@ -562,6 +562,7 @@ function WorkspacesView({ ctx }) {
       });
       toast(`${w.name} updated`, 'success');
       await refresh('workspaces');
+      await refresh('updates'); // clear the Updates nav badge for this workspace
     } catch (e) {
       toast(`Couldn't update ${w.name}: ${e.message}`, 'danger');
     } finally { setUpdateBusy(''); setUpdateProg(null); }

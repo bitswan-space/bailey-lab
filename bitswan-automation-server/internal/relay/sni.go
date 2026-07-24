@@ -12,7 +12,10 @@
 // relay only ferries opaque bytes. The Bailey independently verifies this by
 // fetching its own public URL and pinning the served leaf certificate to its
 // own (see client.go) — if anything terminated TLS in the middle, that check
-// fails loudly and the tunnel is torn down.
+// fails loudly (logged and recorded as a SIEM security event). The tunnel is
+// deliberately left up rather than torn down, so a transient cert-rollover
+// mismatch can't self-inflict an outage; a real interception is surfaced, not
+// silently proxied around.
 package relay
 
 import (
