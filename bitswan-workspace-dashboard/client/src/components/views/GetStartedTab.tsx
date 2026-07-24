@@ -114,9 +114,7 @@ export function GetStartedTab({ onTab, onNewBp }: GetStartedTabProps) {
           <p className="mt-4 max-w-prose text-[15px] leading-relaxed text-muted-foreground">
             Bailey is a complete business-process automation platform — staged
             deployment, supply-chain scanning, disaster-recovery rehearsals and
-            device-bound access are already in the chassis. You shouldn’t have to
-            build the car, so you can think about where you’re driving. This is
-            the whole path, and each step is a tab in the bar above.
+            device-bound access are built in.
           </p>
         </header>
 
