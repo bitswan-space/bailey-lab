@@ -2824,17 +2824,21 @@ class AutomationService:
         except Exception as e:  # noqa: BLE001 — recorded state wins; re-apply fixes
             logging.warning("ingress apply deferred: %s", e)
 
-    async def swap_production_dr(
-        self, bp: str, by: str | None = None, role: str | None = None
-    ) -> dict:
+    async def swap_production_dr(self, bp: str, by: str | None = None) -> dict:
         """The DR go-live swap: flip live_db/live_slot in bitswan.yaml so the
         standby (DR) slot becomes Production, then APPLY — the ingress reconcile
         repoints `-production` → the new live slot and `-dr` → the new standby.
         Zero downtime, no data moved — DR and Production trade places. Audited.
 
+        Admin/auditor only (BSY-03 / #182): this repoints LIVE production, so it
+        carries the same authoritative, fail-closed role gate as the
+        staging→production path — enforced from the verified `by`, never a
+        caller-supplied role (the old, unchecked `role` arg is gone).
+
         The pointer flip + audit are authoritative; the ingress apply is
         best-effort (a transient ingress error must not desync the recorded
         state — re-applying bitswan.yaml re-asserts it)."""
+        self._require_staging_gate_role(by, "swap the DR slot into production")
         cur = self.read_backups(bp)
         target_slot = cur["dr_slot"]
         if not target_slot:
@@ -2942,7 +2946,12 @@ class AutomationService:
         4. re-apply compose to remove the retired slot's containers.
 
         The db never moves: the new code talks to the same live db throughout.
+
+        Admin/auditor only (BSY-03 / #182): this repoints LIVE production, so it
+        carries the same authoritative, fail-closed role gate as the
+        staging→production path, enforced from the verified `by`.
         """
+        self._require_staging_gate_role(by, "run a zero-downtime production promote")
         staged = await self.begin_zero_downtime_promote(bp, by)
         target_slot = staged["target_slot"]
         dep_ids = list(self._bp_stage_members(bp, "production").keys())
