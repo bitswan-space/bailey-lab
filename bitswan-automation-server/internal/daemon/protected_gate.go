@@ -33,7 +33,8 @@ const (
 // upstreamForHost returns the URL the gate reverse-proxies an
 // inner-host request to:
 //
-//	bailey--inner.<domain>      → http://<daemon>:8080 (daemon HTTP server)
+//	bailey--inner.<domain>      → http://<daemon>:<baileyGatePort> (the daemon's
+//	                              LOOPBACK-only gate mux; #183 stage-4 split)
 //	anything else               → the upstream recorded for the route in
 //	                              bailey.db (written by addRouteToIngress)
 //	fallback                    → http://<workspace>__traefik:80 when a
@@ -53,7 +54,7 @@ func upstreamForHost(host string) *url.URL {
 	// it isn't an inner host. The SPA shell itself is served in-process by
 	// serveServerConsole and never reaches here.
 	if isServerConsoleOnboardHost(toOuterHost(host)) {
-		u, _ := url.Parse("http://" + upstreamDaemonHost() + ":8080")
+		u, _ := url.Parse(fmt.Sprintf("http://%s:%d", upstreamDaemonHost(), baileyGatePort))
 		return u
 	}
 	if !isInnerHost(host) {
@@ -61,7 +62,7 @@ func upstreamForHost(host string) *url.URL {
 	}
 	outer := toOuterHost(host)
 	if isBaileyHost(outer) {
-		u, _ := url.Parse("http://" + upstreamDaemonHost() + ":8080")
+		u, _ := url.Parse(fmt.Sprintf("http://%s:%d", upstreamDaemonHost(), baileyGatePort))
 		return u
 	}
 	// Workspace hostname: <workspace>-<service>.<domain> (outer form). Route it
@@ -158,14 +159,13 @@ func isTrustedWorkspaceAppHost(endpointHost string) bool {
 // (bypassing oauth2-proxy) cannot inject identity that flows
 // downstream.
 //
-// NOTE: this does not by itself close the stage-4 gap — the
-// daemon's :8080 listener still trusts X-Forwarded-* with no
-// proof the request came through the gate (see the comment at
-// identityFromHeaders and at the docsServer wiring in
-// server.go). The full fix is the stage-4 proxy split that
-// makes :8080 reachable only via the gate. This strip is the
-// conservative, non-breaking mitigation against identity
-// injection into/through upstream apps.
+// NOTE: the stage-4 split (issue #183 / BSY-05) is now done — the
+// identity-trusting handlers are served on a loopback-only listener
+// (baileyGatePort) reachable solely through this gate, so :8080 no
+// longer exposes them to bitswan_network (see the docsServer wiring in
+// server.go and identityFromHeaders). This header strip is the
+// complementary defence-in-depth: it stops identity/token injection
+// into or through the upstream apps the gate proxies to.
 func gateDirector(r *http.Request) {
 	endpointHost := requestEndpointHost(r)
 	email, groups := identityFromHeaders(r)
