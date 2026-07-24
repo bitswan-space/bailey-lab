@@ -39,19 +39,13 @@ interface Step {
 const STEPS: Step[] = [
   {
     n: 1,
-    Icon: GitBranch,
-    title: 'Work in your own copy',
-    body: 'Opening the workspace drops you into your personal copy — a private branch where you can edit, build and preview freely. Nothing you do touches the shared main until you deliberately Sync & Deploy. Switch or spin up copies from the switcher in the bar above.',
-  },
-  {
-    n: 2,
     Icon: Plus,
     title: 'Create a business process',
-    body: 'A business process is the unit you build, ship and operate — Meridian’s accounts-payable lives in one process, invoice-processing. Name it and the workspace scaffolds its automations (a backend and a frontend) so there is something real to describe and deploy.',
+    body: 'A business process is any repeatable work you want to automate — processing incoming invoices, categorizing credit-card payments, scouting for new leads, keeping inventory in sync. Name it and the workspace scaffolds its automations (a backend and a frontend) so there is something real to describe and deploy.',
     cta: 'New business process',
   },
   {
-    n: 3,
+    n: 2,
     Icon: FileText,
     title: 'Describe it',
     body: 'Before code, intent. Write the spec in rich text, then open the flowchart editor and draw the flow node-by-node — no diagram syntax to learn. The description versions with the process, so the documentation lives next to the code instead of drifting in a wiki.',
@@ -59,15 +53,15 @@ const STEPS: Step[] = [
     cta: 'Open Description',
   },
   {
-    n: 4,
+    n: 3,
     Icon: Bot,
     title: 'Build it with the Coding Agent',
-    body: 'Let the agent build the automation straight from your spec — it runs inside Bailey, in your isolated copy, walled off from production data. Each automation gets a live-dev preview that auto-builds as code changes; click its frontend to click through the real thing. Prefer to edit by hand? The Files sub-tab is a full editor over your copy.',
+    body: 'Let the agent build the automation straight from your spec — it runs inside Bailey, in an isolated sandbox walled off from production data. Each automation gets a live-dev preview that auto-builds as code changes; click its frontend to click through the real thing. Prefer to edit by hand? The Files sub-tab is a full editor over your working tree.',
     tab: 'agent',
     cta: 'Open Coding Agent',
   },
   {
-    n: 5,
+    n: 4,
     Icon: CheckSquare,
     title: 'Pin the rules as tests',
     body: 'Turn the spec’s rules into runnable checks — VAT matches the PO, invoices over €5,000 are held, duplicate numbers never post twice — so “does it still do what we promised?” is a button, not a meeting.',
@@ -75,15 +69,15 @@ const STEPS: Step[] = [
     cta: 'Open Requirements',
   },
   {
-    n: 6,
+    n: 5,
     Icon: Rocket,
     title: 'Sync & Deploy to development',
-    body: 'One button does the careful thing: commit your work, rebase onto main, fast-forward and roll out to Development — with the live build log streaming. Around it sit the three things you check first: the Diff, the History, and the CVEs of the exact image this deploy would build.',
+    body: 'One button does the careful thing: commits your work, brings it onto the shared main, and rolls out to Development — with the live build log streaming. Around it sit the three things you check first: the Diff, the History, and the CVEs of the exact image this deploy would build.',
     tab: 'sync-deploy',
     cta: 'Open Sync & Deploy',
   },
   {
-    n: 7,
+    n: 6,
     Icon: Server,
     title: 'Promote through staging → production',
     body: 'A change moves forward one stage at a time, each hop a zero-downtime blue-green cutover — the live slot never blinks and what promotes is the reviewed image, verbatim. Anyone can promote dev → staging; production is gated until an auditor freezes staging and signs off. Deployment history, secrets, containers, backups and the firewall all live here too, per stage.',
@@ -184,6 +178,32 @@ export function GetStartedTab({ onTab, onNewBp }: GetStartedTabProps) {
             out of running the system, rather than being bolted on afterwards.
           </p>
         </aside>
+
+        {/* Copies come LAST, deliberately: they're an advanced capability, not
+            something a newcomer needs before creating their first process. Framed
+            as the safety net that makes everything above fearless. */}
+        <section className="mt-6 rounded-lg border border-border bg-muted/30 p-5">
+          <div className="flex items-center gap-2">
+            <GitBranch className="size-4 text-primary" aria-hidden />
+            <h2 className="text-[15px] font-semibold text-foreground">
+              Develop without fear
+            </h2>
+            <span className="rounded-full border border-border bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              Advanced
+            </span>
+          </div>
+          <p className="mt-2 text-[14px] leading-relaxed text-muted-foreground">
+            Everything you do happens in your own{' '}
+            <strong className="font-medium text-foreground">copy</strong> — a private
+            branch of the workspace. Nothing you touch reaches the shared main, or
+            anyone else’s work, until you deliberately Sync &amp; Deploy. So experiment
+            freely: spin up a copy, try an idea, rebuild it, even break it on purpose to
+            see what happens — and if you don’t like where it went, just discard the copy.
+            Nothing was ever at stake, and there’s nothing to clean up. Make as many as you
+            like from the switcher in the bar above; each one is an isolated sandbox to
+            build in without worrying about breaking a thing.
+          </p>
+        </section>
 
         <div className="mt-8 flex flex-wrap items-center gap-3">
           <Button onClick={onNewBp}>
