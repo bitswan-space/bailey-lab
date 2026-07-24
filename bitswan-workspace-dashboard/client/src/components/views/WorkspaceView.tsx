@@ -1,5 +1,6 @@
 import { GitBranch, GitMerge, Loader2, Plus, Rocket } from 'lucide-react';
 import { AgentFilesTab } from '@/components/views/AgentFilesTab';
+import { GetStartedTab } from '@/components/views/GetStartedTab';
 import { EnvironmentPanel } from '@/components/agents/EnvironmentPanel';
 import { DeploymentsTab } from '@/components/views/DeploymentsTab';
 import { SyncDeployTab } from '@/components/views/SyncDeployTab';
@@ -40,6 +41,12 @@ export function WorkspaceView({
   onNewBp,
 }: WorkspaceViewProps) {
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
+
+  // Orientation page — always reachable, even before any business process
+  // exists (a brand-new operator opens here), so it precedes the empty state.
+  if (tab === 'get-started') {
+    return <GetStartedTab onTab={onTab} onNewBp={onNewBp} />;
+  }
 
   if (!bp) {
     return (
