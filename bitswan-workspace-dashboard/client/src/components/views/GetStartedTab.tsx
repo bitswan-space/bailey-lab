@@ -28,6 +28,9 @@ interface Step {
   /** The top-bar tab this step is performed in, if any — makes the step a
    *  launch point straight into the pipeline. */
   tab?: FlowTab;
+  /** Steps without a tab can still act — 'new-bp' opens the create dialog.
+   *  Kept separate from `cta` so rewording the label can't break the action. */
+  action?: 'new-bp';
   /** Small label shown on the jump affordance (defaults to "Open"). */
   cta?: string;
 }
@@ -42,6 +45,7 @@ const STEPS: Step[] = [
     Icon: Plus,
     title: 'Create a business process',
     body: 'A business process is any repeatable work you want to automate — processing incoming invoices, categorizing credit-card payments, scouting for new leads, keeping inventory in sync.',
+    action: 'new-bp',
     cta: 'New business process',
   },
   {
@@ -95,7 +99,7 @@ const STEPS: Step[] = [
  */
 export function GetStartedTab({ onTab, onNewBp }: GetStartedTabProps) {
   const act = (step: Step) => {
-    if (step.cta === 'New business process') return onNewBp();
+    if (step.action === 'new-bp') return onNewBp();
     if (step.tab) return onTab(step.tab);
   };
 
@@ -120,7 +124,7 @@ export function GetStartedTab({ onTab, onNewBp }: GetStartedTabProps) {
 
         <ol className="mt-8 flex flex-col">
           {STEPS.map((step) => {
-            const actionable = step.cta === 'New business process' || !!step.tab;
+            const actionable = !!step.action || !!step.tab;
             return (
               <li
                 key={step.n}
