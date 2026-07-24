@@ -66,9 +66,10 @@ func TestProtectedProxyOAuthEnv(t *testing.T) {
 		// Concurrent logins must not share one CSRF/state cookie (issue #47)...
 		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST": "true",
 		// ...but per-request CSRF cookies must be count-capped so abandoned
-		// handshakes can't pile up parent-domain cookies into a 431.
+		// handshakes can't pile up parent-domain cookies into a 431. The 1h
+		// expiry (slow-login tolerance) stays — the cap bounds the header.
 		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST_LIMIT": "5",
-		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE":            "15m",
+		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE":            "1h",
 	}
 	for k, v := range want {
 		if env[k] != v {

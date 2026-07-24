@@ -188,12 +188,11 @@ func protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSec
 		// through. This needs oauth2-proxy >= the version pinned in
 		// dockercompose.go (added mid-7.1x; earlier images silently ignore it).
 		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST_LIMIT": "5",
-		// A CSRF cookie only has to live for one /oauth2/start -> Keycloak ->
-		// /oauth2/callback round-trip, so keep it to the upstream default 15m
-		// rather than the previous 1h: shorter lifetime means an orphan clears
-		// on its own sooner, and the PER_REQUEST_LIMIT above already bounds the
-		// header regardless.
-		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE": "15m",
+		// 1h (default 15m) keeps a Keycloak login form that sat open a while
+		// redeemable instead of 403ing at /oauth2/callback (the issue #47
+		// follow-up). The PER_REQUEST_LIMIT above bounds the orphan pile-up
+		// regardless of lifetime, so the longer expiry costs nothing.
+		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE": "1h",
 	}
 }
 
