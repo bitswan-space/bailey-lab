@@ -170,14 +170,26 @@ export function CopySelector({
     return [...copies].sort((a, b) => a.name.localeCompare(b.name));
   }, [copies, selectedBp]);
 
-  const q = query.trim().toLowerCase();
-  const visible = q
-    ? bpCopies.filter((c) => c.name.toLowerCase().includes(q))
-    : bpCopies;
-
   // Resolve each copy's owner identity, then split per-user copies (slug matches
   // a real user) from custom (manually named) copies. People come first.
-  const identities = useCopyIdentities(visible.map((c) => c.name));
+  // Resolved over ALL listed copies (not just the filtered ones) so the search
+  // below can match what the rows actually display.
+  const identities = useCopyIdentities(bpCopies.map((c) => c.name));
+
+  // Match the search against everything a row can show — the resolved name and
+  // email, not just the raw slug ("smith" must find Alice Smith even though her
+  // slug is alice-acme-com).
+  const q = query.trim().toLowerCase();
+  const visible = q
+    ? bpCopies.filter((c) => {
+        const id = identities[c.name];
+        return (
+          c.name.toLowerCase().includes(q) ||
+          !!id?.name.toLowerCase().includes(q) ||
+          !!id?.email.toLowerCase().includes(q)
+        );
+      })
+    : bpCopies;
   const perUserCopies = visible.filter((c) => !!identities[c.name]?.email);
   const customCopies = visible.filter((c) => !identities[c.name]?.email);
 
