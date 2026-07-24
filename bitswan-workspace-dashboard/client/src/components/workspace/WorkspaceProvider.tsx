@@ -15,6 +15,25 @@ import type {
 
 export type StreamStatus = 'connecting' | 'live' | 'error';
 
+/** A deploy task still running somewhere in the workspace (SSE
+ *  `deploy_progress` before its terminal event). */
+export interface ActiveDeploy {
+  taskId: string;
+  /** BP-level tasks name the BP; single-automation tasks leave it null (their
+   *  `deploymentId` still embeds the BP name). */
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
+  bp: string | null;
+  deploymentId: string;
+  /** Member deployment ids of a BP-level task (empty for single-automation
+   *  tasks) — their `-dev`/`-staging` suffix is how views infer the stage. */
+  members: string[];
+  /** Latest progress line ("Building images…", "2/4 deployed…"). */
+  message: string;
+  current: number;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
+  total: number | null;
+}
+
 interface WorkspaceContextValue {
   /** Latest automations snapshot from the upstream SSE feed. */
   automations: DeployedAutomation[];
@@ -32,6 +51,17 @@ interface WorkspaceContextValue {
    *  `supply_chain` event). The Checks / Supply chain panel watches it to
    *  refresh itself the moment results exist — no manual "check back". */
   supplyChainTick: number;
+  /** Last deploy task that reached a terminal state (SSE `deploy_progress`
+   *  with status completed/failed), whoever started it — another tab, another
+   *  user, the API. Views showing deploy-derived data (stage history) watch
+   *  `seq` and refetch when their BP matches; `bp` is null for
+   *  single-automation deploys, whose `deploymentId` still names the BP. */
+  // eslint-disable-next-line no-restricted-syntax -- null until a deploy finishes
+  deployDone: { seq: number; bp: string | null; deploymentId: string } | null;
+  /** Deploys currently in flight (upserted per `deploy_progress` event,
+   *  dropped on the terminal one) — lets views render a live "deploying"
+   *  placeholder for work started outside them. */
+  activeDeploys: ActiveDeploy[];
   /** Live status of the SSE subscription. */
   status: StreamStatus;
 }
@@ -81,6 +111,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [copies, setCopies] = useState<Copy[] | null>(null);
   const [tasks, setTasks] = useState<GitTask[] | null>(null);
   const [supplyChainTick, setSupplyChainTick] = useState(0);
+  const [deployDone, setDeployDone] = useState<
+    { seq: number; bp: string | null; deploymentId: string } | null
+  >(null);
+  const [activeDeploys, setActiveDeploys] = useState<ActiveDeploy[]>([]);
   const [status, setStatus] = useState<StreamStatus>('connecting');
 
   // Initial git-task-queue snapshot on mount. The server replays the latest
@@ -93,9 +127,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       .tasks()
       .then((res) => {
         if (cancelled) return;
-        // Only seed if the SSE feed hasn't already delivered a snapshot — the
-        // live feed is authoritative.
-        setTasks((cur) => (cur === null ? res.tasks : cur));
+        // MERGE with whatever the SSE feed delivered first, live entries
+        // winning on id collisions. Discarding the REST result whenever any
+        // snapshot beat it to the punch loses the queue on page reload: the
+        // replayed snapshot can be stale/empty while this fetch has the real
+        // queue.
+        setTasks((cur) => {
+          if (!cur || cur.length === 0) return res.tasks;
+          const byId = new Map(res.tasks.map((t) => [t.task_id, t]));
+          for (const t of cur) byId.set(t.task_id, t);
+          return Array.from(byId.values());
+        });
       })
       .catch(() => {
         // gitops down / not configured — leave null so the panel stays in its
@@ -107,7 +149,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const es = new EventSource('/api/events', { withCredentials: true });
+    // The EventSource is created inside `connect()` (bottom of this effect) so
+    // it can be RECREATED: the browser retries dropped connections itself, but
+    // an HTTP-error response — e.g. the gate answering 502 while the dashboard
+    // server restarts — closes the stream permanently, and without manual
+    // reconnection the page silently stops receiving live updates until a
+    // full reload.
+    let es: EventSource | null = null;
+    let retryTimer: number | null = null;
+    let disposed = false;
+    let attempt = 0;
+    let everOpened = false;
 
     const handleAutomationsPayload = (raw: string) => {
       try {
@@ -183,41 +235,129 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
     };
 
-    es.addEventListener('task_queue_snapshot', (ev) => {
+    const connect = () => {
+      if (disposed) return;
+      const src = new EventSource('/api/events', { withCredentials: true });
+      es = src;
+
+      src.addEventListener('task_queue_snapshot', (ev) => {
       handleTaskSnapshot((ev as MessageEvent).data);
       setStatus('live');
     });
-    es.addEventListener('task_queue', (ev) => {
+    src.addEventListener('task_queue', (ev) => {
       handleTaskUpsert((ev as MessageEvent).data);
       setStatus('live');
     });
-    es.addEventListener('automations', (ev) => {
+    src.addEventListener('automations', (ev) => {
       handleAutomationsPayload((ev as MessageEvent).data);
       setStatus('live');
     });
-    es.addEventListener('processes', (ev) => {
+    src.addEventListener('processes', (ev) => {
       handleProcessesPayload((ev as MessageEvent).data);
       setStatus('live');
     });
-    es.addEventListener('copies', (ev) => {
+    src.addEventListener('copies', (ev) => {
       handleCopiesPayload((ev as MessageEvent).data);
       setStatus('live');
     });
-    es.addEventListener('supply_chain', () => {
+    src.addEventListener('deploy_progress', (ev) => {
+      // Non-terminal events keep `activeDeploys` current so views can render
+      // a live "deploying" placeholder; the terminal one (completed/failed)
+      // means the deploy repo / bitswan.yaml changed, so deploy-derived views
+      // (stage history) refetch via `deployDone`. The initiator's own toast
+      // still runs off the deploy-status poll (see deployBp.ts on why
+      // polling, not this event, drives it).
+      try {
+        const t = JSON.parse((ev as MessageEvent).data);
+        if (!t || typeof t !== 'object' || typeof t.task_id !== 'string') return;
+        if (t.status === 'completed' || t.status === 'failed') {
+          setActiveDeploys((cur) => cur.filter((d) => d.taskId !== t.task_id));
+          setDeployDone((cur) => ({
+            seq: (cur?.seq ?? 0) + 1,
+            bp: typeof t.bp === 'string' ? t.bp : null,
+            deploymentId: typeof t.deployment_id === 'string' ? t.deployment_id : '',
+          }));
+        } else {
+          const next: ActiveDeploy = {
+            taskId: t.task_id,
+            bp: typeof t.bp === 'string' ? t.bp : null,
+            deploymentId: typeof t.deployment_id === 'string' ? t.deployment_id : '',
+            members: Array.isArray(t.members)
+              ? t.members.filter((m: unknown): m is string => typeof m === 'string')
+              : [],
+            message: typeof t.message === 'string' ? t.message : '',
+            current: typeof t.current === 'number' ? t.current : 0,
+            total: typeof t.total === 'number' ? t.total : null,
+          };
+          setActiveDeploys((cur) => {
+            const idx = cur.findIndex((d) => d.taskId === next.taskId);
+            if (idx === -1) return [...cur, next];
+            const copy = cur.slice();
+            copy[idx] = next;
+            return copy;
+          });
+        }
+      } catch {
+        // ignore non-JSON event data
+      }
+      setStatus('live');
+    });
+    src.addEventListener('supply_chain', () => {
       // A scan finished — bump the counter so any open Checks / Supply chain
       // panel refetches and shows the result without a manual refresh.
       setSupplyChainTick((n) => n + 1);
       setStatus('live');
     });
-    es.addEventListener('open', () => setStatus('live'));
-    es.addEventListener('error', () => setStatus('error'));
+      src.addEventListener('open', () => {
+        attempt = 0;
+        if (everOpened) {
+          // A true RE-connect: terminal deploy events may have been missed
+          // while the stream was down. The replay that follows this `open`
+          // re-delivers the genuinely-active deploys, so drop the stale set;
+          // bump `deployDone` with no target so deploy-derived views refetch.
+          setActiveDeploys([]);
+          setDeployDone((cur) => ({
+            seq: (cur?.seq ?? 0) + 1,
+            bp: null,
+            deploymentId: '',
+          }));
+        }
+        everOpened = true;
+        setStatus('live');
+      });
+      src.addEventListener('error', () => {
+        setStatus('error');
+        // CONNECTING = the browser is retrying by itself; leave it alone.
+        // CLOSED = permanent failure (non-200 response, e.g. a 502 during a
+        // dashboard-server restart) — recreate the stream with backoff.
+        if (src.readyState === EventSource.CLOSED) {
+          attempt += 1;
+          const delay = Math.min(15_000, 1_000 * 2 ** Math.min(attempt, 4));
+          retryTimer = window.setTimeout(connect, delay);
+        }
+      });
+    };
+    connect();
 
-    return () => es.close();
+    return () => {
+      disposed = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      es?.close();
+    };
   }, []);
 
   return (
     <WorkspaceContext.Provider
-      value={{ automations, processes, copies, tasks, supplyChainTick, status }}
+      value={{
+        automations,
+        processes,
+        copies,
+        tasks,
+        supplyChainTick,
+        deployDone,
+        activeDeploys,
+        status,
+      }}
     >
       {children}
     </WorkspaceContext.Provider>
@@ -288,4 +428,31 @@ export function useSupplyChainTick(): number {
   if (!v)
     throw new Error('useSupplyChainTick must be used inside <WorkspaceProvider>');
   return v.supplyChainTick;
+}
+
+/**
+ * The last deploy task that finished (completed OR failed), regardless of who
+ * started it. Views showing deploy-derived data watch `seq` and refetch when
+ * the BP concerns them — this is what keeps the Deployments tab live for
+ * deploys initiated outside it (Sync & Deploy, another tab, the API). Returns
+ * `null` until a deploy finishes during this session.
+ */
+// eslint-disable-next-line no-restricted-syntax -- null until a deploy finishes
+export function useDeployDone(): { seq: number; bp: string | null; deploymentId: string } | null {
+  const v = useContext(WorkspaceContext);
+  if (!v) throw new Error('useDeployDone must be used inside <WorkspaceProvider>');
+  return v.deployDone;
+}
+
+/**
+ * Deploys currently in flight anywhere in the workspace — one entry per live
+ * `deploy_progress` task, dropped when its terminal event arrives. Views use
+ * it to render a live "deploying" placeholder for work started outside them.
+ * Best-effort: a dropped SSE stream at the wrong moment can lose an entry (or
+ * its removal) until the next event or a page reload.
+ */
+export function useActiveDeploys(): ActiveDeploy[] {
+  const v = useContext(WorkspaceContext);
+  if (!v) throw new Error('useActiveDeploys must be used inside <WorkspaceProvider>');
+  return v.activeDeploys;
 }
