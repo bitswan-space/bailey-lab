@@ -61,8 +61,8 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 # and ad-hoc scripts, which require('playwright') via NODE_PATH (CommonJS
 # only — the ESM loader ignores NODE_PATH) and must launch with
 # { channel: 'chromium' } to target chrome-for-testing. Chromium needs
-# --no-sandbox here (no user namespaces); wired into the seeded .mcp.json.
-# Browsers go to a world-readable
+# --no-sandbox here (no user namespaces); wired into the seeded .mcp.json and
+# documented in the system CLAUDE.md below. Browsers go to a world-readable
 # shared path: this build step runs as root, but sessions run as the agent
 # user. These ENVs must also reach SSH sessions — entrypoint-agent.sh exports
 # them in /etc/profile.d.
@@ -93,11 +93,14 @@ RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
 RUN mkdir -p /workspace/copies /var/log/agent-sessions \
     && chown -R agent:agent /workspace /var/log/agent-sessions
 
-# Default per-copy .mcp.json — entrypoint-agent.sh seeds it into copies that
-# don't have one, as a user-ownable bootstrap they may extend with their own
-# MCP servers. (Claude Code's managed-mcp.json is deliberately not used: it
-# takes exclusive control and would block user-added servers.) A bind mount
-# over the /etc/bitswan file — the pre-existing operator hook — still wins.
+# Platform docs go to Claude Code's managed system memory: loaded in every
+# session for every user and project, updates with the image, and leaves the
+# per-copy CLAUDE.md entirely to the user. (managed-mcp.json is deliberately
+# NOT used for the MCP config — it takes exclusive control and would block
+# users from adding their own MCP servers; .mcp.json is instead seeded
+# per copy by entrypoint-agent.sh as a user-ownable bootstrap. A bind mount
+# over the /etc/bitswan file — the pre-existing operator hook — still wins.)
+COPY CLAUDE.default.md /etc/claude-code/CLAUDE.md
 COPY mcp.default.json /etc/bitswan/mcp.json
 
 # Copy session wrapper script

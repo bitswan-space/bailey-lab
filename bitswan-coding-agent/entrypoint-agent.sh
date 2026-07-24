@@ -33,21 +33,13 @@ if [ -n "$BITSWAN_GIT_REMOTE" ] && [ -n "$BITSWAN_GITOPS_AGENT_SECRET" ]; then
     chmod 600 /home/agent/.git-credentials
 fi
 
-# Copy CLAUDE.md to copies that don't have it yet
-if [ -f /etc/bitswan/CLAUDE.md ]; then
-    for wt in /workspace/copies/*/; do
-        if [ -d "$wt" ] && [ ! -f "$wt/CLAUDE.md" ]; then
-            cp /etc/bitswan/CLAUDE.md "$wt/CLAUDE.md"
-            chown agent:agent "$wt/CLAUDE.md"
-        fi
-    done
-fi
-
 # Seed the Playwright browser MCP config (.mcp.json, #210) into each copy's
 # app root — the directory agent sessions start in; Claude Code only
-# auto-loads it from there. seed-copy-mcp handles one copy; cover the copies
-# present at boot here. Copies created while the container runs are seeded
-# by agent-session-wrapper at session start.
+# auto-loads it from there. (Platform docs are NOT seeded — they ship as
+# managed system memory at /etc/claude-code/CLAUDE.md, so a copy's CLAUDE.md
+# belongs entirely to the user.) seed-copy-mcp handles one copy; cover the
+# copies present at boot here. Copies created while the container runs are
+# seeded by agent-session-wrapper at session start.
 for copy in /workspace/copies/*/; do
     /usr/local/bin/seed-copy-mcp "$copy"
 done
