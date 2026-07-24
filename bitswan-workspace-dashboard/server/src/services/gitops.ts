@@ -50,6 +50,11 @@ export class GitopsClient {
   // snapshot gitops itself delivers on `/events/stream` connect — without
   // tying the dashboard's response to gitops's roundtrip.
   private readonly lastByEvent = new Map<string, unknown>();
+  // Deploy tasks still in flight (latest `deploy_progress` payload per task,
+  // dropped on the terminal event). Replayed to fresh connections so a page
+  // reload mid-deploy still shows the live deploy instead of nothing until
+  // the next progress event happens to arrive.
+  private readonly activeDeployTasks = new Map<string, unknown>();
   private readonly listeners = new Set<Listener>();
 
   constructor(baseUrl: string, secret: string) {
@@ -75,7 +80,14 @@ export class GitopsClient {
    * to replay the initial snapshot when a browser connects mid-stream.
    */
   getCachedEvents(): Iterable<[string, unknown]> {
-    return this.lastByEvent.entries();
+    return [
+      ...this.lastByEvent.entries(),
+      // One frame per in-flight deploy — a reload mid-deploy re-learns what's
+      // running without waiting for the next progress event.
+      ...[...this.activeDeployTasks.values()].map(
+        (d): [string, unknown] => ['deploy_progress', d],
+      ),
+    ];
   }
 
   /**
@@ -1801,6 +1813,11 @@ export class GitopsClient {
     if (!r.ok || !r.body) {
       throw new Error(`gitops /events/stream returned ${r.status}`);
     }
+    // Fresh upstream stream: drop the in-flight-deploy cache. A terminal
+    // event missed during the reconnect gap would otherwise leave a ghost
+    // "deploying" entry replayed to every future connection — and gitops
+    // replays its genuinely-active deploy tasks on connect, repopulating us.
+    this.activeDeployTasks.clear();
     const reader = r.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
@@ -1822,6 +1839,37 @@ export class GitopsClient {
   private handleEvent(ev: UpstreamEvent): void {
     if (REPLAYABLE_EVENTS.has(ev.event)) {
       this.lastByEvent.set(ev.event, ev.data);
+    } else if (ev.event === 'deploy_progress') {
+      // Track in-flight deploys for replay-on-connect; terminal events end
+      // the task, so its entry is dropped rather than replayed.
+      const t = ev.data as { task_id?: unknown; status?: unknown };
+      if (t && typeof t === 'object' && typeof t.task_id === 'string') {
+        if (t.status === 'completed' || t.status === 'failed') {
+          this.activeDeployTasks.delete(t.task_id);
+        } else {
+          this.activeDeployTasks.set(t.task_id, ev.data);
+        }
+      }
+    } else if (ev.event === 'task_queue') {
+      // Fold per-task upserts into the cached snapshot. gitops sends
+      // `task_queue_snapshot` only once per upstream stream open; without this,
+      // a browser connecting later replays that stale (often empty) snapshot —
+      // and its REST /tasks seed defers to whatever SSE delivered first, so
+      // the whole queue "disappears" on a page reload.
+      const t = ev.data as { task_id?: unknown };
+      if (t && typeof t === 'object' && typeof t.task_id === 'string') {
+        const cur = this.lastByEvent.get('task_queue_snapshot');
+        const list: unknown[] = Array.isArray(cur) ? cur.slice() : [];
+        const idx = list.findIndex(
+          (x) =>
+            !!x &&
+            typeof x === 'object' &&
+            (x as { task_id?: unknown }).task_id === t.task_id,
+        );
+        if (idx === -1) list.unshift(ev.data);
+        else list[idx] = ev.data;
+        this.lastByEvent.set('task_queue_snapshot', list);
+      }
     }
     for (const fn of this.listeners) {
       try {

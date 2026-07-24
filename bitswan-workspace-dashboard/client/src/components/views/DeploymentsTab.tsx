@@ -49,7 +49,12 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { toast } from '@/lib/notify';
-import { useAutomations } from '@/components/workspace/WorkspaceProvider';
+import {
+  useAutomations,
+  useActiveDeploys,
+  useDeployDone,
+  type ActiveDeploy,
+} from '@/components/workspace/WorkspaceProvider';
 import { DiffView } from '@/components/diff/DiffView';
 import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
@@ -110,6 +115,18 @@ const STAGE_LABEL: Record<string, string> = Object.fromEntries(
 // DR mirrors Production — it shows Production's deployment data and shares its
 // secrets. Map a stage id to the id whose data it displays.
 const stageDataId = (id: StageId): StageId => (id === 'dr' ? 'production' : id);
+
+/** The stage a deployment id targets. Ids end `-dev` / `-staging`; production
+ *  ids are either `-production` or bare `<automation>-<bp>` (gitops's target-id
+ *  scheme). live-dev instances never appear on this tab, so they map to null —
+ *  checked first because `-live-dev` also ends with `-dev`. */
+// eslint-disable-next-line no-restricted-syntax -- null = not a pipeline stage
+function stageOfDeploymentId(id: string): StageId | null {
+  if (id.endsWith('-live-dev')) return null;
+  if (id.endsWith('-dev')) return 'dev';
+  if (id.endsWith('-staging')) return 'staging';
+  return 'production';
+}
 
 /** The content-hash tag of a baked image (`repo/name:sha<tree-hash>` → the
  *  `sha…` part), which is deterministic from the source content. */
@@ -1724,6 +1741,30 @@ function InspectModal({
 }
 
 // ── Deployment card ─────────────────────────────────────────────────────────
+/** Placeholder history row for a deploy still in flight (from the SSE
+ *  `deploy_progress` feed) — dashed border + live step line, replaced by the
+ *  real entry when the terminal event triggers the history refetch. */
+function DeployingCard({ d, stageLabel }: { d: ActiveDeploy; stageLabel: string }) {
+  return (
+    <div className="flex flex-col gap-2.5 rounded-[10px] border border-dashed border-primary/50 bg-background px-4 py-3.5">
+      <div className="flex flex-wrap items-center gap-2.5">
+        <Loader2 className="size-3.5 animate-spin text-primary" aria-hidden />
+        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-semibold text-primary">
+          Deploying to {stageLabel}…
+        </span>
+        {d.total != null && d.total > 0 && (
+          <span className="text-[11px] text-muted-foreground">
+            {Math.min(d.current, d.total)}/{d.total} container{d.total === 1 ? '' : 's'}
+          </span>
+        )}
+      </div>
+      {d.message && (
+        <div className="text-[12px] text-muted-foreground">{d.message}</div>
+      )}
+    </div>
+  );
+}
+
 function DeploymentCard({
   entry,
   isCurrent,
@@ -1914,9 +1955,16 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   const [gate, setGate] = useState<StagingGate | null>(null);
   const [freezeBusy, setFreezeBusy] = useState(false);
 
+  // Blank to "Loading…" only when switching BPs. A refresh() (deploy
+  // finished, rollback, promote…) keeps the current cards on screen and swaps
+  // the new snapshot in when it lands — stale-while-revalidate, no spinner
+  // flash over data we already have.
+  useEffect(() => {
+    setLoaded(false);
+    setByStage({});
+  }, [bp.name]);
   useEffect(() => {
     let alive = true;
-    setLoaded(false);
     Promise.all(
       DATA_STAGES.map((s) =>
         api
@@ -1970,6 +2018,40 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   }, [bp.name, reloadKey]);
 
   const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  // A deploy finished somewhere — this tab's own actions call refresh()
+  // themselves, but a deploy started OUTSIDE it (Sync & Deploy on a copy,
+  // another browser tab, the gitops API) used to leave the stage cards stale
+  // until a manual page reload. `deploy_progress` terminal events flow over
+  // the shared SSE feed; refetch when the finished deploy concerns this BP.
+  // BP-level tasks carry `bp`; single-automation tasks only name it inside
+  // `deployment_id` (`<automation>-<bp>-<stage>`).
+  const deployDone = useDeployDone();
+  useEffect(() => {
+    if (!deployDone) return;
+    // No target at all = the SSE stream just reconnected and terminal events
+    // may have been missed entirely — refetch regardless of BP.
+    const missedWindow = !deployDone.bp && !deployDone.deploymentId;
+    if (missedWindow || deployDone.bp === bp.name || deployDone.deploymentId.includes(bp.name))
+      refresh();
+    // React to the event (seq) only — depending on bp/refresh identity would
+    // replay a stale event on unrelated re-renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deployDone?.seq]);
+
+  // Deploys in flight for THIS BP on the viewed stage (DR mirrors production)
+  // — rendered as a placeholder row at the top of the history list. BP-level
+  // tasks carry members; single-automation tasks only their deployment id.
+  const activeDeploys = useActiveDeploys();
+  const inFlight = useMemo(() => {
+    const stage = stageDataId(activeStage);
+    return activeDeploys.filter((d) => {
+      if (d.bp !== bp.name && !d.deploymentId.includes(bp.name)) return false;
+      const ids = d.members.length ? d.members : [d.deploymentId];
+      return ids.some((id) => stageOfDeploymentId(id) === stage);
+    });
+  }, [activeDeploys, bp.name, activeStage]);
+
   const isDr = activeStage === 'dr';
 
   // The "Restore" action (stage row, between Production and DR) goes live on the
@@ -2687,7 +2769,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             ) : visibleSection === 'recovery' ? (
               <DisasterRecoveryPanel bp={bp.name} frontends={frontends} />
             ) : visibleSection === 'history' ? (
-              history.length === 0 ? (
+              history.length === 0 && inFlight.length === 0 ? (
                 <div className="px-3 py-10 text-center text-sm text-muted-foreground">
                   <History className="mx-auto size-7 text-muted-foreground" aria-hidden />
                   <div className="mt-2 font-semibold text-foreground">Not deployed yet</div>
@@ -2699,6 +2781,13 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 </div>
               ) : (
                 <div className="flex flex-col gap-3">
+                  {inFlight.map((d) => (
+                    <DeployingCard
+                      key={d.taskId}
+                      d={d}
+                      stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
+                    />
+                  ))}
                   {history.map((e, i) => (
                     <DeploymentCard
                       key={`${e.commit}-${i}`}
