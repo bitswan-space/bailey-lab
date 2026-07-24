@@ -80,7 +80,7 @@ const STEPS: Step[] = [
     n: 6,
     Icon: Server,
     title: 'Promote through staging → production',
-    body: 'A change moves forward one stage at a time, each hop a zero-downtime blue-green cutover — the live slot never blinks and what promotes is the reviewed image, verbatim. Anyone can promote dev → staging; production is gated until an auditor freezes staging and signs off. Deployment history, secrets, containers, backups and the firewall all live here too, per stage.',
+    body: 'Promotion moves a deployment forward one stage at a time — Development → Staging → Production. Each promotion is a blue-green cutover: the new version starts before traffic switches to it, and the image that was already built is re-deployed rather than rebuilt. Anyone can promote from Development to Staging; promoting to Production first requires an auditor to freeze staging and sign off. The tab also holds each stage’s deployment history, secrets, containers, backups and firewall.',
     tab: 'deployments',
     cta: 'Open Deployments',
   },
