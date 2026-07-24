@@ -225,7 +225,11 @@ func (s *Server) handlePassthroughConn(browser net.Conn) {
 	// The deadline only guards against a client that connects but never sends a
 	// hello; a well-behaved client's hello is already in the first packet, so
 	// this returns immediately (no per-connection stall).
-	br := bufio.NewReader(browser)
+	// Size the buffer to hold a whole TLS record (~16 KB max): peekClientHello
+	// peeks the entire ClientHello without consuming it, and a default 4 KB
+	// bufio.Reader would fail with ErrBufferFull on the larger hellos modern
+	// browsers now send (e.g. post-quantum key shares).
+	br := bufio.NewReaderSize(browser, 16*1024+5)
 	_ = browser.SetReadDeadline(time.Now().Add(10 * time.Second))
 	hello, err := peekClientHello(br)
 	if err != nil {
@@ -276,6 +280,18 @@ func (s *Server) handlePassthroughConn(browser net.Conn) {
 		s.mu.Unlock()
 		log.Printf("relay: Bailey %q did not dial back for %s", t.subdomain, connID)
 		browser.Close()
+		// A handleData that claimed this connID just before the delete above
+		// still lands its connection in the buffered handoff with no reader.
+		// Drain and close it (at most one can arrive) so it isn't leaked.
+		go func() {
+			select {
+			case late := <-handoff:
+				if late != nil {
+					late.Close()
+				}
+			case <-time.After(10 * time.Second):
+			}
+		}()
 		return
 	}
 
