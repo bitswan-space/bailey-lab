@@ -13,6 +13,86 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// composeRollbackSuffix names the single previous-version snapshot kept beside a
+// workspace's docker-compose.yml. `bitswan workspace update` saves the current
+// compose here before regenerating; `bitswan rollback` restores it.
+const composeRollbackSuffix = ".rollback"
+
+func workspaceDeploymentDir(workspaceName string) string {
+	return filepath.Join(os.Getenv("HOME"), ".config", "bitswan", "workspaces", workspaceName, "deployment")
+}
+
+// SnapshotWorkspaceCompose saves the workspace's current docker-compose.yml as a
+// rollback point. Called right before a user-initiated `workspace update`
+// regenerates the compose, so a rollback can return to the exact pre-update
+// image pins. A missing compose (never deployed) is a no-op — there is nothing
+// to roll back to yet.
+func SnapshotWorkspaceCompose(workspaceName string) error {
+	composePath := filepath.Join(workspaceDeploymentDir(workspaceName), "docker-compose.yml")
+	data, err := os.ReadFile(composePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read docker-compose.yml for snapshot: %w", err)
+	}
+	if err := os.WriteFile(composePath+composeRollbackSuffix, data, 0644); err != nil {
+		return fmt.Errorf("failed to write rollback snapshot: %w", err)
+	}
+	return nil
+}
+
+// RollbackWorkspaceDeployment restores the previous docker-compose.yml snapshot
+// and re-deploys. The swap is reversible: the current (post-update) compose
+// becomes the new rollback target, so a second `bitswan rollback` re-applies the
+// update. This is deliberately CLI-only — a wrong rollback should require host
+// access, not a browser click.
+func RollbackWorkspaceDeployment(workspaceName string) error {
+	deployDir := workspaceDeploymentDir(workspaceName)
+	composePath := filepath.Join(deployDir, "docker-compose.yml")
+	backupPath := composePath + composeRollbackSuffix
+
+	snapshot, err := os.ReadFile(backupPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no rollback snapshot for %q — nothing to roll back to (one is saved automatically on the next `bitswan workspace update`)", workspaceName)
+		}
+		return fmt.Errorf("failed to read rollback snapshot: %w", err)
+	}
+	current, err := os.ReadFile(composePath)
+	if err != nil {
+		return fmt.Errorf("failed to read current docker-compose.yml: %w", err)
+	}
+
+	if err := os.WriteFile(composePath, snapshot, 0644); err != nil {
+		return fmt.Errorf("failed to restore rollback snapshot: %w", err)
+	}
+	// Keep the just-replaced version as the new rollback target so rollback is
+	// reversible rather than one-way.
+	if err := os.WriteFile(backupPath, current, 0644); err != nil {
+		return fmt.Errorf("failed to update rollback snapshot: %w", err)
+	}
+
+	projectName := workspaceName + "-site"
+	fmt.Println("Rolling back to the previous deployment...")
+	downCmd := exec.Command("docker", "compose", "down")
+	downCmd.Dir = deployDir
+	downCmd.Stdout = os.Stdout
+	downCmd.Stderr = os.Stderr
+	if err := downCmd.Run(); err != nil {
+		return fmt.Errorf("failed to stop containers: %w", err)
+	}
+	upCmd := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--remove-orphans")
+	upCmd.Dir = deployDir
+	upCmd.Stdout = os.Stdout
+	upCmd.Stderr = os.Stderr
+	if err := upCmd.Run(); err != nil {
+		return fmt.Errorf("failed to start containers: %w", err)
+	}
+	fmt.Println("Rollback complete.")
+	return nil
+}
+
 // UpdateWorkspaceDeployment updates the workspace deployment with new AOC configuration
 func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, customInfraDriverImage string, customEgressGatewayImage string, staging bool, dev bool, trustCA bool) error {
 	// Use HOME for file operations (works inside container and outside)

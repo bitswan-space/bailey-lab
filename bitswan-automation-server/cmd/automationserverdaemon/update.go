@@ -16,6 +16,15 @@ func newUpdateCmd() *cobra.Command {
 }
 
 func runUpdateCmd(cmd *cobra.Command, args []string) error {
+	return Recreate()
+}
+
+// Recreate stops and removes the daemon container (if present) and starts a fresh
+// one bound to the CURRENT host binary. `bitswan self-update` calls this after
+// swapping the binary on disk so the daemon runs the new version (the daemon
+// bind-mounts the host binary read-only and cannot replace its own running
+// process).
+func Recreate() error {
 	// Check if container exists
 	checkCmd := exec.Command("docker", "ps", "-a", "--filter", "name=bitswan-automation-server-daemon", "--format", "{{.Names}}")
 	output, err := checkCmd.Output()
@@ -38,4 +47,3 @@ func runUpdateCmd(cmd *cobra.Command, args []string) error {
 
 	return startDaemonContainer("Starting updated automation server daemon container...", "Automation server daemon updated and started successfully")
 }
-

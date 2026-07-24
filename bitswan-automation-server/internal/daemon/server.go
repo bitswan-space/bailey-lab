@@ -38,6 +38,16 @@ type Server struct {
 	// during workspace init. The daemon blocks until a value is sent on this channel.
 	initConfirmMu sync.Mutex
 	initConfirmCh chan struct{}
+
+	// relayMu guards relayStarted so the reverse-proxy tunnel is launched at
+	// most once, whether triggered at daemon startup or by register after the
+	// AOC provisions the proxy path.
+	relayMu      sync.Mutex
+	relayStarted bool
+
+	// serverUpdateMu serializes browser-driven server self-updates so two admins
+	// can't race on the download/swap at once (TryLock → reject the second).
+	serverUpdateMu sync.Mutex
 }
 
 // LoadToken reads the token from the config file
@@ -160,6 +170,14 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// obtained token here so the daemon (not the host) owns ~/.config/bitswan.
 	mux.HandleFunc("/aoc", s.authMiddleware(s.handleAOC))
 	mux.HandleFunc("/aoc/", s.authMiddleware(s.handleAOC))
+
+	// Start the reverse-proxy tunnel on demand (register calls this once the
+	// AOC has provisioned the proxy path).
+	mux.HandleFunc("/relay/start", s.authMiddleware(s.handleRelayStart))
+
+	// Verify the public endpoint is reachable, publicly trusted, and serving
+	// our own certificate (register polls this before printing the URL).
+	mux.HandleFunc("/relay/verify", s.authMiddleware(s.handleRelayVerify))
 
 	// Service endpoints (authenticated)
 	mux.HandleFunc("/service", s.authMiddleware(s.handleService))
@@ -408,6 +426,17 @@ func (s *Server) Run() error {
 	// builds pull common packages from a warm, persistent, cross-workspace cache
 	// instead of the internet (see build_proxy.go). No-op if externally managed.
 	startBuildProxies()
+
+	// If this server is on the AOC reverse-proxy path (NAT'd or --force-proxy),
+	// keep an outbound tunnel to the relay so the public URL reaches us. No-op
+	// otherwise.
+	s.startRelayTunnel()
+
+	// Paranoid end-to-end-TLS self-check for EVERY server with a public domain
+	// (proxied or directly-addressed): confirm the certificate the world is
+	// served is our own, so any TLS interception in transit is caught and
+	// surfaced loudly. No-op on unregistered / domain-less servers.
+	s.startEndpointTLSSelfCheck()
 
 	// Handle shutdown signals
 	sigChan := make(chan os.Signal, 1)

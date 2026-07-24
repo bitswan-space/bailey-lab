@@ -209,6 +209,20 @@ export const Api = {
   restoreWorkspace: (name) => postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/restore`),
   updateWorkspace: (name, onEvent) =>
     postNDJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/update`, {}, onEvent),
+  // Version BUMP: regenerate the workspace's compose with the latest images on
+  // the server's track and recreate its containers. Owner-only; clears the
+  // "update available" badge. Distinct from updateWorkspace (digest re-pull).
+  upgradeWorkspace: (name, onEvent) =>
+    postNDJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/upgrade`, {}, onEvent),
+  // Admin: what's behind on this server (server binary + stale workspaces) +
+  // a count for the Updates nav bubble.
+  adminUpdates: () => getJSON('/bailey/api/admin/updates'),
+  // Admin: update the automation-server binary itself from the browser. The
+  // daemon downloads the official binary from the AOC, swaps it on the host, and
+  // restarts its own container — so the NDJSON stream ends abruptly at the
+  // 'restarting' event when the connection drops with the daemon. Callers then
+  // poll adminUpdates() until the version flips.
+  serverUpdate: (onEvent) => postNDJSON('/bailey/api/admin/server-update', {}, onEvent),
   // Transfer workspace ownership to another user already on this server.
   // Strictly the recorded owner's call — the backend rejects even admins —
   // and the old owner is kept as a member (access grant).

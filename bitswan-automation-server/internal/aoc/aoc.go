@@ -172,28 +172,45 @@ func (c *AOCClient) GetAutomationServerInfo() (*AutomationServerInfo, error) {
 // console and to tell Bailey servers apart from legacy ones. Callers treat
 // failures as non-fatal: registration must still succeed against an older AOC
 // that predates this endpoint.
-func (c *AOCClient) ReportBaileyURL(baileyURL string) error {
+// ReportBaileyURL tells the AOC where this server's Bailey console lives. The
+// AOC treats this as the "ingress is up" signal and provisions the server's
+// public DNS, returning the resulting domain_status ("active" when a direct A
+// record works, "proxied" when the server was routed through the relay, or ""
+// from an older AOC). The caller uses a "proxied" result to start the tunnel.
+func (c *AOCClient) ReportBaileyURL(baileyURL string, forceProxy bool) (string, error) {
 	payload := map[string]interface{}{
 		"bailey_url": baileyURL,
+	}
+	// force_proxy tells the AOC to route this server through the relay even if
+	// its public IP is reachable — the server-side counterpart of the
+	// `register --force-proxy` testing flag, so DNS and domain_status agree with
+	// the tunnel the daemon opens.
+	if forceProxy {
+		payload["force_proxy"] = true
 	}
 
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal bailey_url request: %w", err)
+		return "", fmt.Errorf("failed to marshal bailey_url request: %w", err)
 	}
 
 	resp, err := c.sendRequest("PATCH", fmt.Sprintf("%s/api/automation_server/info", c.settings.AOCUrl), jsonBytes)
 	if err != nil {
-		return fmt.Errorf("error sending bailey_url report: %w", err)
+		return "", fmt.Errorf("error sending bailey_url report: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to report bailey_url: %s - %s", resp.Status, string(body))
+		return "", fmt.Errorf("failed to report bailey_url: %s - %s", resp.Status, string(body))
 	}
 
-	return nil
+	var out struct {
+		DomainStatus string `json:"domain_status"`
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = json.Unmarshal(body, &out) // best-effort: older AOC omits domain_status
+	return out.DomainStatus, nil
 }
 
 // GetAutomationServerToken gets the automation server token (deprecated, use GetAutomationServerInfo)

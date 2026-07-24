@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/workspace"
 )
 
 // WorkspaceSelectRequest represents the request body for selecting a workspace
@@ -33,11 +34,11 @@ type WorkspaceListResponse struct {
 
 // WorkspaceInfo contains detailed information about a workspace
 type WorkspaceInfo struct {
-	Name           string `json:"name"`
-	Domain         string `json:"domain,omitempty"`
-	GitopsURL      string `json:"gitops_url,omitempty"`
-	SSHPublicKey   string `json:"ssh_public_key,omitempty"`
-	GitopsSecret   string `json:"gitops_secret,omitempty"`
+	Name         string `json:"name"`
+	Domain       string `json:"domain,omitempty"`
+	GitopsURL    string `json:"gitops_url,omitempty"`
+	SSHPublicKey string `json:"ssh_public_key,omitempty"`
+	GitopsSecret string `json:"gitops_secret,omitempty"`
 }
 
 // handleWorkspace routes workspace-related requests
@@ -56,6 +57,8 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		s.handleWorkspaceInitConfirm(w, r)
 	case path == "update":
 		s.handleWorkspaceUpdate(w, r)
+	case path == "rollback":
+		s.handleWorkspaceRollback(w, r)
 	case path == "remove":
 		s.handleWorkspaceRemove(w, r)
 	case path == "sync":
@@ -123,6 +126,10 @@ type WorkspaceUpdateRequest struct {
 	DisableDevMode        bool   `json:"disable_dev_mode,omitempty"`
 	GitopsDevSourceDir    string `json:"gitops_dev_source_dir,omitempty"`
 	DashboardDevSourceDir string `json:"dashboard_dev_source_dir,omitempty"`
+	// Progress, when non-nil, is called at each phase of the update so a caller
+	// can render a determinate progress bar. In-process only — never serialized
+	// (the socket/CLI path leaves it nil and streams stdout logs instead).
+	Progress func(fraction float64, label string) `json:"-"`
 }
 
 // WorkspaceRemoveRequest represents the request body for removing a workspace
@@ -259,6 +266,40 @@ func (s *Server) handleWorkspaceUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.streamStdoutOperation(w, func() error {
+		return s.runWorkspaceUpdate(req)
+	})
+}
+
+// handleWorkspaceRollback handles POST /workspace/rollback — restore the previous
+// docker-compose snapshot and re-deploy. Deliberately CLI-only (no GUI wiring).
+func (s *Server) handleWorkspaceRollback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Workspace string `json:"workspace"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Workspace == "" {
+		writeJSONError(w, "workspace is required", http.StatusBadRequest)
+		return
+	}
+
+	s.streamStdoutOperation(w, func() error {
+		return workspace.RollbackWorkspaceDeployment(req.Workspace)
+	})
+}
+
+// streamStdoutOperation runs op with os.Stdout redirected into an NDJSON log
+// stream on w, so long-running docker operations report progress live to the
+// CLI. Serialized on stdoutMutex — only one such operation streams at a time.
+func (s *Server) streamStdoutOperation(w http.ResponseWriter, op func() error) {
 	// Stream logs (NDJSON)
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -308,13 +349,12 @@ func (s *Server) handleWorkspaceUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Parse args and run update logic
-	err = s.runWorkspaceUpdate(req)
+	opErr := op()
 	wPipe.Close()
 	wg.Wait()
 
-	if err != nil {
-		WriteLogEntry(w, "error", fmt.Sprintf("Operation failed: %v", err))
+	if opErr != nil {
+		WriteLogEntry(w, "error", fmt.Sprintf("Operation failed: %v", opErr))
 	}
 }
 

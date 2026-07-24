@@ -285,3 +285,55 @@ func (s *Server) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, e
 
 	writeEvent(map[string]any{"event": "done", "message": "Workspace updated."})
 }
+
+// handleUpgradeWorkspace performs a version BUMP: regenerate the workspace's
+// compose with the latest images on the server's track and recreate its
+// containers. This is what the console's "Update" button (shown when a newer
+// image is available) triggers, and what clears the update-available badge —
+// unlike handleUpdateWorkspace, which only re-pulls the pinned tags' digests.
+// Owner-only. Synchronous; progress goes to the daemon log.
+func (s *Server) handleUpgradeWorkspace(w http.ResponseWriter, r *http.Request, email, workspaceName string) {
+	if !nameRe.MatchString(workspaceName) {
+		writeJSONError(w, "invalid workspace name", http.StatusBadRequest)
+		return
+	}
+	_, groups := identityFromHeaders(r)
+	serverOwner, _ := callerIsServerOwner(email, r)
+	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
+		writeJSONError(w, "only the workspace owner can update it", http.StatusForbidden)
+		return
+	}
+
+	// Stream a determinate progress bar as NDJSON (same event shape as
+	// handleUpdateWorkspace / createWorkspace, consumed by the console's
+	// postNDJSON). runWorkspaceUpdate reports explicit phase fractions.
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	var writeMu sync.Mutex
+	writeEvent := func(payload map[string]any) {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		line, _ := json.Marshal(payload)
+		_, _ = w.Write(append(line, '\n'))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	writeEvent(map[string]any{"event": "start", "message": "Updating " + workspaceName + "…", "fraction": 0})
+	err := s.runWorkspaceUpdate(WorkspaceUpdateRequest{
+		Workspace: workspaceName,
+		Staging:   useStagingTrack(),
+		Progress: func(fraction float64, label string) {
+			writeEvent(map[string]any{"event": "progress", "fraction": fraction, "message": label})
+		},
+	})
+	if err != nil {
+		writeEvent(map[string]any{"event": "error", "error": err.Error()})
+		return
+	}
+	writeEvent(map[string]any{"event": "done", "message": "Workspace updated.", "fraction": 1})
+}

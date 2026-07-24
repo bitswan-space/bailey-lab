@@ -23,6 +23,11 @@ type AOCConfigRequest struct {
 	AccessToken        string `json:"access_token"`
 	ExpiresAt          string `json:"expires_at,omitempty"`
 	Domain             string `json:"domain,omitempty"`
+	// Proxied / RelayAddr / RelayFingerprint configure the reverse-proxy relay
+	// path for a NAT'd (or --force-proxy) server; see the config struct docs.
+	Proxied          bool   `json:"proxied,omitempty"`
+	RelayAddr        string `json:"relay_addr,omitempty"`
+	RelayFingerprint string `json:"relay_fingerprint,omitempty"`
 	// Force overwrites an existing registration instead of failing with 409.
 	Force bool `json:"force,omitempty"`
 }
@@ -112,6 +117,9 @@ func (s *Server) handleAOCConfig(w http.ResponseWriter, r *http.Request) {
 		AccessToken:        req.AccessToken,
 		ExpiresAt:          req.ExpiresAt,
 		Domain:             req.Domain,
+		Proxied:            req.Proxied,
+		RelayAddr:          req.RelayAddr,
+		RelayFingerprint:   req.RelayFingerprint,
 	}); err != nil {
 		writeJSONError(w, "failed to persist AOC config: "+err.Error(), http.StatusInternalServerError)
 		return

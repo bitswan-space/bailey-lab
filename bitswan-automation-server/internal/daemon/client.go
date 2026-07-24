@@ -830,7 +830,11 @@ func (c *Client) InitIngress(verbose bool) (*IngressInitResponse, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doRequest(req)
+	// Ingress init sets up Traefik and issues the wildcard cert (DNS-01), which
+	// takes well over the 10s default client timeout — use the long-running
+	// client so the CLI waits for the daemon instead of giving up with a
+	// "context deadline exceeded" while the work is still in progress.
+	resp, err := c.doLongRunningRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
 	}
@@ -1156,6 +1160,42 @@ func (c *Client) WorkspaceInit(req0 WorkspaceInitRequest) error {
 
 // WorkspaceUpdate runs `bitswan workspace update ...` via the daemon with
 // NDJSON streaming. Typed request — same single-parser rule as WorkspaceInit.
+// WorkspaceRollback restores a workspace's previous docker-compose snapshot and
+// re-deploys, streaming the daemon's progress to stdout.
+func (c *Client) WorkspaceRollback(workspaceName string) error {
+	bodyBytes, err := json.Marshal(map[string]string{"workspace": workspaceName})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "http://unix/workspace/rollback", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doStreamingRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	_, err = c.streamLogs(resp.Body, os.Stdout)
+	return err
+}
+
 func (c *Client) WorkspaceUpdate(req0 WorkspaceUpdateRequest) error {
 	bodyBytes, err := json.Marshal(req0)
 	if err != nil {
@@ -1264,13 +1304,75 @@ func (c *Client) DisconnectFromAOC() error {
 // the single owner of ~/.config/bitswan — register no longer writes it on the
 // host — so this is how a freshly obtained token reaches the daemon before it
 // talks to the AOC (wildcard ingress, protected proxy, workspace connect).
-func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string) error {
+// StartRelayTunnel asks the daemon to (idempotently) start the reverse-proxy
+// tunnel now. Used by register after the AOC provisions the proxy path, since
+// the daemon's boot-time check ran before the AOC knew the server was proxied.
+func (c *Client) StartRelayTunnel() error {
+	req, err := http.NewRequest("POST", "http://unix/relay/start", nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// EndpointVerifyResult mirrors the daemon's /relay/verify response.
+type EndpointVerifyResult struct {
+	OK      bool   `json:"ok"`
+	Issuer  string `json:"issuer"`
+	Pending bool   `json:"pending"`
+	Error   string `json:"error"`
+}
+
+// VerifyEndpoint asks the daemon to check that this server's public URL is
+// reachable, publicly trusted, and serving our own (un-intercepted) cert.
+func (c *Client) VerifyEndpoint() (EndpointVerifyResult, error) {
+	var out EndpointVerifyResult
+	req, err := http.NewRequest("GET", "http://unix/relay/verify", nil)
+	if err != nil {
+		return out, fmt.Errorf("failed to create request: %w", err)
+	}
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return out, fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return out, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return out, fmt.Errorf("failed to decode verify response: %w", err)
+	}
+	return out, nil
+}
+
+// ProxyConfig carries the reverse-proxy relay settings for a NAT'd/--force-proxy
+// server. Zero value (Proxied=false) means the normal direct-A-record path.
+type ProxyConfig struct {
+	Proxied          bool
+	RelayAddr        string
+	RelayFingerprint string
+}
+
+func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string, proxy ProxyConfig) error {
 	reqBody := AOCConfigRequest{
 		AOCUrl:             aocUrl,
 		AutomationServerId: automationServerId,
 		AccessToken:        accessToken,
 		ExpiresAt:          expiresAt,
 		Domain:             domain,
+		Proxied:            proxy.Proxied,
+		RelayAddr:          proxy.RelayAddr,
+		RelayFingerprint:   proxy.RelayFingerprint,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {

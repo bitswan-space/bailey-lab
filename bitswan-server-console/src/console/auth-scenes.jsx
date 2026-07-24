@@ -197,23 +197,47 @@ function ApprovalScene({ onApproved, gateState }) {
   useScE(() => { const t = setInterval(() => setDots(d => (d % 3) + 1), 500); return () => clearInterval(t); }, []);
   useScE(() => { setTotp(''); setError(false); }, [method]);
 
-  // Fetch the pairing code + poll for admin approval.
+  // Fetch the pairing code, auto-rotate it before it expires, and poll for
+  // admin approval. Without rotation, a screen left open past the code's TTL
+  // keeps showing a code that has already expired server-side and can no longer
+  // be approved — the device is then stuck until a manual refresh.
   useScE(() => {
     let alive = true;
-    let timer = null;
-    SApi.pendingPair()
-      .then(r => { if (alive && r) setCode(r.code || ''); })
-      .catch(e => { if (alive) setCodeErr(e.message || 'Could not request a pairing code.'); });
+    let pollTimer = null;
+    let codeTimer = null;
+
+    const fetchCode = async () => {
+      try {
+        const r = await SApi.pendingPair();
+        if (!alive || !r) return;
+        setCode(r.code || '');
+        setCodeErr('');
+        if (codeTimer) clearTimeout(codeTimer);
+        // Re-fetch ~60s before expiry. The server reuses a live code until it's
+        // near expiry, so this hand-off mints a fresh code and the screen always
+        // shows one that's still approvable.
+        const exp = r.expires_at ? Date.parse(r.expires_at) : 0;
+        const ms = exp ? Math.max(5000, exp - Date.now() - 60000) : 4 * 60 * 1000;
+        codeTimer = setTimeout(fetchCode, ms);
+      } catch (e) {
+        if (!alive) return;
+        setCodeErr(e.message || 'Could not request a pairing code.');
+        if (codeTimer) clearTimeout(codeTimer);
+        codeTimer = setTimeout(fetchCode, 5000); // transient — retry
+      }
+    };
+    fetchCode();
+
     const tick = async () => {
       try {
         const r = await SApi.pendingPairPoll();
         if (!alive) return;
         if (r && r.approved) { followRedirect(r.redirect_path); return; }
       } catch (e) { /* transient poll error — keep polling */ }
-      if (alive) timer = setTimeout(tick, 2500);
+      if (alive) pollTimer = setTimeout(tick, 2500);
     };
-    timer = setTimeout(tick, 2500);
-    return () => { alive = false; if (timer) clearTimeout(timer); };
+    pollTimer = setTimeout(tick, 2500);
+    return () => { alive = false; if (pollTimer) clearTimeout(pollTimer); if (codeTimer) clearTimeout(codeTimer); };
   }, []);
 
   const verifyTotp = async () => {

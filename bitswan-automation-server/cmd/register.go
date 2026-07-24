@@ -30,6 +30,9 @@ func newRegisterCmd() *cobra.Command {
 	var aocUrl string
 	var otp string
 	var automationServerId string
+	var forceProxy bool
+	var relayAddr string
+	var relayFingerprint string
 
 	cmd := &cobra.Command{
 		Use:          "register",
@@ -94,9 +97,21 @@ func newRegisterCmd() *cobra.Command {
 			// Persist the AOC connection into the daemon's config volume. From
 			// here on the daemon holds a valid token to talk to the AOC (wildcard
 			// ingress, protected proxy, workspace connect).
+			proxyCfg := daemon.ProxyConfig{}
+			if forceProxy {
+				if relayAddr == "" || relayFingerprint == "" {
+					return fmt.Errorf("--force-proxy requires --relay-addr and --relay-fingerprint (the AOC relay's tunnel endpoint and pinned cert fingerprint)")
+				}
+				proxyCfg = daemon.ProxyConfig{
+					Proxied:          true,
+					RelayAddr:        relayAddr,
+					RelayFingerprint: relayFingerprint,
+				}
+			}
+
 			if err := client.SetAOCConfig(
 				aocUrl, serverInfo.AutomationServerId, aocClient.GetAccessToken(),
-				aocClient.GetExpiresAt(), serverInfo.Domain,
+				aocClient.GetExpiresAt(), serverInfo.Domain, proxyCfg,
 			); err != nil {
 				return fmt.Errorf("failed to save AOC configuration to the daemon: %w", err)
 			}
@@ -109,6 +124,16 @@ func newRegisterCmd() *cobra.Command {
 			// workspace's routes register through the auth wrap rather than as
 			// bare single-tier routes (see addRouteTraefik).
 			if serverInfo.Domain != "" {
+				// --force-proxy exercises the reverse-proxy path on a server that
+				// actually has a public IP: the AOC points DNS at its relay and we
+				// tunnel out to it, instead of the AOC pointing an A record straight
+				// at us. (NAT'd servers take this path automatically once the AOC
+				// reports them unreachable.) The tunnel + TLS-passthrough relay are
+				// set up via the daemon below.
+				if forceProxy {
+					fmt.Println("\n🌐 --force-proxy: this server will be reached through the AOC reverse-proxy relay (end-to-end TLS passthrough).")
+				}
+
 				// Reconfigure the ingress so Traefik obtains a *.<domain>
 				// wildcard certificate via the DNS-01 challenge (through the
 				// AOC) instead of a separate HTTP-01 certificate per endpoint.
@@ -137,10 +162,26 @@ func newRegisterCmd() *cobra.Command {
 				// fail registration.
 				baileyURL := fmt.Sprintf("https://bailey.%s", serverInfo.Domain)
 				fmt.Printf("\n📓 Reporting Bailey console URL to the AOC: %s\n", baileyURL)
-				if err := aocClient.ReportBaileyURL(baileyURL); err != nil {
+				domainStatus, err := aocClient.ReportBaileyURL(baileyURL, forceProxy)
+				if err != nil {
 					fmt.Printf("Warning: Failed to report Bailey URL to the AOC: %v\n", err)
 				} else {
 					fmt.Println("Bailey console URL reported.")
+				}
+
+				// Reporting the Bailey URL makes the AOC provision this server's
+				// public DNS: if the world can't reach us directly (or --force-proxy
+				// was passed) it routes *.<domain> through the reverse-proxy relay
+				// and reports "proxied". The daemon started before this decision, so
+				// kick the tunnel now (idempotent).
+				if domainStatus == "proxied" || forceProxy {
+					fmt.Println("\n🌐 This server will be reached through the AOC reverse-proxy relay (no public inbound route).")
+					if err := client.StartRelayTunnel(); err != nil {
+						fmt.Printf("Warning: failed to start the reverse-proxy tunnel: %v\n", err)
+						fmt.Println("It will start automatically the next time the daemon restarts.")
+					} else {
+						fmt.Println("Reverse-proxy tunnel started.")
+					}
 				}
 			}
 
@@ -152,6 +193,77 @@ func newRegisterCmd() *cobra.Command {
 				return err
 			}
 
+			// Final gate: don't tell the user their Bailey is ready until we've
+			// actually fetched its own public URL and confirmed it is reachable,
+			// serving a publicly-trusted certificate (no browser warning), and
+			// that the certificate is OURS (not intercepted). The wildcard cert
+			// is issued asynchronously (DNS-01), so poll for a few minutes.
+			if serverInfo.Domain != "" {
+				baileyURL := fmt.Sprintf("https://bailey.%s", serverInfo.Domain)
+				fmt.Printf("\n🔎 Bringing %s online. Its TLS certificate is issued in the background\n", baileyURL)
+				fmt.Println("   (Let's Encrypt, DNS-01) — this usually takes 1–2 minutes. Waiting until it's")
+				fmt.Println("   reachable with a valid, un-intercepted certificate before handing it to you.")
+
+				// No blind head-start here: the AOC already waited for the DNS
+				// change to reach INSYNC (live on every Route53 nameserver) before
+				// returning from the Bailey-URL report above, so our first lookup
+				// resolves rather than racing propagation and caching an NXDOMAIN.
+
+				start := time.Now()
+				// Generous ceiling: Let's Encrypt issuance is usually ~2 min but
+				// can occasionally run to ~4; the wait is calm progress now, so a
+				// higher ceiling costs nothing and avoids false-failing a
+				// slow-but-successful issuance.
+				deadline := start.Add(8 * time.Minute)
+				lastHeartbeat := time.Now()
+				lastStage := ""
+				var lastReason string
+				verified := false
+				fmt.Print("   waiting")
+				for time.Now().Before(deadline) {
+					res, err := client.VerifyEndpoint()
+					switch {
+					case err == nil && res.OK:
+						fmt.Printf("\n\n✅ %s is live — certificate issued by %q, verified end-to-end (not intercepted).\n", baileyURL, res.Issuer)
+						verified = true
+					case err != nil:
+						// Daemon/socket hiccup — transient; keep waiting quietly.
+						lastReason = err.Error()
+					case res.Pending:
+						// Expected while the cert issues / DNS settles. Show the
+						// human-readable stage once when it changes; otherwise just
+						// tick, so it reads as steady progress, not a failure loop.
+						lastReason = res.Error
+						if res.Error != lastStage {
+							fmt.Printf("\n   • %s", res.Error)
+							lastStage = res.Error
+						}
+					default:
+						// A hard problem (e.g. interception). Surface it clearly.
+						lastReason = res.Error
+						fmt.Printf("\n   ⚠️  %s", res.Error)
+					}
+					if verified {
+						break
+					}
+					// Steady "still working" tick roughly every 15s, with elapsed
+					// time, so a long wait never looks stalled.
+					if time.Since(lastHeartbeat) >= 15*time.Second {
+						fmt.Printf(" (%ds)", int(time.Since(start).Seconds()))
+						lastHeartbeat = time.Now()
+					}
+					fmt.Print(".")
+					time.Sleep(5 * time.Second)
+				}
+				if !verified {
+					return fmt.Errorf(
+						"registered, but %s did not become verifiably live within 8 minutes (last status: %s).\n"+
+							"The certificate may still be issuing — re-check in a minute; if it persists, the DNS/relay path needs attention",
+						baileyURL, lastReason,
+					)
+				}
+			}
+
 			return nil
 		},
 	}
@@ -160,6 +272,9 @@ func newRegisterCmd() *cobra.Command {
 	cmd.Flags().StringVar(&aocUrl, "aoc-api", "https://api.bitswan.space", "Automation operation server URL")
 	cmd.Flags().StringVar(&otp, "otp", "", "One-time password from web interface (required)")
 	cmd.Flags().StringVar(&automationServerId, "server-id", "", "Automation server ID from web interface (required)")
+	cmd.Flags().BoolVar(&forceProxy, "force-proxy", false, "Reach this server through the AOC reverse-proxy relay even if it has a public IP (for testing the NAT path)")
+	cmd.Flags().StringVar(&relayAddr, "relay-addr", "", "Relay tunnel endpoint host:port to dial (required with --force-proxy)")
+	cmd.Flags().StringVar(&relayFingerprint, "relay-fingerprint", "", "Relay tunnel-cert sha256 fingerprint to pin (required with --force-proxy)")
 
 	cmd.MarkFlagRequired("name")
 	cmd.MarkFlagRequired("otp")

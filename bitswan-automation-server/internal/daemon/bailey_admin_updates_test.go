@@ -166,3 +166,104 @@ func TestFetchDockerHubTags_BadRepo(t *testing.T) {
 		t.Skip("docker hub reachable and returned a result for the bogus repo")
 	}
 }
+
+// TestUpgradeWorkspace_ValidationAndAuthz covers the version-bump upgrade handler
+// (owner-gated) the console's Update button calls.
+func TestUpgradeWorkspace_ValidationAndAuthz(t *testing.T) {
+	domain := writeTestConfig(t)
+	srv := &Server{}
+
+	// Invalid name → 400.
+	wBad := newRecorder()
+	srv.handleUpgradeWorkspace(wBad, baileyReq(http.MethodPost, "/x", "u@example.com"), "u@example.com", "Bad Name")
+	if wBad.Code != http.StatusBadRequest {
+		t.Errorf("invalid name = %d, want 400", wBad.Code)
+	}
+
+	// Non-owner → 403.
+	ws := "upgradews"
+	if _, err := registerEndpoint(ws+"-gitops."+domain, "real@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	wForbid := newRecorder()
+	srv.handleUpgradeWorkspace(wForbid, baileyReq(http.MethodPost, "/x", "intruder@example.com"), "intruder@example.com", ws)
+	if wForbid.Code != http.StatusForbidden {
+		t.Errorf("non-owner upgrade = %d, want 403", wForbid.Code)
+	}
+
+	// Owner but missing deployment → 500 (runWorkspaceUpdate fails; JSON error, not a stream).
+	wsOwned := "upgradewsowned"
+	if _, err := registerEndpoint(wsOwned+"-gitops."+domain, "owner3@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// The upgrade now streams a determinate progress bar as NDJSON, so a
+	// mid-run failure (missing deployment) is a 200 stream carrying an error
+	// event rather than a 500 status.
+	wErr := newRecorder()
+	srv.handleUpgradeWorkspace(wErr, baileyReq(http.MethodPost, "/x", "owner3@example.com"), "owner3@example.com", wsOwned)
+	if wErr.Code != http.StatusOK {
+		t.Fatalf("owner upgrade stream status = %d, want 200", wErr.Code)
+	}
+	if !strings.Contains(wErr.Body.String(), `"event":"error"`) {
+		t.Errorf("expected a streamed error event for a missing deployment; got: %s", wErr.Body.String())
+	}
+}
+
+// TestAdminUpdates_ReturnsPayload covers the admin Updates view endpoint: it
+// always answers 200 with the server block and the host-side update command,
+// even when the release/tag lookups can't resolve.
+func TestAdminUpdates_ReturnsPayload(t *testing.T) {
+	writeTestConfig(t)
+	// A dev/git build → the server is never flagged, keeping the assertion
+	// independent of what the GitHub release endpoint returns.
+	srv := &Server{version: "v2026.07.07.21-git-test"}
+	w := newRecorder()
+	srv.handleAdminUpdates(w, baileyReq(http.MethodGet, "/bailey/api/admin/updates", "admin@example.com"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin updates = %d, want 200", w.Code)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if body["server_update_cmd"] != "bitswan self-update" {
+		t.Errorf("server_update_cmd = %v, want 'bitswan self-update'", body["server_update_cmd"])
+	}
+	if _, ok := body["server"]; !ok {
+		t.Error("response missing 'server' key")
+	}
+	if _, ok := body["count"]; !ok {
+		t.Error("response missing 'count' key")
+	}
+}
+
+// TestWorkspaceRollback_MethodAndValidation covers the CLI rollback daemon
+// handler: method/validation guards and the streamed no-snapshot error path.
+func TestWorkspaceRollback_MethodAndValidation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate: no real workspaces → deterministic no-snapshot
+	srv := &Server{}
+
+	// GET → 405.
+	wGet := newRecorder()
+	srv.handleWorkspaceRollback(wGet, baileyReqBody(http.MethodGet, "/workspace/rollback", "", ""))
+	if wGet.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET rollback = %d, want 405", wGet.Code)
+	}
+
+	// Missing workspace → 400.
+	wEmpty := newRecorder()
+	srv.handleWorkspaceRollback(wEmpty, baileyReqBody(http.MethodPost, "/workspace/rollback", "", "{}"))
+	if wEmpty.Code != http.StatusBadRequest {
+		t.Errorf("empty workspace = %d, want 400", wEmpty.Code)
+	}
+
+	// Valid name, no snapshot → streams 200 with a 'no rollback snapshot' error event.
+	wNo := newRecorder()
+	srv.handleWorkspaceRollback(wNo, baileyReqBody(http.MethodPost, "/workspace/rollback", "", `{"workspace":"ghostws"}`))
+	if wNo.Code != http.StatusOK {
+		t.Fatalf("rollback stream status = %d, want 200", wNo.Code)
+	}
+	if !strings.Contains(wNo.Body.String(), "no rollback snapshot") {
+		t.Errorf("expected no-snapshot error event; got: %s", wNo.Body.String())
+	}
+}

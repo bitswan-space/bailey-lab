@@ -11,6 +11,7 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/cmd/automationserverdaemon"
 	"github.com/bitswan-space/bitswan-workspaces/cmd/certauthority"
 	"github.com/bitswan-space/bitswan-workspaces/cmd/ingress"
+	"github.com/bitswan-space/bitswan-workspaces/cmd/relay"
 	"github.com/bitswan-space/bitswan-workspaces/cmd/test"
 	"github.com/spf13/cobra"
 )
@@ -55,8 +56,11 @@ func newRootCmd(version string) *cobra.Command {
 	cmd.AddCommand(newVersionCmd(version))                                // version subcommand
 	cmd.AddCommand(newWorkspaceCmd())                                     // workspace subcommand
 	cmd.AddCommand(newRegisterCmd())                                      // register subcommand
+	cmd.AddCommand(newRollbackCmd())                                      // rollback subcommand (CLI-only)
+	cmd.AddCommand(newSelfUpdateCmd())                                    // self-update subcommand (CLI-only)
 	cmd.AddCommand(newDisconnectFromAOCCmd())                             // disconnect-from-aoc subcommand
 	cmd.AddCommand(ingress.NewIngressCmd())                               // ingress subcommand
+	cmd.AddCommand(relay.NewRelayCmd())                                   // relay subcommand (AOC reverse-proxy)
 	cmd.AddCommand(certauthority.NewCertAuthorityCmd())                   // certificate authority subcommand
 	cmd.AddCommand(automationserverdaemon.NewAutomationServerDaemonCmd()) // automation server daemon subcommand
 	cmd.AddCommand(automation.NewAutomationCmd())                         // automation subcommand

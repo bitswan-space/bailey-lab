@@ -7,6 +7,7 @@ const { OverviewView, WorkspacesView } = window.SC_WORKSPACES;
 const { UsersView, EndpointAccessView } = window.SC_PEOPLE;
 const { DevicesView, SecurityView } = window.SC_DEVICES;
 const { ResourcesView } = window.SC_RESOURCES;
+const { UpdatesView } = window.SC_UPDATES;
 const { BootstrapScene, ApprovalScene, RecoveryScene, InviteScene } = window.SC_SCENES;
 const { Api } = window.SC_API;
 const { useState: useA, useEffect: useAE, useRef: useAR } = React;
@@ -34,7 +35,8 @@ function initialData() {
     people: null,        // [{ name,email,role,workspaceCount,deviceCount,lastActive,invited }]
     peopleWarning: null, // partial-enumeration `error` string from /people (200 + error)
     resources: null,     // GET /bailey/api/admin/resources (memory budget + per-BP)
-    load: { devices: 'idle', approvals: 'idle', workspaces: 'idle', whoami: 'idle', overview: 'idle', people: 'idle', resources: 'idle' },
+    updates: null,       // GET /bailey/api/admin/updates (server + stale workspaces + count)
+    load: { devices: 'idle', approvals: 'idle', workspaces: 'idle', whoami: 'idle', overview: 'idle', people: 'idle', resources: 'idle', updates: 'idle' },
     error: {},           // { devices, approvals, workspaces, whoami, overview, people, resources }
   };
 }
@@ -128,6 +130,10 @@ function adaptWorkspace(w, callerEmail) {
     dashboardRole: w.dashboard_role || '',
     isOwner: !!w.is_owner,
     isTrashed: !!w.is_trashed,
+    // Deployed component versions + whether a newer image is available on the
+    // server's track (drives the "update available" badge + owner update button).
+    versions: w.versions || null,
+    updateAvailable: !!(w.versions && w.versions.update_available),
     apps: [],
     live: true,
   };
@@ -252,6 +258,7 @@ const NAV = [
     // here now — there's no separate approvals page.
     { id: 'users',     label: 'People & roles',   icon: 'users', badge: 'pending' },
     { id: 'acl',       label: 'Endpoint access',  icon: 'git-fork' },
+    { id: 'updates',   label: 'Updates',          icon: 'arrow-up-circle', badge: 'updates' },
   ]},
 ];
 
@@ -263,7 +270,7 @@ const NAV = [
 // routing works end-to-end. A second path segment carries a view's open
 // "drawer" (the workspace being managed, the person whose devices you're
 // viewing) — e.g. /workspaces/acme, /users/jane@x.
-const ROUTES = ['workspaces', 'handbook', 'overview', 'resources', 'users', 'acl', 'devices', 'security'];
+const ROUTES = ['workspaces', 'handbook', 'overview', 'resources', 'users', 'acl', 'updates', 'devices', 'security'];
 
 function parseLocation() {
   const segs = (window.location.pathname || '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
@@ -345,11 +352,12 @@ function Console({ data, setData, toast, refresh }) {
   };
   const ctx = { data, setData, toast, go: (r) => navigate(r), navigate, route, routeParam, currentUser, openUrl, refresh };
   const pendingCount = data.pending.length;
+  const updatesCount = (data.updates && data.updates.count) || 0;
 
   const views = {
     workspaces: WorkspacesView, overview: OverviewView, users: UsersView,
     acl: EndpointAccessView, devices: DevicesView, security: SecurityView, handbook: HandbookView,
-    resources: ResourcesView,
+    resources: ResourcesView, updates: UpdatesView,
   };
   const View = views[route] || WorkspacesView;
 
@@ -378,7 +386,7 @@ function Console({ data, setData, toast, refresh }) {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                 {sec.items.map(it => (
                   <NavItem key={it.id} item={it} active={route === it.id}
-                    badge={it.badge === 'pending' ? pendingCount : 0} onClick={() => navigate(it.id)} />
+                    badge={it.badge === 'pending' ? pendingCount : it.badge === 'updates' ? updatesCount : 0} onClick={() => navigate(it.id)} />
                 ))}
               </div>
             </div>
@@ -680,6 +688,17 @@ function App() {
     } catch (e) { if (!bg) { setLoad('resources', 'error'); setErr('resources', e.message); } }
   };
 
+  const loadUpdates = useAR();
+  loadUpdates.current = async (opts) => {
+    const bg = opts && opts.background;
+    if (!bg) setLoad('updates', 'loading');
+    try {
+      const r = await withRetry(() => Api.adminUpdates());
+      setData(d => ({ ...d, updates: r }));
+      setLoad('updates', 'ok'); setErr('updates', null);
+    } catch (e) { if (!bg) { setLoad('updates', 'error'); setErr('updates', e.message); } }
+  };
+
   const loadPeople = useAR();
   loadPeople.current = async () => {
     setLoad('people', 'loading');
@@ -701,7 +720,7 @@ function App() {
   // so a view's mutation handler can sync after writing to the backend.
   const refresh = useAR();
   refresh.current = (which, opts) => {
-    const all = { devices: loadDevices, approvals: loadApprovals, workspaces: loadWorkspaces, whoami: loadWhoami, overview: loadOverview, people: loadPeople, resources: loadResources };
+    const all = { devices: loadDevices, approvals: loadApprovals, workspaces: loadWorkspaces, whoami: loadWhoami, overview: loadOverview, people: loadPeople, resources: loadResources, updates: loadUpdates };
     if (which && all[which]) return all[which].current(opts);
     return Promise.all(Object.values(all).map(r => r.current(opts)));
   };
@@ -746,6 +765,7 @@ function App() {
     loadOverview.current();
     loadPeople.current();
     loadResources.current();
+    loadUpdates.current();
   }, [gate.status, scene]);
 
   // Keep the volatile lists fresh without a manual reload. Device approvals
