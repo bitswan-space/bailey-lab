@@ -39,6 +39,7 @@ const WT_STORAGE_KEY = 'dashboard.copy';
 const TAB_STORAGE_KEY = 'dashboard.flowTab';
 
 const FLOW_TABS: FlowTab[] = [
+  'get-started',
   'description',
   'agent',
   'requirements',

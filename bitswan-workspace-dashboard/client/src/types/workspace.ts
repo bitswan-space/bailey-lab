@@ -41,10 +41,13 @@ export interface Copy {
   has_changes: boolean;
 }
 
-/** The top-bar flow tabs. Description and Deployments work without a
- *  copy (both are always main-scoped); the other three follow the
- *  selected copy. Data snapshots live inside Deployments, per stage. */
+/** The top-bar flow tabs. Get started is an always-available orientation
+ *  page (needs no business process or copy). Description and Deployments
+ *  work without a copy (both are always main-scoped); the other three
+ *  follow the selected copy. Data snapshots live inside Deployments, per
+ *  stage. */
 export type FlowTab =
+  | 'get-started'
   | 'description'
   | 'agent'
   | 'requirements'

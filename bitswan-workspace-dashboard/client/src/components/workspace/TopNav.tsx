@@ -3,6 +3,7 @@ import {
   Bot,
   CheckSquare,
   ChevronRight,
+  Compass,
   FileText,
   RefreshCw,
   Rocket,
@@ -93,6 +94,16 @@ const DEPLOYMENTS_STEP: FlowStep = {
   needsCopy: false,
 };
 
+// An always-available orientation page. It's NOT a pipeline stage (it needs no
+// business process or copy), so it sits at the far left, set apart from the
+// flow by a divider rather than a chevron.
+const GET_STARTED_STEP: FlowStep = {
+  id: 'get-started',
+  label: 'Get started',
+  Icon: Compass,
+  needsCopy: false,
+};
+
 /**
  * The single top bar of the shell, in two sections that mirror where work
  * actually happens:
@@ -176,6 +187,10 @@ export function TopNav({
 
   return (
     <div className="flex shrink-0 items-center gap-3 border-b border-border bg-background px-6 py-2.5">
+      {/* Orientation — set apart from the pipeline by a divider, not a chevron. */}
+      {renderStep(GET_STARTED_STEP)}
+      <div className="h-6 w-px shrink-0 bg-border" aria-hidden />
+
       <BpSelector
         bps={bps}
         activeBpId={activeBpId}
