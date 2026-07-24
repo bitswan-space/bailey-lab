@@ -37,6 +37,10 @@ import { SpecAttachments } from '@/components/workspace/SpecAttachments';
 import { SpecEditorToolbar } from '@/components/workspace/SpecEditorToolbar';
 import { codeHighlightPlugin } from '@/components/workspace/spec-code-highlight';
 import {
+  normalizeDocForSave,
+  whitespaceNormalizePlugin,
+} from '@/components/workspace/spec-editor-normalize';
+import {
   buildMarkdownInputRules,
   dedentListItem,
   indentListItem,
@@ -165,6 +169,7 @@ function createSpecState(
       gapCursor(),
       trailingParagraphPlugin,
       tightListsPlugin,
+      whitespaceNormalizePlugin,
       codeHighlightPlugin,
       buildMarkdownInputRules(),
       keymap({
@@ -212,7 +217,9 @@ function createSpecState(
 }
 
 function serializeDoc(state: EditorState): string {
-  let content = defaultMarkdownSerializer.serialize(state.doc);
+  // normalizeDocForSave also expels *trailing* code-run whitespace, which
+  // the live plugin must leave alone (see spec-editor-normalize.ts).
+  let content = defaultMarkdownSerializer.serialize(normalizeDocForSave(state));
   // The trailing paragraph the editor maintains serializes as blank
   // lines — collapse them so the file ends with a single newline.
   content = content.replace(/\n*$/, '\n');
