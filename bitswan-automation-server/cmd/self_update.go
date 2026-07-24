@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -128,6 +129,15 @@ func runSelfUpdate() error {
 	}
 	if err := os.Chmod(tmpPath, 0755); err != nil {
 		return fmt.Errorf("failed to chmod downloaded binary: %w", err)
+	}
+
+	// Validate BEFORE swapping: never install a binary that won't run. Execute
+	// the freshly downloaded file and confirm it reports a bitswan version, so a
+	// truncated / wrong-arch / corrupt download fails here with the live binary
+	// still in place (matches the browser self-update handler).
+	verOut, verErr := exec.Command(tmpPath, "version").CombinedOutput()
+	if verErr != nil || !strings.Contains(string(verOut), "bitswan") {
+		return fmt.Errorf("the downloaded binary failed a sanity check (did not report a version) — not installing it")
 	}
 
 	// Keep the current binary as the rollback point, then swap the new one in.

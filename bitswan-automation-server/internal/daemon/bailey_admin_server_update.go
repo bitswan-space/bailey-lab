@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -61,6 +62,14 @@ func (s *Server) handleAdminServerUpdate(w http.ResponseWriter, r *http.Request)
 	}
 	fail := func(msg string) { emit(map[string]any{"event": "error", "error": msg}) }
 
+	// Only one self-update at a time: two admins triggering this at once would
+	// otherwise race on the download + swap. Reject the second rather than queue.
+	if !s.serverUpdateMu.TryLock() {
+		fail("a server update is already in progress")
+		return
+	}
+	defer s.serverUpdateMu.Unlock()
+
 	emit(map[string]any{"event": "progress", "fraction": 0.02, "message": "Resolving the latest binary…"})
 
 	settings, err := config.NewAutomationServerConfig().GetAutomationOperationsCenterSettings()
@@ -77,12 +86,16 @@ func (s *Server) handleAdminServerUpdate(w http.ResponseWriter, r *http.Request)
 
 	binPath := hostBinaryPath()
 	dir := filepath.Dir(binPath)
-	tmpPath := filepath.Join(dir, ".bitswan.update")
-	_ = os.Remove(tmpPath)
 
 	// --- download (stream progress by Content-Length) ---
 	emit(map[string]any{"event": "progress", "fraction": 0.08, "message": "Downloading the new server binary…"})
-	resp, err := http.Get(url)
+	// Dial + response-header timeouts (NOT a total deadline — the body is a large
+	// streamed binary) so a black-holed AOC fails fast instead of hanging forever.
+	dlClient := &http.Client{Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 30 * time.Second,
+	}}
+	resp, err := dlClient.Get(url)
 	if err != nil {
 		fail("download failed: " + err.Error())
 		return
@@ -93,11 +106,14 @@ func (s *Server) handleAdminServerUpdate(w http.ResponseWriter, r *http.Request)
 		fail(fmt.Sprintf("AOC returned %d downloading the binary: %s", resp.StatusCode, strings.TrimSpace(string(body))))
 		return
 	}
-	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	// Random temp name in the SAME dir (keeps the final rename atomic) so two
+	// concurrent updates can't collide on a fixed path.
+	tmp, err := os.CreateTemp(dir, ".bitswan-update-*")
 	if err != nil {
 		fail("cannot write to " + dir + ": " + err.Error())
 		return
 	}
+	tmpPath := tmp.Name()
 	total := resp.ContentLength
 	var read int64
 	buf := make([]byte, 256*1024)

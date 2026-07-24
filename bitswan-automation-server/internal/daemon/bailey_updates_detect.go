@@ -168,7 +168,10 @@ func fetchAOCBinaryVersion() string {
 		return ""
 	}
 	url := strings.TrimRight(settings.AOCUrl, "/") + "/api/automation_server/bitswan/version?arch=" + runtime.GOARCH
-	resp, err := http.Get(url)
+	// Bounded timeout: this runs on the console version-display path, so a
+	// black-holed AOC must not hang the caller (matches the other AOC calls).
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(url)
 	if err != nil {
 		return ""
 	}

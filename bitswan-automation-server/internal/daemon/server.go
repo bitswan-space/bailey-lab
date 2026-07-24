@@ -44,6 +44,10 @@ type Server struct {
 	// AOC provisions the proxy path.
 	relayMu      sync.Mutex
 	relayStarted bool
+
+	// serverUpdateMu serializes browser-driven server self-updates so two admins
+	// can't race on the download/swap at once (TryLock → reject the second).
+	serverUpdateMu sync.Mutex
 }
 
 // LoadToken reads the token from the config file
