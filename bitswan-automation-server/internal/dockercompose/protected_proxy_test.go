@@ -31,6 +31,7 @@ func TestCreateProtectedProxyDockerComposeFile(t *testing.T) {
 		} `yaml:"services"`
 		Networks map[string]struct {
 			External bool `yaml:"external"`
+			Internal bool `yaml:"internal"`
 		} `yaml:"networks"`
 	}
 	if err := yaml.Unmarshal([]byte(out), &compose); err != nil {
@@ -50,8 +51,10 @@ func TestCreateProtectedProxyDockerComposeFile(t *testing.T) {
 	if svc.Restart != "always" {
 		t.Errorf("restart = %q, want always", svc.Restart)
 	}
-	if len(svc.Networks) != 1 || svc.Networks[0] != "bitswan_network" {
-		t.Errorf("networks = %v, want [bitswan_network]", svc.Networks)
+	// The proxy needs bitswan_network (Traefik + the daemon gate) AND the
+	// private session network (redis).
+	if len(svc.Networks) != 2 || svc.Networks[0] != "bitswan_network" || svc.Networks[1] != "protected-proxy-session" {
+		t.Errorf("networks = %v, want [bitswan_network protected-proxy-session]", svc.Networks)
 	}
 	// Traefik reaches it over the network — no published ports, no mounts.
 	if len(svc.Ports) != 0 {
@@ -62,6 +65,24 @@ func TestCreateProtectedProxyDockerComposeFile(t *testing.T) {
 	}
 	if !compose.Networks["bitswan_network"].External {
 		t.Errorf("bitswan_network must be external")
+	}
+
+	// Redis has no auth, so it must be reachable ONLY from the proxy: never on
+	// bitswan_network (shared with user-controlled workspace containers), only
+	// on the compose-private internal network.
+	redis, ok := compose.Services["bitswan-protected-proxy-redis"]
+	if !ok {
+		t.Fatalf("compose missing bitswan-protected-proxy-redis service:\n%s", out)
+	}
+	if len(redis.Networks) != 1 || redis.Networks[0] != "protected-proxy-session" {
+		t.Errorf("redis networks = %v, want [protected-proxy-session] only", redis.Networks)
+	}
+	priv, ok := compose.Networks["protected-proxy-session"]
+	if !ok {
+		t.Fatalf("compose missing protected-proxy-session network:\n%s", out)
+	}
+	if priv.External || !priv.Internal {
+		t.Errorf("protected-proxy-session must be a compose-private internal network (external=%v internal=%v)", priv.External, priv.Internal)
 	}
 
 	// Env is rendered sorted for deterministic drift detection.
