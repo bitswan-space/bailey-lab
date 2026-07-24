@@ -25,6 +25,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
             BITSWAN_DEPLOYMENT_ID: backend-copy-bar-acme-live-dev
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_INTERNAL_HOSTNAME: ws4-backend-4337-live-dev
             BITSWAN_URL_TEMPLATE: https://ws4-{name}-4337-live-dev.example.com
             BITSWAN_WORKER_HOSTS: backend=ws4-fwgw-4337-live-dev:8080
             BITSWAN_WORKSPACE_NAME: ws4
@@ -71,6 +72,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
             BITSWAN_DEPLOYMENT_ID: frontend-copy-bar-acme-live-dev
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_INTERNAL_HOSTNAME: ws4-frontend-4337-live-dev
             BITSWAN_URL_PREFIX: https://ws4-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws4-{name}-4337-live-dev.example.com

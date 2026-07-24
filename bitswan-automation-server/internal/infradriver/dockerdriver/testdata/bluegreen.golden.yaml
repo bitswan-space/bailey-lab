@@ -23,6 +23,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: shop
             BITSWAN_DEPLOYMENT_ID: backend-shop
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_INTERNAL_HOSTNAME: ws2-backend-8d90-production-blue
             BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-blue.example.com
             BITSWAN_WORKER_HOSTS: backend=ws2-fwgw-8d90-production-blue:8081
             BITSWAN_WORKSPACE_NAME: ws2
@@ -69,6 +70,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: shop
             BITSWAN_DEPLOYMENT_ID: backend-shop@green
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_INTERNAL_HOSTNAME: ws2-backend-8d90-production-green
             BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-green.example.com
             BITSWAN_WORKER_HOSTS: backend=ws2-fwgw-8d90-production-green:8081
             BITSWAN_WORKSPACE_NAME: ws2
@@ -114,6 +116,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: shop
             BITSWAN_DEPLOYMENT_ID: frontend-shop
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_INTERNAL_HOSTNAME: ws2-frontend-8d90-production-blue
             BITSWAN_URL_PREFIX: https://ws2-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-blue.example.com
@@ -160,6 +163,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: shop
             BITSWAN_DEPLOYMENT_ID: frontend-shop@green
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_INTERNAL_HOSTNAME: ws2-frontend-8d90-production-green
             BITSWAN_URL_PREFIX: https://ws2-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-green.example.com

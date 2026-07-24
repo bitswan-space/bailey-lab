@@ -365,6 +365,12 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	env["DEPLOYMENT_ID"] = effectiveDepID
 	env["BITSWAN_AUTOMATION_STAGE"] = stage
 	env["BITSWAN_DEPLOYMENT_ID"] = effectiveDepID
+	// The container's own workspace-internal DNS name. Dev servers that
+	// vet the Host header (vite allowedHosts) need it to accept direct
+	// in-network requests — e.g. the coding agent's browser tooling (#210)
+	// hitting a live-dev frontend by hostname instead of the gated public
+	// domain.
+	env["BITSWAN_INTERNAL_HOSTNAME"] = serviceName
 
 	if wh := workerHosts[fwKey{depCtx, depStage, slot}]; len(wh) > 0 {
 		env["BITSWAN_WORKER_HOSTS"] = strings.Join(wh, ",")

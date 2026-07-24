@@ -10,6 +10,11 @@ import react from '@vitejs/plugin-react'
 // rather than letting it guess the internal dev port. The shim and the Bailey
 // gate both proxy the HMR websocket through to vite.
 const gitopsDomain = process.env.BITSWAN_GITOPS_DOMAIN
+// The workspace-internal DNS name of this container (set by the infra
+// driver). Allowing it lets in-network clients — above all the coding
+// agent's browser tooling — reach the dev server directly by hostname,
+// without the public gate.
+const internalHostname = process.env.BITSWAN_INTERNAL_HOSTNAME
 
 export default defineConfig({
   plugins: [react()],
@@ -17,7 +22,10 @@ export default defineConfig({
   server: {
     host: '127.0.0.1',
     port: Number(process.env.VITE_PORT || 5173),
-    allowedHosts: gitopsDomain ? ['.' + gitopsDomain] : [],
+    allowedHosts: [
+      ...(gitopsDomain ? ['.' + gitopsDomain] : []),
+      ...(internalHostname ? [internalHostname] : []),
+    ],
     hmr: {
       protocol: 'wss',
       clientPort: Number(process.env.VITE_HMR_CLIENT_PORT ?? 443),

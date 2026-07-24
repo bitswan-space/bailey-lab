@@ -49,6 +49,31 @@ RUN apt-get update && apt-get install -y asciinema && rm -rf /var/lib/apt/lists/
 ARG CLAUDE_CODE_VERSION=2.1.197
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# Playwright MCP server + headless Chromium (#210) so Claude Code can drive a
+# browser through first-class MCP tools (browser_navigate,
+# browser_console_messages, browser_take_screenshot, …) and diagnose frontend
+# issues itself. Pinned like CLAUDE_CODE_VERSION above. The MCP package ships
+# its own playwright dependency (an alpha by their release model) and wants
+# the chrome-for-testing distribution, so the browser is installed with the
+# MCP's own install-browser command — a standalone `playwright install` puts
+# browsers at revisions the server refuses to use. One browser serves both
+# access paths: the MCP server (seeded .mcp.json passes --browser chromium)
+# and ad-hoc scripts, which require('playwright') via NODE_PATH (CommonJS
+# only — the ESM loader ignores NODE_PATH) and must launch with
+# { channel: 'chromium' } to target chrome-for-testing. Chromium needs
+# --no-sandbox here (no user namespaces); wired into the seeded .mcp.json.
+# Browsers go to a world-readable
+# shared path: this build step runs as root, but sessions run as the agent
+# user. These ENVs must also reach SSH sessions — entrypoint-agent.sh exports
+# them in /etc/profile.d.
+ARG PLAYWRIGHT_MCP_VERSION=0.0.78
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+    NODE_PATH=/usr/lib/node_modules/@playwright/mcp/node_modules:/usr/lib/node_modules
+RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
+    && playwright-mcp install-browser --with-deps chrome-for-testing \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy bitswan-coding-agent binary from builder
 COPY --from=builder /bitswan-coding-agent /usr/local/bin/bitswan-coding-agent
 
@@ -67,6 +92,13 @@ RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
 # Create workspace directories
 RUN mkdir -p /workspace/copies /var/log/agent-sessions \
     && chown -R agent:agent /workspace /var/log/agent-sessions
+
+# Default per-copy .mcp.json — entrypoint-agent.sh seeds it into copies that
+# don't have one, as a user-ownable bootstrap they may extend with their own
+# MCP servers. (Claude Code's managed-mcp.json is deliberately not used: it
+# takes exclusive control and would block user-added servers.) A bind mount
+# over the /etc/bitswan file — the pre-existing operator hook — still wins.
+COPY mcp.default.json /etc/bitswan/mcp.json
 
 # Copy session wrapper script
 COPY agent-session-wrapper /usr/local/bin/agent-session-wrapper

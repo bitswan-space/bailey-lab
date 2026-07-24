@@ -88,6 +88,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: acme-dev
             BITSWAN_DEPLOYMENT_ID: backend-acme-dev
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_INTERNAL_HOSTNAME: ws1-backend-822b-dev
             BITSWAN_URL_TEMPLATE: https://ws1-{name}-822b-dev.example.com
             BITSWAN_WORKER_HOSTS: backend=ws1-fwgw-822b-dev:8080
             BITSWAN_WORKSPACE_NAME: ws1
@@ -131,6 +132,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: acme-dev
             BITSWAN_DEPLOYMENT_ID: frontend-acme-dev
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_INTERNAL_HOSTNAME: ws1-frontend-822b-dev
             BITSWAN_URL_PREFIX: https://ws1-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws1-{name}-822b-dev.example.com

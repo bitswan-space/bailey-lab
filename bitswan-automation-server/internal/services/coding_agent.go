@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
 	"gopkg.in/yaml.v3"
 )
@@ -119,6 +120,12 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 		)
 	}
 
+	// The dev stage network lets the agent's browser tooling (#210) reach
+	// deployed dev/live-dev frontends by service hostname. Deliberately NOT
+	// staging/production — the agent works on dev copies and gets no lateral
+	// reach into the higher stages.
+	devNetwork := c.devNetworkName()
+
 	bitswanCodingAgent := map[string]interface{}{
 		"image":   codingAgentImage,
 		"restart": "always",
@@ -129,7 +136,7 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 		// 401-ing every /agent/* request.
 		"container_name": workspaceName + "-coding-agent",
 		"hostname":       workspaceName + "-coding-agent",
-		"networks":       []string{"bitswan_network"},
+		"networks":       []string{"bitswan_network", devNetwork},
 		"environment":    envVars,
 		"volumes":        volumes,
 	}
@@ -142,6 +149,9 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
+				"external": true,
+			},
+			devNetwork: map[string]interface{}{
 				"external": true,
 			},
 		},
@@ -280,9 +290,21 @@ func (c *CodingAgentService) IsContainerRunning() bool {
 }
 
 // StartContainer starts the Coding Agent containers
+// devNetworkName is the workspace's dev stage network. The driver ensures it
+// when it deploys something there; the compose here declares it external, so
+// StartContainer must ensure it too or a fresh workspace's coding agent
+// can't come up before the first deployment.
+func (c *CodingAgentService) devNetworkName() string {
+	return c.WorkspaceName + "-dev"
+}
+
 func (c *CodingAgentService) StartContainer() error {
 	deploymentDir := filepath.Join(c.WorkspacePath, "deployment")
 	projectName := c.WorkspaceName + "-coding-agent"
+
+	if _, err := docker.EnsureDockerNetwork(c.devNetworkName(), false); err != nil {
+		return fmt.Errorf("failed to ensure %s network: %w", c.devNetworkName(), err)
+	}
 
 	cmd := exec.Command("docker", "compose", "-f", "docker-compose-coding-agent.yml", "-p", projectName, "up", "-d")
 	cmd.Dir = deploymentDir
@@ -344,6 +366,28 @@ func (c *CodingAgentService) UpdateImage(newImage string) error {
 	if services, ok := compose["services"].(map[string]interface{}); ok {
 		if codingAgentService, ok := services["bitswan-coding-agent"].(map[string]interface{}); ok {
 			codingAgentService["image"] = newImage
+			// Compose files written before the dev-network attachment
+			// (#210) lack it — patch it in so existing installs pick it
+			// up on their next image update.
+			devNet := c.devNetworkName()
+			nets, _ := codingAgentService["networks"].([]interface{})
+			hasDev := false
+			for _, n := range nets {
+				if n == devNet {
+					hasDev = true
+				}
+			}
+			if !hasDev {
+				codingAgentService["networks"] = append(nets, devNet)
+			}
+			topNets, ok := compose["networks"].(map[string]interface{})
+			if !ok {
+				topNets = map[string]interface{}{}
+			}
+			if _, ok := topNets[devNet]; !ok {
+				topNets[devNet] = map[string]interface{}{"external": true}
+				compose["networks"] = topNets
+			}
 		} else {
 			return fmt.Errorf("bitswan-coding-agent service not found in docker-compose-coding-agent.yml")
 		}

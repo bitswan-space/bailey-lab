@@ -88,6 +88,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: acme-staging
             BITSWAN_DEPLOYMENT_ID: backend-acme-staging
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_INTERNAL_HOSTNAME: ws3-backend-822b-staging
             BITSWAN_URL_TEMPLATE: https://ws3-{name}-822b-staging.example.com
             BITSWAN_WORKER_HOSTS: backend=ws3-fwgw-822b-staging:8081
             BITSWAN_WORKSPACE_NAME: ws3
@@ -136,6 +137,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: acme-staging
             BITSWAN_DEPLOYMENT_ID: frontend-acme-staging
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_INTERNAL_HOSTNAME: ws3-frontend-822b-staging
             BITSWAN_URL_PREFIX: https://ws3-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws3-{name}-822b-staging.example.com

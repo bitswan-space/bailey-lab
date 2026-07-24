@@ -43,6 +43,28 @@ if [ -f /etc/bitswan/CLAUDE.md ]; then
     done
 fi
 
+# Seed the Playwright browser MCP config (.mcp.json, #210) into each copy's
+# app root — the directory agent sessions start in; Claude Code only
+# auto-loads it from there. Seed-if-missing: the file is a user-ownable
+# bootstrap they may extend with their own MCP servers. Copies nest as
+# copies/<copy>/<app>/, so locate app roots by their process.toml instead
+# of assuming a directory depth. Seeded/generated files are kept out of
+# the copy's git status via .git/info/exclude (local-only ignore).
+while IFS= read -r toml; do
+    wt="$(dirname "$toml")"
+    if [ -f /etc/bitswan/mcp.json ] && [ ! -f "$wt/.mcp.json" ]; then
+        cp /etc/bitswan/mcp.json "$wt/.mcp.json"
+        chown agent:agent "$wt/.mcp.json"
+    fi
+    if [ -d "$wt/.git" ]; then
+        exclude="$wt/.git/info/exclude"
+        mkdir -p "$wt/.git/info"
+        for pat in /.mcp.json /.playwright-mcp/; do
+            grep -qxF "$pat" "$exclude" 2>/dev/null || echo "$pat" >> "$exclude"
+        done
+    fi
+done < <(find /workspace/copies -mindepth 2 -maxdepth 3 -name process.toml 2>/dev/null)
+
 # Ensure correct permissions
 chown -R agent:agent /home/agent
 chown -R agent:agent /var/log/agent-sessions
@@ -58,6 +80,10 @@ export BITSWAN_AGENT_MODE=true
     echo "export BITSWAN_GIT_REMOTE=\"$BITSWAN_GIT_REMOTE\""
     echo "export BITSWAN_WORKSPACE_NAME=\"$BITSWAN_WORKSPACE_NAME\""
     echo "export BITSWAN_AGENT_MODE=true"
+    # Playwright lives at Dockerfile-ENV paths; SSH sessions don't inherit
+    # container env, so re-export here or the agent can't find the browser.
+    echo "export PLAYWRIGHT_BROWSERS_PATH=\"${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}\""
+    echo "export NODE_PATH=\"${NODE_PATH:-/usr/lib/node_modules}\""
 } > /etc/profile.d/bitswan-agent.sh
 chmod 644 /etc/profile.d/bitswan-agent.sh
 
