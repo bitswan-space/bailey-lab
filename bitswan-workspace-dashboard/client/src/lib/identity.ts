@@ -31,9 +31,17 @@ function fetchIdentity(slug: string): Promise<Identity> {
     .then((r) => (r.ok ? (r.json() as Promise<Identity>) : null))
     .catch(() => null)
     .then((d) => {
-      const v: Identity = d ?? EMPTY;
-      cache[slug] = v;
-      return v;
+      if (d) {
+        // Cache successful lookups — including the AOC's negative answer
+        // ({email: ''}), which genuinely means "custom copy".
+        cache[slug] = d;
+        return d;
+      }
+      // A network/HTTP failure is NOT a negative answer: caching it would pin
+      // this copy as a mono slug under "Custom copies" until a full page
+      // reload. Drop the in-flight entry so the next mount retries.
+      delete cache[slug];
+      return EMPTY;
     });
   cache[slug] = p;
   return p;
