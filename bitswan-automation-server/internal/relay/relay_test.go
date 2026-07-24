@@ -107,7 +107,7 @@ func TestEndToEndPassthrough(t *testing.T) {
 	relayCert, relayDER := selfSigned(t, "relay")
 	relayFP := fmt.Sprintf("%x", sha256.Sum256(relayDER))
 	srv := NewServer("127.0.0.1:0", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{relayCert}},
-		func(_, token, sub string) error {
+		func(token, sub string) error {
 			if token != "good-token" || sub != domain {
 				return fmt.Errorf("bad token/sub")
 			}

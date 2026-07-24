@@ -37,9 +37,13 @@ type Server struct {
 	// observer and cannot be MITM'd.
 	TunnelTLS *tls.Config
 	// ValidateToken confirms a Bailey's AOC token really belongs to the
-	// subdomain it claims, by asking the AOC. Injected so the binary that hosts
-	// the relay needn't hard-depend on the AOC client wiring.
-	ValidateToken func(aocApiURL, token, subdomain string) error
+	// subdomain it claims, by asking the AOC. The AOC endpoint it queries is the
+	// relay's OWN configuration (see cmd/relay) — NEVER a URL taken from the
+	// register frame, since a caller could otherwise nominate an authority that
+	// rubber-stamps any subdomain and hijack another server's tunnel. Injected
+	// so the binary that hosts the relay needn't hard-depend on the AOC client
+	// wiring.
+	ValidateToken func(token, subdomain string) error
 
 	mu       sync.RWMutex
 	tunnels  map[string]*tunnel  // subdomain -> live control channel
@@ -55,7 +59,7 @@ type tunnel struct {
 }
 
 // NewServer builds a relay. Both addrs and TunnelTLS/ValidateToken are required.
-func NewServer(tunnelAddr, passthroughAddr string, tunnelTLS *tls.Config, validate func(string, string, string) error) *Server {
+func NewServer(tunnelAddr, passthroughAddr string, tunnelTLS *tls.Config, validate func(string, string) error) *Server {
 	return &Server{
 		TunnelAddr:      tunnelAddr,
 		PassthroughAddr: passthroughAddr,
@@ -150,12 +154,15 @@ func (s *Server) handleTunnelConn(conn net.Conn) {
 
 func (s *Server) handleRegister(conn net.Conn, br *bufio.Reader, f frame) {
 	sub := strings.ToLower(strings.TrimSpace(f.Subdomain))
-	if sub == "" || f.Token == "" || f.AOCApiURL == "" {
-		_ = writeFrame(conn, frame{Type: frameError, Message: "register requires token, aoc_api_url and subdomain"})
+	if sub == "" || f.Token == "" {
+		_ = writeFrame(conn, frame{Type: frameError, Message: "register requires token and subdomain"})
 		conn.Close()
 		return
 	}
-	if err := s.ValidateToken(f.AOCApiURL, f.Token, sub); err != nil {
+	// NB: f.AOCApiURL is deliberately NOT used here — the relay validates against
+	// its own configured AOC (injected into ValidateToken), never a URL the
+	// connecting client chose.
+	if err := s.ValidateToken(f.Token, sub); err != nil {
 		log.Printf("relay: rejecting registration for %q: %v", sub, err)
 		_ = writeFrame(conn, frame{Type: frameError, Message: "token/subdomain validation failed"})
 		conn.Close()

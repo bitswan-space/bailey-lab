@@ -40,13 +40,17 @@ func NewRelayCmd() *cobra.Command {
 }
 
 func newServeCmd() *cobra.Command {
-	var tunnelAddr, passthroughAddr, certDir string
+	var tunnelAddr, passthroughAddr, certDir, aocAPI string
 
 	cmd := &cobra.Command{
 		Use:          "serve",
 		Short:        "Run the relay (tunnel + SNI passthrough listeners)",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			aocAPI = strings.TrimRight(strings.TrimSpace(aocAPI), "/")
+			if aocAPI == "" {
+				return fmt.Errorf("--aoc-api is required: the relay validates each Bailey's token against THIS AOC and must never trust an AOC URL supplied by the connecting client")
+			}
 			cert, fp, err := loadOrCreateCert(certDir)
 			if err != nil {
 				return err
@@ -59,7 +63,15 @@ func newServeCmd() *cobra.Command {
 				MinVersion:   tls.VersionTLS12,
 			}
 
-			srv := relaysvc.NewServer(tunnelAddr, passthroughAddr, tunnelTLS, validateTokenAgainstAOC)
+			// Validate every registration against the relay's OWN configured AOC
+			// (aocAPI), NEVER the aoc_api_url in the register frame — that value
+			// is client-controlled and could point at an authority that
+			// rubber-stamps any subdomain, letting an attacker hijack another
+			// server's tunnel.
+			validate := func(token, subdomain string) error {
+				return validateTokenAgainstAOC(aocAPI, token, subdomain)
+			}
+			srv := relaysvc.NewServer(tunnelAddr, passthroughAddr, tunnelTLS, validate)
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
@@ -69,6 +81,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tunnelAddr, "tunnel-addr", ":8443", "Public address Baileys dial for the tunnel (TLS)")
 	cmd.Flags().StringVar(&passthroughAddr, "passthrough-addr", ":9443", "Address Traefik forwards browser streams to (SNI passthrough)")
 	cmd.Flags().StringVar(&certDir, "cert-dir", "/var/lib/bitswan-relay", "Where the relay's self-signed tunnel cert is stored")
+	cmd.Flags().StringVar(&aocAPI, "aoc-api", "", "AOC base URL the relay validates Bailey tokens against (required; must be the real AOC, never taken from the connecting client)")
 	return cmd
 }
 

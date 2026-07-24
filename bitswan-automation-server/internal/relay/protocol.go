@@ -40,7 +40,7 @@ type frame struct {
 
 	// register
 	Token     string `json:"token,omitempty"`     // the Bailey's AOC access token
-	AOCApiURL string `json:"aoc_api_url,omitempty"` // AOC base URL the relay validates against
+	AOCApiURL string `json:"aoc_api_url,omitempty"` // AOC base URL (informational only; the relay validates against its OWN configured AOC, never this client-supplied value)
 	Subdomain string `json:"subdomain,omitempty"` // the server's *.bswn.io domain
 
 	// open / data
