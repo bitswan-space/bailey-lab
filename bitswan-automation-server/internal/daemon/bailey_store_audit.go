@@ -30,6 +30,12 @@ const (
 	// a revoke at all.
 	auditAccessGrant  = "access.grant"  // a principal was granted access/owner on an endpoint
 	auditAccessRevoke = "access.revoke" // a principal's grant on an endpoint was removed
+
+	// Second-factor verification abuse (issue #188 / BSY-12). Every failed
+	// TOTP / backup-code / recovery attempt is recorded so it reaches the SIEM;
+	// lockout marks the point a per-account/per-IP cooldown was triggered.
+	audit2FAFailed  = "2fa.verify_failed" // a 2FA verification attempt failed (brute-force signal)
+	audit2FALockout = "2fa.lockout"       // too many failures → per-account/per-IP cooldown engaged
 )
 
 // eventRecord is one audit row, JSON-shaped for the overview feed.
