@@ -125,11 +125,34 @@ func protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSec
 		"OAUTH2_PROXY_REVERSE_PROXY":        "true",
 		"OAUTH2_PROXY_PASS_USER_HEADERS":    "true",
 		"OAUTH2_PROXY_PASS_HOST_HEADER":     "true",
-		"OAUTH2_PROXY_SCOPE":                "openid email profile",
+		// offline_access makes Keycloak issue an OFFLINE refresh token: it
+		// survives browser close and the SSO session's idle death, so oauth2-proxy
+		// can keep the session alive indefinitely by refreshing it — transparently,
+		// with the app behind the proxy none the wiser. Combined with realm-side
+		// single-use refresh-token rotation, each transparent refresh rotates the
+		// token, so a stolen cookie's next refresh collides with ours (breach
+		// detection) and only one holder survives.
+		"OAUTH2_PROXY_SCOPE":                "openid email profile offline_access",
 		"OAUTH2_PROXY_OIDC_GROUPS_CLAIM":    "group_membership",
 		"OAUTH2_PROXY_SKIP_PROVIDER_BUTTON": "true",
 		"OAUTH2_PROXY_COOKIE_SECURE":        "true",
-		"OAUTH2_PROXY_COOKIE_REFRESH":       "4m",
+		// Server-side session store so oauth2-proxy can hold a per-session refresh
+		// lock: concurrent requests serialize on refresh (one rotates the token,
+		// the rest reuse the result), which is what makes single-use refresh-token
+		// rotation safe. Without it, parallel requests replay the pre-rotation
+		// token and Keycloak revokes the session (spurious logout).
+		"OAUTH2_PROXY_SESSION_STORE_TYPE":   "redis",
+		"OAUTH2_PROXY_REDIS_CONNECTION_URL": "redis://bitswan-protected-proxy-redis:6379",
+		// Refresh the token well before it expires (must stay < the realm's
+		// access-token lifespan). On each refresh oauth2-proxy re-issues the
+		// cookie with a fresh COOKIE_EXPIRE window, so an actively-used session
+		// rolls forward and never forces a re-login.
+		"OAUTH2_PROXY_COOKIE_REFRESH": "4m",
+		// A long absolute cookie lifetime so the session survives long idle gaps
+		// (backed by the non-expiring offline refresh token). Rolled forward on
+		// every refresh; the real ceiling is the offline session, which the realm
+		// keeps effectively unbounded.
+		"OAUTH2_PROXY_COOKIE_EXPIRE": "8760h",
 		"OAUTH2_PROXY_SET_XAUTHREQUEST":     "true",
 		"OAUTH2_PROXY_PASS_ACCESS_TOKEN":    "true",
 		// SECURITY (issue #127): the gate strips the proxy-injected
@@ -149,10 +172,27 @@ func protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSec
 		// (or a second *.domain host) starting its own handshake clobbers the
 		// first flow's cookie and that flow 403s at /oauth2/callback right
 		// after the Keycloak login (issue #47). Per-request gives each flow
-		// its own cookie; 1h (default 15m) keeps a login form that sat open a
-		// while redeemable instead of 403ing the same way.
+		// its own cookie.
 		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST": "true",
-		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE":      "1h",
+		// But per-request cookies are UNIQUELY named (_oauth2_proxy_<nonce>_csrf)
+		// and scoped to the parent cookie_domain, so a handshake that never
+		// reaches /oauth2/callback (abandoned tab, prefetch, superseded redirect,
+		// a background *.domain host) orphans its cookie for the full expiry —
+		// and the browser then replays EVERY orphan to EVERY *.domain host on
+		// every request. Left unbounded they stack up until the request header
+		// blows past the ingress limit and the whole app starts returning
+		// 431 Request Header Fields Too Large (observed live). PER_REQUEST_LIMIT
+		// hard-caps how many CSRF cookies can exist at once: on each new
+		// handshake oauth2-proxy evicts the oldest beyond the cap, so the header
+		// contribution is bounded (~5 cookies) no matter how many logins churn
+		// through. This needs oauth2-proxy >= the version pinned in
+		// dockercompose.go (added mid-7.1x; earlier images silently ignore it).
+		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST_LIMIT": "5",
+		// 1h (default 15m) keeps a Keycloak login form that sat open a while
+		// redeemable instead of 403ing at /oauth2/callback (the issue #47
+		// follow-up). The PER_REQUEST_LIMIT above bounds the orphan pile-up
+		// regardless of lifetime, so the longer expiry costs nothing.
+		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE": "1h",
 	}
 }
 

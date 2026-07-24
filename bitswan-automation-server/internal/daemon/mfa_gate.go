@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // MFA gate constants + origin-cookie helpers.
@@ -137,6 +138,15 @@ func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
 
 	if dev := currentDeviceForRequest(r, email); dev != nil {
 		touchDevice(email, dev.ID)
+		// Roll the device cookie's browser expiry forward on active use.
+		// Browsers clamp cookie lifetime to ~400 days regardless of the Expires
+		// we set, so a long-lived cookie would still age out and silently drop
+		// device trust. Re-issuing on use (throttled to once/day so we don't add
+		// Set-Cookie to every response) keeps a trusted device trusted FOREVER —
+		// only an explicit revoke (deleting the device row) ends it.
+		if deviceCookieOlderThan(r, 24*time.Hour) {
+			_ = setDeviceCookie(w, r, email, dev.ID)
+		}
 		return true
 	}
 

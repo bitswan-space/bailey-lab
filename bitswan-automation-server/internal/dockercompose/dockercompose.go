@@ -483,22 +483,54 @@ func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error
 	}
 
 	proxyService := map[string]interface{}{
-		"image":          "quay.io/oauth2-proxy/oauth2-proxy:v7.7.1",
+		"image":          "quay.io/oauth2-proxy/oauth2-proxy:v7.15.3",
 		"restart":        "always",
 		"container_name": "bitswan-protected-proxy",
-		"networks":       []string{"bitswan_network"},
+		"networks":       []string{"bitswan_network", "protected-proxy-session"},
 		"environment":    envList,
+		"depends_on":     []string{"bitswan-protected-proxy-redis"},
+	}
+
+	// Redis session store. oauth2-proxy holds a per-session refresh LOCK in
+	// redis, so concurrent requests can't refresh the same token at once — the
+	// first refreshes, the rest wait and use the rotated token. Without this,
+	// single-use refresh-token rotation (revokeRefreshToken) self-destructs: a
+	// browser's parallel requests each replay the pre-rotation token, Keycloak
+	// sees reuse and revokes the whole session (spurious logout). Persisted to a
+	// volume with AOF so a redis restart doesn't evict sessions and force
+	// re-login.
+	//
+	// SECURITY: redis runs with no auth, so it must NOT join bitswan_network —
+	// every workspace's gitops/infra-driver container (running user-controlled
+	// code) is on that network, and an open redis there would let any workspace
+	// FLUSHALL every user's session or delete the per-session refresh locks
+	// (reintroducing the rotation race this store exists to fix). It lives on a
+	// compose-private, internal (no egress) network shared only with the proxy.
+	redisService := map[string]interface{}{
+		"image":          "redis:7-alpine",
+		"restart":        "always",
+		"container_name": "bitswan-protected-proxy-redis",
+		"networks":       []string{"protected-proxy-session"},
+		"command":        []string{"redis-server", "--appendonly", "yes"},
+		"volumes":        []string{"bitswan-protected-proxy-redis:/data"},
 	}
 
 	dockerCompose := map[string]interface{}{
 		"version": "3.8",
 		"services": map[string]interface{}{
-			"bitswan-protected-proxy": proxyService,
+			"bitswan-protected-proxy":       proxyService,
+			"bitswan-protected-proxy-redis": redisService,
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
 				"external": true,
 			},
+			"protected-proxy-session": map[string]interface{}{
+				"internal": true,
+			},
+		},
+		"volumes": map[string]interface{}{
+			"bitswan-protected-proxy-redis": map[string]interface{}{},
 		},
 	}
 
