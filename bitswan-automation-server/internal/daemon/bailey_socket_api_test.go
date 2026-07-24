@@ -16,6 +16,11 @@ import (
 // so we exercise them directly with httptest against the test bailey.db that
 // TestMain provisions.
 
+// tSockAdminTok is the admin bearer the mutating socket handlers now require
+// (#189). jsonReq sends it so the existing happy/again-error paths still
+// reach their handlers; the rejection path is covered separately.
+const tSockAdminTok = "test-admin-token"
+
 func jsonReq(method, path string, body any) *http.Request {
 	var r *http.Request
 	if body != nil {
@@ -25,6 +30,7 @@ func jsonReq(method, path string, body any) *http.Request {
 	} else {
 		r = httptest.NewRequest(method, path, nil)
 	}
+	r.Header.Set("Authorization", "Bearer "+tSockAdminTok)
 	return r
 }
 
@@ -74,7 +80,7 @@ func TestApprovePendingPairByCode(t *testing.T) {
 }
 
 func TestHandleDeviceApprove(t *testing.T) {
-	s := &Server{}
+	s := &Server{token: tSockAdminTok}
 	email := "dev-approve@example.com"
 	_ = dbDeletePendingPairByEmail(email)
 	e, err := generatePendingPair(email)
@@ -134,6 +140,7 @@ func TestHandleDeviceApprove(t *testing.T) {
 	// Bad body → 400.
 	w = httptest.NewRecorder()
 	bad := httptest.NewRequest(http.MethodPost, "/bailey/devices/approve", strings.NewReader("{not json"))
+	bad.Header.Set("Authorization", "Bearer "+tSockAdminTok)
 	s.handleDeviceApprove(w, bad)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("bad body = %d, want 400", w.Code)
@@ -148,7 +155,7 @@ func TestHandleDeviceApprove(t *testing.T) {
 }
 
 func TestHandleDevicesPending(t *testing.T) {
-	s := &Server{}
+	s := &Server{token: tSockAdminTok}
 	email := "pending-list@example.com"
 	_ = dbDeletePendingPairByEmail(email)
 	if _, err := generatePendingPair(email); err != nil {
@@ -185,7 +192,7 @@ func TestHandleDevicesPending(t *testing.T) {
 // --- endpoint access grants ------------------------------------------------
 
 func TestHandleAccessGrantRevokeList(t *testing.T) {
-	s := &Server{}
+	s := &Server{token: tSockAdminTok}
 	host := "access-cli.example.com"
 	owner := "owner@example.com"
 	user := "grantee@example.com"
@@ -245,7 +252,7 @@ func TestHandleAccessGrantRevokeList(t *testing.T) {
 }
 
 func TestHandleAccessGrantErrors(t *testing.T) {
-	s := &Server{}
+	s := &Server{token: tSockAdminTok}
 
 	// Unknown endpoint → 404.
 	w := httptest.NewRecorder()
@@ -288,5 +295,44 @@ func TestHandleAccessGrantErrors(t *testing.T) {
 	s.handleAccessRevoke(w, httptest.NewRequest(http.MethodGet, "/bailey/access/revoke", nil))
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET revoke = %d, want 405", w.Code)
+	}
+}
+
+// TestSocketMutationsRequireAdminToken pins the #189 / BSY-13 fix: the device
+// approval and ACL grant/revoke socket handlers must reject a caller that
+// reaches the socket without a valid admin token (a first-party container),
+// even though authMiddleware trusts the socket transport itself.
+func TestSocketMutationsRequireAdminToken(t *testing.T) {
+	s := &Server{token: tSockAdminTok}
+	noAuth := func(path string, body any) *http.Request {
+		b, _ := json.Marshal(body)
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(b)))
+		r.Header.Set("Content-Type", "application/json")
+		return r // deliberately NO Authorization header
+	}
+	cases := []struct {
+		name string
+		fn   func(http.ResponseWriter, *http.Request)
+		path string
+		body any
+	}{
+		{"device-approve", s.handleDeviceApprove, "/bailey/devices/approve", map[string]string{"code": "123456"}},
+		{"access-grant", s.handleAccessGrant, "/bailey/access/grant", map[string]string{"host": "h.example.com", "principal": "x@example.com"}},
+		{"access-revoke", s.handleAccessRevoke, "/bailey/access/revoke", map[string]string{"host": "h.example.com", "principal": "x@example.com"}},
+	}
+	for _, c := range cases {
+		w := httptest.NewRecorder()
+		c.fn(w, noAuth(c.path, c.body))
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s without admin token = %d, want 403", c.name, w.Code)
+		}
+	}
+	// A wrong bearer is rejected too (not just a missing one).
+	w := httptest.NewRecorder()
+	r := noAuth("/bailey/access/grant", map[string]string{"host": "h.example.com", "principal": "x@example.com"})
+	r.Header.Set("Authorization", "Bearer not-the-admin-token")
+	s.handleAccessGrant(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("access-grant with wrong token = %d, want 403", w.Code)
 	}
 }

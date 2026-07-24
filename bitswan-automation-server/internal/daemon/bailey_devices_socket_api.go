@@ -34,6 +34,15 @@ func (s *Server) handleDeviceApprove(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// BSY-13 / #189: the daemon socket is mounted into first-party workspace
+	// containers, and authMiddleware trusts any socket peer — so approving a
+	// device (minting trust, attributed to the root admin) must additionally
+	// require the admin token, exactly like the workspace secret-read path.
+	// Without it a compromised first-party container could self-approve a device.
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "approving a device requires the automation-server admin token (run the bitswan CLI on the host, or pass the daemon token as a bearer token)", http.StatusForbidden)
+		return
+	}
 	var req DeviceApproveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)

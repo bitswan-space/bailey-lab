@@ -46,6 +46,15 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// BSY-13 / #189: the daemon socket is reachable by first-party workspace
+	// containers and authMiddleware trusts any socket peer, so granting ACL
+	// access (attributed to the root admin) must additionally require the admin
+	// token — otherwise a compromised first-party container could grant itself
+	// access. Mirrors the workspace secret-read hardening.
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "granting access requires the automation-server admin token (run the bitswan CLI on the host, or pass the daemon token as a bearer token)", http.StatusForbidden)
+		return
+	}
 	var req AccessGrantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -92,6 +101,13 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// BSY-13 / #189: revoking a grant is the same privileged, socket-reachable
+	// ACL mutation as granting one, so gate it on the admin token too — a
+	// first-party container must not be able to revoke access either.
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "revoking access requires the automation-server admin token (run the bitswan CLI on the host, or pass the daemon token as a bearer token)", http.StatusForbidden)
 		return
 	}
 	var req AccessGrantRequest
