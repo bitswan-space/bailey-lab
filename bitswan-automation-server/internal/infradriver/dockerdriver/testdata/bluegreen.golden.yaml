@@ -43,6 +43,7 @@ services:
             gitops.slot: blue
             gitops.stage: production
             gitops.workspace: ws2
+        mem_limit: 1024m
         network_mode: service:ws2-fwgw-8d90-production-blue
         restart: always
         ulimits:
@@ -89,6 +90,7 @@ services:
             gitops.slot: green
             gitops.stage: production
             gitops.workspace: ws2
+        mem_limit: 1024m
         network_mode: service:ws2-fwgw-8d90-production-green
         restart: always
         ulimits:
@@ -135,6 +137,7 @@ services:
             gitops.slot: blue
             gitops.stage: production
             gitops.workspace: ws2
+        mem_limit: 1024m
         network_mode: service:ws2-fwgw-8d90-production-blue
         restart: always
         ulimits:
@@ -181,6 +184,7 @@ services:
             gitops.slot: green
             gitops.stage: production
             gitops.workspace: ws2
+        mem_limit: 1024m
         network_mode: service:ws2-fwgw-8d90-production-green
         restart: always
         ulimits:

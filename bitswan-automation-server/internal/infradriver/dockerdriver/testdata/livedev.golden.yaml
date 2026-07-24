@@ -48,6 +48,7 @@ services:
             gitops.slot: ""
             gitops.stage: live-dev
             gitops.workspace: ws4
+        mem_limit: 1024m
         network_mode: service:ws4-fwgw-4337-live-dev
         restart: always
         ulimits:
@@ -95,6 +96,7 @@ services:
             gitops.slot: ""
             gitops.stage: live-dev
             gitops.workspace: ws4
+        mem_limit: 1024m
         networks:
             ws4-dev:
                 aliases:

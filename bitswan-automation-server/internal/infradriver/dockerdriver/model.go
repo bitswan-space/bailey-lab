@@ -68,6 +68,11 @@ type Deployment struct {
 	// memPolicy in entry.go).
 	MemoryReservation *int   `yaml:"memory_reservation"`
 	MemPolicy         string `yaml:"memory_reservation_policy"`
+	// MemoryLimit (MB) is the hard cgroup cap stamped as compose mem_limit so a
+	// runaway is OOM-killed inside its own cgroup instead of tripping the host's
+	// global OOM killer (#200). Absent → max(1 GB, 2× reservation); never below
+	// the reservation (see memLimitMB in entry.go).
+	MemoryLimit *int `yaml:"memory_limit"`
 	// NOTE: network_mode / networks / volumes / ports / devices / container_name
 	// are intentionally NOT fields here. The driver is a constraining compiler,
 	// not a compose passthrough — a deployment record must not be able to inject

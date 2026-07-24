@@ -108,6 +108,7 @@ services:
             gitops.slot: ""
             gitops.stage: staging
             gitops.workspace: ws3
+        mem_limit: 1024m
         network_mode: service:ws3-fwgw-822b-staging
         restart: always
         ulimits:
@@ -157,6 +158,7 @@ services:
             gitops.slot: ""
             gitops.stage: staging
             gitops.workspace: ws3
+        mem_limit: 1024m
         network_mode: service:ws3-fwgw-822b-staging
         restart: always
         ulimits:

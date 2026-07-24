@@ -260,6 +260,32 @@ func memReservationMB(conf *Deployment) int {
 	return defaultMemReservationMB
 }
 
+// defaultMemLimitMB caps a container whose automation.toml declares no
+// memory_limit — generous on purpose (these are small automation workloads;
+// 1 GB is roomy) while still keeping a runaway from taking down the host,
+// which a reservation alone never did (#200: reservations are soft budget
+// accounting; only a cgroup limit contains the kernel's OOM kill).
+const defaultMemLimitMB = 1024
+
+// memLimitMB is the effective hard memory cap emitted as the compose
+// mem_limit. A declared limit wins but is clamped up to the reservation (a
+// limit below the budgeted floor is a config error, not a request to
+// thrash); otherwise max(defaultMemLimitMB, 2× reservation) so big declared
+// reservations get proportional headroom.
+func memLimitMB(conf *Deployment) int {
+	res := memReservationMB(conf)
+	if conf.MemoryLimit != nil && *conf.MemoryLimit > 0 {
+		if l := *conf.MemoryLimit; l >= res {
+			return l
+		}
+		return res
+	}
+	if d := 2 * res; d > defaultMemLimitMB {
+		return d
+	}
+	return defaultMemLimitMB
+}
+
 // memPolicy is the effective reservation policy ("always-on" | "on-demand");
 // anything but "always-on" is on-demand (evictable-under-pressure + wake-on-access).
 func memPolicy(conf *Deployment) string {
@@ -335,6 +361,7 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		"environment": env,
 		"restart":     "always",
 		"ulimits":     map[string]interface{}{"nofile": map[string]interface{}{"soft": 65536, "hard": 65536}},
+		"mem_limit":   fmt.Sprintf("%dm", memLimitMB(conf)),
 	}
 	if conf.ReplicasOrOne() <= 1 {
 		entry["container_name"] = serviceName
