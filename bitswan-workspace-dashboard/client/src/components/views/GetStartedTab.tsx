@@ -41,7 +41,7 @@ const STEPS: Step[] = [
     n: 1,
     Icon: Plus,
     title: 'Create a business process',
-    body: 'A business process is any repeatable work you want to automate — processing incoming invoices, categorizing credit-card payments, scouting for new leads, keeping inventory in sync. Name it and the workspace scaffolds its automations (a backend and a frontend) so there is something real to describe and deploy.',
+    body: 'A business process is any repeatable work you want to automate — processing incoming invoices, categorizing credit-card payments, scouting for new leads, keeping inventory in sync.',
     cta: 'New business process',
   },
   {
