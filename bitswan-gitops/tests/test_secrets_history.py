@@ -28,6 +28,13 @@ def _envfile(svc, bp, stage):
 
 def test_secret_write_materializes_history_and_rollback(tmp_path, monkeypatch):
     svc = _svc(tmp_path)
+    # #181: changing production secrets now requires admin/auditor. Make the test
+    # writer privileged so the production write below is applied; the READ-side
+    # redaction asserted later is independent (an absent `by` is always
+    # unprivileged, short-circuited before any role lookup).
+    monkeypatch.setattr(
+        "app.services.automation_service.daemon_user_role", lambda by: "admin"
+    )
 
     async def _noop_apply(deployment_ids, deployed_by=None, report=None):
         # No driver in the unit test — rollback's file restore + commit is what we
@@ -180,6 +187,9 @@ def test_production_secret_change_is_pending_not_applied(tmp_path, monkeypatch):
     import app.services.automation_service as mod
 
     svc = _svc(tmp_path)
+    # #181: a production secret change requires admin/auditor — grant it here so
+    # this test exercises the pending/zero-downtime behaviour, not the role gate.
+    monkeypatch.setattr(mod, "daemon_user_role", lambda by: "admin")
     captured: list[list[str]] = []
 
     async def _capture(ids, deployed_by=None, report=None):

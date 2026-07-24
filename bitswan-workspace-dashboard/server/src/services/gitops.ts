@@ -836,6 +836,9 @@ export class GitopsClient {
   async bpSetSecrets(
     bp: string,
     values: Record<string, Record<string, string>>,
+    // Gate-verified caller email. gitops resolves its role and — fail-closed —
+    // only lets an admin/auditor change the production realm (BSY-02 / #181).
+    deployed_by?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/secrets`,
@@ -845,7 +848,7 @@ export class GitopsClient {
           ...this.authHeaders(),
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ values }),
+        body: JSON.stringify({ values, ...(deployed_by ? { deployed_by } : {}) }),
       },
     );
     let body: unknown = null;

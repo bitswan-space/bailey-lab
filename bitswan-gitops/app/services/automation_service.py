@@ -2051,6 +2051,26 @@ class AutomationService:
         }
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         enc = bs.setdefault("secrets", {}).setdefault(bp, {})
+        # BSY-02 / #181: production secret VALUES are admin/auditor-only to READ;
+        # they must be equally protected on WRITE. A non-privileged caller
+        # (resolved fail-closed via the daemon role store, exactly like the read
+        # gate) may declare shared key NAMES but must never set or change a
+        # production VALUE — since they cannot read production, any value they
+        # submit is meaningless and a change would repoint or wipe a secret they
+        # can't see. So for them, keep every stored production value as-is and
+        # allow only new key names (forced to an empty value). Missing identity
+        # or any role-lookup error is treated as unprivileged.
+        if not self._is_production_role(deployed_by):
+            prod_blob = enc.get("production")
+            stored_prod = (
+                bp_secrets.decrypt_secrets(self.secrets_dir, prod_blob)
+                if prod_blob
+                else {}
+            )
+            guarded = dict(stored_prod)
+            for key in cleaned["production"]:
+                guarded.setdefault(key, "")
+            cleaned["production"] = guarded
         # Diff plaintext (not ciphertext) to find realms that really changed.
         changed_realms = set()
         for realm in bp_secrets.REALMS:
