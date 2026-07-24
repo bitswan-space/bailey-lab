@@ -77,8 +77,6 @@ def test_unidentified_writer_cannot_change_production(tmp_path, monkeypatch):
     )
     # No identity → fail-closed → production preserved.
     asyncio.run(
-        svc.write_bp_secrets(
-            "shop", {"production": {"K": "wiped"}}, deployed_by=None
-        )
+        svc.write_bp_secrets("shop", {"production": {"K": "wiped"}}, deployed_by=None)
     )
     assert svc.read_bp_secrets("shop", by="admin@x")["production"]["K"] == "real"
