@@ -64,7 +64,7 @@ const STEPS: Step[] = [
     n: 4,
     Icon: CheckSquare,
     title: 'Pin the rules as tests',
-    body: 'Turn the spec’s rules into runnable checks — VAT matches the PO, invoices over €5,000 are held, duplicate numbers never post twice — so “does it still do what we promised?” is a button, not a meeting.',
+    body: 'In the Requirements & tests tab, record the rules the process must hold as runnable checks — for example, that a total matches its purchase order, or that the same invoice is never processed twice. Run them on demand, and again after any change, to confirm the automation still meets its specification.',
     tab: 'requirements',
     cta: 'Open Requirements',
   },
