@@ -11,6 +11,7 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/automations"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
 	"github.com/bitswan-space/bitswan-workspaces/internal/services"
 	"github.com/bitswan-space/bitswan-workspaces/internal/workspace"
 	"gopkg.in/yaml.v3"
@@ -173,7 +174,7 @@ func updateServices(workspaceName, dashboardImage, kafkaImage, zookeeperImage, c
 
 	// Always try to update the coding-agent service if enabled
 	fmt.Println("Checking coding-agent service...")
-	if err := updateCodingAgentService(workspaceName); err != nil {
+	if err := updateCodingAgentService(workspaceName, staging, dev); err != nil {
 		fmt.Printf("Warning: failed to update coding-agent service: %v\n", err)
 	} else {
 		fmt.Println("Coding-agent service updated successfully!")
@@ -202,7 +203,16 @@ func updateServices(workspaceName, dashboardImage, kafkaImage, zookeeperImage, c
 // for a workspace if it's enabled. The coding-agent has no RegenerateDockerCompose
 // helper, so we re-create the compose from the persisted secret/domain and
 // restart — this is what moves its containers onto the named-volume mounts.
-func updateCodingAgentService(workspaceName string) error {
+//
+// The image is resolved from the update's own channel (staging/dev) so a staging
+// update moves the agent to bitswan/coding-agent-staging like every other
+// service — passing "" here would hard-default to bitswan/coding-agent:latest,
+// which on a staging-only host isn't present, fails to start, and (because the
+// caller only logs a warning) silently leaves the workspace with no agent.
+// Resolution happens BEFORE we stop the running container: if it fails, the
+// existing agent keeps running rather than being torn down for a start we know
+// will fail.
+func updateCodingAgentService(workspaceName string, staging, dev bool) error {
 	svc, err := services.NewCodingAgentService(workspaceName)
 	if err != nil {
 		return fmt.Errorf("failed to create coding-agent service: %w", err)
@@ -215,12 +225,16 @@ func updateCodingAgentService(workspaceName string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read workspace metadata: %w", err)
 	}
-	fmt.Println("Stopping current coding-agent container...")
+	codingAgentImage, err := dockerhub.ResolveCodingAgentImage(staging, dev)
+	if err != nil {
+		return fmt.Errorf("failed to resolve coding-agent image (staging=%t dev=%t): %w", staging, dev, err)
+	}
+	fmt.Printf("Stopping current coding-agent container (updating to %s)...\n", codingAgentImage)
 	if err := svc.StopContainer(); err != nil {
 		return fmt.Errorf("failed to stop coding-agent container: %w", err)
 	}
 	fmt.Println("Regenerating coding-agent docker-compose configuration...")
-	content, err := svc.CreateDockerCompose(md.CodingAgentSecret, "", md.Domain)
+	content, err := svc.CreateDockerCompose(md.CodingAgentSecret, codingAgentImage, md.Domain)
 	if err != nil {
 		return fmt.Errorf("failed to regenerate coding-agent docker-compose: %w", err)
 	}
