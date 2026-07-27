@@ -32,11 +32,29 @@ container requires.
 3. Point the `browser_navigate` tool at that internal URL. No login gate
    applies on the direct path.
 
-Do NOT go through the public `https://…` URL, and do not spoof or reuse the
-public hostname to satisfy Host checks — the public path sits behind an
-interactive login the headless browser cannot complete, and Host tricks make
-the test environment lie about what real users see. If the direct internal
-URL fails, fix the cause instead:
+The direct path is currently the **only** path available from this
+container: the public `https://…` URL sits behind the workspace login
+(Keycloak), and no agent credentials exist yet — there is no account the
+headless browser could log in with, and this container deliberately has no
+network route to the public hostname anyway. A per-workspace agent account
+that logs in through the real gate is planned (bailey-lab#232); until it
+lands, be clear about what the direct path can and cannot tell you:
+
+- **Trustworthy:** the frontend as the dev server serves it — markup,
+  console errors, failed asset/API requests, rendering. The login gate does
+  not rewrite app content, so these match what a logged-in user's browser
+  receives.
+- **Out of reach:** anything identity- or gate-dependent. Requests on the
+  direct path carry no user identity and no session cookie, so
+  identity-aware backend behavior, login redirects, and the gate's own
+  quirks (e.g. its WebSocket handling) are not reproduced here. If an issue
+  only makes sense "after login," say plainly that this environment cannot
+  reproduce it — do not guess.
+
+Do not spoof or reuse the public hostname to satisfy Host checks — a Host
+header that lies about where the browser is actually pointed produces
+conclusions that don't transfer to real users. If the direct internal URL
+fails, fix the cause instead:
 
 - **Vite 403 "Blocked request. This host … is not allowed"** (live-dev
   copies): the dev server vets the Host header via `allowedHosts`. Current
