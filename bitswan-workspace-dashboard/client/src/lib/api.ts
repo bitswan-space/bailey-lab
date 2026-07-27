@@ -291,18 +291,6 @@ export interface DeployStatusResponse {
   current?: number;
 }
 
-export interface PromoteRequest {
-  automation_name: string;
-  /** BP name; becomes the deployment context (and a prefix on the new id). */
-  context?: string;
-  stage: 'staging' | 'production';
-  /** Source-stage checksum to re-deploy. */
-  checksum: string;
-  /** Workspace-relative path of the source — required so the new yaml entry
-   *  carries it, otherwise the dashboard's per-BP filter hides the card. */
-  relative_path?: string;
-}
-
 export interface CreateBusinessProcessRequest {
   /** Human-readable display name; the server derives the slug from it. */
   name: string;
@@ -1130,8 +1118,6 @@ export const api = {
     getJson<DeployStatusResponse>(
       `/api/automations/deploy-status/${encodeURIComponent(taskId)}`,
     ),
-  promoteAutomation: (body: PromoteRequest) =>
-    postJson<DeployResponse>('/api/automations/promote', body),
   removeAutomation: (id: string, opts?: { removeSource?: boolean }) =>
     deleteEmpty(
       `/api/automations/${encodeURIComponent(id)}${opts?.removeSource ? '?remove_source=true' : ''}`,

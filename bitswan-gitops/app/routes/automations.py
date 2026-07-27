@@ -1195,16 +1195,18 @@ async def deploy_automation(
             detail=f"Deployment {deployment_id} is already in progress",
         )
 
-    # Validate stage if provided
-    if stage is not None and stage not in [
-        "dev",
-        "staging",
-        "production",
-        "live-dev",
-    ]:
+    # This per-deployment route is dev/live-dev ONLY. Promoting to staging or
+    # production MUST go through the gated /promote-bp path (freeze + N sign-offs
+    # + admin/auditor), so reject anything else here — including a missing stage,
+    # which would otherwise map to production. Security fix BSY-01 / issue #180:
+    # the deprecated per-automation promote bypassed that gate.
+    if stage not in ["dev", "live-dev"]:
         raise HTTPException(
             status_code=400,
-            detail="Stage must be one of: dev, staging, production, live-dev",
+            detail=(
+                "Stage must be 'dev' or 'live-dev'; promote to staging or "
+                "production through the gated /promote-bp route"
+            ),
         )
 
     # Containment guard (#134): checksum / relative_path are written verbatim
