@@ -286,7 +286,21 @@ export function registerAutomationRoutes(
       return reply.code(400).send({ error: 'values{} is required' });
     }
     try {
-      const r = await gitops.bpSetSecrets(req.params.bp, values);
+      // BSY-02 / #181: production secrets are admin/auditor-only to read; writing
+      // them is equally gated. Resolve the caller's role from the gate-verified
+      // token and, for anyone who is not admin/auditor, drop the production realm
+      // before forwarding so a member can edit dev/staging but never production.
+      // gitops enforces the same fail-closed check authoritatively (this is
+      // defence in depth). The gate-verified email is forwarded so gitops can
+      // authorize a genuine admin/auditor production change.
+      const deployed_by = (await emailFromRequest(req, app.log)) || undefined;
+      const role = await fwRoleFromRequest(req, gitops, app.log);
+      let outValues = values;
+      if (role !== 'admin' && role !== 'auditor') {
+        const { production: _production, ...rest } = values;
+        outValues = rest;
+      }
+      const r = await gitops.bpSetSecrets(req.params.bp, outValues, deployed_by);
       if (!r.ok) {
         return reply
           .code(r.status >= 400 && r.status < 500 ? r.status : 502)
