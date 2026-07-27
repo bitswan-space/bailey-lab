@@ -102,7 +102,8 @@ COPY mcp.default.json /etc/bitswan/mcp.json
 
 # Copy session wrapper script
 COPY agent-session-wrapper /usr/local/bin/agent-session-wrapper
-RUN chmod +x /usr/local/bin/agent-session-wrapper
+COPY seed-copy-mcp /usr/local/bin/seed-copy-mcp
+RUN chmod +x /usr/local/bin/agent-session-wrapper /usr/local/bin/seed-copy-mcp
 
 # Copy entrypoint
 COPY entrypoint-agent.sh /usr/local/bin/entrypoint-agent.sh

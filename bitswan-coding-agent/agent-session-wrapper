@@ -74,6 +74,12 @@ elif [ "$COPY" = "default" ]; then
     cd /workspace/copies
 fi
 
+# Copies created after the container booted missed the entrypoint's MCP
+# seeding (#210) — cover them here so every session has the browser tools.
+# Idempotent and scoped to this session's copy; runs as the agent user
+# (seed-copy-mcp skips the chown it does for the root/entrypoint path).
+/usr/local/bin/seed-copy-mcp "/workspace/copies/${COPY}"
+
 # If SSH_ORIGINAL_COMMAND is set (non-interactive), just run it
 if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
     if [ "$LOGGED" = "false" ]; then

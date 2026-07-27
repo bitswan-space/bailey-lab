@@ -45,25 +45,12 @@ fi
 
 # Seed the Playwright browser MCP config (.mcp.json, #210) into each copy's
 # app root — the directory agent sessions start in; Claude Code only
-# auto-loads it from there. Seed-if-missing: the file is a user-ownable
-# bootstrap they may extend with their own MCP servers. Copies nest as
-# copies/<copy>/<app>/, so locate app roots by their process.toml instead
-# of assuming a directory depth. Seeded/generated files are kept out of
-# the copy's git status via .git/info/exclude (local-only ignore).
-while IFS= read -r toml; do
-    wt="$(dirname "$toml")"
-    if [ -f /etc/bitswan/mcp.json ] && [ ! -f "$wt/.mcp.json" ]; then
-        cp /etc/bitswan/mcp.json "$wt/.mcp.json"
-        chown agent:agent "$wt/.mcp.json"
-    fi
-    if [ -d "$wt/.git" ]; then
-        exclude="$wt/.git/info/exclude"
-        mkdir -p "$wt/.git/info"
-        for pat in /.mcp.json /.playwright-mcp/; do
-            grep -qxF "$pat" "$exclude" 2>/dev/null || echo "$pat" >> "$exclude"
-        done
-    fi
-done < <(find /workspace/copies -mindepth 2 -maxdepth 3 -name process.toml 2>/dev/null)
+# auto-loads it from there. seed-copy-mcp handles one copy; cover the copies
+# present at boot here. Copies created while the container runs are seeded
+# by agent-session-wrapper at session start.
+for copy in /workspace/copies/*/; do
+    /usr/local/bin/seed-copy-mcp "$copy"
+done
 
 # Ensure correct permissions
 chown -R agent:agent /home/agent
