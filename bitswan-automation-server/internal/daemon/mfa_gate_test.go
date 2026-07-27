@@ -97,13 +97,20 @@ func TestMFAGate_UntrustedConsoleRedirectsToOnboard(t *testing.T) {
 	if strings.Contains(loc, gatePathPrefix) {
 		t.Errorf("Location = %q must NOT point at a Go gate page", loc)
 	}
-	if !strings.Contains(loc, "return=") {
-		t.Errorf("Location = %q missing return param", loc)
+	if !strings.HasSuffix(loc, "/bailey/api/device-grant") {
+		t.Errorf("Location = %q, want the onboarding device-grant endpoint", loc)
 	}
+	stashed := false
 	for _, c := range w.Result().Cookies() {
 		if c.Name == deviceCookieName && c.Value != "" {
 			t.Error("gate silently paired a device; want explicit onboarding")
 		}
+		if c.Name == gateOriginCookie && c.Value != "" {
+			stashed = true
+		}
+	}
+	if !stashed {
+		t.Error("gate did not stash the origin in the _bailey_origin cookie")
 	}
 }
 
@@ -133,8 +140,9 @@ func TestMFAGate_OnboardAssetsServed(t *testing.T) {
 }
 
 // TestMFAGate_UntrustedAppHostRedirectsToOnboard verifies that an untrusted
-// top-level HTML GET on an APP host is 303'd to the public ONBOARDING host root
-// with a return param — NOT to the console and NOT to a Go gate page.
+// top-level HTML GET on an APP host is 303'd to the onboarding host's
+// device-grant endpoint, stashing the origin — NOT to the console and NOT to a
+// Go gate page.
 func TestMFAGate_UntrustedAppHostRedirectsToOnboard(t *testing.T) {
 	markServerClaimed(t)
 	domain := writeTestConfig(t)
@@ -153,8 +161,17 @@ func TestMFAGate_UntrustedAppHostRedirectsToOnboard(t *testing.T) {
 	if strings.Contains(loc, gatePathPrefix) {
 		t.Errorf("Location = %q must NOT point at a Go gate page", loc)
 	}
-	if !strings.Contains(loc, "return=") {
-		t.Errorf("Location = %q missing return param", loc)
+	if !strings.HasSuffix(loc, "/bailey/api/device-grant") {
+		t.Errorf("Location = %q, want the onboarding device-grant endpoint", loc)
+	}
+	stashed := false
+	for _, c := range w.Result().Cookies() {
+		if c.Name == gateOriginCookie && strings.Contains(c.Value, "/secret") {
+			stashed = true
+		}
+	}
+	if !stashed {
+		t.Error("gate did not stash the /secret origin in _bailey_origin")
 	}
 }
 

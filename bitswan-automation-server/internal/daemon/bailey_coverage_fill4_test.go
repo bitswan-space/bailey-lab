@@ -42,26 +42,6 @@ func TestGateSelfTrust_FormCodeFallbackSuccess(t *testing.T) {
 
 // --- mfa_gate.go query-string branches ---------------------------------
 
-func TestOnboardGateURL_WithQuery(t *testing.T) {
-	writeTestConfig(t)
-	r := httptest.NewRequest(http.MethodGet, "https://app.test.example.com/path?a=1&b=2", nil)
-	r.Host = "app.test.example.com"
-	got := onboardGateURL(r)
-	if !strings.Contains(got, "return=") || !strings.Contains(got, "bailey-onboard.test.example.com") {
-		t.Errorf("onboardGateURL = %q", got)
-	}
-}
-
-func TestOnboardGateURL_NoDomain(t *testing.T) {
-	// With no config, protectedHostnameDomain() == "" → "/".
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SUDO_USER", "")
-	r := httptest.NewRequest(http.MethodGet, "https://app.example.com/x", nil)
-	if got := onboardGateURL(r); got != "/" {
-		t.Errorf("onboardGateURL no-domain = %q, want /", got)
-	}
-}
-
 func TestRememberOrigin_WithQuery(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "https://app.example.com/deep/link?x=y", nil)
 	w := httptest.NewRecorder()
@@ -79,7 +59,7 @@ func TestRememberOrigin_WithQuery(t *testing.T) {
 
 // --- mfa_devices.go setDeviceCookie domain attribute -------------------
 
-func TestSetDeviceCookie_SetsDomainFromConfig(t *testing.T) {
+func TestSetDeviceCookie_HostOnlyStrict(t *testing.T) {
 	domain := writeTestConfig(t)
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "https://bailey."+domain+"/", nil)
@@ -95,11 +75,13 @@ func TestSetDeviceCookie_SetsDomainFromConfig(t *testing.T) {
 	if dev == nil {
 		t.Fatal("no device cookie")
 	}
-	// net/http strips the leading dot when parsing the Set-Cookie header,
-	// so the recorded Domain is the bare domain (the wire value carried the
-	// leading dot, which is what cookieDomainForProtected sets).
-	if dev.Domain != domain {
-		t.Errorf("cookie domain = %q, want %s", dev.Domain, domain)
+	// Host-only: NO Domain attribute, so the credential is scoped to exactly the
+	// host that set it — never shared with sibling workspace/BP subdomains.
+	if dev.Domain != "" {
+		t.Errorf("cookie domain = %q, want host-only (no Domain)", dev.Domain)
+	}
+	if dev.SameSite != http.SameSiteStrictMode {
+		t.Errorf("cookie SameSite = %v, want Strict", dev.SameSite)
 	}
 }
 
