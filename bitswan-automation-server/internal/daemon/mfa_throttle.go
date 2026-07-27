@@ -323,3 +323,30 @@ func mfaHTMLThrottled(w http.ResponseWriter, retryAfter int) {
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusTooManyRequests)
 }
+
+// mfaHTMLThrottleReject handles a server-rendered 2FA attempt that mfaThrottleBegin
+// refused: it records the blocked attempt, writes the 429 headers, and returns the
+// message for the caller to render in its own form.
+func mfaHTMLThrottleReject(w http.ResponseWriter, email, ip, endpoint string, retryAfter int) string {
+	_ = recordEvent(email, audit2FALockout, endpoint+" ip="+ip+" blocked")
+	mfaHTMLThrottled(w, retryAfter)
+	return mfaThrottledMessage
+}
+
+// mfaHTMLThrottleFail is the server-rendered counterpart of mfaGateThrottleFail:
+// the attempt was already reserved by mfaThrottleBegin and the code did not match.
+// It mirrors the failure (and any lockout it triggered) to the SIEM, writes the
+// status/headers, and returns the message for the caller to render — msg normally,
+// or the cooldown wording once locked.
+func mfaHTMLThrottleFail(w http.ResponseWriter, email, ip, endpoint, msg string, retryAfter int) string {
+	target := endpoint + " ip=" + ip
+	_ = recordEvent(email, audit2FAFailed, target)
+	if retryAfter > 0 {
+		_ = recordEvent(email, audit2FALockout, target)
+		mfaHTMLThrottled(w, retryAfter)
+		return mfaThrottledMessage
+	}
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusUnauthorized)
+	return msg
+}

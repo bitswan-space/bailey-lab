@@ -93,12 +93,21 @@ func accountTOTPHandler(w http.ResponseWriter, r *http.Request, email string) {
 				return
 			}
 			code := strings.TrimSpace(r.FormValue("code"))
-			if !totp.Validate(code, c.Value) {
-				w.Header().Set("Content-Type", "text/html")
-				w.WriteHeader(http.StatusUnauthorized)
-				fmt.Fprint(w, accountTOTPEnrollHTML(email, c.Value, "Code didn't match — check your authenticator and try again."))
+			// Throttled like every other 2FA code check — issue #188.
+			ip := clientIPForRequest(r)
+			_, retry, allowed := mfaThrottleBegin(email, ip)
+			if !allowed {
+				msg := mfaHTMLThrottleReject(w, email, ip, "account-2fa-enroll", retry)
+				fmt.Fprint(w, accountTOTPEnrollHTML(email, c.Value, msg))
 				return
 			}
+			if !totp.Validate(code, c.Value) {
+				msg := mfaHTMLThrottleFail(w, email, ip, "account-2fa-enroll",
+					"Code didn't match — check your authenticator and try again.", retry)
+				fmt.Fprint(w, accountTOTPEnrollHTML(email, c.Value, msg))
+				return
+			}
+			mfaThrottleReset(email, ip)
 			if err := saveTOTPRecord(&totpRecord{
 				Email:     email,
 				Secret:    c.Value,
