@@ -11,6 +11,13 @@ from app.services.automation_service import AutomationService
 
 
 def _git_svc(tmp_path, monkeypatch):
+    # #182: the DR go-live swap + zero-downtime promote are now admin/auditor
+    # gated (resolved from the daemon role store). These tests exercise the
+    # mechanics as a privileged operator; the role gate itself is covered by
+    # test_dr_swap_promote_rbac_182.py.
+    monkeypatch.setattr(
+        "app.services.automation_service.daemon_user_role", lambda by: "admin"
+    )
     monkeypatch.setattr(fws, "firewall_dir", lambda: str(tmp_path / "fw"))
     monkeypatch.delenv("HOST_PATH", raising=False)
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)

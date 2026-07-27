@@ -323,8 +323,10 @@ class BackupRetentionRequest(BaseModel):
 
 
 class BackupSwapRequest(BaseModel):
+    # Attribution only. The DR swap / zero-downtime promote role gate resolves
+    # the caller's role authoritatively from `by` via the daemon store (BSY-03 /
+    # #182) — a caller-supplied role is never trusted, so there is no role field.
     by: str | None = None
-    role: str | None = None
 
 
 @router.get("/business-processes/{bp}/backups")
@@ -360,7 +362,7 @@ async def post_bp_backup_swap_route(
     """DR go-live swap: flip which production slot is live and repoint the
     production ingress to it (zero downtime, no data moved)."""
     try:
-        return await automation_service.swap_production_dr(bp, body.by, body.role)
+        return await automation_service.swap_production_dr(bp, body.by)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 

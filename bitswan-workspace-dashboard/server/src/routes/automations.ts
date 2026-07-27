@@ -575,13 +575,30 @@ export function registerAutomationRoutes(
 
   // Backups → set the production retention policy / run the DR go-live swap.
   // Both attribute to the signed-in user (the client doesn't send `by`).
-  const backupWrite = (suffix: string, method: 'PUT' | 'POST') =>
+  const backupWrite = (
+    suffix: string,
+    method: 'PUT' | 'POST',
+    // BSY-03 / #182: the DR go-live swap and zero-downtime promote repoint LIVE
+    // production, so — like staging→production — require admin/auditor, resolved
+    // from the gate-verified token (gitops enforces the same check
+    // authoritatively; this is the BFF half of the two-layer gate).
+    adminAuditorOnly = false,
+  ) =>
     app.route<{ Params: { bp: string }; Body: Record<string, unknown> }>({
       method,
       url: `/api/automations/business-processes/:bp/backups${suffix}`,
       handler: async (req, reply) => {
         reply.header('Cache-Control', 'no-store');
         if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+        if (adminAuditorOnly) {
+          const role = await fwRoleFromRequest(req, gitops, app.log);
+          if (role !== 'admin' && role !== 'auditor') {
+            return reply.code(403).send({
+              error:
+                'Swapping DR into production or running a zero-downtime promote requires an admin or auditor role.',
+            });
+          }
+        }
         const by = (await emailFromRequest(req, app.log)) || undefined;
         try {
           const r = await gitops.backupWrite(req.params.bp, suffix, method, {
@@ -601,8 +618,8 @@ export function registerAutomationRoutes(
       },
     });
   backupWrite('/retention', 'PUT');
-  backupWrite('/swap', 'POST');
-  backupWrite('/promote', 'POST');
+  backupWrite('/swap', 'POST', true);
+  backupWrite('/promote', 'POST', true);
 
   // Supply chain → SBOM packages + CVEs (syft/grype) for the deployed image(s)
   // at a stage, plus the out-of-scope waiver log.
