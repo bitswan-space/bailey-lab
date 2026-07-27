@@ -44,20 +44,43 @@ func hostCLIToken() string {
 // to read either token store, while the host CLI always sends its host-config
 // token and the daemon itself (or `docker exec` into it) can send s.token.
 func (s *Server) callerHasAdminToken(r *http.Request) bool {
+	_, ok := s.callerAdminPrincipal(r)
+	return ok
+}
+
+// Admin-credential labels for audit attribution. These are deliberately NOT
+// email addresses: the admin token proves possession of a credential, not the
+// identity of a person, so an audit row must not claim a named user performed
+// the action (issue #189 — "record the real caller"). eventRecord.Actor already
+// tolerates non-email values ("" means system).
+const (
+	adminPrincipalHostCLI = "host-cli"     // the host operator's CLI token, from the host config via /host
+	adminPrincipalDaemon  = "daemon-token" // the daemon's own token: the daemon, or `docker exec` into it
+)
+
+// callerAdminPrincipal reports WHICH admin credential a request carries, so
+// privileged handlers can attribute the action to the credential that was
+// actually used instead of to the root-admin account. ok=false means no valid
+// admin token was presented.
+//
+// Both branches are checked with a constant-time comparison: a plain == exits
+// on the first differing byte, so its timing leaks how much of the secret was
+// guessed correctly.
+func (s *Server) callerAdminPrincipal(r *http.Request) (principal string, ok bool) {
 	authHeader := r.Header.Get("Authorization")
 	parts := strings.SplitN(authHeader, " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-		return false
+		return "", false
 	}
 	token := strings.TrimSpace(parts[1])
 	if token == "" {
-		return false
+		return "", false
 	}
 	if s.token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) == 1 {
-		return true
+		return adminPrincipalDaemon, true
 	}
 	if host := hostCLIToken(); host != "" && subtle.ConstantTimeCompare([]byte(token), []byte(host)) == 1 {
-		return true
+		return adminPrincipalHostCLI, true
 	}
-	return false
+	return "", false
 }

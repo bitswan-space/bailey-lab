@@ -40,6 +40,13 @@ func (r *AccessGrantRequest) normalize() {
 	}
 }
 
+// accessAuditTarget renders the affected grant for an audit row: which principal
+// gained or lost which role on which endpoint. Call it after normalize() so the
+// defaults are filled in.
+func accessAuditTarget(r *AccessGrantRequest) string {
+	return r.Host + " " + r.PrincipalType + ":" + r.Principal + " role=" + r.Role
+}
+
 // handleAccessGrant grants a principal access (or owner) on an endpoint.
 func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -51,7 +58,8 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 	// access (attributed to the root admin) must additionally require the admin
 	// token — otherwise a compromised first-party container could grant itself
 	// access. Mirrors the workspace secret-read hardening.
-	if !s.callerHasAdminToken(r) {
+	actor, hasToken := s.callerAdminPrincipal(r)
+	if !hasToken {
 		writeJSONError(w, "granting access requires the automation-server admin token (run the bitswan CLI on the host, or pass the daemon token as a bearer token)", http.StatusForbidden)
 		return
 	}
@@ -86,6 +94,10 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// #189: record WHICH admin credential granted this. granted_by keeps the
+	// root-admin address (it's a displayed column other code reads), but the
+	// audit trail must not imply a named user did it by hand.
+	_ = recordEvent(actor, auditAccessGrant, accessAuditTarget(&req))
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -106,7 +118,8 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 	// BSY-13 / #189: revoking a grant is the same privileged, socket-reachable
 	// ACL mutation as granting one, so gate it on the admin token too — a
 	// first-party container must not be able to revoke access either.
-	if !s.callerHasAdminToken(r) {
+	actor, hasToken := s.callerAdminPrincipal(r)
+	if !hasToken {
 		writeJSONError(w, "revoking access requires the automation-server admin token (run the bitswan CLI on the host, or pass the daemon token as a bearer token)", http.StatusForbidden)
 		return
 	}
@@ -124,6 +137,10 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// #189: a revoke previously left NO trace anywhere — removeGrant takes no
+	// actor and deletes the row that carried granted_by, so the only record of
+	// the grant disappeared with it.
+	_ = recordEvent(actor, auditAccessRevoke, accessAuditTarget(&req))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"revoked":        true,
