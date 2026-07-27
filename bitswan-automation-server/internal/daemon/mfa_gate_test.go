@@ -94,10 +94,7 @@ func TestMFAGate_UntrustedConsoleRedirectsToOnboard(t *testing.T) {
 	if !strings.HasPrefix(loc, "https://"+serverConsoleOnboardHost(domain)+"/") {
 		t.Errorf("Location = %q, want redirect to the onboarding host", loc)
 	}
-	if strings.Contains(loc, gatePathPrefix) {
-		t.Errorf("Location = %q must NOT point at a Go gate page", loc)
-	}
-	if !strings.HasSuffix(loc, "/bailey/api/device-grant") {
+	if !strings.HasSuffix(loc, "/2fa-gate/api/device-grant") {
 		t.Errorf("Location = %q, want the onboarding device-grant endpoint", loc)
 	}
 	stashed := false
@@ -158,10 +155,7 @@ func TestMFAGate_UntrustedAppHostRedirectsToOnboard(t *testing.T) {
 	if !strings.HasPrefix(loc, "https://"+serverConsoleOnboardHost(domain)+"/") {
 		t.Errorf("Location = %q, want redirect to the onboarding host root", loc)
 	}
-	if strings.Contains(loc, gatePathPrefix) {
-		t.Errorf("Location = %q must NOT point at a Go gate page", loc)
-	}
-	if !strings.HasSuffix(loc, "/bailey/api/device-grant") {
+	if !strings.HasSuffix(loc, "/2fa-gate/api/device-grant") {
 		t.Errorf("Location = %q, want the onboarding device-grant endpoint", loc)
 	}
 	stashed := false

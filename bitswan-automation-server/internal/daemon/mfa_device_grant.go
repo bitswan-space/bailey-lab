@@ -24,11 +24,11 @@ import (
 // HMAC-signed "grant" carried in the URL, exactly like an OIDC code:
 //
 //   1. An untrusted host `foo` (enforceMFAGate) stashes the origin and 303s the
-//      browser to  https://<onboard>/bailey/api/device-grant .
+//      browser to  https://<onboard>/2fa-gate/api/device-grant .
 //   2. device-grant runs on the onboarding host — the single source of trust.
 //      If THIS browser is already a trusted device there (its own host-only
 //      cookie), it mints a grant bound to foo and 303s to
-//      https://foo/bailey/api/device-claim?grant=… ; otherwise it sends the
+//      https://foo/2fa-gate/api/device-claim?grant=… ; otherwise it sends the
 //      browser to the pairing SPA (which bounces back via _bailey_origin once
 //      the device is trusted at onboard).
 //   3. device-claim runs on foo, verifies the grant (signature, host, freshness,
@@ -162,8 +162,8 @@ func verifyGrant(token string) (deviceGrant, bool) {
 	}, true
 }
 
-// handleDeviceGrant serves GET /bailey/api/device-grant on the onboarding host.
-func (s *Server) handleDeviceGrant(w http.ResponseWriter, r *http.Request, email string) {
+// handleDeviceGrant serves GET /2fa-gate/api/device-grant on the onboarding host.
+func handleDeviceGrant(w http.ResponseWriter, r *http.Request, email string) {
 	if email == "" {
 		writeJSONError(w, "no identity", http.StatusUnauthorized)
 		return
@@ -180,7 +180,7 @@ func (s *Server) handleDeviceGrant(w http.ResponseWriter, r *http.Request, email
 			writeJSONError(w, "mint grant: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		claim := "https://" + host + "/bailey/api/device-claim?grant=" + url.QueryEscape(grant)
+		claim := "https://" + host + "/2fa-gate/api/device-claim?grant=" + url.QueryEscape(grant)
 		http.Redirect(w, r, claim, http.StatusSeeOther)
 		return
 	}
@@ -190,8 +190,8 @@ func (s *Server) handleDeviceGrant(w http.ResponseWriter, r *http.Request, email
 	http.Redirect(w, r, onboardSPARoot(), http.StatusSeeOther)
 }
 
-// handleDeviceClaim serves GET /bailey/api/device-claim on the ORIGIN host.
-func (s *Server) handleDeviceClaim(w http.ResponseWriter, r *http.Request, email string) {
+// handleDeviceClaim serves GET /2fa-gate/api/device-claim on the ORIGIN host.
+func handleDeviceClaim(w http.ResponseWriter, r *http.Request, email string) {
 	if email == "" {
 		writeJSONError(w, "no identity", http.StatusUnauthorized)
 		return
@@ -200,7 +200,7 @@ func (s *Server) handleDeviceClaim(w http.ResponseWriter, r *http.Request, email
 	// re-process a (possibly stale) grant — just go home.
 	if currentDeviceForRequest(r, email) != nil {
 		clearTrustLoop(w)
-		originRedirect(w, r)
+		redirectAfterClaim(w, r)
 		return
 	}
 	g, ok := verifyGrant(r.URL.Query().Get("grant"))
@@ -220,6 +220,19 @@ func (s *Server) handleDeviceClaim(w http.ResponseWriter, r *http.Request, email
 	}
 	touchDevice(email, g.deviceID)
 	clearTrustLoop(w)
+	redirectAfterClaim(w, r)
+}
+
+// redirectAfterClaim sends the browser on after a claim: to the explicit,
+// same-site ?return= target when present (the chrome wrap uses it to point the
+// iframe straight at the inner page it just trusted, staying on the inner host),
+// otherwise via the stashed _bailey_origin (the top-level dance). safeOriginTarget
+// keeps ?return= same-site, so it can't be an open redirect.
+func redirectAfterClaim(w http.ResponseWriter, r *http.Request) {
+	if ret := strings.TrimSpace(r.URL.Query().Get("return")); ret != "" {
+		http.Redirect(w, r, safeOriginTarget(ret), http.StatusSeeOther)
+		return
+	}
 	originRedirect(w, r)
 }
 
@@ -259,7 +272,7 @@ func onboardDeviceGrantURL() string {
 	if dom == "" {
 		return "/"
 	}
-	return "https://" + serverConsoleOnboardHost(dom) + "/bailey/api/device-grant"
+	return "https://" + serverConsoleOnboardHost(dom) + "/2fa-gate/api/device-grant"
 }
 
 const (

@@ -480,6 +480,16 @@ func handleGatePath(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, gatePathPrefix+"/api/share/"):
 		handleShareAPI(w, r, email, groups)
 
+	// Host-scoped device-trust SSO dance (mfa_device_grant.go). These live under
+	// the gate prefix — not /bailey/api — because gateHandler serves the gate
+	// prefix IN-PROCESS on every host, while /bailey/* is only reachable where
+	// the proxy has a daemon upstream (onboard / inner-bailey), never on an outer
+	// app host where the claim must run.
+	case r.URL.Path == gatePathPrefix+"/api/device-grant":
+		handleDeviceGrant(w, r, email)
+	case r.URL.Path == gatePathPrefix+"/api/device-claim":
+		handleDeviceClaim(w, r, email)
+
 	case r.URL.Path == gatePathPrefix+"/share" ||
 		strings.HasPrefix(r.URL.Path, gatePathPrefix+"/share/"):
 		handleShareEndpoint(w, r, email, groups)

@@ -182,15 +182,20 @@ func onOnboardHost(r *http.Request) bool {
 	return isServerConsoleOnboardHost(toOuterHost(requestEndpointHost(r)))
 }
 
-// originForHost reconstructs the outer scheme://host the untrusted request
-// hit, so the return path the console hands back can rebuild a full URL to
-// the original app host (the console lives on a different host).
+// originForHost reconstructs the scheme://host the untrusted request actually
+// hit, so the dance can rebuild a full URL back to it. It uses the EXACT host
+// (not the outer form): the device-trust credential is now host-only, so the
+// grant dance must target — and set a cookie for, and return to — the precise
+// host that was untrusted. That includes the chrome-wrap INNER host: when an
+// iframe load is untrusted, it has to earn its own cookie and return to the
+// inner content, not be bounced to the outer wrap (which would nest the wrap and
+// never trust the inner host).
 func originForHost(r *http.Request) string {
 	scheme := "https"
 	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
 		scheme = "http"
 	}
-	return scheme + "://" + toOuterHost(requestEndpointHost(r))
+	return scheme + "://" + requestEndpointHost(r)
 }
 
 // rememberOrigin stashes the ABSOLUTE URL the user was trying to reach in a

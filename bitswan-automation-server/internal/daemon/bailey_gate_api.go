@@ -59,13 +59,6 @@ func (s *Server) handleGateAPI(w http.ResponseWriter, r *http.Request, email str
 		guardGet(w, r, func() { handleGatePendingPair(w, r, email) })
 	case "/bailey/api/pending-pair/poll":
 		guardGet(w, r, func() { handleGatePendingPairPoll(w, r, email) })
-	case "/bailey/api/device-grant":
-		// Onboarding-host endpoint: mint a per-host grant for a trusted device
-		// (host-scoped device-trust SSO dance — see mfa_device_grant.go).
-		guardGet(w, r, func() { s.handleDeviceGrant(w, r, email) })
-	case "/bailey/api/device-claim":
-		// Origin-host endpoint: redeem a grant into this host's own device cookie.
-		guardGet(w, r, func() { s.handleDeviceClaim(w, r, email) })
 	case "/bailey/api/self-trust":
 		guardPost(w, r, func() { handleGateSelfTrust(w, r, email) })
 	case "/bailey/api/recover":

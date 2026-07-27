@@ -136,7 +136,7 @@ func TestTrustDanceExhausted(t *testing.T) {
 
 func TestOriginHostFromRequest(t *testing.T) {
 	domain := writeTestConfig(t)
-	r := httptest.NewRequest(http.MethodGet, "https://"+serverConsoleOnboardHost(domain)+"/bailey/api/device-grant", nil)
+	r := httptest.NewRequest(http.MethodGet, "https://"+serverConsoleOnboardHost(domain)+"/2fa-gate/api/device-grant", nil)
 	r.AddCookie(&http.Cookie{Name: gateOriginCookie, Value: "https://app." + domain + "/secret"})
 	if h := originHostFromRequest(r); h != "app."+domain {
 		t.Fatalf("host = %q, want app.%s", h, domain)
@@ -158,7 +158,7 @@ func TestOnboardHelperURLs(t *testing.T) {
 	if got, want := onboardSPARoot(), "https://"+serverConsoleOnboardHost(domain)+"/"; got != want {
 		t.Fatalf("onboardSPARoot = %q, want %q", got, want)
 	}
-	if got, want := onboardDeviceGrantURL(), "https://"+serverConsoleOnboardHost(domain)+"/bailey/api/device-grant"; got != want {
+	if got, want := onboardDeviceGrantURL(), "https://"+serverConsoleOnboardHost(domain)+"/2fa-gate/api/device-grant"; got != want {
 		t.Fatalf("onboardDeviceGrantURL = %q, want %q", got, want)
 	}
 }
@@ -178,15 +178,15 @@ func TestOnboardHelperURLs_NoDomain(t *testing.T) {
 func TestHandleDeviceGrant_Trusted(t *testing.T) {
 	domain := writeTestConfig(t)
 	email := "grantme@example.com"
-	r := trustedGateReq(t, serverConsoleOnboardHost(domain), "/bailey/api/device-grant", email)
+	r := trustedGateReq(t, serverConsoleOnboardHost(domain), "/2fa-gate/api/device-grant", email)
 	r.AddCookie(&http.Cookie{Name: gateOriginCookie, Value: "https://app." + domain + "/secret"})
 	w := httptest.NewRecorder()
-	(&Server{}).handleDeviceGrant(w, r, email)
+	handleDeviceGrant(w, r, email)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("code = %d, want 303", w.Code)
 	}
 	loc := w.Header().Get("Location")
-	if !strings.HasPrefix(loc, "https://app."+domain+"/bailey/api/device-claim?grant=") {
+	if !strings.HasPrefix(loc, "https://app."+domain+"/2fa-gate/api/device-claim?grant=") {
 		t.Fatalf("Location = %q, want a device-claim on the origin host with a grant", loc)
 	}
 }
@@ -194,10 +194,10 @@ func TestHandleDeviceGrant_Trusted(t *testing.T) {
 func TestHandleDeviceGrant_Untrusted(t *testing.T) {
 	domain := writeTestConfig(t)
 	email := "notrust@example.com"
-	r := gateReq(serverConsoleOnboardHost(domain), "/bailey/api/device-grant", email, nil)
+	r := gateReq(serverConsoleOnboardHost(domain), "/2fa-gate/api/device-grant", email, nil)
 	r.AddCookie(&http.Cookie{Name: gateOriginCookie, Value: "https://app." + domain + "/x"})
 	w := httptest.NewRecorder()
-	(&Server{}).handleDeviceGrant(w, r, email)
+	handleDeviceGrant(w, r, email)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("code = %d, want 303", w.Code)
 	}
@@ -209,9 +209,9 @@ func TestHandleDeviceGrant_Untrusted(t *testing.T) {
 func TestHandleDeviceGrant_NoOrigin(t *testing.T) {
 	domain := writeTestConfig(t)
 	email := "noorigin@example.com"
-	r := trustedGateReq(t, serverConsoleOnboardHost(domain), "/bailey/api/device-grant", email)
+	r := trustedGateReq(t, serverConsoleOnboardHost(domain), "/2fa-gate/api/device-grant", email)
 	w := httptest.NewRecorder()
-	(&Server{}).handleDeviceGrant(w, r, email)
+	handleDeviceGrant(w, r, email)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("code = %d, want 303", w.Code)
 	}
@@ -232,10 +232,10 @@ func TestHandleDeviceClaim_Success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := gateReq(host, "/bailey/api/device-claim?grant="+url.QueryEscape(grant), email, nil)
+	r := gateReq(host, "/2fa-gate/api/device-claim?grant="+url.QueryEscape(grant), email, nil)
 	r.AddCookie(&http.Cookie{Name: gateOriginCookie, Value: "https://" + host + "/secret"})
 	w := httptest.NewRecorder()
-	(&Server{}).handleDeviceClaim(w, r, email)
+	handleDeviceClaim(w, r, email)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("code = %d, want 303", w.Code)
 	}
@@ -253,12 +253,32 @@ func TestHandleDeviceClaim_Success(t *testing.T) {
 	}
 }
 
+func TestHandleDeviceClaim_ReturnParam(t *testing.T) {
+	domain := writeTestConfig(t)
+	email := "ret@example.com"
+	host := "app." + domain
+	dev, _ := addDevice(email, "dev")
+	grant, _ := mintGrant(email, host, dev.ID)
+	r := gateReq(host, "/2fa-gate/api/device-claim?grant="+url.QueryEscape(grant)+
+		"&return="+url.QueryEscape("/deep/page?x=y"), email, nil)
+	w := httptest.NewRecorder()
+	handleDeviceClaim(w, r, email)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("code = %d, want 303", w.Code)
+	}
+	// An explicit same-site ?return= wins over _bailey_origin (the chrome wrap
+	// uses it to land the iframe on the inner page it just trusted).
+	if loc := w.Header().Get("Location"); loc != "/deep/page?x=y" {
+		t.Fatalf("Location = %q, want the ?return= path", loc)
+	}
+}
+
 func TestHandleDeviceClaim_InvalidGrant(t *testing.T) {
 	domain := writeTestConfig(t)
 	email := "bad@example.com"
-	r := gateReq("app."+domain, "/bailey/api/device-claim?grant=not-a-grant", email, nil)
+	r := gateReq("app."+domain, "/2fa-gate/api/device-claim?grant=not-a-grant", email, nil)
 	w := httptest.NewRecorder()
-	(&Server{}).handleDeviceClaim(w, r, email)
+	handleDeviceClaim(w, r, email)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("code = %d, want 403", w.Code)
 	}
@@ -269,9 +289,9 @@ func TestHandleDeviceClaim_HostMismatch(t *testing.T) {
 	email := "mismatch@example.com"
 	dev, _ := addDevice(email, "dev")
 	grant, _ := mintGrant(email, "other."+domain, dev.ID) // grant bound to a DIFFERENT host
-	r := gateReq("app."+domain, "/bailey/api/device-claim?grant="+url.QueryEscape(grant), email, nil)
+	r := gateReq("app."+domain, "/2fa-gate/api/device-claim?grant="+url.QueryEscape(grant), email, nil)
 	w := httptest.NewRecorder()
-	(&Server{}).handleDeviceClaim(w, r, email)
+	handleDeviceClaim(w, r, email)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("code = %d, want 403 (grant host != request host)", w.Code)
 	}
@@ -283,12 +303,12 @@ func TestHandleDeviceClaim_ReusedGrant(t *testing.T) {
 	host := "app." + domain
 	dev, _ := addDevice(email, "dev")
 	grant, _ := mintGrant(email, host, dev.ID)
-	r1 := gateReq(host, "/bailey/api/device-claim?grant="+url.QueryEscape(grant), email, nil)
+	r1 := gateReq(host, "/2fa-gate/api/device-claim?grant="+url.QueryEscape(grant), email, nil)
 	r1.AddCookie(&http.Cookie{Name: gateOriginCookie, Value: "https://" + host + "/"})
-	(&Server{}).handleDeviceClaim(httptest.NewRecorder(), r1, email) // consumes it
-	r2 := gateReq(host, "/bailey/api/device-claim?grant="+url.QueryEscape(grant), email, nil)
+	handleDeviceClaim(httptest.NewRecorder(), r1, email) // consumes it
+	r2 := gateReq(host, "/2fa-gate/api/device-claim?grant="+url.QueryEscape(grant), email, nil)
 	w2 := httptest.NewRecorder()
-	(&Server{}).handleDeviceClaim(w2, r2, email)
+	handleDeviceClaim(w2, r2, email)
 	if w2.Code != http.StatusForbidden {
 		t.Fatalf("reused grant code = %d, want 403 (single-use)", w2.Code)
 	}
@@ -298,10 +318,10 @@ func TestHandleDeviceClaim_AlreadyTrusted(t *testing.T) {
 	domain := writeTestConfig(t)
 	email := "already@example.com"
 	host := "app." + domain
-	r := trustedGateReq(t, host, "/bailey/api/device-claim?grant=whatever", email)
+	r := trustedGateReq(t, host, "/2fa-gate/api/device-claim?grant=whatever", email)
 	r.AddCookie(&http.Cookie{Name: gateOriginCookie, Value: "https://" + host + "/home"})
 	w := httptest.NewRecorder()
-	(&Server{}).handleDeviceClaim(w, r, email)
+	handleDeviceClaim(w, r, email)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("code = %d, want 303 (idempotent when already trusted)", w.Code)
 	}
@@ -309,12 +329,12 @@ func TestHandleDeviceClaim_AlreadyTrusted(t *testing.T) {
 
 func TestDeviceHandlers_NoIdentity(t *testing.T) {
 	wg := httptest.NewRecorder()
-	(&Server{}).handleDeviceGrant(wg, httptest.NewRequest(http.MethodGet, "https://x/", nil), "")
+	handleDeviceGrant(wg, httptest.NewRequest(http.MethodGet, "https://x/", nil), "")
 	if wg.Code != http.StatusUnauthorized {
 		t.Fatalf("device-grant no-identity code = %d, want 401", wg.Code)
 	}
 	wc := httptest.NewRecorder()
-	(&Server{}).handleDeviceClaim(wc, httptest.NewRequest(http.MethodGet, "https://x/", nil), "")
+	handleDeviceClaim(wc, httptest.NewRequest(http.MethodGet, "https://x/", nil), "")
 	if wc.Code != http.StatusUnauthorized {
 		t.Fatalf("device-claim no-identity code = %d, want 401", wc.Code)
 	}

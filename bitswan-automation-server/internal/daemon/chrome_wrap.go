@@ -43,9 +43,26 @@ func serveBaileyChrome(w http.ResponseWriter, r *http.Request) {
 	// user requested, so deep links land on the right page inside the
 	// iframe instead of the inner host's root.
 	innerHost := toInnerHost(host)
-	innerURL := "https://" + innerHost + r.URL.Path
+	innerPath := r.URL.Path
 	if r.URL.RawQuery != "" {
-		innerURL += "?" + r.URL.RawQuery
+		innerPath += "?" + r.URL.RawQuery
+	}
+	innerURL := "https://" + innerHost + innerPath
+	// The inner host holds its OWN host-only device cookie (host-scoped trust).
+	// On the iframe's first load it has none — and it can't run the trust dance
+	// itself, because this wrap's frame-src pins the frame to the inner host, so
+	// an in-frame redirect to the onboarding host would be CSP-blocked. Instead
+	// the wrap (which renders only once the OUTER host is trusted) mints a
+	// single-use grant for the inner host and points the iframe at the inner
+	// device-claim, which sets the inner cookie and lands on the requested page —
+	// all on the inner host, within frame-src. Once set, subsequent inner
+	// navigations are trusted directly; the wrap re-mints on each render because
+	// the inner (host-only) cookie is never visible to this outer host.
+	if dev := currentDeviceForRequest(r, email); dev != nil {
+		if g, err := mintGrant(email, innerHost, dev.ID); err == nil {
+			innerURL = "https://" + innerHost + "/2fa-gate/api/device-claim?grant=" +
+				url.QueryEscape(g) + "&return=" + url.QueryEscape(innerPath)
+		}
 	}
 
 	// The Share button is only shown to owners — non-owners have no
