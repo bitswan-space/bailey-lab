@@ -417,6 +417,14 @@ func (s *Server) Run() error {
 		}
 	}()
 
+	// Self-heal daemon-owned sidecars: if a coding-agent/dashboard container was
+	// left down by a restart that interrupted its start (e.g. the server
+	// self-update's `docker restart` landing mid-`compose up`), bring it back —
+	// once now, then resync periodically. Backgrounded so startup never blocks
+	// on Docker; idempotent for anything already running (see
+	// service_reconcile.go).
+	go startServiceReconciler()
+
 	// Own the shared grype vulnerability DB: create its volume now, download it
 	// in the background, and refresh daily. Keeps the ~40s DB download off every
 	// workspace's first interactive CVE scan (see grype_db.go).

@@ -1722,7 +1722,7 @@ func (c *Client) DisableService(serviceType, workspace, stage string) (*ServiceR
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doRequest(req)
+	resp, err := c.doLongRunningRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
 	}
@@ -1810,7 +1810,7 @@ func (c *Client) StartService(serviceType, workspace, stage string) (*ServiceRes
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doRequest(req)
+	resp, err := c.doLongRunningRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
 	}
@@ -1856,7 +1856,7 @@ func (c *Client) StopService(serviceType, workspace, stage string) (*ServiceResp
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doRequest(req)
+	resp, err := c.doLongRunningRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
 	}
@@ -1933,7 +1933,7 @@ func (c *Client) UpdateService(serviceType, workspace string, options map[string
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doRequest(req)
+	resp, err := c.doLongRunningRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
 	}
