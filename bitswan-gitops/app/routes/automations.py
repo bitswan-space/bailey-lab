@@ -91,7 +91,6 @@ class RollbackBPRequest(BaseModel):
     git_commit: str
     deployed_by: str | None = None
     kind: str = "deploy"  # "deploy" | "firewall"
-    role: str | None = None  # caller's Bailey role (for production firewall gating)
 
 
 @router.get("/business-processes/{bp}/history")

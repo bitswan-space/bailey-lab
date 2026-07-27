@@ -43,6 +43,7 @@ from app.services import supply_chain_service
 from app.services import firewall_service
 from app.services.bp_git import fetch_main
 from app.services.git_server import validate_bp_name
+from app.task_queue import current_requester
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
@@ -3228,13 +3229,14 @@ class AutomationService:
         """Production firewall changes require an admin/auditor role — resolved
         AUTHORITATIVELY from the gate-forwarded requester identity via the daemon
         role store, never a caller-supplied role (BSY-08 / #186). Fails closed on
-        a missing or unknown identity. The identity itself is the header-derived
-        principal (BSY-09 / #187), not a spoofable query/body value, so this is a
-        real boundary rather than a convention even for a shared-secret caller."""
+        a missing or unknown identity. The identity is the header-derived
+        principal (BSY-09 / #187): for product traffic the BFF sets it from the
+        gate-verified login, so users can't choose it. A direct holder of the
+        shared secret can still forge the header — the gain is one clean identity
+        channel and a raised bar (name a real admin, not just role=admin), not an
+        absolute boundary."""
         if bp_secrets.realm_for_stage(stage) != "production":
             return
-        from app.task_queue import current_requester
-
         actor = current_requester.get() or ""
         role = daemon_user_role(actor) if actor else ""
         if role not in self._FW_ROLES:
