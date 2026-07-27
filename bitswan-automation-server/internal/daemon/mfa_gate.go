@@ -160,8 +160,19 @@ func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "device not trusted", http.StatusUnauthorized)
 		return false
 	}
+	// Loop backstop: the dance ends by setting THIS host's own device cookie and
+	// returning here. If we keep landing here untrusted, the browser is refusing
+	// the cookie — show an error instead of ping-ponging forever.
+	if trustDanceExhausted(w, r) {
+		writeTrustLoopError(w)
+		return false
+	}
+	// Host-scoped device trust: stash where the user was headed, then send them
+	// to the onboarding host's device-grant, which (if this browser is trusted
+	// there) mints a single-use grant and bounces back to this host's
+	// device-claim to set its own cookie. See mfa_device_grant.go.
 	rememberOrigin(w, r)
-	http.Redirect(w, r, onboardGateURL(r), http.StatusSeeOther)
+	http.Redirect(w, r, onboardDeviceGrantURL(), http.StatusSeeOther)
 	return false
 }
 
@@ -169,22 +180,6 @@ func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
 // onboarding host (its outer hostname; it has no inner/iframe form).
 func onOnboardHost(r *http.Request) bool {
 	return isServerConsoleOnboardHost(toOuterHost(requestEndpointHost(r)))
-}
-
-// onboardGateURL builds an absolute URL to the onboarding host root carrying a
-// same-origin return path, so once the SPA clears the device-trust gate it can
-// bounce the user back to the console/app they were trying to reach. Falls back
-// to "/" when no protected domain is configured (tests / bootstrap).
-func onboardGateURL(r *http.Request) string {
-	dom := protectedHostnameDomain()
-	if dom == "" {
-		return "/"
-	}
-	ret := r.URL.Path
-	if r.URL.RawQuery != "" {
-		ret += "?" + r.URL.RawQuery
-	}
-	return "https://" + serverConsoleOnboardHost(dom) + "/?return=" + url.QueryEscape(originForHost(r)+ret)
 }
 
 // originForHost reconstructs the outer scheme://host the untrusted request

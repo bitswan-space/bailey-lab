@@ -90,6 +90,13 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 			// (the wrap's CSP only allows connect-src 'self').
 			inner.ServeHTTP(w, r)
 			return
+		case r.URL.Path == "/bailey/api/device-claim":
+			// Host-scoped device-trust claim: a top-level navigation that must
+			// reach the daemon gate (set THIS host's own device cookie, then 303
+			// home) rather than render the chrome wrap. /bailey/api/* is
+			// gate-exempt, so an untrusted device can reach it here.
+			inner.ServeHTTP(w, r)
+			return
 		}
 
 		if r.Method != http.MethodGet || !strings.Contains(r.Header.Get("Accept"), "text/html") {
