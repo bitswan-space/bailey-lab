@@ -987,7 +987,6 @@ export class GitopsClient {
       stage: string;
       host: string;
       by?: string;
-      role?: string;
       filename: string;
       content: Buffer;
       contentType?: string;
@@ -997,7 +996,6 @@ export class GitopsClient {
     form.set('stage', input.stage);
     form.set('host', input.host);
     if (input.by) form.set('by', input.by);
-    if (input.role) form.set('role', input.role);
     const blob = new Blob([new Uint8Array(input.content)], {
       type: input.contentType || 'application/pdf',
     });
@@ -1388,7 +1386,6 @@ export class GitopsClient {
     git_commit: string;
     deployed_by?: string;
     kind?: 'deploy' | 'firewall';
-    role?: string;
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const { bp, ...rest } = input;
     const r = await fetch(
