@@ -23,11 +23,6 @@ const adminGroupSuffix = "/admin"
 // handlers (bailey_admin_helpers.go) that reference it by that name.
 const adminGroup = adminGroupSuffix
 
-// baileyConfigName is the name of the AOC oauth config the Bailey
-// management surface authenticates against. Used by signoutRedirect to
-// build the Keycloak end-session URL.
-const baileyConfigName = "bailey"
-
 // isAdmin reports whether the request's forwarded identity is in the
 // org admin group. Thin wrapper over identityFromHeaders/isAdminGroups
 // so handlers can ask the question without unpacking headers.
