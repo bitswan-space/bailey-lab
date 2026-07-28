@@ -139,6 +139,32 @@ def _short_hash(context: str) -> str:
     return hashlib.sha256(context.encode()).hexdigest()[:4]
 
 
+# The workspace object store was renamed minio → garage. Legacy automations
+# (and their baked automation.toml) still declare the `minio` service; the
+# current build only knows `garage`, so an un-migrated declaration is silently
+# skipped ("Unknown service type 'minio'") and NO object-store container is ever
+# composed. Forward-migrate the name wherever a declared-services map is
+# materialized or consumed, so the persisted state + compose become pure garage
+# and minio disappears for good.
+LEGACY_SERVICE_RENAMES = {"minio": "garage"}
+
+
+def migrate_legacy_services(services: dict | None) -> dict:
+    """Return `services` with any legacy service name mapped to its current one.
+    Idempotent; a garage-native declaration passes through untouched. If both the
+    legacy and current name are present, the current one wins (they're the same
+    service)."""
+    if not services:
+        return services or {}
+    # Canonical (already-current) names first, so a real `garage` declaration
+    # wins over a legacy `minio` that renames onto it.
+    out: dict = {n: c for n, c in services.items() if n not in LEGACY_SERVICE_RENAMES}
+    for name, conf in services.items():
+        if name in LEGACY_SERVICE_RENAMES:
+            out.setdefault(LEGACY_SERVICE_RENAMES[name], conf)
+    return out
+
+
 def _default_mem_reservation_mb() -> int:
     """Memory (MB) budgeted for a container whose automation.toml declares no
     memory-reservation (legacy / undeclared) — small on purpose so an unset field
@@ -1501,7 +1527,7 @@ class AutomationService:
                         for name, dep_svc in auto_conf.services.items()
                     }
             if svcs is not None:
-                dep["services"] = svcs
+                dep["services"] = migrate_legacy_services(svcs)
             # Memory governance: persist the effective reservation (MB) + policy
             # so the driver can stamp gitops.mem_reservation_mb / gitops.mem_policy
             # labels the daemon budgets against (over-reservation SIEM, on-demand
@@ -5840,6 +5866,7 @@ class AutomationService:
 
         mapped_stage = stage_for_deployment(stage)
 
+        services = migrate_legacy_services(services)
         for svc_type, svc_conf in services.items():
             enabled = (
                 svc_conf.get("enabled", True)
