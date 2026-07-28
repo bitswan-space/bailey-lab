@@ -268,6 +268,60 @@ describe('WorkspacesView', () => {
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('removed'), 'info'));
   });
 
+  it('manage drawer (co-owner): shown as Owner, not a member, and cannot transfer', async () => {
+    const s = spies();
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'primary@example.test', grants: [
+        { principal_type: 'email', principal_value: 'me@example.test', role: 'owner' },  // the caller — a co-owner
+        { principal_type: 'email', principal_value: 'bob@x', role: 'access' },
+      ] } },
+      '/bailey/api/people/directory': { json: { people: [rosterPerson({ email: 'me@example.test' }), rosterPerson({ email: 'sam@x' })] } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({
+      dashboard: 'https://dash.example.test/', ownerEmail: 'primary@example.test',
+      owners: ['primary@example.test', 'me@example.test'],
+    })] })} extra={s} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    // Both the primary owner and the co-owner render under Ownership as "Owner".
+    await waitFor(() => expect(screen.getByText('primary@example.test')).toBeTruthy());
+    expect(screen.getByText('me@example.test')).toBeTruthy();               // the co-owner (caller)
+    expect(screen.getAllByText('Owner').length).toBeGreaterThanOrEqual(2);  // two owner pills
+    // The co-owner is NOT double-listed as a member; only the access grant is.
+    await waitFor(() => expect(screen.getByText('bob@x')).toBeTruthy());
+    // A co-owner manages members but does not hold the transferable slot.
+    expect(screen.queryByText('Transfer ownership')).toBeNull();
+    // ...and is not offered back as an addable member.
+    expect(screen.queryByTitle('Add me@example.test')).toBeNull();
+    expect(screen.getByTitle('Add sam@x')).toBeTruthy();
+  });
+
+  it('manage drawer (owner): a co-owner shows under Ownership and can be revoked', async () => {
+    const s = spies();
+    const revoked = [];
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': (url, init) => {
+        if (init && (init.method === 'POST' || init.method === 'DELETE')) {
+          const body = new URLSearchParams(init.body || '');
+          revoked.push(`${body.get('principal_value')}:${body.get('role')}`);
+          return { json: { owner_email: 'me@example.test', grants: [{ principal_type: 'email', principal_value: 'bob@x', role: 'access' }] } };
+        }
+        return { json: { owner_email: 'me@example.test', grants: [
+          { principal_type: 'email', principal_value: 'sam@x', role: 'owner' },
+          { principal_type: 'email', principal_value: 'bob@x', role: 'access' },
+        ] } };
+      },
+      '/bailey/api/people/directory': { json: { people: [] } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    await waitFor(() => expect(screen.getByText('sam@x')).toBeTruthy());  // the co-owner
+    // The primary owner still sees Transfer (they hold the transferable slot).
+    expect(screen.getByText('Transfer ownership')).toBeTruthy();
+    // Revoking the co-owner hits the share API with the OWNER role (not access).
+    fireEvent.click(screen.getByTitle('Remove co-owner'));
+    await waitFor(() => expect(revoked).toContain('sam@x:owner'));
+  });
+
   // People directory rows as GET /bailey/api/people/directory returns them
   // — the pool the add-member and transfer pickers select from.
   function rosterPerson(over = {}) {

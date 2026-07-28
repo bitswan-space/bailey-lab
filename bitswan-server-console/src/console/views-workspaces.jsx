@@ -736,7 +736,7 @@ function WorkspacesView({ ctx }) {
       )}
 
       <CreateWorkspaceModal open={createOpen} onClose={() => setCreateOpen(false)} data={data} setData={setData} toast={toast} currentUser={currentUser} refresh={refresh} />
-      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} refresh={refresh} />
+      <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} refresh={refresh} currentUser={currentUser} />
 
       <WModal open={!!trashTarget} onClose={trashBusy ? () => {} : () => setTrashTarget(null)} icon="trash-2"
         title={trashTarget ? `Delete “${trashTarget.name}”?` : 'Delete workspace?'}
@@ -867,7 +867,7 @@ function PersonPickList({ candidates, disabled, titleFor, onPick }) {
 // POST /bailey/api/workspaces/{name}/transfer-ownership — strictly the
 // recorded owner's call (the backend rejects even admins), the recipient
 // must already be a person on this server, and the old owner stays a member.
-function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
+function ManageWorkspaceDrawer({ ws, onClose, toast, refresh, currentUser }) {
   const [share, setShare] = useWS(null);   // {owner_email, grants} | null while loading
   const [err, setErr] = useWS('');
   const [addQuery, setAddQuery] = useWS(''); // search text over the add-member picker
@@ -895,6 +895,11 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   // otherwise be shown management controls the backend then 403s.
   const canManage = ws ? ws.dashboardRole === 'owner' : false;
   const ownerEmail = ws ? ws.ownerEmail : '';
+  // Only the recorded primary owner (owner_email) can transfer the workspace —
+  // the backend rejects even a co-owner's transfer. Co-owners manage members
+  // but don't hold the single transferable slot.
+  const myEmail = (currentUser && currentUser.email) || '';
+  const isPrimaryOwner = !!ownerEmail && myEmail.toLowerCase() === ownerEmail.toLowerCase();
 
   React.useEffect(() => {
     // Fresh drawer, fresh transfer flow — don't leak a half-picked recipient
@@ -916,12 +921,25 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   }, [ws && ws.id]);
 
   if (!ws) return null;
-  // Members list: owners get the live, removable grant list; everyone else
-  // gets the DTO's member roster minus the owner (read-only).
+  // Co-owners: owner-role ACL grants beyond the primary owner_email. A manager
+  // reads them live from the share grants; everyone else from the workspace
+  // DTO's `owners` list (owner_email + co-owners), minus the primary owner.
+  const coOwners = canManage
+    ? (share ? (share.grants || []).filter(g => g.role === 'owner') : [])
+    : (ws.owners || [])
+        .filter(o => o && o.toLowerCase() !== (ownerEmail || '').toLowerCase())
+        .map(o => ({ principal_type: 'email', principal_value: o, role: 'owner' }));
+  // Every owner email (primary + co-owners), lower-cased — keeps owners out of
+  // the Members list and the add-member picker so nobody double-lists.
+  const ownerSet = new Set(
+    [ownerEmail, ...coOwners.map(g => g.principal_value)]
+      .filter(Boolean).map(e => e.toLowerCase()));
+  // Members list: access-role grants only. Owners get the live, removable grant
+  // list; everyone else gets the DTO's roster minus any owner (read-only).
   const members = canManage
     ? (share ? (share.grants || []).filter(g => g.role === 'access') : [])
     : (ws.members || [])
-        .filter(m => m && m.toLowerCase() !== (ownerEmail || '').toLowerCase())
+        .filter(m => m && !ownerSet.has(m.toLowerCase()))
         .map(m => ({ principal_type: 'email', principal_value: m, role: 'access' }));
   const SECTION = { fontSize: 11, fontWeight: 600, color: WC.muted, textTransform: 'uppercase', letterSpacing: 0.4 };
 
@@ -944,7 +962,7 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   const memberSet = new Set(members.map(g => (g.principal_value || '').toLowerCase()));
   const candidates = !canManage ? [] : (directory || []).filter(p =>
     p.email &&
-    p.email.toLowerCase() !== (ownerEmail || '').toLowerCase() &&
+    !ownerSet.has(p.email.toLowerCase()) &&
     !memberSet.has(p.email.toLowerCase()) &&
     (!q || p.email.toLowerCase().includes(q) || (p.name || '').toLowerCase().includes(q)));
 
@@ -1003,25 +1021,44 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
       {/* Ownership — shown to everyone; only the owner can act on it. */}
       <div style={{ ...SECTION, marginBottom: 10 }}>Ownership</div>
       <div style={{ border: `1px solid ${WC.border}`, borderRadius: 10, padding: 14, marginBottom: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           {ownerEmail ? (
-            <WUserChip user={{ email: ownerEmail }} size={36}
-              nameSuffix={<WPill tone="primary" size="xs">Owner</WPill>} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+              <WUserChip user={{ email: ownerEmail }} size={36}
+                nameSuffix={<WPill tone="primary" size="xs">Owner</WPill>} />
+            </div>
           ) : (
-            <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <WAvatar user={{ name: ws.name }} size={36} />
               <div style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg }}>
                 No owner recorded <WPill tone="primary" size="xs">Owner</WPill>
               </div>
-            </>
+            </div>
           )}
+          {/* Co-owners: owner-role grants. Same rights as the primary owner
+              (they just can't transfer the workspace); a manager can revoke them. */}
+          {coOwners.map(g => (
+            <div key={g.principal_value} style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <WUserChip user={{ email: g.principal_value }} size={36}
+                  nameSuffix={<WPill tone="primary" size="xs">Owner</WPill>} />
+              </div>
+              {canManage && (
+                <button onClick={() => removeMember(g)} disabled={busy === g.principal_value} title="Remove co-owner" style={{
+                  width: 28, height: 28, border: 0, background: 'transparent', borderRadius: 6, cursor: 'pointer',
+                  color: WC.mutedFg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <WIcon name="user-minus" size={15} />
+                </button>
+              )}
+            </div>
+          ))}
         </div>
-        {canManage && !transferOpen && (
+        {isPrimaryOwner && !transferOpen && (
           <div style={{ marginTop: 12 }}>
             <WBtn variant="default" size="sm" leftIcon="arrow-left-right" onClick={() => setTransferOpen(true)}>Transfer ownership</WBtn>
           </div>
         )}
-        {canManage && transferOpen && (
+        {isPrimaryOwner && transferOpen && (
           <div style={{ marginTop: 12 }}>
             <div style={{ fontSize: 11.5, color: WC.mutedFg, marginBottom: 6 }}>
               New owner — pick someone already on this server:

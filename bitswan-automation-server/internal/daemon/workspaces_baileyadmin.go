@@ -30,7 +30,8 @@ type accessibleWorkspace struct {
 	IsOwner       bool     `json:"is_owner"`
 	IsTrashed     bool     `json:"is_trashed,omitempty"`
 	OwnerEmail    string   `json:"owner_email,omitempty"` // recorded owner of the dashboard (membership) endpoint
-	Members       []string `json:"members"`               // owner + access-grantee emails on the dashboard endpoint
+	Owners        []string `json:"owners"`                // every owner: owner_email + owner-role grantees (co-owners)
+	Members       []string `json:"members"`               // owner(s) + access-grantee emails on the dashboard endpoint
 	// Deployed component versions + whether a newer image is available on the
 	// server's track. Drives the "update available" badge and the owner update
 	// button in the console.
@@ -89,6 +90,7 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 				IsOwner:       isOwner,
 				IsTrashed:     IsWorkspaceTrashed(name),
 				OwnerEmail:    workspaceOwnerEmail(dashboardHost, gitopsHost),
+				Owners:        workspaceOwnerEmails(dashboardHost),
 				Members:       workspaceMemberEmails(dashboardHost),
 				Versions:      &wv,
 			}
@@ -102,6 +104,39 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 // workspaceMemberEmails returns who can reach a workspace: the dashboard
 // endpoint's owner plus its access-grantee emails (deduped, owner first).
 // Group grants are skipped — there's no single email to render as an avatar.
+// workspaceOwnerEmails returns every owner of the workspace: the recorded
+// owner_email plus any owner-role ACL grants (co-owners). Owner grants are a
+// first-class mechanism (the Share modal issues them and roleFor honors them),
+// so the console must surface them as owners rather than dropping them the way
+// a single owner_email slot does. De-duplicated, owner_email first.
+func workspaceOwnerEmails(dashboardHost string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	add := func(e string) {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			return
+		}
+		k := strings.ToLower(e)
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, e)
+	}
+	if ep, _ := getEndpoint(dashboardHost); ep != nil {
+		add(ep.OwnerEmail)
+	}
+	if grants, err := listGrants(dashboardHost); err == nil {
+		for _, g := range grants {
+			if g.PrincipalType == "email" && g.Role == roleOwner {
+				add(g.PrincipalValue)
+			}
+		}
+	}
+	return out
+}
+
 func workspaceMemberEmails(dashboardHost string) []string {
 	out := []string{}
 	seen := map[string]bool{}

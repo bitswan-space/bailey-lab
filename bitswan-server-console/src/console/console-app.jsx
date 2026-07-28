@@ -123,6 +123,8 @@ function adaptWorkspace(w, callerEmail) {
     dashboard: w.dashboard_url || w.gitops_url || w.editor_url || '#',
     editorUrl: w.editor_url, gitopsUrl: w.gitops_url,
     ownerEmail: w.owner_email || '',
+    // Every owner: the recorded owner_email + owner-role ACL grants (co-owners).
+    owners: w.owners || [],
     // True membership-surface ownership: roleFor(dashboard)==='owner', which
     // is exactly what the owner-only share API enforces. Distinct from
     // is_owner, which is parent-delegated (a dashboard MEMBER counts as owner
