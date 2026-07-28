@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Sharing surfaces, all served under the gate path prefix (/2fa-gate):
@@ -179,13 +180,31 @@ func handleShareAPI(w http.ResponseWriter, r *http.Request, email string, groups
 	writeListing := func() {
 		grants, _ := listGrants(host)
 		requests, _ := listAccessRequests(host)
+		// Magic links (#240): only offered when the caller may actually mint one
+		// (admin/auditor + owner + production). The modal shows the section and
+		// existing links only then.
+		canMint, _ := canMintMagicLink(email, groups, host)
+		mlOut := []map[string]any{}
+		if canMint {
+			if links, err := dbListMagicLinks(host); err == nil {
+				for _, m := range links {
+					mlOut = append(mlOut, map[string]any{
+						"id":         m.ID,
+						"created_by": m.CreatedBy,
+						"expires_at": m.ExpiresAt.Format(time.RFC3339),
+					})
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"hostname":     ep.Hostname,
-			"owner_email":  ep.OwnerEmail,
-			"display_name": ep.DisplayName,
-			"grants":       grants,
-			"requests":     requests,
+			"hostname":            ep.Hostname,
+			"owner_email":         ep.OwnerEmail,
+			"display_name":        ep.DisplayName,
+			"grants":              grants,
+			"requests":            requests,
+			"can_mint_magic_link": canMint,
+			"magic_links":         mlOut,
 		})
 	}
 

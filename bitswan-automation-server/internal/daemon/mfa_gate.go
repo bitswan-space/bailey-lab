@@ -150,6 +150,17 @@ func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 
+	// Magic-link (endpoint-scoped) device trust — the middle tier (#240). A
+	// device that redeemed a magic link is trusted for ONE endpoint only, so the
+	// check is keyed by THIS request's endpoint (its outer host). It satisfies
+	// only the device-trust phase; the per-endpoint ACL still runs separately in
+	// enforceProtectedGate, so scoped trust never grants access on its own — and
+	// it never carries to the console or any other endpoint.
+	if id, ok := deviceIDFromRequest(r, email); ok &&
+		endpointDeviceTrusted(id, toOuterHost(requestEndpointHost(r))) {
+		return true
+	}
+
 	// Untrusted device on a TRUST-REQUIRED host (the console or an app). We do
 	// NOT serve any console/app surface here — the console is the internal half
 	// of the split and only trusted devices reach it. Send the browser to the

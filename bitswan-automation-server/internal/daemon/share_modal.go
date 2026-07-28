@@ -150,6 +150,16 @@ func shareModalHTML() string {
       <p class="bailey-share-empty">Loading…</p>
     </div>
 
+    <div id="bailey-magic-section" style="display:none;border-top:1px solid #E4E4E7;margin-top:14px;padding-top:12px;">
+      <div class="bailey-share-section-title">Magic link · device trust for this endpoint</div>
+      <div style="font-size:12px;color:#92400E;background:#FEF3C7;border:1px solid #FDE68A;border-radius:6px;padding:8px 10px;margin:6px 0 10px;line-height:1.4;">
+        &#9888; Anyone who opens this link and signs in gets their browser device-trusted for <b>this endpoint only</b>. Use it only for low-sensitivity production endpoints. The access list above still applies &mdash; a magic link does not grant access on its own.
+      </div>
+      <div class="bailey-share-list" id="bailey-magic-list"></div>
+      <div id="bailey-magic-new" style="display:none;margin:8px 0;"></div>
+      <button type="button" id="bailey-magic-create" onclick="window.__baileyMagicCreate()">Create magic link</button>
+    </div>
+
     <div class="bailey-share-footer">
       <span style="font-size:12px;color:#71717A;">Changes save instantly.</span>
       <button type="button" onclick="window.__baileyShareClose()">Done</button>
@@ -232,6 +242,38 @@ func shareModalJS(host, callerEmail, apiURL string) string {
       reqBox.style.display = 'none';
       reqTitle.style.display = 'none';
     }
+    renderMagic(data);
+  }
+  var magicCreateURL = '/2fa-gate/api/magic-link/create';
+  var magicRevokeURL = '/2fa-gate/api/magic-link/revoke';
+  function renderMagic(data) {
+    var sec = $('bailey-magic-section');
+    if (!data.can_mint_magic_link) { sec.style.display = 'none'; return; }
+    sec.style.display = '';
+    var list = $('bailey-magic-list');
+    list.innerHTML = '';
+    var links = data.magic_links || [];
+    if (!links.length) {
+      var p = document.createElement('p');
+      p.className = 'bailey-share-empty';
+      p.textContent = 'No magic links yet.';
+      list.appendChild(p);
+    }
+    links.forEach(function(m){
+      var meta = el('div', {class:'bailey-share-meta'}, [
+        el('div', {class:'name', text:'Magic link'}),
+        el('div', {class:'sub',  text:'by ' + (m.created_by||'') + ' · expires ' + String(m.expires_at||'').slice(0,10)})
+      ]);
+      var rm = el('button', {class:'bailey-share-remove', text:'Revoke', onclick:function(){ revokeMagic(m.id); }});
+      list.appendChild(el('div', {class:'bailey-share-row'}, [meta, rm]));
+    });
+  }
+  function revokeMagic(id) {
+    showError('');
+    fetch(magicRevokeURL, {method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:id})})
+      .then(function(r){ if(!r.ok) return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));}); return r.json(); })
+      .then(load).catch(function(e){ showError('Failed to revoke link: '+e); });
   }
   function requestRowFor(req) {
     var avatar = el('div', {class: 'bailey-share-avatar', text: initials(req.email)});
@@ -342,6 +384,25 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     // Heuristic: starts with / → Keycloak group path, otherwise email.
     var pType = (v[0] === '/') ? 'group' : 'email';
     add(pType, v, role).then(function(){ $('bailey-share-input').value = ''; });
+  };
+  window.__baileyMagicCreate = function() {
+    showError('');
+    fetch(magicCreateURL, {method:'POST', credentials:'same-origin'})
+      .then(function(r){ if(!r.ok) return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));}); return r.json(); })
+      .then(function(res){
+        var box = $('bailey-magic-new');
+        box.style.display = ''; box.innerHTML = '';
+        var inp = el('input', {type:'text', value:res.url, readonly:'readonly'});
+        inp.style.cssText = 'width:100%%;font-size:12px;padding:6px 8px;border:1px solid #E4E4E7;border-radius:6px;';
+        inp.onclick = function(){ inp.select(); };
+        var copy = el('button', {type:'button', text:'Copy link', onclick:function(){ inp.select(); try{document.execCommand('copy');}catch(e){} copy.textContent='Copied'; }});
+        copy.style.cssText = 'margin-top:6px;';
+        box.appendChild(el('div', {class:'sub', text:'Share this link (valid until ' + String(res.expires_at||'').slice(0,10) + '):'}));
+        box.appendChild(inp);
+        box.appendChild(copy);
+        load();
+      })
+      .catch(function(e){ showError('Failed to create magic link: '+e); });
   };
   document.addEventListener('keydown', function(e){
     if (e.key === 'Escape' && $('bailey-share-modal').classList.contains('open')) {
