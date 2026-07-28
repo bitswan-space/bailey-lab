@@ -347,6 +347,20 @@ def make_hostname_label(
     return f"{base}{suffix}"
 
 
+def stage_for_hostname(stage: str | None) -> str:
+    """Normalize a deployment's *persisted* stage to the one its PUBLIC hostname
+    uses. The flat bitswan.yaml view stores a production deployment with an empty
+    stage ('' — see `_tree_to_flat`), but every user-facing host keeps the
+    '-production' segment: the deploy URL, the ingress route the driver
+    reconciles, and the dashboard link all compute `stage or "production"`.
+    Resolution/eviction must do the same, or a request to `…-production` never
+    matches its deployment — silently breaking on-demand detection and
+    wake-on-access for EVERY production endpoint (the host looks unknown, so the
+    gate passes a hard 502/closed-connection through instead of the waking page).
+    """
+    return stage or "production"
+
+
 class AutomationService:
     def __init__(self):
         self.bs_home = os.environ.get("BITSWAN_GITOPS_DIR", "/mnt/repo/pipeline")
@@ -5508,9 +5522,13 @@ class AutomationService:
             context = conf.get("context") or ""
             stage = conf.get("stage") or ""
             if (
-                make_hostname_label(self.workspace_name, auto, context, stage).lower()
+                make_hostname_label(
+                    self.workspace_name, auto, context, stage_for_hostname(stage)
+                ).lower()
                 == label
             ):
+                # Return the PERSISTED stage ('' for production) — callers like
+                # _wake_context_stage match deployments on that form.
                 return conf, context, stage
         return None
 
@@ -5573,7 +5591,7 @@ class AutomationService:
                         self.workspace_name,
                         auto,
                         conf.get("context") or "",
-                        conf.get("stage") or "",
+                        stage_for_hostname(conf.get("stage")),
                     )
                 )
         # Tear down the egress gateway of any (context, stage) group that is now
