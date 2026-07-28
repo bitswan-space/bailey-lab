@@ -63,7 +63,7 @@ func trust(t *testing.T, r *http.Request, email string) *http.Request {
 func TestChromeWrap_OuterHostGetsWrap(t *testing.T) {
 	host := "wrap-outer.example.com"
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, browserGet(t, host,"/some/page?x=1", "user@example.com"))
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, host, "/some/page?x=1", "user@example.com"))
 
 	if w.Header().Get("X-Test-Inner") == "1" {
 		t.Fatal("outer browser GET reached the inner handler instead of the wrap")
@@ -85,10 +85,45 @@ func TestChromeWrap_OuterHostGetsWrap(t *testing.T) {
 	}
 }
 
+// TestChromeWrap_OnboardNeverServesConsoleToTrustedDevice: bailey-onboard is the
+// device-trust ONBOARDING host only. A device that's already trusted has
+// finished onboarding and must be bounced OFF the host — never shown the
+// console/admin SPA there (regression: onboard rendered the /workspaces admin).
+func TestChromeWrap_OnboardNeverServesConsoleToTrustedDevice(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+	w := httptest.NewRecorder()
+	// browserGet → trust() attaches a valid device cookie, so this device is trusted.
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, onboard, "/workspaces", "admin@example.com"))
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("onboard + trusted device: status = %d, want 303 (bounced off the onboard host)", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc == "" || strings.Contains(loc, onboard) {
+		t.Errorf("did not bounce the trusted device off the onboard host: Location = %q", loc)
+	}
+}
+
+// A signed-in but UNtrusted device must still be served the onboarding SPA on
+// the onboard host (so it can render the pairing scene) — not redirected.
+func TestChromeWrap_OnboardServesOnboardingToUntrustedDevice(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+	// Signed in (identity header) but NO device cookie → untrusted.
+	r := httptest.NewRequest(http.MethodGet, "https://"+onboard+"/workspaces", nil)
+	r.Host = onboard
+	r.Header.Set("Accept", "text/html")
+	r.Header.Set("X-Forwarded-Email", "newbie@example.com")
+	w := httptest.NewRecorder()
+	wrappedHandler(t).ServeHTTP(w, r)
+	if w.Code == http.StatusSeeOther {
+		t.Fatalf("onboard bounced an UNtrusted device instead of serving the pairing scene (loc=%q)", w.Header().Get("Location"))
+	}
+}
+
 func TestChromeWrap_InnerHostPassesThrough(t *testing.T) {
 	host := "wrap-pass--inner.example.com"
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, browserGet(t, host,"/", "user@example.com"))
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, host, "/", "user@example.com"))
 	if w.Header().Get("X-Test-Inner") != "1" {
 		t.Error("inner-host request didn't reach the inner handler")
 	}
@@ -138,7 +173,7 @@ func TestChromeWrap_GateAPIPassesThroughOnOuter(t *testing.T) {
 func TestChromeWrap_NoIdentityFallsThrough(t *testing.T) {
 	host := "wrap-noident.example.com"
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, browserGet(t, host,"/", ""))
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, host, "/", ""))
 	if w.Header().Get("X-Test-Inner") != "1" {
 		t.Error("identity-less request should fall through to the inner handler (upstream will reject)")
 	}
@@ -152,7 +187,7 @@ func TestChromeWrap_OwnerSeesShareButton(t *testing.T) {
 
 	// Owner gets the Share button + modal.
 	w := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w, browserGet(t, host,"/", "owner@example.com"))
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, host, "/", "owner@example.com"))
 	if !strings.Contains(w.Body.String(), "__baileyShareOpen") {
 		t.Error("owner wrap missing the Share button")
 	}
@@ -163,7 +198,7 @@ func TestChromeWrap_OwnerSeesShareButton(t *testing.T) {
 		t.Fatal(err)
 	}
 	w2 := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w2, browserGet(t, host,"/", "viewer@example.com"))
+	wrappedHandler(t).ServeHTTP(w2, browserGet(t, host, "/", "viewer@example.com"))
 	if !strings.Contains(w2.Body.String(), "bailey-footer") {
 		t.Error("access-role member didn't get the wrap")
 	}
@@ -174,7 +209,7 @@ func TestChromeWrap_OwnerSeesShareButton(t *testing.T) {
 	// A user with no role at all is denied at the outer host — no wrap,
 	// and the generic denial page (no leak of host/owner).
 	w3 := httptest.NewRecorder()
-	wrappedHandler(t).ServeHTTP(w3, browserGet(t, host,"/", "stranger@example.com"))
+	wrappedHandler(t).ServeHTTP(w3, browserGet(t, host, "/", "stranger@example.com"))
 	if w3.Code != http.StatusForbidden {
 		t.Errorf("stranger on outer host: status = %d, want 403", w3.Code)
 	}
