@@ -375,7 +375,12 @@ func serverStatePaths() []string {
 		filepath.Join(cfg, "protected-proxy"),       // cookie-secret (session + CSRF key)
 		filepath.Join(cfg, "certauthorities"),       // operator CAs mounted into every workspace
 		filepath.Join(cfg, "backup", "config.json"), // enabled + retention policy
-		serverManifestPath(),                        // what this server was, for recovery
+		// The operator's "I saved the key" acknowledgement. Captured because a
+		// recovered server would otherwise warn that the key was never saved --
+		// on a machine that demonstrably just recovered *using* that key. A
+		// warning that cries wolf is a warning nobody reads.
+		keyAcknowledgedPath(),
+		serverManifestPath(), // what this server was, for recovery
 	}
 }
 

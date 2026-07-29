@@ -29,7 +29,7 @@ import (
 // docker, BEFORE committing to a rebuild.
 
 func newBackupManifestCmd() *cobra.Command {
-	var aocAPI, serverID, token, keyFile, snapshot, image string
+	var aocAPI, serverID, token, keyFile, snapshot, image, network string
 
 	cmd := &cobra.Command{
 		Use:   "manifest",
@@ -81,7 +81,7 @@ func newBackupManifestCmd() *cobra.Command {
 			}
 
 			manifest, warning, err := readManifestWithoutDaemon(
-				cmd.Context(), aocAPI, serverID, token, key, snapshot, image)
+				cmd.Context(), aocAPI, serverID, token, key, snapshot, image, network)
 			if err != nil {
 				return err
 			}
@@ -98,6 +98,11 @@ func newBackupManifestCmd() *cobra.Command {
 	f.StringVar(&keyFile, "key-file", "", "file holding the backup encryption key (daemon-less mode)")
 	f.StringVar(&image, "runtime-image", "",
 		"image providing restic (default: the pin recorded in the backup, else "+backup.DefaultRuntimeImage+")")
+	// restic runs in a container, so a privately-reachable AOC (one behind the
+	// ingress this very server provides, or on an internal network) needs the
+	// container attached to that network — the host's DNS cannot see it.
+	f.StringVar(&network, "docker-network", "",
+		"docker network to attach restic to, when the AOC is not publicly resolvable")
 	return cmd
 }
 
@@ -119,7 +124,7 @@ func readKeyFile(path string) (string, error) {
 // readManifestWithoutDaemon is the bare-machine bootstrap: build the AOC target
 // from supplied values and read the manifest with restic in a container.
 func readManifestWithoutDaemon(
-	ctx context.Context, aocAPI, serverID, token, key, snapshot, image string,
+	ctx context.Context, aocAPI, serverID, token, key, snapshot, image, network string,
 ) (backup.ServerManifest, string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -129,7 +134,10 @@ func readManifestWithoutDaemon(
 
 	target := backup.NewAOCTarget(aocAPI, serverID, token)
 	exec := backup.NewContainerExec(image)
-	if target.InDockerNetwork() {
+	switch {
+	case network != "":
+		exec.Network = network
+	case target.InDockerNetwork():
 		exec.OnBitswanNetwork()
 	}
 	restic := backup.NewRestic(target, key)

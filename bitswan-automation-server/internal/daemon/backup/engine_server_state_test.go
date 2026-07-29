@@ -38,6 +38,7 @@ func plantServerState(t *testing.T) string {
 	mustWrite(t, filepath.Join(cfg, "traefik", "acme", "acme.json"), "{}")
 	mustWrite(t, filepath.Join(cfg, "protected-proxy", "cookie-secret"), "s3cret")
 	mustWrite(t, filepath.Join(cfg, "backup", "config.json"), `{"enabled":true}`)
+	mustWrite(t, filepath.Join(cfg, "backup", "key-acknowledged"), "")
 	// The traps.
 	mustWrite(t, filepath.Join(cfg, "backup", "restic-key"), "the-repo-key")
 	mustWrite(t, filepath.Join(cfg, "backup", "pre-recover", "ws1-20260729", "big"), "huge")
@@ -106,6 +107,9 @@ func TestServerStateCapturesRealPathsAndNothingDangerous(t *testing.T) {
 		filepath.Join(cfg, "protected-proxy"),
 		filepath.Join(cfg, "certauthorities"),
 		filepath.Join(cfg, "backup", "config.json"),
+		// Without this a recovered server warns the key was never saved, on a
+		// machine that just recovered using it.
+		filepath.Join(cfg, "backup", "key-acknowledged"),
 		filepath.Join(cfg, "server-manifest.json"),
 		"--tag server-config",
 		"--host srv-123",
