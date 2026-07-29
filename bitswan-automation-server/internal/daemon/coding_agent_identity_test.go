@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -527,6 +528,12 @@ func TestProvisionAgentIdentity_WriteFailurePropagates(t *testing.T) {
 }
 
 func TestWriteAgentCredentials_ChownFailureIsFatal(t *testing.T) {
+	// writeAgentCredentials only chowns on Linux — handing a file to uid 1000
+	// is meaningless on a developer's macOS box, and the daemon itself only
+	// runs on Linux. So there is no chown to fail here on other platforms.
+	if runtime.GOOS != "linux" {
+		t.Skip("credentials chown is Linux-only; nothing to fail on " + runtime.GOOS)
+	}
 	ws := t.TempDir()
 	prevChown := chownAgentFile
 	chownAgentFile = func(string) error { return errors.New("chown denied") }
