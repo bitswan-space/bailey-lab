@@ -258,23 +258,35 @@ async function typeMarkdown(pg: import('@playwright/test').Page, md: string): Pr
 test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   test.setTimeout(60 * 60_000);
 
+  // #242 makes bailey-onboard.<domain> device-trust ONLY; the Server Console
+  // lives on the console host (bailey.<domain>) and renders inside the
+  // chrome-wrap iframe. Route every console interaction through that frame.
+  const c = page.frameLocator('iframe').last();
+
   // ---- Onboarding (hard-asserted) — the ONLY page.goto in the whole run ----
   await test.step('onboarding: sign in + claim the server', async () => {
     await page.goto(ENV.onboardUrl + '/');
     await oidcLogin(page, ENV.operatorEmail, ENV.operatorPassword);
     // Idempotent: on a fresh server the bootstrap "Claim this server" button is
     // shown; on an already-claimed server it isn't and we go straight to the
-    // console. Either way we end on the Workspaces view.
-    const claim = page.getByRole('button', { name: /Claim this server/i });
+    // console. Post-#242, Claim may sit on the onboard host directly (untrusted
+    // device) OR on the wrapped console (bailey.<domain>) once trust bounces us
+    // there — accept either surface. Either way we end on the Workspaces view of
+    // the wrapped console.
+    const claimPage = page.getByRole('button', { name: /Claim this server/i });
+    const claimFrame = c.getByRole('button', { name: /Claim this server/i });
     await Promise.race([
-      claim.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
-      page.getByRole('heading', { name: /Workspaces/i }).waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+      claimPage.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+      claimFrame.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+      c.getByRole('heading', { name: /Workspaces/i }).waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
     ]);
-    if (await claim.isVisible().catch(() => false)) {
+    const claim = (await claimPage.isVisible().catch(() => false)) ? claimPage
+      : (await claimFrame.isVisible().catch(() => false)) ? claimFrame : null;
+    if (claim) {
       await capture(page, 'onboard-claim');
       await claim.click();
     }
-    await expect(page.getByRole('heading', { name: /Workspaces/i })).toBeVisible({ timeout: SLA });
+    await expect(c.getByRole('heading', { name: /Workspaces/i })).toBeVisible({ timeout: SLA });
   });
 
   // ---- Create the workspace via the console (idempotent) ----
@@ -282,8 +294,8 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // An existing workspace card carries an "Open" button; a brand-new account
     // shows the "not in any workspace" empty state. Wait for whichever lands so
     // the existence check isn't a render race against the async list fetch.
-    const existing = page.getByText(new RegExp(`^${WORKSPACE.name}$`)).first();
-    const empty = page.getByText(/not in any workspace/i).first();
+    const existing = c.getByText(new RegExp(`^${WORKSPACE.name}$`)).first();
+    const empty = c.getByText(/not in any workspace/i).first();
     await Promise.race([
       existing.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
       empty.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
@@ -292,13 +304,13 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       // Already created on a previous run — nothing to do, just shoot the list.
       await capture(page, 'workspace-create');
     } else {
-      await page.getByRole('button', { name: /New workspace/i }).first().click();
+      await c.getByRole('button', { name: /New workspace/i }).first().click();
       // The create modal isn't an ARIA dialog; target its input by placeholder.
-      const nameInput = page.getByPlaceholder(/payroll-automation/i).first();
+      const nameInput = c.getByPlaceholder(/payroll-automation/i).first();
       await nameInput.waitFor({ state: 'visible', timeout: SLA });
       await nameInput.fill(WORKSPACE.name);
       await capture(page, 'workspace-create');
-      await page.getByRole('button', { name: /^Create workspace$/i }).click();
+      await c.getByRole('button', { name: /^Create workspace$/i }).click();
 
       // Creating a workspace cold-starts its whole container stack (image pulls +
       // compose up), which legitimately runs longer than the short-interaction
@@ -307,9 +319,9 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       // as long as it needs AS LONG AS the log keeps moving. A >PROGRESS freeze of
       // that log is the failure (a dark UI is the bug, not merely slowness), and
       // so is the workspace never appearing.
-      const created = page.getByText(new RegExp(`^${WORKSPACE.name}$`)).first();
-      const already = page.getByText(/already initialized/i).first();
-      const logBox = page.getByTestId('ws-create-log');
+      const created = c.getByText(new RegExp(`^${WORKSPACE.name}$`)).first();
+      const already = c.getByText(/already initialized/i).first();
+      const logBox = c.getByTestId('ws-create-log');
       let lastLog = '';
       let lastChange = Date.now();
       const deadline = Date.now() + 8 * 60_000;
@@ -318,7 +330,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         if (await created.isVisible().catch(() => false)) break; // created
         if (await already.isVisible().catch(() => false)) {
           // Idempotent: a prior run already made it — dismiss and use the existing.
-          await page.getByRole('button', { name: /^Cancel$/ }).first().click().catch(() => {});
+          await c.getByRole('button', { name: /^Cancel$/ }).first().click().catch(() => {});
           break;
         }
         const now = Date.now();
@@ -346,8 +358,8 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     [/Your devices/i, 'devices', /devices/i],
   ] as const) {
     await chapter(slot, async () => {
-      await page.getByRole('button', { name: navLabel }).first().click();
-      await expect(page.getByRole('heading', { name: heading }).first()).toBeVisible({ timeout: SLA });
+      await c.getByRole('button', { name: navLabel }).first().click();
+      await expect(c.getByRole('heading', { name: heading }).first()).toBeVisible({ timeout: SLA });
       await capture(page, slot);
     });
   }
@@ -362,11 +374,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // server's own binary updates host-side (`bitswan self-update`), so its card
   // shows that command rather than a button; rollback is CLI-only.
   await chapter('updates', async () => {
-    await page.getByRole('button', { name: /^Updates/i }).first().click();
-    await expect(page.getByRole('heading', { name: /Updates/i }).first()).toBeVisible({ timeout: SLA });
+    await c.getByRole('button', { name: /^Updates/i }).first().click();
+    await expect(c.getByRole('heading', { name: /Updates/i }).first()).toBeVisible({ timeout: SLA });
     // The server card names the running version and its up-to-date / behind state.
-    await expect(page.getByText(/Automation server/i).first()).toBeVisible({ timeout: SLA });
-    await expect(page.getByText(/Up to date|Update available/).first()).toBeVisible({ timeout: SLA });
+    await expect(c.getByText(/Automation server/i).first()).toBeVisible({ timeout: SLA });
+    await expect(c.getByText(/Up to date|Update available/).first()).toBeVisible({ timeout: SLA });
     await capture(page, 'updates');
   });
 
@@ -380,14 +392,14 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // the daemon, so the connectivity test SUCCEEDS — we hard-assert the card
   // reaches the Connected/success state with NO error before capturing `siem`.
   await chapter('siem', async () => {
-    await page.getByRole('button', { name: /Server overview/i }).first().click();
-    await expect(page.getByText(/SIEM forwarding/i).first()).toBeVisible({ timeout: SLA });
+    await c.getByRole('button', { name: /Server overview/i }).first().click();
+    await expect(c.getByText(/SIEM forwarding/i).first()).toBeVisible({ timeout: SLA });
     // Open the config form (first run shows "Configure ingestor"; an existing
     // config shows "Edit"). Either lands on the same form.
-    const configure = page.getByRole('button', { name: /Configure ingestor|^Edit$/ }).first();
+    const configure = c.getByRole('button', { name: /Configure ingestor|^Edit$/ }).first();
     await configure.waitFor({ state: 'visible', timeout: SLA });
     await configure.click();
-    const url = page.getByPlaceholder(/collector\.example\.com/i).first();
+    const url = c.getByPlaceholder(/collector\.example\.com/i).first();
     await url.waitFor({ state: 'visible', timeout: SLA });
     // Point at the REAL collector (base URL only; Bailey appends /v1/logs).
     await url.fill(ENV.otlpHttpEndpoint);
@@ -396,19 +408,19 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // slot, so the manual shows/explains the form, not just the connected state.
     await capture(page, 'siem-form');
     // Save & connect — runs a bounded connectivity test, then persists.
-    await page.getByRole('button', { name: /Save & connect|Testing…/ }).first().click();
+    await c.getByRole('button', { name: /Save & connect|Testing…/ }).first().click();
     // Wait for the test to settle: the button leaves "Testing…".
-    await page.getByRole('button', { name: /Testing…/ }).first()
+    await c.getByRole('button', { name: /Testing…/ }).first()
       .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
     // HARD-ASSERT the success state — the card's status pill flips to
     // "● Connected" (tone success) and the "Last error:" line is absent, since
     // the collector really is reachable from the daemon. (The pill reads
     // "Disconnected" on failure, so we anchor on "Connected" NOT preceded by
     // "Dis".) The post-save card also lists the endpoint + "Last delivered".
-    const connected = page.getByText(/(?<!Dis)Connected/).first();
+    const connected = c.getByText(/(?<!Dis)Connected/).first();
     await expect(connected, 'SIEM card did not reach a Connected state against the real collector')
       .toBeVisible({ timeout: SLA });
-    await expect(page.getByText(/Last error:/i), 'SIEM connectivity test surfaced an error')
+    await expect(c.getByText(/Last error:/i), 'SIEM connectivity test surfaced an error')
       .toHaveCount(0);
     await capture(page, 'siem');
   });
@@ -435,9 +447,9 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     p.on('close', () => console.log(`  nav[${tag}] ${navEl()} → (tab closed)`));
   };
   await test.step('open the workspace dashboard', async () => {
-    await page.getByRole('button', { name: /Workspaces/i }).first().click();
-    await expect(page.getByRole('heading', { name: /Workspaces/i })).toBeVisible({ timeout: SLA });
-    const open = page.getByRole('button', { name: /^Open$/ }).or(page.getByRole('link', { name: /^Open$/ })).first();
+    await c.getByRole('button', { name: /Workspaces/i }).first().click();
+    await expect(c.getByRole('heading', { name: /Workspaces/i })).toBeVisible({ timeout: SLA });
+    const open = c.getByRole('button', { name: /^Open$/ }).or(c.getByRole('link', { name: /^Open$/ })).first();
     // BP selector trigger — its accessible name is "Process <bp>" in the
     // redesigned top bar (a distinct, always-present shell element, so a good
     // readiness signal). NB: /Business process/i would wrongly match the
@@ -2721,18 +2733,18 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // People & roles view in the Server Console — the same admin surface as the
     // devices chapter. Marek's pending request surfaces inline there.
     await page.bringToFront().catch(() => {});
-    await page.getByRole('button', { name: /People & roles/i }).first().click();
-    await expect(page.getByRole('heading', { name: /People & roles/i }).first()).toBeVisible({ timeout: SLA });
+    await c.getByRole('button', { name: /People & roles/i }).first().click();
+    await expect(c.getByRole('heading', { name: /People & roles/i }).first()).toBeVisible({ timeout: SLA });
     // The console refetches approvals on a background interval; re-click the nav
     // to force a fresh fetch and POLL until Marek's pending device bar appears.
     // This is the heart of the story: the admin sees the request and controls
     // who/which devices get in. Bounded; we re-click People & roles each pass.
-    const pendingBar = page.getByText(/Device awaiting approval/i).first();
+    const pendingBar = c.getByText(/Device awaiting approval/i).first();
     const armDeadline = Date.now() + 90_000;
     for (;;) {
       if (await pendingBar.isVisible().catch(() => false)) break;
       if (Date.now() > armDeadline) break;
-      await page.getByRole('button', { name: /People & roles/i }).first().click().catch(() => {});
+      await c.getByRole('button', { name: /People & roles/i }).first().click().catch(() => {});
       await pendingBar.waitFor({ state: 'visible', timeout: 8_000 }).catch(() => {});
     }
     await expect(
@@ -2747,7 +2759,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // into its underlying field. The "Trust this device" button enables once
     // six characters are entered.
     const codeInput = pendingBar.locator('..').locator('input').first()
-      .or(page.locator('input[inputmode="numeric"], input[maxlength="6"], input').filter({ hasNot: page.locator('[type="search"]') }).last())
+      .or(c.locator('input[inputmode="numeric"], input[maxlength="6"], input').filter({ hasNot: c.locator('[type="search"]') }).last())
       // Collapse the .or() to a single node: a segmented [3,3] code input is TWO
       // <input>s, so the two branches resolve to different boxes — without this
       // the later pressSequentially() (an action) would hit a strict-mode
@@ -2758,15 +2770,15 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // drives each box like a human typing the code.
     await codeInput.click().catch(() => {});
     await codeInput.pressSequentially(pairCode, { delay: 30 });
-    const trustBtn = page.getByRole('button', { name: /^Trust this device$/i }).first();
+    const trustBtn = c.getByRole('button', { name: /^Trust this device$/i }).first();
     await expect(trustBtn, 'the "Trust this device" approval button never enabled after entering the code')
       .toBeEnabled({ timeout: SLA });
     await trustBtn.click();
     // HARD-ASSERT the approval landed: the success toast ("Device trusted for
     // …") fires and the pending bar clears (refresh('approvals') removes it).
     await expect(
-      page.getByText(/Device trusted for/i).first()
-        .or(page.getByText(new RegExp(`Device trusted for ${TEAMMATE.name.split(' ')[0]}`, 'i')).first()),
+      c.getByText(/Device trusted for/i).first()
+        .or(c.getByText(new RegExp(`Device trusted for ${TEAMMATE.name.split(' ')[0]}`, 'i')).first()),
       'approving the device did not surface a "Device trusted" confirmation',
     ).toBeVisible({ timeout: SLA });
     await expect(pendingBar, "the pending request bar did not clear after the admin approved Marek's device")
