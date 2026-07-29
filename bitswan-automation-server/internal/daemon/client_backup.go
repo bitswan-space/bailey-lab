@@ -124,6 +124,24 @@ func (c *Client) BackupKeyMirror() error {
 	return c.backupJSON(http.MethodPost, "/backup/key/mirror", nil, nil)
 }
 
+// BackupRestore runs a targeted restore (files | postgres | couchdb) and
+// streams the job's progress to stdout.
+func (c *Client) BackupRestore(restoreType, workspace, stage, snapshotID string) error {
+	var resp struct {
+		JobID string `json:"job_id"`
+	}
+	payload := map[string]string{
+		"type":        restoreType,
+		"workspace":   workspace,
+		"stage":       stage,
+		"snapshot_id": snapshotID,
+	}
+	if err := c.backupJSON(http.MethodPost, "/backup/restore", payload, &resp); err != nil {
+		return err
+	}
+	return c.StreamJobOutput(resp.JobID, os.Stdout, os.Stdin)
+}
+
 // BackupSnapshots lists restic snapshots (optionally one workspace's) as raw
 // restic JSON.
 func (c *Client) BackupSnapshots(workspace, tag string) (json.RawMessage, error) {

@@ -25,6 +25,46 @@ func newBackupCmd() *cobra.Command {
 	cmd.AddCommand(newBackupRetentionCmd())
 	cmd.AddCommand(newBackupKeyCmd())
 	cmd.AddCommand(newBackupSnapshotsCmd())
+	cmd.AddCommand(newBackupRestoreCmd())
+	return cmd
+}
+
+// newBackupRestoreCmd: targeted restores (docs/backup_restore_runbook.md has
+// the full-server bootstrap procedure composed of these).
+func newBackupRestoreCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "restore",
+		Short: "Restore a workspace's files or databases from the server backup",
+	}
+
+	makeSub := func(restoreType, short string, needsStage bool) *cobra.Command {
+		var workspace, stage, snapshot string
+		sub := &cobra.Command{
+			Use:          restoreType,
+			Short:        short,
+			Args:         cobra.NoArgs,
+			SilenceUsage: true,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if workspace == "" {
+					return fmt.Errorf("--workspace is required")
+				}
+				return backupClient().BackupRestore(restoreType, workspace, stage, snapshot)
+			},
+		}
+		sub.Flags().StringVar(&workspace, "workspace", "", "workspace to restore (required)")
+		sub.Flags().StringVar(&snapshot, "snapshot", "", "restic snapshot id (default: latest)")
+		if needsStage {
+			sub.Flags().StringVar(&stage, "stage", "production", "stage to restore into")
+		}
+		return sub
+	}
+
+	cmd.AddCommand(makeSub("files",
+		"Restore the workspace file tree into a staging dir (never onto the live tree)", false))
+	cmd.AddCommand(makeSub("postgres",
+		"Restore the Postgres dump into the stage's running container (REPLACES data)", true))
+	cmd.AddCommand(makeSub("couchdb",
+		"Restore the CouchDB export into the stage's running container", true))
 	return cmd
 }
 
