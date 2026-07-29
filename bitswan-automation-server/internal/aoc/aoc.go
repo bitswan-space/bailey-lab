@@ -83,6 +83,26 @@ func NewAOCClient() (*AOCClient, error) {
 	}, nil
 }
 
+// NewAOCClientWithToken creates a client from values supplied directly, without
+// reading any config file.
+//
+// For disaster recovery, which runs before a daemon exists and needs to ask the
+// AOC whether a token it found in a restored config still works — the "resume a
+// half-finished recovery" check, which must not spend another one-time password.
+func NewAOCClientWithToken(aocUrl, automationServerId, accessToken string) (*AOCClient, error) {
+	if aocUrl == "" || automationServerId == "" || accessToken == "" {
+		return nil, fmt.Errorf("aoc url, server id and access token are all required")
+	}
+	return &AOCClient{
+		config: config.NewAutomationServerConfig(),
+		settings: &config.AutomationOperationsCenterSettings{
+			AOCUrl:             aocUrl,
+			AutomationServerId: automationServerId,
+			AccessToken:        accessToken,
+		},
+	}, nil
+}
+
 // NewAOCClientWithOTP creates a new AOC client by exchanging OTP for access token
 func NewAOCClientWithOTP(aocUrl, otp, automationServerId string) (*AOCClient, error) {
 	cfg := config.NewAutomationServerConfig()

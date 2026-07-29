@@ -620,6 +620,15 @@ func (s *Server) recoverData(ctx context.Context, req RecoverRequest, set backup
 	}
 }
 
+// PersistServerRecoverReport writes a whole-server recovery's report.
+//
+// Exported because that recovery runs from the CLI, before any daemon exists, yet
+// should leave the same on-disk record a workspace recovery does. It lands in the
+// operator's own ~/.config/bitswan/backup/recoveries rather than the daemon's
+// volume — which is the honest place for it, since the host is where the command
+// ran and the volume may not have existed when it started.
+func PersistServerRecoverReport(report *RecoverReport) { persistRecoverReport(report) }
+
 // finishRecover stamps the end time and persists the final report.
 //
 // Free functions rather than methods: a whole-server recovery writes reports of

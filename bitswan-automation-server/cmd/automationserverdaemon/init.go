@@ -538,6 +538,11 @@ func ensureInotifyLimits() {
 	}
 }
 
+// EnsureDockerVolume creates a named Docker volume if it does not already exist.
+// Exported for disaster recovery, which must create the config volume and
+// restore into it BEFORE any daemon exists.
+func EnsureDockerVolume(name string) error { return ensureDockerVolume(name) }
+
 // ensureDockerVolume creates a named Docker volume if it does not already exist.
 func ensureDockerVolume(name string) error {
 	if exec.Command("docker", "volume", "inspect", name).Run() == nil {

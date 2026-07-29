@@ -158,6 +158,22 @@ func ReadRestoredServerID(ctx context.Context, image string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// ReadRestoredAccessToken returns the AOC access token recorded in the restored
+// (or pre-existing) config, or "".
+//
+// Used to resume a half-finished recovery: a token that still authenticates means
+// a previous run already exchanged an OTP, and OTPs are single-use.
+func ReadRestoredAccessToken(ctx context.Context, image string) (string, error) {
+	out, err := volumeExec(ctx, image, nil,
+		`grep -E '^[[:space:]]*access_token' `+
+			configVolumePath+`/automation_server_config.toml 2>/dev/null | `+
+			`head -1 | cut -d'"' -f2 || true`)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // ConfigVolumeExists reports whether the `bitswan` volume is already present.
 func ConfigVolumeExists(ctx context.Context) bool {
 	cmd := exec.CommandContext(ctx, dockerBinary, "volume", "inspect", BitswanConfigVolume)
