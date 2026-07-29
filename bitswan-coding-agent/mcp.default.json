@@ -2,7 +2,15 @@
   "mcpServers": {
     "playwright": {
       "command": "playwright-mcp",
-      "args": ["--headless", "--no-sandbox", "--browser", "chromium"]
+      "args": [
+        "--headless",
+        "--no-sandbox",
+        "--browser",
+        "chromium",
+        "--isolated",
+        "--storage-state",
+        "/home/agent/.bitswan-browser-state.json"
+      ]
     }
   }
 }

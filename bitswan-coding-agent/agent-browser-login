@@ -1,0 +1,381 @@
+#!/usr/bin/env node
+/*
+ * agent-browser-login — establish the coding agent's authenticated browser
+ * session, the same way a human would, and save it for the Playwright MCP
+ * server (#210) to load.
+ *
+ * WHY A REAL LOGIN. The agent's whole value here is experiencing the app the
+ * way the user does. Reaching an app by its internal container address would
+ * be far easier and would skip oauth2-proxy, Keycloak and Bailey's device
+ * gate — i.e. skip exactly the layers most likely to be broken. So this walks
+ * the public path: public hostname -> oauth2-proxy -> Keycloak login ->
+ * device trust.
+ *
+ * WHY IT HAS TO BE SAVED. playwright-mcp's default profile is a TEMPORARY
+ * directory (`--user-data-dir` unset), so every MCP session starts with an
+ * empty browser and would bounce off the login wall. We therefore write a
+ * storage-state file and the seeded .mcp.json passes it back via
+ * `--storage-state`.
+ *
+ * WHY ONE LOGIN COVERS EVERY APP. Two cookies come out of this:
+ *   - Keycloak's SSO session cookie, on the Keycloak host. Any other app that
+ *     later redirects to Keycloak gets a silent re-auth — no password prompt.
+ *   - Bailey's device-trust cookie, scoped to ".<protected-domain>" (see
+ *     cookieDomainForProtected in the daemon), so it is sent to every host
+ *     under that domain.
+ * That is why the daemon pins login_url to the protected domain: log in on
+ * the wrong domain and the device cookie simply is not sent to the apps.
+ *
+ * Idempotent and safe to re-run. Re-run it if the browser starts landing on a
+ * login page (the Keycloak session outlives nothing in particular).
+ */
+'use strict';
+
+const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const HOME = process.env.HOME || os.homedir();
+const CREDENTIALS_PATH = path.join(HOME, '.bitswan-agent-account.json');
+const STATE_PATH = path.join(HOME, '.bitswan-browser-state.json');
+// Success marker. The state file itself cannot serve as the "did we log in?"
+// signal, because the entrypoint has to pre-create it as an empty-but-valid
+// document: playwright-mcp treats a missing --storage-state file as a hard
+// error on every browser call, so "absent" is not an option we get to use.
+const SESSION_OK_PATH = path.join(HOME, '.bitswan-browser-session.ok');
+
+// Generous but bounded: a cold Keycloak plus a TLS handshake through the
+// relay is slow, while an unbounded wait would hang container startup.
+const NAV_TIMEOUT_MS = 45000;
+
+function log(msg) {
+  process.stderr.write(`agent-browser-login: ${msg}\n`);
+}
+
+/* ---------------------------------------------------------------- TOTP ---
+ * RFC 6238, implemented here rather than pulled in as a dependency: the
+ * agent image installs no OTP library, and this is ~20 lines of crypto we
+ * already have. Parameters must match the daemon's generator
+ * (github.com/pquerna/otp defaults): SHA-1, 30-second step, 6 digits,
+ * base32-encoded secret without padding.
+ */
+function base32Decode(input) {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const clean = String(input).toUpperCase().replace(/=+$/, '').replace(/\s+/g, '');
+  let bits = 0;
+  let value = 0;
+  const out = [];
+  for (const ch of clean) {
+    const idx = alphabet.indexOf(ch);
+    if (idx === -1) throw new Error(`invalid base32 character in TOTP secret: ${ch}`);
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+
+function totpCode(secret, forDate = new Date()) {
+  const counter = Math.floor(forDate.getTime() / 1000 / 30);
+  const buf = Buffer.alloc(8);
+  // Counter is 64-bit big-endian; write it as two 32-bit halves so this
+  // works on Node versions without BigInt buffer writes.
+  buf.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
+  buf.writeUInt32BE(counter % 0x100000000, 4);
+
+  const hmac = crypto.createHmac('sha1', base32Decode(secret)).update(buf).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const bin =
+    ((hmac[offset] & 0x7f) << 24) |
+    ((hmac[offset + 1] & 0xff) << 16) |
+    ((hmac[offset + 2] & 0xff) << 8) |
+    (hmac[offset + 3] & 0xff);
+  return String(bin % 1000000).padStart(6, '0');
+}
+
+/* ------------------------------------------------------------ the flow --- */
+
+function readCredentials() {
+  let raw;
+  try {
+    raw = fs.readFileSync(CREDENTIALS_PATH, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      throw new Error(
+        `no credentials at ${CREDENTIALS_PATH} — this workspace has no coding-agent ` +
+          `account. The daemon writes this file when the agent is enabled; if it is ` +
+          `missing, provisioning failed (check the daemon log for "WARNING: coding ` +
+          `agent enabled WITHOUT a browsing account").`,
+      );
+    }
+    throw e;
+  }
+  const creds = JSON.parse(raw);
+  for (const field of ['email', 'password', 'totp_secret']) {
+    if (!creds[field]) throw new Error(`credentials file is missing "${field}"`);
+  }
+  if (!creds.login_url) {
+    throw new Error(
+      'credentials file has no login_url — this server has no usable public domain, ' +
+        'so no cross-host browser session is possible. Nothing to do.',
+    );
+  }
+  return creds;
+}
+
+// Keycloak's login form. Selectors are Keycloak's own long-standing ids;
+// checked in order so a themed login page with only names still works.
+async function submitKeycloakLogin(page, creds) {
+  const user = page.locator('#username, input[name="username"]').first();
+  const pass = page.locator('#password, input[name="password"]').first();
+  await user.waitFor({ state: 'visible', timeout: NAV_TIMEOUT_MS });
+  await user.fill(creds.email);
+  await pass.fill(creds.password);
+  await Promise.all([
+    page.waitForLoadState('load', { timeout: NAV_TIMEOUT_MS }),
+    page.locator('#kc-login, button[type="submit"], input[type="submit"]').first().click(),
+  ]);
+}
+
+// Pull the visible error Keycloak rendered, so a failure reports the actual
+// reason ("Invalid username or password.") instead of a generic "login
+// failed". Best-effort: themes differ, so fall back to scanning body text for
+// the known phrases rather than depending on any one selector.
+async function keycloakErrorText(page) {
+  try {
+    // Wait for the re-rendered page to actually HAVE text before scraping.
+    // Load-state alone is not enough: measured right after the submit click,
+    // document.body.innerText was still "" (the new document had not been
+    // parsed), so every selector missed and this returned "" — reporting a
+    // bare "login did not complete" while Keycloak was plainly displaying
+    // "Invalid username or password."
+    await page
+      .waitForFunction(() => document.body && document.body.innerText.trim().length > 0, {
+        timeout: 8000,
+      })
+      .catch(() => {});
+    return await page.evaluate(() => {
+      const sel = [
+        '#input-error',
+        '.alert-error',
+        '.kc-feedback-text',
+        '[class*="pf-m-error"]',
+      ];
+      for (const s of sel) {
+        const el = document.querySelector(s);
+        if (el && el.innerText.trim()) return el.innerText.trim();
+      }
+      const body = document.body ? document.body.innerText : '';
+      const known = [
+        'Invalid username or password',
+        'Account is disabled',
+        'Invalid username or password.',
+        'Update password',
+        'Verify email',
+        'Account is temporarily disabled',
+      ];
+      for (const k of known) if (body.includes(k)) return k;
+      return '';
+    });
+  } catch (_) {
+    return '';
+  }
+}
+
+/*
+ * Device trust. POSTed from inside the page rather than with an out-of-band
+ * HTTP client on purpose: the request then carries the browser's oauth2-proxy
+ * session cookie (the gate reads identity from the proxy's forwarded email,
+ * so an unauthenticated client is rejected), and the Set-Cookie that comes
+ * back lands in the browser context we are about to save. Doing it outside
+ * the browser would authenticate something that is not the browser.
+ */
+async function selfTrust(page, creds) {
+  const path_ = creds.self_trust_path || '/bailey/api/self-trust';
+  const code = totpCode(creds.totp_secret);
+
+  // The fetch below is RELATIVE, so it resolves against whatever origin the
+  // page is on. That is DELIBERATE: the device-trust gate is served from
+  // whichever host redirected us — usually bailey-onboard.<domain>, which is a
+  // different host from the console — and the POST has to be same-origin so it
+  // carries the proxy session cookie and so the Set-Cookie lands here.
+  //
+  // What must be checked is that the current host is same-SITE, i.e. under the
+  // protected domain. A browser still sitting on Keycloak would otherwise POST
+  // to <keycloak>/bailey/api/self-trust, and Keycloak answers "404 Unable to
+  // find matching target resource method" — an error that reads like a Bailey
+  // routing bug and sends you hunting in the wrong codebase. (Observed for
+  // real when a wrong username left the page on Keycloak.)
+  const domain = siteDomain(creds.login_url);
+  const here = new URL(page.url());
+  if (here.protocol !== 'https:' || !isSameSite(here.hostname, domain)) {
+    throw new Error(
+      `refusing to self-trust from ${here.origin}: not a host under the ` +
+        `protected domain (${domain}). The gate is served same-site, so this ` +
+        `means the login never reached it.`,
+    );
+  }
+  const result = await page.evaluate(
+    async ([p, totp]) => {
+      const res = await fetch(p, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ totp }),
+        credentials: 'include',
+      });
+      let body = '';
+      try {
+        body = await res.text();
+      } catch (_) {
+        /* status alone is enough to report */
+      }
+      return { status: res.status, body: body.slice(0, 400) };
+    },
+    [path_, code],
+  );
+  if (result.status !== 200) {
+    throw new Error(
+      `self-trust rejected (HTTP ${result.status}): ${result.body}\n` +
+        `If this says "no authenticator enrolled", the daemon's seeded TOTP record is ` +
+        `missing for ${creds.email} — re-enable the coding agent to re-provision.`,
+    );
+  }
+}
+
+// The protected domain, derived by dropping the first label of the login host
+// (login_url is https://bailey.<protected-domain>). Everything same-site lives
+// under this: the console, the apps, and the onboarding host.
+function siteDomain(loginURL) {
+  const host = new URL(loginURL).hostname;
+  const parts = host.split('.');
+  return parts.length > 2 ? parts.slice(1).join('.') : host;
+}
+
+// Is this host part of the protected site (and therefore a legitimate place to
+// find the gate)? Keycloak is NOT — it lives on its own domain.
+function isSameSite(host, domain) {
+  return host === domain || host.endsWith('.' + domain);
+}
+
+function onKeycloak(page) {
+  return /\/realms\/[^/]+\/(protocol\/openid-connect|login-actions)/.test(page.url());
+}
+
+// Trust is established when the login URL loads and STAYS on the login host:
+// no bounce to Keycloak, no /2fa-gate/ page, and no hand-off to the separate
+// onboarding host where the device-trust gate is served.
+async function isThrough(page, loginURL) {
+  await page.goto(loginURL, { waitUntil: 'load', timeout: NAV_TIMEOUT_MS });
+  const url = new URL(page.url());
+  if (onKeycloak(page)) return false;
+  if (url.pathname.includes('/2fa-gate/')) return false;
+  return url.hostname === new URL(loginURL).hostname;
+}
+
+async function main() {
+  const creds = readCredentials();
+  const { chromium } = require('playwright');
+
+  // --no-sandbox mirrors the seeded .mcp.json: this image has no user
+  // namespaces, so Chromium cannot sandbox.
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+  });
+  const context = await browser.newContext({ ignoreHTTPSErrors: false });
+  const page = await context.newPage();
+
+  try {
+    log(`logging in as ${creds.email} at ${creds.login_url}`);
+    await page.goto(creds.login_url, { waitUntil: 'load', timeout: NAV_TIMEOUT_MS });
+
+    if (/\/realms\/[^/]+\/protocol\/openid-connect/.test(page.url())) {
+      // Logged explicitly: without this the successful path is SILENT, and
+      // the output reads as though the login form was skipped entirely —
+      // which is genuinely hard to tell apart from a proxy that isn't
+      // enforcing auth. Say what happened.
+      log('Keycloak login form presented — submitting credentials');
+      await submitKeycloakLogin(page, creds);
+      log('Keycloak login submitted');
+    } else {
+      log('already past Keycloak (no login form presented)');
+    }
+
+    // Did the login actually work?
+    //
+    // Judge by whether we are still on KEYCLOAK, not by whether the host
+    // changed. Two traps here, both hit for real:
+    //
+    //   - a REJECTED login does not stay on /protocol/openid-connect; Keycloak
+    //     posts the form to /realms/<realm>/login-actions/authenticate and
+    //     re-renders the error there. Matching only openid-connect treats a
+    //     failed login as a success.
+    //   - a SUCCESSFUL login on an untrusted device legitimately lands on a
+    //     DIFFERENT host: the device-trust gate lives on
+    //     bailey-onboard.<domain>. Treating "host changed" as failure rejects
+    //     the normal path.
+    const domain = siteDomain(creds.login_url);
+    if (onKeycloak(page)) {
+      const reason = await keycloakErrorText(page);
+      if (/required.action|update.password|verify.email/i.test(reason)) {
+        throw new Error(
+          `Keycloak is asking for an account action before it will complete the ` +
+            `login ("${reason}"). Finish the invite/account email link for ` +
+            `${creds.email} in a normal browser once, then re-run.`,
+        );
+      }
+      throw new Error(
+        `login rejected by Keycloak` +
+          (reason ? `: "${reason}"` : '') +
+          `. Check the address and password for ${creds.email} — note that a ` +
+          `wrong USERNAME also reports "Invalid username or password".`,
+      );
+    }
+    const landed = new URL(page.url());
+    if (!isSameSite(landed.hostname, domain)) {
+      throw new Error(
+        `login ended on ${landed.origin}, which is not under the protected ` +
+          `domain (${domain}) — cannot continue from there.`,
+      );
+    }
+    log(`authenticated; now on ${landed.hostname}`);
+
+    if (!(await isThrough(page, creds.login_url))) {
+      log('device not trusted yet — self-trusting with the seeded authenticator');
+      await selfTrust(page, creds);
+      if (!(await isThrough(page, creds.login_url))) {
+        throw new Error('self-trust returned 200 but the gate still intercepts');
+      }
+    } else {
+      log('device already trusted');
+    }
+
+    // Write via a temp file + rename: an MCP server may be reading this
+    // concurrently, and a truncated storage state fails in a way that looks
+    // like an auth bug rather than a torn file.
+    const tmp = `${STATE_PATH}.tmp`;
+    await context.storageState({ path: tmp });
+    fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, STATE_PATH);
+    // Marker last, and only after the state is durably in place, so a crash
+    // mid-write leaves "not logged in" rather than a marker pointing at a
+    // state file that was never written.
+    fs.writeFileSync(SESSION_OK_PATH, `${creds.email}\n`, { mode: 0o600 });
+    log(`browser session saved to ${STATE_PATH}`);
+  } finally {
+    await browser.close();
+  }
+}
+
+if (require.main === module) {
+  main().catch((err) => {
+    log(`FAILED: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { totpCode, base32Decode };
