@@ -43,8 +43,15 @@ func untilNextBackup(now time.Time) time.Duration {
 // nightly at 02:00 UTC + jitter.
 func (s *Server) startBackupScheduler(engine *backup.Engine) {
 	go func() {
-		// Self-enable off the startup path (it does network I/O: key
-		// escrow check, repo init).
+		// The self-enable talks to the AOC (repo init), which on a server whose
+		// AOC is reached through its own ingress means waiting for Traefik. A
+		// timeout here is not a reason to skip it — fall through and let it fail
+		// the way it always did (see ingress_wait.go).
+		if err := s.waitForOwnIngress(ingressWaitDefault); err != nil {
+			fmt.Printf("Warning: %v; attempting backup self-enable anyway\n", err)
+		}
+
+		// Self-enable off the startup path (it does network I/O: repo init).
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		status, err := backup.EnsureEnabled(ctx)
 		cancel()
@@ -78,7 +85,16 @@ func (s *Server) startBackupScheduler(engine *backup.Engine) {
 			}
 			if last == nil || time.Since(last.FinishedAt) > backupCatchUpAge {
 				time.Sleep(5 * time.Minute) // let workspaces come up first
-				run("catch-up")
+				// A recovered server trips both conditions — the restored
+				// last_run.json is stale by definition — and five minutes in is
+				// usually mid-recovery. Backing up then would make a
+				// half-restored server the newest recovery point. The nightly
+				// run covers it once the recovery finishes.
+				if serverRecoveryInProgress() {
+					fmt.Println("Skipping the catch-up backup: a server recovery is in progress")
+				} else {
+					run("catch-up")
+				}
 			}
 		}
 

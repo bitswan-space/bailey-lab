@@ -155,6 +155,27 @@ func (c *Client) BackupSnapshots(workspace, tag string) (json.RawMessage, error)
 	return raw, nil
 }
 
+// SetServerRecovery opens or closes the whole-server recovery window, which
+// suppresses the AOC workspace-list sync and the scheduler's catch-up backup for
+// its duration. `bitswan recover server` holds it across the whole run.
+func (c *Client) SetServerRecovery(active bool) error {
+	path := "/backup/recover/server/end"
+	if active {
+		path = "/backup/recover/server/begin"
+	}
+	var resp struct {
+		InProgress bool `json:"server_recovery_in_progress"`
+	}
+	if err := c.backupJSON(http.MethodPost, path, nil, &resp); err != nil {
+		return err
+	}
+	if resp.InProgress != active {
+		return fmt.Errorf("daemon reports server_recovery_in_progress=%v, wanted %v",
+			resp.InProgress, active)
+	}
+	return nil
+}
+
 // BackupManifest reads the server manifest recorded inside a snapshot, plus a
 // version-skew warning against the daemon's own binary.
 func (c *Client) BackupManifest(snapshotID string) (backup.ServerManifest, string, error) {

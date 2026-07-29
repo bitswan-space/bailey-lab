@@ -59,6 +59,19 @@ type RecoverRequest struct {
 	GarageMirror  bool `json:"garage_mirror,omitempty"`  // rclone sync (deletes extraneous)
 	DiscardBackup bool `json:"discard_backup,omitempty"` // drop the quarantined tree on success
 	DryRun        bool `json:"dry_run,omitempty"`
+
+	// RebuildImages makes the converge BUILD each business process's images
+	// before starting its containers, instead of assuming they are already in the
+	// local image store.
+	//
+	// Needed on a rebuilt host and nowhere else. Per-BP images are not in the
+	// backup — they only ever existed locally — and the ordinary converge does not
+	// build: the compiler emits `image:` with no `build:` and no pull_policy, so
+	// compose tries to PULL `internal/…` from Docker Hub and the whole converge
+	// fails. Because the tags are content-addressed by the source tree hash, a
+	// rebuild of an unchanged tree reproduces exactly the tags bitswan.yaml pins,
+	// which is what makes this recovery rather than redeployment.
+	RebuildImages bool `json:"rebuild_images,omitempty"`
 }
 
 // RecoverStep is one step's outcome. Field names match backup.StepResult so
@@ -92,8 +105,14 @@ var ErrRecoveryInProgress = fmt.Errorf("a recovery of this workspace is already 
 // background subsystems that must stand aside (the service reconciler and the
 // AOC list sync) are package-level functions.
 var (
-	recoveryMu   sync.Mutex
+	recoveryMu sync.Mutex
+	// recoveringWS holds the workspaces currently mid-recovery.
 	recoveringWS = map[string]bool{}
+	// serverRecovering covers a WHOLE-server recovery, which spans many
+	// per-workspace recoveries with gaps between them. Without it those gaps are
+	// windows in which the AOC list sync would see a half-restored server (see
+	// anyRecoveryInProgress).
+	serverRecovering bool
 )
 
 func beginRecovery(ws string) error {
@@ -119,6 +138,35 @@ func workspaceUnderRecovery(ws string) bool {
 	return recoveringWS[ws]
 }
 
+// beginServerRecovery marks a whole-server recovery as in flight, for its entire
+// duration — through the daemon deploy, the ingress bring-up and every
+// per-workspace recovery.
+//
+// Two things are held off while it is set: the AOC list sync (see
+// anyRecoveryInProgress) and the backup scheduler's catch-up run, which would
+// otherwise fire five minutes after the daemon boots and make a half-restored
+// server the newest recovery point.
+func beginServerRecovery() {
+	recoveryMu.Lock()
+	serverRecovering = true
+	recoveryMu.Unlock()
+}
+
+// endServerRecovery clears the whole-server marker. Callers must defer it: a
+// stuck marker silently disables the AOC list sync.
+func endServerRecovery() {
+	recoveryMu.Lock()
+	serverRecovering = false
+	recoveryMu.Unlock()
+}
+
+// serverRecoveryInProgress reports whether a whole-server recovery is running.
+func serverRecoveryInProgress() bool {
+	recoveryMu.Lock()
+	defer recoveryMu.Unlock()
+	return serverRecovering
+}
+
 // anyRecoveryInProgress reports whether ANY recovery is in flight. The AOC list
 // sync consults this: it reports whatever workspace directories exist right now
 // and AOC deletes anything unreported, which would destroy the workspace's
@@ -127,7 +175,7 @@ func workspaceUnderRecovery(ws string) bool {
 func anyRecoveryInProgress() bool {
 	recoveryMu.Lock()
 	defer recoveryMu.Unlock()
-	return len(recoveringWS) > 0
+	return serverRecovering || len(recoveringWS) > 0
 }
 
 // Seams: every external effect goes through a var so tests need no docker.
@@ -138,6 +186,7 @@ var (
 	recoverComposeUp        = composeUpProject
 	recoverWaitForGitops    = waitForGitopsWithin
 	recoverDeploy           = deployAutomationsCtx
+	recoverRebuildAndDeploy = rebuildAndDeployCtx
 	recoverInitSubTraefik   = initWorkspaceTraefik
 	recoverRepushRoutes     = repushWorkspaceRoutesToSubTraefik
 	recoverSelect           = backup.SelectSnapshotSet
@@ -281,7 +330,7 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 		} else {
 			log(fmt.Sprintf("[%s] ok", name))
 		}
-		s.persistRecoverReport(report)
+		persistRecoverReport(report)
 		return err == nil
 	}
 	skip := func(name, why string) {
@@ -302,7 +351,7 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 		return fmt.Sprintf("files %s from %s", set.Files.ShortID,
 			set.Files.Time.UTC().Format(time.RFC3339)), nil
 	}) {
-		return s.finishRecover(report), fmt.Errorf("could not choose a recovery point")
+		return finishRecover(report), fmt.Errorf("could not choose a recovery point")
 	}
 	report.Snapshots = set
 	report.Warnings = append(report.Warnings, set.Warnings...)
@@ -327,7 +376,7 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 	if req.DryRun {
 		log("Dry run: nothing was changed.")
 		report.OK = true
-		return s.finishRecover(report), nil
+		return finishRecover(report), nil
 	}
 
 	// --- 2. stop everything that could hold a stale inode -----------------
@@ -372,13 +421,13 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 			}
 			return "tree restored", nil
 		}) {
-			return s.finishRecover(report), fmt.Errorf("file restore failed; the workspace was left as it was")
+			return finishRecover(report), fmt.Errorf("file restore failed; the workspace was left as it was")
 		}
 
 		if !step("verify-tree", func() (string, error) { return verifyRestoredTree(ws) }) {
 			rollbackQuarantine(ws, quarantine, log)
 			report.QuarantineDir = ""
-			return s.finishRecover(report), fmt.Errorf("the restored tree is not usable; the workspace was rolled back")
+			return finishRecover(report), fmt.Errorf("the restored tree is not usable; the workspace was rolled back")
 		}
 
 		step("volume-dirs", func() (string, error) {
@@ -397,7 +446,7 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 		metadata, err := config.GetWorkspaceMetadata(ws)
 		if err != nil {
 			report.Steps = append(report.Steps, RecoverStep{Name: "site", Output: err.Error()})
-			return s.finishRecover(report), err
+			return finishRecover(report), err
 		}
 		deploymentDir := filepath.Join(wsDir, "deployment")
 
@@ -408,7 +457,7 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 			}
 			return "gitops + infra-driver up", nil
 		}) {
-			return s.finishRecover(report), fmt.Errorf("could not start the workspace's core containers")
+			return finishRecover(report), fmt.Errorf("could not start the workspace's core containers")
 		}
 
 		if !step("gitops", func() (string, error) {
@@ -417,7 +466,7 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 			}
 			return "reachable", nil
 		}) {
-			return s.finishRecover(report), fmt.Errorf("gitops did not become reachable")
+			return finishRecover(report), fmt.Errorf("gitops did not become reachable")
 		}
 
 		for _, sidecar := range []struct{ name, file, suffix string }{
@@ -446,17 +495,28 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 			return "recreated and routes re-pushed", nil
 		})
 
-		// --- 5. the apply that rebuilds infra services and BP containers ---
-		step("apply", func() (string, error) {
+		// --- 5. the apply that recreates infra services and BP containers ---
+		// With RebuildImages this also BUILDS each BP's images first, which on a
+		// rebuilt host is the difference between converging and failing on a
+		// pull of a local-only `internal/…` tag.
+		stepName, applyResult := "apply", "workspace converged"
+		if req.RebuildImages {
+			stepName, applyResult = "rebuild+apply", "images rebuilt and workspace converged"
+		}
+		step(stepName, func() (string, error) {
 			applyCtx, cancel := context.WithTimeout(ctx, recoverApplyTimeout)
 			defer cancel()
-			if err := recoverDeploy(applyCtx, metadata.GitopsURL, metadata.GitopsSecret, ws, writer); err != nil {
+			deploy := recoverDeploy
+			if req.RebuildImages {
+				deploy = recoverRebuildAndDeploy
+			}
+			if err := deploy(applyCtx, metadata.GitopsURL, metadata.GitopsSecret, ws, writer); err != nil {
 				// A partial apply usually still created the infra services, and
 				// every data step verifies its own container, so keep going.
-				report.Warnings = append(report.Warnings, "apply reported: "+err.Error())
+				report.Warnings = append(report.Warnings, stepName+" reported: "+err.Error())
 				return "", err
 			}
-			return "workspace converged", nil
+			return applyResult, nil
 		})
 	}
 
@@ -474,7 +534,7 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 		_ = os.RemoveAll(quarantine)
 		report.QuarantineDir = ""
 	}
-	return s.finishRecover(report), nil
+	return finishRecover(report), nil
 }
 
 // recoverData restores the databases and object storage for every enabled
@@ -560,16 +620,20 @@ func (s *Server) recoverData(ctx context.Context, req RecoverRequest, set backup
 	}
 }
 
-func (s *Server) finishRecover(report *RecoverReport) *RecoverReport {
+// finishRecover stamps the end time and persists the final report.
+//
+// Free functions rather than methods: a whole-server recovery writes reports of
+// the same shape, and it runs on the host before any *Server exists.
+func finishRecover(report *RecoverReport) *RecoverReport {
 	report.FinishedAt = time.Now().UTC()
-	s.persistRecoverReport(report)
+	persistRecoverReport(report)
 	return report
 }
 
 // persistRecoverReport writes the report after every step: the job manager is
 // in-memory, so a daemon restart mid-recovery would otherwise lose the record
 // of what had already been done.
-func (s *Server) persistRecoverReport(report *RecoverReport) {
+func persistRecoverReport(report *RecoverReport) {
 	dir := filepath.Join(backup.Dir(), "recoveries")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return

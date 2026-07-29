@@ -174,18 +174,37 @@ func deployAutomations(gitopsURL, gitopsSecret, workspaceName string, writer io.
 // a synchronous per-BP git push fan-out with no server-side timeout, so a wedged
 // gitops would otherwise hang a recovery job forever.
 func deployAutomationsCtx(ctx context.Context, gitopsURL, gitopsSecret, workspaceName string, writer io.Writer) error {
-	deployURL := fmt.Sprintf("%s/automations/deploy", gitopsURL)
-	deployURL = automations.TransformURLForDaemon(deployURL, workspaceName)
+	return postToGitops(ctx, gitopsURL, gitopsSecret, workspaceName, "/automations/deploy", "deploy")
+}
 
-	resp, err := automations.SendAutomationRequestCtx(ctx, "POST", deployURL, gitopsSecret)
+// rebuildAndDeployCtx converges a workspace the way deployAutomationsCtx does,
+// but builds each business process's images first.
+//
+// This is the recovery path. The ordinary deploy assumes the images already
+// exist — apply_compose_for_deployments says so outright — and the compiled
+// compose names a local-only `internal/…` tag with no build instructions, so on
+// a host that never built them compose tries to pull from Docker Hub and the
+// converge fails outright. Rebuilding is only meaningful because the tags are
+// content-addressed: an unchanged source tree bakes to the same tag the restored
+// bitswan.yaml pins.
+func rebuildAndDeployCtx(ctx context.Context, gitopsURL, gitopsSecret, workspaceName string, writer io.Writer) error {
+	return postToGitops(ctx, gitopsURL, gitopsSecret, workspaceName,
+		"/automations/rebuild-and-deploy", "rebuild-and-deploy")
+}
+
+func postToGitops(ctx context.Context, gitopsURL, gitopsSecret, workspaceName, path, what string) error {
+	url := automations.TransformURLForDaemon(gitopsURL+path, workspaceName)
+
+	resp, err := automations.SendAutomationRequestCtx(ctx, "POST", url, gitopsSecret)
 	if err != nil {
-		return fmt.Errorf("failed to send deploy request: %w", err)
+		return fmt.Errorf("failed to send %s request: %w", what, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to deploy automations, status code: %d, response: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("failed to %s automations, status code: %d, response: %s",
+			what, resp.StatusCode, string(body))
 	}
 
 	return nil

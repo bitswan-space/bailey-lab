@@ -108,6 +108,12 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	case path == "/recover/workspace" && r.Method == http.MethodPost:
 		s.handleBackupRecoverWorkspace(w, r)
 
+	case path == "/recover/server/begin" && r.Method == http.MethodPost:
+		s.handleServerRecoveryMark(w, r, true)
+
+	case path == "/recover/server/end" && r.Method == http.MethodPost:
+		s.handleServerRecoveryMark(w, r, false)
+
 	case path == "/fetch-snapshot" && r.Method == http.MethodPost:
 		s.handleBackupFetchSnapshot(w, r)
 
@@ -467,6 +473,30 @@ func (s *Server) handleBackupSnapshots(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(raw)
+}
+
+// handleServerRecoveryMark opens and closes the whole-server recovery window.
+//
+// `bitswan recover server` holds this from the moment the daemon comes up until
+// the last workspace is done. While it is set, the AOC list sync is suppressed
+// (it would report a half-restored server and the AOC deletes anything
+// unreported, taking Keycloak clients and MQTT topics with it) and so is the
+// scheduler's catch-up backup, which would otherwise make a half-restored server
+// the newest recovery point.
+//
+// Admin-gated like the rest of the recovery surface: the socket is
+// workspace-reachable, and a workspace must not be able to disable the sync.
+func (s *Server) handleServerRecoveryMark(w http.ResponseWriter, r *http.Request, begin bool) {
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "admin token required", http.StatusForbidden)
+		return
+	}
+	if begin {
+		beginServerRecovery()
+	} else {
+		endServerRecovery()
+	}
+	writeJSON(w, map[string]bool{"server_recovery_in_progress": serverRecoveryInProgress()})
 }
 
 // handleBackupManifest reads the server manifest out of a snapshot — what this

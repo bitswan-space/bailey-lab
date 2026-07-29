@@ -66,12 +66,14 @@ func (h *recoverHarness) install(t *testing.T) {
 		volDirs   func(string) []string
 		enabledFn func(string, string, string) bool
 		skew      func(context.Context, string) string
+		rebuild   func(context.Context, string, string, string, io.Writer) error
 	}{
 		recoverStopContainers, recoverRemoveByLabel, recoverRemoveNamed, recoverComposeUp,
 		recoverWaitForGitops, recoverDeploy, recoverInitSubTraefik, recoverRepushRoutes,
 		recoverSelect, recoverRestoreFiles, recoverWaitService, recoverRestorePostgres,
 		recoverRestoreCouchDB, recoverRestoreGarage, recoverGarageKeyCheck,
 		recoverEnsureVolumeDirs, recoverServiceEnabled, recoverVersionSkew,
+		recoverRebuildAndDeploy,
 	}
 	t.Cleanup(func() {
 		recoverStopContainers, recoverRemoveByLabel, recoverRemoveNamed, recoverComposeUp = saved.stop, saved.byLabel, saved.named, saved.composeUp
@@ -80,6 +82,7 @@ func (h *recoverHarness) install(t *testing.T) {
 		recoverRestoreCouchDB, recoverRestoreGarage, recoverGarageKeyCheck = saved.couch, saved.garage, saved.keys
 		recoverEnsureVolumeDirs, recoverServiceEnabled = saved.volDirs, saved.enabledFn
 		recoverVersionSkew = saved.skew
+		recoverRebuildAndDeploy = saved.rebuild
 	})
 
 	recoverStopContainers = func(ws string, w io.Writer) { h.note("stop") }
@@ -95,6 +98,10 @@ func (h *recoverHarness) install(t *testing.T) {
 	}
 	recoverDeploy = func(_ context.Context, _, _, ws string, w io.Writer) error {
 		h.note("apply")
+		return h.applyErr
+	}
+	recoverRebuildAndDeploy = func(_ context.Context, _, _, ws string, w io.Writer) error {
+		h.note("rebuild+apply")
 		return h.applyErr
 	}
 	recoverInitSubTraefik = func(ws, domain string, verbose bool) (bool, error) {
@@ -395,6 +402,69 @@ func TestRecoverSilentWhenVersionsMatch(t *testing.T) {
 		if step.Name == "version" {
 			t.Errorf("unexpected version step: %+v", step)
 		}
+	}
+}
+
+// On a rebuilt host the images are gone, so the converge has to build them
+// first. Default behaviour must be unchanged — this only fires when asked.
+func TestRecoverRebuildsImagesOnlyWhenRequested(t *testing.T) {
+	h := newRecoverHarness(t)
+	s := &Server{}
+
+	if _, err := s.recoverWorkspace(context.Background(), recoverReq("ws1"), func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if h.index("apply") < 0 || h.index("rebuild+apply") >= 0 {
+		t.Errorf("default recovery must use the plain converge: %v", h.calls)
+	}
+
+	h2 := newRecoverHarness(t)
+	req := recoverReq("ws2")
+	req.RebuildImages = true
+	report, err := (&Server{}).recoverWorkspace(context.Background(), req, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h2.index("rebuild+apply") < 0 || h2.index("apply") >= 0 {
+		t.Errorf("RebuildImages must route at the rebuilding converge: %v", h2.calls)
+	}
+	// The step is named for what it did, so a recovery log says whether images
+	// were rebuilt.
+	var found bool
+	for _, step := range report.Steps {
+		if step.Name == "rebuild+apply" {
+			found = true
+			if !strings.Contains(step.Output, "images rebuilt") {
+				t.Errorf("step output should say images were rebuilt: %q", step.Output)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no rebuild+apply step in the report: %+v", report.Steps)
+	}
+}
+
+// The whole-server marker has to hold across the gaps between per-workspace
+// recoveries: that is when the AOC list sync would see a half-restored server
+// and delete the workspaces it can't see, Keycloak clients and all.
+func TestServerRecoveryGuardSuppressesTheAOCSync(t *testing.T) {
+	if anyRecoveryInProgress() {
+		t.Fatal("registry should start clean")
+	}
+
+	beginServerRecovery()
+	if !serverRecoveryInProgress() || !anyRecoveryInProgress() {
+		t.Error("a server recovery must register as in-progress")
+	}
+	// No workspace is individually recovering, yet the sync must still stand
+	// aside — the gap between workspaces is exactly the dangerous window.
+	if workspaceUnderRecovery("ws1") {
+		t.Error("no workspace should be marked by the server-level guard")
+	}
+
+	endServerRecovery()
+	if serverRecoveryInProgress() || anyRecoveryInProgress() {
+		t.Error("the marker must clear, or the sync stays disabled forever")
 	}
 }
 

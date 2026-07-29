@@ -1406,6 +1406,42 @@ func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt
 	return nil
 }
 
+// SetAOCCredentials swaps in a new access token, leaving the rest of the stored
+// registration untouched. Used by disaster recovery, where the config restored
+// from the backup is right about everything except the token — redeeming the
+// recovery OTP minted a fresh one.
+func (c *Client) SetAOCCredentials(accessToken, expiresAt string) error {
+	bodyBytes, err := json.Marshal(AOCCredentialsRequest{
+		AccessToken: accessToken,
+		ExpiresAt:   expiresAt,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "http://unix/aoc/credentials", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 // AOCStatus reports whether the daemon already holds an AOC registration. Used
 // by register's "already registered" guard now that the host no longer stores
 // the config.
