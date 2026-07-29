@@ -62,8 +62,9 @@ function Avatar({ user, size = 28, ring, src }) {
 // ─── UserChip (avatar + name + email) ────────────────────────────────────────
 // The one DRY way to render an identity across the console: real avatar (by
 // email, initials fallback), a name line with an optional trailing slot for
-// badges, and a monospace email line. Replaces the avatar-plus-two-spans markup
-// that was hand-rolled in the people roster, workspace drawer and gate scenes.
+// badges, and a monospace email line with its own trailing slot (subSuffix).
+// Replaces the avatar-plus-two-spans markup that was hand-rolled in the people
+// roster, workspace drawer and gate scenes.
 // Resolve a real display name (+ avatar) for an email from the AOC identity
 // directory (Keycloak-backed). Bailey itself only knows emails, so this is how
 // the console shows real names for any identity. Module-cached per email — one
@@ -90,7 +91,7 @@ function useDisplayInfo(email) {
   return info && typeof info.then !== 'function' ? info : null;
 }
 
-function UserChip({ user, size = 32, showEmail = true, nameSuffix, sub, gap = 11 }) {
+function UserChip({ user, size = 32, showEmail = true, nameSuffix, sub, subSuffix, gap = 11 }) {
   const info = useDisplayInfo(user && user.email);
   if (!user) return null;
   const displayName = (info && info.name) || user.name || user.email;
@@ -106,9 +107,18 @@ function UserChip({ user, size = 32, showEmail = true, nameSuffix, sub, gap = 11
           </span>
           {nameSuffix}
         </div>
-        {showEmail && secondLine && (
-          <div style={{ fontSize: 11.5, color: C.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {secondLine}
+        {showEmail && (secondLine || subSuffix) && (
+          <div style={{ fontSize: 11.5, color: C.muted, fontFamily: 'Geist Mono, monospace',
+            display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            {/* The line truncates rather than wrapping — in the narrow sidebar an
+                email won't fit, so the full address lives in the title. */}
+            {secondLine && (
+              <span title={typeof secondLine === 'string' ? secondLine : undefined}
+                style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+                {secondLine}
+              </span>
+            )}
+            {subSuffix && <span style={{ flex: '0 0 auto', display: 'inline-flex' }}>{subSuffix}</span>}
           </div>
         )}
       </div>
