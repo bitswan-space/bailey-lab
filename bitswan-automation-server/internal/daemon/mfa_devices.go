@@ -160,14 +160,17 @@ func setDeviceCookie(w http.ResponseWriter, r *http.Request, email, deviceID str
 		Expires:  now.Add(deviceCookieAge),
 		HttpOnly: true,
 		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
-		// None (not Lax) so the cookie travels with iframe loads
-		// inside the bailey chrome wrap. Lax skips iframe subresources,
-		// which would make the gate-inside-iframe see no device cookie
-		// and bounce to /pending-pair → redirect loop.
-		SameSite: http.SameSiteNoneMode,
-	}
-	if dom := cookieDomainForProtected(); dom != "" {
-		c.Domain = dom
+		// HOST-ONLY (no Domain), SameSite=Strict. Each protected host holds only
+		// its OWN device cookie — there is no parent-domain credential that every
+		// workspace / BP subdomain would receive in its request headers. Trust is
+		// carried between hosts by the signed, single-use grant in the SSO dance
+		// (mfa_device_grant.go), never by a cross-site cookie, so this cookie
+		// never needs to ride a cross-site request: Strict is both sufficient and
+		// the safest posture for a bearer credential (never attached to a
+		// cross-site-initiated request). And unlike SameSite=None, a Strict
+		// first-party cookie isn't purged by browsers' third-party-cookie
+		// handling — which is what kept device trust lapsing.
+		SameSite: http.SameSiteStrictMode,
 	}
 	http.SetCookie(w, c)
 	return nil
@@ -199,9 +202,13 @@ func clearDeviceCookie(w http.ResponseWriter) {
 	})
 }
 
-// cookieDomainForProtected returns ".<protected-domain>" so device
-// cookies span every hostname under the operator's public suffix.
-// Returns empty when the server has no public domain configured.
+// cookieDomainForProtected returns ".<protected-domain>" for the parent-scoped
+// helper cookies that legitimately span hosts: the origin-redirect hint
+// (_bailey_origin, a validated same-site target, not a credential) and the admin
+// session cookie. The device-trust CREDENTIAL is deliberately NOT one of these —
+// it is host-only (see setDeviceCookie), so no subdomain ever receives another
+// host's trust cookie in its request headers. Returns empty when the server has
+// no public domain configured.
 func cookieDomainForProtected() string {
 	sc, err := config.NewAutomationServerConfig().LoadConfig()
 	if err != nil || sc == nil {

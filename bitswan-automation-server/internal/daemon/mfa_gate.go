@@ -160,8 +160,19 @@ func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "device not trusted", http.StatusUnauthorized)
 		return false
 	}
+	// Loop backstop: the dance ends by setting THIS host's own device cookie and
+	// returning here. If we keep landing here untrusted, the browser is refusing
+	// the cookie — show an error instead of ping-ponging forever.
+	if trustDanceExhausted(w, r) {
+		writeTrustLoopError(w)
+		return false
+	}
+	// Host-scoped device trust: stash where the user was headed, then send them
+	// to the onboarding host's device-grant, which (if this browser is trusted
+	// there) mints a single-use grant and bounces back to this host's
+	// device-claim to set its own cookie. See mfa_device_grant.go.
 	rememberOrigin(w, r)
-	http.Redirect(w, r, onboardGateURL(r), http.StatusSeeOther)
+	http.Redirect(w, r, onboardDeviceGrantURL(), http.StatusSeeOther)
 	return false
 }
 
@@ -171,31 +182,20 @@ func onOnboardHost(r *http.Request) bool {
 	return isServerConsoleOnboardHost(toOuterHost(requestEndpointHost(r)))
 }
 
-// onboardGateURL builds an absolute URL to the onboarding host root carrying a
-// same-origin return path, so once the SPA clears the device-trust gate it can
-// bounce the user back to the console/app they were trying to reach. Falls back
-// to "/" when no protected domain is configured (tests / bootstrap).
-func onboardGateURL(r *http.Request) string {
-	dom := protectedHostnameDomain()
-	if dom == "" {
-		return "/"
-	}
-	ret := r.URL.Path
-	if r.URL.RawQuery != "" {
-		ret += "?" + r.URL.RawQuery
-	}
-	return "https://" + serverConsoleOnboardHost(dom) + "/?return=" + url.QueryEscape(originForHost(r)+ret)
-}
-
-// originForHost reconstructs the outer scheme://host the untrusted request
-// hit, so the return path the console hands back can rebuild a full URL to
-// the original app host (the console lives on a different host).
+// originForHost reconstructs the scheme://host the untrusted request actually
+// hit, so the dance can rebuild a full URL back to it. It uses the EXACT host
+// (not the outer form): the device-trust credential is now host-only, so the
+// grant dance must target — and set a cookie for, and return to — the precise
+// host that was untrusted. That includes the chrome-wrap INNER host: when an
+// iframe load is untrusted, it has to earn its own cookie and return to the
+// inner content, not be bounced to the outer wrap (which would nest the wrap and
+// never trust the inner host).
 func originForHost(r *http.Request) string {
 	scheme := "https"
 	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
 		scheme = "http"
 	}
-	return scheme + "://" + toOuterHost(requestEndpointHost(r))
+	return scheme + "://" + requestEndpointHost(r)
 }
 
 // rememberOrigin stashes the ABSOLUTE URL the user was trying to reach in a
