@@ -937,6 +937,34 @@ async def deploy_automations(
     return await automation_service.deploy_automations()
 
 
+@router.post("/rebuild-and-deploy")
+async def rebuild_and_deploy(
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Rebuild every automation's images, then converge the workspace.
+
+    For disaster recovery on a rebuilt host. Per-BP images are not part of any
+    backup — they only ever existed in the local image store — and `/deploy`
+    does not build: the compiled compose names a local-only `internal/…` tag
+    with no `build:` and no pull_policy, so compose tries to PULL it from Docker
+    Hub and the whole converge fails. Building first is what makes the restored
+    `bitswan.yaml` deployable.
+
+    This works as recovery rather than redeployment because the image tags are
+    content-addressed by the source git-tree hash: rebuilding an unchanged tree
+    reproduces exactly the tag the restored deployments pin, promoted stages
+    included. Where the source HAS drifted from what was promoted, that tag
+    cannot be reproduced — those deployments are reported in
+    `unreproduced_images` and need a re-promote.
+
+    Synchronous (unlike `/deploy-bp`, which is task-based) so the caller's
+    recovery job can simply await it, and deliberately side-effect-free on git
+    state: it calls the pure `prep_deploy_source`, never a deploy that would
+    rewrite `bitswan.yaml` or record deploy history.
+    """
+    return await automation_service.rebuild_all_images_and_deploy()
+
+
 @router.post("/pull-and-deploy/{branch_name}")
 async def pull_and_deploy(
     branch_name: str,

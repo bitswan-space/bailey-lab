@@ -4998,6 +4998,90 @@ class AutomationService:
             "deployment_id": deployment_id,
         }
 
+    async def rebuild_all_images_and_deploy(self):
+        """Rebuild every automation's images from source, then converge.
+
+        The recovery counterpart to `deploy_automations`. See the route docstring
+        for why a rebuilt host needs this: nothing in the ordinary converge
+        builds, so a host that never built these images cannot start them.
+
+        Only `prep_deploy_source` is used — documented as pure prep, no
+        bitswan.yaml write, no git commit, no compose-up — so this adds images to
+        the local store and changes nothing else. The converge afterwards is the
+        normal one, driven by the restored deployments.
+
+        One automation failing to build does not abort the rest: a workspace
+        coming back with nine of ten business processes is worth more than one
+        that refuses to start at all, and the failures are reported.
+        """
+        sources = scan_workspace_sources(self.workspace_repo_dir)
+        if not sources:
+            logger.info("rebuild-and-deploy: no automation sources found; converging only")
+            return await self.deploy_automations()
+
+        # What the restored deployments expect to run, so we can tell which
+        # pinned tags the rebuild actually reproduced.
+        pinned: dict[str, str] = {}
+        for dep_id, conf in (read_bitswan_yaml(self.gitops_dir) or {}).get(
+            "deployments", {}
+        ).items():
+            image = (conf or {}).get("image")
+            if image:
+                pinned[dep_id] = image
+
+        built: list[dict] = []
+        failures: list[dict] = []
+        rebuilt_tags: set[str] = set()
+
+        for source in sources:
+            relative_path = source.get("relative_path") or ""
+            try:
+                # stage="dev" bakes the source image; the resulting tag is
+                # content-addressed and carries no stage, so it is the same tag
+                # a staging/production deployment references.
+                prep = await self.prep_deploy_source(relative_path, stage="dev")
+            except Exception as exc:  # noqa: BLE001 — reported, never fatal
+                logger.warning("rebuild-and-deploy: %s failed to build: %s", relative_path, exc)
+                failures.append({"relative_path": relative_path, "error": str(exc)})
+                continue
+
+            if prep.get("image"):
+                rebuilt_tags.add(prep["image"])
+            built.append(
+                {
+                    "relative_path": relative_path,
+                    "deployment_id": prep.get("deployment_id"),
+                    "image": prep.get("image"),
+                }
+            )
+
+        # Deployments whose pinned image was NOT reproduced: the source tree has
+        # moved on from what was promoted, so that exact artifact is gone and the
+        # operator has to re-promote. Naming them beats a container that simply
+        # never starts.
+        unreproduced = {
+            dep_id: image
+            for dep_id, image in pinned.items()
+            if image not in rebuilt_tags
+        }
+        if unreproduced:
+            logger.warning(
+                "rebuild-and-deploy: %d pinned image(s) could not be reproduced from "
+                "the current source: %s",
+                len(unreproduced),
+                ", ".join(sorted(unreproduced.values())),
+            )
+
+        deploy_result = await self.deploy_automations()
+
+        return {
+            "message": "Rebuilt images and converged the workspace",
+            "rebuilt": built,
+            "build_failures": failures,
+            "unreproduced_images": unreproduced,
+            "deploy": deploy_result,
+        }
+
     async def deploy_automations(self):
         os.environ["COMPOSE_PROJECT_NAME"] = self.workspace_name
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
