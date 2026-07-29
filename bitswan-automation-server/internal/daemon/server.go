@@ -425,6 +425,13 @@ func (s *Server) Run() error {
 	// service_reconcile.go).
 	go startServiceReconciler()
 
+	// Bring an already-running protected-proxy up to the current config if it's
+	// stale — e.g. one provisioned before the CSRF per-request cap, which
+	// otherwise lets _oauth2_proxy_*_csrf cookies pile up until requests 431. A
+	// daemon update never re-provisions the proxy on its own; this closes that
+	// gap on boot. Backgrounded + best-effort (see protected_proxy_reconcile.go).
+	go reconcileProtectedProxyConfig()
+
 	// Own the shared grype vulnerability DB: create its volume now, download it
 	// in the background, and refresh daily. Keeps the ~40s DB download off every
 	// workspace's first interactive CVE scan (see grype_db.go).
