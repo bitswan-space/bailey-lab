@@ -46,83 +46,103 @@ bitswan backup retention --daily 30 --monthly 12
 bitswan backup snapshots [--workspace W] [--tag postgres]
 ```
 
-## Targeted restore (existing server)
+## Recovering a whole workspace
 
-Databases (REPLACES the stage's current data — for production prefer the
-per-BP DR flow in the workspace dashboard, which restores into the isolated
-DR slot first):
+One command takes a workspace from destroyed-or-broken back to running with its
+data. It restores the tree, recreates every container that mounts it, re-applies
+the deployments so the driver rebuilds the infra services and business-process
+containers, then reloads the databases and object storage for each enabled
+stage:
+
+```
+bitswan backup recover workspace <W>            # a workspace that is gone
+bitswan backup recover workspace <W> --force    # replace one that still exists
+bitswan backup recover workspace <W> --dry-run  # show the plan, change nothing
+```
+
+It runs as a job and streams a step-by-step report; a cold apply outlives any
+client timeout, so there is nothing to wait on locally. The whole current state
+of the workspace is replaced, which is why an existing workspace needs `--force`
+and the CLI asks you to type the name.
+
+Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `--snapshot ID` | anchor on a specific file-tree snapshot (point-in-time); the databases are taken from the SAME backup run |
+| `--stage S` | only this stage (repeatable) |
+| `--skip-files` | keep the current tree; only rebuild containers and reload data |
+| `--skip-postgres` / `--skip-couchdb` / `--skip-garage` | leave that data alone |
+| `--skip-bp-snapshots` | exclude per-process snapshots (large, and fetchable on demand) |
+| `--garage-mirror` | mirror Garage instead of copying — **deletes** objects absent from the backup |
+| `--discard-previous` | delete the quarantined pre-recovery tree on success (kept by default) |
+
+The previous tree is renamed aside to
+`~/.config/bitswan/backup/pre-recover/<W>-<ts>` before anything is written, and
+put back automatically if the restore fails. Each recovery's report is kept at
+`~/.config/bitswan/backup/recoveries/<W>-<ts>.json`.
+
+Reading the report: any step before `verify-tree` failing means nothing was
+changed (or the rollback already ran). Steps after it are independent — a failed
+`postgres:staging` does not stop `garage:production`, and the summary lists
+exactly what needs re-running. Re-run with `--skip-files` to resume from the
+container stage without touching the tree again.
+
+### Targeted restore (single piece)
+
+For repairing one thing rather than recovering a workspace. Databases REPLACE
+the stage's current data — for production prefer the per-BP DR flow in the
+workspace dashboard, which restores into the isolated DR slot first:
 
 ```
 bitswan backup restore postgres --workspace W --stage staging [--snapshot ID]
 bitswan backup restore couchdb  --workspace W --stage staging [--snapshot ID]
+bitswan backup restore garage   --workspace W --stage staging [--snapshot ID]
 ```
 
-Workspace files (non-destructive — lands in a staging dir):
+Workspace files, non-destructively into a staging dir (for inspection or a
+hand-driven recovery):
 
 ```
 bitswan backup restore files --workspace W [--snapshot ID]
 # → ~/.config/bitswan/backup/restores/W/<timestamp>/
 ```
 
-To apply a file restore to the live tree (verified end-to-end by a
-destroy-and-recover drill — see "Drill notes" below):
+### Doing it by hand
 
-1. `docker compose -p <W>-site down` in the workspace's deployment dir
-   (stops gitops + driver; BP containers keep running).
-2. Move the restored tree into place. The restore is nested under the
-   snapshot's absolute path, and there is **no rsync in the daemon image** —
-   use `mv` (same volume, so it is atomic) or `cp -a`:
+Only needed if the command itself is unavailable. This is what it automates, and
+every step is here because omitting it broke something in a real drill:
+
+1. `docker compose -p <W>-site down` in `<wsDir>/deployment`.
+2. Move the restored tree into place. The restore is nested under the snapshot's
+   absolute path, and there is **no rsync in the daemon image**:
    ```
-   R=~/.config/bitswan/backup/restores/<W>/<timestamp>/root/.config/bitswan/workspaces/<W>
+   R=~/.config/bitswan/backup/restores/<W>/<ts>/root/.config/bitswan/workspaces/<W>
    rm -rf ~/.config/bitswan/workspaces/<W> && mv "$R" ~/.config/bitswan/workspaces/<W>
    ```
-3. Bring the workspace back up. **Prefer `bitswan rollback <W>`** over
-   `workspace update`: update REGENERATES the compose and re-resolves images
-   from Docker Hub, which discards the restored image pins (fatal for a
-   workspace built with `--dev`, whose `-dev` images exist only locally —
-   compose then fails on `pull access denied`). `rollback` re-applies the
-   compose that came out of the backup verbatim.
-   If you do run `workspace update`, pass the same flags the workspace was
-   created with (`--dev` / `--staging`), or `rollback` afterwards — update
-   snapshots the pre-update compose, so the restored one is recoverable.
-4. Recreate EVERY container that mounts a subpath of the workspace
-   directory — not just the `-site` project. Docker binds a volume-subpath
-   mount to the directory's **inode** at container-create time, so any
-   container that existed before you replaced the directory keeps pointing at
-   the deleted one and sees an empty mount (symptoms: dashboard file tree
-   empty, coding-agent SSH falling back to a password prompt because
-   `/workspace/.ssh` looks empty). From the deployment dir:
-   ```
-   docker compose -f docker-compose-dashboard.yml    -p <W>-dashboard    up -d --force-recreate
-   docker compose -f docker-compose-coding-agent.yml -p <W>-coding-agent up -d --force-recreate
-   ```
-5. Re-apply the deployments so the driver recreates infra services and BP
-   containers (fresh service volumes start empty): `bitswan automation start
-   <any-deployment> --workspace <W>`. One apply reconciles the whole
-   workspace. **The CLI may time out while the daemon keeps working** — a
-   cold reconcile of many BPs exceeds the client timeout; check
-   `docker ps` rather than retrying.
-6. Restore the databases into the now-running containers:
-   `bitswan backup restore postgres --workspace <W> --stage <stage>` (and
-   `couchdb`) for every enabled stage.
-7. Restore Garage buckets — still manual, see below.
-
-### Garage object data (manual)
-
-```
-# in the daemon container, with the restic env exported (see below)
-restic restore latest --tag "garage,ws:<W>,stage:<stage>" --target /tmp/g
-tar xf /tmp/g/…/garage-<stage>-backup-<ts>.tar          # → garage-backup/<bucket>/…
-# then, per bucket, from inside the stage's rclone toolbox:
-rclone --s3-provider Other --s3-endpoint http://<W>-garage[-stage]:9000 \
-  --s3-region us-east-1 --s3-access-key-id <_system AK> \
-  --s3-secret-access-key <_system SK> sync /tmp/garage-backup/<bucket> :s3:<bucket>
-```
-
-The `_system` credentials are at
-`workspaces/<W>/secrets/garagecreds/<stage>/_system`. Note the driver
-re-creates the buckets empty during step 4, so a DB restored without this
-step leaves dangling object references (rows pointing at missing keys).
+3. Bring the site up with the RESTORED compose — `bitswan rollback <W>`, or
+   `docker compose -p <W>-site up -d --force-recreate`. Do **not** use
+   `bitswan workspace update`: it regenerates the compose and re-resolves images,
+   discarding the restored pins (fatal for a `--dev` workspace, whose images
+   exist only locally — compose then fails with `pull access denied`).
+4. Recreate **every** container that mounts the workspace tree, because Docker
+   binds volume-subpath mounts to the directory *inode* at create time and a
+   survivor silently reads the deleted one:
+   - dashboard and coding-agent: `docker compose -f docker-compose-<svc>.yml -p <W>-<svc> up -d --force-recreate`
+   - the sub-traefik, which subpath-mounts `traefik.yml` and `dynamic.yml` as
+     single FILES: `docker rm -f <W>__traefik` then let the daemon recreate it
+   - the driver's BP and infra containers, which are in the driver's own compose
+     project and which `compose up` will not recreate while the compose content
+     is unchanged: `docker rm -f $(docker ps -aq --filter label=gitops.workspace=<W>)`
+5. Re-apply so the driver rebuilds infra services and BP containers (their
+   volumes come back EMPTY):
+   `bitswan automation start <any-deployment> --workspace <W>`. **The CLI may
+   time out while the daemon keeps working** — check `docker ps`, don't retry.
+6. `bitswan backup restore postgres|couchdb --workspace <W> --stage <stage>` per
+   enabled stage.
+7. `bitswan backup restore garage --workspace <W> --stage <stage>` per enabled
+   stage — **after** the apply, which re-mints the `_system` key the restore
+   authenticates with.
 
 Restic env for ad-hoc commands inside the daemon (keys are indented under
 `[aoc]` in the TOML, so grep by name, not `^key`):
@@ -151,16 +171,11 @@ On a fresh host:
    `~/.config/bitswan/backup/restic-key` (0600) in the daemon volume — or,
    if the AOC escrow still exists, the daemon recovers it automatically on
    startup (`EnsureEnabled`).
-4. Per workspace:
-   a. `bitswan backup restore files --workspace W` and move the tree into
-      `~/.config/bitswan/workspaces/W/` (step list above).
-   b. `bitswan workspace update W` — recreates containers from the restored
-      compose/metadata/secrets.
-   c. `bitswan backup restore postgres --workspace W --stage <each enabled
-      stage>` and the same for couchdb.
-   d. Garage data: **manual** in v1 — extract the `garage-*.tar` from the
-      garage snapshot (`restic restore` + untar) and `rclone sync` each
-      bucket dir back through the workspace's garage toolbox container.
+4. Per workspace: `bitswan backup recover workspace W`. That is the whole
+   per-workspace half, databases and object storage included — see
+   "Recovering a whole workspace" above. Note that per-BP **images** are not
+   backed up (they live only in the local image store), so on a genuinely
+   fresh host each one needs a rebuild pass before its containers can start.
 5. Verify: open each workspace dashboard; for production BPs run the DR
    rehearsal (restore into DR, verify by hand) before trusting the result.
 

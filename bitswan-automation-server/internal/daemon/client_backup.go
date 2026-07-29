@@ -126,15 +126,16 @@ func (c *Client) BackupKeyMirror() error {
 
 // BackupRestore runs a targeted restore (files | postgres | couchdb) and
 // streams the job's progress to stdout.
-func (c *Client) BackupRestore(restoreType, workspace, stage, snapshotID string) error {
+func (c *Client) BackupRestore(restoreType, workspace, stage, snapshotID string, mirror bool) error {
 	var resp struct {
 		JobID string `json:"job_id"`
 	}
-	payload := map[string]string{
+	payload := map[string]interface{}{
 		"type":        restoreType,
 		"workspace":   workspace,
 		"stage":       stage,
 		"snapshot_id": snapshotID,
+		"mirror":      mirror,
 	}
 	if err := c.backupJSON(http.MethodPost, "/backup/restore", payload, &resp); err != nil {
 		return err

@@ -102,6 +102,7 @@ func newBackupRestoreCmd() *cobra.Command {
 
 	makeSub := func(restoreType, short string, needsStage bool) *cobra.Command {
 		var workspace, stage, snapshot string
+		var mirror bool
 		sub := &cobra.Command{
 			Use:          restoreType,
 			Short:        short,
@@ -111,13 +112,17 @@ func newBackupRestoreCmd() *cobra.Command {
 				if workspace == "" {
 					return fmt.Errorf("--workspace is required")
 				}
-				return backupClient().BackupRestore(restoreType, workspace, stage, snapshot)
+				return backupClient().BackupRestore(restoreType, workspace, stage, snapshot, mirror)
 			},
 		}
 		sub.Flags().StringVar(&workspace, "workspace", "", "workspace to restore (required)")
 		sub.Flags().StringVar(&snapshot, "snapshot", "", "restic snapshot id (default: latest)")
 		if needsStage {
 			sub.Flags().StringVar(&stage, "stage", "production", "stage to restore into")
+		}
+		if restoreType == "garage" {
+			sub.Flags().BoolVar(&mirror, "mirror", false,
+				"mirror instead of copy — DELETES objects absent from the backup")
 		}
 		return sub
 	}
@@ -128,6 +133,8 @@ func newBackupRestoreCmd() *cobra.Command {
 		"Restore the Postgres dump into the stage's running container (REPLACES data)", true))
 	cmd.AddCommand(makeSub("couchdb",
 		"Restore the CouchDB export into the stage's running container", true))
+	cmd.AddCommand(makeSub("garage",
+		"Restore the stage's Garage buckets (run after the workspace is applied)", true))
 	return cmd
 }
 

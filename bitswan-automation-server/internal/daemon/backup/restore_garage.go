@@ -20,7 +20,12 @@ import (
 // rooted at "garage-backup/", and copy-in appends member names to the
 // destination, so pushing it at /tmp reproduces /tmp/garage-backup/<bucket>/…
 
-const garageScratch = "/tmp/garage-backup"
+const (
+	// garageArchiveRoot is the tar's top-level directory: ContainerCopyOut roots
+	// the archive at the source path's basename.
+	garageArchiveRoot = "garage-backup"
+	garageScratch     = "/tmp/" + garageArchiveRoot
+)
 
 // garageManifest is the metadata dumpGarageStage writes into the archive.
 type garageManifest struct {
@@ -34,11 +39,19 @@ type garageManifest struct {
 
 // readGarageManifest pulls manifest.json out of the (uncompressed) backup tar
 // host-side, so the bucket list is known without an exec round-trip.
-func readGarageManifest(tarball string) (garageManifest, error) {
+//
+// It also reports which buckets actually have content in the archive. The
+// manifest lists every bucket that EXISTED at backup time, but rclone writes no
+// directory for one that was empty — restoring such a bucket would fail on a
+// missing source directory rather than being the no-op it should be.
+func readGarageManifest(tarball string) (garageManifest, map[string]bool, error) {
 	var manifest garageManifest
+	populated := map[string]bool{}
+	found := false
+
 	f, err := os.Open(tarball)
 	if err != nil {
-		return manifest, err
+		return manifest, nil, err
 	}
 	defer f.Close()
 
@@ -46,24 +59,33 @@ func readGarageManifest(tarball string) (garageManifest, error) {
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			return manifest, fmt.Errorf("no manifest.json in %s", filepath.Base(tarball))
+			break
 		}
 		if err != nil {
-			return manifest, err
+			return manifest, nil, err
 		}
-		name := strings.TrimPrefix(hdr.Name, "./")
-		if filepath.Base(name) != "manifest.json" {
+		// Members are rooted at the scratch dir's basename, e.g.
+		// "garage-backup/<bucket>/<key>" and "garage-backup/manifest.json".
+		name := strings.TrimPrefix(strings.TrimPrefix(hdr.Name, "./"), garageArchiveRoot+"/")
+		if name == "manifest.json" {
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return manifest, nil, err
+			}
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				return manifest, nil, fmt.Errorf("bad manifest.json: %w", err)
+			}
+			found = true
 			continue
 		}
-		data, err := io.ReadAll(tr)
-		if err != nil {
-			return manifest, err
+		if bucket, _, ok := strings.Cut(name, "/"); ok && bucket != "" {
+			populated[bucket] = true
 		}
-		if err := json.Unmarshal(data, &manifest); err != nil {
-			return manifest, fmt.Errorf("bad manifest.json: %w", err)
-		}
-		return manifest, nil
 	}
+	if !found {
+		return manifest, nil, fmt.Errorf("no manifest.json in %s", filepath.Base(tarball))
+	}
+	return manifest, populated, nil
 }
 
 // RestoreGarage replays a stage's Garage buckets from the backup.
@@ -88,7 +110,7 @@ func RestoreGarage(ctx context.Context, ws, stage, snapshotID string, mirror boo
 	}
 	defer os.RemoveAll(dir)
 
-	manifest, err := readGarageManifest(tarball)
+	manifest, populated, err := readGarageManifest(tarball)
 	if err != nil {
 		return "", err
 	}
@@ -169,11 +191,17 @@ func RestoreGarage(ctx context.Context, ws, stage, snapshotID string, mirror boo
 	buckets := append([]string(nil), manifest.Buckets...)
 	sort.Strings(buckets)
 
-	var restored, skipped, failed []string
+	var restored, skipped, empty, failed []string
 	for _, bucket := range buckets {
 		if !live[bucket] {
 			// Creating it here would leave a bucket with no key grants.
 			skipped = append(skipped, bucket)
+			continue
+		}
+		if !populated[bucket] {
+			// It held no objects when the backup ran, so there is nothing to
+			// replay and rclone would fail on the absent source directory.
+			empty = append(empty, bucket)
 			continue
 		}
 		argv := garageRcloneArgv(host, port, accessKey, secretKey,
@@ -193,6 +221,9 @@ func RestoreGarage(ctx context.Context, ws, stage, snapshotID string, mirror boo
 	var parts []string
 	if len(restored) > 0 {
 		parts = append(parts, "restored "+strings.Join(restored, ", "))
+	}
+	if len(empty) > 0 {
+		parts = append(parts, "nothing to restore for "+strings.Join(empty, ", ")+" (empty at backup time)")
 	}
 	if len(skipped) > 0 {
 		parts = append(parts, fmt.Sprintf("skipped %s (bucket no longer exists — its business process is gone)",

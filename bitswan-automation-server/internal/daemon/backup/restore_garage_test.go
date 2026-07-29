@@ -127,6 +127,9 @@ func buildGarageTar(t *testing.T, path string, buckets []string) {
 	})
 	add("garage-backup/manifest.json", manifest)
 	for _, b := range buckets {
+		if strings.HasPrefix(b, "empty-") {
+			continue // rclone writes no directory for a bucket with no objects
+		}
 		add("garage-backup/"+b+"/obj", []byte("payload-"+b))
 	}
 	if err := tw.Close(); err != nil {
@@ -266,5 +269,26 @@ func TestRestoreGarageFailsOnBucketError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "bp-a") {
 		t.Errorf("error does not name the failed bucket: %v", err)
+	}
+}
+
+// A bucket that existed but held no objects at backup time has no directory in
+// the archive (rclone creates none). Restoring it must be a silent no-op, not a
+// failure on a missing source directory — a real drill hit exactly this.
+func TestRestoreGarageSkipsEmptyBucket(t *testing.T) {
+	driver := garageFixture(t, []string{"bp-a", "empty-b"}, []string{"bp-a", "empty-b"}, false)
+
+	out, err := RestoreGarage(context.Background(), "ws1", "production", "garage-snap", false)
+	if err != nil {
+		t.Fatalf("an empty bucket must not fail the restore: %v", err)
+	}
+	if !strings.Contains(out, "empty-b") || !strings.Contains(out, "empty at backup time") {
+		t.Errorf("summary does not explain the empty bucket: %q", out)
+	}
+	if driver.argvContains(":s3:empty-b") {
+		t.Error("ran rclone for a bucket with no data in the archive")
+	}
+	if !driver.argvContains(":s3:bp-a") {
+		t.Error("the populated bucket was not restored")
 	}
 }
