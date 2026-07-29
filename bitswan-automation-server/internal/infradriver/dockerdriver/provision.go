@@ -587,11 +587,12 @@ func wantedBPResources(wctx infradriver.WorkspaceContext, bs *Bitswan) (pgWant, 
 }
 
 // ensureGarageKeysPrecompile mints Garage access keys BEFORE compile for every
-// wanted bucket whose creds file is absent/placeholder, so the compiler bakes
-// real values into the backend env_files. Only possible when the realm's
-// garage container is already RUNNING (i.e. every apply after the first) —
-// on a first-ever apply the compiler writes placeholders and the post-up
-// provisioner mints + converges instead. Best-effort: never fails the apply.
+// wanted bucket whose creds file is absent/placeholder — or names a key Garage
+// no longer has — so the compiler bakes real values into the backend env_files.
+// Only possible when the realm's garage container is already RUNNING (i.e.
+// every apply after the first) — on a first-ever apply the compiler writes
+// placeholders and the post-up provisioner mints + converges instead.
+// Best-effort: never fails the apply.
 func ensureGarageKeysPrecompile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) {
 	_, s3Want := wantedBPResources(wctx, bs)
 	for realm, want := range s3Want {
@@ -602,8 +603,20 @@ func ensureGarageKeysPrecompile(ctx context.Context, wctx infradriver.WorkspaceC
 		if !containerRunning(ctx, container) {
 			continue
 		}
+		// A creds file can name a key Garage doesn't have: restoring a
+		// workspace's secrets onto a rebuilt Garage (its metadata volume holds
+		// buckets AND keys) leaves every BP key dangling. Validate against
+		// ListKeys, exactly as the _system key does, so recovery self-heals
+		// instead of leaving backends permanently AccessDenied.
+		keys, _ := garageListKeys(ctx, container)
+		// Bucket ids for the grant below. reconcileGarageBuckets skips a bucket
+		// it considers fully provisioned (bucket + key both exist server-side),
+		// so a key minted HERE must be granted HERE too — otherwise the skip
+		// fires on a brand-new key that owns nothing and the backend is
+		// AccessDenied forever.
+		buckets, _ := garageListBuckets(ctx, container)
 		for _, bucket := range sortedKeys(want) {
-			if ak, _ := readBucketCreds(wctx.SecretsDir, realm, bucket); ak != "" {
+			if ak, _ := readBucketCreds(wctx.SecretsDir, realm, bucket); ak != "" && keys[ak] {
 				continue
 			}
 			ak, sk, err := garageCreateKey(ctx, container, "bp-"+bucket)
@@ -613,6 +626,15 @@ func ensureGarageKeysPrecompile(ctx context.Context, wctx infradriver.WorkspaceC
 			}
 			if err := writeBucketCreds(wctx.SecretsDir, realm, bucket, ak, sk); err != nil {
 				report("provision", fmt.Sprintf("persist garage key for %s failed: %v", bucket, err))
+				continue
+			}
+			// Grants are idempotent. A bucket that doesn't exist yet is left to
+			// reconcile, which creates AND grants it (its skip can't fire while
+			// the bucket is missing).
+			if bucketID := buckets[bucket]; bucketID != "" {
+				if err := garageAllowBucketKey(ctx, container, bucketID, ak); err != nil {
+					report("provision", fmt.Sprintf("grant %s on %s deferred: %v", ak, bucket, err))
+				}
 			}
 		}
 	}
@@ -792,9 +814,14 @@ func reconcileGarageBuckets(ctx context.Context, wctx infradriver.WorkspaceConte
 			// deploy cost when re-run every time).
 			continue
 		}
-		if bpAK == "" {
-			// Backend was compiled against a placeholder (first-ever apply):
-			// mint now, record for the convergence re-up.
+		if bpAK == "" || !keys[bpAK] {
+			// Backend was compiled against a placeholder (first-ever apply), or
+			// against a key Garage no longer has (a restored secrets tree on a
+			// rebuilt Garage — its metadata volume carries buckets AND keys).
+			// Either way the key cannot be granted, so mint a fresh one and
+			// record it for the convergence re-up; otherwise the grant below
+			// fails with "No such key" and the backend stays AccessDenied
+			// forever.
 			ak, sk, err := garageCreateKey(ctx, container, "bp-"+b)
 			if err != nil {
 				report("provision", fmt.Sprintf("mint garage key for %s deferred: %v", b, err))

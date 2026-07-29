@@ -85,16 +85,27 @@ destroy-and-recover drill — see "Drill notes" below):
    If you do run `workspace update`, pass the same flags the workspace was
    created with (`--dev` / `--staging`), or `rollback` afterwards — update
    snapshots the pre-update compose, so the restored one is recoverable.
-4. Re-apply the deployments so the driver recreates infra services and BP
+4. Recreate EVERY container that mounts a subpath of the workspace
+   directory — not just the `-site` project. Docker binds a volume-subpath
+   mount to the directory's **inode** at container-create time, so any
+   container that existed before you replaced the directory keeps pointing at
+   the deleted one and sees an empty mount (symptoms: dashboard file tree
+   empty, coding-agent SSH falling back to a password prompt because
+   `/workspace/.ssh` looks empty). From the deployment dir:
+   ```
+   docker compose -f docker-compose-dashboard.yml    -p <W>-dashboard    up -d --force-recreate
+   docker compose -f docker-compose-coding-agent.yml -p <W>-coding-agent up -d --force-recreate
+   ```
+5. Re-apply the deployments so the driver recreates infra services and BP
    containers (fresh service volumes start empty): `bitswan automation start
    <any-deployment> --workspace <W>`. One apply reconciles the whole
    workspace. **The CLI may time out while the daemon keeps working** — a
    cold reconcile of many BPs exceeds the client timeout; check
    `docker ps` rather than retrying.
-5. Restore the databases into the now-running containers:
+6. Restore the databases into the now-running containers:
    `bitswan backup restore postgres --workspace <W> --stage <stage>` (and
    `couchdb`) for every enabled stage.
-6. Restore Garage buckets — still manual, see below.
+7. Restore Garage buckets — still manual, see below.
 
 ### Garage object data (manual)
 
@@ -167,6 +178,17 @@ volumes, and `rm -rf`'d the workspace tree, WITHOUT going through
   until step 4's apply, which recreated all 23 containers and the volumes.
 - Postgres restored to identical row counts and content; Garage needed the
   manual step above (the DB otherwise references missing objects).
+- Two provisioner bugs had to be fixed for the workspace to come back
+  working at all, both triggered by restoring secrets onto a REBUILT Garage
+  (its metadata volume stores buckets *and* access keys, so wiping it
+  invalidates every key the restored secrets name):
+  1. a creds file naming a non-existent key was never re-minted (only an
+     empty file was), so backends stayed AccessDenied forever;
+  2. once re-minted pre-compile, `reconcileGarageBuckets` skipped the bucket
+     as "fully provisioned" (bucket + key both exist) and never granted the
+     new key on it — a key owning nothing.
+  Both are fixed in `provision.go`; the symptom to recognise is
+  `No such key: GK…` or `Access Denied` from an app's S3 client.
 - AOC kept the original workspace UUID and its Keycloak client/group, so no
   re-registration was needed.
 
