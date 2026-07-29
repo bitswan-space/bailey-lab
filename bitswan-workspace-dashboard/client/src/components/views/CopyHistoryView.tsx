@@ -45,38 +45,56 @@ function GraphRow({
       {/* copy-is-here marker on the left when the copy shares this main commit */}
       {copyHereLabel ? (
         <div className="absolute left-0 top-2.5 w-1/2 pr-6 text-right">
-          <span className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">
+          <span
+            className="inline-flex max-w-full items-center gap-1 truncate rounded bg-emerald-500/15 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700"
+            title={`${copyHereLabel} is here`}
+          >
             {copyHereLabel} is here
           </span>
         </div>
       ) : null}
-      <div className={cn('w-1/2', isLeft ? 'pr-6 text-right' : 'ml-auto pl-6')}>
+      <div
+        className={cn(
+          'w-1/2 min-w-0',
+          isLeft ? 'pr-6 text-right' : 'ml-auto pl-6',
+        )}
+      >
+        {/* Wrap instead of overflowing: a long branch pill plus the sha can be
+            wider than this half of the graph, and on the left side that overflow
+            runs off the container's left edge where it can't be scrolled to. */}
         <div
           className={cn(
-            'flex items-baseline gap-2',
+            'flex flex-wrap items-baseline gap-x-2 gap-y-1',
             isLeft && 'flex-row-reverse',
           )}
         >
           {tag ? (
             <span
               className={cn(
-                'shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
+                'max-w-full truncate rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
                 isLeft
                   ? 'bg-emerald-500/15 text-emerald-700'
                   : 'bg-primary/15 text-primary',
               )}
+              title={tag}
             >
               {tag}
             </span>
           ) : null}
-          <span className="shrink-0 font-mono text-xs text-muted-foreground">
+          <span
+            className="shrink-0 font-mono text-xs text-muted-foreground"
+            title={commit.sha}
+          >
             {commit.short}
           </span>
-          <span className="truncate text-sm text-foreground">
+          <span
+            className="min-w-0 break-words text-sm text-foreground"
+            title={commit.subject}
+          >
             {commit.subject}
           </span>
         </div>
-        <div className="mt-0.5 text-[11px] text-muted-foreground">
+        <div className="mt-0.5 break-words text-[11px] text-muted-foreground">
           {commit.author_email} · {new Date(commit.date).toLocaleString()}
         </div>
         {(commit.deploys ?? []).map((d) => (
@@ -184,9 +202,20 @@ export function CopyHistoryView({ copy, bp }: { copy: string; bp: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden bg-background">
-      {/* Left: the commit graph. */}
-      <div className="w-[480px] shrink-0 overflow-auto border-r border-border py-4">
-        <div className="relative px-4">
+      {/* Left: the commit graph. Until a commit is picked the right pane is just
+          a placeholder, so let the graph share the width evenly instead of
+          living in a narrow fixed column that truncates every subject; once a
+          commit is selected it steps back so the diff has room. Widths are
+          relative so narrow windows split proportionally too. */}
+      <div
+        className={cn(
+          'min-w-0 overflow-auto border-r border-border py-4',
+          selected ? 'w-2/5 shrink-0' : 'flex-1',
+        )}
+      >
+        {/* Cap the graph's width so the two lanes don't drift to opposite edges
+            of an ultrawide window. */}
+        <div className="relative mx-auto w-full max-w-5xl px-4">
           {/* centre line */}
           <span
             className="absolute bottom-0 top-0 w-0.5 -translate-x-1/2 bg-border"
