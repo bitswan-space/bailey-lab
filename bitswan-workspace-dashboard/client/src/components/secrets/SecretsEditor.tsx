@@ -200,8 +200,8 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
   const stageVals = data.values[realm] || {};
   const missingCount = data.keys.filter((k) => !(stageVals[k] || '').trim()).length;
 
-  /** "Not set" pill — in the sidebar it rides the name row so it can never
-   *  collide with the value input's placeholder (issue #261). */
+  /** "Not set" pill — in the sidebar it rides the card's status row so it can
+   *  never collide with the value input's placeholder (issue #261). */
   const notSetBadge = (
     <span className="shrink-0 whitespace-nowrap text-[10px] font-semibold uppercase tracking-wide text-amber-700">
       Not set
@@ -271,14 +271,18 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
     />
   );
 
-  const deleteBtn = (key: string) => (
+  /** `small` shrinks the button to sit on a compact card's status row. */
+  const deleteBtn = (key: string, small = false) => (
     <button
       type="button"
       onClick={() => removeKey(key)}
       title="Delete secret (removes from every stage)"
-      className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-red-600"
+      className={cn(
+        'flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-red-600',
+        small ? 'size-5' : 'size-8',
+      )}
     >
-      <Trash2 className="size-3.5" aria-hidden />
+      <Trash2 className={small ? 'size-3' : 'size-3.5'} aria-hidden />
     </button>
   );
 
@@ -328,12 +332,24 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
         )}
         {data.keys.map((key, i) =>
           compact ? (
-            <div key={key} className="flex flex-col gap-1">
-              <div className="flex items-center gap-1.5">
-                <div className="min-w-0 flex-1">{keyField(key, i)}</div>
-                {!(stageVals[key] || '').trim() && notSetBadge}
-                {deleteBtn(key)}
+            // Each name/value pair is its own card so the pairs read as one unit
+            // in the narrow sidebar, and both fields span the full card width
+            // (equal widths, nothing overlaying either input) — issue #261.
+            <div
+              key={key}
+              className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/40 p-2"
+            >
+              <div className="flex h-5 items-center gap-1.5">
+                {(stageVals[key] || '').trim() ? (
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Set
+                  </span>
+                ) : (
+                  notSetBadge
+                )}
+                <div className="ml-auto">{deleteBtn(key, true)}</div>
               </div>
+              {keyField(key, i)}
               {valueField(key, i)}
             </div>
           ) : (
