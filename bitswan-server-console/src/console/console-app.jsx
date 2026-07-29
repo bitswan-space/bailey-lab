@@ -815,7 +815,9 @@ function App() {
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-      <Console data={data} setData={setData} toast={showToast} refresh={(w) => refresh.current(w)} />
+      {/* opts must be forwarded — a view polling on its own needs
+          { background: true } to refetch without the loading flicker. */}
+      <Console data={data} setData={setData} toast={showToast} refresh={(w, opts) => refresh.current(w, opts)} />
       {gate.status === 'error' && (
         <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: '10px 16px', background: AC.red,
           color: '#fff', fontSize: 12.5, textAlign: 'center', zIndex: 90 }}>

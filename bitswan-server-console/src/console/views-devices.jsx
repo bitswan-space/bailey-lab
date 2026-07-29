@@ -25,11 +25,25 @@ function DevicesView({ ctx }) {
   // Poll for newly signed-in devices (which create a pending-pair) and for the
   // device list itself, so a new device shows up to be linked — and the linked
   // device appears — without a manual refresh while sitting on this page.
+  // These MUST be background refreshes: a foreground one flips load.devices to
+  // 'loading', which pops the "Loading your devices…" banner in above the list
+  // and shifts everything down for the length of the request — every 5s, that
+  // reads as the whole page flashing (#257).
   useDE(() => {
-    refresh('approvals');
-    const t = setInterval(() => { refresh('approvals'); refresh('devices'); }, 5000);
+    const sync = () => {
+      refresh('approvals', { background: true });
+      refresh('devices', { background: true });
+    };
+    sync();
+    const t = setInterval(sync, 5000);
     return () => clearInterval(t);
   }, []);
+
+  // Stale-while-revalidate: only report 'loading' when there is nothing on
+  // screen yet. Once rows have landed, a refetch keeps them rendered rather
+  // than swapping them for the loading banner. Errors always surface.
+  const devicesStatus = (data.load.devices === 'error' || data.myDevices.length === 0)
+    ? data.load.devices : 'ok';
 
   // Pending devices waiting to be trusted FOR THIS USER. A non-admin only ever
   // sees their own; an admin's other-user pending pairs belong on New user
@@ -56,11 +70,11 @@ function DevicesView({ ctx }) {
       <DPageHeader title="Your devices" icon="laptop"
         subtitle="Every device signed in to your account. Trust spreads device-to-device: a device you've already trusted can vouch for a new one — no admin needed." />
 
-      {data.load.devices !== 'ok' && (
-        <DLiveState status={data.load.devices} error={data.error.devices}
+      {devicesStatus !== 'ok' && (
+        <DLiveState status={devicesStatus} error={data.error.devices}
           label="Loading your devices…" onRetry={() => refresh('devices')} />
       )}
-      {data.load.devices === 'ok' && data.myDevices.length === 0 && myPending.length === 0 && (
+      {devicesStatus === 'ok' && data.myDevices.length === 0 && myPending.length === 0 && (
         <DCard><DEmpty icon="laptop" title="No trusted devices"
           text="No devices are currently paired to your account on this server." /></DCard>
       )}
