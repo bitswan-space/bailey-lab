@@ -32,6 +32,40 @@ describe('DevicesView', () => {
     expect(s.refresh).toHaveBeenCalledWith('devices');
   });
 
+  // #257: the page polled every 5s in the FOREGROUND, so load.devices flipped
+  // to 'loading' and the "Loading your devices…" banner popped in above the
+  // list on every tick — the page visibly flashed. The poll must be background.
+  it('polls in the background so the loading banner never re-appears', () => {
+    const s = spies();
+    vi.useFakeTimers();
+    render(<Host View={DevicesView} data={makeData()} extra={s} />);
+    s.refresh.mockClear();
+    act(() => vi.advanceTimersByTime(5000));
+    vi.useRealTimers();
+    expect(s.refresh).toHaveBeenCalledWith('devices', { background: true });
+    expect(s.refresh).toHaveBeenCalledWith('approvals', { background: true });
+    // No foreground (opts-less) refresh may come from the poll.
+    for (const call of s.refresh.mock.calls) expect(call[1]).toEqual({ background: true });
+  });
+
+  it('keeps rows rendered while a refetch is in flight', () => {
+    render(<Host View={DevicesView} data={makeData({ load: { ...makeData().load, devices: 'loading' } })} extra={spies()} />);
+    expect(screen.getByText('This Mac')).toBeTruthy();
+    expect(screen.queryByText('Loading your devices…')).toBeNull();
+  });
+
+  it('still shows the loading banner on the very first load', () => {
+    render(<Host View={DevicesView} data={makeData({ myDevices: [], load: { ...makeData().load, devices: 'loading' } })} extra={spies()} />);
+    expect(screen.getByText('Loading your devices…')).toBeTruthy();
+    expect(screen.queryByText('No trusted devices')).toBeNull();
+  });
+
+  it('surfaces an error even when stale rows are on screen', () => {
+    render(<Host View={DevicesView} data={makeData({ load: { ...makeData().load, devices: 'error' }, error: { devices: 'boom' } })} extra={spies()} />);
+    expect(screen.getByText('boom')).toBeTruthy();
+    expect(screen.getByText('This Mac')).toBeTruthy();
+  });
+
   it('revoke a non-current device: confirm + remove', async () => {
     const s = spies();
     installFetch({ '/bailey/api/devices/remove': { json: {} } });
