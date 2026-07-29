@@ -1644,56 +1644,6 @@ export class GitopsClient {
   }
 
   // ---------------------------------------------------------------------
-  // Workspace-level off-site backups (`/backups/*` — restic through the
-  // AOC proxy). Config/status, manual runs, and encryption-key management.
-  // ---------------------------------------------------------------------
-
-  /** `GET /backups/config` — configured/enabled state, retention, last run. */
-  offsiteConfig() {
-    return this.requestJson('GET', '/backups/config');
-  }
-
-  /** `POST /backups/config` — enable/disable + whole-server retention. */
-  saveOffsiteConfig(input: {
-    enabled: boolean;
-    retention_daily?: number;
-    retention_monthly?: number;
-  }) {
-    return this.requestJson('POST', '/backups/config', input);
-  }
-
-  /** `POST /backups/run` — start a whole-server backup (202; 409 while running). */
-  runOffsiteBackup() {
-    return this.requestJson('POST', '/backups/run');
-  }
-
-  /** `GET /backups/snapshots[?tag=]` — restic snapshot list. */
-  offsiteSnapshots(tag?: string) {
-    const qs = tag ? `?tag=${encodeURIComponent(tag)}` : '';
-    return this.requestJson('GET', `/backups/snapshots${qs}`);
-  }
-
-  /** `GET /backups/key` — download the restic encryption key. */
-  offsiteKey() {
-    return this.requestJson('GET', '/backups/key');
-  }
-
-  /** `GET /backups/key/s3-status` — is the key mirrored off-site? */
-  offsiteKeyStatus() {
-    return this.requestJson('GET', '/backups/key/s3-status');
-  }
-
-  /** `POST /backups/key/upload-to-s3` — re-mirror the key off-site. */
-  mirrorOffsiteKey() {
-    return this.requestJson('POST', '/backups/key/upload-to-s3');
-  }
-
-  /** `DELETE /backups/key/s3` — delete the off-site key copy (local remains). */
-  deleteOffsiteKeyMirror() {
-    return this.requestJson('DELETE', '/backups/key/s3');
-  }
-
-  // ---------------------------------------------------------------------
   // Git task queue (`/tasks`). The live feed flows over SSE
   // (`task_queue_snapshot` on connect, `task_queue` per change); these REST
   // calls back the initial fetch and the admin "clear queue" action.

@@ -12,7 +12,6 @@ import {
   Trash2,
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
-import { OffsiteBackupsCard } from '@/components/backups/OffsiteBackupsCard';
 import {
   CloneDialog,
   CreateSnapshotDialog,
@@ -155,24 +154,6 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
     })();
   }, [refresh, watchTask]);
 
-  // The off-site push runs fire-and-forget on the server — its completion
-  // doesn't flow through a watchable task. While any row is still
-  // "uploading…", poll the list until it settles (synced/failed). Capped;
-  // a straggler is retried by the server's nightly job anyway.
-  const pendingPolls = useRef(0);
-  useEffect(() => {
-    const hasPending = (data?.snapshots ?? []).some((s) => s.offsite === 'pending');
-    if (!hasPending) {
-      pendingPolls.current = 0;
-      return;
-    }
-    if (pendingPolls.current >= 45) return; // ~3 minutes
-    const timer = setTimeout(() => {
-      pendingPolls.current += 1;
-      void refresh();
-    }, 4000);
-    return () => clearTimeout(timer);
-  }, [data, refresh]);
 
   const bpSlug = data?.bp ?? bp.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const eligibility = data?.eligibility;
@@ -288,9 +269,6 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Workspace-wide off-site (restic) backups — hidden without AOC. */}
-      <OffsiteBackupsCard />
-
       {/* Production: retention policy + live/standby slot + audit log. */}
       {stage === 'production' && <ProductionBackupCard bp={bp.name} />}
 
@@ -391,7 +369,6 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
                       manual
                     </Badge>
                   )}
-                  <OffsiteBadge snapshot={s} />
                 </div>
                 <div className="mt-0.5 flex items-center gap-2 font-mono text-xs text-muted-foreground">
                   <RelativeTime value={s.created_at} />
@@ -477,7 +454,7 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
             <AlertDialogTitle>Delete snapshot?</AlertDialogTitle>
             <AlertDialogDescription>
               {deleteTarget
-                ? `This permanently deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}, ${formatBytes(deleteTarget.total_size_bytes)}) from this server. The stage's live data is not affected.${deleteTarget.offsite === 'synced' ? ' The off-site copy is kept and stays restorable until the retention policy prunes it.' : ''}`
+                ? `This permanently deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}, ${formatBytes(deleteTarget.total_size_bytes)}) from this server. The stage's live data is not affected. Any copy already captured by the server's nightly backup is kept and stays restorable until its retention policy prunes it.`
                 : ''}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -503,48 +480,6 @@ const OPERATION_LABEL: Record<SnapshotTask['operation'], string> = {
   clone: 'Cloning stage data',
   fetch: 'Fetching snapshot from off-site',
 };
-
-/** Off-site mirror state pill: synced / uploading / failed; nothing when
- *  the snapshot was never pushed (auto snapshots, no AOC). */
-function OffsiteBadge({ snapshot }: { snapshot: Snapshot }) {
-  switch (snapshot.offsite) {
-    case 'synced':
-      return (
-        <Badge
-          variant="outline"
-          className="shrink-0 gap-1 border-emerald-200 bg-emerald-50 text-emerald-700"
-          title="A copy of this snapshot is stored off-site"
-        >
-          <Cloud className="size-3" aria-hidden />
-          off-site
-        </Badge>
-      );
-    case 'pending':
-      return (
-        <Badge
-          variant="outline"
-          className="shrink-0 gap-1 text-muted-foreground"
-          title="Uploading to off-site storage"
-        >
-          <CloudUpload className="size-3" aria-hidden />
-          uploading…
-        </Badge>
-      );
-    case 'failed':
-      return (
-        <Badge
-          variant="outline"
-          className="shrink-0 gap-1 border-amber-200 bg-amber-50 text-amber-700"
-          title="Upload to off-site storage failed — retried automatically overnight"
-        >
-          <CloudAlert className="size-3" aria-hidden />
-          off-site failed
-        </Badge>
-      );
-    default:
-      return null;
-  }
-}
 
 function TaskProgressCard({ task }: { task: SnapshotTask }) {
   const pct = snapshotTaskProgress(task);
