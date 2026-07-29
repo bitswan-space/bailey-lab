@@ -23,14 +23,24 @@ import (
 // continues to enforce owner-only writes.
 
 type endpointListEntry struct {
-	Hostname    string          `json:"hostname"`
-	OwnerEmail  string          `json:"owner_email"`
-	DisplayName string          `json:"display_name"`
-	Kind        string          `json:"kind"`  // workspace | frontend | service
-	Stage       string          `json:"stage"` // production | staging | dev | live-dev | ""
-	CreatedAt   string          `json:"created_at"`
-	CallerRole  string          `json:"caller_role"`      // owner | access | viewer (server owner) | none
-	Grants      []endpointGrant `json:"grants,omitempty"` // populated for owner/server-owner views
+	Hostname    string `json:"hostname"`
+	OwnerEmail  string `json:"owner_email"`
+	DisplayName string `json:"display_name"`
+	Kind        string `json:"kind"`  // workspace | frontend | service
+	Stage       string `json:"stage"` // production | staging | dev | live-dev | ""
+	CreatedAt   string `json:"created_at"`
+	// ParentEndpoint is the hostname of the workspace dashboard this endpoint
+	// delegates membership to (empty for top-level endpoints). Workspace and
+	// BusinessProcess let clients group the flat listing into something
+	// human-readable: Workspace is the name of the workspace the endpoint
+	// belongs to (resolved from the parent dashboard host, or the endpoint's
+	// own host for kind=workspace rows); BusinessProcess is the bitswan.yaml
+	// business process a gitops-deployed route was reconciled from.
+	ParentEndpoint  string          `json:"parent_endpoint,omitempty"`
+	Workspace       string          `json:"workspace,omitempty"`
+	BusinessProcess string          `json:"business_process,omitempty"`
+	CallerRole      string          `json:"caller_role"`      // owner | access | viewer (server owner) | none
+	Grants          []endpointGrant `json:"grants,omitempty"` // populated for owner/server-owner views
 }
 
 type endpointListing struct {
@@ -102,14 +112,24 @@ func buildEndpointListing(callerEmail string, callerGroups []string, r *http.Req
 		CallerEmail:   callerEmail,
 		IsServerOwner: serverOwner,
 	}
+	wsByDash := workspaceByDashboardHost()
 	for _, ep := range endpoints {
 		entry := endpointListEntry{
-			Hostname:    ep.Hostname,
-			OwnerEmail:  ep.OwnerEmail,
-			DisplayName: ep.DisplayName,
-			Kind:        ep.Kind,
-			Stage:       ep.Stage,
-			CreatedAt:   ep.CreatedAt,
+			Hostname:        ep.Hostname,
+			OwnerEmail:      ep.OwnerEmail,
+			DisplayName:     ep.DisplayName,
+			Kind:            ep.Kind,
+			Stage:           ep.Stage,
+			CreatedAt:       ep.CreatedAt,
+			ParentEndpoint:  ep.ParentEndpoint,
+			BusinessProcess: ep.SourceBP,
+		}
+		// A parented endpoint belongs to its parent dashboard's workspace; a
+		// parentless one may BE a workspace dashboard.
+		if ep.ParentEndpoint != "" {
+			entry.Workspace = wsByDash[strings.ToLower(ep.ParentEndpoint)]
+		} else {
+			entry.Workspace = wsByDash[strings.ToLower(ep.Hostname)]
 		}
 		role, err := roleFor(ep.Hostname, callerEmail, callerGroups)
 		if err != nil {
@@ -132,4 +152,32 @@ func buildEndpointListing(callerEmail string, callerGroups []string, r *http.Req
 		out.Endpoints = append(out.Endpoints, entry)
 	}
 	return out, nil
+}
+
+// workspaceByDashboardHost maps each workspace's dashboard hostname (lowercase)
+// to the workspace name, so endpoint entries can name the workspace they belong
+// to. The host comes from the workspace's recorded metadata (dashboard-url),
+// falling back to the conventional <name>-dashboard.<domain> — the same
+// construction handleListAccessibleWorkspaces uses. Best-effort: on any error
+// the map is just empty and entries go out ungrouped.
+func workspaceByDashboardHost() map[string]string {
+	out := map[string]string{}
+	full, err := GetWorkspaceList(false, false)
+	if err != nil || full == nil {
+		return out
+	}
+	domain := ""
+	if sc, err := config.NewAutomationServerConfig().LoadConfig(); err == nil && sc != nil {
+		domain = sc.ProtectedHostnameDomain()
+	}
+	for _, ws := range full.Workspaces {
+		host := workspaceDashboardEndpoint(ws.Name)
+		if host == "" && domain != "" {
+			host = strings.ToLower(ws.Name + "-dashboard." + domain)
+		}
+		if host != "" {
+			out[host] = ws.Name
+		}
+	}
+	return out
 }
