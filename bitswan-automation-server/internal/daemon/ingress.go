@@ -791,6 +791,12 @@ func addRouteToIngress(req IngressAddRouteRequest, jwtToken string) error {
 		}
 		if _, err := registerEndpoint(outer, ownerEmail, display, parent, kind, req.Stage); err != nil {
 			fmt.Printf("Warning: failed to register Bailey endpoint for %s: %v\n", outer, err)
+		} else if kind == endpointKindWorkspace {
+			// The workspace dashboard is the endpoint the coding agent's
+			// grant hangs off (children delegate to it), and it may register
+			// after the agent was provisioned. Top the grant up now; a no-op
+			// when it is already there.
+			registerWorkspaceAgentGrant(workspaceName)
 		}
 	}
 	return nil
