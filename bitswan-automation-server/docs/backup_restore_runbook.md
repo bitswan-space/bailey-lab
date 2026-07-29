@@ -242,44 +242,66 @@ The OTP itself is not stored — only a fingerprint of it.
 
 ### On the replacement machine
 
-`bitswan recover server` is not implemented yet; until it is, the sequence
-below is manual, and its **order is not negotiable**.
+One command. Docker is the only prerequisite:
 
-0. Sanity-check the backup before touching anything, using the token from the
-   OTP exchange (this needs only docker):
-   ```
-   bitswan backup manifest --aoc-api <AOC> --server-id <id> \
-     --token <token> --key-file ./backup-encryption-key.txt
-   ```
-   If that prints your workspaces, the key and repo are right.
-1. Create the volume and restore server state into it, **before any daemon
-   exists**:
-   ```
-   docker volume create bitswan
-   docker run --rm -e RESTIC_REPOSITORY -e RESTIC_REST_USERNAME \
-     -e RESTIC_REST_PASSWORD -e RESTIC_PASSWORD \
-     -v bitswan:/root/.config/bitswan --entrypoint restic \
-     bitswan/automation-server-runtime:latest \
-     restore --target / --tag server-config latest
-   ```
-   (Use the `daemon_image` the manifest names — it is the restic that wrote
-   the repo.)
-2. Rename `bailey.db.snapshot` → `bailey.db` in the volume, and reconcile the
-   config: keep the **new** token and expiry from the OTP exchange, take
-   everything else (domain, relay, protected domain) from the restored file.
-3. **Only now** deploy the daemon (`bitswan automation-server-daemon init`).
-   Traefik comes up, finds the restored `rest-state.json`, and renders the
-   right routes. Reversing steps 1–3 means `InitTraefik` writes an empty
-   `dynamic.yml` over the state you just restored.
-4. Put the restic key at `~/.config/bitswan/backup/restic-key` (0600) in the
-   volume.
-5. Per workspace: `bitswan backup recover workspace W` — the whole
-   per-workspace half, databases and object storage included. Per-BP images
-   are not backed up, so each needs a rebuild pass before its containers start.
-6. Verify: open each workspace dashboard. Re-trust the new mkcert CA on
-   `.localhost` setups (compare against `mkcert_ca_fingerprint`). For
-   production BPs, restore into DR and verify by hand before trusting the
-   result.
+```
+curl -fsSL <AOC>/api/automation_server/recover.sh -o ~/bitswan-recover.sh && \
+  sudo sh ~/bitswan-recover.sh --aoc-api "<AOC>" --otp "<otp>" --server-id "<id>"
+```
+
+It asks for the backup encryption key (pass `--key-file <path>` instead for an
+unattended run), then works through six phases, printing each step:
+
+| Phase | What it does |
+|---|---|
+| preflight | checks docker, refuses if this machine is already a *different* server, exchanges the OTP, reads the backup's manifest — nothing is written yet |
+| state | creates the `bitswan` volume and restores the server's own state into it, **before any daemon exists** |
+| daemon | re-applies the recorded image pins, then deploys the daemon |
+| ingress | stores the new token, brings Traefik up on the restored route table, waits for it to serve, provisions the protected proxy, and tells the AOC where this server now lives |
+| workspaces | recovers each workspace — files, secrets, databases, object storage — rebuilding business-process images first |
+| verify | confirms the world is served this server's own certificate |
+
+Useful flags: `--dry-run` (print the plan and stop), `--skip-workspaces`,
+`--workspace W` (repeatable), `--skip-image-rebuild`, `--docker-network` (an AOC
+that is not publicly resolvable), `--snapshot` (recover from an older point).
+
+**If it fails partway, re-run it.** A token that still authenticates is detected
+and reused, so a retry does not need a fresh OTP — and OTPs are single-use with a
+ten-minute life. Workspaces are fail-fast: the run stops at the first one that
+fails rather than burying the cause.
+
+Two things the command cannot do for you, and reports at the end:
+
+- **Re-trust the local CA** on `.localhost` setups. The mkcert CA is deliberately
+  not backed up (a CA signing key does not belong off-site), so a rebuilt server
+  mints a new one; the manifest records the old fingerprint.
+- **Re-promote** any staging/production image whose source has changed since it
+  was promoted. Images are content-addressed by source tree, so an unchanged tree
+  rebuilds to exactly the tag a deployment pins — a changed one cannot.
+
+Then verify production business processes by hand before trusting them.
+
+<details>
+<summary>Doing it by hand (if the command is unavailable)</summary>
+
+The order is not negotiable — restoring after the daemon starts loses the route
+table.
+
+0. Check the backup is readable: `bitswan backup manifest --aoc-api <AOC>
+   --server-id <id> --token <token> --key-file ./key`
+1. `docker volume create bitswan`, then restore into it with restic in a
+   container (`--target / --tag server-config latest`, volume mounted at
+   `/root/.config/bitswan`, image = the manifest's `daemon_image`).
+2. Rename `bailey.db.snapshot` → `bailey.db` in the volume; put the key at
+   `backup/restic-key` (0600).
+3. Reconcile the config: keep the **new** token and expiry, take domain, relay
+   and protected domain from the restored file.
+4. **Only now** `bitswan automation-server-daemon init`.
+5. `bitswan ingress provision-protected-proxy` — nothing else creates it, and
+   every protected hostname 502s until it exists.
+6. Per workspace: `bitswan backup recover workspace W`.
+
+</details>
 
 ## Drill notes (what a real destroy-and-recover proved)
 
@@ -308,6 +330,24 @@ volumes, and `rm -rf`'d the workspace tree, WITHOUT going through
   `No such key: GK…` or `Access Denied` from an app's S3 client.
 - AOC kept the original workspace UUID and its Keycloak client/group, so no
   re-registration was needed.
+
+**What that drill did NOT prove.** It removed containers and volumes but never
+the local Docker **images**, so every `internal/<ws>-<bp>-<auto>-app:sha…` tag was
+still present and the converge found what it needed. On a genuinely fresh host
+those images are absent and the plain converge *fails* — the compiled compose
+names a local-only tag with no build instructions, so compose tries to pull it
+from Docker Hub. That is why `recover server` rebuilds images before converging,
+and why a drill that means to prove bare-metal recovery has to delete the images
+too.
+
+A second drill wiped the whole server — daemon, traefik, protected proxy, the
+`bitswan` volume (config, `bailey.db`, secrets, every workspace tree), the mkcert
+volume and all workspace data volumes — and recovered it. The route table, TLS
+certificate (the *same* one: `acme.json` came back, so no re-issuance),
+`bailey.db` row counts, Postgres and Garage contents all survived. It also found
+the three defects `recover server` now handles: nothing creates the protected
+proxy, the AOC-dependent boot steps race Traefik, and the config merge was
+hand-editing a TOML inside a volume.
 
 **Do NOT use `bitswan workspace remove` to rehearse this.** It is a hard
 teardown (volumes, networks, ingress routes, TLS, images, files) and on
