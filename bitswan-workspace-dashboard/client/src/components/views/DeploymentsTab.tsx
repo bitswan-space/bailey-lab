@@ -1,4 +1,4 @@
-import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Archive,
@@ -308,19 +308,25 @@ function PromoteButton({
   canPromote,
   label,
   busy,
+  pending,
   onClick,
   blockedTitle,
 }: {
   canPromote: boolean;
   label: string;
   busy: boolean;
+  /** THIS promote is in flight — spinner + "Promoting…" (a promote runs tens of
+   *  seconds, so a press with no feedback reads as "nothing happened"). `busy`
+   *  is shared with rollback/other stages and only disables. */
+  pending: boolean;
   onClick: () => void;
   blockedTitle?: string;
 }) {
   return (
     <button
       type="button"
-      disabled={!canPromote || busy}
+      disabled={!canPromote || busy || pending}
+      aria-busy={pending}
       onClick={onClick}
       title={
         canPromote
@@ -332,10 +338,15 @@ function PromoteButton({
         canPromote
           ? 'border-primary bg-primary text-primary-foreground shadow-sm hover:bg-primary/90'
           : 'cursor-not-allowed border-border bg-background text-muted-foreground',
+        canPromote && (busy || pending) && 'cursor-wait opacity-60 hover:bg-primary',
       )}
     >
-      Promote
-      <ArrowRight className="size-3.5" aria-hidden />
+      {pending ? 'Promoting…' : 'Promote'}
+      {pending ? (
+        <Loader2 className="size-3.5 animate-spin" aria-hidden />
+      ) : (
+        <ArrowRight className="size-3.5" aria-hidden />
+      )}
     </button>
   );
 }
@@ -1942,6 +1953,25 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   const [loaded, setLoaded] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [busy, setBusy] = useState(false);
+  // Which promote is in flight, so ONLY that pill shows the spinner + label
+  // change (`busy` is shared with rollback and would spin every promote pill).
+  // eslint-disable-next-line no-restricted-syntax -- null = no promote in flight
+  const [promoting, setPromoting] = useState<'staging' | 'production' | null>(null);
+  // Re-entry guard for the promote handler: a double-click can land a second
+  // call before React re-renders the disabled button, and a promote is a deploy
+  // — firing it twice collides with the running gitops task.
+  const promotingRef = useRef(false);
+  // A promote outlives this tab if the user navigates away mid-request; don't
+  // clear pending state on an unmounted component.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    // Re-armed on mount: StrictMode mounts → unmounts → remounts in dev, and a
+    // cleanup-only effect would leave the flag stuck false after the remount.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   // The Inspect modal and rollback confirm are keyed by the entry's commit;
   // the entry itself is resolved from the loaded history below.
   const [inspectCommit, setInspectCommit] = useUrlParam('inspect');
@@ -2212,26 +2242,48 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
 
   const runPromote = useCallback(
     async (target: 'staging' | 'production') => {
+      // Guard the handler itself, not just the button's `disabled` attribute.
+      if (promotingRef.current) return;
+      promotingRef.current = true;
       setBusy(true);
+      // Pending state on the pressed pill (spinner + "Promoting…") for the whole
+      // request — pressing Promote otherwise gives no feedback at all.
+      setPromoting(target);
       setDeployError(null);
       // Show "Promoting…" on the target stage card immediately, then track the
       // live step messages — so the card never sits on a static "never
       // deployed" through the (multi-second) promote.
       setDeployProgress({ stage: target, msg: `Promoting to ${target}…` });
-      await promoteBpWithToast({
-        bp: bp.name,
-        stage: target,
-        loading: `Promoting ${bp.name} to ${target}…`,
-        success: `${bp.name} promoted to ${target}`,
-        failurePrefix: `Failed to promote ${bp.name} to ${target}`,
-        // Keep the failure on screen for the target stage, not just a toast.
-        onError: (msg) => setDeployError({ stage: target, msg }),
-        // Mirror each live step onto the stage card.
-        onProgress: (msg) => setDeployProgress({ stage: target, msg }),
-      });
-      setDeployProgress(null);
-      setBusy(false);
-      refresh();
+      try {
+        await promoteBpWithToast({
+          bp: bp.name,
+          stage: target,
+          loading: `Promoting ${bp.name} to ${target}…`,
+          success: `${bp.name} promoted to ${target}`,
+          failurePrefix: `Failed to promote ${bp.name} to ${target}`,
+          // Keep the failure on screen for the target stage, not just a toast.
+          // (The promote keeps polling after this tab unmounts — the toast/
+          // activity log carries it from there, so skip the state write.)
+          onError: (msg) => mountedRef.current && setDeployError({ stage: target, msg }),
+          // Mirror each live step onto the stage card.
+          onProgress: (msg) => mountedRef.current && setDeployProgress({ stage: target, msg }),
+        });
+      } catch (err) {
+        // promoteBpWithToast reports its own failures; this only catches an
+        // UNEXPECTED throw — which must still surface (and must not leave the
+        // pill spinning forever, see finally).
+        const msg = String(err);
+        toast.error(`Failed to promote ${bp.name} to ${target}: ${msg}`);
+        if (mountedRef.current) setDeployError({ stage: target, msg });
+      } finally {
+        promotingRef.current = false;
+        if (mountedRef.current) {
+          setDeployProgress(null);
+          setPromoting(null);
+          setBusy(false);
+          refresh();
+        }
+      }
     },
     [bp.name, refresh],
   );
@@ -2539,6 +2591,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   canPromote={canPromote}
                   label={next.label}
                   busy={busy}
+                  pending={promoting === 'staging'}
                   onClick={() => void runPromote('staging')}
                 />
               );
@@ -2570,6 +2623,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                     canPromote={promotable}
                     label={next.label}
                     busy={busy}
+                    pending={promoting === 'production'}
                     blockedTitle={reason}
                     onClick={() => void runPromote('production')}
                   />
@@ -2581,6 +2635,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   canPromote={canPromote}
                   label={next.label}
                   busy={busy}
+                  pending={promoting === next.id}
                   onClick={() => void runPromote(next.id as 'staging' | 'production')}
                 />
               );
