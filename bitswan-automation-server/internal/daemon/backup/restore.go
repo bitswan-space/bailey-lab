@@ -38,11 +38,14 @@ func newResticFromState() (*Restic, error) {
 }
 
 // snapshotMeta is the subset of `restic snapshots --json` restores need.
+// Paths matters for in-place restores: it is the absolute path the snapshot
+// recorded, which must equal the live path we are about to overwrite.
 type snapshotMeta struct {
 	ID      string    `json:"id"`
 	ShortID string    `json:"short_id"`
 	Time    time.Time `json:"time"`
 	Tags    []string  `json:"tags"`
+	Paths   []string  `json:"paths"`
 }
 
 func listSnapshotsMeta(ctx context.Context, restic *Restic, tags []string) ([]snapshotMeta, error) {
@@ -149,6 +152,49 @@ func RestoreWorkspaceFiles(ctx context.Context, ws, snapshotID string) (string, 
 		return "", err
 	}
 	return target, nil
+}
+
+// RestoreFilesInPlace restores a workspace's tree onto its LIVE volume path
+// (restic restore --target / --include <wsDir>), the same pattern FetchSnapshot
+// uses. Ownership and modes come from the snapshot — restic preserves them and
+// the daemon runs as root — so no chown pass is needed.
+//
+// The caller MUST have emptied wsDir first (recovery quarantine-renames it):
+// restic restore merges into an existing tree rather than replacing it, so
+// files that the snapshot doesn't contain would otherwise survive.
+//
+// excludes are absolute paths dropped from the restore (e.g. the per-BP
+// snapshots dir, which is large and re-fetchable on demand).
+func RestoreFilesInPlace(ctx context.Context, ws string, snap FilesSnapshot, excludes []string) error {
+	restic, err := newResticFromState()
+	if err != nil {
+		return err
+	}
+	wsDir := workspaceDir(ws)
+
+	// An in-place restore writes wherever the snapshot recorded. If that path
+	// differs from the live one (a different HOME, a re-pointed volume), the
+	// restore would silently land somewhere else and still report success.
+	if snap.Path != "" && snap.Path != wsDir {
+		return fmt.Errorf(
+			"snapshot %s recorded %s but this server keeps the workspace at %s — "+
+				"refusing an in-place restore to avoid writing to the wrong path",
+			snap.ShortID, snap.Path, wsDir)
+	}
+
+	args := []string{"restore", snap.ID, "--target", "/", "--include", wsDir}
+	for _, ex := range excludes {
+		args = append(args, "--exclude", ex)
+	}
+	if _, _, err := restic.Run(ctx, args...); err != nil {
+		return err
+	}
+
+	// restic exits 0 when --include matches nothing, so verify explicitly.
+	if _, err := os.Stat(wsDir); err != nil {
+		return fmt.Errorf("restore reported success but %s is still missing", wsDir)
+	}
+	return nil
 }
 
 // findFileBySuffix walks root for the first file matching suffix.

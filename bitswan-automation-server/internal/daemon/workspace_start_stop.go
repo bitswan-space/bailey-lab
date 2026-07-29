@@ -248,11 +248,18 @@ func (s *Server) runWorkspaceRestart(workspaceName string, automationsOnly bool,
 
 // waitForGitops polls the GitOps root endpoint until it responds or times out.
 func waitForGitops(metadata config.WorkspaceMetadata, workspaceName string, writer io.Writer) error {
+	return waitForGitopsWithin(metadata, workspaceName, writer, 60*time.Second)
+}
+
+// waitForGitopsWithin is waitForGitops with a caller-chosen deadline. Recovery
+// needs far longer than the 60s a warm start does: a freshly restored tree makes
+// gitops re-scan every BP worktree before it serves.
+func waitForGitopsWithin(metadata config.WorkspaceMetadata, workspaceName string, writer io.Writer, timeout time.Duration) error {
 	healthURL := metadata.GitopsURL + "/"
 	healthURL = automations.TransformURLForDaemon(healthURL, workspaceName)
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequest("GET", healthURL, nil)
@@ -271,5 +278,5 @@ func waitForGitops(metadata config.WorkspaceMetadata, workspaceName string, writ
 		time.Sleep(2 * time.Second)
 	}
 
-	return fmt.Errorf("timed out after 60s waiting for GitOps to become reachable at %s", metadata.GitopsURL)
+	return fmt.Errorf("timed out after %s waiting for GitOps to become reachable at %s", timeout, metadata.GitopsURL)
 }

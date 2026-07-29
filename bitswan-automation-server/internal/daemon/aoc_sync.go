@@ -10,6 +10,14 @@ import (
 // syncWorkspaceListToAOC syncs the workspace list with AOC via the REST API
 // Returns nil if AOC is not configured (not an error)
 func syncWorkspaceListToAOC() error {
+	// AOC deletes any workspace this list omits, taking its Keycloak client,
+	// editor group and MQTT topics with it — none of which are in the backup.
+	// A recovery momentarily has a workspace's tree in flux, so defer rather
+	// than risk reporting it as gone.
+	if anyRecoveryInProgress() {
+		return fmt.Errorf("skipped: a workspace recovery is in progress")
+	}
+
 	// Get the current workspace list
 	result, err := GetWorkspaceList(false, false)
 	if err != nil {

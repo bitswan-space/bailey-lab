@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -166,10 +167,17 @@ func monitorImageBuilds(gitopsURL, gitopsSecret, workspaceName string, imageTags
 
 // deployAutomations calls the deploy endpoint to deploy all automations
 func deployAutomations(gitopsURL, gitopsSecret, workspaceName string, writer io.Writer) error {
+	return deployAutomationsCtx(context.Background(), gitopsURL, gitopsSecret, workspaceName, writer)
+}
+
+// deployAutomationsCtx is deployAutomations bounded by a context. The apply is
+// a synchronous per-BP git push fan-out with no server-side timeout, so a wedged
+// gitops would otherwise hang a recovery job forever.
+func deployAutomationsCtx(ctx context.Context, gitopsURL, gitopsSecret, workspaceName string, writer io.Writer) error {
 	deployURL := fmt.Sprintf("%s/automations/deploy", gitopsURL)
 	deployURL = automations.TransformURLForDaemon(deployURL, workspaceName)
 
-	resp, err := automations.SendAutomationRequest("POST", deployURL, gitopsSecret)
+	resp, err := automations.SendAutomationRequestCtx(ctx, "POST", deployURL, gitopsSecret)
 	if err != nil {
 		return fmt.Errorf("failed to send deploy request: %w", err)
 	}

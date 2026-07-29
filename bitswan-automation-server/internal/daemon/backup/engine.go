@@ -40,8 +40,9 @@ type RunReport struct {
 
 // Engine serializes backup runs (nightly vs run-now) and executes them.
 type Engine struct {
-	mu      sync.Mutex
-	running bool
+	mu          sync.Mutex
+	running     bool
+	reservedFor string // non-empty when held by a recovery rather than a run
 }
 
 // ErrAlreadyRunning distinguishes the 409 case for the API layer.
@@ -68,6 +69,37 @@ func (e *Engine) end() {
 	e.mu.Lock()
 	e.running = false
 	e.mu.Unlock()
+}
+
+// TryReserve claims the engine for something OTHER than a backup run — a
+// recovery, which reads the same restic repo and rewrites the very trees a run
+// would capture. Holding this blocks the nightly scheduler (and a manual run)
+// from starting mid-recovery and capturing a torn workspace as that day's file
+// snapshot. reason surfaces in the 409 the blocked caller gets.
+func (e *Engine) TryReserve(reason string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.running {
+		return ErrAlreadyRunning
+	}
+	e.running = true
+	e.reservedFor = reason
+	return nil
+}
+
+// Release drops a TryReserve claim.
+func (e *Engine) Release() {
+	e.mu.Lock()
+	e.running = false
+	e.reservedFor = ""
+	e.mu.Unlock()
+}
+
+// ReservedFor reports why the engine is busy ("" when it is a plain backup run).
+func (e *Engine) ReservedFor() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.reservedFor
 }
 
 func stagingRoot() string { return filepath.Join(Dir(), "staging") }

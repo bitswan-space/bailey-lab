@@ -162,3 +162,17 @@ func (c *Client) BackupSnapshots(workspace, tag string) (json.RawMessage, error)
 	}
 	return raw, nil
 }
+
+// BackupRecoverWorkspace runs a full workspace recovery and streams the job's
+// step-by-step progress. Recovery replaces the workspace's tree and recreates
+// every one of its containers, so the daemon requires the admin token (which
+// doRequest always sends).
+func (c *Client) BackupRecoverWorkspace(req RecoverRequest) error {
+	var resp struct {
+		JobID string `json:"job_id"`
+	}
+	if err := c.backupJSON(http.MethodPost, "/backup/recover/workspace", req, &resp); err != nil {
+		return err
+	}
+	return c.StreamJobOutput(resp.JobID, os.Stdout, os.Stdin)
+}

@@ -26,6 +26,69 @@ func newBackupCmd() *cobra.Command {
 	cmd.AddCommand(newBackupKeyCmd())
 	cmd.AddCommand(newBackupSnapshotsCmd())
 	cmd.AddCommand(newBackupRestoreCmd())
+	cmd.AddCommand(newBackupRecoverCmd())
+	return cmd
+}
+
+// newBackupRecoverCmd: full workspace recovery in one operation — the
+// automated form of docs/backup_restore_runbook.md.
+func newBackupRecoverCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "recover",
+		Short: "Recover a whole workspace (files, containers and data) from the backup",
+	}
+
+	var req daemon.RecoverRequest
+	var yes bool
+
+	sub := &cobra.Command{
+		Use:   "workspace <workspace-name>",
+		Short: "Restore a workspace's tree, rebuild its containers and reload its data",
+		Long: "Recover a workspace end to end: restore its file tree (secrets included), " +
+			"recreate every container that mounts it, re-apply its deployments so the driver " +
+			"rebuilds the infra services and business-process containers, then reload the " +
+			"databases and object storage for each enabled stage.\n\n" +
+			"By default the whole workspace's current state is replaced, so an existing " +
+			"workspace requires --force.",
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			req.Workspace = args[0]
+
+			if !yes && !req.DryRun {
+				fmt.Printf("This replaces workspace %q — its containers are recreated and its "+
+					"tree and databases are restored from the backup.\nType the workspace name to continue: ",
+					req.Workspace)
+				var answer string
+				_, _ = fmt.Scanln(&answer)
+				if answer != req.Workspace {
+					return fmt.Errorf("aborted")
+				}
+			}
+			return backupClient().BackupRecoverWorkspace(req)
+		},
+		ValidArgsFunction: validWorkspaceArgs,
+	}
+
+	f := sub.Flags()
+	f.StringVar(&req.SnapshotID, "snapshot", "", "files snapshot to anchor the recovery (default: latest)")
+	f.BoolVar(&req.Force, "force", false, "replace an existing workspace directory")
+	f.StringSliceVar(&req.Stages, "stage", nil, "only this stage (repeatable; default: every enabled stage)")
+	f.BoolVar(&req.SkipFiles, "skip-files", false, "keep the current tree; only rebuild containers and reload data")
+	f.BoolVar(&req.SkipContainers, "skip-containers", false, "only restore files (requires --skip-files off)")
+	f.BoolVar(&req.SkipPostgres, "skip-postgres", false, "do not restore Postgres")
+	f.BoolVar(&req.SkipCouchDB, "skip-couchdb", false, "do not restore CouchDB")
+	f.BoolVar(&req.SkipGarage, "skip-garage", false, "do not restore Garage object storage")
+	f.BoolVar(&req.SkipBPSnapshots, "skip-bp-snapshots", false,
+		"exclude per-process snapshots from the file restore (faster; they can be fetched back on demand)")
+	f.BoolVar(&req.GarageMirror, "garage-mirror", false,
+		"mirror Garage buckets instead of copying — DELETES objects absent from the backup")
+	f.BoolVar(&req.DiscardBackup, "discard-previous", false,
+		"delete the quarantined pre-recovery tree on success (kept by default)")
+	f.BoolVar(&req.DryRun, "dry-run", false, "print what would be recovered and exit")
+	f.BoolVar(&yes, "yes", false, "skip the confirmation prompt")
+
+	cmd.AddCommand(sub)
 	return cmd
 }
 

@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -105,6 +108,9 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	case path == "/restore" && r.Method == http.MethodPost:
 		s.handleBackupRestore(w, r)
 
+	case path == "/recover/workspace" && r.Method == http.MethodPost:
+		s.handleBackupRecoverWorkspace(w, r)
+
 	case path == "/fetch-snapshot" && r.Method == http.MethodPost:
 		s.handleBackupFetchSnapshot(w, r)
 
@@ -140,10 +146,11 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Type       string `json:"type"` // files | postgres | couchdb
+		Type       string `json:"type"` // files | postgres | couchdb | garage
 		Workspace  string `json:"workspace"`
 		Stage      string `json:"stage"`
 		SnapshotID string `json:"snapshot_id"`
+		Mirror     bool   `json:"mirror"` // garage: sync (deletes extraneous) instead of copy
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -175,8 +182,12 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		run = func(ctx context.Context) (string, error) {
 			return backup.RestoreCouchDB(ctx, req.Workspace, req.Stage, req.SnapshotID)
 		}
+	case "garage":
+		run = func(ctx context.Context) (string, error) {
+			return backup.RestoreGarage(ctx, req.Workspace, req.Stage, req.SnapshotID, req.Mirror)
+		}
 	default:
-		writeJSONError(w, "type must be files, postgres or couchdb", http.StatusBadRequest)
+		writeJSONError(w, "type must be files, postgres, couchdb or garage", http.StatusBadRequest)
 		return
 	}
 
@@ -193,6 +204,94 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		msg, err := run(ctx)
 		if msg != "" {
 			job.Log("info", msg)
+		}
+		job.Complete(err)
+	}()
+
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]string{"job_id": job.ID})
+}
+
+// handleBackupRecoverWorkspace runs a full workspace recovery as a job. The
+// most destructive route in the daemon: it replaces a workspace's entire tree
+// and recreates every one of its containers.
+func (s *Server) handleBackupRecoverWorkspace(w http.ResponseWriter, r *http.Request) {
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "admin token required", http.StatusForbidden)
+		return
+	}
+	var req RecoverRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Workspace == "" {
+		writeJSONError(w, "workspace is required", http.StatusBadRequest)
+		return
+	}
+	// The name becomes a path segment, a compose project and a restic tag.
+	if strings.ContainsAny(req.Workspace, "/\\") || req.Workspace == ".." {
+		writeJSONError(w, "invalid workspace name", http.StatusBadRequest)
+		return
+	}
+	for _, stage := range req.Stages {
+		switch stage {
+		case "dev", "staging", "production":
+		default:
+			writeJSONError(w, "unknown stage "+stage, http.StatusBadRequest)
+			return
+		}
+	}
+	// Leaving the containers up while replacing the tree under them means
+	// gitops keeps writing into the quarantined directory — silent divergence
+	// with no error anywhere.
+	if req.SkipContainers && !req.SkipFiles {
+		writeJSONError(w,
+			"--skip-containers requires --skip-files: replacing the tree while the containers keep running "+
+				"leaves them bound to the old directory", http.StatusBadRequest)
+		return
+	}
+
+	wsDir := filepath.Join(config.WorkspacesDir(), req.Workspace)
+	if _, err := os.Stat(wsDir); err == nil && !req.Force && !req.DryRun {
+		writeJSONError(w, fmt.Sprintf(
+			"workspace %q already exists on this server — pass force to replace it "+
+				"(this destroys its current tree and containers)", req.Workspace), http.StatusBadRequest)
+		return
+	}
+
+	// A recovery reads the same restic repo and rewrites the very trees a
+	// backup run captures, so the two must not overlap in either direction.
+	if err := beginRecovery(req.Workspace); err != nil {
+		writeJSONError(w, err.Error(), http.StatusConflict)
+		return
+	}
+	if !req.DryRun {
+		if err := s.backupEngine.TryReserve("recovering workspace " + req.Workspace); err != nil {
+			endRecovery(req.Workspace)
+			writeJSONError(w, "a backup run is in progress — retry when it finishes", http.StatusConflict)
+			return
+		}
+	}
+
+	job := GetJobManager().CreateJob("backup_recover_workspace")
+	job.SetState(JobStateRunning)
+	go func() {
+		defer endRecovery(req.Workspace)
+		if !req.DryRun {
+			defer s.backupEngine.Release()
+		}
+		defer func() {
+			if rec := recover(); rec != nil {
+				job.Complete(errAsErr(rec))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), backupRunTimeout)
+		defer cancel()
+
+		report, err := s.recoverWorkspace(ctx, req, func(line string) { job.Log("info", line) })
+		if err == nil && report != nil && !report.OK {
+			err = &backupRunError{"recovery finished with errors (see the step list above)"}
 		}
 		job.Complete(err)
 	}()

@@ -112,19 +112,19 @@ func protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSec
 	}
 
 	return map[string]string{
-		"OAUTH2_PROXY_PROVIDER":             "oidc",
-		"OAUTH2_PROXY_OIDC_ISSUER_URL":      issuerURL,
-		"OAUTH2_PROXY_CLIENT_ID":            clientID,
-		"OAUTH2_PROXY_CLIENT_SECRET":        clientSecret,
-		"OAUTH2_PROXY_HTTP_ADDRESS":         "0.0.0.0:80",
-		"OAUTH2_PROXY_UPSTREAMS":            "http://" + daemonContainerName + ":9080",
-		"OAUTH2_PROXY_EMAIL_DOMAINS":        "*",
-		"OAUTH2_PROXY_COOKIE_SECRET":        cookieSecret,
-		"OAUTH2_PROXY_COOKIE_DOMAINS":       "." + domain,
-		"OAUTH2_PROXY_WHITELIST_DOMAINS":    whitelist,
-		"OAUTH2_PROXY_REVERSE_PROXY":        "true",
-		"OAUTH2_PROXY_PASS_USER_HEADERS":    "true",
-		"OAUTH2_PROXY_PASS_HOST_HEADER":     "true",
+		"OAUTH2_PROXY_PROVIDER":          "oidc",
+		"OAUTH2_PROXY_OIDC_ISSUER_URL":   issuerURL,
+		"OAUTH2_PROXY_CLIENT_ID":         clientID,
+		"OAUTH2_PROXY_CLIENT_SECRET":     clientSecret,
+		"OAUTH2_PROXY_HTTP_ADDRESS":      "0.0.0.0:80",
+		"OAUTH2_PROXY_UPSTREAMS":         "http://" + daemonContainerName + ":9080",
+		"OAUTH2_PROXY_EMAIL_DOMAINS":     "*",
+		"OAUTH2_PROXY_COOKIE_SECRET":     cookieSecret,
+		"OAUTH2_PROXY_COOKIE_DOMAINS":    "." + domain,
+		"OAUTH2_PROXY_WHITELIST_DOMAINS": whitelist,
+		"OAUTH2_PROXY_REVERSE_PROXY":     "true",
+		"OAUTH2_PROXY_PASS_USER_HEADERS": "true",
+		"OAUTH2_PROXY_PASS_HOST_HEADER":  "true",
 		// offline_access makes Keycloak issue an OFFLINE refresh token: it
 		// survives browser close and the SSO session's idle death, so oauth2-proxy
 		// can keep the session alive indefinitely by refreshing it — transparently,
@@ -152,9 +152,9 @@ func protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSec
 		// (backed by the non-expiring offline refresh token). Rolled forward on
 		// every refresh; the real ceiling is the offline session, which the realm
 		// keeps effectively unbounded.
-		"OAUTH2_PROXY_COOKIE_EXPIRE": "8760h",
-		"OAUTH2_PROXY_SET_XAUTHREQUEST":     "true",
-		"OAUTH2_PROXY_PASS_ACCESS_TOKEN":    "true",
+		"OAUTH2_PROXY_COOKIE_EXPIRE":     "8760h",
+		"OAUTH2_PROXY_SET_XAUTHREQUEST":  "true",
+		"OAUTH2_PROXY_PASS_ACCESS_TOKEN": "true",
 		// SECURITY (issue #127): the gate strips the proxy-injected
 		// X-Forwarded-Access-Token from tenant-code upstreams but
 		// deliberately passes the Authorization header through (it carries
