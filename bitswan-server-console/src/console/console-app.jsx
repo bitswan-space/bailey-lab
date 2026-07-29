@@ -396,7 +396,16 @@ function Console({ data, setData, toast, refresh }) {
         {/* Signed-in user */}
         {data.me && data.me.email && (
           <div style={{ borderTop: `1px solid ${AC.border}`, padding: '10px 12px' }}>
-            <AUserChip user={currentUser} size={30} sub={currentUser.isAdmin ? 'Administrator' : 'Member'} />
+            {/* Identity first: the second line is the signed-in email (people
+                expect to see WHO they are here, not what they are). The role
+                stays, demoted to a badge styled like the workspace role pills.
+                UserChip drops the email line when it would duplicate the name
+                line — i.e. when the directory has no real name for us — so
+                the badge can end up alone; that's intentional. */}
+            <AUserChip user={currentUser} size={30}
+              subSuffix={<APill tone={currentUser.isAdmin ? 'primary' : 'neutral'} size="xs">
+                {currentUser.isAdmin ? 'Admin' : 'Member'}
+              </APill>} />
           </div>
         )}
       </aside>

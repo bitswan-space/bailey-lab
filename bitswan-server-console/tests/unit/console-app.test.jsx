@@ -12,7 +12,7 @@ const App = SC_APP;
 
 function setLocation({ search = '', pathname = '/' } = {}) {
   Object.defineProperty(window, 'location', {
-    value: { search, pathname, hostname: 'bailey.example.test', assign: vi.fn(), reload: vi.fn() },
+    value: { search, pathname, protocol: 'https:', hostname: 'bailey.example.test', assign: vi.fn(), reload: vi.fn() },
     configurable: true, writable: true,
   });
 }
@@ -159,6 +159,26 @@ describe('App live-data loading + adapters + routing', () => {
     // Workspaces nav loads for everyone; the Admin section is hidden for non-admins.
     await waitFor(() => expect(screen.getByText('Your devices')).toBeTruthy());
     await waitFor(() => expect(screen.queryByText('Server overview')).toBeNull());
+  });
+
+  // #248: the sidebar card is an IDENTITY slot — it used to spell the role
+  // ("Administrator") under the name, which read as "who am I?" answered with
+  // "what am I?". The email is the second line now; the role is just a badge.
+  it('sidebar card shows the signed-in email, with the role as a badge', async () => {
+    installFetch(fullRoutes({
+      '/bailey/api/whoami': { json: { is_admin: true, headers: { 'X-Forwarded-Email': 'tim@sandbox.test' } } },
+      'https://api.example.test/api/frontend/directory?email=tim@sandbox.test': { json: { name: 'Timothy Hobbs' } },
+    }));
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('Timothy Hobbs')).toBeTruthy());
+    // The email is truncated in the narrow sidebar, so the full address must
+    // stay recoverable from the title attribute.
+    const email = await screen.findByText('tim@sandbox.test');
+    expect(email.getAttribute('title')).toBe('tim@sandbox.test');
+    // The role badge sits on that same line ("Admin" alone is ambiguous — the
+    // nav has an Admin section header too, so assert within the card).
+    expect(email.parentElement.textContent).toContain('Admin');
+    expect(screen.queryByText('Administrator')).toBeNull();
   });
 });
 
