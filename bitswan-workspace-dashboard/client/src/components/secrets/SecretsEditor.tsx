@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { AlertTriangle, Check, Eye, EyeOff, Loader2, Plus, Trash2 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { api, type BpSecrets } from '@/lib/api';
@@ -29,6 +29,36 @@ interface Props {
 }
 
 const REALMS = ['dev', 'staging', 'production'] as const;
+
+/**
+ * Chrome offers saved passwords on (and offers to save) anything it decides is a
+ * credential field, and `type="password"` alone is enough to trigger that — it
+ * was popping the account picker over both the secret name and value fields
+ * (issue #261). Workspace secrets are not browser-managed credentials, so the
+ * value field stays `type="text"` and is masked with CSS instead. Where the
+ * property is unsupported we fall back to a real password field rather than
+ * render secrets in the clear.
+ */
+const CSS_MASK_SUPPORTED =
+  typeof CSS !== 'undefined' &&
+  typeof CSS.supports === 'function' &&
+  // Must match exactly what MASK_STYLE applies, or we'd mask nothing.
+  CSS.supports('-webkit-text-security', 'disc');
+
+// eslint-disable-next-line no-restricted-syntax -- vendor-prefixed CSS property React doesn't type
+const MASK_STYLE = { WebkitTextSecurity: 'disc' } as CSSProperties;
+
+/** Attributes that opt a field out of every password manager we care about. */
+const NO_AUTOFILL = {
+  autoComplete: 'off',
+  autoCorrect: 'off',
+  autoCapitalize: 'off',
+  spellCheck: false,
+  'data-1p-ignore': true, // 1Password
+  'data-lpignore': 'true', // LastPass
+  'data-bwignore': true, // Bitwarden
+  'data-form-type': 'other', // Dashlane & friends
+} as const;
 
 /** Map a deployment stage to its secret realm — matches the gitops backend. */
 function realmFor(stage: string): string {
@@ -170,25 +200,46 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
   const stageVals = data.values[realm] || {};
   const missingCount = data.keys.filter((k) => !(stageVals[k] || '').trim()).length;
 
-  const valueField = (key: string) => {
+  /** "Not set" pill — in the sidebar it rides the name row so it can never
+   *  collide with the value input's placeholder (issue #261). */
+  const notSetBadge = (
+    <span className="shrink-0 whitespace-nowrap text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+      Not set
+    </span>
+  );
+
+  const valueField = (key: string, index: number) => {
     const val = stageVals[key] || '';
     const missing = !val.trim();
+    const masked = !reveal[key];
     return (
       <div className="relative">
         <input
-          type={reveal[key] ? 'text' : 'password'}
+          // Deliberately neutral name/id: anything resembling `password`,
+          // `user` or `email` re-arms Chrome's credential heuristics (#261).
+          name={`bs-secret-value-${index}`}
+          id={`bs-secret-value-${index}`}
+          aria-label={`Value for ${key} in ${stageLabel}`}
+          type={masked && !CSS_MASK_SUPPORTED ? 'password' : 'text'}
+          style={masked && CSS_MASK_SUPPORTED ? MASK_STYLE : undefined}
+          {...NO_AUTOFILL}
           value={val}
           onChange={(e) => setValue(key, e.target.value)}
           placeholder={missing ? 'Needs a value' : 'value'}
           className={cn(
-            'h-8 w-full rounded-md border px-2.5 pr-16 font-mono text-[12px] outline-none focus:border-primary',
+            'h-8 w-full rounded-md border pl-2.5 font-mono text-[12px] outline-none focus:border-primary',
+            // Right padding reserves room for whatever overlays the right edge:
+            // the eye toggle, or the inline "Not set" badge in the wide layout.
+            compact ? (missing ? 'pr-2.5' : 'pr-9') : 'pr-16',
             missing ? 'border-amber-300 bg-amber-50' : 'border-border bg-white',
           )}
         />
         {missing ? (
-          <span className="pointer-events-none absolute right-2 top-1.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
-            Not set
-          </span>
+          !compact && (
+            <span className="pointer-events-none absolute right-2 top-1.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+              Not set
+            </span>
+          )
         ) : (
           <button
             type="button"
@@ -203,16 +254,20 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
     );
   };
 
-  const keyField = (key: string) => (
+  const keyField = (key: string, index: number) => (
     <input
       defaultValue={key}
       key={key}
+      name={`bs-secret-name-${index}`}
+      id={`bs-secret-name-${index}`}
+      aria-label="Secret name (shared across every stage)"
+      {...NO_AUTOFILL}
       onBlur={(e) => renameKey(key, e.target.value)}
       onKeyDown={(e) => {
         if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
       }}
       placeholder="SECRET_NAME"
-      className="h-8 min-w-0 rounded-md border border-border bg-background px-2.5 font-mono text-[12px] font-semibold uppercase outline-none focus:border-primary"
+      className="h-8 w-full min-w-0 rounded-md border border-border bg-background px-2.5 font-mono text-[12px] font-semibold uppercase outline-none focus:border-primary"
     />
   );
 
@@ -228,7 +283,14 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
   );
 
   return (
-    <div className={compact ? '' : 'px-1 py-3'}>
+    // A <form autocomplete="off"> wrapper is what Chrome actually looks at when
+    // deciding whether to offer/save credentials for the fields inside; there is
+    // no real submission (Apply posts via the API), hence the preventDefault.
+    <form
+      {...NO_AUTOFILL}
+      onSubmit={(e) => e.preventDefault()}
+      className={compact ? '' : 'px-1 py-3'}
+    >
       {!compact && (
         <p className="mb-3 max-w-2xl text-[13px] text-muted-foreground">
           Secret <strong className="text-foreground">names are shared</strong> across
@@ -264,53 +326,72 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
             No secrets yet — click &quot;Add secret&quot; below.
           </div>
         )}
-        {data.keys.map((key) =>
+        {data.keys.map((key, i) =>
           compact ? (
             <div key={key} className="flex flex-col gap-1">
               <div className="flex items-center gap-1.5">
-                <div className="min-w-0 flex-1">{keyField(key)}</div>
+                <div className="min-w-0 flex-1">{keyField(key, i)}</div>
+                {!(stageVals[key] || '').trim() && notSetBadge}
                 {deleteBtn(key)}
               </div>
-              {valueField(key)}
+              {valueField(key, i)}
             </div>
           ) : (
             <div key={key} className="grid grid-cols-[210px_1fr_32px] items-center gap-2">
-              {keyField(key)}
-              {valueField(key)}
+              {keyField(key, i)}
+              {valueField(key, i)}
               {deleteBtn(key)}
             </div>
           ),
         )}
       </div>
 
-      <div className="mt-3 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={addKey}
-          title="Adds a secret name to every stage — fill in each stage's value separately"
-          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-dashed border-border bg-white px-3 text-[12px] font-medium text-muted-foreground hover:border-primary/40 hover:text-foreground"
-        >
-          <Plus className="size-3.5" aria-hidden />
-          Add secret
-        </button>
-        <button
-          type="button"
-          onClick={apply}
-          disabled={!dirty || applying}
-          title={dirty ? 'Apply & version secrets' : 'No changes to apply'}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
-        >
-          {applying ? (
-            <Loader2 className="size-3.5 animate-spin" aria-hidden />
-          ) : (
-            <Check className="size-3.5" aria-hidden />
-          )}
-          Apply
-        </button>
+      {/* The Environment sidebar is 300px wide, so there is no room for buttons and the
+          status text on one line — stack the status underneath and let the two
+          buttons split the width instead of wrapping mid-label (issue #261). */}
+      <div className={cn('mt-3 flex gap-2', compact ? 'flex-col' : 'items-center')}>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={addKey}
+            title="Adds a secret name to every stage — fill in each stage's value separately"
+            className={cn(
+              'inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-md border border-dashed border-border bg-white px-3 text-[12px] font-medium text-muted-foreground hover:border-primary/40 hover:text-foreground',
+              compact && 'flex-1 justify-center',
+            )}
+          >
+            <Plus className="size-3.5" aria-hidden />
+            Add secret
+          </button>
+          <button
+            type="button"
+            onClick={apply}
+            disabled={!dirty || applying}
+            title={dirty ? 'Apply & version secrets' : 'No changes to apply'}
+            className={cn(
+              'inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-md bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-40',
+              compact && 'flex-1 justify-center',
+            )}
+          >
+            {applying ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+            ) : (
+              <Check className="size-3.5" aria-hidden />
+            )}
+            Apply
+          </button>
+        </div>
         {dirty && !applying && (
-          <span className="text-[11px] text-amber-600">Unsaved changes</span>
+          <span
+            className={cn(
+              'whitespace-nowrap text-[11px] text-amber-600',
+              compact && 'text-center',
+            )}
+          >
+            Unsaved changes
+          </span>
         )}
       </div>
-    </div>
+    </form>
   );
 }
