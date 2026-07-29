@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 )
@@ -518,20 +517,18 @@ func (c *AOCClient) SendInviteEmail(req InviteEmailRequest) error {
 	return &InviteEmailError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("%s - %s", resp.Status, string(body))}
 }
 
-// GetAOCEnvironmentVariables creates AOC environment variables
-func (c *AOCClient) GetAOCEnvironmentVariables(workspaceId, automationServerToken string) []string {
-	aocUrl := c.settings.AOCUrl
-	// Replace .localhost hostname with Docker service name for internal communication
-	if strings.Contains(aocUrl, ".localhost") {
-		aocUrl = "http://api.bitswan.localhost"
-	}
-
-	vars := []string{
-		"BITSWAN_WORKSPACE_ID=" + workspaceId,
-		"BITSWAN_AOC_URL=" + aocUrl,
-		"BITSWAN_AOC_TOKEN=" + automationServerToken,
-	}
-	return append(vars, c.workerIdentityEnv()...)
+// GetWorkspaceIdentityEnv is the AOC-derived env a workspace's containers
+// receive: the worker identity contract, and nothing else.
+//
+// It deliberately does NOT hand out BITSWAN_AOC_URL/TOKEN/WORKSPACE_ID any
+// more. That token is the SERVER's credential — it authorizes every
+// server-scoped AOC endpoint and every sibling workspace's backup bucket —
+// and it used to sit in every workspace's gitops env purely so gitops could
+// run its own backups. The daemon owns backups now (internal/daemon/backup),
+// so no workspace container needs an AOC credential at all. Workspaces shed
+// the old env on their next `workspace update`.
+func (c *AOCClient) GetWorkspaceIdentityEnv() []string {
+	return c.workerIdentityEnv()
 }
 
 // workerIdentityEnv resolves the identity contract every deployed worker

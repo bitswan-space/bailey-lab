@@ -161,13 +161,10 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, c
 	var aocEnvVars []string
 	aocClient, err := aoc.NewAOCClient()
 	if err == nil && metadata.WorkspaceId != nil {
-		automationServerToken, err := aocClient.GetAutomationServerToken()
-		if err != nil {
-			// AOC is not configured or token is not available, skip AOC env vars
-			// This is not a fatal error - workspace can function without AOC
-		} else {
-			aocEnvVars = aocClient.GetAOCEnvironmentVariables(*metadata.WorkspaceId, automationServerToken)
-		}
+		// Identity env only — a workspace container never receives the
+		// server's AOC credential (the daemon owns backups). Existing
+		// workspaces shed the old BITSWAN_AOC_* env on this update.
+		aocEnvVars = aocClient.GetWorkspaceIdentityEnv()
 	}
 
 	// Get gitops image - use custom image if provided, otherwise get latest

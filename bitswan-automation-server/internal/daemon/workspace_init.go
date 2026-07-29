@@ -662,8 +662,9 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 		fmt.Println("Automation server config not found, skipping workspace registration.")
 	} else {
 		fmt.Println("Getting automation server token...")
-		automationServerToken, err := aocClient.GetAutomationServerToken()
-		if err != nil {
+		// The token authorizes THIS daemon's own AOC calls (registration
+		// below); it is deliberately never passed down to the workspace.
+		if _, err := aocClient.GetAutomationServerToken(); err != nil {
 			fmt.Println("No automation server token available, skipping workspace registration.")
 		} else {
 			fmt.Println("Automation server token received successfully!")
@@ -674,7 +675,9 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 			}
 			fmt.Println("Workspace registered successfully!")
 
-			aocEnvVars = aocClient.GetAOCEnvironmentVariables(workspaceId, automationServerToken)
+			// Identity env only — a workspace container never receives the
+			// server's AOC credential (the daemon owns backups).
+			aocEnvVars = aocClient.GetWorkspaceIdentityEnv()
 		}
 	}
 
