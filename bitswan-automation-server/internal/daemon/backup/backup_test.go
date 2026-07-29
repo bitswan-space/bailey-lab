@@ -2,7 +2,6 @@ package backup
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -200,9 +199,10 @@ func TestEnsureRepoToleratesExisting(t *testing.T) {
 	}
 }
 
+// EnsureEnabled must mint a key when none exists and must NEVER send it
+// anywhere: there is no escrow, by policy.
 func TestEnsureEnabled(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	t.Setenv("HOME", t.TempDir())
 
 	// Not AOC-registered: not runnable, no error.
 	status, err := EnsureEnabled(context.Background())
@@ -210,34 +210,16 @@ func TestEnsureEnabled(t *testing.T) {
 		t.Fatalf("unregistered: status=%+v err=%v", status, err)
 	}
 
-	// Escrow server: no mirrored key yet; accepts PUT.
-	var mirroredKey string
-	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/backups/restic-key") {
-			// restic init from EnsureRepo also lands here; accept anything.
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		switch r.Method {
-		case http.MethodGet:
-			if mirroredKey == "" {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-			w.Write([]byte(mirroredKey))
-		case http.MethodPut:
-			buf := new(strings.Builder)
-			if _, err := io.Copy(buf, r.Body); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			mirroredKey = buf.String()
-			w.WriteHeader(http.StatusOK)
-		}
+	// Record every request the backup package makes, so an accidental
+	// re-introduction of key escrow shows up as a test failure.
+	var paths []string
+	aoc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.WriteHeader(http.StatusOK)
 	}))
-	defer mirror.Close()
+	defer aoc.Close()
 
-	writeServerConfig(t, mirror.URL)
+	writeServerConfig(t, aoc.URL)
 	fakeRestic(t, 0, "")
 
 	status, err = EnsureEnabled(context.Background())
@@ -247,22 +229,26 @@ func TestEnsureEnabled(t *testing.T) {
 	if !status.Runnable() {
 		t.Fatalf("status = %+v, want runnable", status)
 	}
-	localKey, _ := LoadKey()
-	if localKey == "" || mirroredKey != localKey {
-		t.Errorf("key not escrowed: local=%q mirrored=%q", localKey, mirroredKey)
+	key, _ := LoadKey()
+	if key == "" {
+		t.Fatal("no key was minted")
+	}
+	for _, p := range paths {
+		if strings.Contains(p, "restic-key") {
+			t.Errorf("the key was sent to %s — it must never leave this server", p)
+		}
 	}
 
-	// Rebuilt server: wipe local state, keep the escrow — the key must be
-	// recovered, not regenerated.
+	// A rebuilt server has no key and nothing to recover it from, so it mints
+	// a fresh one (a NEW repo) rather than silently reusing anything.
 	t.Setenv("HOME", t.TempDir())
-	writeServerConfig(t, mirror.URL)
+	writeServerConfig(t, aoc.URL)
 	status, err = EnsureEnabled(context.Background())
 	if err != nil || !status.Runnable() {
 		t.Fatalf("rebuilt: status=%+v err=%v", status, err)
 	}
-	recovered, _ := LoadKey()
-	if recovered != mirroredKey {
-		t.Errorf("recovered key = %q, want escrowed %q", recovered, mirroredKey)
+	if fresh, _ := LoadKey(); fresh == "" || fresh == key {
+		t.Errorf("rebuilt server key = %q, want a new one", fresh)
 	}
 
 	// Explicitly disabled: not runnable.
@@ -272,5 +258,30 @@ func TestEnsureEnabled(t *testing.T) {
 	status, err = EnsureEnabled(context.Background())
 	if err != nil || status.Runnable() || !status.AOCConnected {
 		t.Fatalf("disabled: status=%+v err=%v", status, err)
+	}
+}
+
+// The unsaved-key warning is the only thing standing between an operator and
+// unrestorable backups, so it must appear until acknowledged.
+func TestUnsavedKeyWarning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	if w := UnsavedKeyWarning(); w != "" {
+		t.Errorf("no key yet, warning = %q, want empty", w)
+	}
+	if err := SaveKey("some-key"); err != nil {
+		t.Fatal(err)
+	}
+	if w := UnsavedKeyWarning(); w == "" || !strings.Contains(w, "KEY NOT SAVED") {
+		t.Errorf("unacknowledged key, warning = %q", w)
+	}
+	if KeyAcknowledged() {
+		t.Error("acknowledged before anyone acknowledged")
+	}
+	if err := AcknowledgeKey(); err != nil {
+		t.Fatal(err)
+	}
+	if !KeyAcknowledged() || UnsavedKeyWarning() != "" {
+		t.Error("acknowledgement did not silence the warning")
 	}
 }

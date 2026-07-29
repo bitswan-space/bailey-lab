@@ -1,23 +1,24 @@
 package backup
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-// The restic encryption key is the server's crown jewels once backups
-// include workspace secrets: it lives 0600 in the daemon's config volume,
-// is escrowed (mirrored) at AOC so a rebuilt server can recover it, and is
-// downloadable only through admin-gated surfaces. It never reaches a
-// workspace container.
+// The restic encryption key is the server's crown jewels once backups include
+// workspace secrets. It lives 0600 in the daemon's config volume, is
+// downloadable only through admin-gated surfaces, and never reaches a workspace
+// container.
+//
+// It is deliberately NEVER escrowed anywhere — not in S3, not in AOC. That
+// means the key exists in exactly two places: this volume, and whatever copy
+// the operator keeps. Losing both makes every backup permanently unreadable, so
+// the daemon nags until an operator confirms they have saved it (see
+// KeyAcknowledged) rather than quietly assuming a copy exists.
 
 func keyPath() string { return filepath.Join(Dir(), "restic-key") }
 
@@ -51,8 +52,7 @@ func SaveKey(key string) error {
 	return os.WriteFile(keyPath(), []byte(key), 0o600)
 }
 
-// DeleteLocalKey removes the local key file (used only by explicit admin
-// action; the mirrored copy is managed separately).
+// DeleteLocalKey removes the local key file (explicit admin action only).
 func DeleteLocalKey() error {
 	err := os.Remove(keyPath())
 	if os.IsNotExist(err) {
@@ -61,70 +61,34 @@ func DeleteLocalKey() error {
 	return err
 }
 
-var mirrorHTTP = &http.Client{Timeout: 30 * time.Second}
+// keyAcknowledgedPath marks that an operator has confirmed they saved a copy of
+// the key off this server.
+func keyAcknowledgedPath() string { return filepath.Join(Dir(), "key-acknowledged") }
 
-func (t *AOCTarget) mirrorRequest(ctx context.Context, method string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, t.KeyMirrorURL(), body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+t.Token)
-	return mirrorHTTP.Do(req)
+// KeyAcknowledged reports whether the operator has confirmed saving the key.
+// While false, every surface warns: with no escrow, an unsaved key means server
+// recovery is impossible, and the failure is silent until the day it matters.
+func KeyAcknowledged() bool {
+	_, err := os.Stat(keyAcknowledgedPath())
+	return err == nil
 }
 
-// MirrorKey escrows the key at AOC (PUT; also lazily creates the bucket).
-func (t *AOCTarget) MirrorKey(ctx context.Context, key string) error {
-	resp, err := t.mirrorRequest(ctx, http.MethodPut, strings.NewReader(key))
-	if err != nil {
+// AcknowledgeKey records that the key has been saved off-server.
+func AcknowledgeKey() error {
+	if err := ensureDir(); err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("key mirror PUT: unexpected status %s", resp.Status)
-	}
-	return nil
+	return os.WriteFile(keyAcknowledgedPath(), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
 }
 
-// FetchMirroredKey returns the escrowed key, or "" when none is mirrored.
-func (t *AOCTarget) FetchMirroredKey(ctx context.Context) (string, error) {
-	resp, err := t.mirrorRequest(ctx, http.MethodGet, nil)
-	if err != nil {
-		return "", err
+// UnsavedKeyWarning is the message shown while a key exists but has not been
+// acknowledged, or "" when there is nothing to warn about.
+func UnsavedKeyWarning() string {
+	key, err := LoadKey()
+	if err != nil || key == "" || KeyAcknowledged() {
+		return ""
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return "", nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("key mirror GET: unexpected status %s", resp.Status)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(data)), nil
-}
-
-// KeyMirrored reports whether a key is escrowed at AOC.
-func (t *AOCTarget) KeyMirrored(ctx context.Context) (bool, error) {
-	key, err := t.FetchMirroredKey(ctx)
-	if err != nil {
-		return false, err
-	}
-	return key != "", nil
-}
-
-// DeleteMirroredKey removes the escrowed copy (explicit admin action; the
-// console warns that a lost server then makes backups unrecoverable without
-// a downloaded key).
-func (t *AOCTarget) DeleteMirroredKey(ctx context.Context) error {
-	resp, err := t.mirrorRequest(ctx, http.MethodDelete, nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		return fmt.Errorf("key mirror DELETE: unexpected status %s", resp.Status)
-	}
-	return nil
+	return "KEY NOT SAVED — this key is not stored anywhere else. If this server is lost " +
+		"without a copy, every backup is permanently unreadable. Run `bitswan backup key show " +
+		"--acknowledge` once you have stored it somewhere safe."
 }

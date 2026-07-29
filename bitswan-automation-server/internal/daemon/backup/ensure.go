@@ -49,22 +49,14 @@ func EnsureEnabled(ctx context.Context) (Status, error) {
 		return Status{AOCConnected: true, Enabled: true}, err
 	}
 
-	generated := false
 	if key == "" {
-		// Rebuilt-server path first: recover the escrowed key so the
-		// existing repo stays readable.
-		mirrored, err := target.FetchMirroredKey(ctx)
+		// There is no escrow to recover from — by design, the key is never
+		// stored off this server. A missing key therefore always means a NEW
+		// repo, so mint one and let the unsaved-key warning nag until the
+		// operator has stored a copy.
+		key, err = GenerateKey()
 		if err != nil {
-			return Status{AOCConnected: true, Enabled: true}, fmt.Errorf("failed to check escrowed key: %w", err)
-		}
-		if mirrored != "" {
-			key = mirrored
-		} else {
-			key, err = GenerateKey()
-			if err != nil {
-				return Status{AOCConnected: true, Enabled: true}, err
-			}
-			generated = true
+			return Status{AOCConnected: true, Enabled: true}, err
 		}
 		if err := SaveKey(key); err != nil {
 			return Status{AOCConnected: true, Enabled: true}, err
@@ -78,15 +70,5 @@ func EnsureEnabled(ctx context.Context) (Status, error) {
 		return ok, fmt.Errorf("failed to init backup repo: %w", err)
 	}
 
-	// Escrow a freshly minted key (mirror-on-generate, as gitops did). An
-	// existing local key is deliberately NOT re-mirrored: an operator who
-	// explicitly deleted the escrowed copy keeps it deleted. The error is
-	// advisory — the run can proceed with a local-only key; escrow only
-	// matters for rebuilt-server recovery.
-	if generated {
-		if err := target.MirrorKey(ctx, key); err != nil {
-			return ok, fmt.Errorf("backup key generated but escrow failed (key is local-only): %w", err)
-		}
-	}
 	return ok, nil
 }

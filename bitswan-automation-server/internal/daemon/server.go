@@ -77,10 +77,16 @@ type StatusResponse struct {
 
 // NewServer creates a new daemon server
 func NewServer(version string) *Server {
-	return &Server{
+	s := &Server{
 		version:   version,
 		startTime: time.Now(),
 	}
+	// The backup engine stamps the binary version into the server manifest so a
+	// recovery can warn about version skew, and calls back for the manifest
+	// itself (which needs workspace/route/image data only this package has).
+	s.backupEngine.Version = version
+	s.backupEngine.ManifestBuilder = s.buildServerManifest
+	return s
 }
 
 // authMiddleware wraps a handler with bearer token authentication.

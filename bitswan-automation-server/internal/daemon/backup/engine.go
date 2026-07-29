@@ -43,6 +43,15 @@ type Engine struct {
 	mu          sync.Mutex
 	running     bool
 	reservedFor string // non-empty when held by a recovery rather than a run
+
+	// Version is the bitswan binary version, stamped into the manifest so a
+	// recovery can warn about version skew. Set by the daemon at startup.
+	Version string
+
+	// ManifestBuilder produces the server manifest. It lives in the daemon
+	// package (it needs the workspace list, image pins and route table), which
+	// imports this one — hence a hook rather than a direct call.
+	ManifestBuilder func() ([]byte, error)
 }
 
 // ErrAlreadyRunning distinguishes the 409 case for the API layer.
@@ -317,32 +326,133 @@ func (e *Engine) backupServiceStages(ctx context.Context, restic *Restic, ws, se
 	return StepResult{Success: success, Output: strings.Join(lines, "; ")}
 }
 
-// backupServerState stages the server's own files (config TOML + a
-// consistent bailey.db copy) and backs them up under the server-config tag.
+// bitswanConfigDir is the daemon's state root (the `bitswan` volume).
+func bitswanConfigDir() string {
+	return filepath.Join(os.Getenv("HOME"), ".config", "bitswan")
+}
+
+// baileySnapshotPath is where the consistent bailey.db copy is written. It sits
+// beside the live DB ON PURPOSE: the snapshot then records a real path, so a
+// restore lands it next to where it belongs and only needs a rename — no
+// un-nesting of a staging tree.
+func baileySnapshotPath() string {
+	return filepath.Join(bitswanConfigDir(), "bailey.db.snapshot")
+}
+
+// serverManifestPath is the manifest's home — inside the snapshot and readable
+// on the live host without restic.
+func serverManifestPath() string {
+	return filepath.Join(bitswanConfigDir(), "server-manifest.json")
+}
+
+// serverStatePaths is everything the server snapshot captures, enumerated
+// explicitly rather than "the config dir minus excludes".
+//
+// Explicit inclusion is the safer shape: no exclude bug can ever sweep in
+// backup/pre-recover (whole quarantined workspace trees), backup/restores, or —
+// worst of all — backup/restic-key, which would put the repo's own decryption
+// key inside the repo it decrypts.
+//
+// Deliberately NOT captured, each for a reason:
+//   - ~/.local/share/mkcert — holds a CA PRIVATE KEY; kept out of off-site
+//     storage by policy. Its fingerprint goes in the manifest so a post-restore
+//     mismatch is detectable.
+//   - backup/{restic-key,staging,pre-recover,restores,recoveries,*-restore-*}
+//     — circular, transient, or potentially enormous.
+//   - backup/last_run.json — written AFTER this step, so it would always record
+//     the previous run.
+//   - workspaces/ — each workspace has its own files,ws:<name> snapshot.
+//   - bailey.db / -wal / -shm — torn reads; the VACUUM INTO copy replaces them.
+//   - grype / Athens / Verdaccio / proxy-redis volumes — rebuildable caches.
+//   - the local image store, /etc/hosts, host-side CLI config — re-created by
+//     install/register.
+func serverStatePaths() []string {
+	cfg := bitswanConfigDir()
+	return []string{
+		filepath.Join(cfg, "automation_server_config.toml"), // identity: AOC url, server id, token, relay
+		baileySnapshotPath(),                        // users, devices, MFA, ACL, audit, image defaults
+		filepath.Join(cfg, "traefik"),               // rest-state.json (the route table), acme/, certs/
+		filepath.Join(cfg, "protected-proxy"),       // cookie-secret (session + CSRF key)
+		filepath.Join(cfg, "certauthorities"),       // operator CAs mounted into every workspace
+		filepath.Join(cfg, "backup", "config.json"), // enabled + retention policy
+		serverManifestPath(),                        // what this server was, for recovery
+	}
+}
+
+// backupServerState captures the server's own state at REAL absolute paths, so
+// a recovery can `restic restore --target /` it straight into the `bitswan`
+// volume — the same shape RestoreFilesInPlace already relies on.
 func (e *Engine) backupServerState(ctx context.Context, restic *Restic) StepResult {
-	staging := filepath.Join(stagingRoot(), "server")
-	if err := os.MkdirAll(staging, 0o700); err != nil {
-		return StepResult{Success: false, Output: err.Error()}
-	}
+	// A crashed previous run could have left a stale copy behind.
+	os.Remove(baileySnapshotPath())
 
-	home := os.Getenv("HOME")
-	configPath := filepath.Join(home, ".config", "bitswan", "automation_server_config.toml")
-	if err := copyFile(configPath, filepath.Join(staging, "automation_server_config.toml")); err != nil && !os.IsNotExist(err) {
-		return StepResult{Success: false, Output: "config copy failed: " + err.Error()}
-	}
-
-	baileyDB := filepath.Join(home, ".config", "bitswan", "bailey.db")
+	baileyDB := filepath.Join(bitswanConfigDir(), "bailey.db")
 	if _, err := os.Stat(baileyDB); err == nil {
 		// VACUUM INTO makes a consistent single-file copy even while the
-		// daemon has the DB open (torn-write-safe, unlike a plain cp).
-		if err := sqliteVacuumInto(ctx, baileyDB, filepath.Join(staging, "bailey.db")); err != nil {
+		// daemon has the DB open (torn-write-safe, unlike a plain cp, which
+		// would race the WAL).
+		if err := sqliteVacuumInto(ctx, baileyDB, baileySnapshotPath()); err != nil {
 			return StepResult{Success: false, Output: "bailey.db snapshot failed: " + err.Error()}
+		}
+		defer os.Remove(baileySnapshotPath())
+	}
+
+	if e.ManifestBuilder != nil {
+		data, err := e.ManifestBuilder()
+		if err != nil {
+			// A manifest is a recovery convenience, not the backup itself.
+			return e.resticServerStep(ctx, restic, "manifest unavailable: "+err.Error())
+		}
+		if err := os.WriteFile(serverManifestPath(), data, 0o600); err != nil {
+			return e.resticServerStep(ctx, restic, "manifest not written: "+err.Error())
 		}
 	}
 
-	result := resticStep(ctx, restic, []string{"server-config"}, staging)
-	os.RemoveAll(staging)
-	return result
+	return e.resticServerStep(ctx, restic, "")
+}
+
+// resticServerStep backs up whichever of the server paths exist, reporting what
+// was captured and what was absent. A missing optional path (e.g. an empty
+// certauthorities) is never a failure.
+func (e *Engine) resticServerStep(ctx context.Context, restic *Restic, warning string) StepResult {
+	var present, absent []string
+	for _, path := range serverStatePaths() {
+		if _, err := os.Stat(path); err == nil {
+			present = append(present, path)
+		} else {
+			absent = append(absent, filepath.Base(path))
+		}
+	}
+	if len(present) == 0 {
+		return StepResult{Success: false, Output: "no server state found to back up"}
+	}
+
+	args := append([]string{"backup", "--host", restic.Target.ServerID, "--tag", "server-config"}, present...)
+	stdout, stderr, err := restic.Run(ctx, args...)
+
+	names := make([]string, 0, len(present))
+	for _, path := range present {
+		names = append(names, filepath.Base(path))
+	}
+	detail := "captured " + strings.Join(names, ", ")
+	if len(absent) > 0 {
+		detail += "; absent " + strings.Join(absent, ", ")
+	}
+	if warning != "" {
+		detail += "; " + warning
+	}
+
+	if err != nil {
+		return StepResult{Success: false, Output: detail + "; " + err.Error()}
+	}
+	summary := strings.TrimSpace(stdout)
+	if summary == "" {
+		summary = strings.TrimSpace(stderr)
+	}
+	if lines := strings.Split(summary, "\n"); len(lines) > 1 {
+		summary = strings.TrimSpace(lines[len(lines)-1])
+	}
+	return StepResult{Success: true, Output: detail + "; " + summary}
 }
 
 func copyFile(src, dst string) error {

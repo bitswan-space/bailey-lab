@@ -18,7 +18,7 @@ function makeBackups(overrides = {}) {
     enabled: true,
     configured: true,
     has_key: true,
-    key_mirrored: true,
+    key_acknowledged: true,
     running: false,
     retention: { daily: 30, monthly: 12 },
     last_run: {
@@ -57,7 +57,7 @@ describe('BackupsView', () => {
     expect(screen.getAllByText('tenant-a', { selector: 'td' }).length).toBe(4); // one row per step
     // The failed garage step surfaces its reason.
     expect(screen.getByText(/no _system Garage key/)).toBeTruthy();
-    expect(screen.getByText('escrowed at AOC')).toBeTruthy();
+    expect(screen.getByText('saved off-server')).toBeTruthy();
   });
 
   it('shows the not-connected state without any controls', () => {
@@ -95,23 +95,29 @@ describe('BackupsView', () => {
     expect(JSON.parse(call[1].body)).toEqual({ daily: 14, monthly: 12 });
   });
 
-  it('local-only key warns and offers escrow; removing escrow demands confirm', async () => {
-    const s = spies();
-    installFetch({ '/bailey/api/admin/backups/key/mirror': { json: { mirrored: true } } });
-    render(<Host View={BackupsView} data={dataWith(makeBackups({ key_mirrored: false }))} extra={s} />);
-    expect(screen.getByText(/local only/)).toBeTruthy();
-    fireEvent.click(screen.getByText('Escrow at AOC'));
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('Key escrowed at AOC', 'success'));
+  it('an unsaved key warns loudly and offers acknowledgement', async () => {
+    const s2 = spies();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    installFetch({ '/bailey/api/admin/backups/key/acknowledge': { json: { acknowledged: true } } });
+    render(<Host View={BackupsView} data={dataWith(makeBackups({ key_acknowledged: false }))} extra={s2} />);
+    expect(screen.getByText(/NOT SAVED/)).toBeTruthy();
+    fireEvent.click(screen.getByText('I have saved it'));
+    await waitFor(() => expect(s2.toast).toHaveBeenCalledWith('Recorded that the key is saved off-server', 'success'));
   });
 
-  it('remove-escrow is cancellable via the confirm dialog', () => {
-    const s = spies();
+  it('acknowledgement is cancellable and posts nothing', () => {
+    const s2 = spies();
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const fetchMock = installFetch({});
-    render(<Host View={BackupsView} data={dataWith(makeBackups({ key_mirrored: true }))} extra={s} />);
-    fireEvent.click(screen.getByText('Remove escrow'));
-    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('permanently unrecoverable'));
+    render(<Host View={BackupsView} data={dataWith(makeBackups({ key_acknowledged: false }))} extra={s2} />);
+    fireEvent.click(screen.getByText('I have saved it'));
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('permanently unreadable'));
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('an acknowledged key offers no acknowledge button', () => {
+    render(<Host View={BackupsView} data={dataWith(makeBackups())} />);
+    expect(screen.queryByText('I have saved it')).toBeNull();
   });
 
   it('disable/enable toggles post the flag', async () => {

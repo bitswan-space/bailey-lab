@@ -25,15 +25,16 @@ import (
 // BackupStatusResponse is GET /backup/status — shaped close to gitops's old
 // GET /backups/config so console/CLI rendering stays familiar.
 type BackupStatusResponse struct {
-	AOCConnected bool              `json:"aoc_connected"`
-	Enabled      bool              `json:"enabled"`
-	Configured   bool              `json:"configured"` // config file exists
-	HasKey       bool              `json:"has_key"`
-	KeyMirrored  *bool             `json:"key_mirrored,omitempty"` // nil = could not check
-	Running      bool              `json:"running"`
-	Retention    backup.Retention  `json:"retention"`
-	Reason       string            `json:"reason,omitempty"` // why not runnable
-	LastRun      *backup.RunReport `json:"last_run,omitempty"`
+	AOCConnected    bool              `json:"aoc_connected"`
+	Enabled         bool              `json:"enabled"`
+	Configured      bool              `json:"configured"` // config file exists
+	HasKey          bool              `json:"has_key"`
+	KeyAcknowledged bool              `json:"key_acknowledged"`
+	KeyWarning      string            `json:"key_warning,omitempty"` // set while the key is unsaved
+	Running         bool              `json:"running"`
+	Retention       backup.Retention  `json:"retention"`
+	Reason          string            `json:"reason,omitempty"` // why not runnable
+	LastRun         *backup.RunReport `json:"last_run,omitempty"`
 }
 
 func (s *Server) backupStatus(ctx context.Context) BackupStatusResponse {
@@ -45,8 +46,7 @@ func (s *Server) backupStatus(ctx context.Context) BackupStatusResponse {
 		Running:    s.backupEngine.Running(),
 	}
 
-	target, err := backup.LoadAOCTarget()
-	if err != nil {
+	if _, err := backup.LoadAOCTarget(); err != nil {
 		resp.Reason = "server is not registered with an AOC"
 	} else {
 		resp.AOCConnected = true
@@ -54,14 +54,8 @@ func (s *Server) backupStatus(ctx context.Context) BackupStatusResponse {
 
 	key, _ := backup.LoadKey()
 	resp.HasKey = key != ""
-
-	if target != nil && resp.HasKey {
-		checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		if mirrored, err := target.KeyMirrored(checkCtx); err == nil {
-			resp.KeyMirrored = &mirrored
-		}
-	}
+	resp.KeyAcknowledged = backup.KeyAcknowledged()
+	resp.KeyWarning = backup.UnsavedKeyWarning()
 
 	if last, err := backup.LoadLastRun(); err == nil && last != nil {
 		resp.LastRun = last
@@ -102,8 +96,8 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	case path == "/key" && r.Method == http.MethodGet:
 		s.handleBackupKeyGet(w, r)
 
-	case path == "/key/mirror":
-		s.handleBackupKeyMirror(w, r)
+	case path == "/key/acknowledge" && r.Method == http.MethodPost:
+		s.handleBackupKeyAcknowledge(w, r)
 
 	case path == "/restore" && r.Method == http.MethodPost:
 		s.handleBackupRestore(w, r)
@@ -489,50 +483,19 @@ func (s *Server) handleBackupKeyGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"key": key})
 }
 
-func (s *Server) handleBackupKeyMirror(w http.ResponseWriter, r *http.Request) {
-	target, err := backup.LoadAOCTarget()
-	if err != nil {
-		writeJSONError(w, err.Error(), http.StatusServiceUnavailable)
+func (s *Server) handleBackupKeyAcknowledge(w http.ResponseWriter, r *http.Request) {
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "admin token required", http.StatusForbidden)
 		return
 	}
-
-	switch r.Method {
-	case http.MethodGet:
-		mirrored, err := target.KeyMirrored(r.Context())
-		if err != nil {
-			writeJSONError(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		writeJSON(w, map[string]bool{"mirrored": mirrored})
-
-	case http.MethodPost:
-		if !s.callerHasAdminToken(r) {
-			writeJSONError(w, "admin token required", http.StatusForbidden)
-			return
-		}
-		key, err := backup.LoadKey()
-		if err != nil || key == "" {
-			writeJSONError(w, "no backup key exists", http.StatusNotFound)
-			return
-		}
-		if err := target.MirrorKey(r.Context(), key); err != nil {
-			writeJSONError(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		writeJSON(w, map[string]bool{"mirrored": true})
-
-	case http.MethodDelete:
-		if !s.callerHasAdminToken(r) {
-			writeJSONError(w, "admin token required", http.StatusForbidden)
-			return
-		}
-		if err := target.DeleteMirroredKey(r.Context()); err != nil {
-			writeJSONError(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		writeJSON(w, map[string]bool{"mirrored": false})
-
-	default:
-		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+	key, err := backup.LoadKey()
+	if err != nil || key == "" {
+		writeJSONError(w, "no backup key exists yet", http.StatusNotFound)
+		return
 	}
+	if err := backup.AcknowledgeKey(); err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]bool{"acknowledged": true})
 }

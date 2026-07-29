@@ -143,31 +143,22 @@ function BackupsView({ ctx }) {
     setBusy('');
   };
 
-  const mirrorKey = async () => {
-    setBusy('mirror');
-    try {
-      await BApi.backupsKeyMirror();
-      toast('Key escrowed at AOC', 'success');
-      await refresh('backups', { background: true });
-    } catch (e) { toast(`Escrow failed: ${e.message}`, 'danger'); }
-    setBusy('');
-  };
-
-  const deleteMirror = async () => {
-    // The blunt confirm is deliberate: without the escrow AND without a
-    // downloaded copy, losing the server makes every backup unreadable.
+  // With no escrow the key exists only on this server, so the operator
+  // confirming they stored a copy is the only signal that it exists anywhere
+  // else. Downloading is what makes that true; this records it.
+  const acknowledgeKey = async () => {
     const ok = window.confirm(
-      'Remove the escrowed key from AOC?\n\n' +
-      'If this server is lost and you have no downloaded copy, ALL backups become permanently unrecoverable. ' +
-      'Download the key first.',
+      'Confirm that you have stored the encryption key somewhere safe, OFF this server.\n\n' +
+      'It is not saved anywhere else. If this server is lost without your copy, every backup ' +
+      'is permanently unreadable.',
     );
     if (!ok) return;
-    setBusy('mirror');
+    setBusy('ack');
     try {
-      await BApi.backupsKeyMirrorDelete();
-      toast('Escrowed key removed — backups now depend on your downloaded copy.', 'info');
+      await BApi.backupsKeyAcknowledge();
+      toast('Recorded that the key is saved off-server', 'success');
       await refresh('backups', { background: true });
-    } catch (e) { toast(`Could not remove escrow: ${e.message}`, 'danger'); }
+    } catch (e) { toast(`Could not record it: ${e.message}`, 'danger'); }
     setBusy('');
   };
 
@@ -215,23 +206,23 @@ function BackupsView({ ctx }) {
 
           <WCard title="Encryption key" style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 12.5, color: WC.muted, padding: '2px 0 10px' }}>
-              Backups include workspace secrets, so this key is the whole ballgame: it never reaches a
-              workspace, and restores are impossible without it. Keep a copy off this server.
+              Backups include workspace secrets, so this key is the whole ballgame. It is stored
+              <strong> nowhere but this server</strong> — there is no escrow. Download it and keep it
+              somewhere safe: without your copy, losing this server makes every backup permanently
+              unreadable.
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-              {backups.key_mirrored === true && <WPill tone="success" leftIcon="cloud">escrowed at AOC</WPill>}
-              {backups.key_mirrored === false && (
-                <WPill tone="warning" leftIcon="alert-triangle">local only — unrecoverable if this server is lost</WPill>
+              {backups.has_key && backups.key_acknowledged && (
+                <WPill tone="success" leftIcon="check">saved off-server</WPill>
               )}
-              {backups.key_mirrored == null && backups.has_key && <WPill tone="neutral">escrow state unknown</WPill>}
+              {backups.has_key && !backups.key_acknowledged && (
+                <WPill tone="danger" leftIcon="alert-triangle">NOT SAVED — backups are unrecoverable if this server is lost</WPill>
+              )}
               {!backups.has_key && <WPill tone="neutral">no key yet — generated on the first run</WPill>}
               <span style={{ flex: 1 }} />
-              <WBtn variant="ghost" size="sm" leftIcon="download" disabled={busy !== '' || !backups.has_key} onClick={downloadKey}>Download</WBtn>
-              {backups.key_mirrored === false && (
-                <WBtn variant="ghost" size="sm" leftIcon="cloud-upload" disabled={busy !== ''} onClick={mirrorKey}>Escrow at AOC</WBtn>
-              )}
-              {backups.key_mirrored === true && (
-                <WBtn variant="ghost" size="sm" leftIcon="cloud-off" disabled={busy !== ''} onClick={deleteMirror}>Remove escrow</WBtn>
+              <WBtn variant="primary" size="sm" leftIcon="download" disabled={busy !== '' || !backups.has_key} onClick={downloadKey}>Download</WBtn>
+              {backups.has_key && !backups.key_acknowledged && (
+                <WBtn variant="ghost" size="sm" leftIcon="check" disabled={busy !== ''} onClick={acknowledgeKey}>I have saved it</WBtn>
               )}
             </div>
           </WCard>

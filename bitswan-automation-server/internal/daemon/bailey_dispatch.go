@@ -362,8 +362,12 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
-	case "/bailey/api/admin/backups/key/mirror":
-		s.handleAdminBackupsKeyMirror(w, r)
+	case "/bailey/api/admin/backups/key/acknowledge":
+		if r.Method == http.MethodPost {
+			s.handleAdminBackupsKeyAcknowledge(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	case "/bailey/api/admin/server-update":
 		if r.Method == http.MethodPost {

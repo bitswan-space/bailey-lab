@@ -169,14 +169,17 @@ func newBackupStatusCmd() *cobra.Command {
 			fmt.Printf("AOC connected:  %s\n", onOff(status.AOCConnected))
 			fmt.Printf("Enabled:        %s\n", onOff(status.Enabled))
 			fmt.Printf("Encryption key: %s", onOff(status.HasKey))
-			if status.KeyMirrored != nil {
-				if *status.KeyMirrored {
-					fmt.Printf(" (escrowed at AOC)")
+			if status.HasKey {
+				if status.KeyAcknowledged {
+					fmt.Printf(" (saved off-server \u2014 acknowledged)")
 				} else {
-					fmt.Printf(" (LOCAL ONLY — download it: `bitswan backup key show`)")
+					fmt.Printf(" (NOT SAVED)")
 				}
 			}
 			fmt.Println()
+			if status.KeyWarning != "" {
+				fmt.Printf("\n!! %s\n\n", status.KeyWarning)
+			}
 			fmt.Printf("Retention:      %d daily, %d monthly\n", status.Retention.Daily, status.Retention.Monthly)
 			if status.Running {
 				fmt.Println("A backup run is in progress.")
@@ -277,51 +280,35 @@ func newBackupKeyCmd() *cobra.Command {
 		Use:   "key",
 		Short: "Manage the backup encryption key (host admin only)",
 	}
-	cmd.AddCommand(&cobra.Command{
-		Use:          "show",
-		Short:        "Print the encryption key (store it somewhere safe, OFF this server)",
+	var acknowledge bool
+	showCmd := &cobra.Command{
+		Use:   "show",
+		Short: "Print the encryption key (store it somewhere safe, OFF this server)",
+		Long: "Print the backup encryption key.\n\n" +
+			"This key is stored NOWHERE except this server — there is no escrow. If the server " +
+			"is lost and you have no copy, every backup is permanently unreadable. Once you have " +
+			"stored it somewhere safe, re-run with --acknowledge to silence the warnings.",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := backupClient().BackupKey()
+			client := backupClient()
+			key, err := client.BackupKey()
 			if err != nil {
 				return err
 			}
 			fmt.Println(key)
-			return nil
-		},
-	})
-	cmd.AddCommand(&cobra.Command{
-		Use:          "mirror",
-		Short:        "Escrow the key at AOC (recovers a rebuilt server)",
-		Args:         cobra.NoArgs,
-		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := backupClient().BackupKeyMirror(); err != nil {
-				return err
-			}
-			fmt.Println("Key escrowed at AOC.")
-			return nil
-		},
-	})
-	cmd.AddCommand(&cobra.Command{
-		Use:          "mirror-status",
-		Short:        "Report whether the key is escrowed at AOC",
-		Args:         cobra.NoArgs,
-		SilenceUsage: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			mirrored, err := backupClient().BackupKeyMirrorStatus()
-			if err != nil {
-				return err
-			}
-			if mirrored {
-				fmt.Println("Key is escrowed at AOC.")
-			} else {
-				fmt.Println("Key is LOCAL ONLY — if this server is lost, backups are unrecoverable without a downloaded copy.")
+			if acknowledge {
+				if err := client.BackupKeyAcknowledge(); err != nil {
+					return err
+				}
+				fmt.Fprintln(os.Stderr, "Recorded that this key has been saved off-server.")
 			}
 			return nil
 		},
-	})
+	}
+	showCmd.Flags().BoolVar(&acknowledge, "acknowledge", false,
+		"record that you have stored this key safely off this server")
+	cmd.AddCommand(showCmd)
 	return cmd
 }
 

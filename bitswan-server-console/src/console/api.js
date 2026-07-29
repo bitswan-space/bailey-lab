@@ -270,8 +270,7 @@ export const Api = {
   backupsRetention: (daily, monthly) => postJSON('/bailey/api/admin/backups/retention', { daily, monthly }),
   backupsEnabled: (enabled) => postJSON('/bailey/api/admin/backups/enabled', { enabled }),
   backupsKey: () => getJSON('/bailey/api/admin/backups/key'),
-  backupsKeyMirror: () => postJSON('/bailey/api/admin/backups/key/mirror'),
-  backupsKeyMirrorDelete: () => delJSON('/bailey/api/admin/backups/key/mirror'),
+  backupsKeyAcknowledge: () => postJSON('/bailey/api/admin/backups/key/acknowledge'),
   // Admin: update the automation-server binary itself from the browser. The
   // daemon downloads the official binary from the AOC, swaps it on the host, and
   // restarts its own container — so the NDJSON stream ends abruptly at the

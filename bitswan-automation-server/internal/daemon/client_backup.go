@@ -108,20 +108,9 @@ func (c *Client) BackupKey() (string, error) {
 	return resp.Key, nil
 }
 
-// BackupKeyMirrorStatus reports whether the key is escrowed at AOC.
-func (c *Client) BackupKeyMirrorStatus() (bool, error) {
-	var resp struct {
-		Mirrored bool `json:"mirrored"`
-	}
-	if err := c.backupJSON(http.MethodGet, "/backup/key/mirror", nil, &resp); err != nil {
-		return false, err
-	}
-	return resp.Mirrored, nil
-}
-
-// BackupKeyMirror escrows the key at AOC.
-func (c *Client) BackupKeyMirror() error {
-	return c.backupJSON(http.MethodPost, "/backup/key/mirror", nil, nil)
+// BackupKeyAcknowledge records that the key has been stored off this server.
+func (c *Client) BackupKeyAcknowledge() error {
+	return c.backupJSON(http.MethodPost, "/backup/key/acknowledge", nil, nil)
 }
 
 // BackupRestore runs a targeted restore (files | postgres | couchdb) and

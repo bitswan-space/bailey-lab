@@ -19,9 +19,7 @@ import (
 //   POST   /bailey/api/admin/backups/retention    {"daily":30,"monthly":12}
 //   POST   /bailey/api/admin/backups/enabled      {"enabled":true|false}
 //   GET    /bailey/api/admin/backups/key          the restic encryption key
-//   GET    /bailey/api/admin/backups/key/mirror   {"mirrored":bool}
-//   POST   /bailey/api/admin/backups/key/mirror   escrow the key at AOC
-//   DELETE /bailey/api/admin/backups/key/mirror   remove the escrowed copy
+//   POST   /bailey/api/admin/backups/key/acknowledge  confirm the key is saved
 //
 // Run progress is followed by polling GET .../backups (running flips false,
 // last_run carries the outcome) — the same poll-until-done shape the old
@@ -109,38 +107,18 @@ func (s *Server) handleAdminBackupsKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"key": key})
 }
 
-func (s *Server) handleAdminBackupsKeyMirror(w http.ResponseWriter, r *http.Request) {
-	target, err := backup.LoadAOCTarget()
-	if err != nil {
-		writeJSONError(w, err.Error(), http.StatusServiceUnavailable)
+// handleAdminBackupsKeyAcknowledge records that an admin has saved the key off
+// this server. There is no escrow, so this acknowledgement is the only signal
+// that the key exists anywhere but here.
+func (s *Server) handleAdminBackupsKeyAcknowledge(w http.ResponseWriter, r *http.Request) {
+	key, err := backup.LoadKey()
+	if err != nil || key == "" {
+		writeJSONError(w, "no backup key exists yet", http.StatusNotFound)
 		return
 	}
-	switch r.Method {
-	case http.MethodGet:
-		mirrored, err := target.KeyMirrored(r.Context())
-		if err != nil {
-			writeJSONError(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		writeJSON(w, map[string]bool{"mirrored": mirrored})
-	case http.MethodPost:
-		key, err := backup.LoadKey()
-		if err != nil || key == "" {
-			writeJSONError(w, "no backup key exists", http.StatusNotFound)
-			return
-		}
-		if err := target.MirrorKey(r.Context(), key); err != nil {
-			writeJSONError(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		writeJSON(w, map[string]bool{"mirrored": true})
-	case http.MethodDelete:
-		if err := target.DeleteMirroredKey(r.Context()); err != nil {
-			writeJSONError(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		writeJSON(w, map[string]bool{"mirrored": false})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if err := backup.AcknowledgeKey(); err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
+	writeJSON(w, map[string]bool{"acknowledged": true})
 }
