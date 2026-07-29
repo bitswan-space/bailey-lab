@@ -290,4 +290,48 @@ describe('EndpointAccessView', () => {
     expect(screen.getByText('bailey.d')).toBeTruthy();
     expect(screen.getByText('acme-dashboard.d')).toBeTruthy();
   });
+
+  it('search filters the tree by hostname/owner/grant, keeping matching branches (#252)', async () => {
+    installFetch({ '/bailey/api/admin/acl': { json: { endpoints: [
+      { hostname: 'acme-dashboard.d', kind: 'workspace', stage: '', parent: '', owner_email: 'jane@x', grants: [] },
+      { hostname: 'acme-shop.d', kind: 'frontend', stage: '', parent: 'acme-dashboard.d', owner_email: 'jane@x', grants: [{ principal_type: 'email', principal_value: 'bob@x', role: 'access' }] },
+      { hostname: 'acme-gitops.d', kind: 'service', stage: '', parent: 'acme-dashboard.d', owner_email: 'jane@x', grants: [] },
+      { hostname: 'beta-dashboard.d', kind: 'workspace', stage: '', parent: '', owner_email: 'zoe@x', grants: [] },
+    ] } } });
+    render(<Host View={EndpointAccessView} data={makeData()} />);
+    await waitFor(() => expect(screen.getByText('acme-dashboard.d')).toBeTruthy());
+    // A grant-email search keeps the owning workspace visible but prunes
+    // sibling branches that don't match.
+    fireEvent.change(screen.getByPlaceholderText('Search endpoints, owners & grants…'), { target: { value: 'bob@x' } });
+    expect(screen.getByText('acme-dashboard.d')).toBeTruthy(); // ancestor of the match
+    expect(screen.getByText('acme-shop.d')).toBeTruthy();      // the match itself
+    expect(screen.queryByText('acme-gitops.d')).toBeNull();    // non-matching sibling pruned
+    expect(screen.queryByText('beta-dashboard.d')).toBeNull(); // non-matching root gone
+    // No matches → honest empty state, not a blank page.
+    fireEvent.change(screen.getByPlaceholderText('Search endpoints, owners & grants…'), { target: { value: 'nope-nothing' } });
+    expect(screen.getByText('No endpoints match')).toBeTruthy();
+  });
+
+  it('paginates the workspace tree by root and resets to page 1 on search (#252)', async () => {
+    const endpoints = [];
+    for (let i = 1; i <= 23; i++) {
+      const n = String(i).padStart(2, '0');
+      endpoints.push({ hostname: `ws${n}-dashboard.d`, kind: 'workspace', stage: '', parent: '', owner_email: 'jane@x', grants: [] });
+    }
+    installFetch({ '/bailey/api/admin/acl': { json: { endpoints } } });
+    render(<Host View={EndpointAccessView} data={makeData()} />);
+    await waitFor(() => expect(screen.getByText('ws01-dashboard.d')).toBeTruthy());
+    // Page 1 of 3: first 10 roots only, plus the endpoint count.
+    expect(screen.getByText('23 endpoints')).toBeTruthy();
+    expect(screen.getByText('Page 1 of 3 · 23 entries')).toBeTruthy();
+    expect(screen.queryByText('ws11-dashboard.d')).toBeNull();
+    fireEvent.click(screen.getByText('Next'));
+    expect(screen.getByText('ws11-dashboard.d')).toBeTruthy();
+    expect(screen.queryByText('ws01-dashboard.d')).toBeNull();
+    expect(screen.getByText('Page 2 of 3 · 23 entries')).toBeTruthy();
+    // Searching snaps back to page 1 of the narrowed set.
+    fireEvent.change(screen.getByPlaceholderText('Search endpoints, owners & grants…'), { target: { value: 'ws2' } });
+    expect(screen.getByText('ws20-dashboard.d')).toBeTruthy();
+    expect(screen.queryByText(/Page \d+ of/)).toBeNull(); // 4 matches — pager hidden
+  });
 });
