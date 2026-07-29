@@ -28,6 +28,7 @@ type recoverHarness struct {
 	dashboardCompose bool
 	set              backup.SnapshotSet
 	enabled          map[string]bool // "service:stage" → enabled
+	versionWarning   string          // what the manifest's version check reports
 }
 
 func (h *recoverHarness) note(format string, args ...interface{}) {
@@ -64,12 +65,13 @@ func (h *recoverHarness) install(t *testing.T) {
 		keys      func(context.Context, string, string) (string, error)
 		volDirs   func(string) []string
 		enabledFn func(string, string, string) bool
+		skew      func(context.Context, string) string
 	}{
 		recoverStopContainers, recoverRemoveByLabel, recoverRemoveNamed, recoverComposeUp,
 		recoverWaitForGitops, recoverDeploy, recoverInitSubTraefik, recoverRepushRoutes,
 		recoverSelect, recoverRestoreFiles, recoverWaitService, recoverRestorePostgres,
 		recoverRestoreCouchDB, recoverRestoreGarage, recoverGarageKeyCheck,
-		recoverEnsureVolumeDirs, recoverServiceEnabled,
+		recoverEnsureVolumeDirs, recoverServiceEnabled, recoverVersionSkew,
 	}
 	t.Cleanup(func() {
 		recoverStopContainers, recoverRemoveByLabel, recoverRemoveNamed, recoverComposeUp = saved.stop, saved.byLabel, saved.named, saved.composeUp
@@ -77,6 +79,7 @@ func (h *recoverHarness) install(t *testing.T) {
 		recoverSelect, recoverRestoreFiles, recoverWaitService, recoverRestorePostgres = saved.sel, saved.files, saved.waitSvc, saved.pg
 		recoverRestoreCouchDB, recoverRestoreGarage, recoverGarageKeyCheck = saved.couch, saved.garage, saved.keys
 		recoverEnsureVolumeDirs, recoverServiceEnabled = saved.volDirs, saved.enabledFn
+		recoverVersionSkew = saved.skew
 	})
 
 	recoverStopContainers = func(ws string, w io.Writer) { h.note("stop") }
@@ -130,6 +133,7 @@ func (h *recoverHarness) install(t *testing.T) {
 		return "ok", nil
 	}
 	recoverEnsureVolumeDirs = func(ws string) []string { h.note("volume-dirs"); return nil }
+	recoverVersionSkew = func(context.Context, string) string { return h.versionWarning }
 	recoverServiceEnabled = func(ws, service, stage string) bool {
 		if h.enabled == nil {
 			return service == "postgres" && stage == "production"
@@ -341,6 +345,56 @@ func TestRecoverDryRun(t *testing.T) {
 	}
 	if h.index("stop") >= 0 || h.index("files") >= 0 {
 		t.Errorf("dry run changed things: %v", h.calls)
+	}
+}
+
+// A version difference between the binary running the recovery and the one
+// that made the backup is worth saying, but never worth refusing over: an
+// operator mid-disaster must not be blocked by a diagnostic.
+func TestRecoverWarnsOnVersionSkewWithoutFailing(t *testing.T) {
+	h := newRecoverHarness(t)
+	h.versionWarning = "version skew: this backup was made by bitswan 1.2.3 but 2.0.0 is performing the recovery"
+	s := &Server{}
+
+	report, err := s.recoverWorkspace(context.Background(), recoverReq("ws1"), func(string) {})
+	if err != nil {
+		t.Fatalf("recoverWorkspace: %v", err)
+	}
+	if !report.OK {
+		t.Errorf("skew must not fail the recovery: %+v", report.Steps)
+	}
+
+	var found *RecoverStep
+	for i := range report.Steps {
+		if report.Steps[i].Name == "version" {
+			found = &report.Steps[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no version step in report: %+v", report.Steps)
+	}
+	if !found.Success || !strings.Contains(found.Output, "1.2.3") {
+		t.Errorf("version step = %+v", *found)
+	}
+	if len(report.Warnings) == 0 || !strings.Contains(strings.Join(report.Warnings, " "), "version skew") {
+		t.Errorf("warning not surfaced in the report: %v", report.Warnings)
+	}
+}
+
+// Matching versions add no step at all — no noise in the normal case.
+func TestRecoverSilentWhenVersionsMatch(t *testing.T) {
+	h := newRecoverHarness(t)
+	h.versionWarning = ""
+	s := &Server{}
+
+	report, err := s.recoverWorkspace(context.Background(), recoverReq("ws1"), func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range report.Steps {
+		if step.Name == "version" {
+			t.Errorf("unexpected version step: %+v", step)
+		}
 	}
 }
 

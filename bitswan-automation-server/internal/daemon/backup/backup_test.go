@@ -63,8 +63,8 @@ func TestLoadAOCTarget(t *testing.T) {
 	if target.RepoURL() != "https://aoc.example.com/api/automation_server/backups/repo/" {
 		t.Errorf("RepoURL = %q", target.RepoURL())
 	}
-	if target.KeyMirrorURL() != "https://aoc.example.com/api/automation_server/backups/restic-key" {
-		t.Errorf("KeyMirrorURL = %q", target.KeyMirrorURL())
+	if target.InDockerNetwork() {
+		t.Error("a public AOC should not need the docker network")
 	}
 	if target.ServerID != "srv-123" || target.Token != "tok-abc" {
 		t.Errorf("identity = %q/%q", target.ServerID, target.Token)

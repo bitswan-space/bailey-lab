@@ -386,29 +386,44 @@ func (e *Engine) backupServerState(ctx context.Context, restic *Restic) StepResu
 	// A crashed previous run could have left a stale copy behind.
 	os.Remove(baileySnapshotPath())
 
+	// Problems along the way are collected rather than returned: everything
+	// here is one part of the server's state, and losing the route table and
+	// the config because the database could not be read would turn one broken
+	// thing into a snapshot with nothing in it. The step still reports red.
+	var warnings []string
+
 	baileyDB := filepath.Join(bitswanConfigDir(), "bailey.db")
 	if _, err := os.Stat(baileyDB); err == nil {
 		// VACUUM INTO makes a consistent single-file copy even while the
 		// daemon has the DB open (torn-write-safe, unlike a plain cp, which
 		// would race the WAL).
 		if err := sqliteVacuumInto(ctx, baileyDB, baileySnapshotPath()); err != nil {
-			return StepResult{Success: false, Output: "bailey.db snapshot failed: " + err.Error()}
+			warnings = append(warnings, "bailey.db snapshot FAILED: "+err.Error())
+		} else {
+			defer os.Remove(baileySnapshotPath())
 		}
-		defer os.Remove(baileySnapshotPath())
 	}
 
 	if e.ManifestBuilder != nil {
 		data, err := e.ManifestBuilder()
-		if err != nil {
+		switch {
+		case err != nil:
 			// A manifest is a recovery convenience, not the backup itself.
-			return e.resticServerStep(ctx, restic, "manifest unavailable: "+err.Error())
-		}
-		if err := os.WriteFile(serverManifestPath(), data, 0o600); err != nil {
-			return e.resticServerStep(ctx, restic, "manifest not written: "+err.Error())
+			warnings = append(warnings, "manifest unavailable: "+err.Error())
+		default:
+			if err := os.WriteFile(serverManifestPath(), data, 0o600); err != nil {
+				warnings = append(warnings, "manifest not written: "+err.Error())
+			}
 		}
 	}
 
-	return e.resticServerStep(ctx, restic, "")
+	result := e.resticServerStep(ctx, restic, strings.Join(warnings, "; "))
+	// A missing database copy is a real gap in a recoverable server, so it
+	// fails the run even when restic itself succeeded.
+	if len(warnings) > 0 && strings.Contains(warnings[0], "bailey.db snapshot FAILED") {
+		result.Success = false
+	}
+	return result
 }
 
 // resticServerStep backs up whichever of the server paths exist, reporting what

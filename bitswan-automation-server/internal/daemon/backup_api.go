@@ -93,6 +93,9 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	case path == "/snapshots" && r.Method == http.MethodGet:
 		s.handleBackupSnapshots(w, r)
 
+	case path == "/manifest" && r.Method == http.MethodGet:
+		s.handleBackupManifest(w, r)
+
 	case path == "/key" && r.Method == http.MethodGet:
 		s.handleBackupKeyGet(w, r)
 
@@ -464,6 +467,41 @@ func (s *Server) handleBackupSnapshots(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(raw)
+}
+
+// handleBackupManifest reads the server manifest out of a snapshot — what this
+// server WAS at backup time. Admin only: it lists every workspace and the
+// server's identity.
+//
+// Reading it here, on a live server, is the same operation a disaster recovery
+// performs first on a bare machine; the difference is only where restic runs.
+func (s *Server) handleBackupManifest(w http.ResponseWriter, r *http.Request) {
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "admin token required", http.StatusForbidden)
+		return
+	}
+	target, err := backup.LoadAOCTarget()
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	key, err := backup.LoadKey()
+	if err != nil || key == "" {
+		writeJSONError(w, "no backup key exists yet", http.StatusNotFound)
+		return
+	}
+	manifest, err := backup.ReadServerManifest(
+		r.Context(), backup.NewRestic(target, key), r.URL.Query().Get("snapshot"))
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"manifest": manifest,
+		// The recovery would run on THIS binary, so report the skew the same
+		// way a recovery does rather than leaving the caller to compare.
+		"version_warning": backup.CheckVersionSkew(manifest, s.version),
+	})
 }
 
 func (s *Server) handleBackupKeyGet(w http.ResponseWriter, r *http.Request) {

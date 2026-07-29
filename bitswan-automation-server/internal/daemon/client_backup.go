@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/bitswan-space/bitswan-workspaces/internal/daemon/backup"
 )
 
 // Client methods for the server-level backup API (/backup/*). All calls ride
@@ -151,6 +153,23 @@ func (c *Client) BackupSnapshots(workspace, tag string) (json.RawMessage, error)
 		return nil, err
 	}
 	return raw, nil
+}
+
+// BackupManifest reads the server manifest recorded inside a snapshot, plus a
+// version-skew warning against the daemon's own binary.
+func (c *Client) BackupManifest(snapshotID string) (backup.ServerManifest, string, error) {
+	path := "/backup/manifest"
+	if snapshotID != "" {
+		path += "?" + url.Values{"snapshot": []string{snapshotID}}.Encode()
+	}
+	var resp struct {
+		Manifest       backup.ServerManifest `json:"manifest"`
+		VersionWarning string                `json:"version_warning"`
+	}
+	if err := c.backupJSON(http.MethodGet, path, nil, &resp); err != nil {
+		return backup.ServerManifest{}, "", err
+	}
+	return resp.Manifest, resp.VersionWarning, nil
 }
 
 // BackupRecoverWorkspace runs a full workspace recovery and streams the job's

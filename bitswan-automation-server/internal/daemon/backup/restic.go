@@ -17,6 +17,12 @@ var resticBinary = "restic"
 type Restic struct {
 	Target *AOCTarget
 	Key    string // repo encryption key (RESTIC_PASSWORD)
+
+	// Container, when set, runs restic inside a throwaway container from the
+	// automation-server runtime image instead of expecting a restic binary on
+	// this machine. See restic_container.go — the machine being rebuilt in a
+	// disaster recovery has docker but no restic.
+	Container *ContainerExec
 }
 
 // NewRestic builds a runner from the loaded AOC target and local key.
@@ -24,22 +30,50 @@ func NewRestic(target *AOCTarget, key string) *Restic {
 	return &Restic{Target: target, Key: key}
 }
 
-// Env is the restic environment: the REST repo URL and its Basic-auth
-// credentials (username is informational — AOC scopes by token alone).
+// resticEnvVars is the credential environment restic needs: the REST repo URL,
+// its Basic-auth pair (username is informational — AOC scopes by token alone),
+// and the repo password. Names and values live together here because the
+// container path passes only the NAMES to docker, and the two lists must not
+// drift apart.
+func (r *Restic) resticEnvVars() [][2]string {
+	return [][2]string{
+		{"RESTIC_REPOSITORY", "rest:" + r.Target.RepoURL()},
+		{"RESTIC_REST_USERNAME", r.Target.ServerID},
+		{"RESTIC_REST_PASSWORD", r.Target.Token},
+		{"RESTIC_PASSWORD", r.Key},
+	}
+}
+
+// Env is the process environment for a restic run.
 func (r *Restic) Env() []string {
-	return append(os.Environ(),
-		"RESTIC_REPOSITORY=rest:"+r.Target.RepoURL(),
-		"RESTIC_REST_USERNAME="+r.Target.ServerID,
-		"RESTIC_REST_PASSWORD="+r.Target.Token,
-		"RESTIC_PASSWORD="+r.Key,
-	)
+	env := os.Environ()
+	for _, kv := range r.resticEnvVars() {
+		env = append(env, kv[0]+"="+kv[1])
+	}
+	return env
+}
+
+// envNames is the same set of variables, names only.
+func (r *Restic) envNames() []string {
+	names := make([]string, 0, 4)
+	for _, kv := range r.resticEnvVars() {
+		names = append(names, kv[0])
+	}
+	return names
 }
 
 // Run executes restic with the given args. Returns combined stdout and
 // stderr; err is non-nil on non-zero exit (stderr is folded into the error
 // message for direct surfacing in run reports).
 func (r *Restic) Run(ctx context.Context, args ...string) (stdout, stderr string, err error) {
-	cmd := exec.CommandContext(ctx, resticBinary, args...)
+	binary, argv := resticBinary, args
+	if r.Container != nil {
+		binary, argv = dockerBinary, r.Container.argv(r.envNames(), args)
+	}
+	cmd := exec.CommandContext(ctx, binary, argv...)
+	// Either way the credentials arrive through the environment: the container
+	// path passes `-e NAME` with no value, so docker takes it from here rather
+	// than putting secrets in the process table.
 	cmd.Env = r.Env()
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf

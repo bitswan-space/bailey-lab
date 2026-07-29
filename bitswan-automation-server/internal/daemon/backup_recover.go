@@ -149,7 +149,28 @@ var (
 	recoverGarageKeyCheck   = checkGarageKeys
 	recoverEnsureVolumeDirs = ensureWorkspaceVolumeDirsReporting
 	recoverServiceEnabled   = backup.ServiceEnabled
+	recoverVersionSkew      = versionSkewWarning
 )
+
+// versionSkewWarning compares the binary running this recovery against the one
+// that made the backup, as recorded in the server manifest. Any failure to read
+// the manifest returns "": an old snapshot simply has none, and a recovery must
+// never be held up by a diagnostic.
+func versionSkewWarning(ctx context.Context, running string) string {
+	target, err := backup.LoadAOCTarget()
+	if err != nil {
+		return ""
+	}
+	key, err := backup.LoadKey()
+	if err != nil || key == "" {
+		return ""
+	}
+	manifest, err := backup.ReadServerManifest(ctx, backup.NewRestic(target, key), "")
+	if err != nil {
+		return ""
+	}
+	return backup.CheckVersionSkew(manifest, running)
+}
 
 const (
 	recoverGitopsTimeout  = 5 * time.Minute
@@ -287,6 +308,18 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 	report.Warnings = append(report.Warnings, set.Warnings...)
 	for _, w := range set.Warnings {
 		log("Warning: " + w)
+	}
+
+	// --- 1b. version skew: a warning, never a refusal ---------------------
+	// Restores are expected to work across versions, and blocking a recovery
+	// over a version difference would be worse than the risk it names. But if
+	// something behaves oddly afterwards, this is the first thing to check —
+	// so say it up front rather than leaving it to be discovered.
+	if warning := recoverVersionSkew(ctx, s.version); warning != "" {
+		report.Warnings = append(report.Warnings, warning)
+		log("Warning: " + warning)
+		report.Steps = append(report.Steps, RecoverStep{
+			Name: "version", Success: true, Output: warning})
 	}
 
 	report.DriverImage = driverImageFromCompose(ws)

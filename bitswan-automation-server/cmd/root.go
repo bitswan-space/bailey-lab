@@ -44,7 +44,15 @@ Contact BitSwan for licensing information:
 	},
 }
 
+// cliVersion is this binary's version, kept for the commands that run without
+// a daemon to ask — notably the disaster-recovery paths, which compare it
+// against the version recorded in the backup.
+var cliVersion = "dev"
+
+func rootCmdVersion() string { return cliVersion }
+
 func newRootCmd(version string) *cobra.Command {
+	cliVersion = version
 	cmd := &cobra.Command{
 		Use:   "bitswan",
 		Short: "Deploy and manage your bitswan automations",
