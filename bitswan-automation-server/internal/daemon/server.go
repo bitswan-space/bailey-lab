@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/daemon/backup"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 	"github.com/dchest/uniuri"
 )
@@ -54,6 +55,10 @@ type Server struct {
 	// serverUpdateMu serializes browser-driven server self-updates so two admins
 	// can't race on the download/swap at once (TryLock → reject the second).
 	serverUpdateMu sync.Mutex
+
+	// backupEngine serializes server-level backup runs (nightly scheduler vs
+	// run-now) — see internal/daemon/backup.
+	backupEngine backup.Engine
 }
 
 // LoadToken reads the token from the config file
@@ -192,6 +197,10 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// Job endpoints for interactive operations (authenticated)
 	mux.HandleFunc("/jobs", s.authMiddleware(s.handleJobs))
 	mux.HandleFunc("/jobs/", s.authMiddleware(s.handleJobs))
+
+	// Server-level backup endpoints (authenticated; key/snapshot access
+	// additionally demands the admin token — see backup_api.go).
+	mux.HandleFunc("/backup/", s.authMiddleware(s.handleBackup))
 
 	// Bailey device-trust admin (authenticated; socket-trusted). Backs the
 	// `bitswan bailey devices` CLI — approve a pending "trust this device"
@@ -481,6 +490,12 @@ func (s *Server) Run() error {
 	// in the background, and refresh daily. Keeps the ~40s DB download off every
 	// workspace's first interactive CVE scan (see grype_db.go).
 	startGrypeDBRefresher()
+
+	// Nightly server-level backups (whole workspace trees incl. secrets +
+	// DB dumps + server state → one restic repo per server via AOC). Self-
+	// enables on AOC-registered servers; catch-up run when the last one is
+	// stale (see backup_scheduler.go).
+	s.startBackupScheduler(&s.backupEngine)
 
 	// Own the shared read-through build proxies (Go module + npm) so per-BP image
 	// builds pull common packages from a warm, persistent, cross-workspace cache

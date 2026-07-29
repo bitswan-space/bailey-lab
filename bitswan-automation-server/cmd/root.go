@@ -65,6 +65,7 @@ func newRootCmd(version string) *cobra.Command {
 	cmd.AddCommand(automationserverdaemon.NewAutomationServerDaemonCmd()) // automation server daemon subcommand
 	cmd.AddCommand(automation.NewAutomationCmd())                         // automation subcommand
 	cmd.AddCommand(newBaileyCmd())                                        // bailey subcommand (device trust)
+	cmd.AddCommand(newBackupCmd())                                        // backup subcommand (server-level backups)
 	cmd.AddCommand(test.NewTestCmd())                                     // _test subcommand (hidden)
 	cmd.AddCommand(newCompletionCmd())                                    // completion subcommand
 
