@@ -8,10 +8,13 @@ event is broadcast as a freshness bonus, same contract as deploys).
 Error mapping follows `routes/services.py`: ValueError → 400,
 LookupError → 404, BusyError → 409, RuntimeError → 500.
 
-Distinct from `/backups/*` (restic/S3 disaster recovery) — these are
-per-BP, cross-stage data snapshots stored locally on the gitops server.
+These are per-BP, cross-stage data snapshots stored locally on the gitops
+server. Off-site protection is the automation-server daemon's job (it backs
+up this whole directory nightly); snapshots pruned locally are listed as
+`remote_only` from the daemon and can be fetched back through it.
 """
 
+import asyncio
 import os
 
 from fastapi import APIRouter, HTTPException
@@ -31,9 +34,12 @@ from app.snapshot_runner import (
     spawn_fetch_snapshot,
     spawn_restore_snapshot,
 )
-from app.services import snapshot_offsite
 from app.services.snapshot_service import get_snapshot_service
-from app.utils import SERVICE_REALMS, sanitize_automation_name
+from app.utils import (
+    SERVICE_REALMS,
+    daemon_list_offsite_snapshots,
+    sanitize_automation_name,
+)
 
 router = APIRouter(prefix="/snapshots", tags=["snapshots"])
 
@@ -91,9 +97,9 @@ async def list_bp_snapshots(bp: str):
     """All snapshots of one BP across stages + eligibility + disk usage +
     any in-flight tasks (so a reloaded dashboard can resume its progress UI).
 
-    Rows are annotated with their off-site mirror state; snapshots that
-    exist only off-site (local files deleted) are listed too, from the
-    off-site index, with `local: false`."""
+    Snapshots that exist only in the server's backups (local files deleted
+    or pruned) are listed too — from the daemon — with `local: false` and
+    `remote_only: true`; Fetch materializes them back."""
     slug = _bp_slug(bp)
     service = get_snapshot_service()
     try:
@@ -105,20 +111,31 @@ async def list_bp_snapshots(bp: str):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    offsite = snapshot_offsite.offsite_status_for(slug)
+    # Snapshots pruned locally may still live in the automation server's
+    # nightly backups; the daemon is the authority on what can be fetched
+    # back. Best-effort per stage — an unavailable daemon just means no
+    # remote-only rows, never a failed listing.
     local_ids = {s["id"] for s in snapshots}
     for s in snapshots:
         s["local"] = True
-        s["offsite"] = offsite.get(s["id"], {}).get("status", "none")
-    for snapshot_id, entry in offsite.items():
-        if snapshot_id in local_ids or entry.get("status") != "synced":
-            continue
-        row = dict(entry.get("manifest") or {})
-        if row.get("id") != snapshot_id:
-            continue  # index entry without a usable manifest
-        row["local"] = False
-        row["offsite"] = "synced"
-        snapshots.append(row)
+    for stage in sorted(SERVICE_REALMS):
+        for ref in await asyncio.to_thread(
+            daemon_list_offsite_snapshots, slug, stage
+        ):
+            snapshot_id = ref.get("snapshot_id")
+            if not snapshot_id or snapshot_id in local_ids:
+                continue
+            local_ids.add(snapshot_id)
+            snapshots.append(
+                {
+                    "id": snapshot_id,
+                    "bp": slug,
+                    "stage": stage,
+                    "created_at": ref.get("backed_up_at") or "",
+                    "local": False,
+                    "remote_only": True,
+                }
+            )
     snapshots.sort(key=lambda m: m.get("created_at", ""), reverse=True)
 
     active = [t.to_dict() for t in snapshot_manager.get_active_tasks_for_bp(slug)]
@@ -128,7 +145,13 @@ async def list_bp_snapshots(bp: str):
         "eligibility": eligibility,
         "disk_usage_bytes": usage,
         "active_tasks": active,
-        "offsite_enabled": snapshot_offsite.offsite_enabled(),
+        # The automation-server daemon makes the off-site backups; its socket
+        # being mounted is what makes a workspace recoverable from them.
+        "offsite_enabled": os.path.exists(
+            os.environ.get(
+                "BITSWAN_INGRESS_SOCKET", "/var/run/bitswan/automation-server.sock"
+            )
+        ),
     }
 
 
@@ -291,10 +314,6 @@ async def fetch_snapshot(bp: str, stage: str, snapshot_id: str):
     auto-fetches on its own, so this exists for explicit "bring it back"."""
     slug = _bp_slug(bp)
     _validate_stage(stage)
-    if not snapshot_offsite.offsite_enabled():
-        raise HTTPException(
-            status_code=400, detail="Off-site backups are not configured"
-        )
 
     service = get_snapshot_service()
     try:
@@ -305,8 +324,8 @@ async def fetch_snapshot(bp: str, stage: str, snapshot_id: str):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    entry = snapshot_offsite.offsite_status_for(slug).get(snapshot_id)
-    if not entry or entry.get("status") != "synced":
+    remote = await asyncio.to_thread(daemon_list_offsite_snapshots, slug, stage)
+    if not any(r.get("snapshot_id") == snapshot_id for r in remote):
         raise HTTPException(
             status_code=404, detail=f"Snapshot {snapshot_id} not found off-site"
         )
@@ -376,15 +395,16 @@ async def delete_snapshot(bp: str, stage: str, snapshot_id: str):
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
-    # Deleting local files never deletes the off-site copy — that is pruned
-    # only by the BP's retention policy. Tell the UI so it can say so.
-    offsite_entry = snapshot_offsite.offsite_status_for(slug).get(snapshot_id)
+    # Deleting local files never deletes what the server's backup already
+    # captured — that is pruned only by the server's retention policy. Tell
+    # the UI so it can say so.
+    remote = await asyncio.to_thread(daemon_list_offsite_snapshots, slug, stage)
     return {
         "status": "deleted",
         "bp": slug,
         "stage": stage,
         "snapshot_id": snapshot_id,
-        "offsite_retained": bool(
-            offsite_entry and offsite_entry.get("status") == "synced"
+        "offsite_retained": any(
+            r.get("snapshot_id") == snapshot_id for r in remote
         ),
     }

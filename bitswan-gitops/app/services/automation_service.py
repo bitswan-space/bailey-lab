@@ -456,12 +456,9 @@ class AutomationService:
         self.bs_home_host = os.environ.get(
             "BITSWAN_GITOPS_DIR_HOST", "/home/root/.config/bitswan/local-gitops/"
         )
-        self.workspace_id = os.environ.get("BITSWAN_WORKSPACE_ID")
         self.workspace_name = os.environ.get(
             "BITSWAN_WORKSPACE_NAME", "workspace-local"
         )
-        self.aoc_url = os.environ.get("BITSWAN_AOC_URL")
-        self.aoc_token = os.environ.get("BITSWAN_AOC_TOKEN")
         self.gitops_domain = os.environ.get("BITSWAN_GITOPS_DOMAIN")
         self.workspace_name = os.environ.get("BITSWAN_WORKSPACE_NAME")
         self.certs_dir_host = os.environ.get("BITSWAN_CERTS_DIR")

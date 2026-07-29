@@ -12,7 +12,7 @@ database, CouchDB databases under the BP prefix, and Garage bucket — see
         garage.tar           (bucket contents via rclone sync in the toolbox)
 
 Artifacts are stored uncompressed: manual snapshots are mirrored off-site
-into the restic repo (see `snapshot_offsite.py`), and restic deduplicates
+into the automation server's nightly backup, which deduplicates
 and compresses on its own — gzip here would defeat both. Snapshots created
 before this change carry gzipped artifacts (postgres.sql.gz, ...); restores
 detect the format per file, so both restore forever.
@@ -22,8 +22,11 @@ stage restores into any other stage verbatim. Restores use REPLACE
 semantics: the target's current data is auto-snapshotted (kind=auto), then
 cleared, then loaded. Code/deployments are never touched.
 
-Distinct from the restic/S3 disaster-recovery system in
-`app/routes/backups.py`, which backs up whole servers off-site.
+Off-site protection comes from the automation-server daemon's nightly
+server-level backup, which captures this whole snapshots directory (plus
+every workspace's secrets and DB dumps). gitops runs no backup jobs; it
+only asks the daemon to fetch a pruned snapshot back (see
+`utils.daemon_fetch_offsite_snapshot`).
 
 Dumps and loads are STREAMED between the service containers and the
 snapshot files — never buffered whole in Python (unlike the legacy

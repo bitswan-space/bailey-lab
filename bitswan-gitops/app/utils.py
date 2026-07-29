@@ -678,6 +678,71 @@ def daemon_admit_memory(
         client.close()
 
 
+def _workspace_backup_headers() -> dict:
+    """Proof-of-workspace for the daemon's backup routes.
+
+    The daemon socket is bind-mounted into EVERY workspace's containers, so
+    being a socket peer proves nothing. The daemon checks this secret against
+    the workspace's own metadata.yaml, which is the only thing that
+    distinguishes us from a sibling workspace.
+    """
+    return {"X-Bitswan-Workspace-Secret": os.environ.get("BITSWAN_GITOPS_SECRET", "")}
+
+
+def _workspace_name() -> str:
+    return os.environ.get("BITSWAN_WORKSPACE_NAME", "")
+
+
+def daemon_list_offsite_snapshots(bp: str, stage: str) -> list[dict]:
+    """Per-BP snapshots recoverable from the server's nightly backups.
+
+    Replaces the old gitops-side off-site index: the daemon owns the backup
+    repo now, and a snapshot reaches off-site storage by being inside the
+    nightly capture of this workspace's snapshots directory. Returns
+    [{snapshot_id, restic_snapshot, backed_up_at}]; best-effort — an
+    unavailable daemon yields [] so listings never fail on it.
+    """
+    client, base = _ingress_client_and_base()
+    try:
+        resp = client.get(
+            f"{base}/backup/offsite-snapshots",
+            params={"workspace": _workspace_name(), "bp": bp, "stage": stage},
+            headers=_workspace_backup_headers(),
+        )
+        resp.raise_for_status()
+        return (resp.json() or {}).get("snapshots") or []
+    except Exception as e:
+        logger.debug(f"Off-site snapshot listing unavailable: {e}")
+        return []
+    finally:
+        client.close()
+
+
+def daemon_fetch_offsite_snapshot(bp: str, stage: str, snapshot_id: str) -> None:
+    """Materialize a pruned snapshot back onto the shared volume.
+
+    The daemon restores the snapshot directory in place, so afterwards the
+    local snapshot store simply has it. Raises on failure — callers run this
+    before anything destructive, so a dead daemon must abort the operation.
+    """
+    client, base = _ingress_client_and_base()
+    try:
+        resp = client.post(
+            f"{base}/backup/fetch-snapshot",
+            json={
+                "workspace": _workspace_name(),
+                "bp": bp,
+                "stage": stage,
+                "snapshot_id": snapshot_id,
+            },
+            headers=_workspace_backup_headers(),
+            timeout=1800,
+        )
+        resp.raise_for_status()
+    finally:
+        client.close()
+
+
 def add_route_to_ingress(
     hostname: str,
     upstream: str,
