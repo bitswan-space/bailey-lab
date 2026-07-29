@@ -43,8 +43,10 @@ func TestIsBaileyDataPath(t *testing.T) {
 // --- bailey_admin_helpers.go: signoutRedirect --------------------------
 
 func TestSignoutRedirect_NoOauthConfig(t *testing.T) {
-	// With no oauth config for the bailey client, signout falls back to the
-	// local oauth2-proxy sign_out endpoint (no Keycloak end-session URL).
+	// With no protected client available (AOC/domain not configured yet),
+	// signout falls back to the bare oauth2-proxy sign_out (no Keycloak
+	// end-session URL).
+	setProtectedClientForTest(t, "", "") // clear the process cache
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SUDO_USER", "")
 	r := httptest.NewRequest(http.MethodGet, "https://bailey.example.com/bailey/signout", nil)
