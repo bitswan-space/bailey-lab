@@ -37,6 +37,16 @@ export async function postJSON(path, body) {
   return parseJSONResponse(res, path);
 }
 
+// delJSON performs a DELETE and parses the JSON response.
+export async function delJSON(path) {
+  const res = await fetch(path, {
+    method: 'DELETE',
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  });
+  return parseJSONResponse(res, path);
+}
+
 // postForm sends an application/x-www-form-urlencoded body. Used by the
 // device-remove and admin-device-remove handlers, which read r.FormValue.
 // Parses a JSON response.
@@ -252,6 +262,16 @@ export const Api = {
   // update/rollback version ledger (history), the rollback depth, and a count
   // for the Updates nav bubble.
   adminUpdates: () => getJSON('/bailey/api/admin/updates'),
+  // Admin: server-level backups (nightly whole-server restic run made by the
+  // daemon). Status + run-now + retention + encryption-key custody. The key
+  // decrypts backups that include workspace secrets — admin console only.
+  adminBackups: () => getJSON('/bailey/api/admin/backups'),
+  backupsRun: () => postJSON('/bailey/api/admin/backups/run'),
+  backupsRetention: (daily, monthly) => postJSON('/bailey/api/admin/backups/retention', { daily, monthly }),
+  backupsEnabled: (enabled) => postJSON('/bailey/api/admin/backups/enabled', { enabled }),
+  backupsKey: () => getJSON('/bailey/api/admin/backups/key'),
+  backupsKeyMirror: () => postJSON('/bailey/api/admin/backups/key/mirror'),
+  backupsKeyMirrorDelete: () => delJSON('/bailey/api/admin/backups/key/mirror'),
   // Admin: update the automation-server binary itself from the browser. The
   // daemon downloads the official binary from the AOC, swaps it on the host, and
   // restarts its own container — so the NDJSON stream ends abruptly at the

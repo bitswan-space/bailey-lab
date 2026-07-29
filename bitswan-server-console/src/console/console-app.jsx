@@ -8,6 +8,7 @@ const { UsersView, EndpointAccessView } = window.SC_PEOPLE;
 const { DevicesView, SecurityView } = window.SC_DEVICES;
 const { ResourcesView } = window.SC_RESOURCES;
 const { UpdatesView } = window.SC_UPDATES;
+const { BackupsView } = window.SC_BACKUPS;
 const { BootstrapScene, ApprovalScene, RecoveryScene, InviteScene } = window.SC_SCENES;
 const { Api } = window.SC_API;
 const { useState: useA, useEffect: useAE, useRef: useAR } = React;
@@ -36,7 +37,8 @@ function initialData() {
     peopleWarning: null, // partial-enumeration `error` string from /people (200 + error)
     resources: null,     // GET /bailey/api/admin/resources (memory budget + per-BP)
     updates: null,       // GET /bailey/api/admin/updates (server + stale workspaces + count)
-    load: { devices: 'idle', approvals: 'idle', workspaces: 'idle', whoami: 'idle', overview: 'idle', people: 'idle', resources: 'idle', updates: 'idle' },
+    backups: null,       // GET /bailey/api/admin/backups (server-level backup status + last run)
+    load: { devices: 'idle', approvals: 'idle', workspaces: 'idle', whoami: 'idle', overview: 'idle', people: 'idle', resources: 'idle', updates: 'idle', backups: 'idle' },
     error: {},           // { devices, approvals, workspaces, whoami, overview, people, resources }
   };
 }
@@ -262,6 +264,7 @@ const NAV = [
     { id: 'users',     label: 'People & roles',   icon: 'users', badge: 'pending' },
     { id: 'acl',       label: 'Endpoint access',  icon: 'git-fork' },
     { id: 'updates',   label: 'Updates',          icon: 'arrow-up-circle', badge: 'updates' },
+    { id: 'backups',   label: 'Backups',          icon: 'database-backup' },
   ]},
 ];
 
@@ -273,7 +276,7 @@ const NAV = [
 // routing works end-to-end. A second path segment carries a view's open
 // "drawer" (the workspace being managed, the person whose devices you're
 // viewing) — e.g. /workspaces/acme, /users/jane@x.
-const ROUTES = ['workspaces', 'handbook', 'overview', 'resources', 'users', 'acl', 'updates', 'devices', 'security'];
+const ROUTES = ['workspaces', 'handbook', 'overview', 'resources', 'users', 'acl', 'updates', 'backups', 'devices', 'security'];
 
 function parseLocation() {
   const segs = (window.location.pathname || '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
@@ -360,7 +363,7 @@ function Console({ data, setData, toast, refresh }) {
   const views = {
     workspaces: WorkspacesView, overview: OverviewView, users: UsersView,
     acl: EndpointAccessView, devices: DevicesView, security: SecurityView, handbook: HandbookView,
-    resources: ResourcesView, updates: UpdatesView,
+    resources: ResourcesView, updates: UpdatesView, backups: BackupsView,
   };
   const View = views[route] || WorkspacesView;
 
@@ -711,6 +714,17 @@ function App() {
     } catch (e) { if (!bg) { setLoad('updates', 'error'); setErr('updates', e.message); } }
   };
 
+  const loadBackups = useAR();
+  loadBackups.current = async (opts) => {
+    const bg = opts && opts.background;
+    if (!bg) setLoad('backups', 'loading');
+    try {
+      const r = await withRetry(() => Api.adminBackups());
+      setData(d => ({ ...d, backups: r }));
+      setLoad('backups', 'ok'); setErr('backups', null);
+    } catch (e) { if (!bg) { setLoad('backups', 'error'); setErr('backups', e.message); } }
+  };
+
   const loadPeople = useAR();
   loadPeople.current = async (opts) => {
     const bg = opts && opts.background;
@@ -733,7 +747,7 @@ function App() {
   // so a view's mutation handler can sync after writing to the backend.
   const refresh = useAR();
   refresh.current = (which, opts) => {
-    const all = { devices: loadDevices, approvals: loadApprovals, workspaces: loadWorkspaces, whoami: loadWhoami, overview: loadOverview, people: loadPeople, resources: loadResources, updates: loadUpdates };
+    const all = { devices: loadDevices, approvals: loadApprovals, workspaces: loadWorkspaces, whoami: loadWhoami, overview: loadOverview, people: loadPeople, resources: loadResources, updates: loadUpdates, backups: loadBackups };
     if (which && all[which]) return all[which].current(opts);
     return Promise.all(Object.values(all).map(r => r.current(opts)));
   };
@@ -779,6 +793,7 @@ function App() {
     loadPeople.current();
     loadResources.current();
     loadUpdates.current();
+    loadBackups.current();
   }, [gate.status, scene]);
 
   // Keep the volatile lists fresh without a manual reload. Device approvals

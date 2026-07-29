@@ -327,6 +327,44 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
+	case "/bailey/api/admin/backups":
+		if r.Method == http.MethodGet {
+			s.handleAdminBackupsStatus(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups/run":
+		if r.Method == http.MethodPost {
+			s.handleAdminBackupsRun(w, r, email)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups/retention":
+		if r.Method == http.MethodPost {
+			s.handleAdminBackupsRetention(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups/enabled":
+		if r.Method == http.MethodPost {
+			s.handleAdminBackupsEnabled(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups/key":
+		if r.Method == http.MethodGet {
+			s.handleAdminBackupsKey(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups/key/mirror":
+		s.handleAdminBackupsKeyMirror(w, r)
+		return
 	case "/bailey/api/admin/server-update":
 		if r.Method == http.MethodPost {
 			s.handleAdminServerUpdate(w, r)
