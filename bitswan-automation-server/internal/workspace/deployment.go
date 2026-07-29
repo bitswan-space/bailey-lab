@@ -250,12 +250,25 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, c
 		AocEnvVars:         aocEnvVars,
 		GitopsDevSourceDir: gitopsDevSourceDir,
 		TrustCA:            trustCA,
+		// Keep the infra-driver token stable across updates; workspaces from
+		// before the token was persisted get the freshly generated one written
+		// back to metadata below.
+		InfraDriverToken: metadata.InfraDriverToken,
 	}
 
 	// Use existing gitops secret
 	compose, _, err := config.CreateDockerComposeFileWithSecret(metadata.GitopsSecret)
 	if err != nil {
 		return fmt.Errorf("failed to create docker-compose file: %w", err)
+	}
+
+	// Persist the (possibly just-generated) infra-driver token so the daemon
+	// can authenticate to this workspace's driver for server-level backups.
+	if metadata.InfraDriverToken != config.InfraDriverToken {
+		metadata.InfraDriverToken = config.InfraDriverToken
+		if err := metadata.SaveToFile(metadataPath); err != nil {
+			fmt.Printf("Warning: failed to persist infra-driver token to metadata: %v\n", err)
+		}
 	}
 
 	// Write the new docker-compose file

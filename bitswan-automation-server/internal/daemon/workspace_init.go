@@ -716,7 +716,7 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 	fmt.Println("GitOps deployment set up successfully!")
 
 	// Save metadata to file
-	if err := saveMetadata(gitopsConfig, workspaceName, token, domain, noDashboard, noCodingAgent, &workspaceId, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret); err != nil {
+	if err := saveMetadata(gitopsConfig, workspaceName, token, domain, noDashboard, noCodingAgent, &workspaceId, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret, config.InfraDriverToken); err != nil {
 		fmt.Printf("Warning: Failed to save metadata: %v\n", err)
 	}
 
@@ -861,11 +861,12 @@ func setHostsFile(workspaceName, domain string) error {
 	return nil
 }
 
-func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret string) error {
+func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret, infraDriverToken string) error {
 	metadata := config.WorkspaceMetadata{
-		Domain:       domain,
-		GitopsURL:    fmt.Sprintf("https://%s-gitops.%s", workspaceName, domain),
-		GitopsSecret: token,
+		Domain:           domain,
+		GitopsURL:        fmt.Sprintf("https://%s-gitops.%s", workspaceName, domain),
+		GitopsSecret:     token,
+		InfraDriverToken: infraDriverToken,
 	}
 
 	if workspaceId != nil {
