@@ -64,15 +64,65 @@ bitswan backup restore files --workspace W [--snapshot ID]
 # → ~/.config/bitswan/backup/restores/W/<timestamp>/
 ```
 
-To apply a file restore to the live tree:
+To apply a file restore to the live tree (verified end-to-end by a
+destroy-and-recover drill — see "Drill notes" below):
 
 1. `docker compose -p <W>-site down` in the workspace's deployment dir
    (stops gitops + driver; BP containers keep running).
-2. rsync the restored tree over `~/.config/bitswan/workspaces/<W>/`
-   (inside the daemon container, or on the volume directly):
-   `rsync -a --delete <restore-dir>/…/workspaces/<W>/ ~/.config/bitswan/workspaces/<W>/`
-3. `bitswan workspace update <W>` — re-renders compose from the restored
-   `metadata.yaml` and brings gitops back up.
+2. Move the restored tree into place. The restore is nested under the
+   snapshot's absolute path, and there is **no rsync in the daemon image** —
+   use `mv` (same volume, so it is atomic) or `cp -a`:
+   ```
+   R=~/.config/bitswan/backup/restores/<W>/<timestamp>/root/.config/bitswan/workspaces/<W>
+   rm -rf ~/.config/bitswan/workspaces/<W> && mv "$R" ~/.config/bitswan/workspaces/<W>
+   ```
+3. Bring the workspace back up. **Prefer `bitswan rollback <W>`** over
+   `workspace update`: update REGENERATES the compose and re-resolves images
+   from Docker Hub, which discards the restored image pins (fatal for a
+   workspace built with `--dev`, whose `-dev` images exist only locally —
+   compose then fails on `pull access denied`). `rollback` re-applies the
+   compose that came out of the backup verbatim.
+   If you do run `workspace update`, pass the same flags the workspace was
+   created with (`--dev` / `--staging`), or `rollback` afterwards — update
+   snapshots the pre-update compose, so the restored one is recoverable.
+4. Re-apply the deployments so the driver recreates infra services and BP
+   containers (fresh service volumes start empty): `bitswan automation start
+   <any-deployment> --workspace <W>`. One apply reconciles the whole
+   workspace. **The CLI may time out while the daemon keeps working** — a
+   cold reconcile of many BPs exceeds the client timeout; check
+   `docker ps` rather than retrying.
+5. Restore the databases into the now-running containers:
+   `bitswan backup restore postgres --workspace <W> --stage <stage>` (and
+   `couchdb`) for every enabled stage.
+6. Restore Garage buckets — still manual, see below.
+
+### Garage object data (manual)
+
+```
+# in the daemon container, with the restic env exported (see below)
+restic restore latest --tag "garage,ws:<W>,stage:<stage>" --target /tmp/g
+tar xf /tmp/g/…/garage-<stage>-backup-<ts>.tar          # → garage-backup/<bucket>/…
+# then, per bucket, from inside the stage's rclone toolbox:
+rclone --s3-provider Other --s3-endpoint http://<W>-garage[-stage]:9000 \
+  --s3-region us-east-1 --s3-access-key-id <_system AK> \
+  --s3-secret-access-key <_system SK> sync /tmp/garage-backup/<bucket> :s3:<bucket>
+```
+
+The `_system` credentials are at
+`workspaces/<W>/secrets/garagecreds/<stage>/_system`. Note the driver
+re-creates the buckets empty during step 4, so a DB restored without this
+step leaves dangling object references (rows pointing at missing keys).
+
+Restic env for ad-hoc commands inside the daemon (keys are indented under
+`[aoc]` in the TOML, so grep by name, not `^key`):
+
+```
+CFG=~/.config/bitswan/automation_server_config.toml
+export RESTIC_REPOSITORY="rest:$(grep aoc_url $CFG | cut -d'"' -f2)/api/automation_server/backups/repo/"
+export RESTIC_REST_USERNAME="$(grep automation_server_id $CFG | cut -d'"' -f2)"
+export RESTIC_REST_PASSWORD="$(grep access_token $CFG | cut -d'"' -f2)"
+export RESTIC_PASSWORD="$(cat ~/.config/bitswan/backup/restic-key)"
+```
 
 ## Full-server bootstrap (disaster recovery)
 
@@ -102,6 +152,33 @@ On a fresh host:
       bucket dir back through the workspace's garage toolbox container.
 5. Verify: open each workspace dashboard; for production BPs run the DR
    rehearsal (restore into DR, verify by hand) before trusting the result.
+
+## Drill notes (what a real destroy-and-recover proved)
+
+A full drill on a live workspace — 23 containers, Postgres + Garage on two
+stages, 1062 files — removed every container, deleted all six service data
+volumes, and `rm -rf`'d the workspace tree, WITHOUT going through
+`bitswan workspace remove`. Outcome:
+
+- The restored tree was **bit-identical** to the original (1062 files, no
+  differing hashes), secrets and `.aes-key` included.
+- gitops came back knowing every deployment from the restored
+  `bitswan.yaml` (stages, version hashes, URLs) — declared but not running
+  until step 4's apply, which recreated all 23 containers and the volumes.
+- Postgres restored to identical row counts and content; Garage needed the
+  manual step above (the DB otherwise references missing objects).
+- AOC kept the original workspace UUID and its Keycloak client/group, so no
+  re-registration was needed.
+
+**Do NOT use `bitswan workspace remove` to rehearse this.** It is a hard
+teardown (volumes, networks, ingress routes, TLS, images, files) and on
+success the daemon calls `syncWorkspaceListToAOC()`; AOC then treats the
+unreported workspace as a zombie and DELETES it, tearing down its Keycloak
+client, editor group and MQTT topics. That state lives in AOC's Postgres and
+is **not** in the server backup, so recovery would mean re-registering with a
+new workspace id — the restored `metadata.yaml` would be stale. Simulate host
+loss instead (containers + volumes + tree), which is the scenario the backup
+actually covers.
 
 ## Failure modes
 
