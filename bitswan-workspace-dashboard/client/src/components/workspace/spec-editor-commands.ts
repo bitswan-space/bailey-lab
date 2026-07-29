@@ -6,7 +6,7 @@ import {
   wrappingInputRule,
 } from 'prosemirror-inputrules';
 import { schema as markdownSchema } from 'prosemirror-markdown';
-import type { Attrs, MarkType, NodeType } from 'prosemirror-model';
+import { Fragment, Slice, type Attrs, type MarkType, type NodeType } from 'prosemirror-model';
 import { liftListItem, sinkListItem, wrapInList } from 'prosemirror-schema-list';
 import { TextSelection, type Command, type EditorState } from 'prosemirror-state';
 
@@ -152,11 +152,27 @@ export const removeLink: Command = (state, dispatch) => {
 
 /** Insert an inline image node at the selection. */
 export function insertImage(src: string): Command {
+  return insertImages([src]);
+}
+
+/**
+ * Insert images. Without `at` they replace the selection (the cursor); with
+ * it they go in at that document position — where files were dropped. One
+ * transaction, so a single undo takes the whole drop back out.
+ */
+export function insertImages(srcs: string[], at?: number): Command {
   return (state, dispatch) => {
-    if (!src) return false;
+    const nodes = srcs
+      .filter((src) => !!src)
+      .map((src) => markdownSchema.nodes.image.create({ src }));
+    if (nodes.length === 0) return false;
     if (dispatch) {
-      const image = markdownSchema.nodes.image.create({ src });
-      dispatch(state.tr.replaceSelectionWith(image, false).scrollIntoView());
+      const slice = new Slice(Fragment.from(nodes), 0, 0);
+      const tr =
+        at === undefined
+          ? state.tr.replaceSelection(slice)
+          : state.tr.replaceRange(at, at, slice);
+      dispatch(tr.scrollIntoView());
     }
     return true;
   };

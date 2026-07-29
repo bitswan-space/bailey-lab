@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Download, Loader2, Paperclip, Trash2, Upload } from 'lucide-react';
+import {
+  ChevronDown,
+  Download,
+  Loader2,
+  Paperclip,
+  Trash2,
+  Upload,
+} from 'lucide-react';
 import { toast } from '@/lib/notify';
 import {
   AlertDialog,
@@ -13,7 +20,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { api, type FileTreeNode } from '@/lib/api';
+import { api, type FileTreeNode, type FileUploadResponse } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 interface SpecAttachmentsProps {
@@ -26,6 +33,43 @@ export interface AttachmentRow {
   name: string;
   /** Copy-relative path, e.g. `my-bp/attachments/diagram.png`. */
   path: string;
+}
+
+/**
+ * Per-file upload cap. Mirrors the server's multipart `fileSize` limit
+ * (server/src/server.ts) so the entry points can reject an oversized file
+ * with a readable message instead of letting the request fail mid-stream.
+ */
+export const ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+
+/** `ATTACHMENT_MAX_BYTES` as MiB, for user-facing messages. */
+export const ATTACHMENT_MAX_MB = ATTACHMENT_MAX_BYTES / (1024 * 1024);
+
+// Mounted panels register here so an upload made from somewhere else (the
+// editor toolbar's insert-image popover, a pasted screenshot) shows up in
+// the panel without the user having to reload the tab.
+const changeListeners = new Set<() => void>();
+
+/** Tell every mounted attachments panel to refetch its list. */
+export function notifySpecAttachmentsChanged(): void {
+  for (const listener of changeListeners) listener();
+}
+
+/**
+ * Upload files into a BP's `attachments/` folder. The single upload path
+ * for attachments — the panel below, the toolbar's insert-image popover
+ * and paste-to-attach all go through here, so everything lands as a plain
+ * file the coding agent sees under `attachments/`.
+ *
+ * A file whose name already exists is overwritten (the server writes by
+ * basename), same as dropping it on the panel.
+ */
+export function uploadSpecAttachments(
+  copy: string,
+  bpId: string,
+  files: File[],
+): Promise<FileUploadResponse> {
+  return api.copyFiles.upload(copy, `${bpId}/attachments`, files);
 }
 
 // eslint-disable-next-line no-restricted-syntax -- undefined = folder not in tree yet (no attachments uploaded)
@@ -61,10 +105,10 @@ export async function listSpecAttachments(
  * (and git) see them with no extra plumbing.
  */
 export function SpecAttachments({ bpId, copy }: SpecAttachmentsProps) {
-  const attachmentsDir = `${bpId}/attachments`;
   const [files, setFiles] = useState<AttachmentRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AttachmentRow>();
 
   const refresh = useCallback(async () => {
@@ -84,17 +128,28 @@ export function SpecAttachments({ bpId, copy }: SpecAttachmentsProps) {
     void refresh();
   }, [refresh]);
 
+  // Uploads made outside this panel (insert-image popover, paste) refresh it.
+  useEffect(() => {
+    const listener = () => void refresh();
+    changeListeners.add(listener);
+    return () => {
+      changeListeners.delete(listener);
+    };
+  }, [refresh]);
+
   const handleUpload = useCallback(
     async (accepted: File[]) => {
       if (accepted.length === 0) return;
       setUploading(true);
       try {
-        const r = await api.copyFiles.upload(copy, attachmentsDir, accepted);
+        const r = await uploadSpecAttachments(copy, bpId, accepted);
         toast.success(
           r.written.length === 1
             ? `Uploaded ${r.written[0]?.name}`
             : `Uploaded ${r.written.length} attachments`,
         );
+        // Don't swallow what just arrived behind a collapsed panel.
+        setCollapsed(false);
         await refresh();
       } catch (err) {
         toast.error('Upload failed', {
@@ -104,7 +159,7 @@ export function SpecAttachments({ bpId, copy }: SpecAttachmentsProps) {
         setUploading(false);
       }
     },
-    [copy, attachmentsDir, refresh],
+    [copy, bpId, refresh],
   );
 
   const handleDelete = useCallback(async () => {
@@ -132,16 +187,37 @@ export function SpecAttachments({ bpId, copy }: SpecAttachmentsProps) {
     <div
       {...getRootProps()}
       className={cn(
-        'shrink-0 border-t border-border bg-white px-7 py-3 transition-colors',
+        // The activity button (TaskQueuePanel) floats over the bottom-right
+        // corner — bottom-4 right-4, size-11, so it owns the last 60px. The
+        // extra right padding keeps Upload and the per-file download/delete
+        // buttons out from under it. Reserved unconditionally: the float
+        // comes and goes with activity, and controls that shift sideways
+        // when a notification arrives would be worse than a little space.
+        'shrink-0 border-t border-border bg-white py-3 pl-7 pr-20 transition-colors',
         isDragActive && 'bg-primary/5',
       )}
     >
       <input {...getInputProps()} />
       <div className="flex items-center gap-2">
-        <Paperclip className="size-3.5 text-muted-foreground" aria-hidden />
-        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Attachments{files.length > 0 ? ` (${files.length})` : ''}
-        </span>
+        {/* The whole label toggles the list: with many attachments the panel
+            would otherwise eat the bottom of the editor. */}
+        <button
+          type="button"
+          onClick={() => setCollapsed((c) => !c)}
+          aria-expanded={!collapsed}
+          aria-controls="spec-attachments-list"
+          title={collapsed ? 'Show attachments' : 'Hide attachments'}
+          className="flex items-center gap-2 rounded-md py-0.5 pr-1.5 text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ChevronDown
+            className={cn('size-3.5 transition-transform', collapsed && '-rotate-90')}
+            aria-hidden
+          />
+          <Paperclip className="size-3.5" aria-hidden />
+          <span className="text-xs font-semibold uppercase tracking-wide">
+            Attachments{files.length > 0 ? ` (${files.length})` : ''}
+          </span>
+        </button>
         <span className="flex-1" />
         <Button size="sm" variant="outline" onClick={open} disabled={uploading}>
           {uploading ? (
@@ -153,42 +229,49 @@ export function SpecAttachments({ bpId, copy }: SpecAttachmentsProps) {
         </Button>
       </div>
 
-      {loading ? (
-        <div className="py-2 text-xs text-muted-foreground">Loading…</div>
-      ) : files.length === 0 ? (
-        <div className="py-2 text-xs text-muted-foreground">
-          {isDragActive
-            ? 'Drop files to attach them.'
-            : 'No attachments yet — drop files here or click Upload. The coding agent sees them under attachments/.'}
+      {!collapsed && (
+        <div id="spec-attachments-list">
+          {loading ? (
+            <div className="py-2 text-xs text-muted-foreground">Loading…</div>
+          ) : files.length === 0 ? (
+            <div className="py-2 text-xs text-muted-foreground">
+              {isDragActive
+                ? 'Drop files to attach them.'
+                : 'No attachments yet — drop files here or click Upload. The coding agent sees them under attachments/.'}
+            </div>
+          ) : (
+            <ul className="mt-2 flex max-h-44 flex-col overflow-y-auto">
+              {files.map((f) => (
+                <li
+                  key={f.path}
+                  className="group flex items-center gap-2 rounded-md px-1.5 py-1 text-[13px] text-foreground hover:bg-muted/60"
+                >
+                  <Paperclip
+                    className="size-3 shrink-0 text-muted-foreground"
+                    aria-hidden
+                  />
+                  <span className="min-w-0 flex-1 truncate">{f.name}</span>
+                  <a
+                    href={api.copyFiles.rawUrl(copy, f.path)}
+                    download={f.name}
+                    title={`Download ${f.name}`}
+                    className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                  >
+                    <Download className="size-3.5" aria-hidden />
+                  </a>
+                  <button
+                    type="button"
+                    title={`Delete ${f.name}`}
+                    onClick={() => setDeleteTarget(f)}
+                    className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                  >
+                    <Trash2 className="size-3.5" aria-hidden />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
-      ) : (
-        <ul className="mt-2 flex flex-col">
-          {files.map((f) => (
-            <li
-              key={f.path}
-              className="group flex items-center gap-2 rounded-md px-1.5 py-1 text-[13px] text-foreground hover:bg-muted/60"
-            >
-              <Paperclip className="size-3 shrink-0 text-muted-foreground" aria-hidden />
-              <span className="min-w-0 flex-1 truncate">{f.name}</span>
-              <a
-                href={api.copyFiles.rawUrl(copy, f.path)}
-                download={f.name}
-                title={`Download ${f.name}`}
-                className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-              >
-                <Download className="size-3.5" aria-hidden />
-              </a>
-              <button
-                type="button"
-                title={`Delete ${f.name}`}
-                onClick={() => setDeleteTarget(f)}
-                className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
-              >
-                <Trash2 className="size-3.5" aria-hidden />
-              </button>
-            </li>
-          ))}
-        </ul>
       )}
 
       <AlertDialog
