@@ -342,12 +342,35 @@ too.
 
 A second drill wiped the whole server — daemon, traefik, protected proxy, the
 `bitswan` volume (config, `bailey.db`, secrets, every workspace tree), the mkcert
-volume and all workspace data volumes — and recovered it. The route table, TLS
-certificate (the *same* one: `acme.json` came back, so no re-issuance),
-`bailey.db` row counts, Postgres and Garage contents all survived. It also found
-the three defects `recover server` now handles: nothing creates the protected
-proxy, the AOC-dependent boot steps race Traefik, and the config merge was
-hand-editing a TOML inside a volume.
+volume and all workspace data volumes — and recovered it by hand. The route table,
+TLS certificate (the *same* one: `acme.json` came back, so no re-issuance),
+`bailey.db` row counts, Postgres and Garage contents all survived. It found the
+three defects `recover server` now handles: nothing creates the protected proxy,
+the AOC-dependent boot steps race Traefik, and the config merge was hand-editing a
+TOML inside a volume.
+
+A third drill did it properly: the same wipe **plus every `internal/dev-*` image**,
+then the single command. **2m43s, zero manual steps.** What it proved:
+
+- the workspace tree came back with **no files lost**; the 21 that differ are git
+  refs the deploy push touched, re-minted Garage credentials (mandatory — the
+  metadata volume was wiped, invalidating the old keys) and new build logs;
+- `bailey.db` row counts identical across all 13 tables; 15 of 15 routers restored;
+  Postgres and Garage identical on both stages; 23 of 23 containers back;
+- **the same TLS certificate**, again;
+- all four business-process images **rebuilt to byte-identical tags** — the content
+  addressing works: gitops recomputed `sha8fe36734…` from unchanged source and it
+  matched what `bitswan.yaml` pinned;
+- `bailey.<domain>` answered 302 **without** anyone running
+  `provision-protected-proxy`;
+- the config kept `aoc_url` and `domain` with only the token and expiry replaced;
+- re-running with no `--otp` detected the live token and resumed;
+- the recovered server backed itself up green immediately afterwards.
+
+The one sandbox-only concession: this host runs the AOC behind the very Traefik
+being wiped, so the drill pointed `--aoc-api` at the AOC container over the docker
+network (`--docker-network`). In production the AOC is on other hardware and
+reachable normally, which is the case the flag exists to stand in for.
 
 **Do NOT use `bitswan workspace remove` to rehearse this.** It is a hard
 teardown (volumes, networks, ingress routes, TLS, images, files) and on
