@@ -13,7 +13,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { api, type FileTreeNode } from '@/lib/api';
+import { api, type FileTreeNode, type FileUploadResponse } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 interface SpecAttachmentsProps {
@@ -26,6 +26,43 @@ export interface AttachmentRow {
   name: string;
   /** Copy-relative path, e.g. `my-bp/attachments/diagram.png`. */
   path: string;
+}
+
+/**
+ * Per-file upload cap. Mirrors the server's multipart `fileSize` limit
+ * (server/src/server.ts) so the entry points can reject an oversized file
+ * with a readable message instead of letting the request fail mid-stream.
+ */
+export const ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+
+/** `ATTACHMENT_MAX_BYTES` as MiB, for user-facing messages. */
+export const ATTACHMENT_MAX_MB = ATTACHMENT_MAX_BYTES / (1024 * 1024);
+
+// Mounted panels register here so an upload made from somewhere else (the
+// editor toolbar's insert-image popover, a pasted screenshot) shows up in
+// the panel without the user having to reload the tab.
+const changeListeners = new Set<() => void>();
+
+/** Tell every mounted attachments panel to refetch its list. */
+export function notifySpecAttachmentsChanged(): void {
+  for (const listener of changeListeners) listener();
+}
+
+/**
+ * Upload files into a BP's `attachments/` folder. The single upload path
+ * for attachments — the panel below, the toolbar's insert-image popover
+ * and paste-to-attach all go through here, so everything lands as a plain
+ * file the coding agent sees under `attachments/`.
+ *
+ * A file whose name already exists is overwritten (the server writes by
+ * basename), same as dropping it on the panel.
+ */
+export function uploadSpecAttachments(
+  copy: string,
+  bpId: string,
+  files: File[],
+): Promise<FileUploadResponse> {
+  return api.copyFiles.upload(copy, `${bpId}/attachments`, files);
 }
 
 // eslint-disable-next-line no-restricted-syntax -- undefined = folder not in tree yet (no attachments uploaded)
@@ -61,7 +98,6 @@ export async function listSpecAttachments(
  * (and git) see them with no extra plumbing.
  */
 export function SpecAttachments({ bpId, copy }: SpecAttachmentsProps) {
-  const attachmentsDir = `${bpId}/attachments`;
   const [files, setFiles] = useState<AttachmentRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -84,12 +120,21 @@ export function SpecAttachments({ bpId, copy }: SpecAttachmentsProps) {
     void refresh();
   }, [refresh]);
 
+  // Uploads made outside this panel (insert-image popover, paste) refresh it.
+  useEffect(() => {
+    const listener = () => void refresh();
+    changeListeners.add(listener);
+    return () => {
+      changeListeners.delete(listener);
+    };
+  }, [refresh]);
+
   const handleUpload = useCallback(
     async (accepted: File[]) => {
       if (accepted.length === 0) return;
       setUploading(true);
       try {
-        const r = await api.copyFiles.upload(copy, attachmentsDir, accepted);
+        const r = await uploadSpecAttachments(copy, bpId, accepted);
         toast.success(
           r.written.length === 1
             ? `Uploaded ${r.written[0]?.name}`
@@ -104,7 +149,7 @@ export function SpecAttachments({ bpId, copy }: SpecAttachmentsProps) {
         setUploading(false);
       }
     },
-    [copy, attachmentsDir, refresh],
+    [copy, bpId, refresh],
   );
 
   const handleDelete = useCallback(async () => {

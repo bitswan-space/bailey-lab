@@ -33,7 +33,13 @@ import {
 import { Button } from '@/components/ui/button';
 import { useSessions } from '@/components/agents/SessionProvider';
 import { FlowchartEditorModal } from '@/components/workspace/FlowchartEditorModal';
-import { SpecAttachments } from '@/components/workspace/SpecAttachments';
+import {
+  ATTACHMENT_MAX_BYTES,
+  ATTACHMENT_MAX_MB,
+  SpecAttachments,
+  notifySpecAttachmentsChanged,
+  uploadSpecAttachments,
+} from '@/components/workspace/SpecAttachments';
 import { SpecEditorToolbar } from '@/components/workspace/SpecEditorToolbar';
 import { codeHighlightPlugin } from '@/components/workspace/spec-code-highlight';
 import {
@@ -44,6 +50,7 @@ import {
   buildMarkdownInputRules,
   dedentListItem,
   indentListItem,
+  insertImage,
   selectCodeBlockContent,
   toggleBlockquote,
   toggleCodeBlock,
@@ -214,6 +221,17 @@ function createSpecState(
       keymap(baseKeymap),
     ],
   });
+}
+
+/**
+ * Filename for a pasted image. Clipboard blobs all arrive named `image.png`
+ * (or unnamed), so pasting a second screenshot would overwrite the first
+ * attachment — stamp the name to keep every paste its own file.
+ */
+function pastedImageName(file: File, at: number): string {
+  const subtype = file.type.split('/')[1] ?? '';
+  const ext = subtype.replace(/[^a-z0-9]/gi, '') || 'png';
+  return `pasted-image-${at}.${ext}`;
 }
 
 function serializeDoc(state: EditorState): string {
@@ -421,6 +439,55 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
     [],
   );
 
+  // ---- Pasted images -----------------------------------------------------
+
+  const attachPastedImage = useCallback(
+    async (file: File) => {
+      const at = Date.now();
+      if (file.size > ATTACHMENT_MAX_BYTES) {
+        toast.error("Couldn't attach the pasted image", {
+          description: `It is larger than the ${ATTACHMENT_MAX_MB} MB upload limit.`,
+        });
+        return;
+      }
+      const id = `spec-paste-image-${at}`;
+      toast.loading('Attaching pasted image…', { id });
+      try {
+        const named = new File([file], pastedImageName(file, at), { type: file.type });
+        const { written } = await uploadSpecAttachments(copy, bp.id, [named]);
+        // Trust the server's name — it reduces ours to a basename.
+        const name = written[0]?.name;
+        if (!name) throw new Error('The server stored no file.');
+        const state = stateRef.current;
+        if (state) insertImage(`attachments/${name}`)(state, dispatchTransaction);
+        notifySpecAttachmentsChanged();
+        toast.success(`Attached ${name}`, { id });
+      } catch (err) {
+        toast.error("Couldn't attach the pasted image", {
+          id,
+          description: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [copy, bp.id, dispatchTransaction],
+  );
+
+  // A pasted image (a screenshot, say) is uploaded as an attachment and
+  // inserted at the cursor. Only claims the paste when the clipboard really
+  // carries an image file — text/HTML pastes fall through to ProseMirror.
+  const handleEditorPaste = useCallback(
+    (_view: EditorView, event: ClipboardEvent): boolean => {
+      const file = Array.from(event.clipboardData?.files ?? []).find((f) =>
+        f.type.startsWith('image/'),
+      );
+      if (!file) return false;
+      event.preventDefault();
+      void attachPastedImage(file);
+      return true;
+    },
+    [attachPastedImage],
+  );
+
   // ---- Mermaid block editing --------------------------------------------
 
   const handleFlowchartSave = useCallback(
@@ -532,6 +599,7 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
             dispatchTransaction={dispatchTransaction}
             nodeViewComponents={specNodeViewComponents}
             handleClick={handleEditorClick}
+            handlePaste={handleEditorPaste}
           >
             <SpecEditorToolbar
               copy={copy}

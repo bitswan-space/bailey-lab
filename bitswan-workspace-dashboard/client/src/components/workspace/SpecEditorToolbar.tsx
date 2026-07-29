@@ -1,4 +1,5 @@
 import { useEffect, useState, type MutableRefObject, type ReactNode } from 'react';
+import { useDropzone, type FileRejection } from 'react-dropzone';
 import {
   Bold,
   Code,
@@ -12,11 +13,13 @@ import {
   Link as LinkIcon,
   List,
   ListOrdered,
+  Loader2,
   Minus,
   Pilcrow,
   Redo2,
   TextQuote,
   Undo2,
+  Upload,
   Workflow,
   type LucideIcon,
 } from 'lucide-react';
@@ -52,7 +55,14 @@ import {
   toggleHeading,
   toggleList,
 } from './spec-editor-commands';
-import { listSpecAttachments, type AttachmentRow } from './SpecAttachments';
+import {
+  ATTACHMENT_MAX_BYTES,
+  ATTACHMENT_MAX_MB,
+  listSpecAttachments,
+  notifySpecAttachmentsChanged,
+  uploadSpecAttachments,
+  type AttachmentRow,
+} from './SpecAttachments';
 
 interface SpecEditorToolbarProps {
   copy: string;
@@ -122,6 +132,9 @@ export function SpecEditorToolbar({
   const [imageUrl, setImageUrl] = useState('');
   const [attachments, setAttachments] = useState<AttachmentRow[]>([]);
 
+  const [imageUploading, setImageUploading] = useState(false);
+  const [imageUploadError, setImageUploadError] = useState<string>();
+
   const doInsertImage = useEditorEventCallback((view, src: string) => {
     insertImage(src)(view.state, view.dispatch);
     view.focus();
@@ -131,12 +144,72 @@ export function SpecEditorToolbar({
     setImageOpen(open);
     if (open) {
       setImageUrl('');
+      setImageUploadError(undefined);
       // Lazy-load the picker list each open so fresh uploads show up.
       listSpecAttachments(copy, bpId)
         .then(setAttachments)
         .catch(() => setAttachments([]));
     }
   };
+
+  /**
+   * Attach a picked/dropped image and insert it in one motion — the whole
+   * point of the popover's upload affordance: no detour to the attachments
+   * panel first. The file lands in `attachments/` exactly as it would from
+   * the panel, so the coding agent still sees it.
+   */
+  const uploadAndInsert = async (file: File) => {
+    setImageUploadError(undefined);
+    setImageUploading(true);
+    try {
+      const { written } = await uploadSpecAttachments(copy, bpId, [file]);
+      // Trust the server's name — it reduces the client-supplied one to a
+      // basename, so it can differ from `file.name`.
+      const name = written[0]?.name;
+      if (!name) throw new Error('The server stored no file.');
+      doInsertImage(`attachments/${name}`);
+      notifySpecAttachmentsChanged();
+      setImageOpen(false);
+    } catch (err) {
+      // Stay open on failure so the message sits next to the retry.
+      setImageUploadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImageUploading(false);
+    }
+  };
+
+  const handleImageDrop = (accepted: File[], rejected: FileRejection[]) => {
+    const rejection = rejected[0]?.errors[0]?.code;
+    if (rejection) {
+      setImageUploadError(
+        rejection === 'file-too-large'
+          ? `That image is larger than the ${ATTACHMENT_MAX_MB} MB upload limit.`
+          : rejection === 'too-many-files'
+            ? 'One image at a time, please.'
+            : 'That file is not an image.',
+      );
+      return;
+    }
+    const file = accepted[0];
+    if (file) void uploadAndInsert(file);
+  };
+
+  const {
+    getRootProps: getDropRootProps,
+    getInputProps: getDropInputProps,
+    open: openImagePicker,
+    isDragActive,
+  } = useDropzone({
+    onDrop: handleImageDrop,
+    accept: { 'image/*': [] },
+    multiple: false,
+    maxSize: ATTACHMENT_MAX_BYTES,
+    // Same as the attachments panel: the drop target is the whole surface,
+    // clicking is left to an explicit button (the popover holds a text
+    // input, which a click-anywhere dropzone would fight over).
+    noClick: true,
+    noKeyboard: true,
+  });
 
   // Same ref bridge as the link shortcut, for the Mod-Alt-P keymap entry.
   useEffect(() => {
@@ -147,8 +220,10 @@ export function SpecEditorToolbar({
     };
   });
 
+  // Keep in step with what the upload above accepts (`image/*`), or a file
+  // attached from here could go missing from the picker.
   const imageAttachments = attachments.filter((f) =>
-    /\.(jpg|jpeg|png|gif|webp)$/i.test(f.name),
+    /\.(jpg|jpeg|png|gif|webp|svg|avif|bmp)$/i.test(f.name),
   );
 
   return (
@@ -336,10 +411,43 @@ export function SpecEditorToolbar({
           align="start"
           onOpenAutoFocus={(e) => e.preventDefault()}
         >
-          <div className="space-y-3">
+          <div {...getDropRootProps({ className: 'space-y-3' })}>
+            <input {...getDropInputProps()} />
+            <div className="space-y-1.5">
+              <div className="text-sm font-medium">Upload an image</div>
+              <div
+                className={cn(
+                  'flex flex-col items-center gap-1.5 rounded-md border border-dashed border-border px-3 py-3 text-center transition-colors',
+                  isDragActive && 'border-primary bg-primary/5',
+                )}
+              >
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={openImagePicker}
+                  disabled={imageUploading}
+                >
+                  {imageUploading ? (
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Upload className="size-3.5" aria-hidden />
+                  )}
+                  {imageUploading ? 'Uploading…' : 'Choose an image'}
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  {isDragActive
+                    ? 'Drop to attach and insert it.'
+                    : 'or drop one here — it is attached and inserted in one step'}
+                </p>
+              </div>
+              {imageUploadError && (
+                <p className="text-xs text-destructive">Upload failed — {imageUploadError}</p>
+              )}
+            </div>
             <div className="space-y-1.5">
               <label htmlFor="spec-image-url" className="text-sm font-medium">
-                Image URL
+                Or use an image URL
               </label>
               <Input
                 id="spec-image-url"
