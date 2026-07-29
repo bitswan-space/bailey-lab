@@ -80,6 +80,43 @@ fi
 # (seed-copy-mcp skips the chown it does for the root/entrypoint path).
 /usr/local/bin/seed-copy-mcp "/workspace/copies/${COPY}"
 
+# Establish the browser's authenticated session (#232) if it has none yet.
+#
+# Lazy rather than at container boot, deliberately: the login drives a real
+# Chromium through Keycloak, which takes seconds and can hang on a cold or
+# unreachable ingress. Doing it in the entrypoint would delay sshd — i.e.
+# delay the agent being reachable at all — for a capability the session may
+# never use.
+#
+# flock serialises concurrent sessions so two of them don't each launch a
+# browser; -w 60 means a session waits for an in-flight login rather than
+# starting a redundant one, then proceeds regardless.
+#
+# Never fatal: no browser session must not stop a coding session. The agent
+# is told (see AGENTS/CLAUDE guidance) to re-run agent-browser-login itself if
+# it lands on a login page.
+# Keyed on the success marker, NOT on the state file: the entrypoint
+# pre-creates the state file as an empty valid document (playwright-mcp errors
+# on a missing one), so its presence says nothing about whether we logged in.
+#
+# The marker records that a login SUCCEEDED — not that the session is still
+# VALID. Sessions expire (the Keycloak SSO cookie is short-lived; the
+# oauth2-proxy cookie lasts about a week) but a marker file never does, so
+# keying only on its existence means the agent silently stops being logged in
+# and never retries. Re-check once the marker is older than the window below:
+# agent-browser-login short-circuits in seconds when the session is in fact
+# still live ("already past Keycloak"), so a redundant run is cheap whereas a
+# stale marker is not.
+BROWSER_SESSION_MARKER=/home/agent/.bitswan-browser-session.ok
+BROWSER_SESSION_MAX_AGE_MIN=480 # 8h — well inside the oauth2-proxy cookie's life
+if [ -f /home/agent/.bitswan-agent-account.json ] \
+   && { [ ! -f "$BROWSER_SESSION_MARKER" ] \
+        || [ -n "$(find "$BROWSER_SESSION_MARKER" -mmin +"$BROWSER_SESSION_MAX_AGE_MIN" 2>/dev/null)" ]; }; then
+    flock -w 60 /tmp/.bitswan-browser-login.lock \
+        /usr/local/bin/agent-browser-login >>/home/agent/.bitswan-browser-login.log 2>&1 \
+        || echo "note: browser login unavailable (see ~/.bitswan-browser-login.log)" >&2
+fi
+
 # If SSH_ORIGINAL_COMMAND is set (non-interactive), just run it
 if [ -n "$SSH_ORIGINAL_COMMAND" ]; then
     if [ "$LOGGED" = "false" ]; then

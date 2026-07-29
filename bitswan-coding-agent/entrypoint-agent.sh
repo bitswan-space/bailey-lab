@@ -52,6 +52,22 @@ for copy in /workspace/copies/*/; do
     /usr/local/bin/seed-copy-mcp "$copy"
 done
 
+# The MCP server is configured with --storage-state, and playwright-mcp treats
+# a MISSING or unparseable state file as a hard error on every browser call
+# ("Error reading storage state ... ENOENT") — not as "start empty". So an
+# agent on a workspace with no browsing account would get NO working browser
+# at all, which is strictly worse than an unauthenticated one.
+#
+# Guarantee the file exists and is valid. agent-browser-login replaces it with
+# a real session; until then this empty-but-valid state means the browser
+# works, just signed out.
+STATE_FILE=/home/agent/.bitswan-browser-state.json
+if ! node -e "JSON.parse(require('fs').readFileSync('$STATE_FILE','utf8'))" 2>/dev/null; then
+    echo '{"cookies":[],"origins":[]}' > "$STATE_FILE"
+    chmod 600 "$STATE_FILE"
+    chown agent:agent "$STATE_FILE" 2>/dev/null
+fi
+
 # Ensure correct permissions
 chown -R agent:agent /home/agent
 chown -R agent:agent /var/log/agent-sessions
