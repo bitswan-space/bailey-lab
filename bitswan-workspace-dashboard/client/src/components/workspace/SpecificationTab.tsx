@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent as ReactDragEvent,
+} from 'react';
 import { Bot, Save } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import {
@@ -50,7 +57,7 @@ import {
   buildMarkdownInputRules,
   dedentListItem,
   indentListItem,
-  insertImage,
+  insertImages,
   selectCodeBlockContent,
   toggleBlockquote,
   toggleCodeBlock,
@@ -63,6 +70,7 @@ import {
   type SpecEditorContextValue,
 } from '@/components/workspace/spec-node-views';
 import { api, type FileEtag } from '@/lib/api';
+import { cn } from '@/lib/utils';
 import { invalidateReadme } from '@/hooks/useReadme';
 import type { BusinessProcess } from '@/types';
 
@@ -223,6 +231,16 @@ function createSpecState(
   });
 }
 
+/** The image files in a drop or paste payload, in order. */
+function imageFilesFrom(files?: FileList): File[] {
+  return Array.from(files ?? []).filter((f) => f.type.startsWith('image/'));
+}
+
+/** True when a drag carries files (as opposed to text or editor content). */
+function dragCarriesFiles(e: ReactDragEvent): boolean {
+  return Array.from(e.dataTransfer.types).includes('Files');
+}
+
 /**
  * Filename for a pasted image. Clipboard blobs all arrive named `image.png`
  * (or unnamed), so pasting a second screenshot would overwrite the first
@@ -261,6 +279,9 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
 
   // Flowchart editing state. `pos` is set when editing an existing
   // diagram; absent when inserting a new one.
+  // True while files are dragged over the document (drop affordance only).
+  const [fileDragOver, setFileDragOver] = useState(false);
+
   const [flowchartOpen, setFlowchartOpen] = useState(false);
   const [mermaidEditing, setMermaidEditing] = useState<{ pos?: number; source: string }>();
   const [mermaidDeletePos, setMermaidDeletePos] = useState<number>();
@@ -439,37 +460,83 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
     [],
   );
 
-  // ---- Pasted images -----------------------------------------------------
+  // ---- Dropped / pasted images -------------------------------------------
 
-  const attachPastedImage = useCallback(
-    async (file: File) => {
-      const at = Date.now();
-      if (file.size > ATTACHMENT_MAX_BYTES) {
-        toast.error("Couldn't attach the pasted image", {
-          description: `It is larger than the ${ATTACHMENT_MAX_MB} MB upload limit.`,
+  const insertImagesInDoc = useCallback(
+    (srcs: string[], at?: number) => {
+      const state = stateRef.current;
+      if (!state) return;
+      // A drop position is captured before the upload, so the document may
+      // have moved on: clamp it, and fall back to the cursor if the position
+      // turns out not to take an image (inside a code block, say).
+      const pos = at === undefined ? at : Math.min(at, state.doc.content.size);
+      try {
+        insertImages(srcs, pos)(state, dispatchTransaction);
+      } catch {
+        insertImages(srcs)(state, dispatchTransaction);
+      }
+    },
+    [dispatchTransaction],
+  );
+
+  /**
+   * Attach image files and put them in the document — the drop and paste
+   * paths both land here. `at` is a document position (where the file was
+   * dropped); without it the images go in at the cursor.
+   */
+  const attachAndInsertImages = useCallback(
+    async (files: File[], at?: number) => {
+      if (files.length === 0) return;
+      const oversized = files.find((f) => f.size > ATTACHMENT_MAX_BYTES);
+      if (oversized) {
+        toast.error("Couldn't attach the image", {
+          description: `${oversized.name} is larger than the ${ATTACHMENT_MAX_MB} MB upload limit.`,
         });
         return;
       }
-      const id = `spec-paste-image-${at}`;
-      toast.loading('Attaching pasted image…', { id });
+      const id = `spec-image-attach-${Date.now()}`;
+      toast.loading(
+        files.length === 1 ? 'Attaching image…' : `Attaching ${files.length} images…`,
+        { id },
+      );
       try {
-        const named = new File([file], pastedImageName(file, at), { type: file.type });
-        const { written } = await uploadSpecAttachments(copy, bp.id, [named]);
-        // Trust the server's name — it reduces ours to a basename.
-        const name = written[0]?.name;
-        if (!name) throw new Error('The server stored no file.');
-        const state = stateRef.current;
-        if (state) insertImage(`attachments/${name}`)(state, dispatchTransaction);
+        const { written } = await uploadSpecAttachments(copy, bp.id, files);
+        if (written.length === 0) throw new Error('The server stored no file.');
+        // Trust the server's names — it reduces ours to a basename.
+        insertImagesInDoc(
+          written.map((w) => `attachments/${w.name}`),
+          at,
+        );
         notifySpecAttachmentsChanged();
-        toast.success(`Attached ${name}`, { id });
+        toast.success(
+          written.length === 1
+            ? `Attached ${written[0]?.name}`
+            : `Attached ${written.length} images`,
+          { id },
+        );
       } catch (err) {
-        toast.error("Couldn't attach the pasted image", {
+        toast.error("Couldn't attach the image", {
           id,
           description: err instanceof Error ? err.message : String(err),
         });
       }
     },
-    [copy, bp.id, dispatchTransaction],
+    [copy, bp.id, insertImagesInDoc],
+  );
+
+  // Dropping image files anywhere in the document attaches them and inserts
+  // them where they landed. Non-file drags (moving a selection inside the
+  // document, dragging in text) fall through to ProseMirror.
+  const handleEditorDrop = useCallback(
+    (view: EditorView, event: DragEvent): boolean => {
+      const files = imageFilesFrom(event.dataTransfer?.files);
+      if (files.length === 0) return false;
+      event.preventDefault();
+      const at = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
+      void attachAndInsertImages(files, at);
+      return true;
+    },
+    [attachAndInsertImages],
   );
 
   // A pasted image (a screenshot, say) is uploaded as an attachment and
@@ -477,15 +544,17 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
   // carries an image file — text/HTML pastes fall through to ProseMirror.
   const handleEditorPaste = useCallback(
     (_view: EditorView, event: ClipboardEvent): boolean => {
-      const file = Array.from(event.clipboardData?.files ?? []).find((f) =>
-        f.type.startsWith('image/'),
-      );
+      const [file] = imageFilesFrom(event.clipboardData?.files);
       if (!file) return false;
       event.preventDefault();
-      void attachPastedImage(file);
+      // Clipboard blobs share one generic name — stamp it so a second
+      // paste doesn't overwrite the first attachment.
+      const at = Date.now();
+      const named = new File([file], pastedImageName(file, at), { type: file.type });
+      void attachAndInsertImages([named]);
       return true;
     },
-    [attachPastedImage],
+    [attachAndInsertImages],
   );
 
   // ---- Mermaid block editing --------------------------------------------
@@ -599,6 +668,7 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
             dispatchTransaction={dispatchTransaction}
             nodeViewComponents={specNodeViewComponents}
             handleClick={handleEditorClick}
+            handleDrop={handleEditorDrop}
             handlePaste={handleEditorPaste}
           >
             <SpecEditorToolbar
@@ -609,11 +679,53 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
               onInsertDiagram={openNewDiagram}
               toolbarRight={toolbarRight}
             />
-            <div className="flex-1 overflow-auto">
-              <div className="spec-doc relative mx-auto mb-10 mt-6 w-full max-w-[820px] rounded-md border border-border bg-white shadow-sm">
+            {/* A drop on the page itself is handled by the editor's handleDrop,
+                which knows the document position under the pointer. This
+                wrapper drives the drag affordance and catches drops that land
+                beside the page (the scroll container's margins) — which never
+                reach the editor, and which the browser would otherwise treat
+                as "navigate to this file". */}
+            <div
+              className="flex-1 overflow-auto"
+              onDragOver={(e) => {
+                if (!dragCarriesFiles(e)) return;
+                // Without this the browser refuses the drop outright.
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+                setFileDragOver(true);
+              }}
+              onDragLeave={(e) => {
+                // Ignore the dragleave fired when crossing into a child.
+                const to = e.relatedTarget;
+                if (to instanceof Node && e.currentTarget.contains(to)) return;
+                setFileDragOver(false);
+              }}
+              onDrop={(e) => {
+                setFileDragOver(false);
+                // The editor already took it (it ran first, on the inner node).
+                if (e.isDefaultPrevented()) return;
+                const files = imageFilesFrom(e.dataTransfer.files);
+                if (files.length === 0) return;
+                e.preventDefault();
+                void attachAndInsertImages(files);
+              }}
+            >
+              <div
+                className={cn(
+                  'spec-doc relative mx-auto mb-10 mt-6 w-full max-w-[820px] rounded-md border border-border bg-white shadow-sm transition-shadow',
+                  fileDragOver && 'ring-2 ring-primary/40',
+                )}
+              >
                 {empty && (
                   <div className="pointer-events-none absolute left-14 right-14 top-8 text-[15px] leading-[1.7] text-muted-foreground">
                     {PLACEHOLDER}
+                  </div>
+                )}
+                {fileDragOver && (
+                  <div className="pointer-events-none absolute inset-x-0 -top-3 flex justify-center">
+                    <span className="rounded-full bg-primary px-3 py-1 text-xs font-medium text-primary-foreground shadow">
+                      Drop an image to attach and insert it here
+                    </span>
                   </div>
                 )}
                 <ProseMirrorDoc />
