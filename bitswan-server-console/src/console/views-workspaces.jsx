@@ -500,9 +500,8 @@ function WorkspacesView({ ctx }) {
   const [createOpen, setCreateOpen] = useWS(false);
   const [emptyOpen, setEmptyOpen] = useWS(false);
   const [emptyBusy, setEmptyBusy] = useWS(false);
-  // Workspace pending delete-confirmation, and the id currently being restored.
-  const [trashTarget, setTrashTarget] = useWS(null);
-  const [trashBusy, setTrashBusy] = useWS(false);
+  // The id currently being restored. (Deleting a workspace lives in the manage
+  // drawer's danger zone — see ManageWorkspaceDrawer.)
   const [restoreBusy, setRestoreBusy] = useWS('');
   const [updateBusy, setUpdateBusy] = useWS('');
   const [updateProg, setUpdateProg] = useWS(null); // { fraction, label } for the workspace being updated
@@ -568,24 +567,6 @@ function WorkspacesView({ ctx }) {
     } catch (e) {
       toast(`Couldn't empty trash: ${e.message}`, 'danger');
     } finally { setEmptyBusy(false); }
-  };
-
-  // Live: POST /bailey/api/workspaces/{name}/trash (owner-only; 202 — the
-  // daemon marks it trashed synchronously and tears the containers down in the
-  // background, so the next refresh shows it in the archived/trash state).
-  // Permanent removal is the existing "Empty trash" flow.
-  const doTrash = async () => {
-    if (!trashTarget) return;
-    const name = trashTarget.name;
-    setTrashBusy(true);
-    try {
-      await WApi.trashWorkspace(name);
-      toast(`${name} moved to trash`, 'success');
-      setTrashTarget(null);
-      await refresh('workspaces');
-    } catch (e) {
-      toast(`Couldn't delete ${name}: ${e.message}`, 'danger');
-    } finally { setTrashBusy(false); }
   };
 
   // Live: POST /bailey/api/workspaces/{name}/restore (owner-only; clears the
@@ -728,15 +709,9 @@ function WorkspacesView({ ctx }) {
                       onMouseLeave={e => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.color = WC.muted; }}>
                       <WIcon name="settings-2" size={15} />
                     </button>
-                    {/* Delete (trash) — owner-only, active workspaces. Opens a
-                        confirm; the actual deletion reuses the trash flow. */}
-                    {!archived && isOwner && (
-                      <button onClick={() => setTrashTarget(w)} title="Delete workspace" style={{ width: 32, height: 32, border: `1px solid ${WC.border}`, background: '#fff', borderRadius: 8, cursor: 'pointer', color: WC.muted, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                        onMouseEnter={e => { e.currentTarget.style.background = WC.redSoft; e.currentTarget.style.color = WC.red; e.currentTarget.style.borderColor = WC.red; }}
-                        onMouseLeave={e => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.color = WC.muted; e.currentTarget.style.borderColor = WC.border; }}>
-                        <WIcon name="trash-2" size={15} />
-                      </button>
-                    )}
+                    {/* No delete here on purpose: a destructive action must not
+                        sit in the row's rightmost (default) slot. Deletion is
+                        in the manage drawer's danger zone. */}
                   </div>
                 </div>
                 {/* apps */}
@@ -807,16 +782,6 @@ function WorkspacesView({ ctx }) {
 
       <CreateWorkspaceModal open={createOpen} onClose={() => setCreateOpen(false)} data={data} setData={setData} toast={toast} currentUser={currentUser} refresh={refresh} />
       <ManageWorkspaceDrawer ws={manageWs} onClose={() => navigate('workspaces')} toast={toast} refresh={refresh} />
-
-      <WModal open={!!trashTarget} onClose={trashBusy ? () => {} : () => setTrashTarget(null)} icon="trash-2"
-        title={trashTarget ? `Delete “${trashTarget.name}”?` : 'Delete workspace?'}
-        subtitle="The workspace moves to trash and its containers stop. You can restore it, or remove it permanently with Empty trash."
-        footer={<>
-          <WBtn variant="default" disabled={trashBusy} onClick={() => setTrashTarget(null)}>Cancel</WBtn>
-          <WBtn variant="primary" disabled={trashBusy} style={{ background: WC.red, borderColor: WC.red }} onClick={doTrash}>
-            {trashBusy ? 'Deleting…' : 'Delete workspace'}
-          </WBtn>
-        </>} />
 
       <WModal open={emptyOpen} onClose={emptyBusy ? () => {} : () => setEmptyOpen(false)} icon="trash-2" title="Empty trash?"
         subtitle="This permanently deletes every trashed workspace you own — containers and data. This can't be undone."
@@ -956,6 +921,12 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   const [transferQuery, setTransferQuery] = useWS('');
   const [transferTarget, setTransferTarget] = useWS('');
   const [transferBusy, setTransferBusy] = useWS(false);
+  // Delete flow: the danger zone at the bottom of this drawer is the only place
+  // a workspace can be deleted (it used to be a trash icon in the list row,
+  // where it was the rightmost — i.e. default — control). trashOpen is the
+  // confirm modal.
+  const [trashOpen, setTrashOpen] = useWS(false);
+  const [trashBusy, setTrashBusy] = useWS(false);
 
   const dashHost = ws ? hostFromUrl(ws.dashboard) : '';
   // Managing members (add/remove) is only allowed for the TRUE owner of the
@@ -970,6 +941,8 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
     // Fresh drawer, fresh transfer flow — don't leak a half-picked recipient
     // from the previously opened workspace.
     setTransferOpen(false); setTransferQuery(''); setTransferTarget('');
+    // Same for a half-open delete confirm.
+    setTrashOpen(false); setTrashBusy(false);
     // Only owners can read the live share state (the API is owner-only).
     // Non-owners render from the workspace DTO (owner_email + members), which
     // the backend computes for every member — no privileged call needed.
@@ -994,6 +967,9 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
         .filter(m => m && m.toLowerCase() !== (ownerEmail || '').toLowerCase())
         .map(m => ({ principal_type: 'email', principal_value: m, role: 'access' }));
   const SECTION = { fontSize: 11, fontWeight: 600, color: WC.muted, textTransform: 'uppercase', letterSpacing: 0.4 };
+  // An already-trashed workspace is restored (or permanently removed via Empty
+  // trash) from the list — there's nothing to delete here.
+  const archived = ws.status === 'archived';
 
   // Adds a directory pick to the workspace.
   const addMember = async (email) => {
@@ -1057,6 +1033,24 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
       toast(`Couldn't transfer ownership: ${e.message}`, 'danger');
     } finally { setTransferBusy(false); }
   };
+  // Live: POST /bailey/api/workspaces/{name}/trash (owner-only; 202 — the
+  // daemon marks it trashed synchronously and tears the containers down in the
+  // background, so the next refresh shows it in the archived/trash state).
+  // Permanent removal is the existing "Empty trash" flow on the list page.
+  const doTrash = async () => {
+    setTrashBusy(true);
+    try {
+      await WApi.trashWorkspace(ws.name);
+      toast(`${ws.name} moved to trash`, 'success');
+      setTrashOpen(false);
+      if (refresh) await refresh('workspaces');
+      // The workspace is gone from the active list — don't leave its drawer up.
+      onClose();
+    } catch (e) {
+      toast(`Couldn't delete ${ws.name}: ${e.message}`, 'danger');
+    } finally { setTrashBusy(false); }
+  };
+
   const removeMember = async (g) => {
     setBusy(g.principal_value);
     try {
@@ -1175,6 +1169,34 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
           </span>
         </div>
       )}
+
+      {/* Danger zone — the workspace's only delete affordance. Gated exactly
+          like the icon it replaced: true dashboard owner, active workspace. */}
+      {canManage && !archived && (
+        <>
+          <div style={{ borderTop: `1px solid ${WC.border}`, margin: '26px 0 0' }} />
+          <div style={{ ...SECTION, color: WC.red, margin: '18px 0 10px' }}>Danger zone</div>
+          <div style={{ border: `1px solid ${WC.red}55`, background: WC.redSoft, borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 12.5, color: WC.fg, lineHeight: '18px', marginBottom: 11 }}>
+              Deleting <strong>{ws.name}</strong> moves it to trash and stops its containers. You can
+              restore it from the workspaces list, or remove it permanently with Empty trash.
+            </div>
+            <WBtn variant="danger" size="sm" leftIcon="trash-2" disabled={trashBusy}
+              onClick={() => setTrashOpen(true)}>Delete this workspace</WBtn>
+          </div>
+        </>
+      )}
+
+      {/* Delete confirm — unchanged from the icon-button flow it replaced. */}
+      <WModal open={trashOpen} onClose={trashBusy ? () => {} : () => setTrashOpen(false)} icon="trash-2"
+        title={`Delete “${ws.name}”?`}
+        subtitle="The workspace moves to trash and its containers stop. You can restore it, or remove it permanently with Empty trash."
+        footer={<>
+          <WBtn variant="default" disabled={trashBusy} onClick={() => setTrashOpen(false)}>Cancel</WBtn>
+          <WBtn variant="primary" disabled={trashBusy} style={{ background: WC.red, borderColor: WC.red }} onClick={doTrash}>
+            {trashBusy ? 'Deleting…' : 'Delete workspace'}
+          </WBtn>
+        </>} />
     </WDrawer>
   );
 }

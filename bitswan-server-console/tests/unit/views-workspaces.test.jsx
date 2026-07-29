@@ -198,15 +198,26 @@ describe('WorkspacesView', () => {
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith('Trash emptied', 'success'));
   });
 
-  it('owner can delete (trash) an active workspace via the confirm modal', async () => {
+  it('owner deletes (trashes) an active workspace from the drawer danger zone', async () => {
     const s = spies();
     installFetch({ '/bailey/api/workspaces/demo/trash': { json: { ok: true, async: true } } });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs()] })} extra={s} />);
-    fireEvent.click(screen.getByTitle('Delete workspace'));   // opens the confirm modal
+    // The row itself carries no destructive control any more (#250).
+    expect(screen.queryByText('Delete this workspace')).toBeNull();
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    expect(screen.getByText('Danger zone')).toBeTruthy();
+    fireEvent.click(screen.getByText('Delete this workspace')); // opens the confirm modal
     expect(screen.getByText(/moves to trash/)).toBeTruthy();
-    fireEvent.click(screen.getByText('Delete workspace'));     // confirm (reuses trash flow)
+    fireEvent.click(screen.getByText('Delete workspace'));      // confirm (reuses trash flow)
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith('demo moved to trash', 'success'));
     expect(s.refresh).toHaveBeenCalledWith('workspaces');
+  });
+
+  it('an archived workspace has no danger zone (restore/Empty trash instead)', () => {
+    const data = makeData({ workspaces: [liveWs({ status: 'archived', isTrashed: true })] });
+    render(<Host View={WorkspacesView} data={data} extra={spies()} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    expect(screen.queryByText('Danger zone')).toBeNull();
   });
 
   it('owner can restore a trashed workspace', async () => {
@@ -219,9 +230,12 @@ describe('WorkspacesView', () => {
     expect(s.refresh).toHaveBeenCalledWith('workspaces');
   });
 
-  it('non-owner gets no delete button', () => {
+  it('non-owner gets no delete affordance — row or drawer danger zone', () => {
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ isOwner: false, dashboardRole: 'access' })] })} />);
-    expect(screen.queryByTitle('Delete workspace')).toBeNull();
+    expect(screen.queryByText('Delete this workspace')).toBeNull();
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    expect(screen.queryByText('Danger zone')).toBeNull();
+    expect(screen.queryByText('Delete this workspace')).toBeNull();
   });
 
   it('create workspace: invalid name disables, valid name streams + closes', async () => {
