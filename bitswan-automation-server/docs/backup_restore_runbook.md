@@ -19,23 +19,53 @@ Per workspace × enabled stage (tags `postgres|couchdb|garage`, `ws:<name>`,
 tarball, a Garage bucket tar (rclone sync). A stage is enabled iff its
 secrets env file exists; stopped containers are skipped, not failed.
 
-Server state (tag `server-config`): `automation_server_config.toml` (holds
-the AOC registration + tokens) and a `VACUUM INTO` copy of `bailey.db`
-(users, devices, MFA, access grants).
+Server state (tag `server-config`) — everything that makes a host *this*
+server, captured at **real absolute paths** so a recovery can
+`restic restore --target /` straight into the `bitswan` volume:
+
+| Path | Why it must be there |
+|---|---|
+| `automation_server_config.toml` | identity: AOC url, server id, token, relay, domains |
+| `bailey.db.snapshot` | users, devices, MFA, access grants — a `VACUUM INTO` copy, never the live file |
+| `traefik/` | **`rest-state.json` is the global route table**, plus `acme/` (LE account + every cert) and operator-supplied `certs/` |
+| `protected-proxy/` | `cookie-secret`, the session **and** CSRF key — losing it logs everyone out |
+| `certauthorities/` | operator CA PEMs, mounted into every workspace container |
+| `backup/config.json` | enabled flag + retention policy |
+| `server-manifest.json` | what this server was: workspaces, image pins, versions (below) |
+
+`rest-state.json` is the one with no way back: a missing file makes
+`InitTraefik` write an *empty* `dynamic.yml`, and gitops's `/ingress/reconcile`
+decides "in sync" from `bailey.db` alone — so every route looks fine and none
+gets re-pushed.
 
 **Not** backed up: Kafka data, physical DB volumes (logical dumps only),
-build-proxy caches, the grype DB.
+build-proxy caches, the grype DB, per-BP images (local image store only — a
+fresh host needs a rebuild pass), and **the mkcert CA** (`bitswan-mkcert`)
+— a CA signing key stays out of off-site storage by policy. After a rebuild,
+`.localhost` certs are re-minted under a new CA that developers must re-trust;
+the manifest records the old CA's fingerprint so a mismatch is detectable.
+Irrelevant for ACME servers.
+
+The capture is an explicit path list, not "the config dir minus excludes" —
+so no exclude bug can ever sweep in `backup/pre-recover/` (whole quarantined
+workspace trees) or `backup/restic-key`, which would put the repo's own
+decryption key inside the repo it decrypts.
 
 ## The encryption key is the crown jewels
 
-Backups now include workspace secrets, so treat the restic key accordingly:
+Backups include workspace secrets, so the key **is** the data:
 
-- It lives at `~/.config/bitswan/backup/restic-key` (0600) inside the
-  daemon's config volume and is escrowed at AOC on first generation.
-- Download a copy and store it OFF the server: `bitswan backup key show`.
-- `bitswan backup key mirror-status` tells you whether AOC holds it. If the
-  escrow was deleted and the server is lost, **backups are unrecoverable
-  without your downloaded copy.**
+- It lives at `~/.config/bitswan/backup/restic-key` (0600) inside the daemon's
+  config volume, and **nowhere else**. There is no escrow: it is never stored
+  in AOC or in object storage, by design.
+- Download a copy and store it off the server: `bitswan backup key show`.
+- Until you confirm you have, `backup status`, every nightly run and the
+  console say so loudly. Record it with
+  `bitswan backup key show --acknowledge`.
+- If this server is lost and you have no copy, **every backup is permanently
+  unreadable** — by you, by us, by anyone. Nothing in the recovery flow can
+  work around that, which is why it is the first thing the disaster-recovery
+  dialog tells you.
 
 ## Day-2 operations
 
@@ -44,7 +74,33 @@ bitswan backup status                # config, key state, last run per workspace
 bitswan backup run --wait            # manual run, streamed
 bitswan backup retention --daily 30 --monthly 12
 bitswan backup snapshots [--workspace W] [--tag postgres]
+bitswan backup manifest              # what the latest backup says this server is
 ```
+
+## The server manifest
+
+Written fresh into every server snapshot, and the first thing a recovery
+reads — because a bare machine knows none of it. Most of it exists nowhere
+else at all: the `BITSWAN_*` **image pins live only in the daemon container's
+environment**, so a rebuilt server silently reverts to defaults without them.
+
+It also records the **bitswan version** that made the backup. A recovery run
+by a different version warns and continues — restores are expected to work
+across versions, and blocking a disaster recovery over a version difference
+would be worse than the risk it names.
+
+`bitswan backup manifest` reads it on a live server. On a machine with no
+daemon — mid-recovery, or just to check a backup is readable before committing
+to a rebuild — the same command takes the inputs directly:
+
+```
+bitswan backup manifest \
+  --aoc-api https://api.example.com --server-id <id> \
+  --token <token from the recovery OTP> --key-file ./backup-encryption-key.txt
+```
+
+restic is not in the bitswan binary — it ships in the runtime image — so this
+mode runs restic in a throwaway container. Docker is the only prerequisite.
 
 ## Recovering a whole workspace
 
@@ -157,27 +213,73 @@ export RESTIC_PASSWORD="$(cat ~/.config/bitswan/backup/restic-key)"
 
 ## Full-server bootstrap (disaster recovery)
 
-On a fresh host:
+### Getting a token onto a machine that has nothing
 
-1. Install bitswan + daemon (`bitswan automation-server-daemon init`).
-2. Recover the server identity — either restore
-   `automation_server_config.toml` from the old server's `server-config`
-   snapshots (needs the downloaded key: point plain `restic` at
-   `rest:<AOC>/api/automation_server/backups/repo/` with
-   `RESTIC_REST_PASSWORD=<old access token>` — or re-register and ask an AOC
-   admin to re-point the old bucket), or `bitswan register` with a fresh OTP
-   and keep the same server record so the token still matches the bucket.
-3. Place the restic key: write your downloaded copy to
-   `~/.config/bitswan/backup/restic-key` (0600) in the daemon volume — or,
-   if the AOC escrow still exists, the daemon recovers it automatically on
-   startup (`EnsureEnabled`).
-4. Per workspace: `bitswan backup recover workspace W`. That is the whole
-   per-workspace half, databases and object storage included — see
-   "Recovering a whole workspace" above. Note that per-BP **images** are not
-   backed up (they live only in the local image store), so on a genuinely
-   fresh host each one needs a rebuild pass before its containers can start.
-5. Verify: open each workspace dashboard; for production BPs run the DR
-   rehearsal (restore into DR, verify by hand) before trusting the result.
+This is the part that used to be a footgun. The AOC access token authenticates
+the restic repo **and decides which bucket you reach** — and it normally lives
+in the config file *inside* the backup. "Re-register into the same server
+record" fails silently in exactly one direction: a new record, a new empty
+bucket, and an operator who believes they have a backup.
+
+So recovery has its own front door. On the AOC server card, take
+**Recover** → it reports the state of the backup repository (bucket, snapshot
+count, newest snapshot), refuses if there is nothing to restore, and hands you
+a one-time password plus the command to run. The OTP is minted against the
+**existing** server record, so the bucket resolves correctly by construction.
+
+Two things to know before you run it:
+
+- **You need your own copy of the encryption key.** There is no escrow. The
+  dialog says so before you commit to a rebuild you cannot finish.
+- **Redeeming the OTP replaces the server's access token**, which cuts off a
+  server that is still alive (its own backups included) until it re-registers.
+  Issuing the OTP does *not* — the swap happens when the command runs. The
+  card warns when the target still holds a live token.
+
+Every issue is recorded in AOC (`DisasterRecoveryRequest`: who asked, which
+server, when, whether it was redeemed, and whether it displaced a live token).
+The OTP itself is not stored — only a fingerprint of it.
+
+### On the replacement machine
+
+`bitswan recover server` is not implemented yet; until it is, the sequence
+below is manual, and its **order is not negotiable**.
+
+0. Sanity-check the backup before touching anything, using the token from the
+   OTP exchange (this needs only docker):
+   ```
+   bitswan backup manifest --aoc-api <AOC> --server-id <id> \
+     --token <token> --key-file ./backup-encryption-key.txt
+   ```
+   If that prints your workspaces, the key and repo are right.
+1. Create the volume and restore server state into it, **before any daemon
+   exists**:
+   ```
+   docker volume create bitswan
+   docker run --rm -e RESTIC_REPOSITORY -e RESTIC_REST_USERNAME \
+     -e RESTIC_REST_PASSWORD -e RESTIC_PASSWORD \
+     -v bitswan:/root/.config/bitswan --entrypoint restic \
+     bitswan/automation-server-runtime:latest \
+     restore --target / --tag server-config latest
+   ```
+   (Use the `daemon_image` the manifest names — it is the restic that wrote
+   the repo.)
+2. Rename `bailey.db.snapshot` → `bailey.db` in the volume, and reconcile the
+   config: keep the **new** token and expiry from the OTP exchange, take
+   everything else (domain, relay, protected domain) from the restored file.
+3. **Only now** deploy the daemon (`bitswan automation-server-daemon init`).
+   Traefik comes up, finds the restored `rest-state.json`, and renders the
+   right routes. Reversing steps 1–3 means `InitTraefik` writes an empty
+   `dynamic.yml` over the state you just restored.
+4. Put the restic key at `~/.config/bitswan/backup/restic-key` (0600) in the
+   volume.
+5. Per workspace: `bitswan backup recover workspace W` — the whole
+   per-workspace half, databases and object storage included. Per-BP images
+   are not backed up, so each needs a rebuild pass before its containers start.
+6. Verify: open each workspace dashboard. Re-trust the new mkcert CA on
+   `.localhost` setups (compare against `mkcert_ca_fingerprint`). For
+   production BPs, restore into DR and verify by hand before trusting the
+   result.
 
 ## Drill notes (what a real destroy-and-recover proved)
 
