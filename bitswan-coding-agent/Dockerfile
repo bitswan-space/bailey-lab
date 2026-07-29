@@ -99,11 +99,23 @@ RUN mkdir -p /workspace/copies /var/log/agent-sessions \
 # takes exclusive control and would block user-added servers.) A bind mount
 # over the /etc/bitswan file — the pre-existing operator hook — still wins.
 COPY mcp.default.json /etc/bitswan/mcp.json
+# entrypoint-agent.sh copies this into any worktree that has no CLAUDE.md of
+# its own. It is where the agent is told to reach apps through the public gate
+# rather than by their internal address — the guidance the browsing identity
+# depends on. A workspace that mounts its own /etc/bitswan/CLAUDE.md still
+# shadows this default.
+COPY CLAUDE.md /etc/bitswan/CLAUDE.md
 
 # Copy session wrapper script
 COPY agent-session-wrapper /usr/local/bin/agent-session-wrapper
 COPY seed-copy-mcp /usr/local/bin/seed-copy-mcp
-RUN chmod +x /usr/local/bin/agent-session-wrapper /usr/local/bin/seed-copy-mcp
+# Establishes the agent's authenticated browser session (#232) and saves it
+# where the MCP server's --storage-state points. Node script: it needs
+# playwright (via NODE_PATH) to drive the login, and the same crypto the
+# daemon's TOTP seed was generated with.
+COPY agent-browser-login /usr/local/bin/agent-browser-login
+RUN chmod +x /usr/local/bin/agent-session-wrapper /usr/local/bin/seed-copy-mcp \
+    /usr/local/bin/agent-browser-login
 
 # Copy entrypoint
 COPY entrypoint-agent.sh /usr/local/bin/entrypoint-agent.sh
