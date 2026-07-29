@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +188,65 @@ func TestEndpoints_CallerSeesOwnEndpoint(t *testing.T) {
 	}
 	if len(entry.Grants) == 0 {
 		t.Error("owner view should include grants")
+	}
+}
+
+// The listing carries the grouping data clients use to render endpoints
+// under their workspace / business process (#280): parent_endpoint and
+// business_process straight from the endpoint row, and workspace resolved
+// from the parent dashboard host (or the row's own host for dashboards).
+func TestEndpoints_CarriesWorkspaceGrouping(t *testing.T) {
+	domain := writeTestConfig(t)
+	owner := "group-owner@example.com"
+	const wsName = "groupws"
+	// A workspace is a directory under ~/.config/bitswan/workspaces; without
+	// metadata the dashboard host resolves to the conventional
+	// <name>-dashboard.<domain>.
+	wsDir := filepath.Join(os.Getenv("HOME"), ".config", "bitswan", "workspaces", wsName)
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(wsDir) })
+
+	dashHost := wsName + "-dashboard." + domain
+	appHost := wsName + "-fio-frontend." + domain
+	if _, err := registerEndpoint(dashHost, owner, wsName+" (dashboard)", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerEndpoint(appHost, owner, "Fio frontend", dashHost, endpointKindFrontend, "live-dev"); err != nil {
+		t.Fatal(err)
+	}
+	if err := setEndpointSourceBP(appHost, "gitops", "fio"); err != nil {
+		t.Fatal(err)
+	}
+
+	listing, err := buildEndpointListing(owner, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byHost := map[string]endpointListEntry{}
+	for _, e := range listing.Endpoints {
+		byHost[strings.ToLower(e.Hostname)] = e
+	}
+	app, ok := byHost[strings.ToLower(appHost)]
+	if !ok {
+		t.Fatalf("frontend endpoint not listed: %+v", listing.Endpoints)
+	}
+	if app.ParentEndpoint != dashHost {
+		t.Errorf("parent_endpoint = %q, want %q", app.ParentEndpoint, dashHost)
+	}
+	if app.Workspace != wsName {
+		t.Errorf("workspace = %q, want %q", app.Workspace, wsName)
+	}
+	if app.BusinessProcess != "fio" {
+		t.Errorf("business_process = %q, want fio", app.BusinessProcess)
+	}
+	dash, ok := byHost[strings.ToLower(dashHost)]
+	if !ok {
+		t.Fatalf("dashboard endpoint not listed: %+v", listing.Endpoints)
+	}
+	if dash.Workspace != wsName {
+		t.Errorf("dashboard workspace = %q, want %q", dash.Workspace, wsName)
 	}
 }
 

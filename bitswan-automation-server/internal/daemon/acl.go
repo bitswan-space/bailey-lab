@@ -47,7 +47,10 @@ type endpointRecord struct {
 	// Source is the route's provenance: "gitops" (registered by gitops
 	// reconcile from bitswan.yaml — prunable) or "manual" (added by a human /
 	// workspace init — never pruned by reconcile). Defaults to "manual".
-	Source    string
+	Source string
+	// SourceBP is the business process a gitops route belongs to (see
+	// setEndpointSourceBP). Empty for manual routes and legacy gitops rows.
+	SourceBP  string
 	CreatedAt string
 }
 
@@ -95,10 +98,10 @@ func getEndpoint(hostname string) (*endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), COALESCE(source,'manual'), created_at
+	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), COALESCE(source,'manual'), COALESCE(source_bp,''), created_at
 	                    FROM endpoints WHERE hostname = ? COLLATE NOCASE`, hostname)
 	var e endpointRecord
-	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.Source, &e.CreatedAt); err != nil {
+	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.Source, &e.SourceBP, &e.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -447,7 +450,7 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), COALESCE(source,'manual'), created_at FROM endpoints`)
+	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), COALESCE(source,'manual'), COALESCE(source_bp,''), created_at FROM endpoints`)
 	if err != nil {
 		return nil, err
 	}
@@ -455,7 +458,7 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	var out []endpointRecord
 	for rows.Next() {
 		var e endpointRecord
-		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.Source, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.Source, &e.SourceBP, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

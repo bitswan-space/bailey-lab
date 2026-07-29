@@ -696,10 +696,17 @@ function UserDevicesDrawer({ userId, onClose, ctx }) {
 // Admin-only, observational: every registered endpoint with its owner and ACL
 // grants, nested workspace → endpoints by `parent`. Read-only by design — even
 // an admin doesn't edit others' ACLs here; there are no mutation controls.
+// Searchable + paginated (#252): the search matches hostnames, display names,
+// owners and grant principals (a workspace stays visible when anything under
+// it matches), and the workspace tree pages by root so a server with hundreds
+// of endpoints doesn't render one endless column.
+const ACL_PAGE_SIZE = 10; // workspace roots per page
 function EndpointAccessView({ ctx }) {
   const [tree, setTree] = useP(null);     // null = loading
   const [err, setErr] = useP('');
   const [nonce, setNonce] = useP(0);      // bump to refetch
+  const [query, setQuery] = useP('');
+  const [page, setPage] = useP(1);        // 1-based, over filtered roots
 
   usePE(() => {
     let alive = true;
@@ -711,9 +718,20 @@ function EndpointAccessView({ ctx }) {
   }, [nonce]);
 
   const all = tree || [];
+  const q = query.trim().toLowerCase();
+  // An endpoint matches the query on any human-searchable facet: hostname,
+  // display name, owner, grant principals (emails/groups), kind, or stage.
+  const epMatches = (e) => !q ||
+    (e.hostname || '').toLowerCase().includes(q) ||
+    (e.display_name || '').toLowerCase().includes(q) ||
+    (e.owner_email || '').toLowerCase().includes(q) ||
+    (e.kind || '').toLowerCase().includes(q) ||
+    (e.stage || '').toLowerCase().includes(q) ||
+    (e.grants || []).some(g => (g.principal_value || '').toLowerCase().includes(q));
+
   // Special endpoints get their own sections; the rest form the owned tree.
-  const publicEps = all.filter(e => e.access === 'public').sort((a, b) => a.hostname.localeCompare(b.hostname));
-  const allUsersEps = all.filter(e => e.access === 'all-users').sort((a, b) => a.hostname.localeCompare(b.hostname));
+  const publicEps = all.filter(e => e.access === 'public' && epMatches(e)).sort((a, b) => a.hostname.localeCompare(b.hostname));
+  const allUsersEps = all.filter(e => e.access === 'all-users' && epMatches(e)).sort((a, b) => a.hostname.localeCompare(b.hostname));
   const eps = all.filter(e => !e.access || e.access === 'owned');
 
   // Build parent → children for the OWNED endpoints. Roots = owned endpoints
@@ -725,7 +743,18 @@ function EndpointAccessView({ ctx }) {
     const key = (e.parent && byHost[e.parent]) ? e.parent : '';
     (childrenOf[key] = childrenOf[key] || []).push(e);
   });
-  const roots = (childrenOf[''] || []).slice().sort((a, b) => a.hostname.localeCompare(b.hostname));
+  // A node survives the search if it matches or anything below it does; a
+  // node that matches itself keeps its whole subtree visible (so finding a
+  // workspace shows what's in it).
+  const subtreeMatches = (e) => epMatches(e) || (childrenOf[e.hostname] || []).some(subtreeMatches);
+  const roots = (childrenOf[''] || []).filter(subtreeMatches).sort((a, b) => a.hostname.localeCompare(b.hostname));
+
+  // Paginate the workspace tree by ROOT card — a workspace and its endpoints
+  // never split across pages. The page is clamped so shrinking results (a
+  // narrower search) can't strand the view past the end.
+  const totalPages = Math.max(1, Math.ceil(roots.length / ACL_PAGE_SIZE));
+  const curPage = Math.min(page, totalPages);
+  const pageRoots = roots.slice((curPage - 1) * ACL_PAGE_SIZE, curPage * ACL_PAGE_SIZE);
 
   const KIND = {
     workspace: { icon: 'layout-grid', label: 'Workspace' },
@@ -768,7 +797,11 @@ function EndpointAccessView({ ctx }) {
   );
 
   const Node = ({ e, depth }) => {
-    const kids = (childrenOf[e.hostname] || []).slice().sort((a, b) => a.hostname.localeCompare(b.hostname));
+    // While searching, a node that only matched through its descendants shows
+    // just the matching branches; a node that matched itself shows everything.
+    let kids = (childrenOf[e.hostname] || []);
+    if (q && !epMatches(e)) kids = kids.filter(subtreeMatches);
+    kids = kids.slice().sort((a, b) => a.hostname.localeCompare(b.hostname));
     const k = KIND[e.kind] || { icon: 'globe', label: e.kind || 'Endpoint' };
     return (
       <div style={{ marginLeft: depth ? 18 : 0, borderLeft: depth ? `1px solid ${PC.border}` : 'none', paddingLeft: depth ? 14 : 0 }}>
@@ -796,7 +829,9 @@ function EndpointAccessView({ ctx }) {
       <div style={{ fontSize: 12, color: PC.muted, marginTop: 6, lineHeight: '17px' }}>{note}</div>
     </div>
   );
-  const nothing = tree !== null && !err && publicEps.length === 0 && allUsersEps.length === 0 && roots.length === 0;
+  const empty = tree !== null && !err && publicEps.length === 0 && allUsersEps.length === 0 && roots.length === 0;
+  const nothing = empty && !q;    // truly no endpoints registered
+  const noMatches = empty && !!q; // endpoints exist, none match the search
 
   return (
     <div>
@@ -816,9 +851,27 @@ function EndpointAccessView({ ctx }) {
       {err && (
         <PLiveState status="error" error={err} label="Couldn't load endpoint access" onRetry={() => setNonce(n => n + 1)} />
       )}
+
+      {tree !== null && !err && all.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+          <div style={{ position: 'relative', maxWidth: 340, flex: '1 1 260px' }}>
+            <PIcon name="search" size={14} color={PC.mutedFg} style={{ position: 'absolute', left: 11, top: 11 }} />
+            <PTextInput value={query} onChange={(v) => { setQuery(v); setPage(1); }}
+              placeholder="Search endpoints, owners & grants…" style={{ paddingLeft: 32 }} />
+          </div>
+          <span style={{ marginLeft: 'auto', fontSize: 12, color: PC.muted, whiteSpace: 'nowrap' }}>
+            {all.length} endpoint{all.length === 1 ? '' : 's'}
+          </span>
+        </div>
+      )}
+
       {nothing && (
         <PEmpty icon="git-fork" title="No endpoints registered yet"
           text="Endpoints appear here as workspaces and apps are created on this server." />
+      )}
+      {noMatches && (
+        <PEmpty icon="search" title="No endpoints match"
+          text="Try a different hostname, owner, or grant email." />
       )}
 
       {publicEps.length > 0 && (
@@ -838,7 +891,18 @@ function EndpointAccessView({ ctx }) {
       {roots.length > 0 && (
         <>
           <div style={{ ...SECTION, marginTop: 18 }}>Workspaces &amp; apps</div>
-          {roots.map(e => <Node key={e.hostname} e={e} depth={0} />)}
+          {pageRoots.map(e => <Node key={e.hostname} e={e} depth={0} />)}
+          {totalPages > 1 && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, marginTop: 14 }}>
+              <PBtn variant="default" size="sm" leftIcon="chevron-left" disabled={curPage === 1}
+                onClick={() => setPage(curPage - 1)}>Previous</PBtn>
+              <span style={{ fontSize: 12.5, color: PC.muted }}>
+                Page {curPage} of {totalPages} · {roots.length} entries
+              </span>
+              <PBtn variant="default" size="sm" disabled={curPage === totalPages}
+                onClick={() => setPage(curPage + 1)}>Next</PBtn>
+            </div>
+          )}
         </>
       )}
     </div>

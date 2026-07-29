@@ -426,4 +426,30 @@ describe('WorkspacesView', () => {
     fireEvent.click(screen.getByText('Shiny App'));
     expect(s.openUrl).toHaveBeenCalled();
   });
+
+  it('groups accessible apps by workspace with business-process clusters (#280)', async () => {
+    const s = spies();
+    installFetch({ '/bailey/api/endpoints': { json: { endpoints: [
+      { hostname: 'tom-fio-external.d', display_name: 'Fio external', kind: 'frontend', stage: 'live-dev', caller_role: 'access', parent_endpoint: 'tom-dashboard.d', workspace: 'tom', business_process: 'fio' },
+      { hostname: 'tom-fio-internal.d', display_name: 'Fio internal', kind: 'frontend', stage: 'live-dev', caller_role: 'access', parent_endpoint: 'tom-dashboard.d', workspace: 'tom', business_process: 'fio' },
+      { hostname: 'tom-pl-internal.d', display_name: 'PL internal', kind: 'frontend', stage: 'live-dev', caller_role: 'access', parent_endpoint: 'tom-dashboard.d', workspace: 'tom', business_process: 'pl' },
+      { hostname: 'acme-app.d', display_name: 'Acme app', kind: 'frontend', stage: 'production', caller_role: 'access', parent_endpoint: 'acme-dashboard.d', workspace: 'acme' },
+      { hostname: 'stray-app.d', display_name: 'Stray app', kind: 'frontend', stage: '', caller_role: 'access' },
+    ] } } });
+    render(<Host View={WorkspacesView} data={makeData()} extra={s} />);
+    await waitFor(() => expect(screen.getByText('Apps you can access')).toBeTruthy());
+    // Workspace group headers with app counts.
+    expect(screen.getByText('tom')).toBeTruthy();
+    expect(screen.getByText('3 apps')).toBeTruthy();
+    expect(screen.getByText('acme')).toBeTruthy();
+    // Business-process cluster labels inside the workspace group.
+    expect(screen.getByText('fio')).toBeTruthy();
+    expect(screen.getByText('pl')).toBeTruthy();
+    // Apps the backend couldn't place land in the trailing "Other apps" group.
+    expect(screen.getByText('Other apps')).toBeTruthy();
+    expect(screen.getByText('Stray app')).toBeTruthy();
+    // Tiles still launch.
+    fireEvent.click(screen.getByText('Fio external'));
+    expect(s.openUrl).toHaveBeenCalledWith('https://tom-fio-external.d', 'Fio external');
+  });
 });

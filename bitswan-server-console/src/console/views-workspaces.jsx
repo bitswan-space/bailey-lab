@@ -70,6 +70,31 @@ function AppLaunchTile({ app, onOpen }) {
   );
 }
 
+// Horizontal launch tile for the "Apps you can access" section — one live
+// frontend the caller has been granted, opened directly.
+function AccessibleAppTile({ app, onOpen }) {
+  return (
+    <button onClick={onOpen} style={{
+      display: 'flex', alignItems: 'center', gap: 11, padding: '13px 14px', textAlign: 'left',
+      border: `1px solid ${WC.border}`, borderRadius: 11, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}
+      onMouseEnter={e => { e.currentTarget.style.background = WC.surface; e.currentTarget.style.borderColor = WC.borderHi; }}
+      onMouseLeave={e => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.borderColor = WC.border; }}>
+      <span style={{ width: 34, height: 34, borderRadius: 9, flex: '0 0 auto', background: WC.primarySoft,
+        display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <WIcon name="app-window" size={17} color={WC.primary} />
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <span style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{app.name}</span>
+          {app.stage && app.stage !== 'production' && <WPill tone="outline" size="xs">{app.stage}</WPill>}
+        </div>
+        <div style={{ fontSize: 11.5, color: WC.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.host}</div>
+      </div>
+      <WIcon name="external-link" size={14} color={WC.mutedFg} />
+    </button>
+  );
+}
+
 // ─── OVERVIEW ───────────────────────────────────────────────────────────────
 // Fully wired to GET /bailey/api/overview (admin-only): stat-tile counts, the
 // server-identity card (claimed-by/version/region/uptime/start-time), and the
@@ -500,7 +525,34 @@ function WorkspacesView({ ctx }) {
   const accessibleApps = (appsRaw || []).map(e => ({
     id: e.hostname, name: e.display_name || e.hostname, host: e.hostname,
     url: 'https://' + e.hostname, stage: e.stage,
+    workspace: e.workspace || '', bp: e.business_process || '', parent: e.parent_endpoint || '',
   }));
+  // Group the accessible apps by the workspace they belong to (#280) so a
+  // person granted many endpoints sees them organised, not as one flat wall.
+  // Group key: workspace name when the backend resolved one, else the parent
+  // dashboard host, else '' (truly ungrouped — sorted last).
+  const appGroups = (() => {
+    const map = new Map();
+    for (const a of accessibleApps) {
+      const key = a.workspace || a.parent;
+      if (!map.has(key)) map.set(key, { key, workspace: a.workspace, parent: a.parent, apps: [] });
+      map.get(key).apps.push(a);
+    }
+    const groups = [...map.values()];
+    groups.forEach(g => g.apps.sort((x, y) => x.name.localeCompare(y.name)));
+    groups.sort((x, y) => (x.key === '' ? 1 : y.key === '' ? -1 : x.key.localeCompare(y.key)));
+    return groups;
+  })();
+  // Within a group, sub-cluster by business process (named BPs first,
+  // alphabetically; apps without one trail in an unlabelled cluster).
+  const bpClusters = (apps) => {
+    const map = new Map();
+    for (const a of apps) {
+      if (!map.has(a.bp)) map.set(a.bp, { bp: a.bp, apps: [] });
+      map.get(a.bp).apps.push(a);
+    }
+    return [...map.values()].sort((x, y) => (x.bp === '' ? 1 : y.bp === '' ? -1 : x.bp.localeCompare(y.bp)));
+  };
   const noTotp = !data.recovery.totpActive;
   const trashedCount = data.workspaces.filter(w => w.isTrashed).length;
 
@@ -705,33 +757,51 @@ function WorkspacesView({ ctx }) {
       {/* Apps you can access — live frontends you've been granted, even if you
           aren't a member of (or can't create) the owning workspace. Sourced
           from the accessible-endpoints API so a User-role person still has
-          direct links to their apps here. */}
+          direct links to their apps here. Grouped by workspace (and business
+          process within it) so many grants stay readable (#280); apps the
+          backend couldn't place fall back to one flat grid. */}
       {accessibleApps.length > 0 && (
         <div style={{ marginTop: 28 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: WC.fg, marginBottom: 4 }}>Apps you can access</div>
-          <div style={{ fontSize: 12.5, color: WC.muted, marginBottom: 14 }}>Live apps shared with you across this server — open them directly.</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
-            {accessibleApps.map(a => (
-              <button key={a.id} onClick={() => openUrl(a.url, a.name)} style={{
-                display: 'flex', alignItems: 'center', gap: 11, padding: '13px 14px', textAlign: 'left',
-                border: `1px solid ${WC.border}`, borderRadius: 11, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}
-                onMouseEnter={e => { e.currentTarget.style.background = WC.surface; e.currentTarget.style.borderColor = WC.borderHi; }}
-                onMouseLeave={e => { e.currentTarget.style.background = '#fff'; e.currentTarget.style.borderColor = WC.border; }}>
-                <span style={{ width: 34, height: 34, borderRadius: 9, flex: '0 0 auto', background: WC.primarySoft,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <WIcon name="app-window" size={17} color={WC.primary} />
-                </span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                    <span style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.name}</span>
-                    {a.stage && a.stage !== 'production' && <WPill tone="outline" size="xs">{a.stage}</WPill>}
+          <div style={{ fontSize: 12.5, color: WC.muted, marginBottom: 14 }}>Live apps shared with you across this server, grouped by the workspace they run in — open them directly.</div>
+          {appGroups.length === 1 && appGroups[0].key === '' ? (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
+              {appGroups[0].apps.map(a => <AccessibleAppTile key={a.id} app={a} onOpen={() => openUrl(a.url, a.name)} />)}
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {appGroups.map(g => (
+                <WCard key={g.key || '(other)'} pad={0}>
+                  <div style={{ padding: '12px 18px', borderBottom: `1px solid ${WC.surface2}`, display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ width: 28, height: 28, borderRadius: 8, flex: '0 0 auto', background: WC.surface2,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <WIcon name="layout-grid" size={14} color={WC.muted} />
+                    </span>
+                    <span style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg,
+                      fontFamily: g.workspace || !g.parent ? 'inherit' : 'Geist Mono, monospace',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {g.workspace || g.parent || 'Other apps'}
+                    </span>
+                    <span style={{ marginLeft: 'auto', fontSize: 11.5, color: WC.mutedFg }}>
+                      {g.apps.length} app{g.apps.length === 1 ? '' : 's'}
+                    </span>
                   </div>
-                  <div style={{ fontSize: 11.5, color: WC.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.host}</div>
-                </div>
-                <WIcon name="external-link" size={14} color={WC.mutedFg} />
-              </button>
-            ))}
-          </div>
+                  <div style={{ padding: '12px 18px 14px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    {bpClusters(g.apps).map(c => (
+                      <div key={c.bp || '(none)'}>
+                        {c.bp && (
+                          <div style={{ fontSize: 10.5, fontWeight: 600, color: WC.mutedFg, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 8 }}>{c.bp}</div>
+                        )}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
+                          {c.apps.map(a => <AccessibleAppTile key={a.id} app={a} onOpen={() => openUrl(a.url, a.name)} />)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </WCard>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
