@@ -270,14 +270,33 @@ and reused, so a retry does not need a fresh OTP — and OTPs are single-use wit
 ten-minute life. Workspaces are fail-fast: the run stops at the first one that
 fails rather than burying the cause.
 
-Two things the command cannot do for you, and reports at the end:
+### How business-process images come back
+
+Per-BP images are in no backup — they only ever existed in the lost machine's
+local image store — and the ordinary converge does not build, so a missing image
+fails it outright. Recovery rebuilds each one **from the revision its deployment
+records**: `bitswan.yaml` carries `source_commit` per deployment (and `git_commit`
+per BP stage), and the BP's canonical bare repo lives inside the workspace tree
+the backup captures, so the full source history is restored with it. The image tag
+is a pure content address of the source tree, so extracting that commit reproduces
+the pinned tag exactly — for promoted stages as much as for dev, and regardless of
+how far the working copy has moved on since.
+
+Where a rebuild produces a *different* tag, the tree that was deployed was not the
+tree that was committed (untracked files at deploy time, or a hand-built image).
+Those deployments are named in the report and their pins are left untouched —
+retagging would make a signed-off production tag name an artifact nobody approved.
+They need a **re-promote**; their containers will not start until then.
+
+The same resolution runs before a rollback converges, so rolling back to an older
+commit works on a rebuilt host (and after any image prune) rather than failing on
+a Docker Hub pull.
+
+One thing the command cannot do for you, and reports at the end:
 
 - **Re-trust the local CA** on `.localhost` setups. The mkcert CA is deliberately
   not backed up (a CA signing key does not belong off-site), so a rebuilt server
   mints a new one; the manifest records the old fingerprint.
-- **Re-promote** any staging/production image whose source has changed since it
-  was promoted. Images are content-addressed by source tree, so an unchanged tree
-  rebuilds to exactly the tag a deployment pins — a changed one cannot.
 
 Then verify production business processes by hand before trusting them.
 

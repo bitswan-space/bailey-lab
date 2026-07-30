@@ -68,9 +68,10 @@ type RecoverRequest struct {
 	// backup — they only ever existed locally — and the ordinary converge does not
 	// build: the compiler emits `image:` with no `build:` and no pull_policy, so
 	// compose tries to PULL `internal/…` from Docker Hub and the whole converge
-	// fails. Because the tags are content-addressed by the source tree hash, a
-	// rebuild of an unchanged tree reproduces exactly the tags bitswan.yaml pins,
-	// which is what makes this recovery rather than redeployment.
+	// fails. Each missing image is rebuilt from the git revision its deployment
+	// records, and the tag is a pure content address of that source tree, so the
+	// rebuild reproduces exactly the tag bitswan.yaml pins — which is what makes
+	// this recovery rather than redeployment.
 	RebuildImages bool `json:"rebuild_images,omitempty"`
 }
 

@@ -941,7 +941,7 @@ async def deploy_automations(
 async def rebuild_and_deploy(
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    """Rebuild every automation's images, then converge the workspace.
+    """Rebuild every missing pinned image, then converge the workspace.
 
     For disaster recovery on a rebuilt host. Per-BP images are not part of any
     backup — they only ever existed in the local image store — and `/deploy`
@@ -950,17 +950,23 @@ async def rebuild_and_deploy(
     Hub and the whole converge fails. Building first is what makes the restored
     `bitswan.yaml` deployable.
 
-    This works as recovery rather than redeployment because the image tags are
-    content-addressed by the source git-tree hash: rebuilding an unchanged tree
-    reproduces exactly the tag the restored deployments pin, promoted stages
-    included. Where the source HAS drifted from what was promoted, that tag
-    cannot be reproduced — those deployments are reported in
-    `unreproduced_images` and need a re-promote.
+    Each image is rebuilt from the revision its deployment RECORDS
+    (`source_commit`, or the BP stage's `git_commit`), extracted with
+    `git archive` from the BP's canonical bare repo — which lives inside the
+    workspace tree the backup captures, so the full source history survives a
+    recovery. Because the tag is a pure content address of the source tree, that
+    reproduces the pinned tag exactly, for promoted stages as much as for dev.
+
+    Where a rebuild yields a DIFFERENT tag, the tree that was deployed was not
+    the tree that was committed (untracked files at deploy time, or a hand-built
+    image). Those deployments are reported in `unrecoverable` and the pin is left
+    untouched — retagging would make a signed-off production tag name an artifact
+    nobody approved. They need a re-promote.
 
     Synchronous (unlike `/deploy-bp`, which is task-based) so the caller's
     recovery job can simply await it, and deliberately side-effect-free on git
-    state: it calls the pure `prep_deploy_source`, never a deploy that would
-    rewrite `bitswan.yaml` or record deploy history.
+    state: it builds into the local image store and never rewrites
+    `bitswan.yaml` or records deploy history.
     """
     return await automation_service.rebuild_all_images_and_deploy()
 

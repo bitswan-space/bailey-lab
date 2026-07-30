@@ -87,9 +87,11 @@ func newRecoverServerCmd() *cobra.Command {
 			"not in object storage — so your own copy is the only one that exists. Without it " +
 			"the backup cannot be read and no recovery is possible.\n\n" +
 			"Business-process images are rebuilt from source, because they only ever existed in " +
-			"the lost machine's local image store. That reproduces the exact image a deployment " +
-			"pins as long as its source is unchanged; where the source has moved on since a " +
-			"promotion, the run reports which deployments need a re-promote.",
+			"the lost machine's local image store. Each one is rebuilt from the git revision its " +
+			"deployment records, which reproduces the exact image it pins — promoted stages " +
+			"included, however far the working copy has moved on since. Where the tree that was " +
+			"deployed was not the tree that was committed, that tag cannot be reproduced; the run " +
+			"names those deployments, and they need a re-promote.",
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {

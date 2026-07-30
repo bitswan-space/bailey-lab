@@ -31,6 +31,7 @@ from app.utils import (
     sanitize_automation_name,
     update_bp_git,
     write_bp_bitswan,
+    bp_state_dir,
     bp_state_path,
     deployment_bp,
     call_git_command_with_output,
@@ -42,7 +43,7 @@ from app.services import bp_secrets
 from app.services import supply_chain_service
 from app.services import firewall_service
 from app.services.bp_git import fetch_main
-from app.services.git_server import validate_bp_name
+from app.services.git_server import bp_bare_repo_path, validate_bp_name
 from app.task_queue import current_requester
 from fastapi import HTTPException
 
@@ -2144,7 +2145,18 @@ class AutomationService:
             and ((conf or {}).get("stage") or "") == want_stage
         ]
         result: dict = {"deployment_ids": []}
+        images: dict = {"rebuilt": [], "failures": []}
         if deployment_ids:
+            # The restored file pins the images that revision was deployed with,
+            # and a converge does not build. Whenever those images are no longer
+            # in the local store — after a disaster recovery onto fresh hardware,
+            # or after any image prune — compose would try to pull `internal/…`
+            # from Docker Hub and the whole rollback would fail. Rebuild them from
+            # the revision each deployment records first. A no-op (and no git or
+            # docker work) when they are all present, which is the common case.
+            images = await self.resolve_missing_pinned_images(
+                deployment_ids=deployment_ids, progress_callback=progress_callback
+            )
             result = await self.apply_compose_for_deployments(
                 deployment_ids, deployed_by=deployed_by, report=progress_callback
             )
@@ -2154,6 +2166,10 @@ class AutomationService:
             "stage": stage_key,
             "git_commit": node.get("git_commit") if node else None,
             "deployment_ids": deployment_ids,
+            # Images that had to be rebuilt, and any whose exact artifact could
+            # not be reproduced (those containers will not start).
+            "rebuilt_images": images["rebuilt"],
+            "unrecoverable_images": images["failures"],
             "result": result,
         }
 
@@ -4998,87 +5014,332 @@ class AutomationService:
             "deployment_id": deployment_id,
         }
 
+    # --- Rebuilding a pinned image from the revision that produced it --------
+    #
+    # Per-BP images live only in the local image store: no backup contains them,
+    # and the ordinary converge does not build (the compiler emits `image:` with
+    # no `build:` and no pull_policy, so compose tries to PULL `internal/…` from
+    # Docker Hub and the whole converge fails). Anything that puts a host in
+    # front of a deployment whose image is absent therefore has to rebuild it
+    # first — disaster recovery on fresh hardware, and a rollback to a commit
+    # whose image has since been pruned.
+    #
+    # The rebuild is driven by the revision the deployment RECORDS, not by
+    # whatever the working copy holds today. `bitswan.yaml` carries
+    # `source_commit` per deployment (and `git_commit` per BP stage), the BP's
+    # canonical bare repo lives inside the workspace tree that IS backed up, and
+    # the image tag is a pure content address of the source tree — so extracting
+    # the recorded commit reproduces the pinned tag exactly. Building from the
+    # working copy only reproduces whatever HEAD happens to be, which is why
+    # promoted stages used to come back by luck or not at all.
+
+    @staticmethod
+    def _bp_repo_relative_source(bp: str, relative_path: str) -> str | None:
+        """Path of a deployment's source INSIDE its BP repo, or None.
+
+        Deployment `relative_path` is volume-relative (`copies/<copy>/<bp>/…`)
+        while the BP's git repo is rooted at `copies/<copy>/<bp>` — so the first
+        three segments come off. Only the `main` copy maps to the canonical repo;
+        per-user copies are live-dev scratch and bake no image.
+        """
+        parts = [p for p in (relative_path or "").replace("\\", "/").split("/") if p]
+        if len(parts) < 4 or parts[0] != "copies" or parts[1] != "main":
+            return None
+        if parts[2] != bp:
+            return None
+        return "/".join(parts[3:])
+
+    def _pinned_image_targets(self) -> list[dict]:
+        """Every deployment that pins a baked image, with the revision it came from.
+
+        Walks each BP's own bitswan.yaml rather than the flat hydrated view,
+        because the stage node's `git_commit` is the fallback when a deployment
+        predates per-deployment `source_commit` (it is written conditionally).
+        """
+        bp_root = bp_state_dir(self.gitops_dir)
+        if not os.path.isdir(bp_root):
+            return []
+
+        targets: list[dict] = []
+        for bp in sorted(os.listdir(bp_root)):
+            bp_path = os.path.join(bp_root, bp)
+            if not os.path.isdir(bp_path):
+                continue
+            y = read_bitswan_yaml(bp_path) or {}
+            stages = ((y.get("business_processes") or {}).get(bp) or {})
+            for stage, node in stages.items():
+                node = node or {}
+                for dep_id, conf in (node.get("deployments") or {}).items():
+                    conf = conf or {}
+                    image = conf.get("image")
+                    # live-dev bind-mounts the working tree; there is no image.
+                    if not image or conf.get("checksum") == "live-dev":
+                        continue
+                    targets.append(
+                        {
+                            "bp": bp,
+                            "stage": stage,
+                            "deployment_id": dep_id,
+                            "image": image,
+                            "source_commit": conf.get("source_commit")
+                            or node.get("git_commit"),
+                            "relative_path": conf.get("relative_path") or "",
+                            "repo_path": self._bp_repo_relative_source(
+                                bp, conf.get("relative_path") or ""
+                            ),
+                        }
+                    )
+        return targets
+
+    async def _present_image_tags(self) -> set[str]:
+        """Tags currently in the local store, scoped to this workspace's namespace."""
+        images = await self.infra_driver.image_list(self._workspace_ctx())
+        return {i.get("tag") for i in images if i.get("tag")}
+
+    async def _materialize_revision(self, bp: str, commit: str) -> str:
+        """Extract a BP's tree at `commit` and return the dir holding it.
+
+        The result is `<dir>/<bp>/…`, because `_bake_source_image` derives the
+        image tag's BP and automation names from the source dir's basename and
+        its parent's — so the BP level has to be present.
+
+        `git archive` from the BARE repo, not a `copies/` clone: the clone may
+        have drifted, been deleted, or carry untracked files, while the archive is
+        exactly the committed tree. That is what makes the resulting tree hash —
+        and therefore the tag — deterministic. Symlinks come through as symlinks,
+        which matters: they are hashed git-style (mode 120000) and following them
+        would change the content address.
+        """
+        root = os.path.join(self.gitops_dir, ".builds", f"rev-{commit}")
+        target = os.path.join(root, bp)
+        self._ensure_builds_gitignored()
+
+        # Content-addressed by the commit, so an existing extraction is already
+        # exactly right — and serialized per (bp, commit) so two deployments of
+        # the same BP don't race the same directory.
+        async with _build_lock(f"rev:{bp}:{commit}"):
+            if os.path.isdir(target) and os.listdir(target):
+                return root
+            bare = bp_bare_repo_path(bp)
+            tmp = target + ".partial"
+            shutil.rmtree(tmp, ignore_errors=True)
+            os.makedirs(tmp, exist_ok=True)
+            # A real OS pipe, not asyncio's PIPE: a StreamReader cannot be handed
+            # to another child as stdin. Each end is closed in the parent as soon
+            # as the child owning it has been spawned, so tar sees EOF when git
+            # exits and git sees EPIPE if tar dies.
+            read_fd, write_fd = os.pipe()
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "--git-dir", bare, "archive", "--format=tar", commit,
+                    stdout=write_fd,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            finally:
+                os.close(write_fd)
+            try:
+                untar = await asyncio.create_subprocess_exec(
+                    "tar", "-x", "-C", tmp,
+                    stdin=read_fd,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            finally:
+                os.close(read_fd)
+            _, git_err = await proc.communicate()
+            _, tar_err = await untar.communicate()
+            if proc.returncode != 0:
+                shutil.rmtree(tmp, ignore_errors=True)
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        f"revision {commit[:8]} is not in {bp}'s repository: "
+                        f"{(git_err or b'').decode(errors='replace').strip()}"
+                    ),
+                )
+            if untar.returncode != 0:
+                shutil.rmtree(tmp, ignore_errors=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"could not extract {bp} at {commit[:8]}: "
+                        f"{(tar_err or b'').decode(errors='replace').strip()}"
+                    ),
+                )
+            shutil.rmtree(target, ignore_errors=True)
+            os.replace(tmp, target)
+        return root
+
+    @staticmethod
+    def _image_outcome(target: dict, error: str | None = None) -> dict:
+        """One deployment's rebuild outcome, in ONE shape.
+
+        Every failure path reports the same keys — a caller (or an operator
+        reading the recovery report) must not have to know whether the rebuild
+        returned a mismatch or raised.
+        """
+        out = {
+            "deployment_id": target["deployment_id"],
+            "bp": target["bp"],
+            "stage": target["stage"],
+            "pinned_image": target["image"],
+            "source_commit": target.get("source_commit"),
+        }
+        if error is not None:
+            out["error"] = error
+        return out
+
+    async def _rebuild_pinned_image(
+        self,
+        target: dict,
+        progress_callback: Callable[..., Any] | None = None,
+    ) -> dict:
+        """Rebuild ONE deployment's pinned image from its recorded revision.
+
+        Returns the outcome; `reproduced` is the whole point — a rebuild that
+        yields a different tag means the tree that was deployed was not the tree
+        that was committed (untracked files at deploy time, or a hand-built
+        image). That is reported and the pin is left alone: retagging would make
+        a promoted, signed-off tag name an artifact nobody approved.
+        """
+        commit = target["source_commit"]
+        repo_path = target["repo_path"]
+        out = self._image_outcome(target)
+        if not commit:
+            out["error"] = (
+                "the deployment records no source commit, so the exact source "
+                "cannot be recovered — redeploy or re-promote this stage"
+            )
+            return out
+        if not repo_path:
+            out["error"] = (
+                f"source path {target['relative_path']!r} is not inside "
+                f"{target['bp']}'s repository, so it cannot be rebuilt from history"
+            )
+            return out
+
+        root = await self._materialize_revision(target["bp"], commit)
+        source_dir = os.path.join(root, target["bp"], repo_path)
+        if not os.path.isdir(source_dir):
+            out["error"] = (
+                f"{repo_path} does not exist at {commit[:8]} — the source was "
+                f"moved or removed after this deployment"
+            )
+            return out
+
+        # Same two-stage bake the original deploy ran, against the extracted tree.
+        # `_ensure_automation_image` rewrites automation.toml with the resolved
+        # base tag before the hash is taken, exactly as it did then; the tag is
+        # derived from the `image/` subtree, so on a clean checkout that rewrite
+        # is a no-op and the content address is unchanged.
+        base_tag = await self._ensure_automation_image(
+            source_dir, progress_callback=progress_callback
+        )
+        auto_conf = read_automation_config(source_dir)
+        checksum = await calculate_git_tree_hash([source_dir])
+        image, image_id = await self._bake_source_image(
+            source_dir,
+            [source_dir],
+            base_tag or auto_conf.image,
+            auto_conf.mount_path,
+            checksum,
+            progress_callback=progress_callback,
+        )
+        out["image"] = image
+        out["image_id"] = image_id
+        out["reproduced"] = image == target["image"]
+        if not out["reproduced"]:
+            out["error"] = (
+                f"rebuilding {commit[:8]} produced {image}, not the pinned "
+                f"{target['image']} — the deployed tree differed from the "
+                f"committed one, so this exact artifact cannot be recovered; "
+                f"re-promote this stage"
+            )
+        return out
+
+    async def resolve_missing_pinned_images(
+        self,
+        deployment_ids: list[str] | None = None,
+        progress_callback: Callable[..., Any] | None = None,
+    ) -> dict:
+        """Rebuild every pinned image that is absent from the local store.
+
+        Idempotent and cheap when there is nothing to do: images already present
+        are skipped without touching git or docker. `deployment_ids` narrows the
+        scan (a rollback only cares about the BP it restored).
+
+        One deployment failing never stops the others — a workspace coming back
+        with nine of ten business processes is worth more than one that refuses to
+        start at all — and every failure is named in the result.
+        """
+        targets = self._pinned_image_targets()
+        if deployment_ids is not None:
+            wanted = set(deployment_ids)
+            targets = [t for t in targets if t["deployment_id"] in wanted]
+        if not targets:
+            return {"missing": 0, "rebuilt": [], "failures": []}
+
+        present = await self._present_image_tags()
+        missing = [t for t in targets if t["image"] not in present]
+        if not missing:
+            logger.info(
+                "resolve-images: all %d pinned image(s) are present", len(targets)
+            )
+            return {"missing": 0, "rebuilt": [], "failures": []}
+
+        logger.info(
+            "resolve-images: %d of %d pinned image(s) missing; rebuilding from "
+            "their recorded revisions",
+            len(missing),
+            len(targets),
+        )
+
+        rebuilt: list[dict] = []
+        failures: list[dict] = []
+        # Group by revision so one extraction serves every deployment built from
+        # it, and so a BP's stages are handled together.
+        for target in sorted(missing, key=lambda t: (t["source_commit"] or "", t["bp"])):
+            try:
+                result = await self._rebuild_pinned_image(
+                    target, progress_callback=progress_callback
+                )
+            except HTTPException as exc:
+                result = self._image_outcome(target, str(exc.detail))
+            except Exception as exc:  # noqa: BLE001 — reported, never fatal
+                result = self._image_outcome(target, str(exc))
+            if result.get("reproduced"):
+                rebuilt.append(result)
+            else:
+                logger.warning(
+                    "resolve-images: %s (%s) could not be recovered: %s",
+                    target["deployment_id"],
+                    target["image"],
+                    result.get("error"),
+                )
+                failures.append(result)
+
+        return {"missing": len(missing), "rebuilt": rebuilt, "failures": failures}
+
     async def rebuild_all_images_and_deploy(self):
-        """Rebuild every automation's images from source, then converge.
+        """Rebuild every missing pinned image from its revision, then converge.
 
         The recovery counterpart to `deploy_automations`. See the route docstring
-        for why a rebuilt host needs this: nothing in the ordinary converge
-        builds, so a host that never built these images cannot start them.
+        for why a rebuilt host needs this at all.
 
-        Only `prep_deploy_source` is used — documented as pure prep, no
-        bitswan.yaml write, no git commit, no compose-up — so this adds images to
-        the local store and changes nothing else. The converge afterwards is the
-        normal one, driven by the restored deployments.
-
-        One automation failing to build does not abort the rest: a workspace
-        coming back with nine of ten business processes is worth more than one
-        that refuses to start at all, and the failures are reported.
+        Nothing here writes bitswan.yaml, commits, or pushes: it adds images to
+        the local store and nothing else. The converge afterwards is the ordinary
+        one, driven by the restored deployments.
         """
-        sources = scan_workspace_sources(self.workspace_repo_dir)
-        if not sources:
-            logger.info("rebuild-and-deploy: no automation sources found; converging only")
-            return await self.deploy_automations()
-
-        # What the restored deployments expect to run, so we can tell which
-        # pinned tags the rebuild actually reproduced.
-        pinned: dict[str, str] = {}
-        for dep_id, conf in (read_bitswan_yaml(self.gitops_dir) or {}).get(
-            "deployments", {}
-        ).items():
-            image = (conf or {}).get("image")
-            if image:
-                pinned[dep_id] = image
-
-        built: list[dict] = []
-        failures: list[dict] = []
-        rebuilt_tags: set[str] = set()
-
-        for source in sources:
-            relative_path = source.get("relative_path") or ""
-            try:
-                # stage="dev" bakes the source image; the resulting tag is
-                # content-addressed and carries no stage, so it is the same tag
-                # a staging/production deployment references.
-                prep = await self.prep_deploy_source(relative_path, stage="dev")
-            except Exception as exc:  # noqa: BLE001 — reported, never fatal
-                logger.warning("rebuild-and-deploy: %s failed to build: %s", relative_path, exc)
-                failures.append({"relative_path": relative_path, "error": str(exc)})
-                continue
-
-            if prep.get("image"):
-                rebuilt_tags.add(prep["image"])
-            built.append(
-                {
-                    "relative_path": relative_path,
-                    "deployment_id": prep.get("deployment_id"),
-                    "image": prep.get("image"),
-                }
-            )
-
-        # Deployments whose pinned image was NOT reproduced: the source tree has
-        # moved on from what was promoted, so that exact artifact is gone and the
-        # operator has to re-promote. Naming them beats a container that simply
-        # never starts.
-        unreproduced = {
-            dep_id: image
-            for dep_id, image in pinned.items()
-            if image not in rebuilt_tags
-        }
-        if unreproduced:
-            logger.warning(
-                "rebuild-and-deploy: %d pinned image(s) could not be reproduced from "
-                "the current source: %s",
-                len(unreproduced),
-                ", ".join(sorted(unreproduced.values())),
-            )
-
+        resolved = await self.resolve_missing_pinned_images()
         deploy_result = await self.deploy_automations()
 
         return {
-            "message": "Rebuilt images and converged the workspace",
-            "rebuilt": built,
-            "build_failures": failures,
-            "unreproduced_images": unreproduced,
+            "message": "Rebuilt missing images and converged the workspace",
+            "missing_images": resolved["missing"],
+            "rebuilt": resolved["rebuilt"],
+            # Deployments whose exact artifact could not be reproduced. Their
+            # containers will not start until the stage is re-promoted, so this
+            # is the one part of the result an operator has to read.
+            "unrecoverable": resolved["failures"],
             "deploy": deploy_result,
         }
 
