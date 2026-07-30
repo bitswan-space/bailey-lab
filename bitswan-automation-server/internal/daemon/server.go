@@ -86,6 +86,10 @@ func NewServer(version string) *Server {
 	// itself (which needs workspace/route/image data only this package has).
 	s.backupEngine.Version = version
 	s.backupEngine.ManifestBuilder = s.buildServerManifest
+	// Every run re-reports the running version: the copy the AOC keeps is the only
+	// one a recovery can read before it has a binary, and a run is exactly when
+	// what a recovery would restore changes.
+	s.backupEngine.VersionReporter = s.reportVersionToAOC
 	return s
 }
 
@@ -496,8 +500,10 @@ func (s *Server) Run() error {
 
 		// Tell the AOC which build we are, so a disaster recovery can rebuild
 		// this server on the same version. Last, because it is the least urgent
-		// thing here and must not delay the tunnel.
-		s.startVersionReporter()
+		// thing here and must not delay the tunnel. Every subsequent report rides
+		// on a backup run (Engine.VersionReporter); this one exists so a server
+		// that has not backed up yet is still on record.
+		s.reportVersionInBackground()
 	}()
 
 	// Memory governance sweep: every 5 minutes shed the oldest on-demand

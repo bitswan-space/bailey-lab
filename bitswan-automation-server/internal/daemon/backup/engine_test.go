@@ -218,3 +218,49 @@ func TestEngineRejectsConcurrentRuns(t *testing.T) {
 	}
 	engine.end()
 }
+
+// TestRunAllReportsTheVersion pins that every run tells the AOC which binary made
+// it. The AOC's copy of the version is the only one a disaster recovery can read
+// before it has a binary — the manifest's copy is inside the encrypted repo — so a
+// run that captures a new recovery point without reporting would leave the AOC
+// naming a build that no longer matches the newest snapshot.
+func TestRunAllReportsTheVersion(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	aoc := aocStub(t)
+	defer aoc.Close()
+	writeServerConfig(t, aoc.URL)
+	fakeRestic(t, 0, "")
+
+	writeWorkspace(t, "ws1", true)
+	driver := fakeDriver(t, "ws1")
+	defer driver.Close()
+	oldBase := driverBaseURL
+	driverBaseURL = func(ws string) string { return driver.URL }
+	defer func() { driverBaseURL = oldBase }()
+
+	reported := 0
+	engine := Engine{VersionReporter: func() { reported++ }}
+	if _, err := engine.RunAll(context.Background(), func(string) {}); err != nil {
+		t.Fatalf("RunAll: %v", err)
+	}
+	if reported != 1 {
+		t.Fatalf("expected exactly one version report per run, got %d", reported)
+	}
+}
+
+// TestRunAllWithoutAVersionReporter guards the nil hook: the CLI and tests build
+// an Engine directly, and a run must not depend on the daemon having wired it.
+func TestRunAllWithoutAVersionReporter(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	aoc := aocStub(t)
+	defer aoc.Close()
+	writeServerConfig(t, aoc.URL)
+	fakeRestic(t, 0, "")
+
+	var engine Engine
+	if _, err := engine.RunAll(context.Background(), func(string) {}); err != nil {
+		t.Fatalf("RunAll with no VersionReporter: %v", err)
+	}
+}

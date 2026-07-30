@@ -52,6 +52,19 @@ type Engine struct {
 	// package (it needs the workspace list, image pins and route table), which
 	// imports this one — hence a hook rather than a direct call.
 	ManifestBuilder func() ([]byte, error)
+
+	// VersionReporter tells the AOC which binary made this run.
+	//
+	// Called on every run — nightly, catch-up and manual alike — because the
+	// version worth recording is the one that wrote the newest recovery point,
+	// and that is decided here rather than on a clock. A recovery installs the
+	// binary the AOC names, so the two copies of the version (the manifest's,
+	// inside the encrypted repo, and the AOC's, which is the only one a recovery
+	// can read before it has a binary) agree by construction.
+	//
+	// Same layering reason as ManifestBuilder: the AOC client lives in the daemon
+	// package, which imports this one.
+	VersionReporter func()
 }
 
 // ErrAlreadyRunning distinguishes the 409 case for the API layer.
@@ -191,6 +204,15 @@ func (e *Engine) RunAll(ctx context.Context, log func(string)) (*RunReport, erro
 	for _, ws := range workspaces {
 		log("Backing up workspace " + ws)
 		report.Workspaces[ws] = e.backupWorkspace(ctx, restic, ws, log)
+	}
+
+	// Before the server state, because that step writes the manifest carrying the
+	// same version: reporting here keeps the AOC's copy and the snapshot's copy
+	// describing one binary. Placed after the workspace loop only because nothing
+	// in that loop can abort the run, so this is reached whenever a run happens
+	// at all.
+	if e.VersionReporter != nil {
+		e.VersionReporter()
 	}
 
 	log("Backing up server state")

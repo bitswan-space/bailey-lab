@@ -270,6 +270,21 @@ and reused, so a retry does not need a fresh OTP — and OTPs are single-use wit
 ten-minute life. Workspaces are fail-fast: the run stops at the first one that
 fails rather than burying the cause.
 
+### Which CLI version a recovery installs
+
+The command the AOC hands out is pinned to the version the lost server was
+running, so a rebuilt server comes back on the same build rather than on whatever
+is newest. The daemon reports its version to the AOC at startup and on every
+backup run, which means the recorded version describes the binary that wrote the
+newest recovery point. The version is also inside each backup (the server
+manifest), but restic encrypts it and the key is never escrowed — so the AOC's copy
+is the only one readable before a binary exists to read the other.
+
+The pin is dropped, and the newest release installed instead, when the recorded
+version cannot be honoured: nothing was ever reported, it is a build from source
+(no published release to fetch), or that build predates `recover server`. The
+"Disaster recovery" dialog states which case applies before issuing anything.
+
 ### How business-process images come back
 
 Per-BP images are in no backup — they only ever existed in the lost machine's

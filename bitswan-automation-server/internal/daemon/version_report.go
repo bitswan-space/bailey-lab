@@ -19,11 +19,17 @@ import (
 //
 // Hence a report, not a lookup.
 
-// versionReportInterval re-reports periodically so an upgrade does not leave the
-// AOC pinning a version this server no longer runs. Slow on purpose: the value
-// changes only when the binary is replaced, and a recovery that fetches a build
-// one interval stale is a far smaller problem than a chatty daemon.
-const versionReportInterval = 6 * time.Hour
+// versionReportTimeout bounds one report.
+//
+// The AOC client sets no per-request timeout, and this now runs inside a backup
+// run — so without a bound a black-holed AOC would hang the run rather than the
+// report. Generous, because failing to report is not worth a retry: the next run
+// reports again.
+const versionReportTimeout = 30 * time.Second
+
+// versionReportTimeoutForTest is the timeout actually used; a var so a test can
+// prove the bound exists without waiting for it.
+var versionReportTimeoutForTest = versionReportTimeout
 
 // SupportsServerRecovery reports whether THIS build can rebuild a whole server.
 //
@@ -39,17 +45,19 @@ const versionReportInterval = 6 * time.Hour
 // while this stayed true, every recovery would fetch a binary that cannot run it.
 const SupportsServerRecovery = true
 
-// startVersionReporter reports the running version now, then on a slow ticker.
+// reportVersionInBackground reports the running version once, off the caller's
+// goroutine.
+//
+// Used on the startup path so a server that has never backed up still tells the
+// AOC what it is — otherwise the record would not exist until the first nightly,
+// and a server lost on day one would be unrecoverable-at-version. Every later
+// report rides on a backup run instead (Engine.VersionReporter), which is the
+// event that actually changes what a recovery would restore.
 //
 // Best-effort throughout: a server that cannot reach its AOC has larger problems
 // than a stale version record, and nothing here may delay or fail startup.
-func (s *Server) startVersionReporter() {
-	go func() {
-		s.reportVersionToAOC()
-		for range time.Tick(versionReportInterval) {
-			s.reportVersionToAOC()
-		}
-	}()
+func (s *Server) reportVersionInBackground() {
+	go s.reportVersionToAOC()
 }
 
 // reportVersionOnce is a seam so tests can drive the reporting decision without
@@ -69,7 +77,20 @@ func (s *Server) reportVersionToAOC() {
 	if s.version == "" || s.version == "dev" {
 		return
 	}
-	if err := reportVersionOnce(s.version); err != nil {
-		fmt.Printf("Warning: could not report this server's version to the AOC: %v\n", err)
+
+	// Bounded rather than simply awaited: this runs inside a backup run, and the
+	// AOC client has no request timeout of its own. The goroutine may outlive the
+	// wait — one abandoned request per run, which is the cheaper failure.
+	done := make(chan error, 1)
+	go func() { done <- reportVersionOnce(s.version) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			fmt.Printf("Warning: could not report this server's version to the AOC: %v\n", err)
+		}
+	case <-time.After(versionReportTimeoutForTest):
+		fmt.Printf("Warning: reporting this server's version to the AOC timed out after %s\n",
+			versionReportTimeoutForTest)
 	}
 }

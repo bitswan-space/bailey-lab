@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 // What the AOC does with a reported version is decide whether a disaster-recovery
@@ -63,5 +64,46 @@ func TestThisBuildDeclaresRecoverySupport(t *testing.T) {
 	// command, which is the half this package cannot see.
 	if !SupportsServerRecovery {
 		t.Fatal("this build ships `bitswan recover server` and must declare it")
+	}
+}
+
+func TestTheBackupEngineIsWiredToReport(t *testing.T) {
+	// The report now rides on backup runs rather than a clock, which only works if
+	// NewServer actually hands the engine the hook — a silent nil here would mean
+	// the AOC's version record froze at whatever boot last set it.
+	if NewServer("v2026.07.29.50").backupEngine.VersionReporter == nil {
+		t.Fatal("the backup engine has no VersionReporter; runs would never report")
+	}
+}
+
+func TestAHangingReportDoesNotBlockForever(t *testing.T) {
+	// This runs inside a backup run and the AOC client sets no request timeout, so
+	// the bound has to be here: an unreachable-but-not-refusing AOC must cost the
+	// run one timeout, not the whole run.
+	original := reportVersionOnce
+	originalTimeout := versionReportTimeoutForTest
+	t.Cleanup(func() {
+		reportVersionOnce = original
+		versionReportTimeoutForTest = originalTimeout
+	})
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	reportVersionOnce = func(string) error {
+		<-release // never returns within the test
+		return nil
+	}
+	versionReportTimeoutForTest = 20 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() {
+		(&Server{version: "v2026.07.29.50"}).reportVersionToAOC()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reportVersionToAOC did not give up; a backup run would hang on it")
 	}
 }
