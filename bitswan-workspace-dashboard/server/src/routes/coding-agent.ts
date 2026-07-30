@@ -101,7 +101,23 @@ function defaultSessionName(opts: {
   }
 }
 
-function buildAutoCmd(opts: {
+/**
+ * How long a `--resume` has to survive before we stop treating its non-zero
+ * exit as "the conversation isn't there". `claude --resume <uuid>` bails in
+ * well under a second when it can't find the transcript ("No conversation
+ * found with session ID: …"); anything that ran longer than this had a real
+ * conversation and exited for its own reasons, which we must not paper over
+ * by starting a new chat behind the user's back.
+ */
+const RESUME_FAILFAST_SECONDS = 15;
+
+/**
+ * Build the shell command the coding-agent container runs for one session
+ * (transported as `SSH_AUTO_CMD`, materialised into a script and executed by
+ * agent-session-wrapper). Prepares Claude's per-user config, then either
+ * resumes the caller's conversation or starts a new one. Exported for tests.
+ */
+export function buildAutoCmd(opts: {
   copy: string;
   bp?: string;
   sessionId: string;
@@ -141,9 +157,41 @@ function buildAutoCmd(opts: {
       ...(opts.requirement ? { requirement: opts.requirement } : {}),
     }),
   );
-  const claudeArgs = opts.resume
-    ? `--dangerously-skip-permissions --resume ${opts.sessionId}`
-    : `--dangerously-skip-permissions --session-id ${opts.sessionId} -n '${safeName}' '${safePrompt}'`;
+  const freshArgs = `--dangerously-skip-permissions --session-id ${opts.sessionId} -n '${safeName}' '${safePrompt}'`;
+  const resumeArgs = `--dangerously-skip-permissions --resume ${opts.sessionId}`;
+  // Stale-session recovery. The dashboard remembers a conversation UUID for
+  // this (copy, bp) forever, but the transcript that backs it lives inside
+  // the coding-agent container — a container rebuild, a wiped home volume or
+  // a pruned history makes it vanish. `claude --resume <uuid>` then prints
+  // "No conversation found with session ID: …" and exits immediately, the
+  // ssh session ends, and the dashboard is left with no agent (bailey-lab
+  // #246).
+  //
+  // We can't read claude's stderr here (it owns the TTY), so the signal we
+  // key off is its *exit status plus how fast it bailed*: a non-zero exit
+  // within RESUME_FAILFAST_SECONDS means the resume never got off the
+  // ground, so we start a fresh conversation instead. Re-using the SAME uuid
+  // is deliberate — it's free precisely because no conversation holds it, and
+  // it keeps the dtach socket name, the wrapper's .meta.json and the
+  // dashboard's stored id all pointing at one conversation, so the next visit
+  // resumes successfully.
+  //
+  // This fires at most once per ssh session: if the fresh start fails too,
+  // the script exits and the client backs off rather than retrying in here.
+  // Failures that are *not* recoverable this way — the container being
+  // unreachable, DNS not resolving, the user not being authenticated, or
+  // resuming someone else's session — are all rejected before we ever spawn
+  // ssh (see the WS handler below) and never reach this command.
+  //
+  // Note the deliberate absence of backslash escapes in the snippet below:
+  // the wrapper materialises SSH_AUTO_CMD with `echo "$AUTO_CMD" > script`,
+  // and `echo`'s handling of backslashes is shell/option dependent.
+  const launch = opts.resume
+    ? `{ _t0=$SECONDS; claude ${resumeArgs}; _rc=$?; ` +
+      `if [ "$_rc" -ne 0 ] && [ $((SECONDS - _t0)) -lt ${RESUME_FAILFAST_SECONDS} ]; then ` +
+      `echo; echo '[bitswan] could not resume the previous conversation - starting a new one'; ` +
+      `exec claude ${freshArgs}; fi; exit "$_rc"; }`
+    : `exec claude ${freshArgs}`;
   // Both stubs below target $CLAUDE_CONFIG_DIR: agent-session-wrapper gives
   // every dashboard session a per-user config dir (keyed off the oauth2-proxy
   // email), and Claude ignores ~/.claude entirely once that env var is set.
@@ -185,7 +233,7 @@ function buildAutoCmd(opts: {
     `cd ${cd} && ` +
     `${settingsCmd} && ` +
     `${trustCmd} && ` +
-    `exec claude ${claudeArgs}`
+    launch
   );
 }
 
