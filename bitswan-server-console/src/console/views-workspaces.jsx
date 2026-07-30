@@ -997,7 +997,7 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   const addMember = async (email) => {
     if (!email) return;
     setBusy('add');
-    const label = addRole === 'owner' ? 'owner' : 'member';
+    const label = addRole === 'owner' ? 'owner' : 'user';
     try {
       setShare(await WApi.addWorkspaceMember(dashHost, email, addRole));
       toast(`${email} added to ${ws.name} as ${label}`, 'success');
@@ -1092,7 +1092,7 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
     setBusy(p.principal_value);
     try {
       setShare(await WApi.setWorkspaceMemberRole(dashHost, p.principal_type, p.principal_value, newRole, p.role));
-      toast(`${p.principal_value} is now ${newRole === 'owner' ? 'an owner' : 'a member'} of ${ws.name}`, 'success');
+      toast(`${p.principal_value} is now ${newRole === 'owner' ? 'an owner' : 'a user'} of ${ws.name}`, 'success');
     } catch (e) { toast(`Couldn't change role: ${e.message}`, 'danger'); }
     finally { setBusy(''); }
   };
@@ -1104,7 +1104,7 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
       {/* People & roles. Owner is a ROLE, not an exclusive property — a
           workspace can have several owners. Owners are listed first. */}
       <div style={{ ...SECTION, margin: '2px 0 10px', display: 'flex', justifyContent: 'space-between' }}>
-        <span>People &amp; roles</span><span>{(canManage && !share) ? '' : people.length}</span>
+        <span>People with access</span><span>{(canManage && !share) ? '' : people.length}</span>
       </div>
       {err && <div style={{ fontSize: 12.5, color: WC.red, marginBottom: 8 }}>{err}</div>}
       {canManage && !share && !err && <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>Loading people…</div>}
@@ -1115,7 +1115,9 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
         {people.map(p => {
           const isOwnerRole = p.role === 'owner';
           const isGroup = p.principal_type === 'group';
-          const roleLabel = isOwnerRole ? 'Owner' : isGroup ? 'Group' : 'Member';
+          const roleLabel = isOwnerRole ? 'Owner' : isGroup ? 'Group' : 'User';
+          // The recorded owner (first row) is fixed — a static Owner badge, no
+          // controls — exactly like the share dialog's original-owner row.
           const controllable = canManage && !p.isPrimary && !isGroup;
           return (
             <div key={`${p.principal_type}:${p.principal_value}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 6px', borderRadius: 8 }}>
@@ -1123,25 +1125,19 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
                 <WUserChip user={{ email: isGroup ? undefined : p.principal_value, name: isGroup ? p.principal_value : undefined }}
                   size={30}
                   nameSuffix={controllable ? null : (
-                    <>
-                      <WPill tone={isOwnerRole ? 'primary' : 'neutral'} size="xs">{roleLabel}</WPill>
-                      {p.isPrimary && <span style={{ fontSize: 10.5, color: WC.mutedFg, marginLeft: 6 }}>primary</span>}
-                    </>
+                    <WPill tone={isOwnerRole ? 'primary' : 'neutral'} size="xs">{roleLabel}</WPill>
                   )} />
               </div>
               {controllable && (
                 <>
-                  {/* Role dropdown — the standard control for changing a person's role. */}
-                  <div style={{ width: 118, ...(busy === p.principal_value ? { opacity: 0.5, pointerEvents: 'none' } : {}) }}>
+                  {/* Role dropdown (User / Owner) — same control + wording as the share dialog. */}
+                  <div style={{ width: 112, ...(busy === p.principal_value ? { opacity: 0.5, pointerEvents: 'none' } : {}) }}>
                     <WSelect value={isOwnerRole ? 'owner' : 'access'}
                       onChange={(r) => changeRole(p, r)}
-                      options={[{ value: 'access', label: 'Member' }, { value: 'owner', label: 'Owner' }]} />
+                      options={[{ value: 'access', label: 'User' }, { value: 'owner', label: 'Owner' }]} />
                   </div>
-                  <button onClick={() => removeMember(p)} disabled={busy === p.principal_value} title="Remove from workspace" style={{
-                    width: 28, height: 28, border: 0, background: 'transparent', borderRadius: 6, cursor: 'pointer',
-                    color: WC.mutedFg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <WIcon name="user-minus" size={15} />
-                  </button>
+                  <WBtn variant="ghost" size="xs" disabled={busy === p.principal_value}
+                    onClick={() => removeMember(p)}>Remove</WBtn>
                 </>
               )}
             </div>
@@ -1157,7 +1153,7 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
             <span style={{ fontSize: 12.5, color: WC.muted }}>as</span>
             <div style={{ width: 130 }}>
               <WSelect value={addRole} onChange={setAddRole}
-                options={[{ value: 'access', label: 'Member' }, { value: 'owner', label: 'Owner' }]} />
+                options={[{ value: 'access', label: 'User' }, { value: 'owner', label: 'Owner' }]} />
             </div>
             <div style={{ flex: 1 }}>
               <WTextInput value={addQuery} onChange={setAddQuery} placeholder="Search people…" />
@@ -1165,11 +1161,11 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
           </div>
           {pickerBody(candidates,
             q ? 'No one matches.' : 'Everyone on this server is already in this workspace.',
-            (e) => `Add ${e} as ${addRole === 'owner' ? 'owner' : 'member'}`, addMember, busy === 'add')}
+            (e) => `Add ${e} as ${addRole === 'owner' ? 'owner' : 'user'}`, addMember, busy === 'add')}
           <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
             {addRole === 'owner'
               ? 'Owners can manage people and update or delete the workspace.'
-              : "Members can open the workspace's apps. They'll still trust a device of their own to get in."}
+              : "Users can open the workspace's apps. They'll still trust a device of their own to get in."}
           </div>
 
           {/* Reassign the recorded PRIMARY owner — a niche action; to add more

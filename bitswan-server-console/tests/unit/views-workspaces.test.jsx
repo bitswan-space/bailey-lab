@@ -28,7 +28,7 @@ describe('OverviewView', () => {
     fireEvent.click(screen.getByText('People'));
     fireEvent.click(screen.getByText('Devices'));
     fireEvent.click(screen.getByText('Pending'));
-    expect(s.go).toHaveBeenCalledWith('users'); // approvals merged into People & roles
+    expect(s.go).toHaveBeenCalledWith('users'); // approvals merged into People with access
     expect(s.go).toHaveBeenCalledWith('workspaces');
   });
   it('shows the loading/error banner and retries', () => {
@@ -160,9 +160,9 @@ describe('WorkspacesView', () => {
     fireEvent.click(screen.getByText('Open'));
     expect(s.openUrl).toHaveBeenCalled();
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    // Role-based drawer: one "People & roles" list (owners + members from the
+    // Role-based drawer: one "People with access" list (owners + members from the
     // share API). Owner is a role, not an exclusive property.
-    expect(screen.getByText('People & roles')).toBeTruthy();
+    expect(screen.getByText('People with access')).toBeTruthy();
     await waitFor(() => expect(screen.getByText('me@example.test')).toBeTruthy()); // owner
     await waitFor(() => expect(screen.getByText('bob@x')).toBeTruthy());           // member
   });
@@ -271,14 +271,14 @@ describe('WorkspacesView', () => {
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
     await waitFor(() => expect(screen.getByText('me@example.test')).toBeTruthy()); // owner in the People list
-    await waitFor(() => expect(screen.getByTitle('Add new@x as member')).toBeTruthy());
-    fireEvent.click(screen.getByTitle('Add new@x as member'));
+    await waitFor(() => expect(screen.getByTitle('Add new@x as user')).toBeTruthy());
+    fireEvent.click(screen.getByTitle('Add new@x as user'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('added'), 'success'));
     await waitFor(() => expect(screen.getByText('new@x')).toBeTruthy());
     // The share POST answered with the updated grant list, so the new member
     // left the picker ("everyone's in") and can be removed again.
-    expect(screen.queryByTitle('Add new@x as member')).toBeNull();
-    fireEvent.click(screen.getByTitle('Remove from workspace'));
+    expect(screen.queryByTitle('Add new@x as user')).toBeNull();
+    fireEvent.click(screen.getByText('Remove'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('removed'), 'info'));
   });
 
@@ -308,17 +308,17 @@ describe('WorkspacesView', () => {
     });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    await waitFor(() => expect(screen.getByTitle('Add jane@y as member')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTitle('Add jane@y as user')).toBeTruthy());
     // Owner and existing members never appear as candidates.
-    expect(screen.queryByTitle('Add me@example.test as member')).toBeNull();
-    expect(screen.queryByTitle('Add bob@x as member')).toBeNull();
+    expect(screen.queryByTitle('Add me@example.test as user')).toBeNull();
+    expect(screen.queryByTitle('Add bob@x as user')).toBeNull();
     expect(screen.getByText('Invited')).toBeTruthy(); // invited-only flag on sam@x
-    fireEvent.click(screen.getByTitle('Add sam@x as member'));
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('sam@x added to demo as member', 'success'));
+    fireEvent.click(screen.getByTitle('Add sam@x as user'));
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('sam@x added to demo as user', 'success'));
     expect(granted.get('action')).toBe('grant');
     expect(granted.get('principal_value')).toBe('sam@x');
     await waitFor(() => expect(screen.getByText('sam@x')).toBeTruthy()); // now in Members
-    expect(screen.queryByTitle('Add sam@x as member')).toBeNull();                 // and out of the picker
+    expect(screen.queryByTitle('Add sam@x as user')).toBeNull();                 // and out of the picker
   });
 
   it('manage drawer: typing filters the directory picker (matches email or name)', async () => {
@@ -328,13 +328,13 @@ describe('WorkspacesView', () => {
     });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    await waitFor(() => expect(screen.getByTitle('Add jane@y as member')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTitle('Add jane@y as user')).toBeTruthy());
     fireEvent.change(screen.getByPlaceholderText('Search people…'), { target: { value: 'sam' } });
-    expect(screen.getByTitle('Add sam@x as member')).toBeTruthy();
-    expect(screen.queryByTitle('Add jane@y as member')).toBeNull();
+    expect(screen.getByTitle('Add sam@x as user')).toBeTruthy();
+    expect(screen.queryByTitle('Add jane@y as user')).toBeNull();
     fireEvent.change(screen.getByPlaceholderText('Search people…'), { target: { value: 'nobody@z' } });
     expect(screen.getByText('No one matches.')).toBeTruthy(); // honest empty state, search still usable
-    expect(screen.queryByTitle('Add sam@x as member')).toBeNull();
+    expect(screen.queryByTitle('Add sam@x as user')).toBeNull();
   });
 
   it('manage drawer (owner): directory unavailable → honest error, no picker', async () => {
@@ -448,7 +448,7 @@ describe('WorkspacesView', () => {
     fireEvent.click(screen.getByTitle('Manage workspace'));
     // Members can SEE who owns it and who's in it…
     expect(screen.getByText("You're a member of this workspace")).toBeTruthy();
-    expect(screen.getByText('People & roles')).toBeTruthy();
+    expect(screen.getByText('People with access')).toBeTruthy();
     expect(screen.getByText('owner@x')).toBeTruthy();        // the owner
     expect(screen.getByText('mate@x')).toBeTruthy();         // a fellow member
     expect(screen.getByText(/Only an owner can add or remove/)).toBeTruthy();

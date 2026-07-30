@@ -135,7 +135,7 @@ describe('App live-data loading + adapters + routing', () => {
     render(<App />);
     // The manage drawer for ws1 is open on load — no click needed. "People &
     // roles" only exists inside the drawer.
-    await waitFor(() => expect(screen.getByText('People & roles')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('People with access')).toBeTruthy());
   });
 
   it('navigation pushes a canonical URL', async () => {
