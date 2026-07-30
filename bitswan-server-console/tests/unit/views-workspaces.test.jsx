@@ -427,6 +427,33 @@ describe('WorkspacesView', () => {
     expect(posted[1].get('role')).toBe('access');
   });
 
+  it('manage drawer (owner): shows Bailey org-role badges (admin/auditor) inline', async () => {
+    // The people directory carries each person's server-wide Bailey role. The
+    // roster shows a badge for the notable ones (admin/auditor) next to the
+    // name — separate from the per-workspace Owner/User control. Plain members
+    // get no badge.
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [
+        { principal_type: 'email', principal_value: 'aud@x', role: 'access' },
+        { principal_type: 'email', principal_value: 'plain@x', role: 'access' },
+      ] } },
+      '/bailey/api/people/directory': { json: { people: [
+        rosterPerson({ email: 'me@example.test', role: 'admin' }),   // the workspace owner is also a server admin
+        rosterPerson({ email: 'aud@x', role: 'auditor' }),
+        rosterPerson({ email: 'plain@x', role: 'member' }),           // unremarkable — no badge
+      ] } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
+    fireEvent.click(screen.getByTitle('Manage workspace'));
+    await waitFor(() => expect(screen.getByText('me@example.test')).toBeTruthy());
+    // Admin + auditor render exactly once each (getByText throws on duplicates).
+    await waitFor(() => expect(screen.getByText('Admin')).toBeTruthy());
+    expect(screen.getByText('Auditor')).toBeTruthy();
+    // A plain member gets no org badge (member/user are the default, unbadged).
+    expect(screen.queryByText('Member')).toBeNull();
+    expect(screen.queryByText('member')).toBeNull();
+  });
+
   it('manage drawer (non-owner): sees owner + members read-only, no add box', () => {
     const s = spies();
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({

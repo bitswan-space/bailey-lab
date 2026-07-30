@@ -977,6 +977,18 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
     return rows.sort((a, b) => rank(a) - rank(b) ||
       (a.principal_value || '').localeCompare(b.principal_value || ''));
   })();
+  // Bailey org role (admin | auditor | member | user) per email, from the
+  // people directory. Distinct from the workspace role above: it's server-wide,
+  // set in People & roles, and only the notable ones (admin/auditor) get a
+  // badge here — member/user are the unremarkable default. Only owners load the
+  // directory, so the badges show in the owner-managed view.
+  const orgRoleByEmail = new Map();
+  (directory || []).forEach(p => { if (p && p.email && p.role) orgRoleByEmail.set(p.email.toLowerCase(), p.role); });
+  const orgBadgeFor = (email) => {
+    const role = orgRoleByEmail.get((email || '').toLowerCase());
+    if (role !== 'admin' && role !== 'auditor') return null;
+    return <WPill tone={ROLE_TONE[role] || 'neutral'} size="xs">{role === 'admin' ? 'Admin' : 'Auditor'}</WPill>;
+  };
   const SECTION = { fontSize: 11, fontWeight: 600, color: WC.muted, textTransform: 'uppercase', letterSpacing: 0.4 };
   // An already-trashed workspace is restored (or permanently removed via Empty
   // trash) from the list — there's nothing to delete here.
@@ -1083,9 +1095,14 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <WUserChip user={{ email: isGroup ? undefined : p.principal_value, name: isGroup ? p.principal_value : undefined }}
                   size={30}
-                  nameSuffix={controllable ? null : (
-                    <WPill tone={isOwnerRole ? 'primary' : 'neutral'} size="xs">{roleLabel}</WPill>
-                  )} />
+                  nameSuffix={<>
+                    {/* Server-wide Bailey role (admin/auditor) — always shown, so
+                        it's visible whether or not the workspace-role dropdown is. */}
+                    {!isGroup && orgBadgeFor(p.principal_value)}
+                    {/* Workspace role: a static pill only when there's no dropdown
+                        (groups, or the read-only member view). */}
+                    {!controllable && <WPill tone={isOwnerRole ? 'primary' : 'neutral'} size="xs">{roleLabel}</WPill>}
+                  </>} />
               </div>
               {controllable && (
                 <>

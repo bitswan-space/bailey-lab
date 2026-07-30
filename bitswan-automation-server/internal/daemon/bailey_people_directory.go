@@ -16,12 +16,19 @@ import (
 // via the dashboard's parent delegation, workspace members: both can
 // already grant emails on endpoints they control, so both need to see
 // who there is to grant. Someone who owns nothing shareable has no use
-// for the server's email list and gets a 403. Only the picker fields
-// are exposed — no roles, device counts, or activity.
+// for the server's email list and gets a 403.
+//
+// ROLE is the person's authoritative Bailey org role (admin | auditor |
+// member | user) — the same value the admin roster reports. It's exposed
+// here (not just on the admin-only /bailey/api/people) because who the
+// admins and auditors are is already discoverable to any authenticated
+// user via /bailey/auditors — a workspace owner managing people benefits
+// from seeing those badges inline. No device counts or activity, though.
 type directoryPersonDTO struct {
 	Email   string `json:"email"`
 	Name    string `json:"name,omitempty"`
 	Invited bool   `json:"invited"`
+	Role    string `json:"role,omitempty"`
 }
 
 func handleBaileyPeopleDirectory(w http.ResponseWriter, r *http.Request, email string) {
@@ -52,6 +59,7 @@ func handleBaileyPeopleDirectory(w http.ResponseWriter, r *http.Request, email s
 			Email:   people[i].Email,
 			Name:    people[i].Name,
 			Invited: people[i].InvitedOnly,
+			Role:    people[i].Role,
 		})
 	}
 	resp := map[string]any{"people": out}
