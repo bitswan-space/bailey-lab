@@ -397,8 +397,8 @@ function Shell() {
       )}
       {/* The single activity surface, anchored bottom-left: server-side git
           tasks AND transient notifications (former toasts) in one collapsible
-          panel. Admin-only "Clear queue". */}
-      <TaskQueuePanel isAdmin={role === 'admin'} />
+          panel. */}
+      <TaskQueuePanel />
     </div>
   );
 }
