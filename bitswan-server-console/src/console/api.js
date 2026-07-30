@@ -223,11 +223,6 @@ export const Api = {
   // 'restarting' event when the connection drops with the daemon. Callers then
   // poll adminUpdates() until the version flips.
   serverUpdate: (onEvent) => postNDJSON('/bailey/api/admin/server-update', {}, onEvent),
-  // Transfer workspace ownership to another user already on this server.
-  // Strictly the recorded owner's call — the backend rejects even admins —
-  // and the old owner is kept as a member (access grant).
-  transferWorkspaceOwnership: (name, email) =>
-    postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/transfer-ownership`, { email }),
   // Workspace membership = the ACL share state on the workspace's dashboard
   // endpoint host: owner_email + grants. Owner-only (403 otherwise). Returns
   // the updated listing on add/remove.
@@ -241,9 +236,11 @@ export const Api = {
   removeWorkspaceMember: (host, principalType, principalValue, role) =>
     postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
       { action: 'revoke', principal_type: principalType, principal_value: principalValue, role }),
-  // Change a grantee's role (member ⇄ owner): grant the new role first (so they
+  // Change a person's role (user ⇄ owner): grant the new role first (so they
   // never lose access mid-change), then revoke the old one. Returns the updated
-  // share listing. Not for the recorded owner_email (that's a transfer).
+  // share listing. Works for the recorded owner_email too — revoking the 'owner'
+  // role of the owner_email reassigns the slot on the backend (revokeOwnership),
+  // refusing only when it would drop the last owner.
   setWorkspaceMemberRole: async (host, principalType, principalValue, newRole, oldRole) => {
     await postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
       { action: 'grant', principal_type: principalType, principal_value: principalValue, role: newRole });
@@ -268,8 +265,8 @@ export const Api = {
   // device counts. Degrades to a 200 with an `error` field on partial
   // enumeration failure (the view surfaces it without dropping the roster).
   people: () => getJSON('/bailey/api/people'),
-  // Minimal people directory ({email,name,invited} rows) for the member/
-  // transfer pickers. NOT admin-only: any endpoint owner may read it —
+  // Minimal people directory ({email,name,invited} rows) for the add-a-person
+  // picker. NOT admin-only: any endpoint owner may read it —
   // workspace owners included — so every owner gets a pickable list. 403
   // for callers who own nothing shareable.
   peopleDirectory: () => getJSON('/bailey/api/people/directory'),

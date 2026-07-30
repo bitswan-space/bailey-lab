@@ -198,10 +198,19 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     $('bailey-share-title').textContent = 'Share "' + hostLabel + '"';
     var list = $('bailey-share-list');
     list.innerHTML = '';
-    var ownerEmail = data.owner_email || '';
-    // Original owner row first (always present, can't be removed).
-    list.appendChild(rowFor({principal_type:'email', principal_value:ownerEmail, role:'owner', isOriginalOwner:true}));
-    (data.grants||[]).forEach(function(g) { list.appendChild(rowFor(g)); });
+    var ownerEmail = (data.owner_email || '').toLowerCase();
+    // Owner is a role, not a fixed property: the recorded owner_email is shown
+    // first and is editable exactly like any grant (promote/demote/remove).
+    // The backend refuses to remove the last owner.
+    if (data.owner_email) {
+      list.appendChild(rowFor({principal_type:'email', principal_value:data.owner_email, role:'owner'}));
+    }
+    // Skip a grant that merely duplicates the recorded owner — one owner row.
+    (data.grants||[]).forEach(function(g) {
+      if (g.principal_type === 'email' && g.role === 'owner' &&
+          g.principal_value.toLowerCase() === ownerEmail) return;
+      list.appendChild(rowFor(g));
+    });
     if ((data.grants||[]).length === 0) {
       var p = document.createElement('p');
       p.className = 'bailey-share-empty';
@@ -268,19 +277,15 @@ func shareModalJS(host, callerEmail, apiURL string) string {
       el('div', {class:'sub',  text: isGroup ? 'Keycloak group' : 'Email'})
     ]);
     var children = [avatar, meta];
-    if (g.isOriginalOwner) {
-      children.push(el('span', {class:'bailey-share-role owner', text:'Owner'}));
-    } else {
-      var sel = el('select', {class:'bailey-share-role-dropdown'}, [
-        el('option', {value:'access', text:'User'}),
-        el('option', {value:'owner',  text:'Owner'})
-      ]);
-      sel.value = g.role;
-      sel.onchange = function(){ updateRole(g.principal_type, g.principal_value, g.role, sel.value); };
-      var rm  = el('button', {class:'bailey-share-remove', text:'Remove', onclick:function(){ revoke(g.principal_type, g.principal_value, g.role); }});
-      children.push(sel);
-      children.push(rm);
-    }
+    var sel = el('select', {class:'bailey-share-role-dropdown'}, [
+      el('option', {value:'access', text:'User'}),
+      el('option', {value:'owner',  text:'Owner'})
+    ]);
+    sel.value = g.role;
+    sel.onchange = function(){ updateRole(g.principal_type, g.principal_value, g.role, sel.value); };
+    var rm  = el('button', {class:'bailey-share-remove', text:'Remove', onclick:function(){ revoke(g.principal_type, g.principal_value, g.role); }});
+    children.push(sel);
+    children.push(rm);
     return el('div', {class:'bailey-share-row'}, children);
   }
   function load() {
