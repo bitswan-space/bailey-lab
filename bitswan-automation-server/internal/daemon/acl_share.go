@@ -109,10 +109,16 @@ func applyShareAction(host, callerEmail string, r *http.Request) error {
 		}
 		return nil
 	case "revoke":
-		return removeGrant(host,
-			strings.TrimSpace(r.FormValue("principal_type")),
-			strings.TrimSpace(r.FormValue("principal_value")),
-			strings.TrimSpace(r.FormValue("role")))
+		pType := strings.TrimSpace(r.FormValue("principal_type"))
+		pVal := strings.TrimSpace(r.FormValue("principal_value"))
+		role := strings.TrimSpace(r.FormValue("role"))
+		// Revoking OWNER from an email is uniform whether they own via a grant or
+		// via the recorded owner_email — revokeOwnership handles the slot and
+		// refuses to remove the last owner. Everything else is a plain grant drop.
+		if pType == "email" && role == string(roleOwner) {
+			return revokeOwnership(host, pVal)
+		}
+		return removeGrant(host, pType, pVal, role)
 	case "deny-request":
 		target := strings.TrimSpace(r.FormValue("email"))
 		if target == "" {
