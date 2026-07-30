@@ -421,10 +421,23 @@ describe('WorkspacesView', () => {
     expect(screen.queryByPlaceholderText('Search people…')).toBeNull();
   });
 
-  it('workspace card shows member avatars (initials from emails)', () => {
+  // #276: members with a real avatar show the photo; the initials chip is the
+  // fallback (no avatar, or the image fails to load).
+  it('workspace card shows member avatar images keyed by email', () => {
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ members: ['jane@x', 'bob@y'] })] })} />);
-    expect(screen.getByText('JX')).toBeTruthy(); // jane@x → JX
-    expect(screen.getByText('BY')).toBeTruthy(); // bob@y  → BY
+    const jane = screen.getByAltText('jane@x');
+    expect(jane.tagName).toBe('IMG');
+    expect(jane.getAttribute('src')).toContain('/api/frontend/avatars?email=jane%40x');
+    expect(screen.getByAltText('bob@y')).toBeTruthy();
+    // Each avatar still says who it is on hover.
+    expect(screen.getByTitle('jane@x')).toBeTruthy();
+  });
+
+  it('workspace card falls back to initials when a member avatar fails to load', () => {
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ members: ['jane@x', 'bob@y'] })] })} />);
+    fireEvent.error(screen.getByAltText('jane@x'));
+    expect(screen.getByText('JX')).toBeTruthy();          // jane@x → JX
+    expect(screen.getByAltText('bob@y')).toBeTruthy();    // the other one is untouched
   });
 
   it('shows "Apps you can access" from accessible frontends (links, services excluded)', async () => {
