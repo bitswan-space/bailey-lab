@@ -423,12 +423,12 @@ func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, n
 		"image":          "traefik:v3.6",
 		"restart":        "always",
 		"container_name": "traefik",
-		// Only the public web entrypoints are published. Traefik's API/dashboard
-		// (:8080, api.insecure — unauthenticated; leaks the full routing topology)
-		// is NOT published to the host: the daemon and workspace components reach it
-		// in-network via BITSWAN_TRAEFIK_HOST=traefik:8080 on bitswan_network (which
-		// automations are not attached to), so there is no reason to expose it on
-		// the host at all.
+		// Only the public web entrypoints are published. Traefik's API/dashboard is
+		// DISABLED outright in the static config (renderTraefikStaticConfig) — the
+		// daemon manages every route via the file provider, so the HTTP API is
+		// unused. Publishing ONLY 80/443 (never the admin :8080/:9080) is the second
+		// layer of defence: even a mistaken port-publish cannot leak the routing
+		// topology, because nothing is listening on the admin port.
 		"ports":    []string{"80:80", "443:443"},
 		"networks": traefikNetworks,
 		"volumes":  traefikVolumes,
