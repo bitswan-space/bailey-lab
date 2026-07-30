@@ -1083,8 +1083,12 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   };
   // Promote a member to owner, or demote a co-owner to member. Grant-based
   // people only — the recorded primary owner is changed via transfer.
-  const changeRole = async (p) => {
-    const newRole = p.role === 'owner' ? 'access' : 'owner';
+  const changeRole = async (p, newRole) => {
+    if (!newRole || newRole === p.role) return;
+    if (p.role === 'owner' && newRole !== 'owner' && ownerCount <= 1) {
+      toast('A workspace needs at least one owner.', 'danger');
+      return;
+    }
     setBusy(p.principal_value);
     try {
       setShare(await WApi.setWorkspaceMemberRole(dashHost, p.principal_type, p.principal_value, newRole, p.role));
@@ -1118,19 +1122,21 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <WUserChip user={{ email: isGroup ? undefined : p.principal_value, name: isGroup ? p.principal_value : undefined }}
                   size={30}
-                  nameSuffix={<>
-                    <WPill tone={isOwnerRole ? 'primary' : 'neutral'} size="xs">{roleLabel}</WPill>
-                    {p.isPrimary && <span style={{ fontSize: 10.5, color: WC.mutedFg, marginLeft: 6 }}>primary</span>}
-                  </>} />
+                  nameSuffix={controllable ? null : (
+                    <>
+                      <WPill tone={isOwnerRole ? 'primary' : 'neutral'} size="xs">{roleLabel}</WPill>
+                      {p.isPrimary && <span style={{ fontSize: 10.5, color: WC.mutedFg, marginLeft: 6 }}>primary</span>}
+                    </>
+                  )} />
               </div>
               {controllable && (
                 <>
-                  <WBtn variant="ghost" size="xs"
-                    disabled={busy === p.principal_value || (isOwnerRole && ownerCount <= 1)}
-                    title={isOwnerRole ? (ownerCount <= 1 ? 'A workspace needs at least one owner' : 'Demote to member') : 'Promote to owner'}
-                    onClick={() => changeRole(p)}>
-                    {isOwnerRole ? 'Make member' : 'Make owner'}
-                  </WBtn>
+                  {/* Role dropdown — the standard control for changing a person's role. */}
+                  <div style={{ width: 118, ...(busy === p.principal_value ? { opacity: 0.5, pointerEvents: 'none' } : {}) }}>
+                    <WSelect value={isOwnerRole ? 'owner' : 'access'}
+                      onChange={(r) => changeRole(p, r)}
+                      options={[{ value: 'access', label: 'Member' }, { value: 'owner', label: 'Owner' }]} />
+                  </div>
                   <button onClick={() => removeMember(p)} disabled={busy === p.principal_value} title="Remove from workspace" style={{
                     width: 28, height: 28, border: 0, background: 'transparent', borderRadius: 6, cursor: 'pointer',
                     color: WC.mutedFg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -1147,14 +1153,15 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
       {canManage ? (
         <>
           <div style={{ ...SECTION, margin: '20px 0 10px' }}>Add a person</div>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-            {[['access', 'Member'], ['owner', 'Owner']].map(([val, lbl]) => (
-              <WBtn key={val} size="sm" variant={addRole === val ? 'primary' : 'default'}
-                onClick={() => setAddRole(val)}>{lbl}</WBtn>
-            ))}
-          </div>
-          <div style={{ marginBottom: 8 }}>
-            <WTextInput value={addQuery} onChange={setAddQuery} placeholder="Search people…" />
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ fontSize: 12.5, color: WC.muted }}>as</span>
+            <div style={{ width: 130 }}>
+              <WSelect value={addRole} onChange={setAddRole}
+                options={[{ value: 'access', label: 'Member' }, { value: 'owner', label: 'Owner' }]} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <WTextInput value={addQuery} onChange={setAddQuery} placeholder="Search people…" />
+            </div>
           </div>
           {pickerBody(candidates,
             q ? 'No one matches.' : 'Everyone on this server is already in this workspace.',

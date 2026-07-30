@@ -421,15 +421,16 @@ describe('WorkspacesView', () => {
     });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    // The co-owner is VISIBLE (not filtered out like before) and treated as an
-    // owner: the demote control only renders for owner-role grantees, the
-    // promote control only for members.
+    // The co-owner is VISIBLE (not filtered out like before). Each grant-based
+    // person has a standard role DROPDOWN: the co-owner's reads Owner, the
+    // member's reads Member (rendered before the "Add as" select).
     await waitFor(() => expect(screen.getByText('co@x')).toBeTruthy());
     expect(screen.getByText('mate@x')).toBeTruthy();
-    expect(screen.getByText('Make member')).toBeTruthy();  // demote the co-owner
-    expect(screen.getByText('Make owner')).toBeTruthy();   // promote the member
-    // Promoting a member grants owner, then revokes their access grant.
-    fireEvent.click(screen.getByText('Make owner'));
+    const roleSelects = screen.getAllByRole('combobox');
+    expect(roleSelects[0].value).toBe('owner');   // co@x — a co-owner
+    expect(roleSelects[1].value).toBe('access');  // mate@x — a member
+    // Promote the member via the dropdown: grant owner, then revoke access.
+    fireEvent.change(roleSelects[1], { target: { value: 'owner' } });
     await waitFor(() => expect(posted.length).toBeGreaterThanOrEqual(2));
     expect(posted[0].get('action')).toBe('grant');
     expect(posted[0].get('role')).toBe('owner');
