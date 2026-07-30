@@ -1388,9 +1388,6 @@ export const api = {
   /** Git task queue. The live feed comes over the `/api/events` SSE stream;
    *  this is the initial snapshot fetch on mount. */
   tasks: () => getJson<{ tasks: GitTask[] }>('/api/tasks'),
-  /** Admin-only: cancel all queued/running git tasks (gitops 403s non-admins,
-   *  and the server route gates it too). Returns the cancelled count. */
-  clearTasks: () => postJson<{ cancelled: number }>('/api/tasks/clear', {}),
 
   /** Read-only data explorer (Object Storage / SQL panels). List endpoints
    *  return null on 404 = "this BP has no database/bucket at this scope". */
