@@ -107,6 +107,28 @@ jobs:
           export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"
           npm test
 
+      # Exercise EVERY bitswan-coding-agent CLI subcommand against the REAL agent
+      # container the walkthrough just booted — the real gitops API and a real
+      # live-dev deployment (issue #253). This is deliberately NOT a mocked unit
+      # test: the most common CLI breakage is PATH/environment drift (e.g. #247,
+      # copy-detection expecting /workspace/worktrees vs /workspace/copies, and
+      # the `deployments start` contract), which only a real-environment run
+      # catches. Runs after the walkthrough so a workspace + agent + running
+      # deployment exist. Exit 2 = the stack never produced an agent to test
+      # (a walkthrough/stack failure, surfaced by the diagnostics below) → we
+      # flag it loudly but don't double-report it as a CLI failure; exit 1 = a
+      # CLI subcommand is actually broken → fail the job.
+      - name: Coding-agent CLI E2E (all subcommands, real stack)
+        if: always()
+        run: |
+          bash e2e/tests/coding-agent-cli-e2e.sh
+          rc=$?
+          if [ "$rc" = "2" ]; then
+            echo "::warning::coding-agent CLI E2E could not run — no agent/copy/deployment present (see diagnostics)."
+            exit 0
+          fi
+          exit $rc
+
       # Assemble the Operator's Handbook from the editorial content + the
       # screenshots just captured. Chromium (installed above) prints the PDF.
       - name: Generate the Operator's Handbook (HTML + PDF)
