@@ -106,8 +106,13 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		// Labelled with the workspace so the driver permits gitops's scoped
 		// self-exec (root cleanup of copy trees) — the driver refuses any
 		// container not carrying this workspace label.
-		"labels":   map[string]string{"gitops.workspace": config.WorkspaceName},
-		"networks": []string{"bitswan_network"},
+		"labels": map[string]string{"gitops.workspace": config.WorkspaceName},
+		// bitswan_network: the control-plane inner ring (daemon, infra-driver, …).
+		// <ws>-agent: a dedicated bridge shared ONLY with this workspace's coding
+		// agent, so the (untrusted) agent reaches gitops's authenticated API/git
+		// WITHOUT being on bitswan_network. gitops is multi-homed; it does not
+		// route between the two, so the agent gains no path to the inner ring.
+		"networks": []string{"bitswan_network", config.WorkspaceName + "-agent"},
 		"volumes": []interface{}{
 			wsVolume("gitops", "/gitops/gitops"),
 			wsVolume("secrets", "/gitops/secrets"),
@@ -240,6 +245,12 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		},
 		"networks": map[string]interface{}{
 			"bitswan_network": map[string]interface{}{
+				"external": true,
+			},
+			// Dedicated agent↔gitops bridge (ensured before this compose comes up,
+			// in workspace init + UpdateWorkspaceDeployment). External so both this
+			// compose and the separate coding-agent compose reference the same net.
+			config.WorkspaceName + "-agent": map[string]interface{}{
 				"external": true,
 			},
 		},
