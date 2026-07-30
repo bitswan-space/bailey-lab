@@ -927,6 +927,7 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   // confirm modal.
   const [trashOpen, setTrashOpen] = useWS(false);
   const [trashBusy, setTrashBusy] = useWS(false);
+  const [addRole, setAddRole] = useWS('access'); // role a newly-picked person gets
 
   const dashHost = ws ? hostFromUrl(ws.dashboard) : '';
   // Managing members (add/remove) is only allowed for the TRUE owner of the
@@ -959,13 +960,34 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   }, [ws && ws.id]);
 
   if (!ws) return null;
-  // Members list: owners get the live, removable grant list; everyone else
-  // gets the DTO's member roster minus the owner (read-only).
-  const members = canManage
-    ? (share ? (share.grants || []).filter(g => g.role === 'access') : [])
-    : (ws.members || [])
-        .filter(m => m && m.toLowerCase() !== (ownerEmail || '').toLowerCase())
-        .map(m => ({ principal_type: 'email', principal_value: m, role: 'access' }));
+  // Everyone on the workspace, with their ROLE. Owner is a role, not an
+  // exclusive property: the recorded owner_email PLUS anyone granted the
+  // 'owner' role are all owners; 'access' grants are members. Owners first
+  // (the recorded primary owner first), then members.
+  const primaryOwner = ((canManage ? (share && share.owner_email) : ownerEmail) || '').trim();
+  const people = (() => {
+    const rows = [];
+    const seen = new Set();
+    const push = (pt, pv, role, isPrimary) => {
+      pv = (pv || '').trim();
+      const key = `${pt}:${pv}`.toLowerCase();
+      if (!pv || seen.has(key)) return;
+      seen.add(key);
+      rows.push({ principal_type: pt, principal_value: pv, role, isPrimary: !!isPrimary });
+    };
+    if (primaryOwner) push('email', primaryOwner, 'owner', true);
+    if (canManage) {
+      (share ? share.grants || [] : []).forEach(g =>
+        push(g.principal_type, g.principal_value,
+          g.role === 'owner' ? 'owner' : (g.principal_type === 'group' ? 'group' : 'access')));
+    } else {
+      (ws.members || []).forEach(m => push('email', m, 'access'));
+    }
+    const rank = r => (r.isPrimary ? 0 : r.role === 'owner' ? 1 : 2);
+    return rows.sort((a, b) => rank(a) - rank(b) ||
+      (a.principal_value || '').localeCompare(b.principal_value || ''));
+  })();
+  const ownerCount = people.filter(p => p.role === 'owner').length;
   const SECTION = { fontSize: 11, fontWeight: 600, color: WC.muted, textTransform: 'uppercase', letterSpacing: 0.4 };
   // An already-trashed workspace is restored (or permanently removed via Empty
   // trash) from the list — there's nothing to delete here.
@@ -975,10 +997,11 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   const addMember = async (email) => {
     if (!email) return;
     setBusy('add');
+    const label = addRole === 'owner' ? 'owner' : 'member';
     try {
-      setShare(await WApi.addWorkspaceMember(dashHost, email));
-      toast(`${email} added to ${ws.name}`, 'success');
-    } catch (e) { toast(`Couldn't add member: ${e.message}`, 'danger'); }
+      setShare(await WApi.addWorkspaceMember(dashHost, email, addRole));
+      toast(`${email} added to ${ws.name} as ${label}`, 'success');
+    } catch (e) { toast(`Couldn't add ${label}: ${e.message}`, 'danger'); }
     finally { setBusy(''); }
   };
 
@@ -987,11 +1010,10 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   // included) — minus the owner and anyone already granted, narrowed by
   // the search text.
   const q = addQuery.trim().toLowerCase();
-  const memberSet = new Set(members.map(g => (g.principal_value || '').toLowerCase()));
+  const onWorkspace = new Set(people.map(p => (p.principal_value || '').toLowerCase()));
   const candidates = !canManage ? [] : (directory || []).filter(p =>
     p.email &&
-    p.email.toLowerCase() !== (ownerEmail || '').toLowerCase() &&
-    !memberSet.has(p.email.toLowerCase()) &&
+    !onWorkspace.has(p.email.toLowerCase()) &&
     (!q || p.email.toLowerCase().includes(q) || (p.name || '').toLowerCase().includes(q)));
 
   // Transfer recipients: the same directory minus the current owner.
@@ -1056,7 +1078,18 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
     try {
       setShare(await WApi.removeWorkspaceMember(dashHost, g.principal_type, g.principal_value, g.role));
       toast(`${g.principal_value} removed from ${ws.name}`, 'info');
-    } catch (e) { toast(`Couldn't remove member: ${e.message}`, 'danger'); }
+    } catch (e) { toast(`Couldn't remove person: ${e.message}`, 'danger'); }
+    finally { setBusy(''); }
+  };
+  // Promote a member to owner, or demote a co-owner to member. Grant-based
+  // people only — the recorded primary owner is changed via transfer.
+  const changeRole = async (p) => {
+    const newRole = p.role === 'owner' ? 'access' : 'owner';
+    setBusy(p.principal_value);
+    try {
+      setShare(await WApi.setWorkspaceMemberRole(dashHost, p.principal_type, p.principal_value, newRole, p.role));
+      toast(`${p.principal_value} is now ${newRole === 'owner' ? 'an owner' : 'a member'} of ${ws.name}`, 'success');
+    } catch (e) { toast(`Couldn't change role: ${e.message}`, 'danger'); }
     finally { setBusy(''); }
   };
 
@@ -1064,111 +1097,119 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
     <WDrawer open={!!ws} onClose={onClose} icon="layout-grid" title={ws.name}
       subtitle={canManage ? 'You own this workspace' : "You're a member of this workspace"}
       footer={<WBtn variant="primary" onClick={onClose}>Done</WBtn>}>
-      {/* Ownership — shown to everyone; only the owner can act on it. */}
-      <div style={{ ...SECTION, marginBottom: 10 }}>Ownership</div>
-      <div style={{ border: `1px solid ${WC.border}`, borderRadius: 10, padding: 14, marginBottom: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-          {ownerEmail ? (
-            <WUserChip user={{ email: ownerEmail }} size={36}
-              nameSuffix={<WPill tone="primary" size="xs">Owner</WPill>} />
-          ) : (
-            <>
-              <WAvatar user={{ name: ws.name }} size={36} />
-              <div style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg }}>
-                No owner recorded <WPill tone="primary" size="xs">Owner</WPill>
-              </div>
-            </>
-          )}
-        </div>
-        {canManage && !transferOpen && (
-          <div style={{ marginTop: 12 }}>
-            <WBtn variant="default" size="sm" leftIcon="arrow-left-right" onClick={() => setTransferOpen(true)}>Transfer ownership</WBtn>
-          </div>
-        )}
-        {canManage && transferOpen && (
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 11.5, color: WC.mutedFg, marginBottom: 6 }}>
-              New owner — pick someone already on this server:
-            </div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-              <div style={{ flex: 1 }}>
-                <WTextInput value={transferQuery} onChange={setTransferQuery} placeholder="Search people…" />
-              </div>
-              <WBtn variant="default" size="sm" disabled={transferBusy} onClick={() => { setTransferOpen(false); setTransferQuery(''); }}>Cancel</WBtn>
-            </div>
-            {/* Picking a recipient opens the confirm modal directly. */}
-            {pickerBody(transferCandidates,
-              tq ? 'No one matches.' : 'No one else is on this server yet — invite someone first.',
-              (e) => `Transfer to ${e}`, setTransferTarget, transferBusy)}
-            <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
-              They become the workspace's only owner; you stay in it as a member.
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Transfer confirm — the one place a workspace changes hands. */}
-      <WModal open={!!transferTarget} onClose={transferBusy ? () => {} : () => setTransferTarget('')} icon="arrow-left-right"
-        title={`Transfer “${ws.name}” to ${transferTarget}?`}
-        subtitle="They become the workspace's only owner — members, apps, and settings go with it. You stay in the workspace as a member, and only the new owner can transfer it back."
-        footer={<>
-          <WBtn variant="default" disabled={transferBusy} onClick={() => setTransferTarget('')}>Cancel</WBtn>
-          <WBtn variant="primary" disabled={transferBusy} onClick={doTransfer}>
-            {transferBusy ? 'Transferring…' : 'Transfer ownership'}
-          </WBtn>
-        </>} />
-
-      {/* Members */}
-      <div style={{ ...SECTION, margin: '20px 0 10px', display: 'flex', justifyContent: 'space-between' }}>
-        <span>Members</span><span>{(canManage && !share) ? '' : members.length}</span>
+      {/* People & roles. Owner is a ROLE, not an exclusive property — a
+          workspace can have several owners. Owners are listed first. */}
+      <div style={{ ...SECTION, margin: '2px 0 10px', display: 'flex', justifyContent: 'space-between' }}>
+        <span>People &amp; roles</span><span>{(canManage && !share) ? '' : people.length}</span>
       </div>
       {err && <div style={{ fontSize: 12.5, color: WC.red, marginBottom: 8 }}>{err}</div>}
-      {canManage && !share && !err && <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>Loading members…</div>}
-      {(!canManage || share) && members.length === 0 && !err && (
-        <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>No members yet — only the owner has access.</div>
+      {canManage && !share && !err && <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>Loading people…</div>}
+      {(!canManage || share) && people.length === 0 && !err && (
+        <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>No one has access yet.</div>
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {members.map(g => (
-          <div key={g.principal_value} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 6px', borderRadius: 8 }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <WUserChip user={{ email: g.principal_value, name: g.principal_type === 'group' ? g.principal_value : undefined }}
-                size={30}
-                nameSuffix={<WPill tone="neutral" size="xs">{g.principal_type === 'group' ? 'Group' : 'Member'}</WPill>} />
+        {people.map(p => {
+          const isOwnerRole = p.role === 'owner';
+          const isGroup = p.principal_type === 'group';
+          const roleLabel = isOwnerRole ? 'Owner' : isGroup ? 'Group' : 'Member';
+          const controllable = canManage && !p.isPrimary && !isGroup;
+          return (
+            <div key={`${p.principal_type}:${p.principal_value}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 6px', borderRadius: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <WUserChip user={{ email: isGroup ? undefined : p.principal_value, name: isGroup ? p.principal_value : undefined }}
+                  size={30}
+                  nameSuffix={<>
+                    <WPill tone={isOwnerRole ? 'primary' : 'neutral'} size="xs">{roleLabel}</WPill>
+                    {p.isPrimary && <span style={{ fontSize: 10.5, color: WC.mutedFg, marginLeft: 6 }}>primary</span>}
+                  </>} />
+              </div>
+              {controllable && (
+                <>
+                  <WBtn variant="ghost" size="xs"
+                    disabled={busy === p.principal_value || (isOwnerRole && ownerCount <= 1)}
+                    title={isOwnerRole ? (ownerCount <= 1 ? 'A workspace needs at least one owner' : 'Demote to member') : 'Promote to owner'}
+                    onClick={() => changeRole(p)}>
+                    {isOwnerRole ? 'Make member' : 'Make owner'}
+                  </WBtn>
+                  <button onClick={() => removeMember(p)} disabled={busy === p.principal_value} title="Remove from workspace" style={{
+                    width: 28, height: 28, border: 0, background: 'transparent', borderRadius: 6, cursor: 'pointer',
+                    color: WC.mutedFg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <WIcon name="user-minus" size={15} />
+                  </button>
+                </>
+              )}
             </div>
-            {canManage && (
-              <button onClick={() => removeMember(g)} disabled={busy === g.principal_value} title="Remove from workspace" style={{
-                width: 28, height: 28, border: 0, background: 'transparent', borderRadius: 6, cursor: 'pointer',
-                color: WC.mutedFg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <WIcon name="user-minus" size={15} />
-              </button>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      {/* Add member — owner only. Members can see who's in but not change it. */}
+      {/* Add a person at a chosen role — owner only. */}
       {canManage ? (
         <>
-          <div style={{ ...SECTION, margin: '20px 0 10px' }}>Add a member</div>
+          <div style={{ ...SECTION, margin: '20px 0 10px' }}>Add a person</div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            {[['access', 'Member'], ['owner', 'Owner']].map(([val, lbl]) => (
+              <WBtn key={val} size="sm" variant={addRole === val ? 'primary' : 'default'}
+                onClick={() => setAddRole(val)}>{lbl}</WBtn>
+            ))}
+          </div>
           <div style={{ marginBottom: 8 }}>
             <WTextInput value={addQuery} onChange={setAddQuery} placeholder="Search people…" />
           </div>
-          {/* Members are picked from the server's people directory — click to add. */}
           {pickerBody(candidates,
             q ? 'No one matches.' : 'Everyone on this server is already in this workspace.',
-            (e) => `Add ${e}`, addMember, busy === 'add')}
+            (e) => `Add ${e} as ${addRole === 'owner' ? 'owner' : 'member'}`, addMember, busy === 'add')}
           <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
-            Grants this person access by email; they'll still trust a device of their own to get in.
+            {addRole === 'owner'
+              ? 'Owners can manage people and update or delete the workspace.'
+              : "Members can open the workspace's apps. They'll still trust a device of their own to get in."}
+          </div>
+
+          {/* Reassign the recorded PRIMARY owner — a niche action; to add more
+              owners, grant the Owner role above. Only the primary owner may do
+              this (the backend enforces it). */}
+          <div style={{ marginTop: 18 }}>
+            {!transferOpen ? (
+              <button onClick={() => setTransferOpen(true)} style={{ background: 'none', border: 0, padding: 0, color: WC.mutedFg, fontSize: 11.5, cursor: 'pointer', textDecoration: 'underline' }}>
+                Change the primary owner
+              </button>
+            ) : (
+              <div>
+                <div style={{ fontSize: 11.5, color: WC.mutedFg, marginBottom: 6 }}>
+                  New primary owner — pick someone already on this server:
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <WTextInput value={transferQuery} onChange={setTransferQuery} placeholder="Search people…" />
+                  </div>
+                  <WBtn variant="default" size="sm" disabled={transferBusy} onClick={() => { setTransferOpen(false); setTransferQuery(''); }}>Cancel</WBtn>
+                </div>
+                {pickerBody(transferCandidates,
+                  tq ? 'No one matches.' : 'No one else is on this server yet — invite someone first.',
+                  (e) => `Make ${e} the primary owner`, setTransferTarget, transferBusy)}
+              </div>
+            )}
           </div>
         </>
       ) : (
         <div style={{ display: 'flex', gap: 9, padding: 13, borderRadius: 10, background: WC.surface, border: `1px solid ${WC.border}`, marginTop: 20 }}>
           <WIcon name="info" size={15} color={WC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
           <span style={{ fontSize: 12.5, color: WC.muted, lineHeight: '18px' }}>
-            You're a member of this workspace. Only its owner can add or remove members.
+            You're a member of this workspace. Only an owner can add or remove people.
           </span>
         </div>
       )}
+
+      {/* Confirm changing the recorded primary owner. */}
+      <WModal open={!!transferTarget} onClose={transferBusy ? () => {} : () => setTransferTarget('')} icon="arrow-left-right"
+        title={`Make ${transferTarget} the primary owner of “${ws.name}”?`}
+        subtitle="They become the recorded owner. You stay in the workspace as a member; any other owners keep their role."
+        footer={<>
+          <WBtn variant="default" disabled={transferBusy} onClick={() => setTransferTarget('')}>Cancel</WBtn>
+          <WBtn variant="primary" disabled={transferBusy} onClick={doTransfer}>
+            {transferBusy ? 'Updating…' : 'Make primary owner'}
+          </WBtn>
+        </>} />
 
       {/* Danger zone — the workspace's only delete affordance. Gated exactly
           like the icon it replaced: true dashboard owner, active workspace. */}

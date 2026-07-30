@@ -232,12 +232,24 @@ export const Api = {
   // endpoint host: owner_email + grants. Owner-only (403 otherwise). Returns
   // the updated listing on add/remove.
   workspaceMembers: (host) => getJSON(`/2fa-gate/api/share/${encodeURIComponent(host)}`),
-  addWorkspaceMember: (host, email) =>
+  // Add a person to the workspace at a given ROLE — 'owner' (a co-owner; owner
+  // is a role, not an exclusive property) or 'access' (a member). Defaults to
+  // member.
+  addWorkspaceMember: (host, email, role = 'access') =>
     postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
-      { action: 'grant', principal_type: 'email', principal_value: email, role: 'access' }),
+      { action: 'grant', principal_type: 'email', principal_value: email, role }),
   removeWorkspaceMember: (host, principalType, principalValue, role) =>
     postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
       { action: 'revoke', principal_type: principalType, principal_value: principalValue, role }),
+  // Change a grantee's role (member ⇄ owner): grant the new role first (so they
+  // never lose access mid-change), then revoke the old one. Returns the updated
+  // share listing. Not for the recorded owner_email (that's a transfer).
+  setWorkspaceMemberRole: async (host, principalType, principalValue, newRole, oldRole) => {
+    await postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
+      { action: 'grant', principal_type: principalType, principal_value: principalValue, role: newRole });
+    return postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
+      { action: 'revoke', principal_type: principalType, principal_value: principalValue, role: oldRole });
+  },
   emptyTrash: (onEvent) =>
     postNDJSON('/bailey/api/workspaces/empty-trash', { confirmation: 'empty trash' }, onEvent),
   notificationsCount: () => getJSON('/bailey/api/notifications-count'),
