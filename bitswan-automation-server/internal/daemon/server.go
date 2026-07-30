@@ -493,6 +493,11 @@ func (s *Server) Run() error {
 		// --force-proxy), keep an outbound tunnel to the relay so the public URL
 		// reaches us. No-op otherwise, and idempotent.
 		s.startRelayTunnel()
+
+		// Tell the AOC which build we are, so a disaster recovery can rebuild
+		// this server on the same version. Last, because it is the least urgent
+		// thing here and must not delay the tunnel.
+		s.startVersionReporter()
 	}()
 
 	// Memory governance sweep: every 5 minutes shed the oldest on-demand

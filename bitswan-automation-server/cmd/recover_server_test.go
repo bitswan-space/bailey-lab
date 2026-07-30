@@ -300,3 +300,21 @@ func TestRecoverServerRebuildsImagesUnlessOptedOut(t *testing.T) {
 		t.Errorf("skipping the rebuild must leave a to-do for the operator: %v", st.todo)
 	}
 }
+
+// TestRecoveryCapabilityMatchesTheCommandTree keeps daemon.SupportsServerRecovery
+// honest. The daemon reports that flag to the AOC, and the AOC pins a recovery to
+// the reported version only when it is set — so if `recover server` were removed
+// while the flag stayed true, every recovery would fetch a binary that cannot run
+// the command it is about to be handed.
+func TestRecoveryCapabilityMatchesTheCommandTree(t *testing.T) {
+	var found bool
+	for _, sub := range newRecoverCmd().Commands() {
+		if sub.Name() == "server" {
+			found = true
+		}
+	}
+	if found != daemon.SupportsServerRecovery {
+		t.Fatalf("`recover server` present=%v but daemon.SupportsServerRecovery=%v — "+
+			"the AOC would pin versions on a false promise", found, daemon.SupportsServerRecovery)
+	}
+}

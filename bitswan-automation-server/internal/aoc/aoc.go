@@ -232,6 +232,40 @@ func (c *AOCClient) ReportBaileyURL(baileyURL string, forceProxy bool) (string, 
 	return out.DomainStatus, nil
 }
 
+// ReportServerVersion tells the AOC which CLI build this server runs.
+//
+// The version is already recorded inside every backup (the server manifest), but
+// restic encrypts contents and metadata and the key is never escrowed — so the
+// AOC cannot read it there, and neither can a recovery in progress: it would need
+// a running binary to discover which binary to fetch. Reporting it here is what
+// lets the AOC hand out a recovery command pinned to this exact release.
+//
+// supportsRecovery says whether THIS build can perform a whole-server recovery.
+// The AOC pins the version only when it can, so a recorded version whose binary
+// predates `bitswan recover server` never becomes a command that cannot run.
+func (c *AOCClient) ReportServerVersion(version string, supportsRecovery bool) error {
+	payload := map[string]interface{}{
+		"bailey_version":           version,
+		"supports_server_recovery": supportsRecovery,
+	}
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal version report: %w", err)
+	}
+
+	resp, err := c.sendRequest("PATCH", fmt.Sprintf("%s/api/automation_server/info", c.settings.AOCUrl), jsonBytes)
+	if err != nil {
+		return fmt.Errorf("error sending version report: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to report version: %s - %s", resp.Status, string(body))
+	}
+	return nil
+}
+
 // GetAutomationServerToken gets the automation server token (deprecated, use GetAutomationServerInfo)
 func (c *AOCClient) GetAutomationServerToken() (string, error) {
 	// For backward compatibility, return the stored access token
