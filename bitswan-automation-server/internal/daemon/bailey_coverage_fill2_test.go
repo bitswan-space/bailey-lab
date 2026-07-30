@@ -57,11 +57,18 @@ func TestDevicesAPI_RemoveMissingID(t *testing.T) {
 func TestApprovalsAPI(t *testing.T) {
 	email := "approvalsapi@example.com"
 	_ = dbDeletePendingPairByEmail(email)
+	// Trust the VIEWING browser first, then seed the request it's being asked
+	// to approve. Ordering matters now: trusting a device resolves the
+	// account's pending link request (see addDeviceWithOrigin), so seeding
+	// first and letting the harness trust afterwards models an impossible
+	// sequence and would legitimately clear the row.
+	r := baileyReq(http.MethodGet, "/bailey/api/approvals", email)
+	ensureTrustedDeviceForReq(r)
 	if _, err := generatePendingPair(email); err != nil {
 		t.Fatal(err)
 	}
 	// The user sees their own pending approval.
-	w := dispatch(baileyReq(http.MethodGet, "/bailey/api/approvals", email))
+	w := dispatch(r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("approvals = %d", w.Code)
 	}

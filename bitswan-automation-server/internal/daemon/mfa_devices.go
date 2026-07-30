@@ -71,6 +71,18 @@ func addDeviceWithOrigin(email, name, origin string) (*deviceRecord, error) {
 		// A device became trusted (pair-approve claim, self-trust, or
 		// claim TOFU all funnel through here). Audit best-effort.
 		_ = recordEvent(email, auditDeviceApprove, rec.ID)
+		// …and this account's pending device-link request is now resolved.
+		// pending_pairs holds ONE row per email, so whichever path got a
+		// browser trusted — an approved code claimed by the poll, an
+		// authenticator self-trust, a backup-code recovery, the claim/TOFU
+		// bootstrap — there is nothing left for anyone to approve. Only the
+		// poll path used to clear it (claimPendingPair); self-trusting with an
+		// authenticator left the row behind, so every view that lists pending
+		// requests (the /devices "New device waiting to be linked" panel, the
+		// People & roles badge + banner + inline row, the overview count) kept
+		// asking for a code for a device that was already linked and in use.
+		// Best-effort: failing to clear must not undo the trust we just minted.
+		_ = dbDeletePendingPairByEmail(email)
 	}
 	return rec, err
 }

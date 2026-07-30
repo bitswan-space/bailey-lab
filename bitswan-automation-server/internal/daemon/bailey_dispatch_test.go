@@ -317,13 +317,19 @@ func TestBaileyDevices_RemoveScopedToCaller(t *testing.T) {
 
 func TestBaileyApprovals_RoundTrip(t *testing.T) {
 	requester := "pairing-user@example.com"
+	// Trust the browser doing the viewing BEFORE seeding the pending pair:
+	// trusting a device for an account resolves that account's pending link
+	// request (addDeviceWithOrigin), so the reverse order models a sequence
+	// that can't happen and would legitimately clear the row.
+	r := baileyReq(http.MethodGet, "/bailey/api/approvals", requester)
+	ensureTrustedDeviceForReq(r)
 	e, err := generatePendingPair(requester)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// The requester sees only their own pending pair.
-	w := dispatch(baileyReq(http.MethodGet, "/bailey/api/approvals", requester))
+	w := dispatch(r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}

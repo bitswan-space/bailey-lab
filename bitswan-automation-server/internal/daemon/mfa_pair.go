@@ -144,21 +144,71 @@ func claimPendingPair(email string) *pairingEntry {
 	return e
 }
 
+// visiblePendingRequests lists the live, unapproved device-link requests the
+// given approver may act on. Requests already resolved by the account gaining a
+// trusted device are skipped — see latestDevicePairedAtByEmail.
 func visiblePendingRequests(approverEmail string, approverIsAdmin bool) []*pairingEntry {
 	all, err := dbListPendingPairs()
 	if err != nil {
 		return nil
 	}
+	// Fetched once, outside the loop: openBaileyDB runs with
+	// SetMaxOpenConns(1), so a query issued while another is still open
+	// deadlocks (see the note on gatherNotifications). dbListPendingPairs has
+	// fully drained and closed its rows by the time it returns, so this is safe
+	// here but must not move inside a rows iteration.
+	pairedAt := latestDevicePairedAtByEmail()
 	now := time.Now()
 	out := []*pairingEntry{}
 	for _, e := range all {
 		if now.After(e.ExpiresAt) || e.ApprovedBy != "" {
 			continue
 		}
+		// Strictly after, deliberately. paired_at is second-granularity
+		// RFC3339 (always rounded DOWN) while IssuedAt carries nanoseconds, so
+		// a device trusted moments BEFORE the request was issued can read as
+		// same-second; requiring a strict After keeps that from hiding a real
+		// request. The cost is only that a device trusted in the same second
+		// the request was issued isn't filtered — and that case is already
+		// handled outright by the delete in addDeviceWithOrigin.
+		if t, ok := pairedAt[strings.ToLower(e.Email)]; ok && t.After(e.IssuedAt) {
+			continue
+		}
 		if !approverIsAdmin && !strings.EqualFold(e.Email, approverEmail) {
 			continue
 		}
 		out = append(out, e)
+	}
+	return out
+}
+
+// latestDevicePairedAtByEmail maps each account (lowercased email) to the
+// paired_at of its most recently trusted device.
+//
+// A pending device-link request whose account gained a trusted device after the
+// request was issued is stale: pending_pairs is keyed by email, so that trust —
+// from whatever path — is what the request was waiting for.
+// addDeviceWithOrigin now deletes the row outright; this is the defence in
+// depth, and it's also what hides rows already stranded in deployed databases
+// (the reported bug: "New device waiting to be linked" sitting directly above
+// the very device it referred to, badged THIS DEVICE / LINKED / IN USE).
+//
+// Returns nil on error — no filtering rather than hiding real requests.
+func latestDevicePairedAtByEmail() map[string]time.Time {
+	devs, err := listAllDevices()
+	if err != nil {
+		return nil
+	}
+	out := map[string]time.Time{}
+	for _, d := range devs {
+		t, err := time.Parse(time.RFC3339, d.PairedAt)
+		if err != nil {
+			continue // unparseable timestamp → can't judge staleness from it
+		}
+		k := strings.ToLower(d.Email)
+		if cur, ok := out[k]; !ok || t.After(cur) {
+			out[k] = t
+		}
 	}
 	return out
 }
