@@ -38,24 +38,49 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # Install asciinema
 RUN apt-get update && apt-get install -y asciinema && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI
-#
-# The version is pinned via the CLAUDE_CODE_VERSION build arg so builds are
-# reproducible and the installed version is visible in one place. To upgrade,
-# bump the default below (find the latest with `npm view @anthropic-ai/claude-code version`).
-# Changing this value also busts the Docker layer cache, so the new version is
-# actually reinstalled on the next build. CI may override it with
-# `--build-arg CLAUDE_CODE_VERSION=...`.
-ARG CLAUDE_CODE_VERSION=2.1.197
-RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
-
-# Copy bitswan-coding-agent binary from builder
-COPY --from=builder /bitswan-coding-agent /usr/local/bin/bitswan-coding-agent
-
 # Create agent user
 RUN useradd -m -s /bin/bash -u 1000 agent \
     && mkdir -p /home/agent/.ssh \
     && chown -R agent:agent /home/agent
+
+# Install Claude Code CLI
+#
+# Claude Code updates itself. Its updater runs `npm -g config get prefix` and
+# checks that directory for write permission; a plain `npm install -g` puts it
+# in the root-owned /usr prefix, so every session the agent user gets the
+# "Auto-update failed" banner (issue #269).
+#
+# So there are two prefixes, both writable by the runtime user:
+#   * CLAUDE_CODE_BUNDLED_PREFIX (below) — installed at build time so a fresh
+#     container has a working `claude` immediately, with no network round trip.
+#   * CLAUDE_CODE_PREFIX (/home/agent/.npm-global) — what entrypoint-agent.sh
+#     configures as npm's global prefix, so self-updates land there. /home/agent
+#     is a persistent volume (see internal/services/coding_agent.go), so an
+#     update survives container restarts *and* recreation.
+# PATH prefers the self-updated copy and falls back to the bundled one.
+#
+# The version below is only a floor: whatever is installed at build time gets
+# superseded at runtime by Claude Code's own updater, so it does not need
+# routine bumping. It stays pinned rather than `@latest` because this layer is
+# cached — `@latest` would be resolved once and then silently frozen by the
+# layer cache, which is worse than an honest pin. Override for a one-off build
+# with `docker build --build-arg CLAUDE_CODE_VERSION=...`.
+ENV CLAUDE_CODE_PREFIX=/home/agent/.npm-global
+ENV CLAUDE_CODE_BUNDLED_PREFIX=/opt/claude-code
+ENV PATH="${CLAUDE_CODE_PREFIX}/bin:${CLAUDE_CODE_BUNDLED_PREFIX}/bin:${PATH}"
+ARG CLAUDE_CODE_VERSION=2.1.197
+RUN npm install -g --prefix "${CLAUDE_CODE_BUNDLED_PREFIX}" \
+        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && chown -R agent:agent "${CLAUDE_CODE_BUNDLED_PREFIX}"
+
+# sshd sessions do not inherit this image's env: login shells get PATH from
+# /etc/profile (which overwrites it) plus /etc/profile.d/bitswan-agent.sh,
+# written by the entrypoint; non-login `ssh <host> <command>` sessions get it
+# from /etc/environment via pam_env. Cover the latter here.
+RUN printf 'PATH="%s"\n' "$PATH" > /etc/environment
+
+# Copy bitswan-coding-agent binary from builder
+COPY --from=builder /bitswan-coding-agent /usr/local/bin/bitswan-coding-agent
 
 # SSH configuration
 RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \

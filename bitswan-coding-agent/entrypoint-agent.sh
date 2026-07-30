@@ -12,6 +12,23 @@ chown -R agent:agent /home/agent/.ssh 2>/dev/null
 chmod 700 /home/agent/.ssh
 chmod 600 /home/agent/.ssh/authorized_keys 2>/dev/null
 
+# Point npm's global prefix at a directory the agent user owns, so Claude Code
+# can update itself. Its updater resolves the target with `npm -g config get
+# prefix` (run with cwd = the user's home, so ~/.npmrc wins) and refuses with
+# "Auto-update failed" if that directory is not writable — which is what a
+# root-owned `npm install -g` prefix gave us. This prefix lives under
+# /home/agent, a persistent volume, so an update done in one session is still
+# there after a restart. See the Dockerfile for the bundled fallback prefix.
+CLAUDE_CODE_PREFIX="${CLAUDE_CODE_PREFIX:-/home/agent/.npm-global}"
+CLAUDE_CODE_BUNDLED_PREFIX="${CLAUDE_CODE_BUNDLED_PREFIX:-/opt/claude-code}"
+mkdir -p "$CLAUDE_CODE_PREFIX/bin" "$CLAUDE_CODE_PREFIX/lib/node_modules"
+touch /home/agent/.npmrc
+# Only add the line if nothing set a prefix already, so a hand-edited .npmrc
+# left on the volume is not clobbered on every start.
+if ! grep -q '^prefix=' /home/agent/.npmrc; then
+    printf 'prefix=%s\n' "$CLAUDE_CODE_PREFIX" >> /home/agent/.npmrc
+fi
+
 # Configure git for the agent user
 su - agent -c 'git config --global user.name "BitSwan Coding Agent"'
 su - agent -c 'git config --global user.email "agent@bitswan.local"'
@@ -53,6 +70,10 @@ export BITSWAN_AGENT_MODE=true
 # Write environment variables to a file that SSH sessions can source
 # SSH login shells don't inherit Docker container env vars
 {
+    # /etc/profile overwrites whatever PATH pam_env set, and profile.d is
+    # sourced after it, so re-prepend the Claude Code prefixes here. Updated
+    # install first, image-bundled fallback second.
+    echo "export PATH=\"${CLAUDE_CODE_PREFIX}/bin:${CLAUDE_CODE_BUNDLED_PREFIX}/bin:\$PATH\""
     echo "export BITSWAN_GITOPS_URL=\"$BITSWAN_GITOPS_URL\""
     echo "export BITSWAN_GITOPS_AGENT_SECRET=\"$BITSWAN_GITOPS_AGENT_SECRET\""
     echo "export BITSWAN_GIT_REMOTE=\"$BITSWAN_GIT_REMOTE\""

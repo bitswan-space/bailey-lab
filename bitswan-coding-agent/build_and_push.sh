@@ -5,15 +5,10 @@ YEAR=$(date +%Y)
 COMMIT_HASH=$(git rev-parse --short HEAD)
 IMAGE_TAG="bitswan/coding-agent-staging"
 
-# Claude Code version to bundle. Defaults to the pin in the Dockerfile; override
-# by exporting CLAUDE_CODE_VERSION before running (e.g. from CI to ship latest).
-CLAUDE_CODE_VERSION_ARG=()
-if [ -n "$CLAUDE_CODE_VERSION" ]; then
-    CLAUDE_CODE_VERSION_ARG=(--build-arg "CLAUDE_CODE_VERSION=$CLAUDE_CODE_VERSION")
-fi
-
-# Build and push Docker images
-docker build "${CLAUDE_CODE_VERSION_ARG[@]}" -t $IMAGE_TAG:latest -t $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH -f ./Dockerfile .
+# Build and push Docker images. The bundled Claude Code version is just the
+# floor pinned in the Dockerfile — the agent container updates itself at
+# runtime — so there is no version plumbing to thread through here.
+docker build -t $IMAGE_TAG:latest -t $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH -f ./Dockerfile .
 
 docker push $IMAGE_TAG:latest
 docker push $IMAGE_TAG:$YEAR-${GITHUB_RUN_ID}-git-$COMMIT_HASH
