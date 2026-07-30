@@ -480,6 +480,15 @@ func handleGatePath(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, gatePathPrefix+"/api/share/"):
 		handleShareAPI(w, r, email, groups)
 
+	// The share dialog's people picker (#251). Same handler — and therefore
+	// the same authority check (admin, or owner of at least one shareable
+	// endpoint) — as the server console's /bailey/api/people/directory. It
+	// needs its own route under the gate prefix because /bailey/* is only
+	// reachable where the proxy has a daemon upstream, never on an outer app
+	// host, which is exactly where the share dialog runs.
+	case r.URL.Path == gatePathPrefix+"/api/people/directory":
+		handleBaileyPeopleDirectory(w, r, email)
+
 	// Host-scoped device-trust SSO dance (mfa_device_grant.go). These live under
 	// the gate prefix — not /bailey/api — because gateHandler serves the gate
 	// prefix IN-PROCESS on every host, while /bailey/* is only reachable where

@@ -36,11 +36,17 @@ type endpointListEntry struct {
 	// belongs to (resolved from the parent dashboard host, or the endpoint's
 	// own host for kind=workspace rows); BusinessProcess is the bitswan.yaml
 	// business process a gitops-deployed route was reconciled from.
-	ParentEndpoint  string          `json:"parent_endpoint,omitempty"`
-	Workspace       string          `json:"workspace,omitempty"`
-	BusinessProcess string          `json:"business_process,omitempty"`
-	CallerRole      string          `json:"caller_role"`      // owner | access | viewer (server owner) | none
-	Grants          []endpointGrant `json:"grants,omitempty"` // populated for owner/server-owner views
+	ParentEndpoint  string `json:"parent_endpoint,omitempty"`
+	Workspace       string `json:"workspace,omitempty"`
+	BusinessProcess string `json:"business_process,omitempty"`
+	// InheritWorkspaceMembers reports the workspace half of the endpoint's
+	// union ACL (#251): true means every member of ParentEndpoint's workspace
+	// can open this endpoint on top of its own grants. Always reported, so an
+	// auditor can see at a glance which endpoints have had it switched off —
+	// an endpoint's real reach is not readable from Grants alone.
+	InheritWorkspaceMembers bool            `json:"inherit_workspace_members"`
+	CallerRole              string          `json:"caller_role"`      // owner | access | viewer (server owner) | none
+	Grants                  []endpointGrant `json:"grants,omitempty"` // populated for owner/server-owner views
 }
 
 type endpointListing struct {
@@ -123,6 +129,9 @@ func buildEndpointListing(callerEmail string, callerGroups []string, r *http.Req
 			CreatedAt:       ep.CreatedAt,
 			ParentEndpoint:  ep.ParentEndpoint,
 			BusinessProcess: ep.SourceBP,
+			// Only meaningful with a parent to inherit from; reported verbatim
+			// either way so the field never has to be second-guessed.
+			InheritWorkspaceMembers: ep.InheritWorkspaceMembers,
 		}
 		// A parented endpoint belongs to its parent dashboard's workspace; a
 		// parentless one may BE a workspace dashboard.

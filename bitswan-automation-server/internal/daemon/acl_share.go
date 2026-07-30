@@ -119,8 +119,46 @@ func applyShareAction(host, callerEmail string, r *http.Request) error {
 			return fmt.Errorf("email required to deny request")
 		}
 		return removeAccessRequest(host, target)
+	case "workspace-access":
+		// Flip the workspace half of the union ACL (#251). Reaching here
+		// already required owner role on THIS endpoint plus a trusted device.
+		//
+		// SECURITY: a workspace member cannot use this to switch their own
+		// access on. Their role on the endpoint comes from the inheritance
+		// itself, so once it is off they resolve to roleNone and never get
+		// past handleShareAPI's owner check — only the endpoint's own owner
+		// (or an explicit owner grant on it) can turn it back on.
+		enabled, err := parseBoolField(r.FormValue("enabled"))
+		if err != nil {
+			return err
+		}
+		ep, err := getEndpoint(host)
+		if err != nil {
+			return err
+		}
+		if ep == nil {
+			return fmt.Errorf("endpoint %q is not registered", host)
+		}
+		if workspaceMembershipSurface(ep) == "" {
+			return fmt.Errorf("this endpoint isn't part of a workspace — there is no workspace membership to inherit")
+		}
+		return setEndpointWorkspaceInherit(host, enabled)
 	default:
 		return fmt.Errorf("unknown action %q", action)
+	}
+}
+
+// parseBoolField reads a form boolean. Deliberately strict — an
+// unrecognised value on an ACL-widening switch is an error, not a
+// silently-assumed default.
+func parseBoolField(v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "on", "yes":
+		return true, nil
+	case "0", "false", "off", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("enabled must be true or false, got %q", v)
 	}
 }
 
@@ -134,10 +172,14 @@ func handleShareIndex(w http.ResponseWriter, email string, groups []string) {
 // in-wrap modal calls so the user can manage grants without leaving
 // the page.
 //
-//	GET    /2fa-gate/api/share/<host> → {owner_email, grants, requests}
-//	POST   /2fa-gate/api/share/<host> → add grant / deny-request
+//	GET    /2fa-gate/api/share/<host> → {owner_email, grants, requests,
+//	                                     workspace}
+//	POST   /2fa-gate/api/share/<host> → add grant / deny-request /
+//	       workspace-access toggle
 //	       (form-encoded: principal_type, principal_value, role —
-//	        or action=deny-request&email=...) → returns updated GET
+//	        or action=deny-request&email=...
+//	        or action=workspace-access&enabled=true|false)
+//	       → returns updated GET
 //	DELETE /2fa-gate/api/share/<host> → revoke grant (same form fields)
 //	       → returns updated GET
 //
@@ -171,15 +213,26 @@ func handleShareAPI(w http.ResponseWriter, r *http.Request, email string, groups
 	}
 
 	writeListing := func() {
+		// Re-read the endpoint row: a mutation in this same request (e.g. the
+		// workspace-access toggle) has already changed it, and the response is
+		// what the dialog re-renders from — a stale `ep` would show the switch
+		// snapping back to its old position.
+		cur := ep
+		if fresh, err := getEndpoint(host); err == nil && fresh != nil {
+			cur = fresh
+		}
 		grants, _ := listGrants(host)
 		requests, _ := listAccessRequests(host)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"hostname":     ep.Hostname,
-			"owner_email":  ep.OwnerEmail,
-			"display_name": ep.DisplayName,
+			"hostname":     cur.Hostname,
+			"owner_email":  cur.OwnerEmail,
+			"display_name": cur.DisplayName,
 			"grants":       grants,
 			"requests":     requests,
+			// nil when the endpoint has no workspace membership surface; the
+			// dialog then draws no inherited row.
+			"workspace": workspaceAccessFor(cur),
 		})
 	}
 
