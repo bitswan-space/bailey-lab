@@ -30,7 +30,7 @@ function avatarUrlForEmail(email) {
   return `${aocApiBase()}/api/frontend/avatars?email=${encodeURIComponent(email)}`;
 }
 
-function Avatar({ user, size = 28, ring, src }) {
+function Avatar({ user, size = 28, ring, src, alt }) {
   const [imgOk, setImgOk] = useS(!!src);
   useE(() => { setImgOk(!!src); }, [src]);
   if (!user) return null;
@@ -46,7 +46,7 @@ function Avatar({ user, size = 28, ring, src }) {
   };
   if (src && imgOk) {
     return (
-      <img src={src} alt="" draggable={false} onError={() => setImgOk(false)}
+      <img src={src} alt={alt || ''} draggable={false} onError={() => setImgOk(false)}
         style={{ ...base, objectFit: 'cover', display: 'block', background: color }} />
     );
   }
@@ -496,16 +496,23 @@ function Select({ value, onChange, options, style }) {
 }
 
 // ─── Avatar stack ───────────────────────────────────────────────────────────
+// Members carry an email, so the stack renders the same real avatar the sidebar
+// user card and the people roster do (Avatar with src=…/avatars?email=…, which
+// falls back to the initials chip when there's no image or it fails to load).
 function AvatarStack({ users, max = 4, size = 26 }) {
   const shown = users.slice(0, max);
   const extra = users.length - shown.length;
   return (
     <div style={{ display: 'inline-flex', alignItems: 'center' }}>
-      {shown.map((u, i) => (
-        <span key={u.id} style={{ marginLeft: i ? -8 : 0, boxShadow: '0 0 0 2px #fff', borderRadius: 9999 }}>
-          <Avatar user={u} size={size} />
-        </span>
-      ))}
+      {shown.map((u, i) => {
+        const label = u.name || u.email || '';
+        return (
+          <span key={u.id} title={label || undefined}
+            style={{ marginLeft: i ? -8 : 0, boxShadow: '0 0 0 2px #fff', borderRadius: 9999 }}>
+            <Avatar user={u} size={size} src={avatarUrlForEmail(u.email)} alt={label} />
+          </span>
+        );
+      })}
       {extra > 0 && (
         <span style={{
           marginLeft: -8, width: size, height: size, borderRadius: 9999, background: C.surface2,

@@ -682,8 +682,10 @@ function WorkspacesView({ ctx }) {
                       </div>
                     )}
                   </div>
+                  {/* Members are emails — pass them through as `email` too so the
+                      stack can resolve each member's real avatar (#276). */}
                   {w.members && w.members.length > 0 && (
-                    <WAvatarStack users={w.members.map(m => ({ id: m, name: m }))} size={26} />
+                    <WAvatarStack users={w.members.map(m => ({ id: m, name: m, email: m }))} size={26} />
                   )}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     {!archived && isOwner && w.updateAvailable && (
