@@ -99,6 +99,16 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 	// audit trail must not imply a named user did it by hand.
 	_ = recordEvent(actor, auditAccessGrant, accessAuditTarget(&req))
 
+	// A fresh grant satisfies any pending request from that email, exactly as
+	// the browser share form does (applyShareAction). Without this the owner's
+	// approvals view keeps listing a request that has already been granted —
+	// the view would be telling them something untrue. Only meaningful for
+	// email principals: access_requests is keyed by email, so a group grant
+	// has no single request to clear.
+	if req.PrincipalType == "email" {
+		_ = removeAccessRequest(req.Host, req.Principal)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"granted":        true,

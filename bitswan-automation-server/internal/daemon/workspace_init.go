@@ -787,6 +787,14 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 			return fmt.Errorf("failed to enable coding-agent service: %w", err)
 		}
 
+		// Non-fatal by design — see the same call in
+		// enableCodingAgentService. During init this matters more, not
+		// less: failing here would abort creating the whole workspace
+		// over an optional capability.
+		if err := provisionAgentIdentity(workspaceName, codingAgentService.WorkspacePath); err != nil {
+			fmt.Printf("WARNING: coding agent enabled WITHOUT a browsing account for workspace '%s': %v\n", workspaceName, err)
+		}
+
 		if err := codingAgentService.StartContainer(); err != nil {
 			return fmt.Errorf("failed to start coding-agent container: %w", err)
 		}

@@ -251,6 +251,64 @@ func TestHandleAccessGrantRevokeList(t *testing.T) {
 	}
 }
 
+// A CLI grant must clear the grantee's pending access request, like the
+// browser share form does. Otherwise the owner's approvals view keeps
+// showing a request that has already been satisfied.
+func TestHandleAccessGrantClearsPendingRequest(t *testing.T) {
+	s := &Server{}
+	host := "access-pending.example.com"
+	user := "asked-for-access@example.com"
+	if _, err := registerEndpoint(host, "owner@example.com", "Pending App", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := addAccessRequest(host, user); err != nil {
+		t.Fatal(err)
+	}
+	if reqs, _ := listAccessRequests(host); len(reqs) != 1 {
+		t.Fatalf("precondition: %d pending requests, want 1", len(reqs))
+	}
+
+	w := httptest.NewRecorder()
+	s.handleAccessGrant(w, jsonReq(http.MethodPost, "/bailey/access/grant",
+		map[string]string{"host": host, "principal": user}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("grant = %d; body=%s", w.Code, w.Body.String())
+	}
+
+	reqs, err := listAccessRequests(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reqs) != 0 {
+		t.Errorf("pending request survived the grant: %+v", reqs)
+	}
+}
+
+// A group grant must leave email-keyed requests alone — access_requests has
+// no notion of a group, so clearing one would be guessing.
+func TestHandleAccessGrantGroupKeepsPendingRequest(t *testing.T) {
+	s := &Server{}
+	host := "access-pending-group.example.com"
+	user := "still-waiting@example.com"
+	if _, err := registerEndpoint(host, "owner@example.com", "Group App", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := addAccessRequest(host, user); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	s.handleAccessGrant(w, jsonReq(http.MethodPost, "/bailey/access/grant", map[string]string{
+		"host": host, "principal": "/some/group", "principal_type": "group",
+	}))
+	if w.Code != http.StatusOK {
+		t.Fatalf("grant = %d; body=%s", w.Code, w.Body.String())
+	}
+	if reqs, _ := listAccessRequests(host); len(reqs) != 1 {
+		t.Errorf("group grant cleared an email request: %+v", reqs)
+	}
+}
+
 func TestHandleAccessGrantErrors(t *testing.T) {
 	s := &Server{token: tSockAdminTok}
 

@@ -829,6 +829,16 @@ func (s *Server) enableCodingAgentService(req ServiceEnableRequest) error {
 		return err
 	}
 
+	// Mint the agent's browsing identity before the container starts, so
+	// the credentials are there the first time it looks. Deliberately NOT
+	// fatal: editing code — the agent's actual job — does not depend on
+	// this, so an AOC hiccup must not block enabling the agent. The cost
+	// is that the capability is silently absent, which is why this logs
+	// loudly rather than quietly.
+	if err := provisionAgentIdentity(req.Workspace, agentService.WorkspacePath); err != nil {
+		fmt.Printf("WARNING: coding agent enabled WITHOUT a browsing account for workspace '%s': %v\n", req.Workspace, err)
+	}
+
 	return agentService.StartContainer()
 }
 
@@ -840,6 +850,13 @@ func (s *Server) disableCodingAgentService(workspace string) error {
 
 	if !agentService.IsEnabled() {
 		return fmt.Errorf("Coding Agent service is not enabled for workspace '%s'", workspace)
+	}
+
+	// Tear the identity down before the service, and don't let a failure
+	// block the disable the operator asked for. A leftover bot account is
+	// a real loose end, so it is reported rather than swallowed.
+	if err := deprovisionAgentIdentity(workspace, agentService.WorkspacePath); err != nil {
+		fmt.Printf("WARNING: failed to remove the coding agent's browsing account for workspace '%s' (it may still exist in Keycloak): %v\n", workspace, err)
 	}
 
 	return agentService.Disable()

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -516,6 +517,135 @@ func (c *AOCClient) SendInviteEmail(req InviteEmailRequest) error {
 		return &InviteEmailError{StatusCode: resp.StatusCode, Code: aocErr.Code, Message: aocErr.Error}
 	}
 	return &InviteEmailError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("%s - %s", resp.Status, string(body))}
+}
+
+// AgentAccountResponse is the AOC's reply to EnsureAgentAccount: the
+// credentials of a workspace's coding-agent bot account.
+//
+// Email is DERIVED BY THE AOC, not chosen here — it lives in the
+// reserved .invalid TLD so a bot address structurally cannot collide
+// with a human's. Treat it as opaque and store what the AOC returned;
+// do not reconstruct it locally, or a rename will silently split one
+// account into two.
+//
+// Password is rotated on every call, so any copy already written into a
+// workspace's agent container is invalidated the moment this is called
+// again. Callers must persist the new value before reporting success.
+type AgentAccountResponse struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Created  bool   `json:"created"`
+}
+
+// AgentAccountError is a structured failure from the AOC's agent-account
+// endpoint. Code carries the AOC's machine-readable reason, so callers
+// can distinguish "this will never work" from "try again later":
+//
+//   - "unknown_workspace" (404) — the AOC has no workspace by this name
+//     for this server. Permanent until the workspace is registered; do
+//     not retry in a loop.
+//   - "ensure_failed" (409) — the derived address is held by an account
+//     the AOC refuses to touch because it is not marked as an agent.
+//     Needs a human; retrying cannot clear it.
+//   - "keycloak_error" (502) — Keycloak was unreachable or errored.
+//     Transient; safe to retry.
+type AgentAccountError struct {
+	StatusCode int
+	Code       string
+	Message    string
+}
+
+func (e *AgentAccountError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("AOC agent account failed (%d %s): %s", e.StatusCode, e.Code, e.Message)
+	}
+	return fmt.Sprintf("AOC agent account failed (%d): %s", e.StatusCode, e.Message)
+}
+
+// Permanent reports whether retrying this request could ever succeed
+// without someone intervening.
+func (e *AgentAccountError) Permanent() bool {
+	return e.Code == "unknown_workspace" || e.Code == "ensure_failed"
+}
+
+// EnsureAgentAccount gets-or-creates the coding-agent bot account for one
+// workspace and returns freshly rotated credentials for it.
+//
+// The account is a plain member of this server's AOC org and holds no
+// admin or auditor group, so it can log into the org's protected apps
+// with exactly the rights any org member has — which is the point: it
+// lets the coding agent reach an app the same way a user does, through
+// the public hostname and oauth2-proxy, rather than through an internal
+// address that would bypass the very layers we want it to exercise.
+//
+// The workspace name is the one registered with the AOC; the AOC rejects
+// anything that is not one of this server's own workspaces.
+//
+// Returns a *AgentAccountError when the AOC rejected the request (check
+// Permanent() before retrying); any other error means the AOC wasn't
+// reachable at all.
+func (c *AOCClient) EnsureAgentAccount(workspaceName string) (*AgentAccountResponse, error) {
+	payload, _ := json.Marshal(map[string]string{"workspace_name": workspaceName})
+	url := fmt.Sprintf("%s/api/automation_server/keycloak/agent-account", c.settings.AOCUrl)
+	resp, err := c.sendRequest("POST", url, payload)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request to %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		var aocErr struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		if err := json.Unmarshal(body, &aocErr); err == nil && (aocErr.Code != "" || aocErr.Error != "") {
+			return nil, &AgentAccountError{StatusCode: resp.StatusCode, Code: aocErr.Code, Message: aocErr.Error}
+		}
+		return nil, &AgentAccountError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("%s - %s", resp.Status, string(body))}
+	}
+
+	var result AgentAccountResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("error decoding JSON: %w", err)
+	}
+	// A 200 with either field empty would otherwise be written into the
+	// agent's credential file as a login that can never work; fail here
+	// where the cause is still obvious.
+	if result.Email == "" || result.Password == "" {
+		return nil, fmt.Errorf("AOC returned an incomplete agent account for workspace %q", workspaceName)
+	}
+	return &result, nil
+}
+
+// DeleteAgentAccount removes a workspace's coding-agent bot account.
+// Returns nil when the account was deleted or was already absent.
+func (c *AOCClient) DeleteAgentAccount(workspaceName string) error {
+	url := fmt.Sprintf(
+		"%s/api/automation_server/keycloak/agent-account?workspace_name=%s",
+		c.settings.AOCUrl, neturl.QueryEscape(workspaceName),
+	)
+	// The name goes in the query string, not a body: a DELETE body is
+	// legal but widely dropped by intermediaries, and this server may
+	// reach the AOC through the reverse-proxy relay.
+	resp, err := c.sendRequest("DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("error sending request to %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	var aocErr struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &aocErr); err == nil && (aocErr.Code != "" || aocErr.Error != "") {
+		return &AgentAccountError{StatusCode: resp.StatusCode, Code: aocErr.Code, Message: aocErr.Error}
+	}
+	return &AgentAccountError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("%s - %s", resp.Status, string(body))}
 }
 
 // GetAOCEnvironmentVariables creates AOC environment variables
