@@ -1463,6 +1463,14 @@ class AutomationService:
 
         register_new_bps_for_members(bs_yaml, members)
 
+        # Seed the default egress allow-list (the AOC Keycloak the platform
+        # itself injects as KEYCLOAK_URL) for any (bp, realm) here that has no
+        # firewall node yet — #311. Rides this method's single write + commit,
+        # so it is versioned in bitswan.yaml and appears in the deployment
+        # history like every other firewall change; an operator can revoke it,
+        # and a revoked/denied realm is never re-seeded.
+        firewall_service.seed_default_rules_for_members(bs_yaml, members)
+
         deployments = bs_yaml.setdefault("deployments", {})
 
         for m in members:
@@ -4702,6 +4710,18 @@ class AutomationService:
                 deployment_config["active"] = True
 
             bp = deployment_bp(deployment_config)
+            # Default egress allow-list for a first-deploy (bp, realm) — the
+            # single-deployment equivalent of the seeding write_deployment_entries
+            # does (#311). Placed here so it rides the same commit as the deploy.
+            firewall_service.seed_default_rules_for_members(
+                bs_yaml,
+                [
+                    {
+                        "relative_path": deployment_config.get("relative_path"),
+                        "stage": deployment_config.get("stage") or "production",
+                    }
+                ],
+            )
             await self._persist_bp_state(
                 bs_yaml,
                 {bp} if bp else set(),
