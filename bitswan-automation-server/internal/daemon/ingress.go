@@ -525,13 +525,21 @@ func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, err
 		if err != nil {
 			return false, fmt.Errorf("failed to inspect workspace traefik mounts: %w", err)
 		}
-		if strings.Contains(string(mounts), "/etc/traefik/dynamic.yml") {
-			return false, nil // up to date — reads dynamic.yml already
+		// Also recreate a sub-traefik still running with IP forwarding enabled: a
+		// container created before the ip_forward=0 sysctl can bridge stage nets at
+		// L3. `docker inspect` exposes the applied sysctls, so an already-hardened
+		// one reads net.ipv4.ip_forward:0 and stays a no-op.
+		sysctls, _ := exec.Command("docker", "inspect", "--format",
+			"{{index .HostConfig.Sysctls \"net.ipv4.ip_forward\"}}", containerName).Output()
+		hardened := strings.TrimSpace(string(sysctls)) == "0"
+		if strings.Contains(string(mounts), "/etc/traefik/dynamic.yml") && hardened {
+			return false, nil // up to date — reads dynamic.yml already + can't forward
 		}
 		if out, rmErr := exec.Command("docker", "rm", "-f", containerName).CombinedOutput(); rmErr != nil {
-			return false, fmt.Errorf("failed to remove stale (REST-provider) workspace traefik %s: %w: %s", containerName, rmErr, strings.TrimSpace(string(out)))
+			return false, fmt.Errorf("failed to remove stale workspace traefik %s: %w: %s", containerName, rmErr, strings.TrimSpace(string(out)))
 		}
-		// Fall through to recreate with the file provider + dynamic.yml mount.
+		// Fall through to recreate with the file provider + dynamic.yml mount + the
+		// no-forwarding sysctl.
 	}
 
 	// Create workspace traefik config directory
@@ -915,19 +923,37 @@ func reapplyWorkspaceIngressACLs() {
 	if err != nil {
 		return
 	}
-	seen := map[string]bool{}
+	// One domain per workspace (any of its routes) — needed to recreate a
+	// sub-traefik that predates the no-forward sysctl.
+	domainByWs := map[string]string{}
 	for _, r := range routes {
-		label, _, _ := strings.Cut(toOuterHost(r.Hostname), ".")
-		ws := workspaceFromLabel(label)
-		if ws == "" || seen[ws] {
+		label, dom, ok := strings.Cut(toOuterHost(r.Hostname), ".")
+		if !ok || dom == "" {
 			continue
 		}
-		seen[ws] = true
+		ws := workspaceFromLabel(label)
+		if ws == "" {
+			continue
+		}
+		if _, dup := domainByWs[ws]; !dup {
+			domainByWs[ws] = dom
+		}
+	}
+	for ws, dom := range domainByWs {
+		// Recreate the sub-traefik if it predates the ip_forward=0 sysctl (drift
+		// check inside initWorkspaceTraefik); a no-op once hardened. The durable
+		// file-provider dynamic.yml is preserved across the recreate, so routes
+		// survive it.
+		if _, ierr := initWorkspaceTraefik(ws, dom, false); ierr != nil {
+			fmt.Printf("Warning: could not harden sub-traefik for workspace %q: %v\n", ws, ierr)
+		}
+		// Ensure the C1 ingress ACL is in the dynamic config (idempotent, no
+		// route churn).
 		if err := traefikapi.EnsureIngressACL(traefikapi.GetWorkspaceTraefikBaseURL(ws)); err != nil {
 			fmt.Printf("Warning: could not apply sub-traefik ingress ACL to workspace %q: %v\n", ws, err)
 			continue
 		}
-		fmt.Printf("Applied sub-traefik ingress ACL (C1) to workspace %q\n", ws)
+		fmt.Printf("Applied stage isolation (ingress ACL + no IP forwarding) to workspace %q\n", ws)
 	}
 }
 

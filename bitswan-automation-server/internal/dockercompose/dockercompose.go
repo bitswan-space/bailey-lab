@@ -613,6 +613,15 @@ func CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikPath, domain,
 		"container_name": containerName,
 		"networks":       traefikNetworks,
 		"volumes":        traefikVolumes,
+		// The sub-traefik multi-homes onto every stage bridge to reach app
+		// upstreams. It's an L7 proxy and never forwards IP packets, so disable
+		// forwarding in its own network namespace: it then CANNOT be used to route
+		// one stage network into another at L3 — no cross-stage bridge exists at
+		// the packet layer, complementing the L7 ingress ACL. (net.ipv4.ip_forward
+		// is per-netns, so this affects only this container, not host bridging.)
+		"sysctls": map[string]interface{}{
+			"net.ipv4.ip_forward": "0",
+		},
 	}
 
 	if domain != "" {
