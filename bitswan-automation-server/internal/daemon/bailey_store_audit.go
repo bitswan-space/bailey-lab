@@ -24,6 +24,13 @@ const (
 	auditInviteRedeem      = "invite.redeem"      // an invitee redeemed their invite (first device trusted)
 
 	auditMemOverReservation = "container.mem_over_reservation" // a container's memory usage exceeded its reservation
+
+	// Endpoint ACL changes over the daemon socket (issue #189 / BSY-13). These
+	// are operator-only mutations, so they need a trail of their own — the
+	// endpoint_grants.granted_by column records the grant but nothing recorded
+	// a revoke at all.
+	auditAccessGrant  = "access.grant"  // a principal was granted access/owner on an endpoint
+	auditAccessRevoke = "access.revoke" // a principal's grant on an endpoint was removed
 )
 
 // eventRecord is one audit row, JSON-shaped for the overview feed.

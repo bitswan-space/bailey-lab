@@ -117,6 +117,17 @@ func approvePendingPair(email, code, approverEmail string, approverIsAdmin bool)
 // only the code. Returns the approved entry, or nil if no live (unexpired)
 // pending pair has that code.
 func approvePendingPairByCode(code, approverEmail string) *pairingEntry {
+	return approvePendingPairByCodeVia(code, approverEmail, "CLI")
+}
+
+// approvePendingPairByCodeVia is approvePendingPairByCode with the admin
+// credential that authorised it recorded in ApproverInfo. The socket handler
+// passes the credential from callerAdminPrincipal so the provenance says which
+// token approved the device rather than implying the root admin did it by hand
+// (issue #189). ApprovedBy stays the root-admin address: callers only test it
+// for emptiness, and it remains the account under whose authority the approval
+// ran.
+func approvePendingPairByCodeVia(code, approverEmail, via string) *pairingEntry {
 	e, err := dbLoadPendingPairByCode(code)
 	if err != nil || e == nil {
 		return nil
@@ -125,7 +136,7 @@ func approvePendingPairByCode(code, approverEmail string) *pairingEntry {
 		return nil
 	}
 	e.ApprovedBy = approverEmail
-	e.ApproverInfo = approverEmail + " (admin via CLI)"
+	e.ApproverInfo = approverEmail + " (admin via " + via + ")"
 	if err := dbUpsertPendingPair(e); err != nil {
 		return nil
 	}
