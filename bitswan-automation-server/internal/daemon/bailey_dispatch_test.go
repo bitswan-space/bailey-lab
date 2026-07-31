@@ -313,6 +313,65 @@ func TestBaileyDevices_RemoveScopedToCaller(t *testing.T) {
 	}
 }
 
+// TestBaileyApprovals_DenyPersists pins the fix for the "Dismiss doesn't
+// persist" bug: dismissing a pending device request deletes it server-side
+// (POST /bailey/api/approvals/deny) so it stays gone across refetches, with the
+// same admin-or-own-email visibility as the list.
+func TestBaileyApprovals_DenyPersists(t *testing.T) {
+	requester := "deny-user@example.com"
+	if _, err := generatePendingPair(requester); err != nil {
+		t.Fatal(err)
+	}
+
+	// An unrelated non-admin cannot deny someone else's request…
+	wForbidden := dispatch(baileyForm("/bailey/api/approvals/deny", "deny-bystander@example.com", url.Values{"email": {requester}}))
+	if wForbidden.Code != http.StatusForbidden {
+		t.Fatalf("non-admin denying another user's request = %d, want 403", wForbidden.Code)
+	}
+	// …and the pending pair survives that rejected attempt.
+	if e, _ := dbLoadPendingPairByEmail(requester); e == nil {
+		t.Fatal("pending pair removed by an unauthorized deny")
+	}
+
+	// The requester denies their OWN request: 200, refreshed list omits it, and
+	// it's gone from the store (persistent — not just hidden client-side).
+	wSelf := dispatch(baileyForm("/bailey/api/approvals/deny", requester, url.Values{"email": {requester}}))
+	if wSelf.Code != http.StatusOK {
+		t.Fatalf("self-deny = %d, want 200: %s", wSelf.Code, wSelf.Body.String())
+	}
+	var got struct {
+		Pending []baileyApprovalDTO `json:"pending"`
+	}
+	if err := json.Unmarshal(wSelf.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, wSelf.Body.String())
+	}
+	for _, p := range got.Pending {
+		if strings.EqualFold(p.Email, requester) {
+			t.Error("denied request still present in the refreshed list")
+		}
+	}
+	if e, _ := dbLoadPendingPairByEmail(requester); e != nil {
+		t.Error("pending pair still in the store after deny — dismiss is not persistent")
+	}
+
+	// Idempotent: denying an already-gone request is a no-op 200.
+	if w := dispatch(baileyForm("/bailey/api/approvals/deny", requester, url.Values{"email": {requester}})); w.Code != http.StatusOK {
+		t.Fatalf("idempotent re-deny = %d, want 200", w.Code)
+	}
+
+	// An admin can deny any user's request.
+	other := "deny-other@example.com"
+	if _, err := generatePendingPair(other); err != nil {
+		t.Fatal(err)
+	}
+	if w := dispatch(baileyForm("/bailey/api/approvals/deny", "deny-boss@example.com", url.Values{"email": {other}}, adminGrp)); w.Code != http.StatusOK {
+		t.Fatalf("admin deny = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if e, _ := dbLoadPendingPairByEmail(other); e != nil {
+		t.Error("admin deny did not remove the pending pair")
+	}
+}
+
 // --- approvals round-trip against seeded pending_pairs -----------------
 
 func TestBaileyApprovals_RoundTrip(t *testing.T) {

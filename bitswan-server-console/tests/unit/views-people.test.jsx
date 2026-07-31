@@ -154,11 +154,28 @@ describe('UsersView — device approvals', () => {
     await waitFor(() => expect(screen.getByText(/Code didn't match/)).toBeTruthy());
   });
 
-  it('dismiss clears the request from view', () => {
+  it('dismiss denies the request server-side (persistent) then refreshes', async () => {
     const s = spies();
+    let denied = null;
+    installFetch({ '/bailey/api/approvals/deny': (url, init) => {
+      denied = new URLSearchParams(init.body);
+      return { json: { pending: [] } };
+    } });
     render(<Host View={UsersView} data={withPending()} extra={s} />);
     fireEvent.click(screen.getByText('Dismiss'));
-    expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Dismissed request'), 'info');
+    // It hits the deny endpoint (persistent removal), not just a local hide,
+    // then refreshes the approvals list.
+    await waitFor(() => expect(denied).not.toBeNull());
+    expect(denied.get('email')).toBe('alex@h');
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Dismissed the device request'), 'info'));
+    expect(s.refresh).toHaveBeenCalledWith('approvals');
+  });
+
+  it('dismiss surfaces a server error instead of silently hiding', async () => {
+    installFetch({ '/bailey/api/approvals/deny': { status: 500, json: { error: 'boom' } } });
+    render(<Host View={UsersView} data={withPending()} />);
+    fireEvent.click(screen.getByText('Dismiss'));
+    await waitFor(() => expect(screen.getByText(/Could not dismiss|boom/)).toBeTruthy());
   });
 });
 
