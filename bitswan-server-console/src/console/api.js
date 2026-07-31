@@ -222,6 +222,10 @@ export const Api = {
   devices: () => getJSON('/bailey/api/devices'),
   removeDevice: (id) => postForm('/bailey/api/devices/remove', { id }),
   approvals: () => getJSON('/bailey/api/approvals'),
+  // Deny (permanently remove) a pending device-pair request — the persistent
+  // "Dismiss". Unlike a local hide, it deletes the request server-side so it
+  // doesn't reappear on the next refetch. Returns the refreshed { pending }.
+  denyApproval: (email) => postForm('/bailey/api/approvals/deny', { email }),
   // Approve a pending pairing. The JSON variant isn't wired in the
   // dispatcher; the live route is the gate's form handler, which is
   // same-origin and bypasses the chrome wrap. Returns 2xx HTML on
