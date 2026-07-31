@@ -21,6 +21,9 @@ const (
 	auditInviteResend      = "invite.resend"      // an admin re-sent an invite (fresh token + expiry)
 	auditInviteRevoke      = "invite.revoke"      // an admin revoked an outstanding invite
 	auditInviteRedeem      = "invite.redeem"      // an invitee redeemed their invite (first device trusted)
+	auditMagicLinkCreate   = "magiclink.create"   // an admin/auditor owner minted an endpoint-scoped magic link (#240)
+	auditMagicLinkRedeem   = "magiclink.redeem"   // a user redeemed a magic link (device trusted for one endpoint)
+	auditMagicLinkRevoke   = "magiclink.revoke"   // a magic link was revoked
 
 	auditMemOverReservation = "container.mem_over_reservation" // a container's memory usage exceeded its reservation
 

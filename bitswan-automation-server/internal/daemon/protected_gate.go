@@ -490,6 +490,18 @@ func handleGatePath(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == gatePathPrefix+"/api/device-claim":
 		handleDeviceClaim(w, r, email)
 
+	// Magic links — endpoint-scoped device-trust invites (#240). In-process on
+	// any host (like the rest of the gate prefix), so redeem works on an outer
+	// app host where /bailey/api has no daemon upstream.
+	case r.URL.Path == magicLinkCreatePath:
+		handleMagicLinkCreate(w, r, email, groups)
+	case r.URL.Path == magicLinkRedeemPath:
+		handleMagicLinkRedeem(w, r, email)
+	case r.URL.Path == magicLinkListPath:
+		handleMagicLinkList(w, r, email, groups)
+	case r.URL.Path == magicLinkRevokePath:
+		handleMagicLinkRevoke(w, r, email, groups)
+
 	case r.URL.Path == gatePathPrefix+"/share" ||
 		strings.HasPrefix(r.URL.Path, gatePathPrefix+"/share/"):
 		handleShareEndpoint(w, r, email, groups)
