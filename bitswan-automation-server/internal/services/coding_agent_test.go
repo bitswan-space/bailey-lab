@@ -69,3 +69,34 @@ func TestCodingAgentComposeNetworkIsolation(t *testing.T) {
 		t.Errorf("BITSWAN_GITOPS_URL not set to gitops over the shared net; env=%v", agent.Environment)
 	}
 }
+
+// TestGitopsContainerFilterArgs pins the fix for the agent-start bug: the
+// container that gets attached to the <ws>-agent bridge must be ONLY the gitops
+// service container. Filtering by gitops.workspace alone also matches every
+// automation gitops deploys (live-dev / blue-green / staging app containers,
+// garage, postgres, firewall) — many of which share another container's network
+// namespace, which Docker refuses to attach an extra network to, aborting the
+// whole coding-agent bring-up. The compose-service filter is what pins it.
+func TestGitopsContainerFilterArgs(t *testing.T) {
+	args := gitopsContainerFilterArgs("myws")
+	joined := ""
+	for _, a := range args {
+		joined += a + " "
+	}
+	if !contains(args, "label=gitops.workspace=myws") {
+		t.Errorf("missing workspace-scope filter; got %q", joined)
+	}
+	// The load-bearing part: without this, dozens of containers match.
+	if !contains(args, "label=com.docker.compose.service=bitswan-gitops") {
+		t.Errorf("missing the compose-service filter that isolates gitops; got %q", joined)
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

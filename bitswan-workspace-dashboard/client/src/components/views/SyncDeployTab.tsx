@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Rocket, CheckCircle2, SlidersHorizontal, Terminal } from 'lucide-react';
+import { Rocket, CheckCircle2, SlidersHorizontal, Terminal, GitMerge } from 'lucide-react';
 import { toast } from '@/lib/notify';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { useSessions } from '@/components/agents/SessionProvider';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
 import { DiffTab } from '@/components/diff/DiffTab';
@@ -50,6 +60,9 @@ export function SyncDeployTab({
   const { startSyncSession, agentStatus, ensureAgent } =
     useSessions();
   const [busy, setBusy] = useState(false);
+  // True after a sync returns needs_rebase: opens the "automerge failed" dialog
+  // so the user chooses whether to repair with a coding-agent session.
+  const [rebaseNeeded, setRebaseNeeded] = useState(false);
   // Append-only build log for the in-flight (or just-finished) deploy: every
   // line gitops emits — image build steps, build.sh output (vite/go build),
   // per-member "Prepared N/M" — not just the latest line the toast shows.
@@ -145,11 +158,11 @@ export function SyncDeployTab({
         return;
       }
       if (result.status === 'needs_rebase') {
-        toast.info(
-          'main has moved on — opening a coding-agent session to rebase this copy. ' +
-            'When it finishes, come back and press Sync & Deploy again.',
-        );
-        await handoffToAgent();
+        // main moved on since this copy branched, so the automatic
+        // fast-forward/merge can't apply cleanly. Don't silently yank the user
+        // to the coding-agent screen — explain what happened and let them choose
+        // to repair it (a rebase session) or come back later.
+        setRebaseNeeded(true);
         return;
       }
       // Fast-forwarded into main. The sync endpoint ALREADY spawned the
@@ -351,6 +364,36 @@ export function SyncDeployTab({
           </div>
         )}
       </div>
+
+      {/* Automerge failed → offer a coding-agent repair, instead of yanking the
+          user straight to the agent screen. */}
+      <AlertDialog open={rebaseNeeded} onOpenChange={(o) => !o && setRebaseNeeded(false)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <GitMerge className="size-5 text-amber-600" aria-hidden /> Automerge failed
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              <span className="font-mono font-semibold text-foreground">main</span> has moved on
+              since this copy branched, so your changes to{' '}
+              <span className="font-mono font-semibold text-foreground">{bp.name}</span> can’t be
+              merged in automatically. A coding-agent session can rebase this copy onto main; when it
+              finishes, come back and press <strong>Sync &amp; Deploy</strong> again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Not now</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setRebaseNeeded(false);
+                void handoffToAgent();
+              }}
+            >
+              Repair with coding agent
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
