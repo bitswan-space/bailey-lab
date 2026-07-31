@@ -1886,6 +1886,16 @@ class AutomationService:
         containers, re-deriving the backend's secret env, reloading firewall)."""
         validate_bp_name(bp)
         stage_key = "production" if stage in ("", "production") else stage
+        # BSY-07 / #185: a rollback reinstates a prior committed state — which,
+        # for staging/production, is itself a (re)deploy TO that stage. Re-run the
+        # SAME freeze + audit + admin/auditor gate a forward promotion must pass,
+        # so a superseded or known-vulnerable production image can't be reinstated
+        # without sign-off, and a frozen staging image can't be swapped under an
+        # in-flight audit. dev has no gate (matching a dev deploy). The role is
+        # resolved authoritatively from `deployed_by` via the daemon store,
+        # fail-closed — never a caller-supplied role.
+        if stage_key in ("staging", "production"):
+            self._assert_promotable(bp, stage_key, deployed_by)
         bp_dir = bp_state_path(self.gitops_dir, bp)
         content, _, rc = await call_git_command_with_output(
             "git", "show", f"{git_commit}:bitswan.yaml", cwd=bp_dir
