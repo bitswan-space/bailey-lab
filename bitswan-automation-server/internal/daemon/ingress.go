@@ -475,6 +475,29 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	return true, nil
 }
 
+// bitswanNetworkAllowCIDRs resolves bitswan_network's subnet(s) — the ONLY
+// source range from which the daemon gate reaches a workspace sub-traefik. Every
+// stage bridge (dev/staging/production) uses a disjoint subnet, so allowlisting
+// exactly this on the sub-traefik routers (traefikapi.SetIngressAllowCIDRs) lets
+// the gate through while rejecting any stage-network peer that tries to route a
+// cross-stage Host directly — finding C1. Returns nil (⇒ fail-closed default) if
+// the network can't be inspected.
+func bitswanNetworkAllowCIDRs() []string {
+	out, err := exec.Command("docker", "network", "inspect", "bitswan_network",
+		"--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}").Output()
+	if err != nil {
+		fmt.Printf("Warning: could not resolve bitswan_network subnet for the sub-traefik ingress ACL: %v\n", err)
+		return nil
+	}
+	var cidrs []string
+	for _, f := range strings.Fields(string(out)) {
+		if strings.Contains(f, "/") {
+			cidrs = append(cidrs, f)
+		}
+	}
+	return cidrs
+}
+
 // initWorkspaceTraefik initializes a traefik proxy for a workspace.
 func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, error) {
 	homeDir := os.Getenv("HOME")
@@ -879,6 +902,32 @@ func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
 		if !wrapAvailable {
 			_ = traefikapi.AddRouteWithTraefik(toOuterHost(r.Hostname), r.Upstream, subURL)
 		}
+	}
+}
+
+// reapplyWorkspaceIngressACLs re-renders every workspace sub-traefik's dynamic
+// config so the ingress-only ACL (finding C1) lands on routes written by an
+// older daemon — without re-adding routes (traefikapi.EnsureIngressACL is a
+// no-op state rewrite, so no route churns). Idempotent: the emitted config is
+// identical once applied, so running it on every boot is cheap and safe.
+func reapplyWorkspaceIngressACLs() {
+	routes, err := listProtectedRoutes()
+	if err != nil {
+		return
+	}
+	seen := map[string]bool{}
+	for _, r := range routes {
+		label, _, _ := strings.Cut(toOuterHost(r.Hostname), ".")
+		ws := workspaceFromLabel(label)
+		if ws == "" || seen[ws] {
+			continue
+		}
+		seen[ws] = true
+		if err := traefikapi.EnsureIngressACL(traefikapi.GetWorkspaceTraefikBaseURL(ws)); err != nil {
+			fmt.Printf("Warning: could not apply sub-traefik ingress ACL to workspace %q: %v\n", ws, err)
+			continue
+		}
+		fmt.Printf("Applied sub-traefik ingress ACL (C1) to workspace %q\n", ws)
 	}
 }
 

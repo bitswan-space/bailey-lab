@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 	"github.com/dchest/uniuri"
 )
 
@@ -390,6 +391,22 @@ func (s *Server) Run() error {
 				time.Sleep(2 * time.Second)
 			}
 		}
+	}()
+
+	// Pin the source-IP allowlist every workspace sub-traefik enforces on its
+	// routes BEFORE any route is (re)written below: the sub-traefik multi-homes
+	// onto all stage bridges to reach upstreams, so only the gate's network
+	// (bitswan_network) may reach it — a stage-network peer routing a cross-stage
+	// Host is rejected (finding C1). Synchronous + resolved from the live network.
+	traefikapi.SetIngressAllowCIDRs(bitswanNetworkAllowCIDRs())
+
+	// One-time migration: apply that ACL to workspaces whose sub-traefik routes
+	// predate it (their routers have no middleware yet). Backgrounded — it reads
+	// files + repushes routes — and self-skips once applied, so it's a no-op on
+	// every subsequent boot. Small delay so the sub-traefiks are up first.
+	go func() {
+		time.Sleep(5 * time.Second)
+		reapplyWorkspaceIngressACLs()
 	}()
 
 	// Ensure the global Traefik is on the CURRENT config on startup — not just a
