@@ -1,5 +1,7 @@
 /** Formatting helpers shared by the data-explorer panels. */
 
+import { formatRelative } from '@/lib/format-date';
+
 /** Human-readable byte size ("—" for absent values, e.g. folders). */
 // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable input
 export function fmtBytes(n: number | null | undefined): string {
@@ -15,12 +17,10 @@ export function fmtBytes(n: number | null | undefined): string {
   return `${v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
-/** Locale timestamp from an ISO string ("—" when absent/unparsable). */
+/** Relative timestamp from an ISO string ("—" when absent/unparsable). */
 // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable input
 export function fmtDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString();
+  return formatRelative(iso);
 }
 
 /** Planner row estimate: -1 = never analyzed. */

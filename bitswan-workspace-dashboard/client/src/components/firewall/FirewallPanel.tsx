@@ -16,6 +16,7 @@ import {
 import { toast } from '@/lib/notify';
 import { api, type FirewallReport, type FirewallRule, type GdprRecord } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { formatRelative, type WhenInput } from '@/lib/format-date';
 
 const REALM_LABEL: Record<string, string> = {
   dev: 'Development',
@@ -300,7 +301,11 @@ export function FirewallPanel({
       <Section title="Allowed">
         {allowed.length === 0 && <Empty>No hosts allowed yet.</Empty>}
         {allowed.map((r) => (
-          <Row key={r.host} host={r.host} sub={r.purpose ? `${r.purpose} · by ${r.by} · ${r.at}` : `by ${r.by} · ${r.at}`}>
+          <Row
+            key={r.host}
+            host={r.host}
+            sub={r.purpose ? `${r.purpose} · by ${r.by} · ${fmt(r.at)}` : `by ${r.by} · ${fmt(r.at)}`}
+          >
             {recordBtn(r)}
             {canEdit && <Btn onClick={() => removeRule(r.host)} kind="deny" busy={busy === r.host}>Revoke</Btn>}
           </Row>
@@ -310,7 +315,7 @@ export function FirewallPanel({
       {denied.length > 0 && (
         <Section title="Denied">
           {denied.map((r) => (
-            <Row key={r.host} host={r.host} sub={`denied by ${r.by} · ${r.at}`} blocked>
+            <Row key={r.host} host={r.host} sub={`denied by ${r.by} · ${fmt(r.at)}`} blocked>
               {recordBtn(r)}
               {canEdit && (
                 <>
@@ -358,13 +363,8 @@ export function FirewallPanel({
   );
 }
 
-function fmt(s: string | null) {
-  if (!s) return 'unknown';
-  try {
-    return new Date(s).toLocaleString();
-  } catch {
-    return s;
-  }
+function fmt(s: WhenInput) {
+  return s ? formatRelative(s) : 'unknown';
 }
 
 // GDPR data-processing record form / viewer for a 3rd-party host (wireframe

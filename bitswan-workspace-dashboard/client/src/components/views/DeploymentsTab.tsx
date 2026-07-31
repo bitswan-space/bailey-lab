@@ -87,6 +87,8 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { cn } from '@/lib/utils';
+import { RelativeTime } from '@/components/shared/RelativeTime';
+import { formatAbsolute, formatRelative } from '@/lib/format-date';
 import { setUrlParams, useUrlEnum, useUrlParam } from '@/lib/urlState';
 import type { BusinessProcess, SnapshotStage } from '@/types';
 import { StageSnapshotsSection } from '@/components/views/StageSnapshotsSection';
@@ -192,6 +194,34 @@ const SECTION_IDS: Section[] = [
 
 function short(sha: string | null | undefined, n = 12): string {
   return (sha ?? '').slice(0, n);
+}
+
+/**
+ * Do two commit references point at the same commit?
+ *
+ * Git shas reach this file at three different lengths — full from the API, 12
+ * chars in a history row, 8 in the stage header — so a plain `===` between two
+ * of them silently never matches. Compare on the shorter one's prefix instead,
+ * and demand at least 7 chars so a stray short string can never alias a real
+ * sha.
+ */
+function sameCommit(
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable input
+  a: string | null | undefined,
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable input
+  b: string | null | undefined,
+): boolean {
+  const x = (a ?? '').trim().toLowerCase();
+  const y = (b ?? '').trim().toLowerCase();
+  const n = Math.min(x.length, y.length);
+  if (n < 7) return false;
+  return x.slice(0, n) === y.slice(0, n);
+}
+
+/** History events that record a code version; the rest (firewall / backup /
+ *  secret audit records) carry no deployable source commit. */
+function isCodeDeploy(e: BpHistoryEntry): boolean {
+  return e.source !== 'firewall' && e.source !== 'backup' && e.source !== 'secret';
 }
 
 // ── Section tab (underlined) ────────────────────────────────────────────────
@@ -381,7 +411,7 @@ function FreezeControl({
   const R = 34; // arc radius — same centre as the staging circle, just outside it
   const p = R * 0.707; // 45° offset
   const title = frozen
-    ? `Staging frozen${gate.frozen_by ? ` by ${gate.frozen_by}` : ''}${gate.frozen_at ? ` · ${gate.frozen_at}` : ''}${canManage ? ' — click to unfreeze (re-opens promotion from Development)' : ''}`
+    ? `Staging frozen${gate.frozen_by ? ` by ${gate.frozen_by}` : ''}${gate.frozen_at ? ` · ${formatAbsolute(gate.frozen_at)}` : ''}${canManage ? ' — click to unfreeze (re-opens promotion from Development)' : ''}`
     : canManage
       ? 'Freeze staging — locks the image for audit and enables promotion to Production'
       : 'Only admins and auditors can freeze staging';
@@ -497,7 +527,10 @@ function LogRow({ e }: { e: StagingLogEntry }) {
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="text-[13px] font-semibold text-foreground">{e.who}</span>
           {e.role ? <span className="text-[12px] text-muted-foreground">· {e.role}</span> : null}
-          <span className="text-[12px] text-muted-foreground">· {e.at}</span>
+          <span className="text-[12px] text-muted-foreground">
+            {'· '}
+            <RelativeTime value={e.at} />
+          </span>
         </div>
         <div className="mt-0.5 text-[13px] text-foreground">{e.detail}</div>
       </div>
@@ -531,7 +564,10 @@ function SignoffRow({ a }: { a: StagingSignoff }) {
           >
             {ok ? 'Approved' : 'Changes requested'}
           </span>
-          <span className="text-[12px] text-muted-foreground">· {a.at}</span>
+          <span className="text-[12px] text-muted-foreground">
+            {'· '}
+            <RelativeTime value={a.at} />
+          </span>
         </div>
         {a.note ? (
           <div className="mt-1 rounded-md border-l-2 border-border bg-muted/40 px-2.5 py-1.5 text-[12px] text-muted-foreground">
@@ -731,7 +767,7 @@ function AuditsPanel({
             <span>
               Staging is <strong className="text-foreground">frozen</strong>
               {gate.frozen_by ? ` by ${gate.frozen_by}` : ''}
-              {gate.frozen_at ? ` · ${gate.frozen_at}` : ''}. Audits below apply to the frozen
+              {gate.frozen_at ? ` · ${formatRelative(gate.frozen_at)}` : ''}. Audits below apply to the frozen
               image
               {gate.frozen_sha ? ` (${gate.frozen_sha.slice(0, 12)})` : ''}.
             </span>
@@ -1779,6 +1815,7 @@ function DeployingCard({ d, stageLabel }: { d: ActiveDeploy; stageLabel: string 
 function DeploymentCard({
   entry,
   isCurrent,
+  liveVersion,
   stageLabel,
   busy,
   onRollback,
@@ -1786,6 +1823,9 @@ function DeploymentCard({
 }: {
   entry: BpHistoryEntry;
   isCurrent: boolean;
+  /** The source commit actually running on this stage right now ('' = nothing
+   *  deployed yet). Used to spot rows that duplicate the live version. */
+  liveVersion: string;
   stageLabel: string;
   busy: boolean;
   onRollback: () => void;
@@ -1794,6 +1834,17 @@ function DeploymentCard({
   const tone = entryTone(entry, isCurrent);
   const isFw = entry.source === 'firewall';
   const isBackup = entry.source === 'backup';
+  // A PRIOR row whose code is the code running right now — the classic case is
+  // the original deploy of a commit the operator later rolled back TO, which
+  // leaves two rows for one live version. Rolling back to it is a no-op and
+  // inspecting it just diffs the live tree against itself, so it loses both
+  // actions and says plainly that it is already running (#312). Failed deploys
+  // and non-code audit records are excluded: they never put code on the stage.
+  const isLiveDuplicate =
+    !isCurrent &&
+    isCodeDeploy(entry) &&
+    entry.status !== 'failed' &&
+    sameCommit(entry.source_commit, liveVersion);
   const audits = entry.audit ?? [];
   // Which auditors' notes are expanded (badge is clickable to reveal the note).
   const [openNotes, setOpenNotes] = useState<Record<string, boolean>>({});
@@ -1804,18 +1855,46 @@ function DeploymentCard({
     <div
       className={cn(
         'flex flex-col gap-2.5 rounded-[10px] border bg-background px-4 py-3.5',
-        isCurrent ? 'border-primary ring-[3px] ring-primary/15' : 'border-border',
+        isCurrent
+          ? 'border-primary ring-[3px] ring-primary/15'
+          : isLiveDuplicate
+            ? 'border-emerald-300 bg-emerald-50/40'
+            : 'border-border',
       )}
     >
       <div className="flex flex-wrap items-center gap-2.5">
-        <span className={cn('size-2.5 rounded-full', tone.dot)} aria-hidden />
+        {/* A live duplicate is emerald regardless of how its own deploy ended —
+            "this code is running" is a present-tense fact, so the dot must not
+            contradict the chip next to it. */}
+        <span
+          className={cn('size-2.5 rounded-full', isLiveDuplicate ? 'bg-emerald-500' : tone.dot)}
+          aria-hidden
+        />
         <span className="font-mono text-[13px] font-semibold text-foreground">{short(ver)}</span>
-        <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', tone.cls)}>
-          {isCurrent ? `Current on ${stageLabel}` : tone.label}
-        </span>
-        <span className="ml-auto text-[11px] text-muted-foreground">{entry.deployed_at}</span>
+        {isLiveDuplicate ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700"
+            title={`This is the version running on ${stageLabel} right now — there is nothing to roll back to.`}
+          >
+            <Check className="size-3" aria-hidden />
+            Currently deployed
+          </span>
+        ) : (
+          <span className={cn('rounded-full px-2 py-0.5 text-[11px] font-semibold', tone.cls)}>
+            {isCurrent ? `Current on ${stageLabel}` : tone.label}
+          </span>
+        )}
+        <RelativeTime
+          value={entry.deployed_at}
+          className="ml-auto text-[11px] text-muted-foreground"
+        />
         <div className="flex items-center gap-1.5">
-          {isCurrent ? (
+          {isLiveDuplicate ? (
+            // No Roll back (it is already here) and no Inspect (it would diff
+            // the live tree against itself) — say why, so the missing buttons
+            // read as intentional rather than broken.
+            <span className="text-[11px] text-muted-foreground">Already running</span>
+          ) : isCurrent ? (
             // The newest entry is the current state — you are already here, so
             // there is nothing to roll back TO. Manage the running deployment.
             <>
@@ -1921,7 +2000,12 @@ function DeploymentCard({
               >
                 <div className="text-[11px] font-medium text-foreground">
                   {a.who}
-                  {a.at ? <span className="font-normal text-muted-foreground"> · {a.at}</span> : null}
+                  {a.at ? (
+                    <span className="font-normal text-muted-foreground">
+                      {' · '}
+                      <RelativeTime value={a.at} />
+                    </span>
+                  ) : null}
                 </div>
                 <div className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">
                   {a.note || 'Approved (no note left).'}
@@ -2135,6 +2219,15 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     () => history.find((e) => e.commit === data?.current) ?? history[0] ?? null,
     [history, data],
   );
+  // The source commit actually running on this stage. Deliberately NOT derived
+  // from `currentEntry`, which falls back to history[0] for display purposes:
+  // "the newest thing we know about" is not the same claim as "this is live",
+  // and marking a row as deployed on that basis would be a lie. '' when the
+  // stage has nothing deployed, so no row gets marked.
+  const liveVersion = useMemo(() => {
+    const cur = data?.current ? history.find((e) => e.commit === data.current) : undefined;
+    return cur?.source_commit ?? '';
+  }, [history, data]);
 
   // Resolve the URL-keyed Inspect modal / rollback confirm back to their
   // history entries; the setters write the entry's commit into the URL.
@@ -2688,7 +2781,14 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   <div className={cn('mt-0.5 text-[13px] font-semibold', friendly.color)}>
                     {friendly.label}
                     <span className="font-normal text-muted-foreground">
-                      {currentEntry?.deployed_at ? ` · updated ${currentEntry.deployed_at}` : ' · never deployed'}
+                      {currentEntry?.deployed_at ? (
+                        <>
+                          {' · updated '}
+                          <RelativeTime value={currentEntry.deployed_at} />
+                        </>
+                      ) : (
+                        ' · never deployed'
+                      )}
                     </span>
                   </div>
                 )}
@@ -2848,6 +2948,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                       key={`${e.commit}-${i}`}
                       entry={e}
                       isCurrent={e.commit === data?.current}
+                      liveVersion={liveVersion}
                       stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
                       busy={busy}
                       onRollback={() => setConfirm(e)}

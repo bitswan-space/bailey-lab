@@ -16,6 +16,8 @@ import { api, type BpSnapshot, type DrPolicy, type DrStatus } from '@/lib/api';
 import type { SnapshotTask } from '@/types';
 import { snapshotStepLabel, watchSnapshotTask } from '@/lib/snapshotTask';
 import { cn } from '@/lib/utils';
+import { RelativeTime } from '@/components/shared/RelativeTime';
+import { formatRelative } from '@/lib/format-date';
 
 /**
  * Disaster Recovery panel (Deployments → DR stage → Rehearse & restore).
@@ -206,7 +208,7 @@ export function DisasterRecoveryPanel({
   }
 
   const overdue = dr.overdue;
-  const lastTxt = dr.last ? `${dr.last.at} by ${dr.last.by}` : 'never';
+  const lastTxt = dr.last ? `${formatRelative(dr.last.at)} by ${dr.last.by}` : 'never';
 
   return (
     <div className="relative flex flex-col gap-3.5">
@@ -380,10 +382,10 @@ export function DisasterRecoveryPanel({
                     )}
                   </div>
                   <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-                    {s.created_at?.slice(0, 10)} · {fmtSize(s.total_size_bytes)}
+                    <RelativeTime value={s.created_at} /> · {fmtSize(s.total_size_bytes)}
                     {test && !isInDr && (
                       <span className="ml-2 font-sans text-emerald-700">
-                        ✓ tested {test.at}
+                        ✓ tested <RelativeTime value={test.at} />
                       </span>
                     )}
                   </div>
@@ -401,7 +403,7 @@ export function DisasterRecoveryPanel({
                       title={test.note || undefined}
                     >
                       <Check className="size-3.5" aria-hidden />
-                      Tested {test.at} · {test.by}
+                      Tested <RelativeTime value={test.at} /> · {test.by}
                     </span>
                   ) : (
                     <button

@@ -3,6 +3,7 @@ import { Rocket } from 'lucide-react';
 import { api, type CopyHistory, type HistoryCommit } from '@/lib/api';
 import { DiffView } from '@/components/diff/DiffView';
 import { cn } from '@/lib/utils';
+import { RelativeTime } from '@/components/shared/RelativeTime';
 
 function GraphRow({
   commit,
@@ -95,7 +96,7 @@ function GraphRow({
           </span>
         </div>
         <div className="mt-0.5 break-words text-[11px] text-muted-foreground">
-          {commit.author_email} · {new Date(commit.date).toLocaleString()}
+          {commit.author_email} · <RelativeTime value={commit.date} />
         </div>
         {(commit.deploys ?? []).map((d) => (
           <div

@@ -35,6 +35,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { api, type BackupState } from '@/lib/api';
+import { RelativeTime } from '@/components/shared/RelativeTime';
 import {
   snapshotStepLabel,
   snapshotTaskProgress,
@@ -54,18 +55,6 @@ function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
-
-function formatWhen(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
 }
 
 /** The services captured in a snapshot, e.g. "Postgres + Object storage". */
@@ -405,7 +394,7 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
                   <OffsiteBadge snapshot={s} />
                 </div>
                 <div className="mt-0.5 flex items-center gap-2 font-mono text-xs text-muted-foreground">
-                  <span>{formatWhen(s.created_at)}</span>
+                  <RelativeTime value={s.created_at} />
                   <span aria-hidden>·</span>
                   <span>{formatBytes(s.total_size_bytes)}</span>
                   <span aria-hidden>·</span>
@@ -713,7 +702,7 @@ function ProductionBackupCard({ bp }: { bp: string }) {
               </span>
               <span className="min-w-0 flex-1 truncate text-foreground">{e.detail}</span>
               <span className="shrink-0 text-[11px] text-muted-foreground">
-                {e.by} · {e.at}
+                {e.by} · <RelativeTime value={e.at} />
               </span>
             </div>
           ))}
