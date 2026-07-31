@@ -134,6 +134,13 @@ func (s *Server) runWorkspaceUpdate(req WorkspaceUpdateRequest) error {
 	// too makes every update self-heal an already-migrated workspace.
 	ensureWorkspaceVolumeDirs(workspaceName)
 
+	// Capture the pre-update version + compose for the version ledger
+	// (who/when/which version) and as the rollback artifact restored on a UI
+	// rollback.
+	composePath := filepath.Join(workspacePath, "deployment", "docker-compose.yml")
+	preCompose, _ := os.ReadFile(composePath)
+	fromVer := detectWorkspaceVersions(workspaceName).Gitops
+
 	// Snapshot the current compose as a rollback point BEFORE regenerating it, so
 	// `bitswan rollback <workspace>` can return to the exact pre-update image pins.
 	report(0.15, "Saving a rollback snapshot…")
@@ -154,6 +161,16 @@ func (s *Server) runWorkspaceUpdate(req WorkspaceUpdateRequest) error {
 	fmt.Println("Checking for enabled services to update...")
 	if err := updateServices(workspaceName, dashboardImage, kafkaImage, zookeeperImage, couchdbImage, staging, dev, trustCA); err != nil {
 		fmt.Printf("Warning: some services failed to update: %v\n", err)
+	}
+
+	// Record the update in the version ledger (who/when/from→to) and keep the
+	// pre-update compose as a rollback artifact (bounded updateRollbackDepth
+	// deep). Best-effort — a completed update is never failed on a ledger write.
+	if len(preCompose) > 0 {
+		toVer := detectWorkspaceVersions(workspaceName).Gitops
+		if _, herr := recordWorkspaceUpdate(req.Actor, workspaceName, fromVer, toVer, string(preCompose), false); herr != nil {
+			fmt.Printf("Warning: could not record update history: %v\n", herr)
+		}
 	}
 
 	report(1.0, "Update complete")

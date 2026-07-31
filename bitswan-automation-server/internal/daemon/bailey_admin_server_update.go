@@ -45,6 +45,7 @@ func hostBinaryPath() string {
 // before the connection drops (the daemon is replaced), after which it polls
 // the version until it flips.
 func (s *Server) handleAdminServerUpdate(w http.ResponseWriter, r *http.Request) {
+	actor, _ := identityFromHeaders(r) // WHO, for the version ledger
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -169,13 +170,27 @@ func (s *Server) handleAdminServerUpdate(w http.ResponseWriter, r *http.Request)
 
 	// --- atomic swap (keep the old one as .bak for `self-update --rollback`) ---
 	emit(map[string]any{"event": "progress", "fraction": 0.85, "message": "Installing the new binary…"})
-	if cur, err := os.ReadFile(binPath); err == nil {
-		_ = os.WriteFile(binPath+".bak", cur, 0o755)
+	prevBinary, _ := os.ReadFile(binPath)
+	if len(prevBinary) > 0 {
+		_ = os.WriteFile(binPath+".bak", prevBinary, 0o755)
 	}
 	if err := os.Rename(tmpPath, binPath); err != nil {
 		_ = os.Remove(tmpPath)
 		fail("install failed (could not replace " + binPath + "): " + err.Error())
 		return
+	}
+
+	// Record the update in the version ledger (who/when/from→to) and keep the
+	// previous binary as a rollback artifact (bounded to updateRollbackDepth).
+	// Non-fatal: the swap already succeeded, so a ledger failure is surfaced but
+	// never rolled back into an update failure.
+	if len(prevBinary) > 0 {
+		fromVer := detectServerVersion(s.version).Current
+		toVer := versionFromCLIOutput(string(verOut))
+		if _, herr := recordServerUpdate(actor, fromVer, toVer, prevBinary, false); herr != nil {
+			emit(map[string]any{"event": "progress", "fraction": 0.9,
+				"message": "Update applied (history record failed: " + herr.Error() + ")"})
+		}
 	}
 
 	// --- restart the daemon container to run the new binary ---

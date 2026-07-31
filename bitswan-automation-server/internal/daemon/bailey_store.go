@@ -226,6 +226,25 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_ts_idx ON events(ts);
 
+-- Update history: an append-only ledger of automation-server and workspace
+-- updates (and rollbacks) — WHO updated WHAT to WHICH version and WHEN. It also
+-- backs rollback: the artifact column holds the pre-update state to restore (for the
+-- server, a path to the saved previous binary; for a workspace, the inline
+-- pre-update docker-compose.yml). Pruned to the last few rows per target
+-- (updateRollbackDepth), whose artifacts are the offered rollback points.
+CREATE TABLE IF NOT EXISTS update_history (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts           TEXT NOT NULL,
+  actor        TEXT NOT NULL COLLATE NOCASE,
+  target_kind  TEXT NOT NULL,
+  target_name  TEXT NOT NULL,
+  from_version TEXT NOT NULL,
+  to_version   TEXT NOT NULL,
+  is_rollback  INTEGER NOT NULL DEFAULT 0,
+  artifact     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS update_history_target_idx ON update_history(target_kind, target_name, id);
+
 -- Pending Bailey invites. An admin invites an AOC-org member by email;
 -- the emailed link carries a single-use token whose SHA-256 hex digest
 -- is stored here (the raw token is never at rest — a leaked/backed-up

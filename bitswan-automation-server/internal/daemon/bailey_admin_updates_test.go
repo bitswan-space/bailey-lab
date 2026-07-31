@@ -226,8 +226,16 @@ func TestAdminUpdates_ReturnsPayload(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("bad json: %v", err)
 	}
-	if body["server_update_cmd"] != "bitswan self-update" {
-		t.Errorf("server_update_cmd = %v, want 'bitswan self-update'", body["server_update_cmd"])
+	// The CLI hint is gone (issue #254 — don't document CLI in the UI); the
+	// payload now carries the version ledger + rollback depth instead.
+	if _, ok := body["server_update_cmd"]; ok {
+		t.Error("server_update_cmd should no longer be sent (CLI hint removed)")
+	}
+	if _, ok := body["history"]; !ok {
+		t.Error("response missing 'history' key")
+	}
+	if body["rollback_depth"] != float64(updateRollbackDepth) {
+		t.Errorf("rollback_depth = %v, want %d", body["rollback_depth"], updateRollbackDepth)
 	}
 	if _, ok := body["server"]; !ok {
 		t.Error("response missing 'server' key")
