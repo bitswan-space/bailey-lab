@@ -55,6 +55,39 @@ func TestPeopleDirectory_EndpointOwnerCanList(t *testing.T) {
 	}
 }
 
+// The directory carries each person's authoritative Bailey org role so the
+// workspace people panel can badge admins/auditors inline.
+func TestPeopleDirectory_ReportsOrgRole(t *testing.T) {
+	const owner = "dirrole-owner@example.com"
+	const auditor = "dirrole-auditor@example.com"
+	domain := writeTestConfig(t)
+	host := "dirrolews-dashboard." + domain
+	if _, err := registerEndpoint(host, owner, "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = deleteEndpoint(host) })
+	// A person with the auditor role, surfaced into the roster via a pending
+	// invite. The directory must report their role, not just the picker fields.
+	seedInvite(t, auditor, roleAuditor, time.Hour)
+
+	code, people := directoryPeople(t, owner)
+	if code != http.StatusOK {
+		t.Fatalf("owner directory = %d, want 200", code)
+	}
+	var got *directoryPersonDTO
+	for i := range people {
+		if strings.EqualFold(people[i].Email, auditor) {
+			got = &people[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("auditor missing from directory: %+v", people)
+	}
+	if got.Role != roleAuditor {
+		t.Errorf("directory role = %q, want %q", got.Role, roleAuditor)
+	}
+}
+
 func TestPeopleDirectory_RequiresOwnedEndpointUnlessAdmin(t *testing.T) {
 	writeTestConfig(t)
 	// A user who owns nothing shareable is refused.

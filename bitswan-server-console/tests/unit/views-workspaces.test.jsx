@@ -28,7 +28,7 @@ describe('OverviewView', () => {
     fireEvent.click(screen.getByText('People'));
     fireEvent.click(screen.getByText('Devices'));
     fireEvent.click(screen.getByText('Pending'));
-    expect(s.go).toHaveBeenCalledWith('users'); // approvals merged into People & roles
+    expect(s.go).toHaveBeenCalledWith('users'); // approvals merged into People with access
     expect(s.go).toHaveBeenCalledWith('workspaces');
   });
   it('shows the loading/error banner and retries', () => {
@@ -160,9 +160,9 @@ describe('WorkspacesView', () => {
     fireEvent.click(screen.getByText('Open'));
     expect(s.openUrl).toHaveBeenCalled();
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    // Wireframe drawer: Ownership + Members (real, from the share API).
-    expect(screen.getByText('Ownership')).toBeTruthy();
-    expect(screen.getByText('Members')).toBeTruthy();
+    // Role-based drawer: one "People with access" list (owners + members from the
+    // share API). Owner is a role, not an exclusive property.
+    expect(screen.getByText('People with access')).toBeTruthy();
     await waitFor(() => expect(screen.getByText('me@example.test')).toBeTruthy()); // owner
     await waitFor(() => expect(screen.getByText('bob@x')).toBeTruthy());           // member
   });
@@ -270,20 +270,22 @@ describe('WorkspacesView', () => {
     });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    await waitFor(() => expect(screen.getByText(/No members yet/)).toBeTruthy());
-    await waitFor(() => expect(screen.getByTitle('Add new@x')).toBeTruthy());
-    fireEvent.click(screen.getByTitle('Add new@x'));
+    await waitFor(() => expect(screen.getByText('me@example.test')).toBeTruthy()); // owner in the People list
+    await waitFor(() => expect(screen.getByTitle('Add new@x as user')).toBeTruthy());
+    fireEvent.click(screen.getByTitle('Add new@x as user'));
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('added'), 'success'));
     await waitFor(() => expect(screen.getByText('new@x')).toBeTruthy());
     // The share POST answered with the updated grant list, so the new member
     // left the picker ("everyone's in") and can be removed again.
-    expect(screen.queryByTitle('Add new@x')).toBeNull();
-    fireEvent.click(screen.getByTitle('Remove from workspace'));
+    expect(screen.queryByTitle('Add new@x as user')).toBeNull();
+    // Every row (owner included) now has a Remove; owners sort first, so the
+    // new member (access) is the second Remove.
+    fireEvent.click(screen.getAllByText('Remove')[1]);
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('removed'), 'info'));
   });
 
   // People directory rows as GET /bailey/api/people/directory returns them
-  // — the pool the add-member and transfer pickers select from.
+  // — the pool the add-a-person picker selects from.
   function rosterPerson(over = {}) {
     return { email: 'p@x', name: over.email || 'p@x', invited: false, ...over };
   }
@@ -308,17 +310,17 @@ describe('WorkspacesView', () => {
     });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    await waitFor(() => expect(screen.getByTitle('Add jane@y')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTitle('Add jane@y as user')).toBeTruthy());
     // Owner and existing members never appear as candidates.
-    expect(screen.queryByTitle('Add me@example.test')).toBeNull();
-    expect(screen.queryByTitle('Add bob@x')).toBeNull();
+    expect(screen.queryByTitle('Add me@example.test as user')).toBeNull();
+    expect(screen.queryByTitle('Add bob@x as user')).toBeNull();
     expect(screen.getByText('Invited')).toBeTruthy(); // invited-only flag on sam@x
-    fireEvent.click(screen.getByTitle('Add sam@x'));
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('sam@x added to demo', 'success'));
+    fireEvent.click(screen.getByTitle('Add sam@x as user'));
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('sam@x added to demo as user', 'success'));
     expect(granted.get('action')).toBe('grant');
     expect(granted.get('principal_value')).toBe('sam@x');
     await waitFor(() => expect(screen.getByText('sam@x')).toBeTruthy()); // now in Members
-    expect(screen.queryByTitle('Add sam@x')).toBeNull();                 // and out of the picker
+    expect(screen.queryByTitle('Add sam@x as user')).toBeNull();                 // and out of the picker
   });
 
   it('manage drawer: typing filters the directory picker (matches email or name)', async () => {
@@ -328,13 +330,13 @@ describe('WorkspacesView', () => {
     });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    await waitFor(() => expect(screen.getByTitle('Add jane@y')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTitle('Add jane@y as user')).toBeTruthy());
     fireEvent.change(screen.getByPlaceholderText('Search people…'), { target: { value: 'sam' } });
-    expect(screen.getByTitle('Add sam@x')).toBeTruthy();
-    expect(screen.queryByTitle('Add jane@y')).toBeNull();
+    expect(screen.getByTitle('Add sam@x as user')).toBeTruthy();
+    expect(screen.queryByTitle('Add jane@y as user')).toBeNull();
     fireEvent.change(screen.getByPlaceholderText('Search people…'), { target: { value: 'nobody@z' } });
     expect(screen.getByText('No one matches.')).toBeTruthy(); // honest empty state, search still usable
-    expect(screen.queryByTitle('Add sam@x')).toBeNull();
+    expect(screen.queryByTitle('Add sam@x as user')).toBeNull();
   });
 
   it('manage drawer (owner): directory unavailable → honest error, no picker', async () => {
@@ -344,63 +346,112 @@ describe('WorkspacesView', () => {
     });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    await waitFor(() => expect(screen.getByText(/No members yet/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('me@example.test')).toBeTruthy()); // owner in the People list
     await waitFor(() => expect(screen.getByText(/Couldn't load the server's people directory/)).toBeTruthy());
     expect(screen.queryByTitle(/^Add /)).toBeNull();
   });
 
-  it('manage drawer (owner): transfers ownership via directory pick + confirm modal', async () => {
+  it('manage drawer (owner): the recorded owner is an editable role, not a fixed badge', async () => {
+    // Flattened model: there is no "primary owner". The recorded owner_email is
+    // shown first but carries the same role DROPDOWN + Remove as anyone else,
+    // and demoting it routes through grant-then-revoke (the backend reassigns
+    // the owner_email slot). No transfer flow, no confirm modal.
     const s = spies();
-    let transferred = null;
+    const posted = [];
     installFetch({
-      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
-      '/bailey/api/people/directory': { json: { people: [rosterPerson({ email: 'me@example.test' }), rosterPerson({ email: 'sam@x', name: 'Sam' })] } },
-      '/bailey/api/workspaces/demo/transfer-ownership': (url, init) => {
-        transferred = JSON.parse(init.body);
-        return { json: { ok: true, workspace: 'demo', owner_email: transferred.email } };
+      '/2fa-gate/api/share/dash.example.test': (url, init) => {
+        if (init && init.method === 'POST') {
+          posted.push(new URLSearchParams(init.body));
+          return { json: { owner_email: 'zoe@x', grants: [{ principal_type: 'email', principal_value: 'me@example.test', role: 'access' }] } };
+        }
+        return { json: { owner_email: 'me@example.test', grants: [
+          { principal_type: 'email', principal_value: 'zoe@x', role: 'owner' }, // a co-owner (keeps ≥1 owner after demote)
+        ] } };
       },
+      '/bailey/api/people/directory': { json: { people: [] } },
     });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    fireEvent.click(screen.getByText('Transfer ownership'));
-    await waitFor(() => expect(screen.getByTitle('Transfer to sam@x')).toBeTruthy());
-    // The current owner is never offered as a recipient.
-    expect(screen.queryByTitle('Transfer to me@example.test')).toBeNull();
-    fireEvent.click(screen.getByTitle('Transfer to sam@x'));   // pick opens the confirm modal directly
-    expect(screen.getByText(/only the new owner can transfer it back/)).toBeTruthy();
-    fireEvent.click(screen.getByText('Transfer ownership')); // the modal's confirm (the card button is hidden while the panel is open)
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('transferred to sam@x'), 'success'));
-    expect(transferred).toEqual({ email: 'sam@x' });
-    expect(s.refresh).toHaveBeenCalledWith('workspaces');
+    await waitFor(() => expect(screen.getByText('me@example.test')).toBeTruthy());
+    // No transfer affordance survives the flatten.
+    expect(screen.queryByText('Change the primary owner')).toBeNull();
+    // Both owners sort first, alphabetically: me@example.test before zoe@x, so
+    // the recorded owner's dropdown is the first combobox — and it's editable.
+    const roleSelects = screen.getAllByRole('combobox');
+    expect(roleSelects[0].value).toBe('owner');  // me@example.test — the recorded owner
+    fireEvent.change(roleSelects[0], { target: { value: 'access' } });
+    await waitFor(() => expect(posted.length).toBeGreaterThanOrEqual(2));
+    expect(posted[0].get('action')).toBe('grant');
+    expect(posted[0].get('role')).toBe('access');
+    expect(posted[0].get('principal_value')).toBe('me@example.test');
+    expect(posted[1].get('action')).toBe('revoke');
+    expect(posted[1].get('role')).toBe('owner');
+    expect(posted[1].get('principal_value')).toBe('me@example.test');
   });
 
-  it('manage drawer: a rejected transfer surfaces the backend error, picker intact', async () => {
+  it('manage drawer (owner): co-owners show as Owner and roles are changeable', async () => {
     const s = spies();
+    const posted = [];
     installFetch({
-      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [] } },
-      // e.g. the recipient's invite expired between listing and confirming.
-      '/bailey/api/people/directory': { json: { people: [rosterPerson({ email: 'stranger@x', invited: true })] } },
-      '/bailey/api/workspaces/demo/transfer-ownership': { status: 400, json: { error: "stranger@x isn't on this server yet — invite them first" } },
+      '/2fa-gate/api/share/dash.example.test': (url, init) => {
+        if (init && init.method === 'POST') {
+          posted.push(new URLSearchParams(init.body));
+          return { json: { owner_email: 'me@example.test', grants: [{ principal_type: 'email', principal_value: 'mate@x', role: 'owner' }] } };
+        }
+        return { json: { owner_email: 'me@example.test', grants: [
+          { principal_type: 'email', principal_value: 'co@x', role: 'owner' },     // a CO-OWNER — owner is a role, not exclusive
+          { principal_type: 'email', principal_value: 'mate@x', role: 'access' },   // a member
+        ] } };
+      },
+      '/bailey/api/people/directory': { json: { people: [] } },
     });
     render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} extra={s} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    fireEvent.click(screen.getByText('Transfer ownership'));
-    await waitFor(() => expect(screen.getByTitle('Transfer to stranger@x')).toBeTruthy());
-    fireEvent.click(screen.getByTitle('Transfer to stranger@x'));
-    fireEvent.click(screen.getByText('Transfer ownership')); // modal confirm
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining("isn't on this server yet"), 'danger'));
-    expect(s.refresh).not.toHaveBeenCalledWith('workspaces');
-    // The panel survives the failure so the owner can pick someone else.
-    expect(screen.getByTitle('Transfer to stranger@x')).toBeTruthy();
+    // The co-owner is VISIBLE (not filtered out like before). Every person —
+    // including the recorded owner — has a standard role DROPDOWN reading Owner
+    // or User. Owners sort first alphabetically (co@x, me@example.test), then
+    // users (mate@x); the "Add as" select trails them all.
+    await waitFor(() => expect(screen.getByText('co@x')).toBeTruthy());
+    expect(screen.getByText('mate@x')).toBeTruthy();
+    const roleSelects = screen.getAllByRole('combobox');
+    expect(roleSelects[0].value).toBe('owner');   // co@x — a co-owner
+    expect(roleSelects[1].value).toBe('owner');   // me@example.test — the recorded owner
+    expect(roleSelects[2].value).toBe('access');  // mate@x — a user
+    // Promote the user via the dropdown: grant owner, then revoke access.
+    fireEvent.change(roleSelects[2], { target: { value: 'owner' } });
+    await waitFor(() => expect(posted.length).toBeGreaterThanOrEqual(2));
+    expect(posted[0].get('action')).toBe('grant');
+    expect(posted[0].get('role')).toBe('owner');
+    expect(posted[0].get('principal_value')).toBe('mate@x');
+    expect(posted[1].get('action')).toBe('revoke');
+    expect(posted[1].get('role')).toBe('access');
   });
 
-  it('manage drawer (non-owner): no transfer control at all', () => {
-    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({
-      isOwner: false, dashboardRole: 'access', ownerEmail: 'owner@x', members: ['owner@x'],
-      dashboard: 'https://dash.example.test/',
-    })] })} />);
+  it('manage drawer (owner): shows Bailey org-role badges (admin/auditor) inline', async () => {
+    // The people directory carries each person's server-wide Bailey role. The
+    // roster shows a badge for the notable ones (admin/auditor) next to the
+    // name — separate from the per-workspace Owner/User control. Plain members
+    // get no badge.
+    installFetch({
+      '/2fa-gate/api/share/dash.example.test': { json: { owner_email: 'me@example.test', grants: [
+        { principal_type: 'email', principal_value: 'aud@x', role: 'access' },
+        { principal_type: 'email', principal_value: 'plain@x', role: 'access' },
+      ] } },
+      '/bailey/api/people/directory': { json: { people: [
+        rosterPerson({ email: 'me@example.test', role: 'admin' }),   // the workspace owner is also a server admin
+        rosterPerson({ email: 'aud@x', role: 'auditor' }),
+        rosterPerson({ email: 'plain@x', role: 'member' }),           // unremarkable — no badge
+      ] } },
+    });
+    render(<Host View={WorkspacesView} data={makeData({ workspaces: [liveWs({ dashboard: 'https://dash.example.test/' })] })} />);
     fireEvent.click(screen.getByTitle('Manage workspace'));
-    expect(screen.queryByText('Transfer ownership')).toBeNull();
+    await waitFor(() => expect(screen.getByText('me@example.test')).toBeTruthy());
+    // Admin + auditor render exactly once each (getByText throws on duplicates).
+    await waitFor(() => expect(screen.getByText('Admin')).toBeTruthy());
+    expect(screen.getByText('Auditor')).toBeTruthy();
+    // A plain member gets no org badge (member/user are the default, unbadged).
+    expect(screen.queryByText('Member')).toBeNull();
+    expect(screen.queryByText('member')).toBeNull();
   });
 
   it('manage drawer (non-owner): sees owner + members read-only, no add box', () => {
@@ -412,10 +463,10 @@ describe('WorkspacesView', () => {
     fireEvent.click(screen.getByTitle('Manage workspace'));
     // Members can SEE who owns it and who's in it…
     expect(screen.getByText("You're a member of this workspace")).toBeTruthy();
-    expect(screen.getByText('Ownership')).toBeTruthy();
+    expect(screen.getByText('People with access')).toBeTruthy();
     expect(screen.getByText('owner@x')).toBeTruthy();        // the owner
     expect(screen.getByText('mate@x')).toBeTruthy();         // a fellow member
-    expect(screen.getByText(/Only its owner can add or remove/)).toBeTruthy();
+    expect(screen.getByText(/Only an owner can add or remove/)).toBeTruthy();
     // …but get no controls to change membership.
     expect(screen.queryByText('Add a member')).toBeNull();
     expect(screen.queryByPlaceholderText('Search people…')).toBeNull();
