@@ -32,7 +32,12 @@ type Server struct {
 	server       *http.Server
 	docsServer   *http.Server
 	docsListener net.Listener
-	token        string
+	// baileyServer serves the identity-trusting Bailey management + gate handlers
+	// on a LOOPBACK-only listener (issue #183), reachable only via the in-process
+	// gate — never directly from another container on the shared network.
+	baileyServer   *http.Server
+	baileyListener net.Listener
+	token          string
 
 	// initConfirmCh is used to signal that the user has confirmed the SSH key prompt
 	// during workspace init. The daemon blocks until a value is sent on this channel.
@@ -293,36 +298,37 @@ func (s *Server) Run() error {
 	// on this mux — they are what the wrap iframe shows on the Bailey
 	// management hostname.
 	//
-	// SECURITY / STAGE-4 GAP (critical, known): handleBailey and
-	// handleGatePathRoot below decide authorization entirely from the
-	// request's X-Forwarded-* / X-Auth-Request-* identity headers (see
-	// identityFromHeaders). This listener MUST therefore only ever be
-	// reachable via the trusted oauth2-proxy/gate chain. Today it is NOT:
-	// the listener is bound to all interfaces (net.Listen("tcp", ":8080")
-	// below) on the shared bitswan_network, so any container — including
-	// user-controlled workspace apps — can connect directly with forged
-	// identity headers and impersonate an arbitrary user or admin. The
-	// accepted fix is the stage-4 proxy split: bind this listener to
-	// loopback / a non-routable daemon<->gate-only network so the gate is
-	// the sole reachable path. It is NOT re-bound here because the ACME
-	// DNS-01 bridge (acmeBridgePath, served on this same mux) and the
-	// docs ingress are reached cross-container by docker DNS name
-	// (bitswan-automation-server-daemon:8080); binding to 127.0.0.1
-	// without the proxy split would break them. Partial mitigation lives
-	// in the gate Director (startProtectedGate) which strips
-	// client-supplied identity headers before proxying. TODO(stage-4):
-	// split the bailey/gate handlers onto a loopback/internal-network-only
-	// listener and route container-to-container calls through an
-	// authenticated path.
-	docsMux := http.NewServeMux()
-	docsMux.HandleFunc(gatePathPrefix+"/", handleGatePathRoot)
+	// SECURITY / STAGE-4 SPLIT (issue #183 / BSY-05, done): handleBailey and
+	// handleGatePathRoot decide authorization entirely from the request's
+	// X-Forwarded-* / X-Auth-Request-* identity headers (see identityFromHeaders),
+	// so they MUST only ever be reachable via the trusted oauth2-proxy/gate chain.
+	// They are therefore served on a SEPARATE loopback-only listener
+	// (127.0.0.1:baileyGatePort, gateMux) that no other container on the shared
+	// bitswan_network can reach — the in-process gate is the sole path in, and it
+	// strips any client-supplied identity headers before proxying (gateDirector).
+	// The cross-container endpoints that don't trust identity — the ACME DNS-01
+	// bridge (basic-auth) and the docs — stay on the network :8080 listener
+	// (docsMux) so Traefik and the docs ingress keep reaching them by container
+	// name, which is why we couldn't simply re-bind the single old listener to
+	// loopback. When the gate later moves to its own unprivileged container, it
+	// reaches this listener via BAILEY_DAEMON_HOST instead of localhost.
+	// gateMux — the identity-trusting Bailey management + gate handlers
+	// (handleBailey, handleGatePathRoot decide authorization from the request's
+	// X-Forwarded-* identity, see identityFromHeaders). It is served ONLY on the
+	// loopback listener below (127.0.0.1:baileyGatePort), so the sole reachable
+	// path is the in-process gate (startProtectedGate), which proxies the
+	// bailey/onboard inner hosts here (upstreamForHost → localhost:baileyGatePort
+	// after the trusted oauth2-proxy hop). A peer on bitswan_network can no
+	// longer connect directly with forged identity headers.
+	gateMux := http.NewServeMux()
+	gateMux.HandleFunc(gatePathPrefix+"/", handleGatePathRoot)
 	// Bailey management surface (JSON/API + favicon + static + sign-out).
 	// The React Server Console (the HTML) is served by serveServerConsole
 	// in chromeWrapMiddleware on the console inner host; these are the
 	// data endpoints it fetches, proxied here through the gate.
-	docsMux.HandleFunc("/bailey", s.handleBailey)
-	docsMux.HandleFunc("/bailey/", s.handleBailey)
-	docsMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	gateMux.HandleFunc("/bailey", s.handleBailey)
+	gateMux.HandleFunc("/bailey/", s.handleBailey)
+	gateMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// "/" on the Bailey hostname is also the post-logout landing
 		// page (Keycloak does exact redirect-URI matching). Until the
 		// management UI ships (stage 3), send users to the share index.
@@ -332,13 +338,24 @@ func (s *Server) Run() error {
 		}
 		s.handleDocs(w, r)
 	})
-	docsMux.HandleFunc("/api-docs", s.handleDocs)
 
+	// docsMux — the endpoints legitimately reached CROSS-CONTAINER without any
+	// identity trust: the API docs and the ACME DNS-01 bridge. These stay on the
+	// network :8080 listener so Traefik (httpreq provider) and the docs ingress
+	// keep reaching them by container name. No identity-trusting handler lives
+	// here anymore (issue #183 / BSY-05, the stage-4 split): a peer that connects
+	// straight to :8080 can hit only docs + the basic-auth'd ACME bridge, never
+	// /bailey or the gate pages.
+	docsMux := http.NewServeMux()
+	docsMux.HandleFunc("/api-docs", s.handleDocs)
+	docsMux.HandleFunc("/", s.handleDocs)
 	// ACME DNS-01 bridge for Traefik's httpreq provider. Served on the TCP
 	// listener so the Traefik container can reach it over bitswan_network;
 	// protected by basic auth with the shared bridge secret.
 	docsMux.HandleFunc(acmeBridgePath+"/present", s.handleACMEDNSChallenge("present"))
 	docsMux.HandleFunc(acmeBridgePath+"/cleanup", s.handleACMEDNSChallenge("cleanup"))
+
+	s.baileyServer = &http.Server{Handler: gateMux}
 	s.docsServer = &http.Server{
 		Handler: docsMux,
 	}
@@ -349,6 +366,15 @@ func (s *Server) Run() error {
 		return fmt.Errorf("failed to create docs HTTP listener: %w", err)
 	}
 	s.docsListener = docsListener
+
+	// Loopback-only listener for the identity-trusting Bailey management + gate
+	// handlers (issue #183 / BSY-05): reachable solely by the in-process gate,
+	// never by another container on the shared bitswan_network.
+	baileyListener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", baileyGatePort))
+	if err != nil {
+		return fmt.Errorf("failed to create bailey gate HTTP listener: %w", err)
+	}
+	s.baileyListener = baileyListener
 
 	// Set up ingress route for docs (with retry logic)
 	go func() {
@@ -474,6 +500,13 @@ func (s *Server) Run() error {
 		}
 	}()
 
+	go func() {
+		fmt.Printf("Bailey management (gate-only) server listening on 127.0.0.1:%d\n", baileyGatePort)
+		if err := s.baileyServer.Serve(baileyListener); err != nil && err != http.ErrServerClosed {
+			errChan <- err
+		}
+	}()
+
 	// Wait for shutdown signal or error
 	select {
 	case err := <-errChan:
@@ -492,6 +525,12 @@ func (s *Server) Run() error {
 
 	if err := s.docsServer.Shutdown(ctx); err != nil {
 		return fmt.Errorf("docs server shutdown error: %w", err)
+	}
+
+	if s.baileyServer != nil {
+		if err := s.baileyServer.Shutdown(ctx); err != nil {
+			return fmt.Errorf("bailey gate server shutdown error: %w", err)
+		}
 	}
 
 	// Clean up socket file
