@@ -56,11 +56,28 @@ describe('UpdatesView', () => {
       return { ndjson: [{ event: 'done', fraction: 1, message: 'ok' }] };
     } });
     render(<Host View={UpdatesView} data={withUpdates()} extra={s} />);
+    // The row button only opens a confirm dialog — it does NOT roll back yet.
     fireEvent.click(screen.getByTitle('Roll back to g1'));
+    expect(screen.getByText(/Roll wraptest back to g1\?/)).toBeTruthy();
+    expect(hit).toBeNull();
+    // Confirming fires the rollback.
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }));
     await waitFor(() => expect(hit).not.toBeNull());
     expect(hit.url).toContain('/bailey/api/workspaces/wraptest/rollback');
     expect(JSON.parse(hit.body).id).toBe(5);
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('rolled back to g1'), 'success'));
     expect(s.refresh).toHaveBeenCalledWith('updates');
+  });
+
+  it('cancelling the confirm dialog does not roll back', async () => {
+    const s = spies();
+    let hit = null;
+    installFetch({ '/bailey/api/workspaces/wraptest/rollback': () => { hit = true; return { ndjson: [{ event: 'done' }] }; } });
+    render(<Host View={UpdatesView} data={withUpdates()} extra={s} />);
+    fireEvent.click(screen.getByTitle('Roll back to g1'));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    // Dialog dismissed; no request made.
+    expect(screen.queryByText(/Roll wraptest back to g1\?/)).toBeNull();
+    expect(hit).toBeNull();
   });
 });

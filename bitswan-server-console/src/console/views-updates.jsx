@@ -6,7 +6,7 @@ import React from 'react';
 // history list (bounded server-side — no CLI needed).
 
 const { C: WC, Icon: WIcon, Pill: WPill, Btn: WBtn } = window.WD_SHELL;
-const { Card: WCard, PageHeader: WPageHeader, UpdateBar: WUpdateBar } = window.SC_UI;
+const { Card: WCard, PageHeader: WPageHeader, UpdateBar: WUpdateBar, Modal: WModal } = window.SC_UI;
 const { Api: UApi } = window.SC_API;
 const { useState: useUS } = React;
 
@@ -24,7 +24,8 @@ function UpdatesView({ ctx }) {
   const [prog, setProg] = useUS(null); // { fraction, label } for the workspace being updated
   const [srvBusy, setSrvBusy] = useUS(false);
   const [srvProg, setSrvProg] = useUS(null);
-  const [rbId, setRbId] = useUS(0); // update-history id currently being rolled back
+  const [rbId, setRbId] = useUS(0);       // update-history id currently being rolled back
+  const [confirm, setConfirm] = useUS(null); // history entry pending rollback confirmation
 
   // Drive a server-binary op (update OR rollback): both swap the host binary and
   // restart the daemon, so the NDJSON stream ends at 'restarting' and we poll the
@@ -99,6 +100,17 @@ function UpdatesView({ ctx }) {
       `${entry.target_name} rolled back to ${entry.from_version}`);
   };
 
+  // A rollback is a real change — the server restarts (the console reconnects),
+  // a workspace recreates its containers — so it goes through an explicit
+  // confirm dialog rather than firing on the first click.
+  const confirmRollback = () => {
+    const h = confirm;
+    if (!h) return;
+    setConfirm(null);
+    if (h.target_kind === 'server') doServerRollback(h);
+    else doWorkspaceRollback(h);
+  };
+
   const history = (upd && upd.history) || [];
   const depth = (upd && upd.rollback_depth) || 3;
   const anyBusy = srvBusy || !!busy;
@@ -130,7 +142,7 @@ function UpdatesView({ ctx }) {
         ) : (
           <WBtn variant="ghost" size="xs" leftIcon="rotate-ccw" disabled={anyBusy}
             title={`Roll back to ${h.from_version}`}
-            onClick={() => (isServer ? doServerRollback(h) : doWorkspaceRollback(h))}>
+            onClick={() => setConfirm(h)}>
             Roll back to {h.from_version}
           </WBtn>
         )}
@@ -212,6 +224,23 @@ function UpdatesView({ ctx }) {
           </WCard>
         </>
       )}
+
+      {/* Confirm before rolling back — it's a real change, not an undo. */}
+      <WModal open={!!confirm} onClose={() => setConfirm(null)} icon="rotate-ccw"
+        title={confirm
+          ? (confirm.target_kind === 'server'
+            ? `Roll the automation server back to ${confirm.from_version}?`
+            : `Roll ${confirm.target_name} back to ${confirm.from_version}?`)
+          : ''}
+        subtitle={confirm
+          ? (confirm.target_kind === 'server'
+            ? `The server binary is restored to ${confirm.from_version} and the server restarts — the console will reconnect on the older version. This is recorded, and reversible to any of the last ${depth} versions.`
+            : `${confirm.target_name}'s deployment is restored to ${confirm.from_version} and its containers are recreated. This is recorded, and reversible to any of the last ${depth} versions.`)
+          : ''}
+        footer={<>
+          <WBtn variant="ghost" onClick={() => setConfirm(null)}>Cancel</WBtn>
+          <WBtn variant="primary" leftIcon="rotate-ccw" onClick={confirmRollback}>Roll back</WBtn>
+        </>} />
     </div>
   );
 }
