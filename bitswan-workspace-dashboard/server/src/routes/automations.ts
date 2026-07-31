@@ -725,8 +725,9 @@ export function registerAutomationRoutes(
     },
   );
 
-  // Firewall → set/delete a rule, or pull rules forward. The actor email + the
-  // resolved role are injected server-side; gitops enforces prod RBAC.
+  // Firewall → set/delete a rule, or pull rules forward. The actor email is
+  // injected server-side; gitops resolves the role itself from the forwarded
+  // identity (X-Forwarded-Email) and enforces prod RBAC (#186/#187).
   const fwWrite = (
     suffix: string,
     method: 'PUT' | 'DELETE' | 'POST',
@@ -738,12 +739,10 @@ export function registerAutomationRoutes(
         reply.header('Cache-Control', 'no-store');
         if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
         const by = (await emailFromRequest(req, app.log)) || undefined;
-        const role = await fwRoleFromRequest(req, gitops, app.log);
         try {
           const r = await gitops.firewallWrite(req.params.bp, suffix, method, {
             ...(req.body ?? {}),
             ...(by ? { by } : {}),
-            role,
           });
           if (!r.ok) {
             return reply
@@ -794,9 +793,9 @@ export function registerAutomationRoutes(
       if (!stage || !host || !content) {
         return reply.code(400).send({ error: 'stage, host and file are required' });
       }
-      // Attribution + role come from the validated token, never the client.
+      // Attribution comes from the validated token, never the client; gitops
+      // resolves the role itself from the forwarded identity (#186/#187).
       const by = (await emailFromRequest(req, app.log)) || undefined;
-      const role = await fwRoleFromRequest(req, gitops, app.log);
       try {
         const r = await gitops.firewallDpaUpload(req.params.bp, {
           stage,
@@ -805,7 +804,6 @@ export function registerAutomationRoutes(
           content,
           contentType,
           ...(by ? { by } : {}),
-          ...(role ? { role } : {}),
         });
         if (!r.ok) {
           return reply
@@ -1030,17 +1028,15 @@ export function registerAutomationRoutes(
       return reply.code(400).send({ error: 'stage and git_commit are required' });
     }
     // Deployer attribution comes from the validated token, never the client.
+    // Firewall rollbacks are RBAC-gated in production; gitops resolves the
+    // role itself from the forwarded identity (#186/#187).
     const deployer = await emailFromRequest(req, app.log);
-    // Firewall rollbacks are RBAC-gated in production — resolve the role here so
-    // the client cannot assert its own role (gitops enforces it again).
-    const role = kind === 'firewall' ? await fwRoleFromRequest(req, gitops, app.log) : undefined;
     try {
       const r = await gitops.bpRollback({
         bp: req.params.bp,
         stage,
         git_commit,
         ...(kind ? { kind } : {}),
-        ...(role ? { role } : {}),
         ...(deployer ? { deployed_by: deployer } : {}),
       });
       if (!r.ok) {
