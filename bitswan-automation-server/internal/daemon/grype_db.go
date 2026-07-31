@@ -29,12 +29,17 @@ const grypeRefreshInterval = 24 * time.Hour
 
 // gitopsImageForGrype resolves the gitops image whose grype populates the shared
 // DB volume: the operator's pin (BITSWAN_GITOPS_IMAGE) if set, else the resolved
-// default. Returns "" if neither is available.
+// default ON THE SAME TRACK the daemon deploys workspaces on. Tracking the deploy
+// track matters — a staging-track host's production `bitswan/gitops` tag can be
+// far older than what workspaces actually run and may predate the bundled grype
+// binary entirely (older images have no grype at all), which would make every
+// refresh fail with "grype: not found" and let the shared DB rot until grype
+// rejects it as too old. Returns "" if neither is available.
 func gitopsImageForGrype() string {
 	if img := os.Getenv("BITSWAN_GITOPS_IMAGE"); img != "" {
 		return img
 	}
-	img, err := dockerhub.ResolveGitopsImage(false, false)
+	img, err := dockerhub.ResolveGitopsImage(useStagingTrack(), false)
 	if err != nil {
 		return ""
 	}

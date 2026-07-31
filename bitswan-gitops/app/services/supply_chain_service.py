@@ -86,9 +86,14 @@ def _write_unavailable(path: str, reason: str) -> None:
     )
 
 
-async def _run(*cmd: str, timeout: int = 600) -> tuple[int, bytes, bytes]:
+async def _run(
+    *cmd: str, timeout: int = 600, env: dict | None = None
+) -> tuple[int, bytes, bytes]:
     proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
@@ -98,38 +103,42 @@ async def _run(*cmd: str, timeout: int = 600) -> tuple[int, bytes, bytes]:
     return proc.returncode or 0, out, err
 
 
-# When the automation-server daemon owns the grype DB it mounts it here
-# read-only (GRYPE_DB_CACHE_DIR) and refreshes it once per host per day, so this
-# workspace must NOT try to `grype db update` (the mount is read-only, and it'd
-# duplicate the ~40s download the daemon already did for every workspace).
-_DB_MANAGED = os.environ.get("BITSWAN_GRYPE_DB_MANAGED") == "1"
+# The vulnerability DB has a SINGLE owner: the automation-server daemon. It
+# downloads and refreshes it once per host per day into a shared volume that
+# every workspace's gitops mounts READ-ONLY (GRYPE_DB_CACHE_DIR). A workspace
+# therefore never updates the DB itself — that would fight the read-only mount
+# and duplicate the daemon's work.
+#
+# Two grype knobs enforce that here. grype's built-in auto-update is ON by
+# default and, the moment the DB looks stale, tries to write the mount — which
+# on a read-only mount fails with a confusing "permission denied" and takes the
+# whole scan down. We turn it OFF, and turn OFF grype's DB age validation too:
+# freshness is the daemon's responsibility, so a scan must trust the mounted DB
+# as-is (and keep working through a brief lag in the daemon's daily refresh)
+# rather than reject it and go dark. Every grype invocation runs with this env.
+def _grype_env() -> dict:
+    return {
+        **os.environ,
+        "GRYPE_DB_AUTO_UPDATE": "false",
+        "GRYPE_DB_VALIDATE_AGE": "false",
+    }
 
 
-async def update_vuln_db() -> bool:
-    """Refresh grype's vulnerability DB (best-effort; needs outbound internet).
-    Returns False if it couldn't update — scans then use the last cached DB.
-    No-op when the daemon owns the DB (read-only shared mount): the daemon keeps
-    it current, so we just trust what's mounted."""
-    if _DB_MANAGED:
-        return True
-    rc, _, _ = await _run("grype", "db", "update", timeout=300)
-    return rc == 0
-
-
-# Ensure the grype vulnerability DB exists at least once before the first scan.
-# A freshly-built gitops image ships WITHOUT the DB (it's downloaded at runtime),
-# so the very first scan would otherwise find a missing DB and produce no CVE
-# matches (the panel sits in "Scan pending"/empty). We download it once, lazily,
-# guarded by a lock so concurrent scans don't race multiple downloads. Cached for
-# the process lifetime; the daily refresh job keeps it current after that.
+# Confirm the daemon-owned DB is present before the first scan. A freshly-built
+# gitops image ships WITHOUT the DB and the daemon downloads it at runtime, so an
+# early scan could otherwise find a missing DB and produce no CVE matches (the
+# panel sits in "Scan pending"/empty). We just wait for the daemon's copy to
+# appear — we never fetch it ourselves. Cached for the process lifetime once
+# ready; guarded by a lock so concurrent scans don't each shell out to check.
 _db_ready = False
 _db_lock: asyncio.Lock | None = None
 
 
 async def ensure_vuln_db() -> bool:
-    """Make sure grype has a usable vulnerability DB; download it once if not.
-    Best-effort: returns True if the DB is (now) present, False otherwise. Never
-    raises — a scan with no DB simply yields no matches rather than crashing."""
+    """Report whether grype's (daemon-owned, read-only) vulnerability DB is ready
+    to scan against. Never downloads or updates it — the automation-server daemon
+    is the sole writer. Best-effort: True once the DB is present, False while the
+    daemon's first refresh is still in flight. Never raises."""
     global _db_ready, _db_lock
     if _db_ready:
         return True
@@ -138,21 +147,14 @@ async def ensure_vuln_db() -> bool:
     async with _db_lock:
         if _db_ready:
             return True
-        # `grype db status` exits non-zero when the DB is missing/invalid.
-        rc, _, _ = await _run("grype", "db", "status", timeout=60)
+        # `grype db status` exits non-zero when the DB is missing. With age
+        # validation off it accepts a present-but-slightly-stale daemon DB.
+        rc, _, _ = await _run("grype", "db", "status", timeout=60, env=_grype_env())
         if rc == 0:
             _db_ready = True
-            return True
-        # Daemon-managed DB: never download here (read-only mount). If it's not
-        # ready yet the daemon's first refresh is still in flight — don't cache
-        # readiness, so a later scan rechecks once the daemon has populated it.
-        if _DB_MANAGED:
-            return False
-        # Missing/invalid — download it (needs outbound internet).
-        ok = await update_vuln_db()
-        if ok:
-            _db_ready = True
-        return ok
+        # If not ready, the daemon's refresh is still in flight — don't cache the
+        # negative, so a later scan rechecks once the daemon has populated it.
+        return _db_ready
 
 
 # ── parsing ──────────────────────────────────────────────────────────────────
@@ -245,7 +247,9 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
         # A fresh gitops image has no vuln DB yet — make sure it's downloaded
         # once before the first scan, or grype finds nothing to match against.
         await ensure_vuln_db()
-        rc, out, err = await _run("grype", f"sbom:{sbom_path}", "-o", "json")
+        rc, out, err = await _run(
+            "grype", f"sbom:{sbom_path}", "-o", "json", env=_grype_env()
+        )
         if rc != 0 or not out:
             _write_unavailable(
                 cve_path, f"grype failed: {err.decode(errors='replace')}"
