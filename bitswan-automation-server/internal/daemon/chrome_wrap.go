@@ -123,6 +123,15 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool, launcher laun
 		shareScript = shareModalJS(host, emailDisp, apiURL)
 	}
 
+	// A red PUBLIC badge when this protected endpoint is also published at a
+	// public, no-login URL (#220) — so an operator inside the guarded app can
+	// see, and jump to, its public face. Shown to everyone on the bar.
+	publicBadge := ""
+	if ph, ok := publicHostForEndpoint(host); ok {
+		publicBadge = `<a class="bailey-public-badge" href="https://` + html.EscapeString(ph) +
+			`" target="_blank" rel="noopener" title="This endpoint is also published at a public URL with no login">PUBLIC</a>`
+	}
+
 	return fmt.Sprintf(`<!doctype html>
 <html><head>
 <meta charset="utf-8">
@@ -169,6 +178,12 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool, launcher laun
     background: %[5]s; color: #18181B; font-weight: 500;
   }
   footer.bailey-footer a.btn-primary:hover { background: #E4E4E7; color: #18181B; }
+  footer.bailey-footer a.bailey-public-badge {
+    display: inline-flex; align-items: center; height: 18px; padding: 0 8px;
+    border-radius: 999px; background: #DC2626; color: #fff; font-weight: 600;
+    font-size: 10px; letter-spacing: 0.05em; text-decoration: none; flex-shrink: 0;
+  }
+  footer.bailey-footer a.bailey-public-badge:hover { background: #B91C1C; }
 %[9]s
 %[15]s
 </style>
@@ -179,6 +194,7 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool, launcher laun
   <span class="brand">%[7]s Protected by Bitswan <b>Bailey</b></span>
   <span class="dot">·</span>
   <span class="who"><b>%[8]s</b></span>
+  %[19]s
   <span class="spacer"></span>
   %[10]s
   <a class="btn" href="%[13]s" target="_top">Logout</a>
@@ -239,7 +255,8 @@ func baileyChromeHTML(email, host, iframeSrc string, isOwner bool, launcher laun
 		launcherCSS,                      // %[15]s
 		baileyLauncherButtonHTML(),       // %[16]s
 		baileyLauncherMenuHTML(launcher), // %[17]s
-		launcherJS)                       // %[18]s
+		launcherJS,                       // %[18]s
+		publicBadge)                      // %[19]s
 }
 
 // jsString renders s as a double-quoted JS string literal, safe to

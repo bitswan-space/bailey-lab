@@ -86,6 +86,28 @@ func isPublicEndpointHost(host string) bool {
 	return ok
 }
 
+// publicHostForEndpoint is the reverse of publicHostUnderlying: given a
+// protected endpoint host, returns the public host it's published at (if any).
+// Used by the chrome wrap to badge a protected endpoint that is also public.
+func publicHostForEndpoint(endpointHost string) (string, bool) {
+	endpointHost = strings.ToLower(strings.TrimSuffix(endpointHost, "."))
+	publicHostMu.RLock()
+	c := publicHostCache
+	publicHostMu.RUnlock()
+	if c == nil {
+		refreshPublicHostCache()
+		publicHostMu.RLock()
+		c = publicHostCache
+		publicHostMu.RUnlock()
+	}
+	for ph, eh := range c {
+		if eh == endpointHost {
+			return ph, true
+		}
+	}
+	return "", false
+}
+
 // --- authorization ---
 
 // canMakePublic enforces #220's publish rule: owner AND admin-or-auditor AND
@@ -130,6 +152,28 @@ func aocPublicSettings() (*config.AutomationOperationsCenterSettings, error) {
 
 // aocAllocatePublicEndpoint asks the AOC to allocate a public subdomain for the
 // endpoint (ensuring the *.public.<aoc-id> wildcard) and returns the host+URL.
+// aocErrorMessage turns an AOC error response into a short, human-readable
+// sentence. It NEVER returns the raw body — that is often an HTML error page
+// (e.g. Django's 404) which must never surface in the UI.
+func aocErrorMessage(status int, body []byte) string {
+	var j struct {
+		Error  string `json:"error"`
+		Detail string `json:"detail"`
+	}
+	if json.Unmarshal(body, &j) == nil {
+		if m := strings.TrimSpace(j.Error); m != "" {
+			return m
+		}
+		if m := strings.TrimSpace(j.Detail); m != "" {
+			return m
+		}
+	}
+	if status == http.StatusNotFound {
+		return "this operations center doesn't support public endpoints yet"
+	}
+	return fmt.Sprintf("the operations center returned HTTP %d", status)
+}
+
 func aocAllocatePublicEndpoint(endpointHost, endpointName string) (publicHost, publicURL string, err error) {
 	s, err := aocPublicSettings()
 	if err != nil {
@@ -152,8 +196,8 @@ func aocAllocatePublicEndpoint(endpointHost, endpointName string) (publicHost, p
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", "", fmt.Errorf("AOC allocate public endpoint returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return "", "", fmt.Errorf("%s", aocErrorMessage(resp.StatusCode, b))
 	}
 	var out struct {
 		PublicHost string `json:"public_host"`
@@ -191,8 +235,8 @@ func aocDeallocatePublicEndpoint(endpointHost string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("AOC deallocate public endpoint returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return fmt.Errorf("%s", aocErrorMessage(resp.StatusCode, b))
 	}
 	return nil
 }
@@ -204,15 +248,21 @@ func aocDeallocatePublicEndpoint(endpointHost string) error {
 // protected hosts — public hosts must not trigger a Keycloak login.
 func registerPublicRoute(publicHost string) error {
 	upstream := daemonContainerName + gateListenAddr // e.g. bitswan-automation-server-daemon:9080
-	// Public hosts live under the AOC's *.public.<aoc-id> namespace, not this
-	// server's own wildcard, so they need a per-host DNS-01 cert — HTTP-01 can't
-	// work because the host only resolves through the relay. The DNS-01 solver
-	// runs through the AOC ACME bridge, which authorises _acme-challenge under
-	// the public namespace for the owning server (acmeChallengeFQDNAllowed +
-	// the AOC side of #220).
+	// Public hosts share the AOC's per-AOC *.public.<aoc-id> namespace, so we
+	// obtain ONE wildcard DNS-01 cert for that namespace — exactly like the
+	// per-server *.<domain> cert — rather than a per-host cert. The challenge
+	// then runs once for the whole namespace (_acme-challenge.public.<aoc-id>)
+	// instead of racing DNS propagation on every publish. HTTP-01 can't work
+	// (the host only resolves through the relay); the DNS-01 solver runs through
+	// the AOC ACME bridge, which authorises the challenge for the owning server.
+	parts := strings.SplitN(publicHost, ".", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("malformed public host %q", publicHost)
+	}
+	publicBase := parts[1] // public.<aoc-id>.bswn.io
 	return traefikapi.AddRouteWithTLSDomains(
 		publicHost, upstream, "", dnsCertResolverName,
-		[]traefikapi.TLSDomain{{Main: publicHost}})
+		traefikapi.WildcardTLSDomains(publicBase))
 }
 
 func deregisterPublicRoute(publicHost string) error {
@@ -239,7 +289,7 @@ func handlePublicCreate(w http.ResponseWriter, r *http.Request, email string, gr
 	}
 	publicHost, publicURL, err := aocAllocatePublicEndpoint(host, name)
 	if err != nil {
-		writeJSONErrorStatus(w, "allocate public subdomain: "+err.Error(), http.StatusBadGateway)
+		writeJSONErrorStatus(w, "Couldn't publish: "+err.Error()+".", http.StatusBadGateway)
 		return
 	}
 	// Persist BEFORE registering the route so acmeChallengeFQDNAllowed (which
