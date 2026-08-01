@@ -9,6 +9,7 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerAutomationRoutes } from './routes/automations.js';
 import { registerBusinessProcessRoutes } from './routes/business-processes.js';
 import { registerEventRoutes } from './routes/events.js';
+import { registerPublicEndpointRoutes } from './routes/public-endpoints.js';
 import { registerTemplateRoutes } from './routes/templates.js';
 import { registerCodingAgentRoutes } from './routes/coding-agent.js';
 import { registerSnapshotRoutes } from './routes/snapshots.js';
@@ -82,6 +83,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerOffsiteBackupRoutes(app, { gitops });
   registerTaskRoutes(app, { gitops });
   registerEventRoutes(app, { gitops });
+  registerPublicEndpointRoutes(app);
 
   // Hourly reaper for pasted terminal images (see services/agent-uploads.ts).
   startAgentUploadsSweeper(app, { workspaceRoot: WORKSPACE_ROOT });
