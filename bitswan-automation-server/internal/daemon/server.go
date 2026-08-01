@@ -473,6 +473,11 @@ func (s *Server) Run() error {
 	// otherwise.
 	s.startRelayTunnel()
 
+	// Re-assert published public endpoints (issue #220): warm the gate's
+	// public-host cache and re-register each public host's traefik route so a
+	// restart restores public serving. Idempotent; no-op when none are set.
+	reapplyPublicEndpoints()
+
 	// Paranoid end-to-end-TLS self-check for EVERY server with a public domain
 	// (proxied or directly-addressed): confirm the certificate the world is
 	// served is our own, so any TLS interception in transit is caught and

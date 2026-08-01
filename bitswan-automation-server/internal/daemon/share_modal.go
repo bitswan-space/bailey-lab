@@ -198,6 +198,14 @@ func shareModalHTML() string {
       <button type="button" id="bailey-magic-create" class="bailey-magic-btn" onclick="window.__baileyMagicConfirm()">Create magic link</button>
     </div>
 
+    <div id="bailey-public-section" style="display:none;border-top:1px solid #EFEFF1;margin-top:6px;padding-top:6px;">
+      <div class="bailey-share-section-title">Public URL</div>
+      <div id="bailey-public-status" class="bailey-share-empty">Not public — only people on the access list can reach this endpoint.</div>
+      <div id="bailey-public-new" class="bailey-magic-linkbox" style="display:none;"></div>
+      <button type="button" id="bailey-public-make" class="bailey-magic-btn" onclick="window.__baileyPublicConfirm()">Make public</button>
+      <button type="button" id="bailey-public-revoke" class="bailey-share-remove" style="display:none;" onclick="window.__baileyPublicRevoke()">Make private</button>
+    </div>
+
     <div class="bailey-share-footer">
       <span style="font-size:12px;color:#71717A;">Changes save instantly.</span>
       <button type="button" onclick="window.__baileyShareClose()">Done</button>
@@ -211,6 +219,18 @@ func shareModalHTML() string {
     <div class="bailey-magic-dialog-actions">
       <button type="button" class="bailey-magic-cancel" onclick="window.__baileyMagicCancel()">Cancel</button>
       <button type="button" class="bailey-magic-go" onclick="window.__baileyMagicCreate()">Create link</button>
+    </div>
+  </div>
+</div>
+<div id="bailey-public-confirm" class="bailey-magic-confirm" onclick="if(event.target===this)window.__baileyPublicCancel()">
+  <div class="bailey-magic-dialog" role="dialog" aria-modal="true" aria-labelledby="bailey-public-confirm-title">
+    <h3 id="bailey-public-confirm-title">Make this endpoint public?</h3>
+    <p>This publishes <b id="bailey-public-confirm-host"></b> at a <b>public URL served with no Bailey login</b>. Anyone on the internet can reach it, and the app will see every visitor as <code>anon@example.com</code>. The endpoint keeps its normal protected URL — this only adds a public one. Only do this for a production frontend that is meant to be public.</p>
+    <p style="margin-top:8px;font-size:12px;color:#71717A;">Type the endpoint hostname to confirm:</p>
+    <input type="text" id="bailey-public-confirm-input" autocomplete="off" autocapitalize="off" spellcheck="false" style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #D4D4D8;border-radius:6px;" oninput="window.__baileyPublicCheck()">
+    <div class="bailey-magic-dialog-actions">
+      <button type="button" class="bailey-magic-cancel" onclick="window.__baileyPublicCancel()">Cancel</button>
+      <button type="button" class="bailey-magic-go" id="bailey-public-go" disabled onclick="window.__baileyPublicCreate()">Make public</button>
     </div>
   </div>
 </div>`
@@ -291,9 +311,36 @@ func shareModalJS(host, callerEmail, apiURL string) string {
       reqTitle.style.display = 'none';
     }
     renderMagic(data);
+    renderPublic(data);
   }
   var magicCreateURL = '/2fa-gate/api/magic-link/create';
   var magicRevokeURL = '/2fa-gate/api/magic-link/revoke';
+  var publicCreateURL = '/2fa-gate/api/public/create';
+  var publicRevokeURL = '/2fa-gate/api/public/revoke';
+  function renderPublic(data) {
+    var sec = $('bailey-public-section');
+    if (!data.can_make_public && !data.is_public) { sec.style.display = 'none'; return; }
+    sec.style.display = '';
+    var status = $('bailey-public-status');
+    var makeBtn = $('bailey-public-make');
+    var revokeBtn = $('bailey-public-revoke');
+    var box = $('bailey-public-new');
+    if (data.is_public && data.public_url) {
+      status.textContent = 'Public — anyone can reach this at:';
+      box.style.display = ''; box.innerHTML = '';
+      var inp = el('input', {type:'text', value:data.public_url, readonly:'readonly'});
+      inp.onclick = function(){ inp.select(); };
+      var copy = el('button', {class:'bailey-magic-copy', type:'button', text:'Copy', onclick:function(){ inp.select(); try{document.execCommand('copy');}catch(e){} copy.textContent='Copied'; }});
+      box.appendChild(inp); box.appendChild(copy);
+      makeBtn.style.display = 'none';
+      revokeBtn.style.display = data.can_make_public ? '' : 'none';
+    } else {
+      status.textContent = 'Not public — only people on the access list can reach this endpoint.';
+      box.style.display = 'none'; box.innerHTML = '';
+      makeBtn.style.display = data.can_make_public ? '' : 'none';
+      revokeBtn.style.display = 'none';
+    }
+  }
   function renderMagic(data) {
     var sec = $('bailey-magic-section');
     if (!data.can_mint_magic_link) { sec.style.display = 'none'; return; }
@@ -452,8 +499,39 @@ func shareModalJS(host, callerEmail, apiURL string) string {
       })
       .catch(function(e){ showError('Failed to create magic link: '+e); });
   };
+  window.__baileyPublicConfirm = function(){
+    $('bailey-public-confirm-host').textContent = hostLabel;
+    var inp = $('bailey-public-confirm-input');
+    inp.value = ''; inp.placeholder = hostLabel;
+    $('bailey-public-go').disabled = true;
+    $('bailey-public-confirm').classList.add('open');
+    setTimeout(function(){ inp.focus(); }, 30);
+  };
+  window.__baileyPublicCancel = function(){ $('bailey-public-confirm').classList.remove('open'); };
+  window.__baileyPublicCheck = function(){
+    var v = $('bailey-public-confirm-input').value.trim().toLowerCase();
+    $('bailey-public-go').disabled = (v !== String(hostLabel).toLowerCase());
+  };
+  window.__baileyPublicCreate = function(){
+    if ($('bailey-public-confirm-input').value.trim().toLowerCase() !== String(hostLabel).toLowerCase()) return;
+    $('bailey-public-confirm').classList.remove('open');
+    showError('');
+    fetch(publicCreateURL, {method:'POST', credentials:'same-origin'})
+      .then(function(r){ if(!r.ok) return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));}); return r.json(); })
+      .then(function(){ load(); })
+      .catch(function(e){ showError('Failed to make public: '+e); });
+  };
+  window.__baileyPublicRevoke = function(){
+    showError('');
+    if (!confirm('Make ' + hostLabel + ' private again? Its public URL will stop working.')) return;
+    fetch(publicRevokeURL, {method:'POST', credentials:'same-origin'})
+      .then(function(r){ if(!r.ok) return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));}); return r.json(); })
+      .then(function(){ load(); })
+      .catch(function(e){ showError('Failed to make private: '+e); });
+  };
   document.addEventListener('keydown', function(e){
     if (e.key !== 'Escape') return;
+    if ($('bailey-public-confirm').classList.contains('open')) { window.__baileyPublicCancel(); return; }
     if ($('bailey-magic-confirm').classList.contains('open')) { window.__baileyMagicCancel(); return; }
     if ($('bailey-share-modal').classList.contains('open')) { window.__baileyShareClose(); }
   });

@@ -133,7 +133,14 @@ func acmeChallengeFQDNAllowed(fqdn, domain string) bool {
 	if !found || rest == "" {
 		return false
 	}
-	return rest == domain || strings.HasSuffix(rest, "."+domain)
+	if rest == domain || strings.HasSuffix(rest, "."+domain) {
+		return true
+	}
+	// Published public endpoints (issue #220) live under the AOC's
+	// *.public.<aoc-id> namespace, not this server's own domain, but the gate
+	// still terminates their TLS — so authorise DNS-01 challenges for hosts
+	// THIS server has actually published (nothing else under that namespace).
+	return isPublicEndpointHost(rest)
 }
 
 // acmeDNSChallengeRequest matches the body lego's httpreq provider sends.

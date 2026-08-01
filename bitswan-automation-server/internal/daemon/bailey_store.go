@@ -245,6 +245,20 @@ CREATE TABLE IF NOT EXISTS invites (
   consumed_at TEXT,
   email_sent  INTEGER NOT NULL DEFAULT 0
 );
+
+-- Published public endpoints (issue #220). An auditor/admin publishes a
+-- PRODUCTION frontend as a public URL: a secondary host under the AOC's
+-- *.public.<aoc-id> wildcard that the gate serves with NO auth and a fixed
+-- anon@example.com identity toward the app. One row per published endpoint;
+-- public_host is the AOC-allocated <slug>.public.<aoc-id>.bswn.io.
+CREATE TABLE IF NOT EXISTS public_endpoints (
+  endpoint_host TEXT PRIMARY KEY COLLATE NOCASE,
+  public_host   TEXT NOT NULL COLLATE NOCASE,
+  created_by    TEXT NOT NULL COLLATE NOCASE,
+  created_at    TEXT NOT NULL,
+  FOREIGN KEY (endpoint_host) REFERENCES endpoints(hostname) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS public_endpoints_pub_idx ON public_endpoints(public_host);
 `
 
 // baileyDBPath returns the absolute on-disk location of the daemon's

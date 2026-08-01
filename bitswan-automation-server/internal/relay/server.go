@@ -45,10 +45,30 @@ type Server struct {
 	// wiring.
 	ValidateToken func(token, subdomain string) error
 
-	mu       sync.RWMutex
-	tunnels  map[string]*tunnel  // subdomain -> live control channel
-	pending  map[string]chan net.Conn // conn_id -> waiting browser stream handoff
+	// ResolvePublicHost maps a published public host (issue #220,
+	// <slug>.public.<aoc-id>.bswn.io) to the owning server's registered
+	// subdomain, by asking the AOC. Like ValidateToken it is injected from
+	// cmd/relay and queries the relay's OWN configured AOC — never a
+	// client-supplied URL. Optional: nil disables public-host routing.
+	ResolvePublicHost func(host string) (subdomain string, err error)
+
+	mu      sync.RWMutex
+	tunnels map[string]*tunnel       // subdomain -> live control channel
+	pending map[string]chan net.Conn // conn_id -> waiting browser stream handoff
+
+	pubMu    sync.Mutex
+	pubCache map[string]pubCacheEntry // public host -> resolved subdomain (TTL-cached)
 }
+
+// pubCacheEntry is a cached public-host → subdomain resolution.
+type pubCacheEntry struct {
+	sub    string
+	expiry time.Time
+}
+
+// publicHostTTL is how long a resolved public-host → subdomain mapping is
+// cached before re-asking the AOC.
+const publicHostTTL = 60 * time.Second
 
 // tunnel is one registered Bailey's control channel.
 type tunnel struct {
@@ -67,6 +87,7 @@ func NewServer(tunnelAddr, passthroughAddr string, tunnelTLS *tls.Config, valida
 		ValidateToken:   validate,
 		tunnels:         map[string]*tunnel{},
 		pending:         map[string]chan net.Conn{},
+		pubCache:        map[string]pubCacheEntry{},
 	}
 }
 
@@ -247,6 +268,12 @@ func (s *Server) handlePassthroughConn(browser net.Conn) {
 
 	t := s.tunnelForSNI(sni)
 	if t == nil {
+		// Published public endpoints (issue #220) live under the AOC's
+		// *.public.<aoc-id> namespace and carry no server subdomain in the SNI,
+		// so the suffix match above can't route them — resolve via the AOC.
+		t = s.tunnelForPublicSNI(sni)
+	}
+	if t == nil {
 		log.Printf("relay: no tunnel registered for SNI %q", sni)
 		browser.Close()
 		return
@@ -314,6 +341,58 @@ func (s *Server) tunnelForSNI(sni string) *tunnel {
 		}
 	}
 	return best
+}
+
+// tunnelForPublicSNI routes a published public host (issue #220) to the tunnel
+// of the server that owns it. Public hosts don't contain the owning server's
+// subdomain, so we ask the AOC (via the injected ResolvePublicHost, which uses
+// the relay's own configured AOC — never a client-supplied URL) which server
+// owns the host, cache the answer briefly, and route to that tunnel.
+func (s *Server) tunnelForPublicSNI(sni string) *tunnel {
+	if s.ResolvePublicHost == nil {
+		return nil
+	}
+	host := strings.ToLower(strings.TrimSuffix(sni, "."))
+	// Cheap guard so unrelated no-tunnel SNIs don't trigger an AOC round-trip.
+	if !strings.Contains(host, ".public.") {
+		return nil
+	}
+	sub, ok := s.pubCacheGet(host)
+	if !ok {
+		resolved, err := s.ResolvePublicHost(host)
+		if err != nil {
+			log.Printf("relay: resolve public host %q: %v", host, err)
+			return nil
+		}
+		sub = strings.ToLower(strings.TrimSpace(resolved))
+		if sub == "" {
+			return nil
+		}
+		s.pubCachePut(host, sub)
+	}
+	s.mu.RLock()
+	t := s.tunnels[sub]
+	s.mu.RUnlock()
+	return t
+}
+
+func (s *Server) pubCacheGet(host string) (string, bool) {
+	s.pubMu.Lock()
+	defer s.pubMu.Unlock()
+	e, ok := s.pubCache[host]
+	if !ok || time.Now().After(e.expiry) {
+		if ok {
+			delete(s.pubCache, host)
+		}
+		return "", false
+	}
+	return e.sub, true
+}
+
+func (s *Server) pubCachePut(host, sub string) {
+	s.pubMu.Lock()
+	s.pubCache[host] = pubCacheEntry{sub: sub, expiry: time.Now().Add(publicHostTTL)}
+	s.pubMu.Unlock()
 }
 
 // splice pumps bytes both ways until either side closes, then tears both down.
