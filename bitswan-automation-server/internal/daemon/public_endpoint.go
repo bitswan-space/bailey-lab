@@ -86,6 +86,55 @@ func isPublicEndpointHost(host string) bool {
 	return ok
 }
 
+// handlePublicEndpointsList serves the workspace's published public endpoints as
+// JSON on the network :8080 listener, so the workspace dashboard can badge the
+// "Open app" links that are also public (#220). Low-sensitivity — public
+// endpoints are public by definition — so no auth beyond bitswan_network reach.
+func (s *Server) handlePublicEndpointsList(w http.ResponseWriter, r *http.Request) {
+	recs, err := dbListPublicEndpoints()
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := make([]map[string]string, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, map[string]string{
+			"endpoint_host": rec.EndpointHost,
+			"public_host":   rec.PublicHost,
+			"public_url":    "https://" + rec.PublicHost,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// isPublicNamespaceBase reports whether host is the base of the per-AOC public
+// namespace this server publishes under (i.e. some published host is
+// "<label>." + host, e.g. host == "public.<aoc-id>.bswn.io"). The ONE wildcard
+// cert for the namespace runs its DNS-01 challenge at this base
+// (_acme-challenge.public.<aoc-id>), so the ACME bridge must authorise it.
+func isPublicNamespaceBase(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "" {
+		return false
+	}
+	publicHostMu.RLock()
+	c := publicHostCache
+	publicHostMu.RUnlock()
+	if c == nil {
+		refreshPublicHostCache()
+		publicHostMu.RLock()
+		c = publicHostCache
+		publicHostMu.RUnlock()
+	}
+	for ph := range c {
+		if i := strings.IndexByte(ph, '.'); i >= 0 && ph[i+1:] == host {
+			return true
+		}
+	}
+	return false
+}
+
 // publicHostForEndpoint is the reverse of publicHostUnderlying: given a
 // protected endpoint host, returns the public host it's published at (if any).
 // Used by the chrome wrap to badge a protected endpoint that is also public.
@@ -400,5 +449,96 @@ func directPublic(r *http.Request, endpointHost string) {
 	// pseudo-identity. anon@example.com is not a real user.
 	r.Header.Set("X-Forwarded-Email", anonPublicEmail)
 	r.Header.Del("X-Forwarded-Groups")
+	// A real Keycloak access token for anon@example.com, so the app's backend
+	// sees a genuine bearer token exactly as on the protected path (#220).
+	if tok, err := anonAccessToken(); err == nil && tok != "" {
+		r.Header.Set("X-Forwarded-Access-Token", tok)
+		r.Header.Set("X-Auth-Request-Access-Token", tok)
+	}
 	stripBaileyAuthCookies(r)
+}
+
+var (
+	anonTokenMu  sync.Mutex
+	anonTokenVal string
+	anonTokenExp time.Time
+)
+
+// anonAccessToken returns a cached real Keycloak access token for
+// anon@example.com (minted by the AOC for this server's protected client),
+// refreshing at ~80% of its lifetime. It is what makes a PUBLIC endpoint
+// indistinguishable from the protected one to the app (#220).
+func anonAccessToken() (string, error) {
+	anonTokenMu.Lock()
+	defer anonTokenMu.Unlock()
+	if anonTokenVal != "" && time.Now().Before(anonTokenExp) {
+		return anonTokenVal, nil
+	}
+	s, err := aocPublicSettings()
+	if err != nil {
+		return "", err
+	}
+	base := strings.TrimRight(s.AOCUrl, "/")
+	req, err := http.NewRequest(http.MethodGet, base+"/api/automation_server/public-anon-token", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.AccessToken)
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return "", fmt.Errorf("%s", aocErrorMessage(resp.StatusCode, b))
+	}
+	var out struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.AccessToken == "" {
+		return "", fmt.Errorf("AOC returned an empty anon token")
+	}
+	ttl := out.ExpiresIn
+	if ttl <= 0 {
+		ttl = 900
+	}
+	anonTokenVal = out.AccessToken
+	anonTokenExp = time.Now().Add(time.Duration(ttl*8/10) * time.Second)
+	return anonTokenVal, nil
+}
+
+// servePublicOAuth2 replicates the oauth2-proxy endpoints an app calls, for a
+// public host (#220), so the frontend gets its token exactly as on the
+// protected path. Returns true if it handled the request.
+func servePublicOAuth2(w http.ResponseWriter, r *http.Request) bool {
+	switch r.URL.Path {
+	case "/oauth2/auth":
+		// The BitSwan frontend lib reads X-Auth-Request-Access-Token off this
+		// response (202), just like oauth2-proxy's --set-xauthrequest.
+		tok, err := anonAccessToken()
+		if err != nil {
+			http.Error(w, "anon token unavailable: "+err.Error(), http.StatusBadGateway)
+			return true
+		}
+		w.Header().Set("X-Auth-Request-Access-Token", tok)
+		w.Header().Set("X-Auth-Request-Email", anonPublicEmail)
+		w.Header().Set("X-Auth-Request-User", anonPublicEmail)
+		w.Header().Set("X-Auth-Request-Preferred-Username", anonPublicEmail)
+		w.WriteHeader(http.StatusAccepted)
+		return true
+	case "/oauth2/userinfo":
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"user":              anonPublicEmail,
+			"email":             anonPublicEmail,
+			"preferredUsername": anonPublicEmail,
+		})
+		return true
+	}
+	return false
 }

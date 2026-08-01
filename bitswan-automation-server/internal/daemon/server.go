@@ -354,6 +354,8 @@ func (s *Server) Run() error {
 	// protected by basic auth with the shared bridge secret.
 	docsMux.HandleFunc(acmeBridgePath+"/present", s.handleACMEDNSChallenge("present"))
 	docsMux.HandleFunc(acmeBridgePath+"/cleanup", s.handleACMEDNSChallenge("cleanup"))
+	// Published public endpoints, for the dashboard's "Open app" PUBLIC badge (#220).
+	docsMux.HandleFunc("/public-endpoints", s.handlePublicEndpointsList)
 
 	s.baileyServer = &http.Server{Handler: gateMux}
 	s.docsServer = &http.Server{

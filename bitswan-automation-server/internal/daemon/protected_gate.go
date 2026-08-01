@@ -381,8 +381,13 @@ func gateHandler(w http.ResponseWriter, r *http.Request, proxy *httputil.Reverse
 		return
 	}
 	// Published public endpoints (#220): no gate — the director rewrites the
-	// request to the underlying app with a fixed anon identity.
+	// request to the underlying app with a fixed anon identity + a real anon
+	// access token. The oauth2-proxy endpoints the app calls are served locally
+	// so it can't tell it's public.
 	if isPublicEndpointHost(requestEndpointHost(r)) {
+		if servePublicOAuth2(w, r) {
+			return
+		}
 		proxy.ServeHTTP(w, r)
 		return
 	}
