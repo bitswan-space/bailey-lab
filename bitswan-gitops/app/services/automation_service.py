@@ -1996,13 +1996,33 @@ class AutomationService:
         deployed_by: str | None = None,
         progress_callback: Callable[..., Any] | None = None,
     ) -> dict:
-        """Roll a BP back to a prior commit by restoring its ENTIRE bitswan.yaml
-        (the BP's own deploy repo) to that revision, then redeploying. bitswan.yaml
-        holds everything — deployment images, secrets, firewall, backups — so this
-        one flow restores all of it; there is no per-kind rollback. `git_commit`
-        is the history entry's commit sha; the restore's own commit ("rollback …")
-        becomes the new history entry, and the driver re-applies (recreating
-        containers, re-deriving the backend's secret env, reloading firewall)."""
+        """Roll ONE STAGE of a BP back to a prior commit, then redeploy that stage.
+
+        A history entry is a commit of the BP's own bitswan.yaml — and that ONE
+        file holds EVERY stage of the BP (dev, staging, production, plus each
+        copy's live-dev context). So restoring the whole file, as this used to do,
+        reverted the other stages as a side effect: rolling DEVELOPMENT back to a
+        commit that predates a staging promote deleted staging's deployment
+        entries, and since the driver compiles the pushed file wholesale, staging
+        vanished from the desired compose → its containers were retired as
+        orphans and its ingress route pruned. Staging then read as "Asleep" and
+        could not be woken, because nothing was left in bitswan.yaml to
+        re-activate (#314).
+
+        The restore is therefore a per-stage SLICE of `git_commit` applied on top
+        of the CURRENT state:
+
+          * business_processes[<bp>][<stage>] — the stage's members + their
+            images/replicas + the node's source git_commit,
+          * secrets[<bp>][<realm>] and firewall[<bp>][<realm>] — that stage's
+            realm only (dev and live-dev share the `dev` realm),
+
+        and nothing else. Other stages, other contexts (copies) and the BP-wide
+        domains (backups, audits, disaster recovery, staging gate) keep their
+        current state. `git_commit` is the history entry's commit sha; the
+        restore's own commit ("rollback …") becomes the new history entry, and the
+        driver re-applies the stage (recreating containers, re-deriving the
+        backend's secret env, reloading firewall)."""
         validate_bp_name(bp)
         stage_key = "production" if stage in ("", "production") else stage
         # BSY-07 / #185: a rollback reinstates a prior committed state — which,
@@ -2015,6 +2035,8 @@ class AutomationService:
         # fail-closed — never a caller-supplied role.
         if stage_key in ("staging", "production"):
             self._assert_promotable(bp, stage_key, deployed_by)
+        realm = bp_secrets.realm_for_stage(stage_key)
+        want_stage = "" if stage_key == "production" else stage_key
         bp_dir = bp_state_path(self.gitops_dir, bp)
         content, _, rc = await call_git_command_with_output(
             "git", "show", f"{git_commit}:bitswan.yaml", cwd=bp_dir
@@ -2027,36 +2049,113 @@ class AutomationService:
             y = yaml.safe_load(content) or {}
         except Exception:
             raise HTTPException(status_code=500, detail="Could not parse that revision")
+        if not isinstance(y, dict):
+            raise HTTPException(status_code=500, detail="Could not parse that revision")
 
-        # Restore the BP's bitswan.yaml exactly as it was at git_commit — the whole
-        # file (every context + secrets + firewall + backups), not just images.
-        with open(os.path.join(bp_dir, "bitswan.yaml"), "w") as f:
-            yaml.dump(y, f)
-        await update_bp_git(
-            self.gitops_dir,
-            self.gitops_dir_host,
-            bp,
+        # The revision's slice for THIS stage. `None`/empty means the revision
+        # holds no such state — for secrets/firewall that is itself the state to
+        # restore (the realm predates nothing → drop it); for the stage node it
+        # means the revision is not a deploy point for this stage, so the current
+        # members are left alone (e.g. rolling back a secret-only history entry on
+        # a stage that has never been deployed).
+        node = ((y.get("business_processes") or {}).get(bp) or {}).get(stage_key) or {}
+        target_blob = ((y.get("secrets") or {}).get(bp) or {}).get(realm)
+        if not isinstance(target_blob, str) or not target_blob:
+            target_blob = None
+        target_fw = ((y.get("firewall") or {}).get(bp) or {}).get(realm) or None
+        if not node and target_blob is None and target_fw is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Revision {git_commit[:8]} holds no {stage_key} state for "
+                    f"'{bp}' — it is not a rollback point for that stage"
+                ),
+            )
+
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        deployments = bs.setdefault("deployments", {})
+        # A persisted node always carries its members (the writer re-groups the
+        # flat map, so a memberless node is never written) — require them anyway,
+        # so a hand-edited revision can't empty a stage that then has nothing left
+        # to push and would strand its containers.
+        restored_members = (node.get("deployments") or {}) if node else {}
+        if restored_members:
+            # Swap THIS stage's members for the revision's: drop the ones currently
+            # deployed at (context=bp, stage) — a member added after the target
+            # revision must go — then put the revision's back. Deployments of any
+            # other stage or context are never in this set, which is the whole
+            # point (#314).
+            for did in [
+                did
+                for did, conf in deployments.items()
+                if (conf or {}).get("context") == bp
+                and ((conf or {}).get("stage") or "") == want_stage
+            ]:
+                del deployments[did]
+            for did, conf in restored_members.items():
+                c = copy.deepcopy(conf) if isinstance(conf, dict) else {}
+                # The tree encodes context/stage by position; the flat view (what
+                # _persist_bp_state re-groups on write) carries them explicitly.
+                c["context"] = bp
+                c["stage"] = want_stage
+                c.setdefault("active", True)
+                deployments[did] = c
+            # The node's shared source version — what the history entry pointed at.
+            bs.setdefault("business_processes", {}).setdefault(bp, {}).setdefault(
+                stage_key, {}
+            )["git_commit"] = node.get("git_commit")
+
+        # Per-realm secrets + firewall: set what the revision had, or drop the
+        # realm when it had none. Only this stage's realm is touched, so a dev
+        # rollback can no longer revert production's secrets or its (role-gated)
+        # firewall allow-list.
+        for key, val in (("secrets", target_blob), ("firewall", target_fw)):
+            top = bs.get(key)
+            if not isinstance(top, dict):
+                if val is None:
+                    continue
+                top = {}
+                bs[key] = top
+            entry = top.get(bp)
+            if not isinstance(entry, dict):
+                if val is None:
+                    continue
+                entry = {}
+                top[bp] = entry
+            if val is None:
+                entry.pop(realm, None)
+            else:
+                entry[realm] = copy.deepcopy(val)
+
+        await self._persist_bp_state(
+            bs,
+            {bp},
             bp,
             "deploy",
             deployed_by=deployed_by,
-            message=f"rollback {bp} @ {git_commit[:8]}",
+            message=f"rollback {bp} → {stage_key} @ {git_commit[:8]}",
         )
-        # Redeploy every deployment the restored file declares so the driver
-        # re-applies the restored state (images, secret env, firewall).
-        restored = read_bitswan_yaml(bp_dir) or {}
-        deployment_ids = list((restored.get("deployments") or {}).keys())
-        result = await self.apply_compose_for_deployments(
-            deployment_ids, deployed_by=deployed_by, report=progress_callback
-        )
-        target_src = None
-        node = ((y.get("business_processes") or {}).get(bp, {}) or {}).get(stage_key)
-        if node:
-            target_src = node.get("git_commit")
+        # Redeploy exactly this stage's restored members so the driver re-applies
+        # them (images, secret env, firewall). The driver still compiles the whole
+        # per-BP file, but every other stage in it is now byte-identical to before
+        # the rollback, so nothing else is recreated or retired.
+        restored = read_bitswan_yaml(self.gitops_dir) or {}
+        deployment_ids = [
+            did
+            for did, conf in (restored.get("deployments") or {}).items()
+            if (conf or {}).get("context") == bp
+            and ((conf or {}).get("stage") or "") == want_stage
+        ]
+        result: dict = {"deployment_ids": []}
+        if deployment_ids:
+            result = await self.apply_compose_for_deployments(
+                deployment_ids, deployed_by=deployed_by, report=progress_callback
+            )
         return {
             "message": "Rolled back",
             "bp": bp,
             "stage": stage_key,
-            "git_commit": target_src,
+            "git_commit": node.get("git_commit") if node else None,
             "deployment_ids": deployment_ids,
             "result": result,
         }
@@ -5563,9 +5662,22 @@ class AutomationService:
     async def _wake_context_stage(self, context: str, stage: str) -> dict:
         """Re-activate + redeploy every deployment sharing (context, stage) — the
         on-demand wake for staging/production (dev/live-dev use the LRU-aware
-        wake_live_dev). stage is the persisted form ('' for production)."""
+        wake_live_dev). stage is the persisted form ('' for production).
+
+        Fails LOUDLY. A wake that can't do anything used to return an empty
+        success — the dashboard's Wake button then reported "woken" while the
+        stage stayed down, with the only trace a gitops log line (#314). The two
+        ways it can't do anything:
+
+          * the group has NO deploy entries in bitswan.yaml — there is nothing to
+            re-activate (never deployed, or the entries were removed). 404 with
+            what to do about it.
+          * the redeploy raised — the stage is still asleep, so the error must
+            reach the caller instead of being swallowed.
+        """
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         want = stage or ""
+        stage_label = stage or "production"
         deps = [
             did
             for did, conf in (bs.get("deployments") or {}).items()
@@ -5573,16 +5685,39 @@ class AutomationService:
             and ((conf or {}).get("stage") or "") == want
         ]
         if not deps:
-            return {"context": context, "deployment_ids": []}
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Nothing to wake: '{context}' has no {stage_label} deployment "
+                    "entries in bitswan.yaml. The stage was never deployed, or its "
+                    "entries are gone — deploy or promote to it again."
+                ),
+            )
+        failed: dict[str, str] = {}
         for dep in deps:
             try:
                 await self.mark_as_active(dep)
             except Exception as e:  # noqa: BLE001
+                failed[dep] = str(e)
                 logger.warning("on-demand wake mark-active of %s failed: %s", dep, e)
+        if len(failed) == len(deps):
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Could not re-activate any member of {context}/{stage_label}: "
+                    + "; ".join(f"{d}: {m}" for d, m in sorted(failed.items()))
+                ),
+            )
         try:
             await self.apply_compose_for_deployments(deps, report=None)
+        except HTTPException:
+            raise
         except Exception as e:  # noqa: BLE001
             logger.warning("on-demand wake redeploy of %s failed: %s", context, e)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Wake of {context}/{stage_label} failed to redeploy: {e}",
+            ) from e
         return {"context": context, "deployment_ids": deps}
 
     async def sleep_context_stage(
@@ -5649,7 +5784,9 @@ class AutomationService:
 
     async def wake_context_stage(self, context: str, stage: str) -> dict:
         """Public wake for a (context, stage) group — re-activate + redeploy.
-        The manual counterpart of on-demand wake-on-access (dashboard Wake button)."""
+        The manual counterpart of on-demand wake-on-access (dashboard Wake button).
+        Raises (404/5xx) rather than reporting success when there is nothing to
+        wake or the redeploy fails — see _wake_context_stage."""
         return await self._wake_context_stage(context, stage)
 
     def _resolve_host_deployment(self, host: str) -> tuple[dict, str, str] | None:
