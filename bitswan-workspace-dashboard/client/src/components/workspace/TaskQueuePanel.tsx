@@ -20,6 +20,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import { useNow } from '@/hooks/useNow';
+import { formatAbsolute, formatRelative } from '@/lib/format-date';
 import type { GitTask, GitTaskStatus } from '@/types';
 
 const COLLAPSE_KEY = 'dashboard.taskQueue.collapsed';
@@ -79,18 +81,13 @@ const STATUS_META: Record<
   info: { label: '', text: 'text-sky-600 dark:text-sky-400', Icon: Info },
 };
 
-/** Compact "3m ago" / "just now" relative time from an epoch-ms stamp. */
+/**
+ * Compact "3m ago" / "just now" from an epoch-ms stamp — the activity feed is a
+ * dense two-column list, so it uses the shared formatter's SHORT variant rather
+ * than the "2 minutes ago" prose the rest of the dashboard shows.
+ */
 function relativeTime(ms: number, now: number): string {
-  if (!Number.isFinite(ms)) return '';
-  const secs = Math.max(0, Math.round((now - ms) / 1000));
-  if (secs < 10) return 'just now';
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.round(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.round(hrs / 24);
-  return `${days}d ago`;
+  return formatRelative(ms, { variant: 'short', now });
 }
 
 function gitTaskToItem(task: GitTask): ActivityItem {
@@ -211,14 +208,19 @@ function ActivityRow({ item, now }: { item: ActivityItem; now: number }) {
         </div>
         <div className="flex shrink-0 flex-col items-end gap-0.5 text-right">
           {meta.label ? <span className={cn('font-medium', meta.text)}>{meta.label}</span> : null}
-          <span className="text-muted-foreground">{relativeTime(item.stampMs, now)}</span>
+          <span className="text-muted-foreground" title={formatAbsolute(item.stampMs) || undefined}>
+            {relativeTime(item.stampMs, now)}
+          </span>
         </div>
       </div>
       {expandable && expanded ? (
         <ol className="ml-5 mt-1 space-y-0.5 border-l border-border pl-2">
           {trail.map((t, i) => (
             <li key={i} className="flex items-baseline gap-2">
-              <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+              <span
+                className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground"
+                title={formatAbsolute(t.at) || undefined}
+              >
                 {relativeTime(t.at, now)}
               </span>
               <span className="min-w-0 flex-1 break-words font-mono text-[11px] text-muted-foreground">
@@ -237,14 +239,10 @@ export function TaskQueuePanel() {
   const notifications = useNotifications();
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [showLog, setShowLog] = useState(false);
-  // A ticking clock so relative timestamps stay fresh without per-row timers.
-  const [now, setNow] = useState(() => Date.now());
+  // The app-wide ticking clock, so relative timestamps stay fresh without this
+  // panel owning a timer of its own.
+  const now = useNow();
   const listRef = useRef<HTMLUListElement>(null);
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 15_000);
-    return () => clearInterval(id);
-  }, []);
 
   const toggle = useCallback(() => {
     setCollapsed((c) => {

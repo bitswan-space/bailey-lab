@@ -5,6 +5,8 @@ import { api, type CveSeverity, type SupplyChainReport } from '@/lib/api';
 import { SessionExpiredError } from '@/lib/session';
 import { useSupplyChainTick } from '@/components/workspace/WorkspaceProvider';
 import { cn } from '@/lib/utils';
+import { RelativeTime } from '@/components/shared/RelativeTime';
+import { formatRelative } from '@/lib/format-date';
 
 /**
  * Supply chain panel (wireframe `SupplyChain`): the SBOM packages + grype CVEs
@@ -251,7 +253,7 @@ export function SupplyChainPanel({
   }
 
   const waivers = report.waivers ?? [];
-  const scannedAt = report.scanned_at ? new Date(report.scanned_at).toLocaleString() : 'unknown';
+  const scannedAt = report.scanned_at ? formatRelative(report.scanned_at) : 'unknown';
   const dialogWaiver = dialog
     ? waivers.find((w) => w.package === dialog.package && w.cve === dialog.cve)
     : undefined;
@@ -376,7 +378,8 @@ export function SupplyChainPanel({
                   <span className="font-mono text-muted-foreground">{w.package}</span> — {w.comment}
                 </div>
                 <div className="mt-0.5 text-[11px] text-muted-foreground">
-                  Marked out of scope by <strong className="font-semibold text-foreground">{w.by}</strong> · {w.at}
+                  Marked out of scope by <strong className="font-semibold text-foreground">{w.by}</strong> ·{' '}
+                  <RelativeTime value={w.at} />
                 </div>
               </div>
               {!readOnly && (
@@ -444,7 +447,8 @@ export function SupplyChainPanel({
                   </div>
                   <div className="text-[12.5px] leading-snug text-zinc-700">{dialogWaiver.comment}</div>
                   <div className="text-[11px] text-muted-foreground">
-                    by <strong className="font-semibold text-foreground">{dialogWaiver.by}</strong> · {dialogWaiver.at}
+                    by <strong className="font-semibold text-foreground">{dialogWaiver.by}</strong> ·{' '}
+                    <RelativeTime value={dialogWaiver.at} />
                   </div>
                 </div>
               ) : !readOnly ? (

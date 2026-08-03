@@ -22,19 +22,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { api } from '@/lib/api';
 import type { OffsiteBackupConfig } from '@/types';
-
-function formatWhen(iso: string | undefined): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-}
+import { RelativeTime } from '@/components/shared/RelativeTime';
 
 /** "workspace ok, postgres failed" style summary of a run's per-service results. */
 function runSummary(config: OffsiteBackupConfig): string {
@@ -236,7 +224,7 @@ export function OffsiteBackupsCard() {
               <span className={last.ok ? 'text-emerald-700' : 'text-amber-700'}>
                 {last.ok ? 'ok' : 'errors'}
               </span>{' '}
-              · {formatWhen(last.finished_at)}
+              · <RelativeTime value={last.finished_at} />
               {runSummary(config) ? ` · ${runSummary(config)}` : ''}
             </>
           ) : (
