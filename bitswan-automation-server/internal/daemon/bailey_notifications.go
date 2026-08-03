@@ -33,7 +33,9 @@ type notification struct {
 func gatherNotifications(callerEmail string, callerGroups []string, isAdmin bool) ([]notification, error) {
 	var out []notification
 
-	// (1) Pending pair requests — entirely in-memory, no DB at all.
+	// (1) Pending pair requests. Two sequential queries inside
+	// visiblePendingRequests (pending_pairs, then devices for the
+	// already-trusted filter), each closed before the next opens.
 	for _, p := range visiblePendingRequests(callerEmail, isAdmin) {
 		out = append(out, notification{
 			Kind:        "pair",

@@ -66,11 +66,16 @@ func TestStatic_RoutedThroughDispatch(t *testing.T) {
 func TestNotifications_CountForPendingPair(t *testing.T) {
 	email := "notif@example.com"
 	_ = dbDeletePendingPairByEmail(email)
+	// Trust the viewing browser first — see TestApprovalsAPI: trusting a device
+	// now clears the account's pending link request, so seeding before the
+	// harness trusts would model an impossible sequence.
+	r := baileyReq(http.MethodGet, "/bailey/api/notifications-count", email)
+	ensureTrustedDeviceForReq(r)
 	if _, err := generatePendingPair(email); err != nil {
 		t.Fatal(err)
 	}
 	// The user sees their own pending pair as a notification.
-	w := dispatch(baileyReq(http.MethodGet, "/bailey/api/notifications-count", email))
+	w := dispatch(r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("count = %d", w.Code)
 	}
