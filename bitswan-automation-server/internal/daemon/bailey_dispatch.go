@@ -217,6 +217,9 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			case "upgrade":
 				s.handleUpgradeWorkspace(w, r, email, workspaceName)
 				return
+			case "rollback":
+				s.handleBaileyWorkspaceRollback(w, r, email, workspaceName)
+				return
 			}
 		}
 	}
@@ -327,6 +330,13 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 	case "/bailey/api/admin/server-update":
 		if r.Method == http.MethodPost {
 			s.handleAdminServerUpdate(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/server-rollback":
+		if r.Method == http.MethodPost {
+			s.handleAdminServerRollback(w, r)
 			return
 		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

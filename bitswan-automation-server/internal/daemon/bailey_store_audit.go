@@ -41,6 +41,14 @@ const (
 	// lockout marks the point a per-account/per-IP cooldown was triggered.
 	audit2FAFailed  = "2fa.verify_failed" // a 2FA verification attempt failed (brute-force signal)
 	audit2FALockout = "2fa.lockout"       // too many failures → per-account/per-IP cooldown engaged
+
+	// Update / rollback of the automation-server binary and of workspaces. The
+	// target carries the version transition (e.g. "v1 → v2"); rollbacks reuse the
+	// same verbs so a SIEM sees the whole lineage. The structured version ledger
+	// (who/when/which version, plus rollback artifacts) lives in update_history;
+	// these mirror it into the activity feed + SIEM.
+	auditServerUpdate    = "server.update"    // the automation server binary was updated/rolled back
+	auditWorkspaceUpdate = "workspace.update" // a workspace was updated/rolled back to new images
 )
 
 // eventRecord is one audit row, JSON-shaped for the overview feed.

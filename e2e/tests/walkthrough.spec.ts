@@ -364,21 +364,27 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     });
   }
 
-  // ---- Updates (admin): version visibility + update availability. The Updates
-  // nav item carries a bubble when any component is behind; the view names the
-  // server's running version (current → latest) with an "Up to date" / "Update
-  // available" pill, and lists the workspaces with updates plus a per-workspace
-  // Update button. On a FRESHLY onboarded server every component is on the latest
-  // track, so this captures the genuine "up to date" state (no fabricated
-  // update) — the server's real version and an all-current workspace list. The
-  // server's own binary updates host-side (`bitswan self-update`), so its card
-  // shows that command rather than a button; rollback is CLI-only.
+  // ---- Updates (admin): version visibility, update availability, and the
+  // update audit log. The Updates nav item carries a bubble when any component is
+  // behind; the view names the server's running version (current → latest) with
+  // an "Up to date" / "Update available" pill, lists the workspaces with updates
+  // plus a per-workspace Update button, and shows an "Update history" ledger —
+  // who updated what, to which version, and when — that each retained version
+  // can be rolled back from (bounded to the last 3, all in-UI, no CLI). On a
+  // FRESHLY onboarded server every component is on the latest track and nothing
+  // has been updated yet, so this captures the genuine "up to date" state with an
+  // honest empty history (no fabricated update). Server and workspace updates AND
+  // their rollbacks are exercised at the unit/integration level; here we assert
+  // the audit-log surface renders for the handbook capture.
   await chapter('updates', async () => {
     await c.getByRole('button', { name: /^Updates/i }).first().click();
     await expect(c.getByRole('heading', { name: /Updates/i }).first()).toBeVisible({ timeout: SLA });
     // The server card names the running version and its up-to-date / behind state.
     await expect(c.getByText(/Automation server/i).first()).toBeVisible({ timeout: SLA });
     await expect(c.getByText(/Up to date|Update available/).first()).toBeVisible({ timeout: SLA });
+    // The update audit log renders (empty on a fresh server, populated after any
+    // update) — the who/when/which-version record + rollback controls.
+    await expect(c.getByText(/Update history/i).first()).toBeVisible({ timeout: SLA });
     await capture(page, 'updates');
   });
 

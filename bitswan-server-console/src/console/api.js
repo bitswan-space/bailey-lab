@@ -243,8 +243,14 @@ export const Api = {
   // "update available" badge. Distinct from updateWorkspace (digest re-pull).
   upgradeWorkspace: (name, onEvent) =>
     postNDJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/upgrade`, {}, onEvent),
-  // Admin: what's behind on this server (server binary + stale workspaces) +
-  // a count for the Updates nav bubble.
+  // Roll a workspace back to a retained previous version (by update-history id).
+  // Owner-only; bounded to the last few versions server-side. Streams progress
+  // like an update.
+  rollbackWorkspace: (name, id, onEvent) =>
+    postNDJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/rollback`, { id }, onEvent),
+  // Admin: what's behind on this server (server binary + stale workspaces), the
+  // update/rollback version ledger (history), the rollback depth, and a count
+  // for the Updates nav bubble.
   adminUpdates: () => getJSON('/bailey/api/admin/updates'),
   // Admin: update the automation-server binary itself from the browser. The
   // daemon downloads the official binary from the AOC, swaps it on the host, and
@@ -252,6 +258,9 @@ export const Api = {
   // 'restarting' event when the connection drops with the daemon. Callers then
   // poll adminUpdates() until the version flips.
   serverUpdate: (onEvent) => postNDJSON('/bailey/api/admin/server-update', {}, onEvent),
+  // Admin: roll the automation-server binary back to a retained previous version
+  // (by update-history id). Same restart dance + version-polling as serverUpdate.
+  serverRollback: (id, onEvent) => postNDJSON('/bailey/api/admin/server-rollback', { id }, onEvent),
   // Workspace membership = the ACL share state on the workspace's dashboard
   // endpoint host: owner_email + grants. Owner-only (403 otherwise). Returns
   // the updated listing on add/remove.

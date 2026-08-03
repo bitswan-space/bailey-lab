@@ -12,8 +12,9 @@ import (
 // Both workspace updates and the server's own binary are appliable from the
 // GUI: workspace updates pull new containers, and the server self-update writes
 // the new binary to the host and recreates the daemon container (POST
-// /bailey/api/admin/server-update). We also surface the host-side
-// `bitswan self-update` command as an alternative for operators.
+// /bailey/api/admin/server-update). The response also carries the version
+// ledger (who/when/which version) that backs the Updates-page audit log and its
+// bounded (updateRollbackDepth) rollback controls.
 func (s *Server) handleAdminUpdates(w http.ResponseWriter, r *http.Request) {
 	server := detectServerVersion(s.version)
 
@@ -36,11 +37,20 @@ func (s *Server) handleAdminUpdates(w http.ResponseWriter, r *http.Request) {
 		count++
 	}
 
+	// Version ledger: the last updateRollbackDepth rows per target, newest first.
+	// Backs the audit log (who/when/which version) and the rollback controls. The
+	// Artifact field is json:"-", so restorable-state paths never reach the client.
+	history, _ := dbListRecentUpdateHistory(updateRollbackDepth)
+	if history == nil {
+		history = []updateHistoryEntry{}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"server":            server,
-		"workspaces":        updates,
-		"count":             count,
-		"server_update_cmd": "bitswan self-update",
+		"server":         server,
+		"workspaces":     updates,
+		"count":          count,
+		"history":        history,
+		"rollback_depth": updateRollbackDepth,
 	})
 }
