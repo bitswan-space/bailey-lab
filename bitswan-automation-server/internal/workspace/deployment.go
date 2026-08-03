@@ -82,6 +82,9 @@ func RollbackWorkspaceDeployment(workspaceName string) error {
 	if err := downCmd.Run(); err != nil {
 		return fmt.Errorf("failed to stop containers: %w", err)
 	}
+	// The restored compose declares the <ws>-agent bridge external; make sure it
+	// exists before bringing gitops back up. Idempotent.
+	_ = exec.Command("docker", "network", "create", workspaceName+"-agent").Run()
 	upCmd := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--remove-orphans")
 	upCmd.Dir = deployDir
 	upCmd.Stdout = os.Stdout
@@ -232,6 +235,12 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, c
 		return fmt.Errorf("failed to stop containers: %w", err)
 	}
 	fmt.Println("GitOps containers stopped.")
+
+	// Ensure the dedicated agent↔gitops bridge exists before the gitops compose
+	// (which declares <ws>-agent as external) comes up. Idempotent — this also
+	// migrates workspaces created before the agent was moved off bitswan_network.
+	// A genuine failure surfaces on the compose up below ("network not found").
+	_ = exec.Command("docker", "network", "create", workspaceName+"-agent").Run()
 
 	fmt.Println("Starting GitOps containers...")
 	upCmd := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--remove-orphans")

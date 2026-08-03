@@ -117,6 +117,17 @@ func approvePendingPair(email, code, approverEmail string, approverIsAdmin bool)
 // only the code. Returns the approved entry, or nil if no live (unexpired)
 // pending pair has that code.
 func approvePendingPairByCode(code, approverEmail string) *pairingEntry {
+	return approvePendingPairByCodeVia(code, approverEmail, "CLI")
+}
+
+// approvePendingPairByCodeVia is approvePendingPairByCode with the admin
+// credential that authorised it recorded in ApproverInfo. The socket handler
+// passes the credential from callerAdminPrincipal so the provenance says which
+// token approved the device rather than implying the root admin did it by hand
+// (issue #189). ApprovedBy stays the root-admin address: callers only test it
+// for emptiness, and it remains the account under whose authority the approval
+// ran.
+func approvePendingPairByCodeVia(code, approverEmail, via string) *pairingEntry {
 	e, err := dbLoadPendingPairByCode(code)
 	if err != nil || e == nil {
 		return nil
@@ -125,7 +136,7 @@ func approvePendingPairByCode(code, approverEmail string) *pairingEntry {
 		return nil
 	}
 	e.ApprovedBy = approverEmail
-	e.ApproverInfo = approverEmail + " (admin via CLI)"
+	e.ApproverInfo = approverEmail + " (admin via " + via + ")"
 	if err := dbUpsertPendingPair(e); err != nil {
 		return nil
 	}
@@ -205,13 +216,25 @@ func selfTrustHandler(w http.ResponseWriter, r *http.Request, email string) {
 		return
 	}
 	code := strings.TrimSpace(r.FormValue("code"))
-	if !totp.Validate(code, rec.Secret) {
+	// Same brute-force throttle as the JSON twin (/bailey/api/self-trust): this
+	// form verifies the identical factor, so leaving it unthrottled would just
+	// relocate the attack (issue #188).
+	ip := clientIPForRequest(r)
+	_, retry, allowed := mfaThrottleBegin(email, ip)
+	if !allowed {
 		e, _ := generatePendingPairUA(email, r.UserAgent())
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprint(w, pendingPairHTML(email, e, true, true, "That code didn't match — check your authenticator and try again."))
+		msg := mfaHTMLThrottleReject(w, email, ip, "self-trust-form", retry)
+		fmt.Fprint(w, pendingPairHTML(email, e, true, true, msg))
 		return
 	}
+	if !totp.Validate(code, rec.Secret) {
+		e, _ := generatePendingPairUA(email, r.UserAgent())
+		msg := mfaHTMLThrottleFail(w, email, ip, "self-trust-form",
+			"That code didn't match — check your authenticator and try again.", retry)
+		fmt.Fprint(w, pendingPairHTML(email, e, true, true, msg))
+		return
+	}
+	mfaThrottleReset(email, ip)
 	if _, err := completeNewDevicePairFor(w, r, email, "self via authenticator"); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -411,17 +434,26 @@ func recoveryHandler(w http.ResponseWriter, r *http.Request, email string) {
 		mode := strings.TrimSpace(r.FormValue("mode"))
 		if mode == "backup" {
 			backup := strings.TrimSpace(r.FormValue("backup"))
+			// Throttled like the JSON twin (/bailey/api/recover) — issue #188.
+			ip := clientIPForRequest(r)
+			_, retry, allowed := mfaThrottleBegin(email, ip)
+			if !allowed {
+				msg := mfaHTMLThrottleReject(w, email, ip, "recover-backup-form", retry)
+				fmt.Fprint(w, recoveryFormHTML(email, totpEnrolled, backupEnrolled, true, msg))
+				return
+			}
 			ok, err := dbConsumeBackupCode(email, backup)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			if !ok {
-				w.Header().Set("Content-Type", "text/html")
-				w.WriteHeader(http.StatusUnauthorized)
-				fmt.Fprint(w, recoveryFormHTML(email, totpEnrolled, backupEnrolled, true, "That doesn't look like a valid backup code."))
+				msg := mfaHTMLThrottleFail(w, email, ip, "recover-backup-form",
+					"That doesn't look like a valid backup code.", retry)
+				fmt.Fprint(w, recoveryFormHTML(email, totpEnrolled, backupEnrolled, true, msg))
 				return
 			}
+			mfaThrottleReset(email, ip)
 			if _, err := completeNewDevicePairFor(w, r, email, "self via backup code"); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -435,12 +467,20 @@ func recoveryHandler(w http.ResponseWriter, r *http.Request, email string) {
 			return
 		}
 		code := strings.TrimSpace(r.FormValue("code"))
-		if !totp.Validate(code, rec.Secret) {
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprint(w, recoveryFormHTML(email, totpEnrolled, backupEnrolled, false, "Code didn't match — try again."))
+		ip := clientIPForRequest(r)
+		_, retry, allowed := mfaThrottleBegin(email, ip)
+		if !allowed {
+			msg := mfaHTMLThrottleReject(w, email, ip, "recover-totp-form", retry)
+			fmt.Fprint(w, recoveryFormHTML(email, totpEnrolled, backupEnrolled, false, msg))
 			return
 		}
+		if !totp.Validate(code, rec.Secret) {
+			msg := mfaHTMLThrottleFail(w, email, ip, "recover-totp-form",
+				"Code didn't match — try again.", retry)
+			fmt.Fprint(w, recoveryFormHTML(email, totpEnrolled, backupEnrolled, false, msg))
+			return
+		}
+		mfaThrottleReset(email, ip)
 		if _, err := completeNewDevicePairFor(w, r, email, "self via authenticator recovery"); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

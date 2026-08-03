@@ -237,12 +237,21 @@ func handleEnrollPOST(w http.ResponseWriter, r *http.Request, basePath, email st
 		http.Error(w, "enrolment session expired — start over", http.StatusBadRequest)
 		return
 	}
-	if !totp.Validate(code, candidate.Value) {
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprint(w, totpEnrollHTML(email, candidate.Value, basePath, "Code didn't match — check your authenticator and try again."))
+	// Throttled like the JSON twin (/bailey/api/totp/verify) — issue #188.
+	ip := clientIPForRequest(r)
+	_, retry, allowed := mfaThrottleBegin(email, ip)
+	if !allowed {
+		msg := mfaHTMLThrottleReject(w, email, ip, "totp-enroll-form", retry)
+		fmt.Fprint(w, totpEnrollHTML(email, candidate.Value, basePath, msg))
 		return
 	}
+	if !totp.Validate(code, candidate.Value) {
+		msg := mfaHTMLThrottleFail(w, email, ip, "totp-enroll-form",
+			"Code didn't match — check your authenticator and try again.", retry)
+		fmt.Fprint(w, totpEnrollHTML(email, candidate.Value, basePath, msg))
+		return
+	}
+	mfaThrottleReset(email, ip)
 	if err := saveTOTPRecord(&totpRecord{
 		Email:     email,
 		Secret:    candidate.Value,
@@ -288,13 +297,24 @@ func handleChallengePOST(w http.ResponseWriter, r *http.Request, basePath, email
 		return
 	}
 	code := strings.TrimSpace(r.FormValue("code"))
-	if !totp.Validate(code, rec.Secret) {
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusUnauthorized)
+	// This is the second-factor LOGIN step — the most attractive brute-force
+	// target of the 2FA surface, so it gets the same throttle (issue #188).
+	ip := clientIPForRequest(r)
+	_, retry, allowed := mfaThrottleBegin(email, ip)
+	if !allowed {
 		pair, _ := generatePendingPairUA(email, r.UserAgent())
-		fmt.Fprint(w, totpChallengeHTML(email, basePath, "Code didn't match — try again.", pair))
+		msg := mfaHTMLThrottleReject(w, email, ip, "totp-challenge", retry)
+		fmt.Fprint(w, totpChallengeHTML(email, basePath, msg, pair))
 		return
 	}
+	if !totp.Validate(code, rec.Secret) {
+		pair, _ := generatePendingPairUA(email, r.UserAgent())
+		msg := mfaHTMLThrottleFail(w, email, ip, "totp-challenge",
+			"Code didn't match — try again.", retry)
+		fmt.Fprint(w, totpChallengeHTML(email, basePath, msg, pair))
+		return
+	}
+	mfaThrottleReset(email, ip)
 	if err := setSessionCookie(w, r, email); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

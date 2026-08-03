@@ -155,40 +155,81 @@ func registerEndpoint(hostname, ownerEmail, displayName, parentEndpoint, kind, s
 	return getEndpoint(hostname)
 }
 
-// setEndpointOwner rewrites the endpoint's recorded original owner.
-// Used by workspace ownership transfer — the ONLY path that ever
-// changes owner_email after registration.
+// setEndpointOwner rewrites the endpoint's recorded owner_email. owner_email is
+// just "one of the owners" — the one surfaced for display and inherited by
+// child endpoints — and is kept pointing at a current owner as owners come and
+// go (see revokeOwnership). There is no immovable "primary" owner.
 func setEndpointOwner(hostname, ownerEmail string) error {
 	db, err := openBaileyDB()
 	if err != nil {
 		return err
 	}
 	hostname = strings.TrimSpace(hostname)
-	ownerEmail = strings.TrimSpace(ownerEmail)
-	if hostname == "" || ownerEmail == "" {
-		return fmt.Errorf("hostname and owner are required")
+	if hostname == "" {
+		return fmt.Errorf("hostname is required")
 	}
 	_, err = db.Exec(`UPDATE endpoints SET owner_email = ? WHERE hostname = ? COLLATE NOCASE`,
-		ownerEmail, hostname)
+		strings.TrimSpace(ownerEmail), hostname)
 	return err
 }
 
-// reassignChildEndpoints moves the recorded owner of every endpoint
-// parented to parentHost from oldOwner to newOwner. Children whose
-// owner_email is someone else were registered with an explicit owner
-// (e.g. a manual add-route) and are deliberately left alone — only the
-// rows that inherited the workspace owner at registration follow the
-// transfer.
-func reassignChildEndpoints(parentHost, oldOwner, newOwner string) error {
-	db, err := openBaileyDB()
-	if err != nil {
+// endpointOwners returns every email that owns the endpoint — the recorded
+// owner_email (if any) plus every email grant with role=owner — deduped,
+// owner_email first. Owner is a role, not an exclusive property.
+func endpointOwners(hostname string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	add := func(e string) {
+		e = strings.TrimSpace(e)
+		if e == "" || seen[strings.ToLower(e)] {
+			return
+		}
+		seen[strings.ToLower(e)] = true
+		out = append(out, e)
+	}
+	if ep, _ := getEndpoint(hostname); ep != nil {
+		add(ep.OwnerEmail)
+	}
+	if grants, err := listGrants(hostname); err == nil {
+		for _, g := range grants {
+			if g.PrincipalType == "email" && g.Role == roleOwner {
+				add(g.PrincipalValue)
+			}
+		}
+	}
+	return out
+}
+
+// revokeOwnership removes email as an owner of the endpoint: it drops any owner
+// grant and, if email is the recorded owner_email, hands that slot to another
+// current owner. It refuses to remove the LAST owner — the one invariant the
+// old immovable "primary owner" really protected. A no-op if email isn't an
+// owner. Child endpoints inherit workspace owners via parent delegation in
+// roleFor, so nothing needs to cascade.
+func revokeOwnership(hostname, email string) error {
+	email = strings.TrimSpace(email)
+	var remaining []string
+	isOwner := false
+	for _, o := range endpointOwners(hostname) {
+		if strings.EqualFold(o, email) {
+			isOwner = true
+		} else {
+			remaining = append(remaining, o)
+		}
+	}
+	if !isOwner {
+		return nil
+	}
+	if len(remaining) == 0 {
+		return fmt.Errorf("a workspace must keep at least one owner")
+	}
+	if err := removeGrant(hostname, "email", email, string(roleOwner)); err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE endpoints SET owner_email = ?
-	    WHERE parent_endpoint = ? COLLATE NOCASE
-	      AND owner_email = ? COLLATE NOCASE`,
-		strings.TrimSpace(newOwner), strings.TrimSpace(parentHost), strings.TrimSpace(oldOwner))
-	return err
+	if ep, _ := getEndpoint(hostname); ep != nil && strings.EqualFold(ep.OwnerEmail, email) {
+		return setEndpointOwner(hostname, remaining[0])
+	}
+	return nil
 }
 
 // deleteEndpoint removes an endpoint and (via ON DELETE CASCADE) all

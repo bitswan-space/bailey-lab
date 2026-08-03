@@ -330,6 +330,9 @@ func workspaceStageNetworks(workspaceName string) []string {
 		workspaceName + "-dev",
 		workspaceName + "-staging",
 		workspaceName + "-production",
+		// Dedicated coding-agent↔gitops bridge (see coding_agent.go /
+		// dockercompose.go). Torn down with the workspace like the stage nets.
+		workspaceName + "-agent",
 	}
 }
 

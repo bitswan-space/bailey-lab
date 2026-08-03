@@ -11,6 +11,12 @@ import (
 const (
 	docsHostname = "automation-server-daemon-docs.bitswan.localhost"
 	docsPort     = 8080
+	// baileyGatePort is the LOOPBACK-only listener for the identity-trusting
+	// Bailey management + gate handlers (issue #183 / BSY-05, the stage-4 split).
+	// Bound to 127.0.0.1 so the sole reachable path is the in-process gate
+	// (upstreamForHost proxies bailey/onboard inner hosts to localhost here); no
+	// peer on bitswan_network can reach it directly with forged identity headers.
+	baileyGatePort = 8081
 )
 
 // handleDocs serves the Swagger UI documentation

@@ -43,6 +43,7 @@ from app.services import supply_chain_service
 from app.services import firewall_service
 from app.services.bp_git import fetch_main
 from app.services.git_server import validate_bp_name
+from app.task_queue import current_requester
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
@@ -1885,6 +1886,16 @@ class AutomationService:
         containers, re-deriving the backend's secret env, reloading firewall)."""
         validate_bp_name(bp)
         stage_key = "production" if stage in ("", "production") else stage
+        # BSY-07 / #185: a rollback reinstates a prior committed state — which,
+        # for staging/production, is itself a (re)deploy TO that stage. Re-run the
+        # SAME freeze + audit + admin/auditor gate a forward promotion must pass,
+        # so a superseded or known-vulnerable production image can't be reinstated
+        # without sign-off, and a frozen staging image can't be swapped under an
+        # in-flight audit. dev has no gate (matching a dev deploy). The role is
+        # resolved authoritatively from `deployed_by` via the daemon store,
+        # fail-closed — never a caller-supplied role.
+        if stage_key in ("staging", "production"):
+            self._assert_promotable(bp, stage_key, deployed_by)
         bp_dir = bp_state_path(self.gitops_dir, bp)
         content, _, rc = await call_git_command_with_output(
             "git", "show", f"{git_commit}:bitswan.yaml", cwd=bp_dir
@@ -3224,12 +3235,21 @@ class AutomationService:
             "allowed": [r["host"] for r in rule_list if r.get("status") == "allowed"],
         }
 
-    def _require_fw_role(self, stage: str, role: str | None) -> None:
-        """Production rule changes require an admin or auditor role."""
-        if (
-            bp_secrets.realm_for_stage(stage) == "production"
-            and role not in self._FW_ROLES
-        ):
+    def _require_fw_role(self, stage: str) -> None:
+        """Production firewall changes require an admin/auditor role — resolved
+        AUTHORITATIVELY from the gate-forwarded requester identity via the daemon
+        role store, never a caller-supplied role (BSY-08 / #186). Fails closed on
+        a missing or unknown identity. The identity is the header-derived
+        principal (BSY-09 / #187): for product traffic the BFF sets it from the
+        gate-verified login, so users can't choose it. A direct holder of the
+        shared secret can still forge the header — the gain is one clean identity
+        channel and a raised bar (name a real admin, not just role=admin), not an
+        absolute boundary."""
+        if bp_secrets.realm_for_stage(stage) != "production":
+            return
+        actor = current_requester.get() or ""
+        role = daemon_user_role(actor) if actor else ""
+        if role not in self._FW_ROLES:
             raise HTTPException(
                 status_code=403,
                 detail="Only admin or auditor roles may change production firewall rules",
@@ -3244,13 +3264,12 @@ class AutomationService:
         purpose: str = "",
         gdpr: dict | None = None,
         by: str | None = None,
-        role: str | None = None,
     ) -> dict:
         """Allow or deny an outbound host for a BP stage. Versioned in
         bitswan.yaml (the audit log of who decided what, when, and why)."""
         if status not in ("allowed", "denied"):
             raise HTTPException(status_code=400, detail="status must be allowed|denied")
-        self._require_fw_role(stage, role)
+        self._require_fw_role(stage)
         host = host.strip().lower()
         if not host:
             raise HTTPException(status_code=400, detail="host is required")
@@ -3276,10 +3295,9 @@ class AutomationService:
         stage: str,
         host: str,
         by: str | None = None,
-        role: str | None = None,
     ) -> dict:
         """Remove a rule (revoke an allow / clear a deny) — its own commit."""
-        self._require_fw_role(stage, role)
+        self._require_fw_role(stage)
         host = host.strip().lower()
         realm = bp_secrets.realm_for_stage(stage)
         bs = read_bitswan_yaml(self.gitops_dir) or {}
@@ -3299,12 +3317,11 @@ class AutomationService:
         from_stage: str,
         to_stage: str,
         by: str | None = None,
-        role: str | None = None,
     ) -> dict:
         """Pull firewall rules forward (e.g. dev→staging→production). Copies the
         source realm's rules onto the target realm. Target=production needs the
         role check."""
-        self._require_fw_role(to_stage, role)
+        self._require_fw_role(to_stage)
         from_realm = bp_secrets.realm_for_stage(from_stage)
         to_realm = bp_secrets.realm_for_stage(to_stage)
         bs = read_bitswan_yaml(self.gitops_dir) or {}
@@ -3331,7 +3348,6 @@ class AutomationService:
         stage: str,
         git_commit: str,
         by: str | None = None,
-        role: str | None = None,
     ) -> dict:
         """Roll a BP realm's firewall rule set back to a prior commit. The audit
         log lives in git (bp_history surfaces every firewall change), so a
@@ -3341,7 +3357,7 @@ class AutomationService:
         immediately reflects the restored allow-list. Production rollbacks
         require an admin/auditor role (same gate as live edits)."""
         validate_bp_name(bp)
-        self._require_fw_role(stage, role)
+        self._require_fw_role(stage)
         realm = bp_secrets.realm_for_stage(stage)
         # Fail loudly if the revision does not exist (rather than silently
         # clearing the realm because git show returned nothing).
@@ -3417,12 +3433,11 @@ class AutomationService:
         content: bytes,
         filename: str | None = None,
         by: str | None = None,
-        role: str | None = None,
     ) -> dict:
         """Store a host's DPA PDF in the gitops repo (firewall-dpa/<bp>/) and
         version it. Production needs admin/auditor, same as a rule change."""
         validate_bp_name(bp)
-        self._require_fw_role(stage, role)
+        self._require_fw_role(stage)
         if not content:
             raise HTTPException(status_code=400, detail="empty DPA upload")
         host = host.strip().lower()

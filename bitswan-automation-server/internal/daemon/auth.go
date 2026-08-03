@@ -123,23 +123,18 @@ func stripBaileyAuthCookies(r *http.Request) {
 // identity on the request (e.g. before the OIDC handshake has run, or
 // in unit tests).
 //
-// SECURITY / STAGE-4 GAP: these X-Forwarded-* / X-Auth-Request-* headers
-// are TRUSTED here with NO proof the request actually traversed
-// oauth2-proxy. That is safe only as long as this code path is reached
-// EXCLUSIVELY via the trusted gate/oauth2-proxy chain. It is NOT safe on
-// the daemon's :8080 TCP listener, which is bound to all interfaces and
-// reachable by any container on bitswan_network (including
-// user-controlled workspace apps) — any of them can connect directly
-// with forged X-Forwarded-Email/-Groups and impersonate an arbitrary
-// user or org admin. The known, accepted stage-4 fix is the proxy split:
-// :8080 must be bound to loopback / a non-routable daemon<->gate-only
-// network so the only reachable path is through the gate. It is NOT
-// bound to loopback today because the ACME DNS-01 bridge (acme_dns.go)
-// and the docs ingress (docs.go) reach :8080 cross-container by its
-// docker DNS name; re-binding without the proxy split would break them.
-// Until that split lands, the gate's Director strip (startProtectedGate)
-// is the partial mitigation. DO NOT add new trust in these headers on
-// any TCP-reachable surface without the gate in front.
+// SECURITY: these X-Forwarded-* / X-Auth-Request-* headers are TRUSTED
+// here with NO proof the request itself traversed oauth2-proxy, so this
+// code path is safe ONLY when reached exclusively via the trusted
+// gate/oauth2-proxy chain. The stage-4 split (issue #183 / BSY-05) makes
+// that hold: every handler that calls this — handleBailey,
+// handleGatePathRoot — is served on the daemon's LOOPBACK-only gate
+// listener (baileyGatePort, see the docsServer wiring in server.go),
+// reachable solely through the in-process gate, never directly from a
+// container on bitswan_network. The network :8080 listener now serves
+// only the identity-free docs + basic-auth'd ACME bridge. DO NOT add new
+// trust in these headers on any network-reachable surface without the
+// gate in front — keep new identity-trusting handlers on gateMux.
 func identityFromHeaders(r *http.Request) (string, []string) {
 	email := r.Header.Get("X-Forwarded-Email")
 	if email == "" {

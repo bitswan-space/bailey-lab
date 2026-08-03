@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
 	"gopkg.in/yaml.v3"
 )
@@ -129,9 +130,17 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 		// 401-ing every /agent/* request.
 		"container_name": workspaceName + "-coding-agent",
 		"hostname":       workspaceName + "-coding-agent",
-		"networks":       []string{"bitswan_network"},
-		"environment":    envVars,
-		"volumes":        volumes,
+		// SECURITY: the coding agent runs untrusted (member-/AI-authored) code
+		// and MUST NOT sit on bitswan_network (the control-plane inner ring),
+		// where it could reach the daemon gate (:8080/:9080) and every other
+		// control-plane container. It joins ONLY this dedicated per-workspace
+		// bridge, shared solely with gitops, so its entire reachable surface is
+		// the authenticated gitops API (/agent, Bearer token) + git (/git). See
+		// dockercompose.go (gitops also joins <ws>-agent) and StartContainer
+		// (network ensured + gitops attached at bring-up).
+		"networks":    []string{workspaceName + "-agent"},
+		"environment": envVars,
+		"volumes":     volumes,
 	}
 
 	// Construct the docker-compose data structure
@@ -141,7 +150,7 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 			"bitswan-coding-agent": bitswanCodingAgent,
 		},
 		"networks": map[string]interface{}{
-			"bitswan_network": map[string]interface{}{
+			workspaceName + "-agent": map[string]interface{}{
 				"external": true,
 			},
 		},
@@ -279,10 +288,59 @@ func (c *CodingAgentService) IsContainerRunning() bool {
 	return len(lines) > 0 && lines[0] != ""
 }
 
+// AgentNetworkName returns the dedicated, isolated per-workspace bridge that
+// the coding agent shares ONLY with gitops. Keeping the agent off
+// bitswan_network is the whole point: untrusted agent code must not be able to
+// reach the control-plane inner ring (daemon gate, other workspaces' gitops,
+// etc.). Its sole reachable dependency is the authenticated gitops API/git.
+func AgentNetworkName(workspaceName string) string {
+	return workspaceName + "-agent"
+}
+
+// EnsureAgentNetwork creates the dedicated agent↔gitops bridge (idempotent) and
+// attaches the currently-running gitops container to it. The gitops compose
+// also declares this network (dockercompose.go), so the wiring survives a
+// gitops recreate; this attach covers the window where the agent is enabled on
+// a workspace whose gitops has not yet been re-upped onto the new network.
+func (c *CodingAgentService) EnsureAgentNetwork() error {
+	net := AgentNetworkName(c.WorkspaceName)
+	if _, err := docker.EnsureDockerNetwork(net, false); err != nil {
+		return fmt.Errorf("failed to ensure agent network %q: %w", net, err)
+	}
+	// Find the gitops container by its workspace label (its container name is
+	// project-prefixed and not stable, but the label is).
+	out, err := exec.Command("docker", "ps", "-q",
+		"--filter", "label=gitops.workspace="+c.WorkspaceName).Output()
+	if err != nil {
+		return fmt.Errorf("failed to locate gitops container for %q: %w", c.WorkspaceName, err)
+	}
+	ids := strings.Fields(string(out))
+	if len(ids) == 0 {
+		// gitops not running yet — the declarative compose wiring will attach it
+		// when the workspace comes up. Nothing to do here.
+		return nil
+	}
+	for _, id := range ids {
+		connectOut, cerr := exec.Command("docker", "network", "connect", net, id).CombinedOutput()
+		if cerr != nil && !strings.Contains(string(connectOut), "already exists in network") {
+			return fmt.Errorf("failed to attach gitops %s to %q: %w: %s", id, net, cerr, string(connectOut))
+		}
+	}
+	return nil
+}
+
 // StartContainer starts the Coding Agent containers
 func (c *CodingAgentService) StartContainer() error {
 	deploymentDir := filepath.Join(c.WorkspacePath, "deployment")
 	projectName := c.WorkspaceName + "-coding-agent"
+
+	// The agent compose references the <ws>-agent network as external, so it
+	// must exist (and gitops must be reachable on it) before we bring the agent
+	// up. Fail loudly if we can't wire it — a silently-started agent that can't
+	// reach gitops is worse than a clear error.
+	if err := c.EnsureAgentNetwork(); err != nil {
+		return err
+	}
 
 	cmd := exec.Command("docker", "compose", "-f", "docker-compose-coding-agent.yml", "-p", projectName, "up", "-d")
 	cmd.Dir = deploymentDir

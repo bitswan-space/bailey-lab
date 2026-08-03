@@ -113,6 +113,46 @@ function OAuthButton({ label, icon, onClick }) {
   );
 }
 
+// ─── 2FA brute-force indicator (issue #188 / BSY-12) ────────────────────────
+// The daemon rate-limits code verification: > 3 failures shows a warning, and
+// after 5 it imposes a 25s per-account/per-IP cooldown. useThrottle tracks that
+// state (seeded from gate-state, updated from each failed ApiError) and runs the
+// cooldown countdown; ThrottleNote renders it under the code field.
+function useThrottle(gateState) {
+  const [fails, setFails] = useSc((gateState && gateState.failed_attempts) || 0);
+  const [retry, setRetry] = useSc((gateState && gateState.retry_after) || 0);
+  useScE(() => {
+    if (retry <= 0) return undefined;
+    const t = setInterval(() => setRetry(s => (s <= 1 ? 0 : s - 1)), 1000);
+    return () => clearInterval(t);
+  }, [retry > 0]);
+  // Fold a failed-verification ApiError into the indicator state.
+  const record = (e) => {
+    if (e && Number.isFinite(e.failedAttempts) && e.failedAttempts > 0) setFails(e.failedAttempts);
+    if (e && Number.isFinite(e.retryAfter) && e.retryAfter > 0) setRetry(e.retryAfter);
+  };
+  const clear = () => { setFails(0); setRetry(0); };
+  return { fails, retry, locked: retry > 0, record, clear };
+}
+
+function ThrottleNote({ throttle }) {
+  if (throttle.retry > 0) {
+    return (
+      <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 600 }}>
+        Too many attempts — for your security, sign-in is paused. Try again in {throttle.retry}s.
+      </div>
+    );
+  }
+  if (throttle.fails > 3) {
+    return (
+      <div style={{ marginTop: 10, fontSize: 12.5, color: SC.amber || '#b45309', fontWeight: 600 }}>
+        {throttle.fails} failed attempts. After 5, sign-in pauses for 25 seconds.
+      </div>
+    );
+  }
+  return null;
+}
+
 // ─── 1. FIRST-ADMIN BOOTSTRAP ───────────────────────────────────────────────
 // POST /bailey/api/claim records the caller as root admin and TOFU-trusts this
 // browser; on ok we follow the (cookie-backed) trusted state into the console.
@@ -193,6 +233,7 @@ function ApprovalScene({ onApproved, gateState }) {
   const [totp, setTotp] = useSc('');
   const [error, setError] = useSc(false);
   const [trusting, setTrusting] = useSc(false);
+  const throttle = useThrottle(gateState);
   const [dots, setDots] = useSc(1);
   useScE(() => { const t = setInterval(() => setDots(d => (d % 3) + 1), 500); return () => clearInterval(t); }, []);
   useScE(() => { setTotp(''); setError(false); }, [method]);
@@ -245,8 +286,10 @@ function ApprovalScene({ onApproved, gateState }) {
     setTrusting(true); setError(false);
     try {
       const r = await SApi.selfTrust(totp);
+      throttle.clear();
       followRedirect(r && r.redirect_path);
     } catch (e) {
+      throttle.record(e);
       setError(true); setTrusting(false);
     }
   };
@@ -307,9 +350,10 @@ function ApprovalScene({ onApproved, gateState }) {
             <div style={{ display: 'flex', justifyContent: 'center' }}>
               <SSeg format={[3, 3]} value={totp} onChange={v => { setTotp(v); setError(false); }} size="lg" auto mono />
             </div>
-            {error && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>That code didn't match. Try the current code from your app.</div>}
+            {error && !throttle.locked && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>That code didn't match. Try the current code from your app.</div>}
+            <ThrottleNote throttle={throttle} />
             <div style={{ marginTop: 16 }}>
-              <SBtn variant="primary" leftIcon="shield-check" onClick={verifyTotp} disabled={trusting || totp.replace(/\D/g, '').length < 6} style={{ width: '100%' }}>{trusting ? 'Verifying…' : 'Verify & trust this device'}</SBtn>
+              <SBtn variant="primary" leftIcon="shield-check" onClick={verifyTotp} disabled={trusting || throttle.locked || totp.replace(/\D/g, '').length < 6} style={{ width: '100%' }}>{throttle.locked ? `Wait ${throttle.retry}s` : (trusting ? 'Verifying…' : 'Verify & trust this device')}</SBtn>
             </div>
           </div>
         )}
@@ -356,13 +400,16 @@ function RecoveryScene({ onRecovered, goConsole, gateState }) {
   const [backup, setBackup] = useSc('');
   const [error, setError] = useSc(false);
   const [busy, setBusy] = useSc(false);
+  const throttle = useThrottle(gateState);
 
   const recover = async (body) => {
     setBusy(true); setError(false);
     try {
       const r = await SApi.recover(body);
+      throttle.clear();
       followRedirect(r && r.redirect_path);
     } catch (e) {
+      throttle.record(e);
       setError(true); setBusy(false);
     }
   };
@@ -395,9 +442,10 @@ function RecoveryScene({ onRecovered, goConsole, gateState }) {
             <div style={{ display: 'flex', justifyContent: 'center' }}>
               <SSeg format={[3, 3]} value={code} onChange={v => { setCode(v); setError(false); }} size="lg" auto mono />
             </div>
-            {error && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>That code didn't match. Try the current code from your app.</div>}
+            {error && !throttle.locked && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>That code didn't match. Try the current code from your app.</div>}
+            <ThrottleNote throttle={throttle} />
             <div style={{ marginTop: 18 }}>
-              <SBtn variant="primary" onClick={submitTotp} style={{ width: '100%' }} disabled={busy || code.replace(/\D/g, '').length < 6}>{busy ? 'Verifying…' : 'Verify & trust this device'}</SBtn>
+              <SBtn variant="primary" onClick={submitTotp} style={{ width: '100%' }} disabled={busy || throttle.locked || code.replace(/\D/g, '').length < 6}>{throttle.locked ? `Wait ${throttle.retry}s` : (busy ? 'Verifying…' : 'Verify & trust this device')}</SBtn>
             </div>
           </div>
         ) : (
@@ -406,9 +454,10 @@ function RecoveryScene({ onRecovered, goConsole, gateState }) {
             <input value={backup} onChange={e => { setBackup(e.target.value.toUpperCase()); setError(false); }} placeholder="XXXX-XXXX" autoFocus
               style={{ width: 200, height: 46, textAlign: 'center', fontFamily: 'Geist Mono, monospace', fontSize: 20, fontWeight: 600,
                 letterSpacing: 1, border: `1.5px solid ${error ? SC.red : SC.border}`, borderRadius: 10, outline: 'none', color: SC.fg }} />
-            {error && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>That backup code wasn't accepted. Each code works only once.</div>}
+            {error && !throttle.locked && <div style={{ marginTop: 10, fontSize: 12.5, color: SC.red, fontWeight: 500 }}>That backup code wasn't accepted. Each code works only once.</div>}
+            <ThrottleNote throttle={throttle} />
             <div style={{ marginTop: 18 }}>
-              <SBtn variant="primary" onClick={submitBackup} style={{ width: '100%' }} disabled={busy}>{busy ? 'Checking…' : 'Use backup code'}</SBtn>
+              <SBtn variant="primary" onClick={submitBackup} style={{ width: '100%' }} disabled={busy || throttle.locked}>{throttle.locked ? `Wait ${throttle.retry}s` : (busy ? 'Checking…' : 'Use backup code')}</SBtn>
             </div>
           </div>
         )}

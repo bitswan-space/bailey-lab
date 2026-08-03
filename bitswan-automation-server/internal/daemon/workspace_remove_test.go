@@ -180,7 +180,7 @@ func TestWorkspaceComposeProjectsAndStageNetworks(t *testing.T) {
 		t.Errorf("workspaceComposeProjects(pr) = %v, want 6 entries (no raw/lower dupe)", got)
 	}
 	nets := workspaceStageNetworks("pr")
-	if len(nets) != 3 || nets[0] != "pr-dev" || nets[1] != "pr-staging" || nets[2] != "pr-production" {
+	if len(nets) != 4 || nets[0] != "pr-dev" || nets[1] != "pr-staging" || nets[2] != "pr-production" || nets[3] != "pr-agent" {
 		t.Errorf("workspaceStageNetworks = %v", nets)
 	}
 }

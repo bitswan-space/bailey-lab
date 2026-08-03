@@ -26,6 +26,20 @@ describe('Avatar / AvatarStack', () => {
     render(<Avatar user={user} ring={true} />);
     expect(screen.getByText('AL')).toBeTruthy();
   });
+  it('renders the image when a src loads, initials when it errors', () => {
+    render(<Avatar user={user} src="http://x.test/a.png" alt="Ada Lovelace" />);
+    const img = screen.getByAltText('Ada Lovelace');
+    expect(screen.queryByText('AL')).toBeNull();
+    fireEvent.error(img);
+    expect(screen.getByText('AL')).toBeTruthy();
+  });
+  it('AvatarStack renders real avatars for users with an email (#276)', () => {
+    render(<AvatarStack users={[{ id: 'u1', name: 'Ada Lovelace', email: 'ada@x' }]} />);
+    expect(screen.getByAltText('Ada Lovelace').getAttribute('src')).toContain('email=ada%40x');
+    expect(screen.getByTitle('Ada Lovelace')).toBeTruthy();
+    fireEvent.error(screen.getByAltText('Ada Lovelace'));
+    expect(screen.getByText('AL')).toBeTruthy();
+  });
   it('AvatarStack shows overflow count', () => {
     const users = [1, 2, 3, 4, 5, 6].map((n) => ({ id: 'u' + n, name: `N${n} x`, color: '#000' }));
     render(<AvatarStack users={users} max={4} />);

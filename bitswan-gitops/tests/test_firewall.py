@@ -18,6 +18,7 @@ from app.utils import (
 from app.services import automation_service as asvc
 from app.services import firewall_service as fws
 from app.services.automation_service import AutomationService
+from app.task_queue import current_requester
 
 
 def _svc(tmp_path, monkeypatch):
@@ -59,26 +60,40 @@ def test_set_rule_persists_and_audits(tmp_path, monkeypatch):
 
 def test_production_requires_admin_or_auditor(tmp_path, monkeypatch):
     svc = _svc(tmp_path, monkeypatch)
-    # non-privileged role on production → 403
+    # #186/#187: the role is resolved from the daemon store keyed on the
+    # header-derived requester identity — never a caller-supplied role.
+    monkeypatch.setattr(
+        asvc,
+        "daemon_user_role",
+        lambda e: {"admin@x": "admin", "auditor@x": "auditor"}.get(e, "member"),
+    )
+    # A member on production → 403.
+    current_requester.set("member@x")
     with pytest.raises(HTTPException) as e:
         asyncio.run(
             svc.set_firewall_rule(
-                "shop", "production", "api.x.com", "allowed", by="u", role="member"
+                "shop", "production", "api.x.com", "allowed", by="member@x"
             )
         )
     assert e.value.status_code == 403
-    # dev is fine for anyone
+    # dev is fine for anyone (not gated).
     asyncio.run(
-        svc.set_firewall_rule(
-            "shop", "dev", "api.x.com", "allowed", by="u", role="member"
-        )
+        svc.set_firewall_rule("shop", "dev", "api.x.com", "allowed", by="member@x")
     )
-    # admin/auditor allowed on production
-    for role in ("admin", "auditor"):
-        fw = asyncio.run(
+    # No identity at all also fails closed on production.
+    current_requester.set(None)
+    with pytest.raises(HTTPException) as e0:
+        asyncio.run(
             svc.set_firewall_rule(
-                "shop", "production", "api.x.com", "allowed", by="a", role=role
+                "shop", "production", "api.x.com", "allowed", by="member@x"
             )
+        )
+    assert e0.value.status_code == 403
+    # admin/auditor allowed on production.
+    for who in ("admin@x", "auditor@x"):
+        current_requester.set(who)
+        fw = asyncio.run(
+            svc.set_firewall_rule("shop", "production", "api.x.com", "allowed", by=who)
         )
         assert "api.x.com" in fw["allowed"]
 
@@ -118,10 +133,10 @@ def test_attempts_feed_from_gateway_jsonl(tmp_path, monkeypatch):
     review = {a["host"]: a["count"] for a in fw["attempts"]}
     assert review == {"evil.com": 2, "pypi.org": 1}  # needs-review feed (no rules yet)
     # once a rule exists for a host, it drops out of needs-review
+    monkeypatch.setattr(asvc, "daemon_user_role", lambda e: "admin")
+    current_requester.set("a@x")
     asyncio.run(
-        svc.set_firewall_rule(
-            "shop", "production", "pypi.org", "denied", by="a", role="admin"
-        )
+        svc.set_firewall_rule("shop", "production", "pypi.org", "denied", by="a@x")
     )
     fw2 = svc.read_firewall("shop", "production")
     assert {a["host"] for a in fw2["attempts"]} == {"evil.com"}
@@ -191,17 +206,19 @@ def test_firewall_rollback_restores_prior_ruleset(tmp_path, monkeypatch):
 
 def test_firewall_rollback_production_requires_role(tmp_path, monkeypatch):
     svc = _git_svc(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        asvc, "daemon_user_role", lambda e: "admin" if e == "admin@x" else "member"
+    )
+    current_requester.set("admin@x")
     asyncio.run(
-        svc.set_firewall_rule(
-            "shop", "production", "a.com", "allowed", by="a", role="admin"
-        )
+        svc.set_firewall_rule("shop", "production", "a.com", "allowed", by="admin@x")
     )
     _, fw_entries = _fw_history(svc, "shop", "production")
     commit = fw_entries[0]["commit"]
+    # A member cannot roll back a production firewall change.
+    current_requester.set("member@x")
     with pytest.raises(HTTPException) as e:
-        asyncio.run(
-            svc.rollback_firewall("shop", "production", commit, by="u", role="member")
-        )
+        asyncio.run(svc.rollback_firewall("shop", "production", commit, by="member@x"))
     assert e.value.status_code == 403
 
 
@@ -281,10 +298,12 @@ def test_dpa_pdf_stored_in_repo_per_host(tmp_path, monkeypatch):
 
 def test_dpa_upload_production_requires_role(tmp_path, monkeypatch):
     svc = _svc(tmp_path, monkeypatch)
+    monkeypatch.setattr(asvc, "daemon_user_role", lambda e: "member")
+    current_requester.set("member@x")
     with pytest.raises(HTTPException) as e:
         asyncio.run(
             svc.store_firewall_dpa(
-                "shop", "production", "x.com", b"%PDF", by="u", role="member"
+                "shop", "production", "x.com", b"%PDF", by="member@x"
             )
         )
     assert e.value.status_code == 403

@@ -126,7 +126,9 @@ func TestListAccessibleWorkspaces_OwnerSeesEntry(t *testing.T) {
 	if entry == nil {
 		t.Fatalf("owned workspace not listed: %+v", resp.Workspaces)
 	}
-	if !entry.IsOwner || entry.GitopsRole != "owner" {
+	// gitops-only workspace (no dashboard endpoint): the ACL falls back to
+	// gitops, and the resolved workspace role is surfaced as the canonical role.
+	if !entry.IsOwner || entry.DashboardRole != "owner" {
 		t.Errorf("entry roles wrong: %+v", entry)
 	}
 	// The primary "Open" target is the workspace dashboard, not gitops.
@@ -298,5 +300,69 @@ func TestRestoreWorkspace_RemovesMarkerWhenComposeUpRuns(t *testing.T) {
 	// the restore attempt.
 	if !strings.Contains(sb.String(), "Restoring workspace") {
 		t.Errorf("restore log missing intro: %s", sb.String())
+	}
+}
+
+// TestWorkspaceOwnership_AnchoredOnDashboard locks the standardization: a
+// workspace's ACL lives on its DASHBOARD endpoint, not gitops.
+//   - an owner GRANT on the dashboard makes a co-owner a real owner (the bug:
+//     the UI showed "Owner" via the grant but update was denied because the
+//     auth checked the gitops endpoint instead);
+//   - a plain access grant is not ownership;
+//   - owning the internal gitops endpoint does NOT confer workspace ownership
+//     when a dashboard exists (we no longer anchor on gitops);
+//   - a legacy --no-dashboard workspace still falls back to gitops.
+func TestWorkspaceOwnership_AnchoredOnDashboard(t *testing.T) {
+	domain := writeTestConfig(t)
+
+	ws := "aclstdws"
+	dashboardHost := ws + "-dashboard." + domain
+	gitopsHost := ws + "-gitops." + domain
+	creator := "creator@example.com"
+	// Canonical layout: dashboard is the workspace endpoint; gitops is its
+	// internal service child. Both created with the creator as owner_email.
+	if _, err := registerEndpoint(dashboardHost, creator, "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerEndpoint(gitopsHost, creator, "", dashboardHost, endpointKindService, ""); err != nil {
+		t.Fatal(err)
+	}
+	// A co-owner granted ownership ON THE DASHBOARD, and a plain access member.
+	if err := addGrant(dashboardHost, "email", "coowner@example.com", "owner", creator); err != nil {
+		t.Fatal(err)
+	}
+	if err := addGrant(dashboardHost, "email", "viewer@example.com", "access", creator); err != nil {
+		t.Fatal(err)
+	}
+
+	if !callerOwnsWorkspace(creator, nil, false, ws) {
+		t.Error("recorded dashboard owner should own the workspace")
+	}
+	if !callerOwnsWorkspace("coowner@example.com", nil, false, ws) {
+		t.Error("dashboard owner-GRANT should confer workspace ownership (the reported bug)")
+	}
+	if callerOwnsWorkspace("viewer@example.com", nil, false, ws) {
+		t.Error("a dashboard access grant must NOT confer ownership")
+	}
+	if callerOwnsWorkspace("stranger@example.com", nil, false, ws) {
+		t.Error("a non-member must not own the workspace")
+	}
+
+	// Owning ONLY the internal gitops endpoint must not make you the workspace
+	// owner when a dashboard exists — the ACL is anchored on the dashboard.
+	if err := addGrant(gitopsHost, "email", "gitopsonly@example.com", "owner", creator); err != nil {
+		t.Fatal(err)
+	}
+	if callerOwnsWorkspace("gitopsonly@example.com", nil, false, ws) {
+		t.Error("owning the gitops endpoint must NOT confer workspace ownership when a dashboard exists")
+	}
+
+	// Legacy --no-dashboard workspace: no dashboard endpoint → fall back to gitops.
+	nd := "aclstdnd"
+	if _, err := registerEndpoint(nd+"-gitops."+domain, "legacy@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !callerOwnsWorkspace("legacy@example.com", nil, false, nd) {
+		t.Error("--no-dashboard workspace should fall back to the gitops endpoint owner")
 	}
 }
