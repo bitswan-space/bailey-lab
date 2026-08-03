@@ -20,7 +20,6 @@ from app.routes.templates import router as templates_router
 from app.routes.tasks import router as tasks_router
 from app.task_queue import current_requester
 from app.dependencies import verify_token
-from urllib.parse import parse_qs
 
 
 import os
@@ -59,9 +58,16 @@ async def log_slow_requests(request: Request, call_next):
 class _RequesterMiddleware:
     """Pure-ASGI middleware (runs in the request's own task, so the contextvar
     propagates to the endpoint and the git ops it triggers — unlike a
-    BaseHTTPMiddleware). Attributes the request's git task-queue work to the
-    initiating user, read from the gate-forwarded identity header or the
-    by/deployed_by/author query param."""
+    BaseHTTPMiddleware). Resolves the acting identity SOLELY from the
+    gate-forwarded identity header (BSY-09 / #187).
+
+    The shared bearer secret is TRANSPORT auth only — it says "a trusted caller
+    (the BFF) reached us", not "who". The real principal is the gate-verified
+    email the BFF forwards as X-Forwarded-Email on every request. We deliberately
+    no longer fall back to a request-supplied by/deployed_by/author query param:
+    that let any holder of the shared secret assert an arbitrary identity, so the
+    role/author gates keyed on it were convention, not a boundary. No header →
+    no identity (system/anonymous), and identity-gated actions fail closed."""
 
     def __init__(self, app):
         self.app = app
@@ -74,13 +80,8 @@ class _RequesterMiddleware:
             k.decode("latin1").lower(): v.decode("latin1")
             for k, v in scope.get("headers", [])
         }
-        qs = parse_qs(scope.get("query_string", b"").decode("latin1"))
-        requester = (
-            headers.get("x-forwarded-email")
-            or headers.get("x-auth-request-email")
-            or (qs.get("by") or [None])[0]
-            or (qs.get("deployed_by") or [None])[0]
-            or (qs.get("author") or [None])[0]
+        requester = headers.get("x-forwarded-email") or headers.get(
+            "x-auth-request-email"
         )
         token = current_requester.set(requester)
         try:

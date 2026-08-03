@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Sharing surfaces, all served under the gate path prefix (/2fa-gate):
@@ -109,10 +110,16 @@ func applyShareAction(host, callerEmail string, r *http.Request) error {
 		}
 		return nil
 	case "revoke":
-		return removeGrant(host,
-			strings.TrimSpace(r.FormValue("principal_type")),
-			strings.TrimSpace(r.FormValue("principal_value")),
-			strings.TrimSpace(r.FormValue("role")))
+		pType := strings.TrimSpace(r.FormValue("principal_type"))
+		pVal := strings.TrimSpace(r.FormValue("principal_value"))
+		role := strings.TrimSpace(r.FormValue("role"))
+		// Revoking OWNER from an email is uniform whether they own via a grant or
+		// via the recorded owner_email — revokeOwnership handles the slot and
+		// refuses to remove the last owner. Everything else is a plain grant drop.
+		if pType == "email" && role == string(roleOwner) {
+			return revokeOwnership(host, pVal)
+		}
+		return removeGrant(host, pType, pVal, role)
 	case "deny-request":
 		target := strings.TrimSpace(r.FormValue("email"))
 		if target == "" {
@@ -173,7 +180,8 @@ func handleShareIndex(w http.ResponseWriter, email string, groups []string) {
 // the page.
 //
 //	GET    /2fa-gate/api/share/<host> → {owner_email, grants, requests,
-//	                                     workspace}
+//	                                     workspace, can_mint_magic_link,
+//	                                     magic_links}
 //	POST   /2fa-gate/api/share/<host> → add grant / deny-request /
 //	       workspace-access toggle
 //	       (form-encoded: principal_type, principal_value, role —
@@ -223,13 +231,31 @@ func handleShareAPI(w http.ResponseWriter, r *http.Request, email string, groups
 		}
 		grants, _ := listGrants(host)
 		requests, _ := listAccessRequests(host)
+		// Magic links (#240): only offered when the caller may actually mint one
+		// (admin/auditor + owner + production). The modal shows the section and
+		// existing links only then.
+		canMint, _ := canMintMagicLink(email, groups, host)
+		mlOut := []map[string]any{}
+		if canMint {
+			if links, err := dbListMagicLinks(host); err == nil {
+				for _, m := range links {
+					mlOut = append(mlOut, map[string]any{
+						"id":         m.ID,
+						"created_by": m.CreatedBy,
+						"expires_at": m.ExpiresAt.Format(time.RFC3339),
+					})
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"hostname":     cur.Hostname,
-			"owner_email":  cur.OwnerEmail,
-			"display_name": cur.DisplayName,
-			"grants":       grants,
-			"requests":     requests,
+			"hostname":            cur.Hostname,
+			"owner_email":         cur.OwnerEmail,
+			"display_name":        cur.DisplayName,
+			"grants":              grants,
+			"requests":            requests,
+			"can_mint_magic_link": canMint,
+			"magic_links":         mlOut,
 			// nil when the endpoint has no workspace membership surface; the
 			// dialog then draws no inherited row.
 			"workspace": workspaceAccessFor(cur),

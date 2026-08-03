@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -185,11 +186,15 @@ func TestUpstreamForHost(t *testing.T) {
 	if u := upstreamForHost("not-inner.example.com"); u != nil {
 		t.Errorf("outer host must have no gate upstream, got %v", u)
 	}
-	if u := upstreamForHost("bailey--inner.example.com"); u == nil || u.Host != "localhost:8080" {
-		t.Errorf("bailey inner upstream = %v, want daemon :8080", u)
+	// #183: the identity-trusting bailey handlers now live on the loopback-only
+	// gate port, so the gate proxies the inner host there (not the network :8080).
+	wantLoopback := fmt.Sprintf("localhost:%d", baileyGatePort)
+	if u := upstreamForHost("bailey--inner.example.com"); u == nil || u.Host != wantLoopback {
+		t.Errorf("bailey inner upstream = %v, want daemon %s", u, wantLoopback)
 	}
 	t.Setenv("BAILEY_DAEMON_HOST", "daemon-container")
-	if u := upstreamForHost("bailey--inner.example.com"); u == nil || u.Host != "daemon-container:8080" {
+	wantOverride := fmt.Sprintf("daemon-container:%d", baileyGatePort)
+	if u := upstreamForHost("bailey--inner.example.com"); u == nil || u.Host != wantOverride {
 		t.Errorf("BAILEY_DAEMON_HOST override not honoured, got %v", u)
 	}
 }
@@ -300,8 +305,9 @@ func TestGateDirector_TokenStrippedFromUnknownHost(t *testing.T) {
 func TestGateDirector_TokenPreservedForBaileyUpstream(t *testing.T) {
 	r := directorRequest(t, "bailey--inner.example.com")
 	gateDirector(r)
-	if r.URL.Host != "localhost:8080" {
-		t.Fatalf("bailey upstream = %q, want localhost:8080", r.URL.Host)
+	wantLoopback := fmt.Sprintf("localhost:%d", baileyGatePort)
+	if r.URL.Host != wantLoopback {
+		t.Fatalf("bailey upstream = %q, want %s", r.URL.Host, wantLoopback)
 	}
 	if got := r.Header.Get("X-Forwarded-Access-Token"); got != "kc-live-token" {
 		t.Errorf("X-Forwarded-Access-Token = %q, want the gate-captured token re-applied", got)

@@ -111,6 +111,62 @@ func TestShareAPI_GrantRevokeLifecycle(t *testing.T) {
 	}
 }
 
+// TestShareAPI_RevokeOwnerRoleReassignsSlot pins the flattened ownership model:
+// owner is a role, not a fixed "primary" slot. Revoking the recorded
+// owner_email's owner role — via the same DELETE the share modal sends — hands
+// the recorded slot to a remaining owner rather than orphaning the workspace,
+// and the last owner can never be revoked.
+func TestShareAPI_RevokeOwnerRoleReassignsSlot(t *testing.T) {
+	host := "share-owner-reassign.example.com"
+	if _, err := registerEndpoint(host, "alice@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// The recorded owner is the ONLY owner — revoking it must be refused
+	// (a workspace must keep at least one owner).
+	w := shareAPIRequest(t, http.MethodDelete, host, "alice@example.com", url.Values{
+		"principal_type":  {"email"},
+		"principal_value": {"alice@example.com"},
+		"role":            {"owner"},
+	}, true)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("revoke last owner status = %d, want 400: %s", w.Code, w.Body.String())
+	}
+
+	// Add a co-owner, then revoke the recorded owner_email's owner role. The
+	// recorded slot must move to the co-owner; alice must no longer be an owner.
+	if w := shareAPIRequest(t, http.MethodPost, host, "alice@example.com", url.Values{
+		"principal_type":  {"email"},
+		"principal_value": {"bob@example.com"},
+		"role":            {"owner"},
+	}, true); w.Code != http.StatusOK {
+		t.Fatalf("grant owner status = %d: %s", w.Code, w.Body.String())
+	}
+	if owners := endpointOwners(host); len(owners) != 2 {
+		t.Fatalf("endpointOwners after co-owner grant = %v, want 2", owners)
+	}
+
+	w = shareAPIRequest(t, http.MethodDelete, host, "alice@example.com", url.Values{
+		"principal_type":  {"email"},
+		"principal_value": {"alice@example.com"},
+		"role":            {"owner"},
+	}, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("revoke owner status = %d: %s", w.Code, w.Body.String())
+	}
+	ep, _ := getEndpoint(host)
+	if ep == nil || !strings.EqualFold(ep.OwnerEmail, "bob@example.com") {
+		t.Fatalf("owner_email not reassigned to co-owner: %+v", ep)
+	}
+	if role, _ := directRoleFor(host, "alice@example.com", nil); role == roleOwner {
+		t.Errorf("alice is still an owner after revoke, role = %q", role)
+	}
+	owners := endpointOwners(host)
+	if len(owners) != 1 || !strings.EqualFold(owners[0], "bob@example.com") {
+		t.Errorf("endpointOwners after reassign = %v, want [bob@example.com]", owners)
+	}
+}
+
 func TestShareAPI_GrantClearsPendingRequest(t *testing.T) {
 	host := "share-clears-request.example.com"
 	if _, err := registerEndpoint(host, "owner@example.com", "", "", "", ""); err != nil {

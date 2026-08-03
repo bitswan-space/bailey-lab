@@ -244,14 +244,33 @@ const emptyTraefikDynamicConfig = `http:
   services: {}
 `
 
+// workspaceTraefikStaticConfig is the per-workspace sub-traefik's static config.
+// The API/dashboard is intentionally omitted: routes come from the file provider
+// (dynamic.yml), so Traefik's HTTP API is unused, and enabling it would serve this
+// workspace's full cross-stage route table unauthenticated on the implicit :8080
+// entrypoint. forwardedHeaders.insecure only trusts the upstream gate's
+// X-Forwarded-* headers on the web entrypoint — unrelated to the API.
+const workspaceTraefikStaticConfig = `entryPoints:
+  web:
+    address: ":80"
+    forwardedHeaders:
+      insecure: true
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
+`
+
 func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
 	cfg := fmt.Sprintf(`entryPoints:
   web:
     address: ":80"
   websecure:
     address: ":443"
-api:
-  insecure: true
+# API/dashboard DISABLED: the daemon manages every route via the file provider
+# (dynamic.yml), so Traefik's HTTP API is unused. Leaving it enabled serves the
+# full routing topology UNAUTHENTICATED on the implicit :8080 entrypoint — a data
+# leak the instant that port is published or forwarded. There is no reason to run it.
 providers:
   file:
     filename: /etc/traefik/dynamic.yml
@@ -501,18 +520,7 @@ func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, err
 	// sub-traefik) + the FILE provider (durable across restarts). Routes are
 	// written to /etc/traefik/dynamic.yml (a bitswan-volume subpath shared with
 	// the daemon) and reloaded by Traefik on change — no in-memory REST push.
-	traefikStaticConfig := `entryPoints:
-  web:
-    address: ":80"
-    forwardedHeaders:
-      insecure: true
-api:
-  insecure: true
-providers:
-  file:
-    filename: /etc/traefik/dynamic.yml
-    watch: true
-`
+	traefikStaticConfig := workspaceTraefikStaticConfig
 
 	traefikConfigFilePath := traefikConfig + "/traefik.yml"
 	if err := os.WriteFile(traefikConfigFilePath, []byte(traefikStaticConfig), 0755); err != nil {
@@ -621,25 +629,15 @@ providers:
 		return false, fmt.Errorf("workspace traefik container failed to start")
 	}
 
-	// Initialize workspace traefik via API
-	workspaceTraefikURL := fmt.Sprintf("http://%s:8080", containerName)
-
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(workspaceTraefikURL)
-	if err == nil {
-		defer resp.Body.Close()
-		// Target the sub-traefik by explicit workspace name. Do NOT mutate the
-		// process-global BITSWAN_TRAEFIK_HOST: it is shared by every concurrent
-		// request, so a global route push racing this window would be redirected
-		// into this sub-traefik and dump the entire global route table here.
-		if err := traefikapi.InitWorkspaceTraefik(workspaceName); err != nil {
-			if verbose {
-				fmt.Printf("Warning: failed to init workspace traefik API: %v\n", err)
-			}
-		}
-	} else {
+	// Seed the workspace sub-traefik's file-provider state (dynamic.yml). This is
+	// a FILE write, not an HTTP call — Traefik's API is disabled — so it no longer
+	// depends on the sub-traefik being reachable on :8080 (which no longer exists).
+	// Do NOT mutate the process-global BITSWAN_TRAEFIK_HOST: it is shared by every
+	// concurrent request, so a global route push racing this window would be
+	// redirected into this sub-traefik and dump the entire global route table here.
+	if err := traefikapi.InitWorkspaceTraefik(workspaceName); err != nil {
 		if verbose {
-			fmt.Printf("Cannot connect directly to workspace traefik, skipping API initialization\n")
+			fmt.Printf("Warning: failed to seed workspace traefik file-provider state: %v\n", err)
 		}
 	}
 

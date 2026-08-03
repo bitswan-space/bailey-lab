@@ -138,6 +138,11 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleBaileyApprovalsAPI(w, r, email, callerIsAdmin(email))
 			return
 		}
+	case "/bailey/api/approvals/deny":
+		if r.Method == http.MethodPost {
+			handleBaileyApprovalDenyAPI(w, r, email, callerIsAdmin(email))
+			return
+		}
 	case "/bailey/api/people/directory":
 		// NOT admin-gated like the rest of /bailey/api/people/* — the
 		// handler enforces its own endpoint-owner check.
@@ -211,9 +216,6 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 				return
 			case "upgrade":
 				s.handleUpgradeWorkspace(w, r, email, workspaceName)
-				return
-			case "transfer-ownership":
-				handleTransferWorkspaceOwnership(w, r, email, workspaceName)
 				return
 			}
 		}

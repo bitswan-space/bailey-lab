@@ -70,13 +70,14 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 			name := ws.Name
 			dashboardHost := name + "-dashboard." + domain
 			gitopsHost := name + "-gitops." + domain
-			dashboardRole, _ := roleFor(dashboardHost, email, groups)
-			gitopsRole, _ := roleFor(gitopsHost, email, groups)
-			isOwner := dashboardRole == roleOwner || gitopsRole == roleOwner
-			// Visible to: caller with any role on the dashboard (the
-			// membership surface) or the gitops sub-endpoint, OR the server
-			// owner (audit view).
-			if dashboardRole == roleNone && gitopsRole == roleNone && !serverOwner {
+			// The dashboard endpoint is the workspace's canonical ACL surface;
+			// ownership and visibility are resolved there via the same helper
+			// the auth checks use, so "Owner" here == able-to-manage everywhere.
+			role := workspaceRoleFor(name, domain, email, groups)
+			isOwner := role == roleOwner
+			// Visible to any member of the workspace ACL, or the server owner
+			// (audit view).
+			if role == roleNone && !serverOwner {
 				continue
 			}
 			wv := detectWorkspaceVersions(name)
@@ -84,8 +85,7 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 				Name:          name,
 				DashboardURL:  "https://" + dashboardHost,
 				GitopsURL:     "https://" + gitopsHost,
-				DashboardRole: string(dashboardRole),
-				GitopsRole:    string(gitopsRole),
+				DashboardRole: string(role),
 				IsOwner:       isOwner,
 				IsTrashed:     IsWorkspaceTrashed(name),
 				OwnerEmail:    workspaceOwnerEmail(dashboardHost, gitopsHost),
@@ -430,21 +430,35 @@ func recordWorkspaceOwnership(name, domain, email string) []string {
 	return warnings
 }
 
+// workspaceACLHost returns the endpoint that carries a workspace's access
+// control: the DASHBOARD endpoint, which is the canonical membership surface.
+// gitops is an internal service endpoint (it should not even be reachable from
+// outside) and must NOT be the ownership anchor. Legacy --no-dashboard
+// workspaces have no dashboard endpoint, so they fall back to gitops — the only
+// ACL surface they have.
+func workspaceACLHost(workspaceName, domain string) string {
+	dashboardHost := workspaceName + "-dashboard." + domain
+	if ep, _ := getEndpoint(dashboardHost); ep != nil {
+		return dashboardHost
+	}
+	return workspaceName + "-gitops." + domain
+}
+
+// workspaceRoleFor resolves the caller's role on the workspace's ACL endpoint
+// (the dashboard). This is the SINGLE source of truth for workspace ownership /
+// membership: the workspace list, callerOwnsWorkspace and the trash sweep all
+// use it, so the "Owner" the UI shows and the owner the auth checks enforce can
+// never diverge. roleFor honours owner GRANTS on the dashboard, not just its
+// recorded owner_email — a co-owner granted ownership is a real owner.
+func workspaceRoleFor(workspaceName, domain, email string, groups []string) endpointRole {
+	role, _ := roleFor(workspaceACLHost(workspaceName, domain), email, groups)
+	return role
+}
+
 // callerOwnsWorkspace is the auth check for trash + restore + update +
-// empty-trash. A caller owns the workspace if they're the DIRECT owner
-// of its gitops endpoint, OR they're the server owner (audit override).
-//
-// SECURITY (parent-delegation escalation): we resolve the gitops role
-// with directRoleFor, NOT roleFor. roleFor applies parent delegation —
-// the gitops endpoint's parent is the workspace dashboard, so a role
-// on the dashboard carries over to the child (since #129 at the SAME
-// role, never upgraded — but a dashboard owner still resolves as owner
-// of gitops via delegation). Destructive workspace operations are
-// deliberately stricter than that: they require ownership recorded on
-// the gitops endpoint itself. directRoleFor reads only the gitops
-// endpoint's own rows (original owner or a direct grant on gitops
-// itself), so any dashboard-only member — access OR owner-by-
-// delegation — is denied here.
+// empty-trash. A caller owns the workspace if they own its dashboard ACL
+// endpoint (recorded owner_email OR an owner grant), OR they're the server
+// owner (audit override).
 func callerOwnsWorkspace(callerEmail string, callerGroups []string, isServerOwner bool, workspaceName string) bool {
 	if isServerOwner {
 		return true
@@ -453,12 +467,7 @@ func callerOwnsWorkspace(callerEmail string, callerGroups []string, isServerOwne
 	if sc == nil {
 		return false
 	}
-	gitopsHost := workspaceName + "-gitops." + sc.ProtectedHostnameDomain()
-	role, err := directRoleFor(gitopsHost, callerEmail, callerGroups)
-	if err != nil {
-		return false
-	}
-	return role == roleOwner
+	return workspaceRoleFor(workspaceName, sc.ProtectedHostnameDomain(), callerEmail, callerGroups) == roleOwner
 }
 
 // handleTrashWorkspace flips the trash marker synchronously (so the

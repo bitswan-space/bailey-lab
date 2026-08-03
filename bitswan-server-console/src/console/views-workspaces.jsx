@@ -682,8 +682,10 @@ function WorkspacesView({ ctx }) {
                       </div>
                     )}
                   </div>
+                  {/* Members are emails — pass them through as `email` too so the
+                      stack can resolve each member's real avatar (#276). */}
                   {w.members && w.members.length > 0 && (
-                    <WAvatarStack users={w.members.map(m => ({ id: m, name: m }))} size={26} />
+                    <WAvatarStack users={w.members.map(m => ({ id: m, name: m, email: m }))} size={26} />
                   )}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     {!archived && isOwner && w.updateAvailable && (
@@ -857,16 +859,17 @@ function CreateWorkspaceModal({ open, onClose, data, setData, toast, currentUser
   );
 }
 
-// ─── MANAGE WORKSPACE DRAWER (members + ownership transfer) ─────────────────
+// ─── MANAGE WORKSPACE DRAWER (people + roles) ──────────────────────────────
 // Every workspace shown here comes from the live /bailey/api/workspaces
-// endpoint; the member roster is the real ACL share state of the workspace's
-// dashboard endpoint, and ownership transfer is the live workspace API.
+// endpoint; the roster is the real ACL share state of the workspace's
+// dashboard endpoint. Owner is a role, not an exclusive property — a
+// workspace can have several, all equal.
 function hostFromUrl(u) {
   try { return new URL(u).host; } catch (e) { return ''; }
 }
 
 // PersonPickList — click-to-pick rows over the server's people roster.
-// Shared by the add-member picker and the transfer-ownership picker.
+// Feeds the add-a-person picker.
 function PersonPickList({ candidates, disabled, titleFor, onPick }) {
   if (!candidates.length) return null;
   return (
@@ -895,38 +898,30 @@ function PersonPickList({ candidates, disabled, titleFor, onPick }) {
   );
 }
 
-// Ownership + Members, per the wireframe. Members are the REAL ACL grants on
-// the workspace's dashboard endpoint (GET/POST /2fa-gate/api/share/<host>):
-// owner_email + access grants. Owner-only — a non-owner can't read the share
-// state, so they get an honest read-only note. Ownership transfer is live:
-// POST /bailey/api/workspaces/{name}/transfer-ownership — strictly the
-// recorded owner's call (the backend rejects even admins), the recipient
-// must already be a person on this server, and the old owner stays a member.
+// People + roles. The roster is the REAL ACL grants on the workspace's
+// dashboard endpoint (GET/POST /2fa-gate/api/share/<host>): owner_email +
+// grants. Owner is a role (not exclusive) — promote/demote and remove are all
+// direct row actions. Owner-only — a non-owner can't read the share state, so
+// they get an honest read-only note.
 function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   const [share, setShare] = useWS(null);   // {owner_email, grants} | null while loading
   const [err, setErr] = useWS('');
   const [addQuery, setAddQuery] = useWS(''); // search text over the add-member picker
   const [busy, setBusy] = useWS('');        // '' | 'add' | <principal being removed>
-  // People directory ({email,name,invited}) feeding both pickers. The
-  // endpoint is open to any endpoint owner — every owner of this drawer
-  // gets a list. Members are added/transfers started ONLY by picking from
+  // People directory ({email,name,invited}) feeding the add-a-person picker.
+  // The endpoint is open to any endpoint owner — every owner of this drawer
+  // gets a list. People are added ONLY by picking from
   // it (the search inputs are filters, not free-text entry), so dirErr is
   // a real failure state the sections must surface.
   const [directory, setDirectory] = useWS(null); // null = loading
   const [dirErr, setDirErr] = useWS(false);
-  // Transfer-ownership flow: picking a recipient goes straight to the
-  // confirm modal (the transfer hands the workspace away — a mis-click
-  // must not). transferTarget is the picked recipient; '' = modal closed.
-  const [transferOpen, setTransferOpen] = useWS(false);
-  const [transferQuery, setTransferQuery] = useWS('');
-  const [transferTarget, setTransferTarget] = useWS('');
-  const [transferBusy, setTransferBusy] = useWS(false);
   // Delete flow: the danger zone at the bottom of this drawer is the only place
   // a workspace can be deleted (it used to be a trash icon in the list row,
   // where it was the rightmost — i.e. default — control). trashOpen is the
   // confirm modal.
   const [trashOpen, setTrashOpen] = useWS(false);
   const [trashBusy, setTrashBusy] = useWS(false);
+  const [addRole, setAddRole] = useWS('access'); // role a newly-picked person gets
 
   const dashHost = ws ? hostFromUrl(ws.dashboard) : '';
   // Managing members (add/remove) is only allowed for the TRUE owner of the
@@ -938,10 +933,8 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   const ownerEmail = ws ? ws.ownerEmail : '';
 
   React.useEffect(() => {
-    // Fresh drawer, fresh transfer flow — don't leak a half-picked recipient
-    // from the previously opened workspace.
-    setTransferOpen(false); setTransferQuery(''); setTransferTarget('');
-    // Same for a half-open delete confirm.
+    // Fresh drawer — clear any half-open delete confirm from the previously
+    // opened workspace.
     setTrashOpen(false); setTrashBusy(false);
     // Only owners can read the live share state (the API is owner-only).
     // Non-owners render from the workspace DTO (owner_email + members), which
@@ -959,13 +952,45 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   }, [ws && ws.id]);
 
   if (!ws) return null;
-  // Members list: owners get the live, removable grant list; everyone else
-  // gets the DTO's member roster minus the owner (read-only).
-  const members = canManage
-    ? (share ? (share.grants || []).filter(g => g.role === 'access') : [])
-    : (ws.members || [])
-        .filter(m => m && m.toLowerCase() !== (ownerEmail || '').toLowerCase())
-        .map(m => ({ principal_type: 'email', principal_value: m, role: 'access' }));
+  // Everyone on the workspace, with their ROLE. Owner is a role, not an
+  // exclusive property, and no owner is special: the recorded owner_email and
+  // everyone granted the 'owner' role are all equal owners; 'access' grants are
+  // users. Owners first, then users, each block alphabetical.
+  const recordedOwner = ((canManage ? (share && share.owner_email) : ownerEmail) || '').trim();
+  const people = (() => {
+    const rows = [];
+    const seen = new Set();
+    const push = (pt, pv, role) => {
+      pv = (pv || '').trim();
+      const key = `${pt}:${pv}`.toLowerCase();
+      if (!pv || seen.has(key)) return;
+      seen.add(key);
+      rows.push({ principal_type: pt, principal_value: pv, role });
+    };
+    if (recordedOwner) push('email', recordedOwner, 'owner');
+    if (canManage) {
+      (share ? share.grants || [] : []).forEach(g =>
+        push(g.principal_type, g.principal_value,
+          g.role === 'owner' ? 'owner' : (g.principal_type === 'group' ? 'group' : 'access')));
+    } else {
+      (ws.members || []).forEach(m => push('email', m, 'access'));
+    }
+    const rank = r => (r.role === 'owner' ? 0 : 1);
+    return rows.sort((a, b) => rank(a) - rank(b) ||
+      (a.principal_value || '').localeCompare(b.principal_value || ''));
+  })();
+  // Bailey org role (admin | auditor | member | user) per email, from the
+  // people directory. Distinct from the workspace role above: it's server-wide,
+  // set in People & roles, and only the notable ones (admin/auditor) get a
+  // badge here — member/user are the unremarkable default. Only owners load the
+  // directory, so the badges show in the owner-managed view.
+  const orgRoleByEmail = new Map();
+  (directory || []).forEach(p => { if (p && p.email && p.role) orgRoleByEmail.set(p.email.toLowerCase(), p.role); });
+  const orgBadgeFor = (email) => {
+    const role = orgRoleByEmail.get((email || '').toLowerCase());
+    if (role !== 'admin' && role !== 'auditor') return null;
+    return <WPill tone={ROLE_TONE[role] || 'neutral'} size="xs">{role === 'admin' ? 'Admin' : 'Auditor'}</WPill>;
+  };
   const SECTION = { fontSize: 11, fontWeight: 600, color: WC.muted, textTransform: 'uppercase', letterSpacing: 0.4 };
   // An already-trashed workspace is restored (or permanently removed via Empty
   // trash) from the list — there's nothing to delete here.
@@ -975,10 +1000,11 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   const addMember = async (email) => {
     if (!email) return;
     setBusy('add');
+    const label = addRole === 'owner' ? 'owner' : 'user';
     try {
-      setShare(await WApi.addWorkspaceMember(dashHost, email));
-      toast(`${email} added to ${ws.name}`, 'success');
-    } catch (e) { toast(`Couldn't add member: ${e.message}`, 'danger'); }
+      setShare(await WApi.addWorkspaceMember(dashHost, email, addRole));
+      toast(`${email} added to ${ws.name} as ${label}`, 'success');
+    } catch (e) { toast(`Couldn't add ${label}: ${e.message}`, 'danger'); }
     finally { setBusy(''); }
   };
 
@@ -987,20 +1013,11 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
   // included) — minus the owner and anyone already granted, narrowed by
   // the search text.
   const q = addQuery.trim().toLowerCase();
-  const memberSet = new Set(members.map(g => (g.principal_value || '').toLowerCase()));
+  const onWorkspace = new Set(people.map(p => (p.principal_value || '').toLowerCase()));
   const candidates = !canManage ? [] : (directory || []).filter(p =>
     p.email &&
-    p.email.toLowerCase() !== (ownerEmail || '').toLowerCase() &&
-    !memberSet.has(p.email.toLowerCase()) &&
+    !onWorkspace.has(p.email.toLowerCase()) &&
     (!q || p.email.toLowerCase().includes(q) || (p.name || '').toLowerCase().includes(q)));
-
-  // Transfer recipients: the same directory minus the current owner.
-  // Existing members ARE eligible — promoting a member is the common case.
-  const tq = transferQuery.trim().toLowerCase();
-  const transferCandidates = !canManage ? [] : (directory || []).filter(p =>
-    p.email &&
-    p.email.toLowerCase() !== (ownerEmail || '').toLowerCase() &&
-    (!tq || p.email.toLowerCase().includes(tq) || (p.name || '').toLowerCase().includes(tq)));
 
   // One muted status line under a picker's search bar.
   const pickNote = (text, red) => (
@@ -1014,25 +1031,6 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
     return <PersonPickList candidates={list} disabled={disabled} titleFor={titleFor} onPick={onPick} />;
   };
 
-  // Hands the workspace to the picked recipient: the backend rewrites the
-  // recorded owner (children included) and keeps the caller on as a member.
-  // On success the refreshed workspace DTO re-renders this drawer in the
-  // member view.
-  const doTransfer = async () => {
-    const email = transferTarget.trim();
-    if (!email) return;
-    setTransferBusy(true);
-    try {
-      await WApi.transferWorkspaceOwnership(ws.name, email);
-      toast(`${ws.name} transferred to ${email} — you're now a member`, 'success');
-      setTransferTarget(''); setTransferOpen(false); setTransferQuery('');
-      if (refresh) await refresh('workspaces');
-    } catch (e) {
-      // Keep the panel open so the owner can pick someone else.
-      setTransferTarget('');
-      toast(`Couldn't transfer ownership: ${e.message}`, 'danger');
-    } finally { setTransferBusy(false); }
-  };
   // Live: POST /bailey/api/workspaces/{name}/trash (owner-only; 202 — the
   // daemon marks it trashed synchronously and tears the containers down in the
   // background, so the next refresh shows it in the archived/trash state).
@@ -1056,7 +1054,19 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
     try {
       setShare(await WApi.removeWorkspaceMember(dashHost, g.principal_type, g.principal_value, g.role));
       toast(`${g.principal_value} removed from ${ws.name}`, 'info');
-    } catch (e) { toast(`Couldn't remove member: ${e.message}`, 'danger'); }
+    } catch (e) { toast(`Couldn't remove person: ${e.message}`, 'danger'); }
+    finally { setBusy(''); }
+  };
+  // Promote a user to owner, or demote an owner to user. Every owner is equal,
+  // so any owner row can be changed; the backend refuses to remove the last
+  // owner (a workspace must keep one), which surfaces here as a toast.
+  const changeRole = async (p, newRole) => {
+    if (!newRole || newRole === p.role) return;
+    setBusy(p.principal_value);
+    try {
+      setShare(await WApi.setWorkspaceMemberRole(dashHost, p.principal_type, p.principal_value, newRole, p.role));
+      toast(`${p.principal_value} is now ${newRole === 'owner' ? 'an owner' : 'a user'} of ${ws.name}`, 'success');
+    } catch (e) { toast(`Couldn't change role: ${e.message}`, 'danger'); }
     finally { setBusy(''); }
   };
 
@@ -1064,108 +1074,83 @@ function ManageWorkspaceDrawer({ ws, onClose, toast, refresh }) {
     <WDrawer open={!!ws} onClose={onClose} icon="layout-grid" title={ws.name}
       subtitle={canManage ? 'You own this workspace' : "You're a member of this workspace"}
       footer={<WBtn variant="primary" onClick={onClose}>Done</WBtn>}>
-      {/* Ownership — shown to everyone; only the owner can act on it. */}
-      <div style={{ ...SECTION, marginBottom: 10 }}>Ownership</div>
-      <div style={{ border: `1px solid ${WC.border}`, borderRadius: 10, padding: 14, marginBottom: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-          {ownerEmail ? (
-            <WUserChip user={{ email: ownerEmail }} size={36}
-              nameSuffix={<WPill tone="primary" size="xs">Owner</WPill>} />
-          ) : (
-            <>
-              <WAvatar user={{ name: ws.name }} size={36} />
-              <div style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg }}>
-                No owner recorded <WPill tone="primary" size="xs">Owner</WPill>
-              </div>
-            </>
-          )}
-        </div>
-        {canManage && !transferOpen && (
-          <div style={{ marginTop: 12 }}>
-            <WBtn variant="default" size="sm" leftIcon="arrow-left-right" onClick={() => setTransferOpen(true)}>Transfer ownership</WBtn>
-          </div>
-        )}
-        {canManage && transferOpen && (
-          <div style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 11.5, color: WC.mutedFg, marginBottom: 6 }}>
-              New owner — pick someone already on this server:
-            </div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-              <div style={{ flex: 1 }}>
-                <WTextInput value={transferQuery} onChange={setTransferQuery} placeholder="Search people…" />
-              </div>
-              <WBtn variant="default" size="sm" disabled={transferBusy} onClick={() => { setTransferOpen(false); setTransferQuery(''); }}>Cancel</WBtn>
-            </div>
-            {/* Picking a recipient opens the confirm modal directly. */}
-            {pickerBody(transferCandidates,
-              tq ? 'No one matches.' : 'No one else is on this server yet — invite someone first.',
-              (e) => `Transfer to ${e}`, setTransferTarget, transferBusy)}
-            <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
-              They become the workspace's only owner; you stay in it as a member.
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Transfer confirm — the one place a workspace changes hands. */}
-      <WModal open={!!transferTarget} onClose={transferBusy ? () => {} : () => setTransferTarget('')} icon="arrow-left-right"
-        title={`Transfer “${ws.name}” to ${transferTarget}?`}
-        subtitle="They become the workspace's only owner — members, apps, and settings go with it. You stay in the workspace as a member, and only the new owner can transfer it back."
-        footer={<>
-          <WBtn variant="default" disabled={transferBusy} onClick={() => setTransferTarget('')}>Cancel</WBtn>
-          <WBtn variant="primary" disabled={transferBusy} onClick={doTransfer}>
-            {transferBusy ? 'Transferring…' : 'Transfer ownership'}
-          </WBtn>
-        </>} />
-
-      {/* Members */}
-      <div style={{ ...SECTION, margin: '20px 0 10px', display: 'flex', justifyContent: 'space-between' }}>
-        <span>Members</span><span>{(canManage && !share) ? '' : members.length}</span>
+      {/* People & roles. Owner is a ROLE, not an exclusive property — a
+          workspace can have several owners. Owners are listed first. */}
+      <div style={{ ...SECTION, margin: '2px 0 10px', display: 'flex', justifyContent: 'space-between' }}>
+        <span>People with access</span><span>{(canManage && !share) ? '' : people.length}</span>
       </div>
       {err && <div style={{ fontSize: 12.5, color: WC.red, marginBottom: 8 }}>{err}</div>}
-      {canManage && !share && !err && <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>Loading members…</div>}
-      {(!canManage || share) && members.length === 0 && !err && (
-        <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>No members yet — only the owner has access.</div>
+      {canManage && !share && !err && <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>Loading people…</div>}
+      {(!canManage || share) && people.length === 0 && !err && (
+        <div style={{ fontSize: 12.5, color: WC.muted, padding: '6px 2px' }}>No one has access yet.</div>
       )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {members.map(g => (
-          <div key={g.principal_value} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '8px 6px', borderRadius: 8 }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <WUserChip user={{ email: g.principal_value, name: g.principal_type === 'group' ? g.principal_value : undefined }}
-                size={30}
-                nameSuffix={<WPill tone="neutral" size="xs">{g.principal_type === 'group' ? 'Group' : 'Member'}</WPill>} />
+        {people.map(p => {
+          const isOwnerRole = p.role === 'owner';
+          const isGroup = p.principal_type === 'group';
+          const roleLabel = isOwnerRole ? 'Owner' : isGroup ? 'Group' : 'User';
+          // Every person with an email principal is directly editable (role
+          // dropdown + remove); groups carry a static badge. No owner is fixed.
+          const controllable = canManage && !isGroup;
+          return (
+            <div key={`${p.principal_type}:${p.principal_value}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 6px', borderRadius: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <WUserChip user={{ email: isGroup ? undefined : p.principal_value, name: isGroup ? p.principal_value : undefined }}
+                  size={30}
+                  nameSuffix={<>
+                    {/* Server-wide Bailey role (admin/auditor) — always shown, so
+                        it's visible whether or not the workspace-role dropdown is. */}
+                    {!isGroup && orgBadgeFor(p.principal_value)}
+                    {/* Workspace role: a static pill only when there's no dropdown
+                        (groups, or the read-only member view). */}
+                    {!controllable && <WPill tone={isOwnerRole ? 'primary' : 'neutral'} size="xs">{roleLabel}</WPill>}
+                  </>} />
+              </div>
+              {controllable && (
+                <>
+                  {/* Role dropdown (User / Owner) — same control + wording as the share dialog. */}
+                  <div style={{ width: 112, ...(busy === p.principal_value ? { opacity: 0.5, pointerEvents: 'none' } : {}) }}>
+                    <WSelect value={isOwnerRole ? 'owner' : 'access'}
+                      onChange={(r) => changeRole(p, r)}
+                      options={[{ value: 'access', label: 'User' }, { value: 'owner', label: 'Owner' }]} />
+                  </div>
+                  <WBtn variant="ghost" size="xs" disabled={busy === p.principal_value}
+                    onClick={() => removeMember(p)}>Remove</WBtn>
+                </>
+              )}
             </div>
-            {canManage && (
-              <button onClick={() => removeMember(g)} disabled={busy === g.principal_value} title="Remove from workspace" style={{
-                width: 28, height: 28, border: 0, background: 'transparent', borderRadius: 6, cursor: 'pointer',
-                color: WC.mutedFg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <WIcon name="user-minus" size={15} />
-              </button>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      {/* Add member — owner only. Members can see who's in but not change it. */}
+      {/* Add a person at a chosen role — owner only. */}
       {canManage ? (
         <>
-          <div style={{ ...SECTION, margin: '20px 0 10px' }}>Add a member</div>
-          <div style={{ marginBottom: 8 }}>
-            <WTextInput value={addQuery} onChange={setAddQuery} placeholder="Search people…" />
+          <div style={{ ...SECTION, margin: '20px 0 10px' }}>Add a person</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ fontSize: 12.5, color: WC.muted }}>as</span>
+            <div style={{ width: 130 }}>
+              <WSelect value={addRole} onChange={setAddRole}
+                options={[{ value: 'access', label: 'User' }, { value: 'owner', label: 'Owner' }]} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <WTextInput value={addQuery} onChange={setAddQuery} placeholder="Search people…" />
+            </div>
           </div>
-          {/* Members are picked from the server's people directory — click to add. */}
           {pickerBody(candidates,
             q ? 'No one matches.' : 'Everyone on this server is already in this workspace.',
-            (e) => `Add ${e}`, addMember, busy === 'add')}
+            (e) => `Add ${e} as ${addRole === 'owner' ? 'owner' : 'user'}`, addMember, busy === 'add')}
           <div style={{ fontSize: 11.5, color: WC.mutedFg, marginTop: 8 }}>
-            Grants this person access by email; they'll still trust a device of their own to get in.
+            {addRole === 'owner'
+              ? 'Owners can manage people and update or delete the workspace.'
+              : "Users can open the workspace's apps. They'll still trust a device of their own to get in."}
           </div>
         </>
       ) : (
         <div style={{ display: 'flex', gap: 9, padding: 13, borderRadius: 10, background: WC.surface, border: `1px solid ${WC.border}`, marginTop: 20 }}>
           <WIcon name="info" size={15} color={WC.muted} style={{ marginTop: 1, flex: '0 0 auto' }} />
           <span style={{ fontSize: 12.5, color: WC.muted, lineHeight: '18px' }}>
-            You're a member of this workspace. Only its owner can add or remove members.
+            You're a member of this workspace. Only an owner can add or remove people.
           </span>
         </div>
       )}

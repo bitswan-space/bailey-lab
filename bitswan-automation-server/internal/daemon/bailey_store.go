@@ -181,6 +181,43 @@ CREATE TABLE IF NOT EXISTS singletons (
   value BLOB NOT NULL
 );
 
+-- Endpoint-scoped device trust — the MIDDLE tier between untrusted and fully
+-- trusted (issue #240). A device that redeemed a magic link (magic_links) is
+-- trusted ONLY for the named endpoint; the gate treats it as device-trusted for
+-- that one host, and the endpoint's ACL still applies separately. Keyed by the
+-- _bailey_device cookie's device id + the endpoint's OUTER hostname. Deleting an
+-- endpoint cascades its scoped trust away.
+CREATE TABLE IF NOT EXISTS endpoint_device_trust (
+  device_id     TEXT NOT NULL,
+  endpoint_host TEXT NOT NULL COLLATE NOCASE,
+  email         TEXT NOT NULL COLLATE NOCASE,
+  trusted_at    TEXT NOT NULL,
+  PRIMARY KEY (device_id, endpoint_host),
+  FOREIGN KEY (endpoint_host) REFERENCES endpoints(hostname) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS endpoint_device_trust_host_idx ON endpoint_device_trust(endpoint_host);
+
+-- Magic links: reusable, revocable, endpoint-scoped device-trust invites. An
+-- admin/auditor who ALSO owns a PRODUCTION endpoint mints one; anyone who opens
+-- it and signs in gets their device trusted for THAT endpoint only
+-- (endpoint_device_trust) — never fully, and never any ACL grant. Only the
+-- SHA-256 hex of the token is stored (the raw token lives only in the URL), so a
+-- leaked/backed-up bailey.db can't reconstruct working links. Reusable until
+-- expiry or revoke — that's the point: invite many users to a low-sensitivity
+-- endpoint without entering a pairing code per device.
+CREATE TABLE IF NOT EXISTS magic_links (
+  id            TEXT PRIMARY KEY,
+  token_hash    TEXT NOT NULL,
+  endpoint_host TEXT NOT NULL COLLATE NOCASE,
+  created_by    TEXT NOT NULL COLLATE NOCASE,
+  created_at    TEXT NOT NULL,
+  expires_at    TEXT NOT NULL,
+  revoked_at    TEXT,
+  FOREIGN KEY (endpoint_host) REFERENCES endpoints(hostname) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS magic_links_token_idx ON magic_links(token_hash);
+CREATE INDEX IF NOT EXISTS magic_links_host_idx ON magic_links(endpoint_host);
+
 -- Append-only security audit log. One row per security-relevant
 -- mutation (device approve/revoke, workspace create/trash, server
 -- claim, TOTP enrol). Powers the Server Console overview's recent

@@ -81,7 +81,7 @@ const P_ROLES = [
 // this is the person's first device or an additional one, so the admin has the
 // context to decide. POSTs to the gate's approve handler (PApi.approvePair).
 function PendingApprovalBar({ req, person, ctx }) {
-  const { toast, refresh, setData } = ctx;
+  const { toast, refresh } = ctx;
   const [code, setCode] = useP('');
   const [error, setError] = useP(false);
   const [errMsg, setErrMsg] = useP('');
@@ -112,11 +112,19 @@ function PendingApprovalBar({ req, person, ctx }) {
         : (e.message || 'Approval failed.'));
     } finally { setBusy(false); }
   };
-  // No "deny" route exists server-side; pending pairs expire on their own.
-  // Dismiss only clears it from this view until the next refetch.
-  const dismiss = () => {
-    setData(d => ({ ...d, pending: (d.pending || []).filter(x => x.id !== req.id) }));
-    toast(`Dismissed request from ${req.userName} (it will expire server-side)`, 'info');
+  // Persistently deny the request server-side (delete the pending pair), then
+  // refresh — otherwise it reappears on the next refetch. A denied user can
+  // still request again from their device; this just clears the current one.
+  const dismiss = async () => {
+    setBusy(true); setError(false); setErrMsg('');
+    try {
+      await PApi.denyApproval(req.userEmail);
+      toast(`Dismissed the device request from ${req.userName}`, 'info');
+      await refresh('approvals');
+    } catch (e) {
+      setError(true);
+      setErrMsg(e.message || 'Could not dismiss the request.');
+    } finally { setBusy(false); }
   };
 
   return (

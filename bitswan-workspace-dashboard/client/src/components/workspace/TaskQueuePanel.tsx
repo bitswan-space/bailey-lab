@@ -19,7 +19,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { GitTask, GitTaskStatus } from '@/types';
 
@@ -233,15 +232,10 @@ function ActivityRow({ item, now }: { item: ActivityItem; now: number }) {
   );
 }
 
-export function TaskQueuePanel({
-  isAdmin,
-}: {
-  isAdmin: boolean;
-}) {
+export function TaskQueuePanel() {
   const { tasks } = useTaskQueue();
   const notifications = useNotifications();
   const [collapsed, setCollapsed] = useState(readCollapsed);
-  const [clearing, setClearing] = useState(false);
   const [showLog, setShowLog] = useState(false);
   // A ticking clock so relative timestamps stay fresh without per-row timers.
   const [now, setNow] = useState(() => Date.now());
@@ -280,27 +274,6 @@ export function TaskQueuePanel({
     () => items.filter((i) => isActive(i.status)).length,
     [items],
   );
-  // The admin "Clear queue" acts on the git task queue specifically.
-  const gitActive = useMemo(
-    () => (tasks ? tasks.filter((t) => t.status === 'queued' || t.status === 'running').length : 0),
-    [tasks],
-  );
-
-  const onClear = useCallback(async () => {
-    setClearing(true);
-    try {
-      const res = await api.clearTasks();
-      toast.success(
-        res.cancelled > 0
-          ? `Cancelled ${res.cancelled} task${res.cancelled === 1 ? '' : 's'}`
-          : 'Queue already idle',
-      );
-    } catch (err) {
-      toast.error(`Could not clear the queue: ${String(err)}`);
-    } finally {
-      setClearing(false);
-    }
-  }, []);
 
   const anyRunning = useMemo(
     () => items.some((i) => i.status === 'running'),
@@ -391,23 +364,6 @@ export function TaskQueuePanel({
             <ActivityRow key={item.key} item={item} now={now} />
           ))}
         </ul>
-        {isAdmin && (
-          <div className="border-t border-border p-2">
-            <button
-              type="button"
-              onClick={onClear}
-              disabled={clearing || gitActive === 0}
-              className="flex w-full items-center justify-center gap-1.5 rounded-md border border-input px-2 py-1.5 text-xs font-medium text-foreground hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
-            >
-              {clearing ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <Ban className="size-3.5" />
-              )}
-              Clear queue
-            </button>
-          </div>
-        )}
       </div>
       <ActivityLogModal open={showLog} onOpenChange={setShowLog} items={items} now={now} />
     </>

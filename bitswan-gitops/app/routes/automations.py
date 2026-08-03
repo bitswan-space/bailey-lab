@@ -91,7 +91,6 @@ class RollbackBPRequest(BaseModel):
     git_commit: str
     deployed_by: str | None = None
     kind: str = "deploy"  # "deploy" | "firewall"
-    role: str | None = None  # caller's Bailey role (for production firewall gating)
 
 
 @router.get("/business-processes/{bp}/history")
@@ -448,21 +447,18 @@ class FirewallRuleRequest(BaseModel):
     purpose: str | None = None
     gdpr: dict | None = None
     by: str | None = None
-    role: str | None = None  # caller's Bailey role (admin/auditor) for prod gating
 
 
 class FirewallDeleteRequest(BaseModel):
     stage: str
     host: str
     by: str | None = None
-    role: str | None = None
 
 
 class FirewallPromoteRequest(BaseModel):
     from_stage: str
     to_stage: str
     by: str | None = None
-    role: str | None = None
 
 
 @router.get("/business-processes/{bp}/firewall")
@@ -491,7 +487,6 @@ async def put_bp_firewall_rule(
         body.purpose or "",
         body.gdpr,
         body.by,
-        body.role,
     )
 
 
@@ -503,7 +498,7 @@ async def delete_bp_firewall_rule(
 ):
     """Remove a firewall rule (revoke/clear)."""
     return await automation_service.delete_firewall_rule(
-        bp, body.stage, body.host, body.by, body.role
+        bp, body.stage, body.host, body.by
     )
 
 
@@ -515,7 +510,7 @@ async def promote_bp_firewall(
 ):
     """Pull firewall rules forward (dev→staging→production)."""
     return await automation_service.promote_firewall(
-        bp, body.from_stage, body.to_stage, body.by, body.role
+        bp, body.from_stage, body.to_stage, body.by
     )
 
 
@@ -525,7 +520,6 @@ async def upload_bp_firewall_dpa(
     stage: str = Form(...),
     host: str = Form(...),
     by: str | None = Form(None),
-    role: str | None = Form(None),
     file: UploadFile = File(...),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
@@ -533,7 +527,7 @@ async def upload_bp_firewall_dpa(
     the gitops repo under firewall-dpa/<bp>/. Production needs admin/auditor."""
     content = await file.read()
     return await automation_service.store_firewall_dpa(
-        bp, stage, host, content, filename=file.filename, by=by, role=role
+        bp, stage, host, content, filename=file.filename, by=by
     )
 
 
@@ -623,7 +617,6 @@ async def rollback_bp(
             stage=body.stage,
             git_commit=body.git_commit,
             by=body.deployed_by,
-            role=body.role,
         )
     return await automation_service.rollback_business_process(
         bp=bp,

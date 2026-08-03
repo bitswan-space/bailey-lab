@@ -92,6 +92,41 @@ func TestChromeWrap_OuterHostGetsWrap(t *testing.T) {
 	}
 }
 
+// TestChromeWrap_OnboardNeverServesConsoleToTrustedDevice: bailey-onboard is the
+// device-trust ONBOARDING host only. A device that's already trusted has
+// finished onboarding and must be bounced OFF the host — never shown the
+// console/admin SPA there (regression: onboard rendered the /workspaces admin).
+func TestChromeWrap_OnboardNeverServesConsoleToTrustedDevice(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+	w := httptest.NewRecorder()
+	// browserGet → trust() attaches a valid device cookie, so this device is trusted.
+	wrappedHandler(t).ServeHTTP(w, browserGet(t, onboard, "/workspaces", "admin@example.com"))
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("onboard + trusted device: status = %d, want 303 (bounced off the onboard host)", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc == "" || strings.Contains(loc, onboard) {
+		t.Errorf("did not bounce the trusted device off the onboard host: Location = %q", loc)
+	}
+}
+
+// A signed-in but UNtrusted device must still be served the onboarding SPA on
+// the onboard host (so it can render the pairing scene) — not redirected.
+func TestChromeWrap_OnboardServesOnboardingToUntrustedDevice(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+	// Signed in (identity header) but NO device cookie → untrusted.
+	r := httptest.NewRequest(http.MethodGet, "https://"+onboard+"/workspaces", nil)
+	r.Host = onboard
+	r.Header.Set("Accept", "text/html")
+	r.Header.Set("X-Forwarded-Email", "newbie@example.com")
+	w := httptest.NewRecorder()
+	wrappedHandler(t).ServeHTTP(w, r)
+	if w.Code == http.StatusSeeOther {
+		t.Fatalf("onboard bounced an UNtrusted device instead of serving the pairing scene (loc=%q)", w.Header().Get("Location"))
+	}
+}
+
 func TestChromeWrap_InnerHostPassesThrough(t *testing.T) {
 	host := "wrap-pass--inner.example.com"
 	w := httptest.NewRecorder()

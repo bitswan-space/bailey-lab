@@ -54,6 +54,18 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 				inner.ServeHTTP(w, r)
 				return
 			}
+			// The onboarding host serves ONLY the device-trust scenes. A device
+			// that is already trusted has finished onboarding and must NEVER be
+			// shown the console/admin surface here — bounce it to where it
+			// belongs (the saved origin, else the console host). Only the
+			// top-level page navigation is redirected; the SPA's own assets/APIs
+			// (handled above / below) still serve the untrusted pairing flow.
+			if isTopLevelHTMLGet(r) {
+				if email, _ := identityFromHeaders(r); email != "" && currentDeviceForRequest(r, email) != nil {
+					originRedirect(w, r)
+					return
+				}
+			}
 			serveServerConsole(w, r)
 			return
 		}

@@ -15,15 +15,30 @@ const (
 	auditDeviceRevoke      = "device.revoke"      // a device was removed (self-service or admin)
 	auditWorkspaceCreate   = "workspace.create"   // a workspace was provisioned
 	auditWorkspaceTrash    = "workspace.trash"    // a workspace was moved to trash
-	auditWorkspaceTransfer = "workspace.transfer" // workspace ownership moved to another user
 	auditServerClaim       = "server.claim"       // the one-time root-admin bootstrap ran
 	auditTOTPEnrol         = "totp.enrol"         // a user enrolled an authenticator secret
 	auditInviteCreate      = "invite.create"      // an admin invited an AOC-org member
 	auditInviteResend      = "invite.resend"      // an admin re-sent an invite (fresh token + expiry)
 	auditInviteRevoke      = "invite.revoke"      // an admin revoked an outstanding invite
 	auditInviteRedeem      = "invite.redeem"      // an invitee redeemed their invite (first device trusted)
+	auditMagicLinkCreate   = "magiclink.create"   // an admin/auditor owner minted an endpoint-scoped magic link (#240)
+	auditMagicLinkRedeem   = "magiclink.redeem"   // a user redeemed a magic link (device trusted for one endpoint)
+	auditMagicLinkRevoke   = "magiclink.revoke"   // a magic link was revoked
 
 	auditMemOverReservation = "container.mem_over_reservation" // a container's memory usage exceeded its reservation
+
+	// Endpoint ACL changes over the daemon socket (issue #189 / BSY-13). These
+	// are operator-only mutations, so they need a trail of their own — the
+	// endpoint_grants.granted_by column records the grant but nothing recorded
+	// a revoke at all.
+	auditAccessGrant  = "access.grant"  // a principal was granted access/owner on an endpoint
+	auditAccessRevoke = "access.revoke" // a principal's grant on an endpoint was removed
+
+	// Second-factor verification abuse (issue #188 / BSY-12). Every failed
+	// TOTP / backup-code / recovery attempt is recorded so it reaches the SIEM;
+	// lockout marks the point a per-account/per-IP cooldown was triggered.
+	audit2FAFailed  = "2fa.verify_failed" // a 2FA verification attempt failed (brute-force signal)
+	audit2FALockout = "2fa.lockout"       // too many failures → per-account/per-IP cooldown engaged
 )
 
 // eventRecord is one audit row, JSON-shaped for the overview feed.

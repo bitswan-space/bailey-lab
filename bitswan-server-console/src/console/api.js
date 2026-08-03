@@ -132,13 +132,22 @@ export class ApiError extends Error {
     this.status = status;
     this.path = path;
     this.code = code || '';
+    // 2FA brute-force throttle (issue #188): the daemon returns these on a
+    // failed verification so the UI can warn past 3 fails and show the
+    // per-account/per-IP cooldown. 0 when the body carried neither.
+    this.failedAttempts = 0;
+    this.retryAfter = 0;
   }
 }
 
 async function parseJSONResponse(res, path) {
   const text = await res.text().catch(() => '');
   if (!res.ok) {
-    throw new ApiError(extractErrorText(text) || `${res.status} ${res.statusText}`, res.status, path, extractErrorCode(text));
+    const err = new ApiError(extractErrorText(text) || `${res.status} ${res.statusText}`, res.status, path, extractErrorCode(text));
+    const th = extractThrottle(text);
+    err.failedAttempts = th.failedAttempts;
+    err.retryAfter = th.retryAfter;
+    throw err;
   }
   if (!text) return null;
   try {
@@ -176,6 +185,22 @@ function extractErrorCode(text) {
   } catch (e) { return ''; }
 }
 
+// extractThrottle pulls the 2FA brute-force counters (issue #188) out of a
+// failed-verification body: failed_attempts (drives the > 3 warning) and
+// retry_after seconds (the per-account/per-IP cooldown). 0 when absent.
+function extractThrottle(text) {
+  const out = { failedAttempts: 0, retryAfter: 0 };
+  if (!text) return out;
+  const t = text.trim();
+  if (!t.startsWith('{')) return out;
+  try {
+    const o = JSON.parse(t);
+    if (o && Number.isFinite(o.failed_attempts)) out.failedAttempts = o.failed_attempts;
+    if (o && Number.isFinite(o.retry_after)) out.retryAfter = o.retry_after;
+  } catch (e) { /* not JSON */ }
+  return out;
+}
+
 // ─── Endpoint wrappers (one place per backend route) ────────────────────────
 
 export const Api = {
@@ -197,6 +222,10 @@ export const Api = {
   devices: () => getJSON('/bailey/api/devices'),
   removeDevice: (id) => postForm('/bailey/api/devices/remove', { id }),
   approvals: () => getJSON('/bailey/api/approvals'),
+  // Deny (permanently remove) a pending device-pair request — the persistent
+  // "Dismiss". Unlike a local hide, it deletes the request server-side so it
+  // doesn't reappear on the next refetch. Returns the refreshed { pending }.
+  denyApproval: (email) => postForm('/bailey/api/approvals/deny', { email }),
   // Approve a pending pairing. The JSON variant isn't wired in the
   // dispatcher; the live route is the gate's form handler, which is
   // same-origin and bypasses the chrome wrap. Returns 2xx HTML on
@@ -223,21 +252,30 @@ export const Api = {
   // 'restarting' event when the connection drops with the daemon. Callers then
   // poll adminUpdates() until the version flips.
   serverUpdate: (onEvent) => postNDJSON('/bailey/api/admin/server-update', {}, onEvent),
-  // Transfer workspace ownership to another user already on this server.
-  // Strictly the recorded owner's call — the backend rejects even admins —
-  // and the old owner is kept as a member (access grant).
-  transferWorkspaceOwnership: (name, email) =>
-    postJSON(`/bailey/api/workspaces/${encodeURIComponent(name)}/transfer-ownership`, { email }),
   // Workspace membership = the ACL share state on the workspace's dashboard
   // endpoint host: owner_email + grants. Owner-only (403 otherwise). Returns
   // the updated listing on add/remove.
   workspaceMembers: (host) => getJSON(`/2fa-gate/api/share/${encodeURIComponent(host)}`),
-  addWorkspaceMember: (host, email) =>
+  // Add a person to the workspace at a given ROLE — 'owner' (a co-owner; owner
+  // is a role, not an exclusive property) or 'access' (a member). Defaults to
+  // member.
+  addWorkspaceMember: (host, email, role = 'access') =>
     postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
-      { action: 'grant', principal_type: 'email', principal_value: email, role: 'access' }),
+      { action: 'grant', principal_type: 'email', principal_value: email, role }),
   removeWorkspaceMember: (host, principalType, principalValue, role) =>
     postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
       { action: 'revoke', principal_type: principalType, principal_value: principalValue, role }),
+  // Change a person's role (user ⇄ owner): grant the new role first (so they
+  // never lose access mid-change), then revoke the old one. Returns the updated
+  // share listing. Works for the recorded owner_email too — revoking the 'owner'
+  // role of the owner_email reassigns the slot on the backend (revokeOwnership),
+  // refusing only when it would drop the last owner.
+  setWorkspaceMemberRole: async (host, principalType, principalValue, newRole, oldRole) => {
+    await postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
+      { action: 'grant', principal_type: principalType, principal_value: principalValue, role: newRole });
+    return postForm(`/2fa-gate/api/share/${encodeURIComponent(host)}`,
+      { action: 'revoke', principal_type: principalType, principal_value: principalValue, role: oldRole });
+  },
   emptyTrash: (onEvent) =>
     postNDJSON('/bailey/api/workspaces/empty-trash', { confirmation: 'empty trash' }, onEvent),
   notificationsCount: () => getJSON('/bailey/api/notifications-count'),
@@ -256,8 +294,8 @@ export const Api = {
   // device counts. Degrades to a 200 with an `error` field on partial
   // enumeration failure (the view surfaces it without dropping the roster).
   people: () => getJSON('/bailey/api/people'),
-  // Minimal people directory ({email,name,invited} rows) for the member/
-  // transfer pickers. NOT admin-only: any endpoint owner may read it —
+  // Minimal people directory ({email,name,invited} rows) for the add-a-person
+  // picker. NOT admin-only: any endpoint owner may read it —
   // workspace owners included — so every owner gets a pickable list. 403
   // for callers who own nothing shareable.
   peopleDirectory: () => getJSON('/bailey/api/people/directory'),
