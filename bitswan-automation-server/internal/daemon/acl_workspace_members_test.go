@@ -307,6 +307,8 @@ func TestShareModalRendersWorkspaceRowAndPicker(t *testing.T) {
 	for _, cls := range []string{
 		".bailey-share-inherited", ".bailey-share-members",
 		".bailey-share-count", ".bailey-share-picker",
+		".bailey-share-member .dot",       // avatar
+		".bailey-share-member .who .mail", // email under the name
 	} {
 		if !strings.Contains(shareModalCSS, cls) {
 			t.Errorf("share modal CSS is missing %s", cls)
@@ -317,9 +319,23 @@ func TestShareModalRendersWorkspaceRowAndPicker(t *testing.T) {
 	if strings.Contains(js, "%!") {
 		t.Fatalf("format verb error in rendered share JS")
 	}
-	// The picker must call the shared people directory, not a parallel API.
+	// The picker must call the shared people directory, not a parallel API. It
+	// also supplies the display names for every chip.
 	if !strings.Contains(js, gatePathPrefix+"/api/people/directory") {
 		t.Error("share JS does not point the picker at the people directory endpoint")
+	}
+	// Identity chips use the console's avatar treatment (hashed colour +
+	// initials), ported in avatarColor/initialsFor. The hsl() literal and the
+	// separator class are the two things that must not drift from
+	// console-ui.jsx, or the same person gets a different avatar in each UI.
+	for _, frag := range []string{
+		"function avatarColor(", "function initialsFor(", "function personChip(",
+		"'hsl(' + (h % 360) + ' 52% 45%)'", // %% survived Sprintf
+		`split(/[\s@._-]+/)`,
+	} {
+		if !strings.Contains(js, frag) {
+			t.Errorf("share JS is missing the console avatar port: %s", frag)
+		}
 	}
 	// The inherited row is informational: no switch, and nothing that posts a
 	// workspace-access mutation.

@@ -146,16 +146,26 @@ const shareModalCSS = `
   }
   .bailey-share-members.open { display: block; }
   .bailey-share-member {
-    display: flex; align-items: center; gap: 8px; padding: 3px 0;
-    font-size: 13px; color: #3F3F46; min-width: 0;
+    display: flex; align-items: center; gap: 10px; padding: 4px 0; min-width: 0;
   }
+  /* Same identity treatment as the console's UserChip: a filled circle with
+     initials, coloured by a stable hash of the display name (avatarColor in
+     the JS below), then the name over the email. */
   .bailey-share-member .dot {
-    width: 22px; height: 22px; border-radius: 50%; background: #6B7280; color: white;
+    width: 28px; height: 28px; border-radius: 50%; background: #6B7280; color: white;
     display: flex; align-items: center; justify-content: center;
-    font-size: 10px; font-weight: 600; flex-shrink: 0;
+    font-size: 11px; font-weight: 600; flex-shrink: 0; letter-spacing: 0.2px;
   }
-  .bailey-share-member .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .bailey-share-members .note { font-size: 12px; color: #71717A; padding-top: 6px; }
+  .bailey-share-member .who { min-width: 0; }
+  .bailey-share-member .who .line {
+    font-size: 13px; font-weight: 600; color: #18181B;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bailey-share-member .who .mail {
+    font-size: 11.5px; color: #71717A; font-family: 'Geist Mono', ui-monospace, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bailey-share-members .note { font-size: 12px; color: #71717A; padding-top: 8px; }
 
   /* --- People picker (#251) ---------------------------------------------
      Click-to-pick over the server's people directory, mirroring the
@@ -321,12 +331,54 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     (children||[]).forEach(function(c) { if (c) n.appendChild(c); });
     return n;
   }
-  function initials(s) {
-    s = String(s || '').replace(/[^a-zA-Z0-9]/g,' ').trim();
-    if (!s) return '?';
-    var parts = s.split(/\s+/);
-    if (parts.length === 1) return parts[0].slice(0,2).toUpperCase();
-    return (parts[0][0]+parts[1][0]).toUpperCase();
+  // avatarColor / initialsFor are ported verbatim from the server console's
+  // Avatar (console-ui.jsx), so a person's chip looks the same here as in the
+  // workspace member list: a filled circle in a colour hashed from their
+  // display name, with up to two initials.
+  //
+  // The console additionally loads a real photo from the AOC and a real display
+  // name from its identity directory. Neither is reachable from this dialog:
+  // the chrome wrap's CSP is img-src 'self' data: <inner host> and connect-src
+  // 'self', so a cross-origin avatar/name fetch is blocked — and widening a
+  // security header on every protected page for a nicer avatar is not a trade
+  // worth making. Initials + the name Bailey knows is the honest rendering.
+  function avatarColor(s) {
+    var h = 0;
+    s = String(s || '');
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return 'hsl(' + (h %% 360) + ' 52%% 45%%)';
+  }
+  function initialsFor(s) {
+    // Split on spaces AND email/handle separators, so "jane@acme.com" → "JA".
+    // Character class and fallback match console-ui.jsx exactly — a different
+    // split would give the same person different initials in the two UIs.
+    var name = String(s || '');
+    var parts = name.split(/[\s@._-]+/).filter(Boolean);
+    var out = parts.map(function(w) { return w[0]; }).slice(0, 2).join('').toUpperCase();
+    return out || (name[0] || '?').toUpperCase();
+  }
+  // personChip builds the avatar + name/email pair used for every human in
+  // this dialog. displayName falls back to the email, and the mono email line
+  // is dropped when it would just repeat the name (same rule as UserChip).
+  function personChip(email, name) {
+    var display = name || email;
+    var dot = el('div', {class:'dot', text: initialsFor(display)});
+    dot.style.background = avatarColor(display);
+    var lines = [el('div', {class:'line', text: display +
+      (String(email).toLowerCase() === callerEmail.toLowerCase() ? ' (you)' : '')})];
+    if (display !== email) lines.push(el('div', {class:'mail', text: email, title: email}));
+    return [dot, el('div', {class:'who'}, lines)];
+  }
+  // nameFor looks a person's display name up in the people directory the picker
+  // already loaded. Returns '' when unknown (directory still loading, failed,
+  // or the person isn't on this server) — callers then show the bare email.
+  function nameFor(email) {
+    if (!directory || !email) return '';
+    var key = String(email).toLowerCase();
+    for (var i = 0; i < directory.length; i++) {
+      if (String(directory[i].email).toLowerCase() === key) return directory[i].name || '';
+    }
+    return '';
   }
   function showError(msg) {
     var e = $('bailey-share-error');
@@ -464,15 +516,16 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     // Enumerate the inherited set — the whole point of this row is that an
     // admin can see exactly WHO "workspace members" means.
     members.forEach(function(m) {
-      panel.appendChild(el('div', {class:'bailey-share-member'}, [
-        el('div', {class:'dot', text: initials(m)}),
-        el('div', {class:'who', text: m + (m.toLowerCase() === callerEmail.toLowerCase() ? ' (you)' : '')})
-      ]));
+      panel.appendChild(el('div', {class:'bailey-share-member'}, personChip(m, nameFor(m))));
     });
     groups.forEach(function(gp) {
+      // A group is not a person — keep the neutral marker, no hashed colour.
       panel.appendChild(el('div', {class:'bailey-share-member'}, [
         el('div', {class:'dot', text:'##'}),
-        el('div', {class:'who', text: gp + ' (Keycloak group)'})
+        el('div', {class:'who'}, [
+          el('div', {class:'line', text: gp}),
+          el('div', {class:'mail', text:'Keycloak group'})
+        ])
       ]));
     });
     if (!members.length && !groups.length) {
@@ -540,12 +593,14 @@ func shareModalJS(host, callerEmail, apiURL string) string {
         el('div', {class:'line', text: named ? p.name : p.email}),
         named ? el('div', {class:'mail', text: p.email}) : null
       ]);
+      var pickAvatar = el('div', {class:'bailey-share-avatar', text: initialsFor(p.name || p.email)});
+      pickAvatar.style.background = avatarColor(p.name || p.email);
       box.appendChild(el('button', {
         type:'button', class:'bailey-share-pick',
         title:'Add ' + p.email,
         onclick: function() { pick(p.email); }
       }, [
-        el('div', {class:'bailey-share-avatar', text: initials(p.name || p.email)}),
+        pickAvatar,
         who,
         el('span', {class:'tag', text: p.invited ? 'Invited' : ''})
       ]));
@@ -557,6 +612,13 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     box.classList.add('open');
   }
 
+  // redrawWithNames re-renders the parts whose labels come from the people
+  // directory. No-op until the grant listing has arrived (render() draws them
+  // from scratch anyway, with whatever the directory holds by then).
+  function redrawWithNames() {
+    if (lastData) render(lastData); else renderPicker();
+  }
+
   function pick(email) {
     add('email', email, $('bailey-share-role').value).then(function() {
       $('bailey-share-input').value = '';
@@ -564,10 +626,13 @@ func shareModalJS(host, callerEmail, apiURL string) string {
   }
 
   function requestRowFor(req) {
-    var avatar = el('div', {class: 'bailey-share-avatar', text: initials(req.email)});
+    var display = nameFor(req.email) || req.email;
+    var avatar = el('div', {class: 'bailey-share-avatar', text: initialsFor(display)});
+    avatar.style.background = avatarColor(display);
     var meta = el('div', {class:'bailey-share-meta'}, [
-      el('div', {class:'name', text: req.email}),
-      el('div', {class:'sub',  text: 'Requested ' + (req.requested_at || '')})
+      el('div', {class:'name', text: display}),
+      el('div', {class:'sub',  text: (display === req.email ? '' : req.email + ' · ') +
+                                     'requested ' + (req.requested_at || '')})
     ]);
     var approve = el('button', {
       class:'bailey-share-remove',
@@ -601,10 +666,16 @@ func shareModalJS(host, callerEmail, apiURL string) string {
   function rowFor(g) {
     var isGroup = g.principal_type === 'group';
     var isMe    = !isGroup && g.principal_value.toLowerCase() === callerEmail.toLowerCase();
-    var avatar  = el('div', {class: 'bailey-share-avatar' + (isGroup ? ' group' : ''), text: isGroup ? '##' : initials(g.principal_value)});
+    // Same identity chip as the inherited member list, so one dialog doesn't
+    // render two different kinds of person.
+    var display = (isGroup ? '' : nameFor(g.principal_value)) || g.principal_value;
+    var avatar  = el('div', {class: 'bailey-share-avatar' + (isGroup ? ' group' : ''),
+                             text: isGroup ? '##' : initialsFor(display)});
+    if (!isGroup) avatar.style.background = avatarColor(display);
     var meta    = el('div', {class:'bailey-share-meta'}, [
-      el('div', {class:'name', text: g.principal_value + (isMe ? ' (you)' : '')}),
-      el('div', {class:'sub',  text: isGroup ? 'Keycloak group' : 'Email'})
+      el('div', {class:'name', text: display + (isMe ? ' (you)' : '')}),
+      el('div', {class:'sub',  text: isGroup ? 'Keycloak group'
+                                            : (display === g.principal_value ? 'Email' : g.principal_value)})
     ]);
     var children = [avatar, meta];
     var sel = el('select', {class:'bailey-share-role-dropdown'}, [
@@ -660,9 +731,10 @@ func shareModalJS(host, callerEmail, apiURL string) string {
   window.__baileyShareOpen = function() {
     $('bailey-share-modal').classList.add('open');
     load();
-    // Picker data is independent of the grant listing, so fetch it in
-    // parallel and redraw when it lands.
-    loadDirectory().then(renderPicker);
+    // Picker data is independent of the grant listing, so fetch it in parallel.
+    // It also supplies the display names for the member/grant chips, so redraw
+    // those too once it lands — whichever request finishes second wins.
+    loadDirectory().then(redrawWithNames);
     var inp = $('bailey-share-input');
     inp.oninput = renderPicker;
     setTimeout(function(){ inp.focus(); }, 30);
