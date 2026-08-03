@@ -13,26 +13,13 @@ import (
 // is a grant in `endpoint_grants` (additional owners, accessors,
 // group access).
 //
-// The effective ACL is a SET UNION of two halves:
-//
-//	(everyone with a role on the endpoint's workspace) ∪ (its own grants)
-//
-// The workspace half is the ACL of the endpoint's parent — the workspace
-// dashboard — and can be switched off per endpoint
-// (endpoints.inherit_workspace_members, default ON). The manual half is
-// always in effect.
-//
 // Resolution order on every request:
 //  1. Endpoint exists?             → if not, treat as "not yet
 //     registered" (open until a route registration sets an owner)
 //  2. Caller is original owner?    → access granted as 'owner'
 //  3. Caller email has any grant?  → access granted at that role
 //  4. Caller in any granted group? → access granted at that role
-//  5. Workspace inheritance on and caller has a role on the parent?
-//     → access granted at their PARENT role (never upgraded)
-//  6. Otherwise                    → deny (caller can request access)
-//
-// Any lookup error at any step denies — see roleFor.
+//  5. Otherwise                    → deny (caller can request access)
 //
 // ACL state is keyed by the OUTER hostname; inner-subdomain requests
 // look up against the same row (see enforceEndpointACL).
@@ -63,15 +50,8 @@ type endpointRecord struct {
 	Source string
 	// SourceBP is the business process a gitops route belongs to (see
 	// setEndpointSourceBP). Empty for manual routes and legacy gitops rows.
-	SourceBP string
-	// InheritWorkspaceMembers is the workspace half of the union ACL (#251):
-	// when true, everyone with a role on ParentEndpoint (the workspace
-	// dashboard — the workspace's membership surface) can open this endpoint
-	// too, on top of its own grants. When false, only this endpoint's own
-	// owner/grants apply. Defaults to true. No effect when ParentEndpoint is
-	// empty: there is no membership surface to union in.
-	InheritWorkspaceMembers bool
-	CreatedAt               string
+	SourceBP  string
+	CreatedAt string
 }
 
 // Endpoint kinds. Stored verbatim in endpoints.kind.
@@ -112,48 +92,22 @@ type accessRequest struct {
 	Hostname string `json:"hostname,omitempty"`
 }
 
-// endpointColumns is the SELECT list every endpointRecord read uses, so a
-// new column can't be added to one query and forgotten in the other.
-// scanEndpoint consumes exactly these, in order.
-const endpointColumns = `hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''),
-	COALESCE(kind,''), COALESCE(stage,''), COALESCE(source,'manual'), COALESCE(source_bp,''),
-	COALESCE(inherit_workspace_members,1), created_at`
-
-// endpointScanner is what both *sql.Row and *sql.Rows satisfy.
-type endpointScanner interface{ Scan(dest ...any) error }
-
-// scanEndpoint reads one endpointColumns row into a record. The
-// inherit_workspace_members column is stored as an INTEGER, so it lands in
-// an int first; anything non-zero is "on", and a NULL (impossible under the
-// NOT NULL DEFAULT 1, but cheap to be safe about) COALESCEs to on — the
-// default must never read back as "workspace members are excluded".
-func scanEndpoint(s endpointScanner) (*endpointRecord, error) {
-	var e endpointRecord
-	var inherit int
-	if err := s.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint,
-		&e.Kind, &e.Stage, &e.Source, &e.SourceBP, &inherit, &e.CreatedAt); err != nil {
-		return nil, err
-	}
-	e.InheritWorkspaceMembers = inherit != 0
-	return &e, nil
-}
-
 // getEndpoint returns the registered endpoint or nil if unknown.
 func getEndpoint(hostname string) (*endpointRecord, error) {
 	db, err := openBaileyDB()
 	if err != nil {
 		return nil, err
 	}
-	row := db.QueryRow(`SELECT `+endpointColumns+`
+	row := db.QueryRow(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), COALESCE(source,'manual'), COALESCE(source_bp,''), created_at
 	                    FROM endpoints WHERE hostname = ? COLLATE NOCASE`, hostname)
-	e, err := scanEndpoint(row)
-	if err != nil {
+	var e endpointRecord
+	if err := row.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.Source, &e.SourceBP, &e.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	return e, nil
+	return &e, nil
 }
 
 // registerEndpoint creates the endpoint row. parentEndpoint (may be
@@ -362,9 +316,8 @@ func listGrants(hostname string) ([]endpointGrant, error) {
 //
 // groups is the caller's Keycloak groups (X-Forwarded-Groups split).
 //
-// roleFor is a SET UNION (#251): the endpoint's own grants ∪ the
-// members of its workspace. An endpoint registered with a parent
-// endpoint (the workspace dashboard, recorded explicitly at
+// roleFor includes parent delegation: an endpoint registered with a
+// parent endpoint (the workspace dashboard, recorded explicitly at
 // registration time — see addRouteToIngress) inherits membership from
 // it AT THE ROLE the caller holds on the parent, never higher. An
 // owner of the dashboard is owner of everything spawned under the
@@ -372,55 +325,50 @@ func listGrants(hostname string) ([]endpointGrant, error) {
 // endpoints but does not own them — sharing a child requires an
 // explicit owner grant on the child (or owner on the dashboard).
 //
-// The workspace half is switchable per endpoint:
-// endpoints.inherit_workspace_members (default ON — see the share
-// dialog's "workspace · inherited" row). With it OFF, only the
-// endpoint's own owner and grants apply; the manual half is never
-// switchable, so an explicitly-added person keeps access either way.
-//
 // SECURITY (#129): delegation must never upgrade access→owner. The
 // dashboard `access` grant is the routine way to let a teammate into a
 // workspace; promoting it to owner of every child endpoint would let
 // any member share (re-grant, including to arbitrary external emails)
 // the automations and frontends other members created. The parent's
 // own ACL is unchanged either way — delegation only flows parent→child.
-//
-// SECURITY (#251): every error path returns roleNone. Callers routinely
-// drop the error (`role, _ := roleFor(...)`), so a lookup failure MUST
-// read as "no access", never as the last role we happened to compute.
 func roleFor(hostname, email string, groups []string) (endpointRole, error) {
 	role, err := directRoleFor(hostname, email, groups)
-	if err != nil {
-		return roleNone, err
-	}
-	if role == roleOwner {
-		return roleOwner, nil
+	if err != nil || role == roleOwner {
+		return role, err
 	}
 	ep, err := getEndpoint(hostname)
-	if err != nil {
-		return roleNone, err
+	if err != nil || ep == nil {
+		return role, err
 	}
-	if ep == nil {
-		return role, nil
+	if surface := workspaceMembershipSurface(ep); surface != "" {
+		parentRole, err := directRoleFor(surface, email, groups)
+		if err != nil {
+			return role, err
+		}
+		// The direct role here is at most `access` (owner short-circuited
+		// above), so taking the parent's role can only widen, never
+		// downgrade: owner on the parent ⇒ owner of the child; access on
+		// the parent ⇒ access on the child.
+		if parentRole != roleNone {
+			return parentRole, nil
+		}
 	}
-	surface := workspaceMembershipSurface(ep)
-	if surface == "" || !ep.InheritWorkspaceMembers {
-		return role, nil
-	}
-	return unionWithWorkspaceRole(role, func() (endpointRole, error) {
-		return directRoleFor(surface, email, groups)
-	})
+	return role, nil
 }
 
 // workspaceMembershipSurface returns the endpoint whose ACL defines "the
-// members of this endpoint's workspace" — the recorded parent (the
-// workspace dashboard). Empty when there is none to union in: a
-// parentless endpoint (a dashboard itself, or a standalone route), or a
-// row that names itself as its parent (which would recurse).
+// members of this endpoint's workspace" — the recorded parent, i.e. the
+// workspace dashboard. Empty when there is none: a parentless endpoint (a
+// dashboard itself, or a standalone route), or a row that names itself as
+// its parent (which would recurse).
 //
-// This is explicit data only. We deliberately do NOT infer a workspace
-// from the hostname: an endpoint whose parent was never recorded has no
+// This is explicit data only. We deliberately do NOT infer a workspace from
+// the hostname: an endpoint whose parent was never recorded has no
 // membership surface, and gets its own grants and nothing more.
+//
+// roleFor uses this to resolve the inherited half of the ACL, and the share
+// dialog uses it to describe that half (workspaceAccessFor) — one definition,
+// so what the dialog shows can't drift from what the gate enforces.
 func workspaceMembershipSurface(ep *endpointRecord) string {
 	if ep == nil || ep.ParentEndpoint == "" {
 		return ""
@@ -429,54 +377,6 @@ func workspaceMembershipSurface(ep *endpointRecord) string {
 		return ""
 	}
 	return ep.ParentEndpoint
-}
-
-// unionWithWorkspaceRole adds the workspace-membership half to a direct
-// role. lookup resolves the caller's role on the membership surface.
-//
-// FAIL CLOSED: if membership can't be determined the answer is roleNone,
-// not the direct role — a broken or missing workspace lookup must never
-// leave a half-evaluated ACL standing in for a decision. direct is at
-// most `access` here (owner short-circuits in roleFor), so a non-empty
-// workspace role can only widen, never downgrade.
-func unionWithWorkspaceRole(direct endpointRole, lookup func() (endpointRole, error)) (endpointRole, error) {
-	wsRole, err := lookup()
-	if err != nil {
-		return roleNone, err
-	}
-	if wsRole != roleNone {
-		return wsRole, nil
-	}
-	return direct, nil
-}
-
-// setEndpointWorkspaceInherit flips the workspace half of an endpoint's
-// union ACL. Authorization is the caller's job — every path into this is
-// owner-only AND trusted-device-gated (see handleShareAPI).
-func setEndpointWorkspaceInherit(hostname string, on bool) error {
-	db, err := openBaileyDB()
-	if err != nil {
-		return err
-	}
-	hostname = strings.TrimSpace(hostname)
-	if hostname == "" {
-		return fmt.Errorf("hostname is required")
-	}
-	v := 0
-	if on {
-		v = 1
-	}
-	res, err := db.Exec(`UPDATE endpoints SET inherit_workspace_members = ? WHERE hostname = ? COLLATE NOCASE`,
-		v, hostname)
-	if err != nil {
-		return err
-	}
-	// An UPDATE that matched nothing means the endpoint isn't registered —
-	// report it rather than returning success on a no-op write.
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		return fmt.Errorf("endpoint %q is not registered", hostname)
-	}
-	return nil
 }
 
 // directRoleFor resolves the caller's role from the endpoint's own
@@ -614,18 +514,18 @@ func listAllEndpoints() ([]endpointRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT ` + endpointColumns + ` FROM endpoints`)
+	rows, err := db.Query(`SELECT hostname, owner_email, COALESCE(display_name,''), COALESCE(parent_endpoint,''), COALESCE(kind,''), COALESCE(stage,''), COALESCE(source,'manual'), COALESCE(source_bp,''), created_at FROM endpoints`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []endpointRecord
 	for rows.Next() {
-		e, err := scanEndpoint(rows)
-		if err != nil {
+		var e endpointRecord
+		if err := rows.Scan(&e.Hostname, &e.OwnerEmail, &e.DisplayName, &e.ParentEndpoint, &e.Kind, &e.Stage, &e.Source, &e.SourceBP, &e.CreatedAt); err != nil {
 			return nil, err
 		}
-		out = append(out, *e)
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }

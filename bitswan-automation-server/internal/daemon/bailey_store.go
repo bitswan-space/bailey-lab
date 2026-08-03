@@ -55,14 +55,6 @@ CREATE TABLE IF NOT EXISTS endpoints (
   -- human via the add-route CLI or workspace-init infra. The ingress reconcile
   -- only ever prunes 'gitops' routes — manual routes are preserved.
   source          TEXT NOT NULL DEFAULT 'manual',
-  -- inherit_workspace_members: 1 = the effective ACL is the UNION of the
-  -- workspace's members (everyone with a role on parent_endpoint, the
-  -- workspace dashboard) and this endpoint's own grants; 0 = only this
-  -- endpoint's own owner/grants can open it. Defaults to 1 — a workspace
-  -- member is expected to reach what the workspace deploys. Meaningless
-  -- for an endpoint with no parent_endpoint (there is no membership
-  -- surface to union in); see roleFor.
-  inherit_workspace_members INTEGER NOT NULL DEFAULT 1,
   created_at      TEXT NOT NULL
 );
 
@@ -333,16 +325,6 @@ func openBaileyDB() (*sql.DB, error) {
 			!strings.Contains(err.Error(), "duplicate column name") {
 			db.Close()
 			baileyDBErr = fmt.Errorf("migrate endpoints.source_bp: %w", err)
-			return
-		}
-		// Migration for inherit_workspace_members (#251): the per-endpoint
-		// switch for the workspace half of the union ACL. Existing rows default
-		// to 1, i.e. workspace members keep the access they already have via
-		// parent delegation — this migration does not narrow any endpoint.
-		if _, err := db.Exec(`ALTER TABLE endpoints ADD COLUMN inherit_workspace_members INTEGER NOT NULL DEFAULT 1`); err != nil &&
-			!strings.Contains(err.Error(), "duplicate column name") {
-			db.Close()
-			baileyDBErr = fmt.Errorf("migrate endpoints.inherit_workspace_members: %w", err)
 			return
 		}
 		// Migration for databases created before devices.origin existed. origin

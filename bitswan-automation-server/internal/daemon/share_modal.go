@@ -16,12 +16,15 @@ import (
 // reloads. The standalone share page (acl_share.go) reuses this exact
 // component, pre-opened.
 //
-// The dialog shows BOTH halves of the union ACL (#251): a boxed,
-// clearly-labelled "workspace · inherited" row (expandable to the actual
-// member list, carrying the switch that turns that half off), and below it
-// the people granted on this endpoint alone. The add field is free text —
-// any email or /group/path — with a click-to-pick list of the server's
-// people underneath it, mirroring the workspace sidebar's "Add a member".
+// The dialog shows BOTH halves of who can open the endpoint (#251): a
+// boxed, clearly-labelled "workspace · inherited" row, expandable to the
+// actual member list, and below it the people granted on this endpoint
+// alone. It used to show only the latter, so an endpoint reachable by a
+// whole workspace read as "1 person, no additional people yet". The
+// inherited row is informational — that access is administered in the
+// workspace, not here. The add field is free text (any email or
+// /group/path) with a click-to-pick list of the server's people underneath
+// it, mirroring the workspace sidebar's "Add a member".
 
 const shareModalCSS = `
   /* Modal overlay — sits above the iframe, dimmed backdrop */
@@ -122,26 +125,22 @@ const shareModalCSS = `
   .bailey-share-empty { padding: 16px 20px; color: #71717A; font-size: 13px; text-align: center; }
 
   /* --- Inherited workspace access (#251) --------------------------------
-     The effective ACL is (all workspace members) ∪ (people added here).
-     The workspace half gets its own boxed, tinted row carrying the switch
-     that turns it off, so it never reads as just another grantee. */
+     Workspace members can already open what their workspace deploys; this
+     row says so. Boxed and tinted so it reads as a statement about the
+     workspace rather than as one more individually-granted person. It is
+     informational: membership is managed in the workspace, not here. */
   .bailey-share-inherited {
     margin: 2px 12px 8px; padding: 10px 12px; border-radius: 10px;
     border: 1px solid #C7D7FE; background: #F5F8FF;
   }
-  .bailey-share-inherited.off { border-color: #E4E4E7; background: #FAFAFA; }
   .bailey-share-inherited-head { display: flex; align-items: center; gap: 12px; }
   .bailey-share-inherited .bailey-share-avatar { background: #1E40AF; }
-  .bailey-share-inherited.off .bailey-share-avatar { background: #A1A1AA; }
   .bailey-share-count {
     font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 999px;
     border: 1px solid #C7D7FE; background: #DBEAFE; color: #1E40AF;
     flex-shrink: 0; cursor: pointer; white-space: nowrap;
   }
   .bailey-share-count:hover { background: #C7D7FE; }
-  .bailey-share-inherited.off .bailey-share-count {
-    background: #F4F4F5; color: #52525B; border-color: #E4E4E7;
-  }
   .bailey-share-members {
     display: none; margin-top: 10px; padding-top: 8px; border-top: 1px dashed #C7D7FE;
   }
@@ -157,28 +156,6 @@ const shareModalCSS = `
   }
   .bailey-share-member .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bailey-share-members .note { font-size: 12px; color: #71717A; padding-top: 6px; }
-
-  /* Switch. A real checkbox underneath (keyboard + a11y), track/knob drawn
-     on top so it reads as an on/off switch rather than a list checkbox. */
-  .bailey-share-switch { position: relative; display: inline-flex; flex-shrink: 0; }
-  .bailey-share-switch input {
-    position: absolute; inset: 0; width: 100%; height: 100%;
-    margin: 0; opacity: 0; cursor: pointer;
-  }
-  .bailey-share-switch .track {
-    display: block; width: 38px; height: 22px; border-radius: 999px;
-    background: #D4D4D8; transition: background 120ms ease;
-  }
-  .bailey-share-switch .knob {
-    position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
-    border-radius: 50%; background: white; box-shadow: 0 1px 2px rgba(0,0,0,0.25);
-    transition: transform 120ms ease; pointer-events: none;
-  }
-  .bailey-share-switch input:checked ~ .track { background: #093DF5; }
-  .bailey-share-switch input:checked ~ .knob { transform: translateX(16px); }
-  .bailey-share-switch input:focus-visible ~ .track { box-shadow: 0 0 0 3px rgba(9,61,245,0.25); }
-  .bailey-share-switch input:disabled ~ .track { opacity: 0.5; }
-  .bailey-share-switch input:disabled { cursor: progress; }
 
   /* --- People picker (#251) ---------------------------------------------
      Click-to-pick over the server's people directory, mirroring the
@@ -453,41 +430,23 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     return parts.join(' + ');
   }
 
-  // callerHasDirectOwnership: does the caller own this endpoint in its OWN
-  // right (recorded owner, or an explicit owner grant), as opposed to owning
-  // it only through the workspace inheritance? Used to warn before switching
-  // the inheritance off would lock them out of this dialog. An owner grant
-  // held via a GROUP can't be checked here (the browser doesn't know the
-  // caller's groups), so this can be a false negative — an extra warning,
-  // never a missing one.
-  function callerHasDirectOwnership(data) {
-    if (!data) return false;
-    var me = callerEmail.toLowerCase();
-    if ((data.owner_email || '').toLowerCase() === me) return true;
-    return (data.grants || []).some(function(g) {
-      return g.role === 'owner' && g.principal_type === 'email' &&
-             (g.principal_value || '').toLowerCase() === me;
-    });
-  }
-
   function renderWorkspace(ws) {
     var box = $('bailey-share-workspace');
     box.innerHTML = '';
     var sub = $('bailey-share-sub');
     if (!ws) {
-      // Endpoint isn't part of a workspace — there is nothing to inherit.
+      // Endpoint isn't part of a workspace — there is nothing inherited.
       sub.textContent = 'Only people you invite can open this endpoint.';
       return;
     }
     var members = ws.members || [];
     var groups  = ws.groups  || [];
-    sub.textContent = ws.enabled
-      ? 'Everyone in the ' + ws.label + ' workspace can open this endpoint, plus anyone added below.'
-      : 'Workspace members are switched off — only the people listed below can open this endpoint.';
+    sub.textContent = 'Everyone in the ' + ws.label +
+      ' workspace can open this endpoint, plus anyone added below.';
 
     var avatar = el('div', {class:'bailey-share-avatar group', text:'WS'});
     var meta = el('div', {class:'bailey-share-meta'}, [
-      el('div', {class:'name', text: ws.label + ' members'}),
+      el('div', {class:'name', text: 'Members of ' + ws.label + ' have access'}),
       el('div', {class:'sub',  text: 'workspace · inherited from ' + ws.endpoint})
     ]);
     var panel = el('div', {class:'bailey-share-members' + (membersOpen ? ' open' : '')});
@@ -502,7 +461,8 @@ func shareModalJS(host, callerEmail, apiURL string) string {
       }
     });
 
-    // Enumerate the inherited set so an admin can see WHO this admits.
+    // Enumerate the inherited set — the whole point of this row is that an
+    // admin can see exactly WHO "workspace members" means.
     members.forEach(function(m) {
       panel.appendChild(el('div', {class:'bailey-share-member'}, [
         el('div', {class:'dot', text: initials(m)}),
@@ -518,53 +478,12 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     if (!members.length && !groups.length) {
       panel.appendChild(el('div', {class:'note', text:'This workspace has no members recorded yet.'}));
     }
+    // Say where this access is administered, since it can't be edited here.
     panel.appendChild(el('div', {class:'note',
-      text:'Managed in the workspace, not here. Removing someone from the workspace removes this access.'}));
+      text:'Managed in the workspace, not here — removing someone from the workspace removes this access.'}));
 
-    var input = el('input', {type:'checkbox'});
-    input.checked = !!ws.enabled;
-    input.setAttribute('aria-label', 'Let ' + ws.label + ' workspace members open this endpoint');
-    input.onchange = function() { setWorkspaceAccess(ws, input.checked, input); };
-    var sw = el('label', {class:'bailey-share-switch', title:'Workspace members can open this endpoint'}, [
-      input,
-      el('span', {class:'track'}),
-      el('span', {class:'knob'})
-    ]);
-
-    var head = el('div', {class:'bailey-share-inherited-head'}, [avatar, meta, countBtn, sw]);
-    box.appendChild(el('div', {class:'bailey-share-inherited' + (ws.enabled ? '' : ' off')}, [head, panel]));
-  }
-
-  function setWorkspaceAccess(ws, enabled, input) {
-    showError('');
-    var n = (ws.members || []).length;
-    var msg;
-    if (enabled) {
-      msg = 'Let all members of the ' + ws.label + ' workspace (' +
-            peopleLabel(n, (ws.groups || []).length) + ') open this endpoint?';
-    } else {
-      msg = 'Stop ' + ws.label + ' workspace members from opening this endpoint? ' +
-            'People added individually keep their access.';
-      if (!callerHasDirectOwnership(lastData)) {
-        msg += '\n\nWarning: your own access to this endpoint comes from that workspace, ' +
-               'so this will lock you out of this dialog.';
-      }
-    }
-    if (!confirm(msg)) { input.checked = !enabled; return; }
-    var body = new URLSearchParams();
-    body.append('action', 'workspace-access');
-    body.append('enabled', enabled ? 'true' : 'false');
-    input.disabled = true;
-    fetch(apiURL, {method:'POST', credentials:'same-origin',
-                   headers:{'Content-Type':'application/x-www-form-urlencoded'},
-                   body: body.toString()})
-      .then(function(r){ if(!r.ok) return r.json().then(function(d){ throw new Error(d.error||'HTTP '+r.status); }); return r.json(); })
-      .then(render)
-      .catch(function(e){
-        input.disabled = false;
-        input.checked = !enabled;
-        showError('Could not change workspace access: ' + e.message);
-      });
+    var head = el('div', {class:'bailey-share-inherited-head'}, [avatar, meta, countBtn]);
+    box.appendChild(el('div', {class:'bailey-share-inherited'}, [head, panel]));
   }
 
   // --- People picker (#251) ---
@@ -597,10 +516,9 @@ func shareModalJS(host, callerEmail, apiURL string) string {
       (lastData.grants || []).forEach(function(g) {
         if (g.principal_type === 'email') taken[(g.principal_value||'').toLowerCase()] = true;
       });
-      // Workspace members already reach this endpoint while the inheritance
-      // is on; offering to re-add them would be noise. With it off they ARE
-      // worth offering — an individual grant is how you let one back in.
-      if (lastData.workspace && lastData.workspace.enabled) {
+      // Workspace members already reach this endpoint, so offering to add
+      // them again would be noise.
+      if (lastData.workspace) {
         (lastData.workspace.members || []).forEach(function(m) { taken[m.toLowerCase()] = true; });
       }
     }
