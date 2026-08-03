@@ -24,6 +24,8 @@ const (
 	auditMagicLinkCreate = "magiclink.create" // an admin/auditor owner minted an endpoint-scoped magic link (#240)
 	auditMagicLinkRedeem = "magiclink.redeem" // a user redeemed a magic link (device trusted for one endpoint)
 	auditMagicLinkRevoke = "magiclink.revoke" // a magic link was revoked
+	auditPublicCreate    = "public.create"    // an admin/auditor owner published a production frontend publicly (#220)
+	auditPublicRevoke    = "public.revoke"    // a published endpoint was made private again (#220)
 
 	auditMemOverReservation = "container.mem_over_reservation" // a container's memory usage exceeded its reservation
 
