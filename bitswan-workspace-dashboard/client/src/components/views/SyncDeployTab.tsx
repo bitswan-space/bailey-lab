@@ -39,6 +39,15 @@ interface SyncDeployTabProps {
  * Sync & Deploy again, which now fast-forwards. main is never advanced by a
  * direct push — only by this user-gated deploy.
  */
+// Sub-tab display labels. The URL keeps the stable `checks` key (bookmarks don't
+// break), but the tab reads "Supply Chain Security" — it's the pre-deploy CVE
+// scan plus the out-of-scope audit log, so name it for what it is.
+const SUBTAB_LABELS = {
+  diff: 'Diff',
+  history: 'History',
+  checks: 'Supply Chain Security',
+} as const;
+
 export function SyncDeployTab({
   bp,
   wt,
@@ -63,9 +72,9 @@ export function SyncDeployTab({
     if (el) el.scrollTop = el.scrollHeight;
   }, [deployLog]);
 
-  // Checks: scan the image a deploy of this BP WOULD build from this copy's
-  // source (built + scanned on demand). Memoised so the panel doesn't refetch
-  // on every render.
+  // Supply Chain Security: scan the image a deploy of this BP WOULD build from
+  // this copy's source (built + scanned on demand). Memoised so the panel
+  // doesn't refetch on every render.
   const checksFetcher = useCallback(
     () => api.supplyChainPreview(bp.name, wt.name),
     [bp.name, wt.name],
@@ -313,13 +322,13 @@ export function SyncDeployTab({
             type="button"
             onClick={() => setView(id)}
             className={cn(
-              '-mb-px border-b-2 py-2.5 text-[13px] font-medium capitalize transition-colors',
+              '-mb-px border-b-2 py-2.5 text-[13px] font-medium transition-colors',
               view === id
                 ? 'border-foreground text-foreground'
                 : 'border-transparent text-muted-foreground hover:text-foreground',
             )}
           >
-            {id}
+            {SUBTAB_LABELS[id]}
           </button>
         ))}
       </div>

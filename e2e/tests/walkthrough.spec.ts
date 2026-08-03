@@ -4,7 +4,7 @@
  *
  * Journey: onboarding (OIDC → claim → device trust) → create the Meridian Foods
  * workspace via the Server Console → create the invoice-processing BP → describe
- * it → Coding Agent → Sync & Deploy (+ CVE Checks) → deploy to dev → promote to
+ * it → Coding Agent → Sync & Deploy (+ Supply Chain Security scan) → deploy to dev → promote to
  * production → backups → rehearse recovery into DR.
  *
  * PURE-BROWSER RULES (a human with a mouse + keyboard could do every step):
@@ -1387,27 +1387,27 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'file-editor-saved');
   });
 
-  // ---- Sync & Deploy: the Diff / History / Checks sub-tabs ----
+  // ---- Sync & Deploy: the Diff / History / Supply Chain Security sub-tabs ----
   // Every sub-tab a real operator inspects before shipping: the Diff (what
   // becomes main), the History (copy + main commits with deploy tags), and the
-  // Checks tab (the CVE scan of the image this deploy would build).
+  // Supply Chain Security tab (the CVE scan of the image this deploy would build).
   await chapter('sync-deploy', async () => {
     await clickTopTab(/Sync & Deploy/i);
     await capture(dashPage, 'sync-deploy');
     // (The redundant 'sync-deploy-diff' capture was removed — it duplicated the
     // Sync & Deploy shot above. The matching content slot is removed too.) We
-    // still bounce through the Diff sub-tab so History/Checks below start clean.
+    // still bounce through the Diff sub-tab so History/Supply Chain Security below start clean.
     await d.getByRole('button', { name: /^diff$/i }).first().click().catch(() => {});
     // History sub-tab — the copy + main commit timeline with deploy markers.
     await d.getByRole('button', { name: /^history$/i }).first().click().catch(() => {});
     await capture(dashPage, 'sync-deploy-history');
-    // Checks sub-tab — the pre-deploy supply-chain scan of the image this
+    // Supply Chain Security sub-tab — the pre-deploy supply-chain scan of the image this
     // deploy WOULD build. The scan bakes an ephemeral image then scans it, so
     // it can be "pending" right after a BP is scaffolded; we capture the REAL
     // CVE list AFTER the first dev deploy (see the deploy chapter), where a
     // built image for this BP exists and the preview resolves to a real scan.
     // Here we just open the tab to show it exists in the flow.
-    await d.getByRole('button', { name: /^checks$/i }).first().click();
+    await d.getByRole('button', { name: /Supply Chain Security/i }).first().click();
     await d.getByText(/Loading supply chain/i).first()
       .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
   });
@@ -1756,15 +1756,15 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'containers-memory').catch(() => {});
   });
 
-  // ---- Checks (real CVEs) — now that a built image for this BP exists, the
-  // Sync & Deploy → Checks preview resolves to a real SBOM/CVE scan. Wait for
+  // ---- Supply Chain Security (real CVEs) — now that a built image for this BP exists, the
+  // Sync & Deploy → Supply Chain Security preview resolves to a real SBOM/CVE scan. Wait for
   // the scan to leave its loading/pending states and show actual rows before
   // shooting, so the manual prints real advisories, not an empty placeholder.
   await chapter('checks-cve', async () => {
     await clickTopTab(/Sync & Deploy/i);
-    // The Checks preview bakes the image this BP would build and runs
+    // The Supply Chain Security preview bakes the image this BP would build and runs
     // syft+grype on it in the background, re-fetching the panel periodically. We
-    // re-open the Checks sub-tab a few times, each time waiting a BOUNDED window
+    // re-open the Supply Chain Security sub-tab a few times, each time waiting a BOUNDED window
     // for a REAL scan to appear (CVE rows / clean state / scanned footer). This
     // is hang-proof: every wait is a Playwright locator.waitFor with an explicit
     // timeout (never an open-ended poll), so a slow or pending scan can't stall
@@ -1781,7 +1781,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       .or(d.getByText(/scanned\b|in-scope CVE|No active CVEs|vulnerabilit|out of scope/i).first());
     let landed = false;
     for (let attempt = 0; attempt < 6 && !landed; attempt++) {
-      await d.getByRole('button', { name: /^checks$/i }).first().click().catch(() => {});
+      await d.getByRole('button', { name: /Supply Chain Security/i }).first().click().catch(() => {});
       // Bounded wait for the fetch spinner to clear, then for a real scan row.
       await d.getByText(/Loading supply chain/i).first()
         .waitFor({ state: 'hidden', timeout: 30_000 }).catch(() => {});
@@ -1791,16 +1791,16 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         .catch(() => false);
       if (!landed && attempt < 5) {
         // Re-mount the panel (diff → checks) so the NEXT fetch can pick up the
-        // finished background scan. Note we re-click Checks at the TOP of the
+        // finished background scan. Note we re-click Supply Chain Security at the TOP of the
         // next iteration, so the loop never ENDS on Diff.
         await d.getByRole('button', { name: /^diff$/i }).first().click().catch(() => {});
       }
     }
-    // Land FIRMLY on the Checks sub-tab before capturing — never leave the shot
-    // on Diff. Click Checks LAST, wait for the panel to settle on a real scan
+    // Land FIRMLY on the Supply Chain Security sub-tab before capturing — never leave the shot
+    // on Diff. Click Supply Chain Security LAST, wait for the panel to settle on a real scan
     // (or its honest pending state if the background scan is genuinely slow),
-    // then capture the Checks tab.
-    await d.getByRole('button', { name: /^checks$/i }).first().click().catch(() => {});
+    // then capture the Supply Chain Security tab.
+    await d.getByRole('button', { name: /Supply Chain Security/i }).first().click().catch(() => {});
     await d.getByText(/Loading supply chain/i).first()
       .waitFor({ state: 'hidden', timeout: 30_000 }).catch(() => {});
     // Best-effort final settle on the real scan; if still pending we capture the

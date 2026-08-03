@@ -1074,14 +1074,14 @@ export const api = {
       `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}`,
     ),
   /** Supply chain: CVEs for the image a deploy of this BP would build from the
-   *  current copy's source (Sync & Deploy → Checks). Builds + scans on demand. */
+   *  current copy's source (Sync & Deploy → Supply Chain Security). Builds + scans on demand. */
   supplyChainPreview: (bp: string, copy: string | null) =>
     getJson<SupplyChainReport>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/preview${copy ? `?copy=${encodeURIComponent(copy)}` : ''}`,
     ),
   /** Supply chain: mark a CVE out of scope. Stored in the copy's source tree
-   *  (cve-waivers.yaml, committed) — authored from the Checks tab, so it carries
-   *  to main with the code. Returns the refreshed Checks preview. */
+   *  (cve-waivers.yaml, committed) — authored from the Supply Chain Security tab, so it carries
+   *  to main with the code. Returns the refreshed Supply Chain Security preview. */
   addCveWaiver: (
     bp: string,
     body: { copy: string | null; package: string; cve: string; comment: string },

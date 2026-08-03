@@ -9,8 +9,9 @@ import { cn } from '@/lib/utils';
 /**
  * Supply chain panel (wireframe `SupplyChain`): the SBOM packages + grype CVEs
  * for the image(s) deployed to a stage, a severity rollup, and a "mark CVE out
- * of scope" flow. Out-of-scope markings are stored in bitswan.yaml (versioned)
- * with who/when/why and shown in an audit log; they drop out of the rollup.
+ * of scope" flow. Out-of-scope markings live in the BP's source tree
+ * (cve-waivers.yaml, versioned in git) with who/when/why and are shown in a
+ * dedicated audit-log section; they drop out of the severity rollup.
  *
  * Real images yield hundreds of packages, so we sort vulnerable-first and hide
  * clean packages behind a toggle (everything is still one click away).
@@ -51,15 +52,15 @@ export function SupplyChainPanel({
   stage: string;
   stageLabel: string;
   readOnly?: boolean;
-  /** Copy whose source tree out-of-scope markings are written to (Checks tab).
+  /** Copy whose source tree out-of-scope markings are written to (Supply Chain Security tab).
    *  Required for editing; the read-only Supply chain tab omits it. */
   copy?: string | null;
   /** Override how the report is loaded (defaults to the deployed-image scan).
-   *  The Checks tab passes a preview fetch of the about-to-be-built image. */
+   *  The Supply Chain Security tab passes a preview fetch of the about-to-be-built image. */
   fetcher?: () => Promise<SupplyChainReport>;
   /** Message shown when there's nothing to scan (status not-deployed). */
   emptyHint?: string;
-  /** Override the intro line above the rollup (e.g. the Checks tab explains
+  /** Override the intro line above the rollup (e.g. the Supply Chain Security tab explains
    *  it's the to-be-built image, not a deployed one). */
   intro?: React.ReactNode;
 }) {
@@ -186,7 +187,7 @@ export function SupplyChainPanel({
     const work = api.addCveWaiver(bp, { copy: copy ?? null, package: dialog.package, cve: dialog.cve, comment: comment.trim() });
     toast.promise(work, {
       loading: 'Recording…',
-      success: `${dialog.cve} marked out of scope — logged in bitswan.yaml`,
+      success: `${dialog.cve} marked out of scope — recorded in cve-waivers.yaml (your source tree)`,
       error: (e: unknown) => `Failed: ${String(e)}`,
     });
     work.then((r) => { setReport(r); setDialog(null); setComment(''); }).catch(() => {}).finally(() => setBusy(false));
@@ -265,7 +266,7 @@ export function SupplyChainPanel({
               Packages in the image{report.image_count > 1 ? 's' : ''} deployed to {stageLabel} and
               known vulnerabilities (CVEs) against them.{' '}
               {readOnly
-                ? 'Out-of-scope decisions are made from Sync & Deploy → Checks and ship with the code.'
+                ? 'Out-of-scope decisions are made from Sync & Deploy → Supply Chain Security and ship with the code.'
                 : 'Click a CVE to view it or mark it out of scope.'}
             </>
           )}
