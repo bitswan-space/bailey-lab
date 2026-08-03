@@ -96,6 +96,48 @@ func RollbackWorkspaceDeployment(workspaceName string) error {
 	return nil
 }
 
+// SiteComposePath is the workspace's site docker-compose.yml (gitops +
+// infra-driver), the file the version ledger snapshots and restores.
+func SiteComposePath(workspaceName string) string {
+	return filepath.Join(workspaceDeploymentDir(workspaceName), "docker-compose.yml")
+}
+
+// RestoreWorkspaceComposeAndRedeploy overwrites the site docker-compose.yml with
+// a previously-captured version and recreates the site containers. Unlike
+// RollbackWorkspaceDeployment (which toggles the single CLI `.rollback`
+// snapshot), this restores a SPECIFIC historical compose — the UI "roll back to
+// version N" flow, bounded to the last few versions by the caller.
+func RestoreWorkspaceComposeAndRedeploy(workspaceName, composeContent string) error {
+	if len(composeContent) == 0 {
+		return fmt.Errorf("empty rollback compose for %q — nothing to restore", workspaceName)
+	}
+	deployDir := workspaceDeploymentDir(workspaceName)
+	composePath := filepath.Join(deployDir, "docker-compose.yml")
+	if err := os.WriteFile(composePath, []byte(composeContent), 0644); err != nil {
+		return fmt.Errorf("failed to restore compose: %w", err)
+	}
+
+	projectName := workspaceName + "-site"
+	downCmd := exec.Command("docker", "compose", "down")
+	downCmd.Dir = deployDir
+	downCmd.Stdout = os.Stdout
+	downCmd.Stderr = os.Stderr
+	if err := downCmd.Run(); err != nil {
+		return fmt.Errorf("failed to stop containers: %w", err)
+	}
+	// The restored compose declares the <ws>-agent bridge external; make sure it
+	// exists before bringing gitops back up. Idempotent.
+	_ = exec.Command("docker", "network", "create", workspaceName+"-agent").Run()
+	upCmd := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--remove-orphans")
+	upCmd.Dir = deployDir
+	upCmd.Stdout = os.Stdout
+	upCmd.Stderr = os.Stderr
+	if err := upCmd.Run(); err != nil {
+		return fmt.Errorf("failed to start containers: %w", err)
+	}
+	return nil
+}
+
 // UpdateWorkspaceDeployment updates the workspace deployment with new AOC configuration
 func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, customInfraDriverImage string, customEgressGatewayImage string, staging bool, dev bool, trustCA bool) error {
 	// Use HOME for file operations (works inside container and outside)

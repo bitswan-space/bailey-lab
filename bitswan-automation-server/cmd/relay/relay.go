@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -40,7 +41,7 @@ func NewRelayCmd() *cobra.Command {
 }
 
 func newServeCmd() *cobra.Command {
-	var tunnelAddr, passthroughAddr, certDir, aocAPI string
+	var tunnelAddr, passthroughAddr, certDir, aocAPI, relaySecret string
 
 	cmd := &cobra.Command{
 		Use:          "serve",
@@ -73,6 +74,18 @@ func newServeCmd() *cobra.Command {
 			}
 			srv := relaysvc.NewServer(tunnelAddr, passthroughAddr, tunnelTLS, validate)
 
+			// Published public endpoints (issue #220) don't carry the owning
+			// server's subdomain in their SNI, so the relay resolves them against
+			// its OWN configured AOC (never a client-supplied URL), presenting a
+			// shared secret. No secret ⇒ public-host routing stays disabled.
+			if relaySecret != "" {
+				srv.ResolvePublicHost = func(host string) (string, error) {
+					return resolvePublicHostViaAOC(aocAPI, relaySecret, host)
+				}
+			} else {
+				fmt.Println("ℹ️  no --relay-secret / $BITSWAN_RELAY_SHARED_SECRET set — public-endpoint (#220) routing is disabled")
+			}
+
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			return srv.Run(ctx)
@@ -82,7 +95,48 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&passthroughAddr, "passthrough-addr", ":9443", "Address Traefik forwards browser streams to (SNI passthrough)")
 	cmd.Flags().StringVar(&certDir, "cert-dir", "/var/lib/bitswan-relay", "Where the relay's self-signed tunnel cert is stored")
 	cmd.Flags().StringVar(&aocAPI, "aoc-api", "", "AOC base URL the relay validates Bailey tokens against (required; must be the real AOC, never taken from the connecting client)")
+	cmd.Flags().StringVar(&relaySecret, "relay-secret", os.Getenv("BITSWAN_RELAY_SHARED_SECRET"), "Shared secret the relay presents to the AOC to resolve published public-endpoint hosts (issue #220). Defaults to $BITSWAN_RELAY_SHARED_SECRET; empty disables public-host routing.")
 	return cmd
+}
+
+// resolvePublicHostViaAOC asks the relay's configured AOC which server owns a
+// published public host (issue #220), returning that server's subdomain (the
+// tunnel key). Empty return + nil error means "no such public host". The AOC
+// url is the relay's OWN (never client-supplied); the shared secret authorises
+// this relay to the AOC's resolve endpoint.
+func resolvePublicHostViaAOC(aocApiURL, relaySecret, host string) (string, error) {
+	aocApiURL = strings.TrimRight(strings.TrimSpace(aocApiURL), "/")
+	if aocApiURL == "" {
+		return "", fmt.Errorf("empty AOC url")
+	}
+	if strings.TrimSpace(relaySecret) == "" {
+		return "", fmt.Errorf("no relay shared secret configured")
+	}
+	req, err := http.NewRequest(http.MethodGet,
+		aocApiURL+"/api/automation_server/public-endpoint/resolve?host="+url.QueryEscape(host), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+relaySecret)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("reach AOC: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", nil // not a known public host
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("AOC public-endpoint resolve returned HTTP %d", resp.StatusCode)
+	}
+	var out struct {
+		Subdomain string `json:"subdomain"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decode AOC resolve: %w", err)
+	}
+	return out.Subdomain, nil
 }
 
 func newFingerprintCmd() *cobra.Command {

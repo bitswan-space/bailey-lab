@@ -197,6 +197,11 @@ const ACTIVITY_KINDS = {
   'device.revoke':    { icon: 'user-x',       tone: 'danger',  verb: 'revoked a device for' },
   'totp.enrol':       { icon: 'key-round',    tone: 'warning', verb: 'enrolled an authenticator' },
   'server.claim':     { icon: 'flag',         tone: 'primary', verb: 'claimed this server' },
+  // target = "<from> → <to>" (or "rolled back <from> → <to>"); see the daemon's
+  // update_history ledger.
+  'server.update':    { icon: 'arrow-up-circle', tone: 'primary', verb: 'updated the automation server' },
+  // target = "<workspace>: <from> → <to>".
+  'workspace.update': { icon: 'arrow-up-circle', tone: 'primary', verb: 'updated' },
   'workspace.create': { icon: 'folder-plus',  tone: 'primary', verb: 'created workspace' },
   'workspace.trash':  { icon: 'trash-2',      tone: 'danger',  verb: 'trashed workspace' },
   // Invite lifecycle (target = invitee email; for redeem the ACTOR is the

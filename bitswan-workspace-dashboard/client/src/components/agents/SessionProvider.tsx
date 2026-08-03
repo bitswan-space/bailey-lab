@@ -53,6 +53,13 @@ export interface ActiveSession {
   exited: boolean;
   /** True when started via Resume (claude --resume <uuid>). */
   resume: boolean;
+  /**
+   * WebSocket close code, set once the session has exited. 1008/1011 mean
+   * the server refused to spawn the agent at all (bad request, not
+   * authenticated, coding-agent host unreachable) — those aren't fixed by
+   * trying again. A normal 1000/1005 means the remote process ended.
+   */
+  exitCode?: number;
 }
 
 interface Scope {
@@ -84,7 +91,7 @@ interface SessionsContextValue {
   startRequirementSession(copy: string, bp: string, requirementId: string): string;
   resumeSession(copy: string, bp: string | null, claudeSessionId: string, kind: SessionKind): string;
   /** Called by SessionTerminal when its WS closes. */
-  markExited(id: string): void;
+  markExited(id: string, exitCode?: number): void;
   /** Subscribed-to by hooks that want to invalidate caches when a session ends. */
   onExit(handler: (session: ActiveSession) => void): () => void;
 
@@ -290,12 +297,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [setSelectedFor],
   );
 
-  const markExited = useCallback((id: string) => {
+  const markExited = useCallback((id: string, exitCode?: number) => {
     setSessions((prev) => {
       let exited: ActiveSession | undefined;
       const next = prev.map((s) => {
         if (s.id !== id) return s;
-        const updated = { ...s, exited: true };
+        const updated = {
+          ...s,
+          exited: true,
+          ...(exitCode === undefined ? {} : { exitCode }),
+        };
         exited = updated;
         return updated;
       });
@@ -414,7 +425,7 @@ function SessionsLayer({
   // eslint-disable-next-line no-restricted-syntax -- discriminated scope state
   currentScope: Scope | null;
   selectedByScope: Record<string, string | null>;
-  markExited: (id: string) => void;
+  markExited: (id: string, exitCode?: number) => void;
   // eslint-disable-next-line no-restricted-syntax -- null = nowhere to overlay
   rect: PaneRect | null;
 }) {
@@ -473,7 +484,7 @@ function SessionsLayer({
                 kind={s.kind}
                 resume={s.resume}
                 hidden={!selected}
-                onExit={() => markExited(s.id)}
+                onExit={(info) => markExited(s.id, info.code)}
                 {...(s.requirementId ? { requirementId: s.requirementId } : {})}
               />
             </div>

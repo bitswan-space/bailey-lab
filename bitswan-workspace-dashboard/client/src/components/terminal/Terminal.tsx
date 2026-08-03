@@ -5,6 +5,19 @@ import { Base64, ClipboardAddon, type IClipboardProvider } from '@xterm/addon-cl
 
 type UploadStatus = 'uploading' | 'done' | 'failed';
 
+/**
+ * Why the socket went away. The WebSocket close code is the only structured
+ * signal we get: the server closes with 1008/1011 when it refused to spawn
+ * anything at all (bad request, not authenticated, coding-agent host
+ * unreachable), and with a normal 1000/1005 when the remote process simply
+ * ended. Callers use that to tell "retrying might help" from "it won't".
+ */
+export interface TerminalExitInfo {
+  /** WebSocket close code (1000/1005 = normal, 1008 = rejected, 1011 = server error). */
+  code: number;
+  reason: string;
+}
+
 export interface TerminalProps {
   /**
    * WebSocket path (path + query) the terminal connects to. The component
@@ -14,7 +27,7 @@ export interface TerminalProps {
    */
   wsUrl: string;
   /** Fires once when the underlying WebSocket reports close. */
-  onExit?: () => void;
+  onExit?: (info: TerminalExitInfo) => void;
   /**
    * Uploads pasted/dropped files somewhere the process on the far end of the
    * PTY can read them, and resolves to the paths (relative to that process's
@@ -236,9 +249,9 @@ export function Terminal({ wsUrl, onExit, onUploadFiles }: TerminalProps) {
       }
     });
 
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (ev) => {
       term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
-      if (wasOpened) onExitRef.current?.();
+      if (wasOpened) onExitRef.current?.({ code: ev.code, reason: ev.reason });
     });
 
     const encoder = new TextEncoder();

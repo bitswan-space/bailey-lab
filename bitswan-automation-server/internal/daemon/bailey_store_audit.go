@@ -11,19 +11,21 @@ import "time"
 // Stable action verbs. Centralised so call sites can't drift on
 // spelling and the frontend can switch on a known set.
 const (
-	auditDeviceApprove     = "device.approve"     // a device became trusted (pair-approve, self-trust, or claim TOFU)
-	auditDeviceRevoke      = "device.revoke"      // a device was removed (self-service or admin)
-	auditWorkspaceCreate   = "workspace.create"   // a workspace was provisioned
-	auditWorkspaceTrash    = "workspace.trash"    // a workspace was moved to trash
-	auditServerClaim       = "server.claim"       // the one-time root-admin bootstrap ran
-	auditTOTPEnrol         = "totp.enrol"         // a user enrolled an authenticator secret
-	auditInviteCreate      = "invite.create"      // an admin invited an AOC-org member
-	auditInviteResend      = "invite.resend"      // an admin re-sent an invite (fresh token + expiry)
-	auditInviteRevoke      = "invite.revoke"      // an admin revoked an outstanding invite
-	auditInviteRedeem      = "invite.redeem"      // an invitee redeemed their invite (first device trusted)
-	auditMagicLinkCreate   = "magiclink.create"   // an admin/auditor owner minted an endpoint-scoped magic link (#240)
-	auditMagicLinkRedeem   = "magiclink.redeem"   // a user redeemed a magic link (device trusted for one endpoint)
-	auditMagicLinkRevoke   = "magiclink.revoke"   // a magic link was revoked
+	auditDeviceApprove   = "device.approve"   // a device became trusted (pair-approve, self-trust, or claim TOFU)
+	auditDeviceRevoke    = "device.revoke"    // a device was removed (self-service or admin)
+	auditWorkspaceCreate = "workspace.create" // a workspace was provisioned
+	auditWorkspaceTrash  = "workspace.trash"  // a workspace was moved to trash
+	auditServerClaim     = "server.claim"     // the one-time root-admin bootstrap ran
+	auditTOTPEnrol       = "totp.enrol"       // a user enrolled an authenticator secret
+	auditInviteCreate    = "invite.create"    // an admin invited an AOC-org member
+	auditInviteResend    = "invite.resend"    // an admin re-sent an invite (fresh token + expiry)
+	auditInviteRevoke    = "invite.revoke"    // an admin revoked an outstanding invite
+	auditInviteRedeem    = "invite.redeem"    // an invitee redeemed their invite (first device trusted)
+	auditMagicLinkCreate = "magiclink.create" // an admin/auditor owner minted an endpoint-scoped magic link (#240)
+	auditMagicLinkRedeem = "magiclink.redeem" // a user redeemed a magic link (device trusted for one endpoint)
+	auditMagicLinkRevoke = "magiclink.revoke" // a magic link was revoked
+	auditPublicCreate    = "public.create"    // an admin/auditor owner published a production frontend publicly (#220)
+	auditPublicRevoke    = "public.revoke"    // a published endpoint was made private again (#220)
 
 	auditMemOverReservation = "container.mem_over_reservation" // a container's memory usage exceeded its reservation
 
@@ -39,6 +41,14 @@ const (
 	// lockout marks the point a per-account/per-IP cooldown was triggered.
 	audit2FAFailed  = "2fa.verify_failed" // a 2FA verification attempt failed (brute-force signal)
 	audit2FALockout = "2fa.lockout"       // too many failures → per-account/per-IP cooldown engaged
+
+	// Update / rollback of the automation-server binary and of workspaces. The
+	// target carries the version transition (e.g. "v1 → v2"); rollbacks reuse the
+	// same verbs so a SIEM sees the whole lineage. The structured version ledger
+	// (who/when/which version, plus rollback artifacts) lives in update_history;
+	// these mirror it into the activity feed + SIEM.
+	auditServerUpdate    = "server.update"    // the automation server binary was updated/rolled back
+	auditWorkspaceUpdate = "workspace.update" // a workspace was updated/rolled back to new images
 )
 
 // eventRecord is one audit row, JSON-shaped for the overview feed.

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Terminal } from '@/components/terminal/Terminal';
+import { Terminal, type TerminalExitInfo } from '@/components/terminal/Terminal';
 import { api } from '@/lib/api';
 import { getAccessToken } from '@/lib/auth-token';
 
@@ -15,7 +15,7 @@ interface Props {
   /** When true, ssh into the agent with `claude --resume <sessionId>` instead of a fresh session. */
   resume: boolean;
   hidden: boolean;
-  onExit: () => void;
+  onExit: (info: TerminalExitInfo) => void;
 }
 
 /**

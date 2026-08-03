@@ -48,7 +48,7 @@ interface WorkspaceContextValue {
   // eslint-disable-next-line no-restricted-syntax -- nullable until first delivery
   tasks: GitTask[] | null;
   /** Monotonic counter bumped each time a supply-chain scan finishes (SSE
-   *  `supply_chain` event). The Checks / Supply chain panel watches it to
+   *  `supply_chain` event). The Supply Chain Security / Supply chain panel watches it to
    *  refresh itself the moment results exist — no manual "check back". */
   supplyChainTick: number;
   /** Last deploy task that reached a terminal state (SSE `deploy_progress`
@@ -303,7 +303,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setStatus('live');
     });
     src.addEventListener('supply_chain', () => {
-      // A scan finished — bump the counter so any open Checks / Supply chain
+      // A scan finished — bump the counter so any open Supply Chain Security / Supply chain
       // panel refetches and shows the result without a manual refresh.
       setSupplyChainTick((n) => n + 1);
       setStatus('live');

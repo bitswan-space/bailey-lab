@@ -54,6 +54,94 @@ logger = logging.getLogger(__name__)
 SECRET_MASK = "****"
 
 
+def _project_inspect(info: dict) -> dict:
+    """Project a raw `docker inspect` record onto the fields the dashboard's
+    Inspect view renders (mirrors client/src/types/docker.ts).
+
+    This is an explicit ALLOW-LIST, not a blacklist: the raw record carries
+    `Config.Env` — the container's environment with secret values UNMASKED — so
+    nothing crosses the wire unless it is named here. The masked `Env` rows are
+    attached separately by `inspect_automation`.
+
+    Docker nests most of this (`.Name`, `.State.Status`, `.State.Pid`,
+    `.NetworkSettings.Networks.<net>.IPAddress`, `.Config.Hostname`), which is
+    exactly the shape the dashboard reads — unlike the flat `/containers/json`
+    LIST dict `Container.to_docker_dict()` produces (#265).
+    """
+    info = info or {}
+    state = info.get("State") or {}
+    health = state.get("Health") or {}
+    config = info.get("Config") or {}
+    healthcheck = config.get("Healthcheck") or {}
+    host = info.get("HostConfig") or {}
+    net = info.get("NetworkSettings") or {}
+    projected = {
+        "Id": info.get("Id"),
+        "Name": info.get("Name"),
+        # Docker's `Created` is an RFC3339 STRING here (the list shape uses Unix
+        # seconds) — passed through verbatim; the UI parses it.
+        "Created": info.get("Created"),
+        "RestartCount": info.get("RestartCount"),
+        "Image": info.get("Image"),
+        "State": {
+            "Status": state.get("Status"),
+            "Running": state.get("Running"),
+            "Pid": state.get("Pid"),
+        },
+        "Config": {
+            "Image": config.get("Image"),
+            "Hostname": config.get("Hostname"),
+            "Labels": config.get("Labels") or {},
+        },
+        "HostConfig": {
+            "NanoCpus": host.get("NanoCpus"),
+            "Memory": host.get("Memory"),
+            "NetworkMode": host.get("NetworkMode"),
+        },
+        "NetworkSettings": {
+            "Networks": {
+                name: {"IPAddress": (cfg or {}).get("IPAddress")}
+                for name, cfg in (net.get("Networks") or {}).items()
+            },
+            # An exposed-but-unpublished port maps to null in docker's output;
+            # normalized to [] so the UI can tell "no host binding" from
+            # "field missing".
+            "Ports": {
+                port: [
+                    {
+                        "HostIp": (b or {}).get("HostIp"),
+                        "HostPort": (b or {}).get("HostPort"),
+                    }
+                    for b in (binds or [])
+                ]
+                for port, binds in (net.get("Ports") or {}).items()
+            },
+        },
+        "Mounts": [
+            {
+                "Type": m.get("Type"),
+                "Source": m.get("Source"),
+                "Destination": m.get("Destination"),
+                "Mode": m.get("Mode"),
+                "RW": m.get("RW"),
+            }
+            for m in (info.get("Mounts") or [])
+            if isinstance(m, dict)
+        ],
+    }
+    if health:
+        projected["State"]["Health"] = {
+            "Status": health.get("Status"),
+            "FailingStreak": health.get("FailingStreak"),
+        }
+    if healthcheck:
+        projected["Config"]["Healthcheck"] = {
+            "Test": healthcheck.get("Test"),
+            "Interval": healthcheck.get("Interval"),
+        }
+    return projected
+
+
 def _mask_env(env_list: list, secret_keys: set, reveal: bool) -> list[dict]:
     """Parse docker-inspect `Config.Env` ("KEY=VALUE" strings) into
     [{name, value, secret, masked}] rows, replacing secret values with
@@ -458,9 +546,17 @@ class AutomationService:
     async def inspect_automation(
         self, deployment_id: str, by: str | None = None
     ) -> list[dict]:
-        """The deployment's containers (the driver-derived dict), each enriched
-        with its environment (`Env`: [{name, value, secret, masked}]) read from
-        the driver's raw `docker inspect`.
+        """The deployment's containers as `docker inspect`-shaped records (see
+        `_project_inspect`), each enriched with its environment (`Env`:
+        [{name, value, secret, masked}]).
+
+        The container LIST is only used to discover the ids — the payload itself
+        comes from the driver's raw `docker inspect`, because that is the only
+        source of name/status/pid/network/hostname/mounts/limits. Returning the
+        flat `/containers/json` list dict instead left most of the Inspect view
+        blank (#265). A container whose inspect fails (or that disappeared
+        between list and inspect) degrades to the list dict, so it is still
+        listed — the UI renders the fields it can't read as "unavailable".
 
         Secret env values (names in the BP's secret set for the deployment's
         realm) are MASKED here, server-side — a masked value never leaves
@@ -473,22 +569,37 @@ class AutomationService:
         if not containers:
             return containers
         secret_keys, reveal = self._env_secret_visibility(deployment_id, by)
+        out: list[dict] = []
         for c in containers:
             cid = c.get("Id")
             if not cid:
+                out.append(c)
                 continue
             try:
                 info = await self.infra_driver.container_inspect(
                     self._workspace_ctx(), cid
                 )
-                env_list = ((info or {}).get("Config") or {}).get("Env") or []
             except Exception:
                 logger.warning(
-                    "container_inspect failed for %s; omitting env", cid[:12]
+                    "container_inspect failed for %s; falling back to the "
+                    "container-list record (no env)",
+                    cid[:12],
                 )
+                out.append(c)
                 continue
-            c["Env"] = _mask_env(env_list, secret_keys, reveal)
-        return containers
+            if not info:
+                # Gone between list and inspect — keep what the list told us.
+                out.append(c)
+                continue
+            row = _project_inspect(info)
+            # The gitops.* labels come from the container either way; prefer the
+            # inspect record but don't lose them if it reported none.
+            if not row["Config"]["Labels"]:
+                row["Config"]["Labels"] = c.get("Labels") or {}
+            env_list = (info.get("Config") or {}).get("Env") or []
+            row["Env"] = _mask_env(env_list, secret_keys, reveal)
+            out.append(row)
+        return out
 
     # Roles allowed to see NON-production secret values in the env view: any
     # role the daemon's authoritative store knows ("normal users"). Production
@@ -1462,6 +1573,14 @@ class AutomationService:
         from app.services.bp_databases import register_new_bps_for_members
 
         register_new_bps_for_members(bs_yaml, members)
+
+        # Seed the default egress allow-list (the AOC Keycloak the platform
+        # itself injects as KEYCLOAK_URL) for any (bp, realm) here that has no
+        # firewall node yet — #311. Rides this method's single write + commit,
+        # so it is versioned in bitswan.yaml and appears in the deployment
+        # history like every other firewall change; an operator can revoke it,
+        # and a revoked/denied realm is never re-seeded.
+        firewall_service.seed_default_rules_for_members(bs_yaml, members)
 
         deployments = bs_yaml.setdefault("deployments", {})
 
@@ -4712,6 +4831,18 @@ class AutomationService:
                 deployment_config["active"] = True
 
             bp = deployment_bp(deployment_config)
+            # Default egress allow-list for a first-deploy (bp, realm) — the
+            # single-deployment equivalent of the seeding write_deployment_entries
+            # does (#311). Placed here so it rides the same commit as the deploy.
+            firewall_service.seed_default_rules_for_members(
+                bs_yaml,
+                [
+                    {
+                        "relative_path": deployment_config.get("relative_path"),
+                        "stage": deployment_config.get("stage") or "production",
+                    }
+                ],
+            )
             await self._persist_bp_state(
                 bs_yaml,
                 {bp} if bp else set(),

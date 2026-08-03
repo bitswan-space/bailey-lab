@@ -326,6 +326,7 @@ func (s *Server) handleUpgradeWorkspace(w http.ResponseWriter, r *http.Request, 
 	writeEvent(map[string]any{"event": "start", "message": "Updating " + workspaceName + "…", "fraction": 0})
 	err := s.runWorkspaceUpdate(WorkspaceUpdateRequest{
 		Workspace: workspaceName,
+		Actor:     email,
 		Staging:   useStagingTrack(),
 		Progress: func(fraction float64, label string) {
 			writeEvent(map[string]any{"event": "progress", "fraction": fraction, "message": label})

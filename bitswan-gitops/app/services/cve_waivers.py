@@ -9,8 +9,8 @@ The file sits BESIDE the automation source directories, never inside one, so it
 is outside the content-addressed image build (`dirs_to_merge` are the automation
 dirs) — marking a CVE out of scope never rebuilds or rescans the image.
 
-Decisions are made from the Checks tab (which operates on a copy); the Supply
-chain tab reads them from `main` read-only, for audit.
+Decisions are made from the Supply Chain Security tab (which operates on a copy);
+the Supply chain tab reads them from `main` read-only, for audit.
 """
 
 import os

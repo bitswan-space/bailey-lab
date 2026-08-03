@@ -297,6 +297,22 @@ func AgentNetworkName(workspaceName string) string {
 	return workspaceName + "-agent"
 }
 
+// gitopsContainerFilterArgs are the `docker ps` filters that select EXACTLY the
+// workspace's gitops container — and nothing else. Scoping by
+// `gitops.workspace` alone is NOT enough: every automation gitops deploys
+// (live-dev previews, blue/green/staging app containers, garage, postgres,
+// firewall gateways) also carries that label, so a bare filter matches dozens of
+// containers. Many of those share another container's network namespace
+// (network_mode: container:…) and Docker refuses to attach an extra network to
+// such a container — so attaching them would abort the whole agent bring-up.
+// The compose service label pins it to the single gitops service container.
+func gitopsContainerFilterArgs(workspaceName string) []string {
+	return []string{
+		"--filter", "label=gitops.workspace=" + workspaceName,
+		"--filter", "label=com.docker.compose.service=bitswan-gitops",
+	}
+}
+
 // EnsureAgentNetwork creates the dedicated agent↔gitops bridge (idempotent) and
 // attaches the currently-running gitops container to it. The gitops compose
 // also declares this network (dockercompose.go), so the wiring survives a
@@ -307,10 +323,10 @@ func (c *CodingAgentService) EnsureAgentNetwork() error {
 	if _, err := docker.EnsureDockerNetwork(net, false); err != nil {
 		return fmt.Errorf("failed to ensure agent network %q: %w", net, err)
 	}
-	// Find the gitops container by its workspace label (its container name is
-	// project-prefixed and not stable, but the label is).
-	out, err := exec.Command("docker", "ps", "-q",
-		"--filter", "label=gitops.workspace="+c.WorkspaceName).Output()
+	// Find the gitops container — and ONLY gitops (see gitopsContainerFilterArgs
+	// for why the compose-service filter is load-bearing).
+	psArgs := append([]string{"ps", "-q"}, gitopsContainerFilterArgs(c.WorkspaceName)...)
+	out, err := exec.Command("docker", psArgs...).Output()
 	if err != nil {
 		return fmt.Errorf("failed to locate gitops container for %q: %w", c.WorkspaceName, err)
 	}

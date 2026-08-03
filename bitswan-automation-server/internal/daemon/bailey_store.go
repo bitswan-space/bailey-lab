@@ -226,6 +226,25 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_ts_idx ON events(ts);
 
+-- Update history: an append-only ledger of automation-server and workspace
+-- updates (and rollbacks) — WHO updated WHAT to WHICH version and WHEN. It also
+-- backs rollback: the artifact column holds the pre-update state to restore (for the
+-- server, a path to the saved previous binary; for a workspace, the inline
+-- pre-update docker-compose.yml). Pruned to the last few rows per target
+-- (updateRollbackDepth), whose artifacts are the offered rollback points.
+CREATE TABLE IF NOT EXISTS update_history (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts           TEXT NOT NULL,
+  actor        TEXT NOT NULL COLLATE NOCASE,
+  target_kind  TEXT NOT NULL,
+  target_name  TEXT NOT NULL,
+  from_version TEXT NOT NULL,
+  to_version   TEXT NOT NULL,
+  is_rollback  INTEGER NOT NULL DEFAULT 0,
+  artifact     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS update_history_target_idx ON update_history(target_kind, target_name, id);
+
 -- Pending Bailey invites. An admin invites an AOC-org member by email;
 -- the emailed link carries a single-use token whose SHA-256 hex digest
 -- is stored here (the raw token is never at rest — a leaked/backed-up
@@ -245,6 +264,20 @@ CREATE TABLE IF NOT EXISTS invites (
   consumed_at TEXT,
   email_sent  INTEGER NOT NULL DEFAULT 0
 );
+
+-- Published public endpoints (issue #220). An auditor/admin publishes a
+-- PRODUCTION frontend as a public URL: a secondary host under the AOC's
+-- *.public.<aoc-id> wildcard that the gate serves with NO auth and a fixed
+-- anon@example.com identity toward the app. One row per published endpoint;
+-- public_host is the AOC-allocated <slug>.public.<aoc-id>.bswn.io.
+CREATE TABLE IF NOT EXISTS public_endpoints (
+  endpoint_host TEXT PRIMARY KEY COLLATE NOCASE,
+  public_host   TEXT NOT NULL COLLATE NOCASE,
+  created_by    TEXT NOT NULL COLLATE NOCASE,
+  created_at    TEXT NOT NULL,
+  FOREIGN KEY (endpoint_host) REFERENCES endpoints(hostname) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS public_endpoints_pub_idx ON public_endpoints(public_host);
 `
 
 // baileyDBPath returns the absolute on-disk location of the daemon's

@@ -354,6 +354,8 @@ func (s *Server) Run() error {
 	// protected by basic auth with the shared bridge secret.
 	docsMux.HandleFunc(acmeBridgePath+"/present", s.handleACMEDNSChallenge("present"))
 	docsMux.HandleFunc(acmeBridgePath+"/cleanup", s.handleACMEDNSChallenge("cleanup"))
+	// Published public endpoints, for the dashboard's "Open app" PUBLIC badge (#220).
+	docsMux.HandleFunc("/public-endpoints", s.handlePublicEndpointsList)
 
 	s.baileyServer = &http.Server{Handler: gateMux}
 	s.docsServer = &http.Server{
@@ -472,6 +474,11 @@ func (s *Server) Run() error {
 	// keep an outbound tunnel to the relay so the public URL reaches us. No-op
 	// otherwise.
 	s.startRelayTunnel()
+
+	// Re-assert published public endpoints (issue #220): warm the gate's
+	// public-host cache and re-register each public host's traefik route so a
+	// restart restores public serving. Idempotent; no-op when none are set.
+	reapplyPublicEndpoints()
 
 	// Paranoid end-to-end-TLS self-check for EVERY server with a public domain
 	// (proxied or directly-addressed): confirm the certificate the world is

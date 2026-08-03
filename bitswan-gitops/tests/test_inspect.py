@@ -1,14 +1,20 @@
 """Tests for the Inspect-modal backend: bp_files (git-backed source browse at a
-commit) and scale_business_process (scale all of a BP stage's members). The
-bundle (docker save + pg_dump) is exercised live."""
+commit), scale_business_process (scale all of a BP stage's members) and the
+inspect payload shape the Overview panel renders. The bundle (docker save +
+pg_dump) is exercised live."""
 
 import asyncio
 import os
 import subprocess
+import types
 
 from app.utils import dump_bitswan_yaml
 from app.services import automation_service as asvc
-from app.services.automation_service import AutomationService
+from app.services.automation_service import (
+    AutomationService,
+    SECRET_MASK,
+    _project_inspect,
+)
 
 
 def _git(*args, cwd):
@@ -135,3 +141,205 @@ def test_scale_business_process_scales_all_members(tmp_path, monkeypatch):
     assert res["replicas"] == 3
     assert set(res["members"]) == {"backend-shop-dev", "frontend-shop-dev"}
     assert sorted(calls) == [("backend-shop-dev", 3), ("frontend-shop-dev", 3)]
+
+
+# --- the Overview panel's payload shape (#265) -----------------------------
+
+# A realistic `docker inspect` record for a live-dev frontend container, trimmed
+# to the keys the projection reads plus a couple it must NOT forward.
+_RAW_INSPECT = {
+    "Id": "56e6dff3a7de1f2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071829304",
+    "Created": "2026-07-30T14:53:59.123456789Z",
+    "Name": "/frontend-copy-admin-timssandbox2-bswn-io-bp-bookmaker-live-dev",
+    "RestartCount": 0,
+    "Image": "sha256:aaaabbbbccccddddeeeeffff0000111122223333444455556666777788889999",
+    "State": {
+        "Status": "running",
+        "Running": True,
+        "Paused": False,
+        "Pid": 41234,
+        "Health": {"Status": "healthy", "FailingStreak": 0, "Log": [{"Output": "ok"}]},
+    },
+    "Config": {
+        "Hostname": "56e6dff3a7de",
+        "Image": "internal/horror-bookmaker-frontend:sha244750a6479",
+        "Labels": {
+            "gitops.deployment_id": "frontend-bookmaker-live-dev",
+            "gitops.workspace": "horror",
+        },
+        # MUST NOT reach the client unmasked — the whole point of the allow-list.
+        "Env": ["API_KEY=supersecret", "BITSWAN_AUTOMATION_STAGE=live-dev"],
+        "Healthcheck": {
+            "Test": ["CMD-SHELL", "curl -f localhost:3000"],
+            "Interval": 30000000000,
+        },
+    },
+    "HostConfig": {
+        "NanoCpus": 2000000000,
+        "Memory": 536870912,
+        "NetworkMode": "horror-net",
+    },
+    "NetworkSettings": {
+        "Ports": {
+            "3000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "32770"}],
+            "9000/tcp": None,
+        },
+        "Networks": {
+            "horror-net": {
+                "IPAddress": "172.19.0.7",
+                "MacAddress": "02:42:ac:13:00:07",
+                "NetworkID": "abc123",
+            }
+        },
+    },
+    "Mounts": [
+        {
+            "Type": "bind",
+            "Source": "/opt/bitswan/copies/main/bookmaker",
+            "Destination": "/src",
+            "Mode": "ro",
+            "RW": False,
+        }
+    ],
+}
+
+# What `Container.to_docker_dict()` produces — the flat `/containers/json` LIST
+# shape that inspect_automation used to return, leaving the panel blank.
+_LIST_DICT = {
+    "Id": _RAW_INSPECT["Id"],
+    "Names": ["/frontend-bookmaker-live-dev"],
+    "State": "running",
+    "Status": "healthy",
+    "Created": 1785000839,
+    "Image": "internal/horror-bookmaker-frontend:sha244750a6479",
+    "Labels": {"gitops.deployment_id": "frontend-bookmaker-live-dev"},
+}
+
+
+def test_project_inspect_keeps_the_nested_fields_the_panel_renders():
+    p = _project_inspect(_RAW_INSPECT)
+
+    assert (
+        p["Name"] == "/frontend-copy-admin-timssandbox2-bswn-io-bp-bookmaker-live-dev"
+    )
+    assert p["State"]["Status"] == "running"
+    assert p["State"]["Running"] is True
+    assert p["State"]["Pid"] == 41234
+    assert p["State"]["Health"] == {"Status": "healthy", "FailingStreak": 0}
+    assert p["Config"]["Hostname"] == "56e6dff3a7de"
+    assert p["Config"]["Image"] == "internal/horror-bookmaker-frontend:sha244750a6479"
+    assert p["Config"]["Labels"]["gitops.workspace"] == "horror"
+    assert p["Config"]["Healthcheck"]["Interval"] == 30000000000
+    assert p["HostConfig"] == {
+        "NanoCpus": 2000000000,
+        "Memory": 536870912,
+        "NetworkMode": "horror-net",
+    }
+    assert p["NetworkSettings"]["Networks"] == {
+        "horror-net": {"IPAddress": "172.19.0.7"}
+    }
+    # A published port keeps its host binding; an exposed-but-unpublished port
+    # normalizes from null to [] so the UI can tell it from a missing field.
+    assert p["NetworkSettings"]["Ports"] == {
+        "3000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "32770"}],
+        "9000/tcp": [],
+    }
+    assert p["Mounts"] == [
+        {
+            "Type": "bind",
+            "Source": "/opt/bitswan/copies/main/bookmaker",
+            "Destination": "/src",
+            "Mode": "ro",
+            "RW": False,
+        }
+    ]
+    # `Created` stays docker's RFC3339 string — NOT coerced to a number, which is
+    # what rendered every timestamp as January 1970.
+    assert p["Created"] == "2026-07-30T14:53:59.123456789Z"
+
+
+def test_project_inspect_is_an_allow_list_and_drops_raw_env():
+    p = _project_inspect(_RAW_INSPECT)
+    # The unmasked `Config.Env` must never be forwarded; masked rows are attached
+    # separately by inspect_automation as a top-level `Env`.
+    assert "Env" not in p["Config"]
+    assert "Log" not in p["State"]["Health"]
+    assert "MacAddress" not in p["NetworkSettings"]["Networks"]["horror-net"]
+
+
+def test_project_inspect_tolerates_an_empty_record():
+    p = _project_inspect({})
+    assert p["Id"] is None
+    assert p["State"] == {"Status": None, "Running": None, "Pid": None}
+    assert p["Config"]["Labels"] == {}
+    assert p["Mounts"] == []
+    assert "Health" not in p["State"]
+
+
+def _inspect_stub(containers, inspect_result=None, boom=False):
+    """A minimal `self` for AutomationService.inspect_automation."""
+
+    async def get_container(_deployment_id):
+        return containers
+
+    async def container_inspect(_ctx, _cid):
+        if boom:
+            raise RuntimeError("driver unreachable")
+        return inspect_result
+
+    return types.SimpleNamespace(
+        get_container=get_container,
+        infra_driver=types.SimpleNamespace(container_inspect=container_inspect),
+        _workspace_ctx=lambda: None,
+        _env_secret_visibility=lambda _dep, _by: ({"API_KEY"}, False),
+    )
+
+
+def _inspect(stub, deployment_id="frontend-bookmaker-live-dev", by=None):
+    return asyncio.run(AutomationService.inspect_automation(stub, deployment_id, by=by))
+
+
+def test_inspect_automation_returns_the_inspect_shape_not_the_list_shape():
+    """The regression this fixes: the endpoint used to return the flat container
+    LIST dict, so the panel's Name/Status/Network/IP/Ports/Hostname/PID reads
+    (all nested) resolved to nothing."""
+    rows = _inspect(_inspect_stub([dict(_LIST_DICT)], inspect_result=_RAW_INSPECT))
+
+    assert len(rows) == 1
+    row = rows[0]
+    # Nested, docker-shaped — not `Names`/`State: "running"`.
+    assert "Names" not in row
+    assert row["Name"].lstrip("/").startswith("frontend-")
+    assert row["State"]["Status"] == "running"
+    assert row["State"]["Pid"] == 41234
+    assert row["NetworkSettings"]["Networks"]["horror-net"]["IPAddress"] == "172.19.0.7"
+    assert row["Config"]["Hostname"] == "56e6dff3a7de"
+    assert row["HostConfig"]["Memory"] == 536870912
+    assert row["Mounts"][0]["Destination"] == "/src"
+    assert isinstance(row["Created"], str)
+
+    # Env still arrives masked, exactly as before.
+    by_name = {e["name"]: e for e in row["Env"]}
+    assert by_name["API_KEY"]["value"] == SECRET_MASK
+    assert by_name["API_KEY"]["masked"] is True
+    assert by_name["BITSWAN_AUTOMATION_STAGE"]["value"] == "live-dev"
+
+
+def test_inspect_automation_keeps_list_labels_when_inspect_reports_none():
+    raw = {**_RAW_INSPECT, "Config": {**_RAW_INSPECT["Config"], "Labels": {}}}
+    rows = _inspect(_inspect_stub([dict(_LIST_DICT)], inspect_result=raw))
+    assert rows[0]["Config"]["Labels"] == _LIST_DICT["Labels"]
+
+
+def test_inspect_automation_degrades_to_the_list_record_when_inspect_fails():
+    """A container we can't inspect must still be listed (the UI marks the
+    fields it couldn't read as unavailable) — not dropped."""
+    rows = _inspect(_inspect_stub([dict(_LIST_DICT)], boom=True))
+    assert len(rows) == 1
+    assert rows[0]["Names"] == _LIST_DICT["Names"]
+    assert "Env" not in rows[0]
+
+
+def test_inspect_automation_degrades_when_the_container_vanished():
+    rows = _inspect(_inspect_stub([dict(_LIST_DICT)], inspect_result={}))
+    assert rows == [_LIST_DICT]

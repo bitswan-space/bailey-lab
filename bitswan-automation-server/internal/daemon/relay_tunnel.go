@@ -282,6 +282,11 @@ type relayInfo struct {
 	Proxied          bool   `json:"proxied"`
 	RelayAddr        string `json:"relay_addr"`
 	RelayFingerprint string `json:"relay_fingerprint"`
+	// AocPublicId is the AOC's per-deployment namespace for published public
+	// endpoints (issue #220): their hosts live under *.public.<aoc_public_id>.
+	// The daemon receives the full allocated host from the allocate call, so
+	// this is informational/forward-compatible.
+	AocPublicId string `json:"aoc_public_id"`
 }
 
 // fetchRelayInfoFromAOC asks the AOC whether this server is proxied and, if so,

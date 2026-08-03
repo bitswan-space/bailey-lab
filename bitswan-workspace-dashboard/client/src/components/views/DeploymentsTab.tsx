@@ -1957,6 +1957,39 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   // change (`busy` is shared with rollback and would spin every promote pill).
   // eslint-disable-next-line no-restricted-syntax -- null = no promote in flight
   const [promoting, setPromoting] = useState<'staging' | 'production' | null>(null);
+  // Published public endpoints (#220): endpoint host → public (no-login) URL, so
+  // an Open-app frontend that is also public shows a red PUBLIC badge linking to it.
+  const [publicByHost, setPublicByHost] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/public-endpoints')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: Array<{ endpoint_host?: string; public_url?: string }>) => {
+        if (!alive || !Array.isArray(list)) return;
+        const m: Record<string, string> = {};
+        for (const e of list)
+          if (e.endpoint_host && e.public_url)
+            m[e.endpoint_host.toLowerCase()] = e.public_url;
+        setPublicByHost(m);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const publicUrlFor = useCallback(
+    (u: string | null): string | null => {
+      if (!u) return null;
+      let host = u;
+      try {
+        host = new URL(u).host;
+      } catch {
+        /* u may already be a bare host */
+      }
+      return publicByHost[host.toLowerCase()] ?? null;
+    },
+    [publicByHost],
+  );
   // Re-entry guard for the promote handler: a double-click can land a second
   // call before React re-renders the disabled button, and a promote is a deploy
   // — firing it twice collides with the running gitops task.
@@ -2197,6 +2230,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         display: a?.deployment_id ? stateToDisplay(a.state) : 'not-deployed',
         replicas: a?.replicas ?? 0,
         url: a?.automation_url ?? null,
+        publicUrl: publicUrlFor(a?.automation_url ?? null),
         expose: a?.expose ?? false,
         memUsageBytes: a?.mem_usage_bytes ?? null,
         memReservationMB: a?.mem_reservation_mb ?? null,
@@ -2204,7 +2238,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         asleepReason: a?.asleep_reason ?? null,
       };
     });
-  }, [currentEntry, automations, isDr, drSlot]);
+  }, [currentEntry, automations, isDr, drSlot, publicUrlFor]);
   const frontends = members.filter((m) => m.expose);
   const replicaTotal = members.reduce((a, m) => a + (m.replicas || 0), 0);
 
@@ -2766,22 +2800,37 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                       )}
                     </>
                   );
-                  return openable ? (
+                  const card = openable ? (
                     <a
-                      key={f.id}
                       href={f.url ?? undefined}
                       target="_blank"
                       rel="noreferrer"
                       className={cn(
-                        'flex w-[280px] max-w-full items-center gap-2.5 rounded-[10px] border border-border px-3.5 py-3 hover:border-primary/40 hover:shadow-sm',
+                        'flex w-full items-center gap-2.5 rounded-[10px] border border-border px-3.5 py-3 hover:border-primary/40 hover:shadow-sm',
                         !running && 'bg-muted/30',
                       )}
                     >
                       {inner}
                     </a>
                   ) : (
-                    <div key={f.id} className="flex w-[280px] max-w-full items-center gap-2.5 rounded-[10px] border border-border bg-muted/30 px-3.5 py-3 opacity-75">
+                    <div className="flex w-full items-center gap-2.5 rounded-[10px] border border-border bg-muted/30 px-3.5 py-3 opacity-75">
                       {inner}
+                    </div>
+                  );
+                  return (
+                    <div key={f.id} className="relative w-[280px] max-w-full">
+                      {card}
+                      {f.publicUrl && (
+                        <a
+                          href={f.publicUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="Public — opens the no-login public URL"
+                          className="absolute right-2 top-2 rounded-full bg-red-600 px-1.5 py-0.5 text-[9px] font-bold uppercase leading-none tracking-wide text-white hover:bg-red-700"
+                        >
+                          Public
+                        </a>
+                      )}
                     </div>
                   );
                 })}

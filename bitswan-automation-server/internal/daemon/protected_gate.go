@@ -168,6 +168,12 @@ func isTrustedWorkspaceAppHost(endpointHost string) bool {
 // into or through the upstream apps the gate proxies to.
 func gateDirector(r *http.Request) {
 	endpointHost := requestEndpointHost(r)
+	// Published public endpoints (#220) are served with no auth and a fixed
+	// anon@example.com identity toward the underlying app — see directPublic.
+	if underlying, ok := publicHostUnderlying(endpointHost); ok {
+		directPublic(r, underlying)
+		return
+	}
 	email, groups := identityFromHeaders(r)
 	// Capture the oauth2-proxy-injected access token BEFORE the strip so
 	// it can be re-applied to trusted first-party upstreams only. Only
@@ -374,6 +380,17 @@ func gateHandler(w http.ResponseWriter, r *http.Request, proxy *httputil.Reverse
 		handleGatePath(w, r)
 		return
 	}
+	// Published public endpoints (#220): no gate — the director rewrites the
+	// request to the underlying app with a fixed anon identity + a real anon
+	// access token. The oauth2-proxy endpoints the app calls are served locally
+	// so it can't tell it's public.
+	if isPublicEndpointHost(requestEndpointHost(r)) {
+		if servePublicOAuth2(w, r) {
+			return
+		}
+		proxy.ServeHTTP(w, r)
+		return
+	}
 	if !enforceProtectedGate(w, r) {
 		return
 	}
@@ -510,6 +527,12 @@ func handleGatePath(w http.ResponseWriter, r *http.Request) {
 		handleMagicLinkList(w, r, email, groups)
 	case r.URL.Path == magicLinkRevokePath:
 		handleMagicLinkRevoke(w, r, email, groups)
+
+	// Public endpoints — publish/unpublish a production frontend (#220).
+	case r.URL.Path == publicCreatePath:
+		handlePublicCreate(w, r, email, groups)
+	case r.URL.Path == publicRevokePath:
+		handlePublicRevoke(w, r, email, groups)
 
 	case r.URL.Path == gatePathPrefix+"/share" ||
 		strings.HasPrefix(r.URL.Path, gatePathPrefix+"/share/"):

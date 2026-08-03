@@ -188,6 +188,62 @@ func TestEgressFirewall_ExposedWorkerFirewalled(t *testing.T) {
 	}
 }
 
+// #311 — the allow-list is DATA in bitswan.yaml, not compiler policy. gitops
+// seeds the AOC Keycloak host (from KEYCLOAK_URL) into a BP realm's rules on its
+// first deploy; this pins the contract that makes that visible seed effective:
+// exactly the `status: allowed` hosts reach the gateway proxy's
+// BITSWAN_FW_ALLOW, denied hosts do not, and the compiler adds nothing of its
+// own (no wildcard, no host derived from the workspace domain).
+func TestEgressFirewall_AllowListComesFromBitswanYAML(t *testing.T) {
+	yamlWithRules := stagingBitswanYAML + `firewall:
+  acme:
+    staging:
+      posture: enforce
+      rules:
+        keycloak.example.com:
+          status: allowed
+        blocked.example.com:
+          status: denied
+`
+	svcs := compileToServices(t, stagingScenario(yamlWithRules, frontendExposeTOML, backendWorkerTOML))
+
+	var proxies []string
+	for name, svc := range svcs {
+		if fwRole(svc) != "proxy" {
+			continue
+		}
+		proxies = append(proxies, name)
+		env, _ := svc["environment"].(map[string]interface{})
+		allow, _ := env["BITSWAN_FW_ALLOW"].(string)
+		if allow != "keycloak.example.com" {
+			t.Fatalf("proxy %q BITSWAN_FW_ALLOW = %q, want exactly %q (allowed rules only, no extras)",
+				name, allow, "keycloak.example.com")
+		}
+		if strings.Contains(allow, "*") {
+			t.Fatalf("proxy %q allow-list contains a wildcard: %q", name, allow)
+		}
+	}
+	if len(proxies) == 0 {
+		t.Fatalf("no firewall proxy emitted; services=%v", keys(svcs))
+	}
+}
+
+// With no firewall node at all the allow-list stays EMPTY — the compiler never
+// invents a default host. Seeding is gitops' job (and lands in bitswan.yaml,
+// where an operator can see and revoke it), never a hidden compiler bypass.
+func TestEgressFirewall_NoNodeMeansEmptyAllowList(t *testing.T) {
+	svcs := compileToServices(t, stagingScenario(stagingBitswanYAML, frontendExposeTOML, backendWorkerTOML))
+	for name, svc := range svcs {
+		if fwRole(svc) != "proxy" {
+			continue
+		}
+		env, _ := svc["environment"].(map[string]interface{})
+		if allow, _ := env["BITSWAN_FW_ALLOW"].(string); allow != "" {
+			t.Fatalf("proxy %q allow-list is %q with no firewall node — want empty", name, allow)
+		}
+	}
+}
+
 // dropsCap reports whether svc drops the given capability.
 func dropsCap(svc map[string]interface{}, cap string) bool {
 	cd, ok := svc["cap_drop"].([]interface{})

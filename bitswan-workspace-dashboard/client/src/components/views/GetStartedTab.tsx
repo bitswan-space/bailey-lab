@@ -76,7 +76,7 @@ const STEPS: Step[] = [
     n: 5,
     Icon: Rocket,
     title: 'Sync & Deploy to development',
-    body: 'Syncs what you’ve been working on into the deployment pipeline and rolls out to Development — with the live build log streaming. The tab also shows the Diff of what will change, the commit History with deploy markers, and a Checks view listing the CVEs found in the image this deploy would build.',
+    body: 'Syncs what you’ve been working on into the deployment pipeline and rolls out to Development — with the live build log streaming. The tab also shows the Diff of what will change, the commit History with deploy markers, and a Supply Chain Security view listing the CVEs found in the image this deploy would build — plus the out-of-scope markings, versioned in your source tree.',
     tab: 'sync-deploy',
     cta: 'Open Sync & Deploy',
   },
