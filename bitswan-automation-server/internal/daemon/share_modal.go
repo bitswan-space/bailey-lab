@@ -113,6 +113,47 @@ const shareModalCSS = `
   }
   .bailey-share-error.shown { display: block; }
   .bailey-share-empty { padding: 16px 20px; color: #71717A; font-size: 13px; text-align: center; }
+
+  /* Magic link: one unobtrusive button; the risk copy lives in a confirm dialog. */
+  .bailey-magic-btn {
+    margin: 2px 20px 10px; padding: 9px 14px; border: 1px solid #093DF5; border-radius: 8px;
+    background: white; color: #093DF5; font: inherit; font-weight: 500; cursor: pointer;
+  }
+  .bailey-magic-btn:hover { background: #EEF2FF; }
+  .bailey-magic-linkbox { display: flex; gap: 8px; align-items: center; padding: 0 20px 10px; }
+  .bailey-magic-linkbox input {
+    flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid #E4E4E7; border-radius: 8px;
+    font: inherit; font-size: 12px; color: #3F3F46; background: #FAFAFA; outline: none;
+  }
+  .bailey-magic-copy {
+    padding: 8px 12px; border: 1px solid #E4E4E7; border-radius: 8px;
+    background: white; font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  .bailey-magic-copy:hover { background: #F4F4F5; }
+  /* Secondary confirm dialog */
+  .bailey-magic-confirm {
+    position: fixed; inset: 0; background: rgba(15,18,30,0.5);
+    display: none; align-items: center; justify-content: center; z-index: 2147483647;
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #18181B;
+  }
+  .bailey-magic-confirm.open { display: flex; }
+  .bailey-magic-dialog {
+    background: white; border-radius: 12px; box-shadow: 0 24px 60px rgba(0,0,0,0.3);
+    width: min(420px, 92vw); padding: 22px 22px 18px;
+  }
+  .bailey-magic-dialog h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+  .bailey-magic-dialog p { margin: 0 0 18px; color: #52525B; font-size: 13px; line-height: 1.5; }
+  .bailey-magic-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .bailey-magic-cancel {
+    padding: 9px 16px; border: 1px solid #E4E4E7; border-radius: 8px;
+    background: white; color: #3F3F46; font: inherit; font-weight: 500; cursor: pointer;
+  }
+  .bailey-magic-cancel:hover { background: #F4F4F5; }
+  .bailey-magic-go {
+    padding: 9px 16px; border: 0; border-radius: 8px;
+    background: #093DF5; color: white; font: inherit; font-weight: 500; cursor: pointer;
+  }
+  .bailey-magic-go:hover { background: #0731C4; }
 `
 
 // shareModalHTML returns the modal markup. Hidden by default
@@ -150,9 +191,26 @@ func shareModalHTML() string {
       <p class="bailey-share-empty">Loading…</p>
     </div>
 
+    <div id="bailey-magic-section" style="display:none;border-top:1px solid #EFEFF1;margin-top:6px;padding-top:6px;">
+      <div class="bailey-share-section-title">Magic links</div>
+      <div class="bailey-share-list" id="bailey-magic-list"></div>
+      <div id="bailey-magic-new" class="bailey-magic-linkbox" style="display:none;"></div>
+      <button type="button" id="bailey-magic-create" class="bailey-magic-btn" onclick="window.__baileyMagicConfirm()">Create magic link</button>
+    </div>
+
     <div class="bailey-share-footer">
       <span style="font-size:12px;color:#71717A;">Changes save instantly.</span>
       <button type="button" onclick="window.__baileyShareClose()">Done</button>
+    </div>
+  </div>
+</div>
+<div id="bailey-magic-confirm" class="bailey-magic-confirm" onclick="if(event.target===this)window.__baileyMagicCancel()">
+  <div class="bailey-magic-dialog" role="dialog" aria-modal="true" aria-labelledby="bailey-magic-confirm-title">
+    <h3 id="bailey-magic-confirm-title">Create a magic link?</h3>
+    <p>Anyone who opens this link and signs in gets their browser device-trusted for <b>this endpoint only</b>. Use it only for low-sensitivity production endpoints — the access list still applies, so a magic link does not grant access on its own.</p>
+    <div class="bailey-magic-dialog-actions">
+      <button type="button" class="bailey-magic-cancel" onclick="window.__baileyMagicCancel()">Cancel</button>
+      <button type="button" class="bailey-magic-go" onclick="window.__baileyMagicCreate()">Create link</button>
     </div>
   </div>
 </div>`
@@ -232,6 +290,38 @@ func shareModalJS(host, callerEmail, apiURL string) string {
       reqBox.style.display = 'none';
       reqTitle.style.display = 'none';
     }
+    renderMagic(data);
+  }
+  var magicCreateURL = '/2fa-gate/api/magic-link/create';
+  var magicRevokeURL = '/2fa-gate/api/magic-link/revoke';
+  function renderMagic(data) {
+    var sec = $('bailey-magic-section');
+    if (!data.can_mint_magic_link) { sec.style.display = 'none'; return; }
+    sec.style.display = '';
+    var list = $('bailey-magic-list');
+    list.innerHTML = '';
+    var links = data.magic_links || [];
+    if (!links.length) {
+      var p = document.createElement('p');
+      p.className = 'bailey-share-empty';
+      p.textContent = 'No magic links yet.';
+      list.appendChild(p);
+    }
+    links.forEach(function(m){
+      var meta = el('div', {class:'bailey-share-meta'}, [
+        el('div', {class:'name', text:'Magic link'}),
+        el('div', {class:'sub',  text:'by ' + (m.created_by||'') + ' · expires ' + String(m.expires_at||'').slice(0,10)})
+      ]);
+      var rm = el('button', {class:'bailey-share-remove', text:'Revoke', onclick:function(){ revokeMagic(m.id); }});
+      list.appendChild(el('div', {class:'bailey-share-row'}, [meta, rm]));
+    });
+  }
+  function revokeMagic(id) {
+    showError('');
+    fetch(magicRevokeURL, {method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({id:id})})
+      .then(function(r){ if(!r.ok) return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));}); return r.json(); })
+      .then(load).catch(function(e){ showError('Failed to revoke link: '+e); });
   }
   function requestRowFor(req) {
     var avatar = el('div', {class: 'bailey-share-avatar', text: initials(req.email)});
@@ -343,10 +433,29 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     var pType = (v[0] === '/') ? 'group' : 'email';
     add(pType, v, role).then(function(){ $('bailey-share-input').value = ''; });
   };
+  window.__baileyMagicConfirm = function(){ $('bailey-magic-confirm').classList.add('open'); };
+  window.__baileyMagicCancel = function(){ $('bailey-magic-confirm').classList.remove('open'); };
+  window.__baileyMagicCreate = function() {
+    $('bailey-magic-confirm').classList.remove('open');
+    showError('');
+    fetch(magicCreateURL, {method:'POST', credentials:'same-origin'})
+      .then(function(r){ if(!r.ok) return r.text().then(function(t){throw new Error(t||('HTTP '+r.status));}); return r.json(); })
+      .then(function(res){
+        var box = $('bailey-magic-new');
+        box.style.display = ''; box.innerHTML = '';
+        var inp = el('input', {type:'text', value:res.url, readonly:'readonly'});
+        inp.onclick = function(){ inp.select(); };
+        var copy = el('button', {class:'bailey-magic-copy', type:'button', text:'Copy link', onclick:function(){ inp.select(); try{document.execCommand('copy');}catch(e){} copy.textContent='Copied'; }});
+        box.appendChild(inp);
+        box.appendChild(copy);
+        load();
+      })
+      .catch(function(e){ showError('Failed to create magic link: '+e); });
+  };
   document.addEventListener('keydown', function(e){
-    if (e.key === 'Escape' && $('bailey-share-modal').classList.contains('open')) {
-      window.__baileyShareClose();
-    }
+    if (e.key !== 'Escape') return;
+    if ($('bailey-magic-confirm').classList.contains('open')) { window.__baileyMagicCancel(); return; }
+    if ($('bailey-share-modal').classList.contains('open')) { window.__baileyShareClose(); }
   });
 })();`, apiURL, callerEmail, html.UnescapeString(host))
 }

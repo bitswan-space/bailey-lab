@@ -93,3 +93,34 @@ func handleBaileyApprovalsAPI(w http.ResponseWriter, r *http.Request, email stri
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"pending": out})
 }
+
+// handleBaileyApprovalDenyAPI denies (permanently removes) a pending
+// device-pair request. Without this, "Dismiss" in the UI could only hide the
+// request locally until the next refetch — it reappeared because the pending
+// pair lived on server-side until it expired. Deleting it is the persistent
+// dismiss.
+//
+// Same visibility rule as the approvals list (visiblePendingRequests): an admin
+// may deny any pending request; a non-admin may deny only their own. Idempotent
+// — denying an already-gone request is a no-op. Returns the refreshed list so
+// the caller can update in place.
+func handleBaileyApprovalDenyAPI(w http.ResponseWriter, r *http.Request, email string, isAdmin bool) {
+	if err := r.ParseForm(); err != nil {
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	target := strings.TrimSpace(r.FormValue("email"))
+	if target == "" {
+		writeJSONError(w, "email is required", http.StatusBadRequest)
+		return
+	}
+	if !isAdmin && !strings.EqualFold(target, email) {
+		writeJSONError(w, "you can only dismiss your own pending device requests", http.StatusForbidden)
+		return
+	}
+	if err := dbDeletePendingPairByEmail(target); err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	handleBaileyApprovalsAPI(w, r, email, isAdmin)
+}

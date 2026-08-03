@@ -124,6 +124,11 @@ type gateState struct {
 	CanClaim         bool   `json:"can_claim"`          // unclaimed AND this caller may run the one-time bootstrap
 	HasTrustedDevice bool   `json:"has_trusted_device"` // this user ALREADY has ≥1 trusted device (can self-approve a new one)
 	InvitePending    bool   `json:"invite_pending"`     // a live (unconsumed, unexpired) invite exists for this user
+	// 2FA brute-force throttle (issue #188): failed_attempts drives the SPA's
+	// "too many attempts" visual indicator (shown past mfaWarnThreshold), and
+	// retry_after is the remaining per-account/per-IP cooldown in seconds.
+	FailedAttempts int `json:"failed_attempts"`
+	RetryAfter     int `json:"retry_after"`
 }
 
 func handleGateState(w http.ResponseWriter, r *http.Request, email string, groups []string) {
@@ -144,6 +149,16 @@ func handleGateState(w http.ResponseWriter, r *http.Request, email string, group
 			invitePending = true
 		}
 	}
+	// 2FA brute-force throttle state (issue #188): surface the current cooldown
+	// + fail count so a freshly-loaded scene reflects a lockout / warning even
+	// before the user submits another code.
+	// Only for an identified caller: this route intentionally answers without an
+	// identity (the pre-trust SPA needs it), and throttle counters are per-user
+	// state that an anonymous caller has no business reading.
+	var retryAfter, failedAttempts int
+	if strings.TrimSpace(email) != "" {
+		retryAfter, failedAttempts = mfaThrottleState(email, clientIPForRequest(r))
+	}
 	writeJSON(w, gateState{
 		Email:            email,
 		IsAdmin:          callerIsAdmin(email),
@@ -154,6 +169,8 @@ func handleGateState(w http.ResponseWriter, r *http.Request, email string, group
 		CanClaim:         !claimed && eligibleToClaim(email, groups),
 		HasTrustedDevice: hasTrustedDevice,
 		InvitePending:    invitePending,
+		FailedAttempts:   failedAttempts,
+		RetryAfter:       retryAfter,
 	})
 }
 
@@ -260,6 +277,10 @@ func handleGateSelfTrust(w http.ResponseWriter, r *http.Request, email string) {
 	if !requireIdentity(w, email) {
 		return
 	}
+	ip, ok := mfaGateThrottlePrecheck(w, r, email)
+	if !ok {
+		return
+	}
 	rec, err := loadTOTPRecord(email)
 	if err != nil || rec == nil {
 		writeJSONError(w, "no authenticator enrolled for this account", http.StatusForbidden)
@@ -267,10 +288,18 @@ func handleGateSelfTrust(w http.ResponseWriter, r *http.Request, email string) {
 	}
 	body := decodeGateBody(r)
 	code := strings.TrimSpace(body.TOTP)
-	if !totp.Validate(code, rec.Secret) {
-		writeJSONError(w, "that code didn't match", http.StatusUnauthorized)
+	// Reserve the attempt in the same critical section that checks the cooldown
+	// — a read-only pre-check would let concurrent requests all slip through.
+	fails, retry, allowed := mfaThrottleBegin(email, ip)
+	if !allowed {
+		mfaGateThrottleReject(w, email, ip, "self-trust", fails, retry)
 		return
 	}
+	if !totp.Validate(code, rec.Secret) {
+		mfaGateThrottleFail(w, email, ip, "self-trust", "that code didn't match", fails, retry)
+		return
+	}
+	mfaThrottleReset(email, ip)
 	if _, err := completeNewDevicePairFor(w, r, email, "self via authenticator"); err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -287,6 +316,10 @@ func handleGateRecover(w http.ResponseWriter, r *http.Request, email string) {
 	if !requireIdentity(w, email) {
 		return
 	}
+	ip, okT := mfaGateThrottlePrecheck(w, r, email)
+	if !okT {
+		return
+	}
 	rec, _ := loadTOTPRecord(email)
 	totpEnrolled := rec != nil
 	backupEnrolled := dbBackupCodesExist(email)
@@ -296,15 +329,21 @@ func handleGateRecover(w http.ResponseWriter, r *http.Request, email string) {
 	}
 	body := decodeGateBody(r)
 	if backup := strings.TrimSpace(body.Backup); backup != "" {
+		fails, retry, allowed := mfaThrottleBegin(email, ip)
+		if !allowed {
+			mfaGateThrottleReject(w, email, ip, "recover-backup", fails, retry)
+			return
+		}
 		ok, err := dbConsumeBackupCode(email, backup)
 		if err != nil {
 			writeJSONError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if !ok {
-			writeJSONError(w, "that backup code isn't valid", http.StatusUnauthorized)
+			mfaGateThrottleFail(w, email, ip, "recover-backup", "that backup code isn't valid", fails, retry)
 			return
 		}
+		mfaThrottleReset(email, ip)
 		if _, err := completeNewDevicePairFor(w, r, email, "self via backup code"); err != nil {
 			writeJSONError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -317,10 +356,16 @@ func handleGateRecover(w http.ResponseWriter, r *http.Request, email string) {
 		writeJSONError(w, "authenticator not set up for this account", http.StatusForbidden)
 		return
 	}
-	if !totp.Validate(strings.TrimSpace(body.TOTP), rec.Secret) {
-		writeJSONError(w, "that code didn't match", http.StatusUnauthorized)
+	fails, retry, allowed := mfaThrottleBegin(email, ip)
+	if !allowed {
+		mfaGateThrottleReject(w, email, ip, "recover-totp", fails, retry)
 		return
 	}
+	if !totp.Validate(strings.TrimSpace(body.TOTP), rec.Secret) {
+		mfaGateThrottleFail(w, email, ip, "recover-totp", "that code didn't match", fails, retry)
+		return
+	}
+	mfaThrottleReset(email, ip)
 	if _, err := completeNewDevicePairFor(w, r, email, "self via authenticator recovery"); err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -395,6 +440,10 @@ func handleGateTOTPVerify(w http.ResponseWriter, r *http.Request, email string) 
 	if !requireIdentity(w, email) {
 		return
 	}
+	ip, okT := mfaGateThrottlePrecheck(w, r, email)
+	if !okT {
+		return
+	}
 	if rec, _ := loadTOTPRecord(email); rec != nil {
 		writeJSONError(w, "authenticator already enrolled", http.StatusConflict)
 		return
@@ -405,10 +454,16 @@ func handleGateTOTPVerify(w http.ResponseWriter, r *http.Request, email string) 
 		return
 	}
 	body := decodeGateBody(r)
-	if !totp.Validate(strings.TrimSpace(body.Code), c.Value) {
-		writeJSONError(w, "that code didn't match", http.StatusUnauthorized)
+	fails, retry, allowed := mfaThrottleBegin(email, ip)
+	if !allowed {
+		mfaGateThrottleReject(w, email, ip, "totp-verify", fails, retry)
 		return
 	}
+	if !totp.Validate(strings.TrimSpace(body.Code), c.Value) {
+		mfaGateThrottleFail(w, email, ip, "totp-verify", "that code didn't match", fails, retry)
+		return
+	}
+	mfaThrottleReset(email, ip)
 	if err := saveTOTPRecord(&totpRecord{
 		Email:     email,
 		Secret:    c.Value,

@@ -132,13 +132,22 @@ export class ApiError extends Error {
     this.status = status;
     this.path = path;
     this.code = code || '';
+    // 2FA brute-force throttle (issue #188): the daemon returns these on a
+    // failed verification so the UI can warn past 3 fails and show the
+    // per-account/per-IP cooldown. 0 when the body carried neither.
+    this.failedAttempts = 0;
+    this.retryAfter = 0;
   }
 }
 
 async function parseJSONResponse(res, path) {
   const text = await res.text().catch(() => '');
   if (!res.ok) {
-    throw new ApiError(extractErrorText(text) || `${res.status} ${res.statusText}`, res.status, path, extractErrorCode(text));
+    const err = new ApiError(extractErrorText(text) || `${res.status} ${res.statusText}`, res.status, path, extractErrorCode(text));
+    const th = extractThrottle(text);
+    err.failedAttempts = th.failedAttempts;
+    err.retryAfter = th.retryAfter;
+    throw err;
   }
   if (!text) return null;
   try {
@@ -176,6 +185,22 @@ function extractErrorCode(text) {
   } catch (e) { return ''; }
 }
 
+// extractThrottle pulls the 2FA brute-force counters (issue #188) out of a
+// failed-verification body: failed_attempts (drives the > 3 warning) and
+// retry_after seconds (the per-account/per-IP cooldown). 0 when absent.
+function extractThrottle(text) {
+  const out = { failedAttempts: 0, retryAfter: 0 };
+  if (!text) return out;
+  const t = text.trim();
+  if (!t.startsWith('{')) return out;
+  try {
+    const o = JSON.parse(t);
+    if (o && Number.isFinite(o.failed_attempts)) out.failedAttempts = o.failed_attempts;
+    if (o && Number.isFinite(o.retry_after)) out.retryAfter = o.retry_after;
+  } catch (e) { /* not JSON */ }
+  return out;
+}
+
 // ─── Endpoint wrappers (one place per backend route) ────────────────────────
 
 export const Api = {
@@ -197,6 +222,10 @@ export const Api = {
   devices: () => getJSON('/bailey/api/devices'),
   removeDevice: (id) => postForm('/bailey/api/devices/remove', { id }),
   approvals: () => getJSON('/bailey/api/approvals'),
+  // Deny (permanently remove) a pending device-pair request — the persistent
+  // "Dismiss". Unlike a local hide, it deletes the request server-side so it
+  // doesn't reappear on the next refetch. Returns the refreshed { pending }.
+  denyApproval: (email) => postForm('/bailey/api/approvals/deny', { email }),
   // Approve a pending pairing. The JSON variant isn't wired in the
   // dispatcher; the live route is the gate's form handler, which is
   // same-origin and bypasses the chrome wrap. Returns 2xx HTML on

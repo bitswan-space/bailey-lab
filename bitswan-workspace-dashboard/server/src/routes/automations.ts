@@ -1031,6 +1031,19 @@ export function registerAutomationRoutes(
     // Firewall rollbacks are RBAC-gated in production; gitops resolves the
     // role itself from the forwarded identity (#186/#187).
     const deployer = await emailFromRequest(req, app.log);
+    // BSY-07 / #185: a production rollback is a production (re)deploy, so gate it
+    // admin/auditor like a promote. This is the BFF half; gitops re-runs the full
+    // promotion audit gate (freeze + sign-offs) authoritatively from the token.
+    // (Firewall rollbacks are role-gated by gitops itself — see #186/#187 above.)
+    if (kind !== 'firewall' && (stage === 'production' || stage === '')) {
+      const rbRole = await fwRoleFromRequest(req, gitops, app.log);
+      if (rbRole !== 'admin' && rbRole !== 'auditor') {
+        return reply.code(403).send({
+          error:
+            'Rolling back Production requires an admin or auditor role, and re-runs the promotion audit gate.',
+        });
+      }
+    }
     try {
       const r = await gitops.bpRollback({
         bp: req.params.bp,
