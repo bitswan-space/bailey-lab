@@ -253,3 +253,42 @@ def test_waivers_live_in_the_source_tree_and_commit(tmp_path, monkeypatch):
         == []
     )
     assert cve_waivers.read_waivers("shop", None) == {}
+
+
+# ── the daemon is the sole DB owner ──────────────────────────────────────────
+def test_grype_env_forbids_workspace_db_writes():
+    """Every grype call from a workspace runs with auto-update and age-validation
+    OFF, so grype never tries to write the read-only, daemon-owned DB mount."""
+    env = scs._grype_env()
+    assert env["GRYPE_DB_AUTO_UPDATE"] == "false"
+    assert env["GRYPE_DB_VALIDATE_AGE"] == "false"
+    # It still inherits the process env (GRYPE_DB_CACHE_DIR, PATH, …).
+    assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_workspace_has_no_db_updater():
+    """The workspace-side `grype db update` is gone — the automation-server
+    daemon is the single writer of the shared DB."""
+    assert not hasattr(scs, "update_vuln_db")
+
+
+async def test_ensure_vuln_db_reads_only_never_updates(monkeypatch):
+    """ensure_vuln_db only checks `grype db status` (with the no-write env); it
+    never runs `grype db update`."""
+    calls = []
+
+    async def fake_run(*cmd, timeout=600, env=None):
+        calls.append((cmd, env))
+        return (0, b"", b"")  # db status → present
+
+    monkeypatch.setattr(scs, "_run", fake_run)
+    monkeypatch.setattr(scs, "_db_ready", False)
+    monkeypatch.setattr(scs, "_db_lock", None)
+
+    assert await scs.ensure_vuln_db() is True
+    assert calls, "grype db status was not invoked"
+    cmd, env = calls[0]
+    assert cmd == ("grype", "db", "status")
+    assert env["GRYPE_DB_AUTO_UPDATE"] == "false"
+    assert not any("update" in part for (c, _e) in calls for part in c)
+    monkeypatch.setattr(scs, "_db_ready", False)  # don't leak readiness to other tests

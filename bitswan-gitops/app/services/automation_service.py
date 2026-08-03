@@ -3409,9 +3409,10 @@ class AutomationService:
         return await self.preview_supply_chain(bp, copy)
 
     async def rescan_deployed_images(self) -> dict:
-        """Daily job: refresh the grype vuln DB (best-effort) and re-run grype
-        against every distinct deployed image's cached SBOM so new CVEs surface."""
-        await supply_chain_service.update_vuln_db()
+        """Daily job: re-run grype against every distinct deployed image's cached
+        SBOM so new CVEs surface. The vulnerability DB is refreshed by the
+        automation-server daemon (the sole owner of the shared, read-only mount),
+        so this job only re-scans — it never updates the DB itself."""
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         seen: set[str] = set()
         scanned = 0
