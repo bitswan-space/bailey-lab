@@ -52,4 +52,10 @@ func TestTraefikComposesNeverPublishAdminPort(t *testing.T) {
 	if !strings.Contains(global, "80:80") || !strings.Contains(global, "443:443") {
 		t.Errorf("global traefik must still publish 80/443:\n%s", global)
 	}
+
+	// The multi-homed workspace sub-traefik must disable IP forwarding so it
+	// cannot bridge one stage network into another at L3 (stage isolation).
+	if !strings.Contains(sub, "net.ipv4.ip_forward") || !strings.Contains(sub, "sysctls") {
+		t.Errorf("workspace sub-traefik must set the net.ipv4.ip_forward sysctl:\n%s", sub)
+	}
 }

@@ -13,6 +13,41 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// IngressAllowMiddlewareName is the sub-traefik middleware (defined in every
+// dynamic.yml, referenced as a default on the `web` entrypoint) that restricts
+// which SOURCE IPs may reach a workspace's routes. See SetIngressAllowCIDRs.
+const IngressAllowMiddlewareName = "ingress-only"
+
+// ingressAllowCIDRs is the allowlist of source CIDRs that may reach a workspace
+// sub-traefik. The sub-traefik multi-homes onto every stage bridge (dev/staging/
+// production) to reach app upstreams, which means a stage-network peer — e.g.
+// member-/AI-authored code running in live-dev on `<ws>-dev` — could otherwise
+// open its `:80` directly and send a *production* Host header, reaching prod
+// behind the auth gate (finding C1, cross-stage bypass). The ONLY legitimate
+// caller is the daemon gate, which reaches the sub-traefik from bitswan_network;
+// stage bridges use disjoint subnets. So the daemon sets this to bitswan_network's
+// CIDR at startup, and every router (via the entrypoint default middleware)
+// rejects any source outside it — closing the cross-stage crossing at L3.
+var (
+	ingressAllowMu    sync.RWMutex
+	ingressAllowCIDRs []string
+)
+
+// SetIngressAllowCIDRs installs the source-IP allowlist applied to every
+// workspace sub-traefik router (see ingressAllowCIDRs). Call it once at daemon
+// startup, before any routes are written.
+func SetIngressAllowCIDRs(cidrs []string) {
+	ingressAllowMu.Lock()
+	defer ingressAllowMu.Unlock()
+	ingressAllowCIDRs = append([]string(nil), cidrs...)
+}
+
+func getIngressAllowCIDRs() []string {
+	ingressAllowMu.RLock()
+	defer ingressAllowMu.RUnlock()
+	return append([]string(nil), ingressAllowCIDRs...)
+}
+
 // ============================================================
 // Public types
 // ============================================================
@@ -77,6 +112,7 @@ type traefikRouter struct {
 	EntryPoints []string          `json:"entryPoints,omitempty"`
 	Rule        string            `json:"rule"`
 	Service     string            `json:"service"`
+	Middlewares []string          `json:"middlewares,omitempty"`
 	TLS         *traefikRouterTLS `json:"tls,omitempty"`
 }
 
@@ -285,6 +321,46 @@ func writeDynamicConfig(traefikBaseURL string, state *traefikDynConfig) error {
 	}
 	m["tls"] = tls
 
+	// Define the source-IP allowlist middleware that every WORKSPACE sub-traefik
+	// router references (AddRouteWithTLSDomains), so each rejects any source
+	// outside the gate's network (finding C1). Written on every config push so it
+	// can never drift out of the file the routers depend on. Only for workspace
+	// sub-traefiks — the public-facing global traefik must accept public sources.
+	// Empty allowlist ⇒ fail CLOSED (a single host that matches nothing in
+	// practice) rather than leaving the crossing open, so a mis-started daemon
+	// breaks routing loudly instead of silently exposing production.
+	if isWorkspaceURL(traefikBaseURL) {
+		cidrs := getIngressAllowCIDRs()
+		if len(cidrs) == 0 {
+			cidrs = []string{"0.0.0.0/32"}
+		}
+		httpM, _ := m["http"].(map[string]interface{})
+		if httpM == nil {
+			httpM = map[string]interface{}{}
+			m["http"] = httpM
+		}
+		mws, _ := httpM["middlewares"].(map[string]interface{})
+		if mws == nil {
+			mws = map[string]interface{}{}
+			httpM["middlewares"] = mws
+		}
+		mws[IngressAllowMiddlewareName] = map[string]interface{}{
+			"ipAllowList": map[string]interface{}{"sourceRange": cidrs},
+		}
+		// Attach it to EVERY router — not just ones (re)added after the ACL
+		// landed — so routes written by an older daemon are covered on the next
+		// config push without a per-route rewrite. Idempotent.
+		if routers, ok := httpM["routers"].(map[string]interface{}); ok {
+			for _, rv := range routers {
+				rm, ok := rv.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				rm["middlewares"] = []string{IngressAllowMiddlewareName}
+			}
+		}
+	}
+
 	out, err := yaml.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("failed to marshal dynamic config to YAML: %w", err)
@@ -321,6 +397,15 @@ func writeWatchedFile(path string, out []byte) error {
 		return fmt.Errorf("failed to close dynamic config %s: %w", path, err)
 	}
 	return nil
+}
+
+// EnsureIngressACL re-renders a workspace sub-traefik's dynamic config from its
+// current recorded state WITHOUT changing any route — so the ingress-only
+// middleware (applied to every router by writeDynamicConfig) lands on routes
+// written by an older daemon. Idempotent and route-churn-free: the emitted YAML
+// is identical after the first application. No-op on the global traefik.
+func EnsureIngressACL(traefikBaseURL string) error {
+	return modifyState(traefikBaseURL, func(*traefikDynConfig) error { return nil })
 }
 
 // modifyState serialises load → fn → save → push under stateMu.
@@ -459,6 +544,12 @@ func AddRouteWithTLSDomains(hostname, upstream, traefikBaseURL, resolver string,
 		}
 		if workspaceTarget {
 			router.EntryPoints = []string{"web"}
+			// A workspace sub-traefik multi-homes onto every stage bridge to reach
+			// upstreams, so gate it: only the gate's network (bitswan_network) may
+			// reach these routes; a stage-network peer sending a cross-stage Host is
+			// rejected (finding C1). The middleware is defined in every dynamic.yml
+			// (writeDynamicConfig) from the daemon-set allowlist.
+			router.Middlewares = []string{IngressAllowMiddlewareName}
 		} else {
 			router.EntryPoints = []string{"web", "websecure"}
 			router.TLS = &traefikRouterTLS{CertResolver: resolver, Domains: tlsDomains}
