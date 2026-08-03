@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Boxes, Folder, GitPullRequest, Loader2, MessageSquare, Plus } from 'lucide-react';
+import {
+  AlertTriangle,
+  Boxes,
+  Folder,
+  GitPullRequest,
+  Loader2,
+  MessageSquare,
+  RotateCcw,
+} from 'lucide-react';
 import { FilesTab } from '@/components/files/FilesTab';
 import { DiffTab } from '@/components/diff/DiffTab';
 import { ContainersPane } from '@/components/agents/ContainersPane';
@@ -21,6 +29,34 @@ interface AgentFilesTabProps {
 
 type Sub = 'chat' | 'files' | 'containers';
 const SUBS: Sub[] = ['chat', 'files', 'containers'];
+
+/**
+ * A session that dies sooner than this never really got going — the agent
+ * failed to launch (bad resume, container wedged, claude not authenticated).
+ * One that outlives it was a working agent that ended for its own reasons
+ * (the user quit it, the server's idle timeout fired, the ws dropped), and is
+ * restarted immediately with a clean slate of attempts.
+ */
+const HEALTHY_SESSION_MS = 20_000;
+/**
+ * Backoff before each *re*-launch after a failed one. Its length is also the
+ * attempt budget: once it's exhausted we stop and show the error rather than
+ * hammering the coding-agent container.
+ */
+const RELAUNCH_BACKOFF_MS = [2_000, 8_000, 20_000];
+
+/**
+ * Where autostart stands for the viewed BP. `launching` covers both "a
+ * session is up" and "we're about to (re)try one" — the other two are the
+ * give-up states the pane renders an error for.
+ */
+type LaunchState =
+  /** Running, starting, or waiting out a backoff before the next attempt. */
+  | 'launching'
+  /** The agent started and died on launch, every attempt we had. */
+  | 'exits-immediately'
+  /** The server refused to spawn it — retrying the same request won't help. */
+  | 'refused';
 
 /**
  * The Agents screen, per the wireframe (Workspace Dashboard → Agents): one
@@ -47,6 +83,7 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     setSelectedFor,
     agentStatus,
     ensureAgent,
+    onExit,
   } = useSessions();
   const { sessions: past, loading: pastLoading } = useAgentSessions(copy, bp);
 
@@ -101,24 +138,65 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     }
   }, [agent, selectedId, setSelectedFor, copy, bp]);
 
-  // Auto-reattach: the agent runs server-side inside `dtach` keyed by the
-  // Claude session UUID, so it survives a browser close / hard refresh — but
-  // the client's live-session list is in-memory and starts empty. When the
-  // user opens this BP's Coding Agent tab and nothing is attached, resume the
-  // most recent session: `dtach -A` re-attaches to the still-running agent
-  // (or `claude --resume` restores the conversation if it has exited). With no
-  // prior session, start a fresh one so the tab is never empty. Fires once per
-  // (copy, bp) visit; only when the tab is actually visible.
-  const autoAttachedScope = useRef<string | null>(null);
-  useEffect(() => {
-    if (!tabVisible || pastLoading) return;
-    const key = `${copy}/${bp}`;
-    if (agent) {
-      autoAttachedScope.current = key; // already attached — nothing to do
-      return;
+  // ---------------------------------------------------------------------
+  // Autostart. There is no manual "Start agent" step (bailey-lab #246): an
+  // agent that isn't running is a bug, so the tab launches one itself and
+  // only ever shows the user a spinner or — if launching keeps failing — an
+  // error with a Retry.
+  //
+  // `launchGen` is the request signal: bumping it asks the effect below for
+  // another launch. Together with the (copy, bp) key it forms the token the
+  // effect dedupes on, so a launch happens once per request and once per
+  // scope, never in a render loop.
+  // ---------------------------------------------------------------------
+  const [launchGen, setLaunchGen] = useState(0);
+  const [launchState, setLaunchState] = useState<LaunchState>('launching');
+  const launchFailed = launchState !== 'launching';
+  const failedAttempts = useRef(0);
+  // eslint-disable-next-line no-restricted-syntax -- null = no relaunch pending
+  const relaunchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelRelaunch = useCallback(() => {
+    if (relaunchTimer.current) {
+      clearTimeout(relaunchTimer.current);
+      relaunchTimer.current = null;
     }
-    if (autoAttachedScope.current === key) return;
-    autoAttachedScope.current = key;
+  }, []);
+
+  // Don't relaunch into a browser tab nobody is looking at: a backgrounded
+  // dashboard would otherwise re-attach every time the server's idle timeout
+  // reaps the session. Coming back to the tab re-runs the effect below.
+  const [docVisible, setDocVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const onVisibility = () => setDocVisible(!document.hidden);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
+  // Reset per-scope launch state when the user moves to another BP, so a
+  // wedged agent in one BP doesn't leave the next one stuck on its error.
+  useEffect(() => {
+    failedAttempts.current = 0;
+    setLaunchState('launching');
+    return cancelRelaunch;
+  }, [copy, bp, cancelRelaunch]);
+
+  // The agent runs server-side inside `dtach` keyed by the Claude session
+  // UUID, so it survives a browser close / hard refresh — but the client's
+  // live-session list is in-memory and starts empty. When nothing is
+  // attached, resume the most recent conversation: `dtach -A` re-attaches to
+  // the still-running agent, or `claude --resume` restores the conversation
+  // if it has exited (and the server falls back to a fresh conversation on
+  // the same UUID when the transcript is gone — see buildAutoCmd). With no
+  // prior session at all, start a fresh one.
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing launched yet
+  const launchedToken = useRef<string | null>(null);
+  useEffect(() => {
+    if (!tabVisible || !docVisible || pastLoading) return;
+    if (agent) return; // already attached — nothing to do
+    if (launchFailed) return; // out of attempts; waiting on the user's Retry
+    const token = `${copy}/${bp}#${launchGen}`;
+    if (launchedToken.current === token) return;
+    launchedToken.current = token;
     const resumable = past
       .filter((s) => s.claudeSessionId && s.kind !== 'sync')
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
@@ -127,10 +205,62 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     } else {
       startSession(copy, bp);
     }
-    // The scope-keyed guard re-evaluates automatically when (copy, bp) changes
-    // — a different key means a different scope to attach. Within one scope it
-    // fires once, so a manual exit isn't immediately auto-restarted.
-  }, [tabVisible, pastLoading, agent, past, copy, bp, resumeSession, startSession]);
+  }, [
+    tabVisible,
+    docVisible,
+    pastLoading,
+    agent,
+    launchFailed,
+    launchGen,
+    past,
+    copy,
+    bp,
+    resumeSession,
+    startSession,
+  ]);
+
+  // Restart loop guard. Every session end in this scope lands here; how it's
+  // handled depends on why it ended.
+  //
+  //   - The server refused to spawn anything (1008 bad request / forbidden
+  //     resume / not authenticated, 1011 coding-agent host unreachable):
+  //     retrying can't fix that, so surface it straight away.
+  //   - The session had been up and running: restart it — the agent is meant
+  //     to be running the whole time this tab is open.
+  //   - It died on launch: count it against the attempt budget and try again
+  //     after a growing backoff; when the budget runs out, stop and show the
+  //     error instead of hammering the container.
+  useEffect(
+    () =>
+      onExit((s) => {
+        const inScope =
+          s.copy === copy && (s.bp === bp || (s.kind === 'sync' && s.bp === null));
+        if (!inScope) return;
+        if (s.exitCode === 1008 || s.exitCode === 1011) {
+          cancelRelaunch();
+          setLaunchState('refused');
+          return;
+        }
+        if (Date.now() - s.startedAt >= HEALTHY_SESSION_MS) {
+          failedAttempts.current = 0;
+          setLaunchGen((g) => g + 1);
+          return;
+        }
+        const attempt = failedAttempts.current;
+        failedAttempts.current = attempt + 1;
+        const backoff = RELAUNCH_BACKOFF_MS[attempt];
+        if (backoff === undefined) {
+          setLaunchState('exits-immediately');
+          return;
+        }
+        cancelRelaunch();
+        relaunchTimer.current = setTimeout(() => {
+          relaunchTimer.current = null;
+          setLaunchGen((g) => g + 1);
+        }, backoff);
+      }),
+    [onExit, copy, bp, cancelRelaunch],
+  );
 
   // A friendly name for the agent chip: the conversation title once the poll
   // has one, else a stable fallback.
@@ -140,7 +270,13 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     return p?.title || 'Coding agent';
   }, [agent, past]);
 
-  const start = useCallback(async () => {
+  // Manual escape hatch for the exhausted-attempts state: re-warm the
+  // container and hand the attempt budget back to the autostart effect.
+  const retry = useCallback(async () => {
+    cancelRelaunch();
+    failedAttempts.current = 0;
+    setLaunchState('launching');
+    setLaunchGen((g) => g + 1);
     if (agentStatus === 'idle' || agentStatus === 'failed') {
       try {
         await ensureAgent();
@@ -148,8 +284,7 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
         // ensureAgent surfaces failure via agentStatus.
       }
     }
-    startSession(copy, bp);
-  }, [agentStatus, ensureAgent, startSession, copy, bp]);
+  }, [agentStatus, ensureAgent, cancelRelaunch]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -159,11 +294,15 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
           <span
             className={cn(
               'size-1.5 rounded-full',
-              agent ? 'bg-emerald-600' : 'bg-muted-foreground/40',
+              agent
+                ? 'bg-emerald-600'
+                : launchFailed
+                  ? 'bg-destructive'
+                  : 'bg-muted-foreground/40',
             )}
           />
           <span className="text-[13px] font-semibold text-foreground">
-            {title ?? 'No agent running'}
+            {title ?? (launchFailed ? 'Agent unavailable' : 'Starting agent…')}
           </span>
         </div>
         <SubTab
@@ -206,26 +345,31 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
           sub !== 'chat' && 'hidden',
         )}
       >
+        {/* Transitional state only. The agent is started automatically, so
+            the user sees a spinner while that is in flight — and an error
+            with a Retry if it keeps failing, which is a bug worth showing
+            rather than an empty pane. */}
         {!agent && (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-            {agentStatus === 'failed' ? (
-              <span className="text-destructive">
-                Coding agent unavailable — click Start to retry.
-              </span>
+            {launchFailed ? (
+              <>
+                <AlertTriangle className="size-5 text-amber-600" aria-hidden />
+                <span className="max-w-md text-center text-destructive">
+                  {launchState === 'refused'
+                    ? 'The coding agent for this business process could not be reached.'
+                    : `The coding agent for this business process exited immediately on ${
+                        RELAUNCH_BACKOFF_MS.length + 1
+                      } attempts.`}
+                </span>
+                <Button onClick={retry} size="sm" variant="outline">
+                  <RotateCcw className="size-3.5" aria-hidden /> Retry
+                </Button>
+              </>
             ) : (
-              <span>No agent running for this business process yet.</span>
+              <span className="flex items-center gap-2">
+                <Loader2 className="size-3.5 animate-spin" aria-hidden /> Starting agent…
+              </span>
             )}
-            <Button onClick={start} disabled={agentStatus === 'pending'} size="sm">
-              {agentStatus === 'pending' ? (
-                <>
-                  <Loader2 className="size-3.5 animate-spin" /> Starting coding agent…
-                </>
-              ) : (
-                <>
-                  <Plus className="size-3.5" /> Start agent
-                </>
-              )}
-            </Button>
           </div>
         )}
       </main>
