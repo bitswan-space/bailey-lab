@@ -196,6 +196,16 @@ func handleShareAPI(w http.ResponseWriter, r *http.Request, email string, groups
 				}
 			}
 		}
+		// Make public (#220): offered under the same authority as magic links
+		// (admin/auditor + owner + production), further restricted to frontends
+		// inside canMakePublic. is_public/public_url reflect the current state.
+		canPub, _ := canMakePublic(email, groups, host)
+		isPublic := false
+		publicURL := ""
+		if pe, _ := dbGetPublicEndpoint(host); pe != nil {
+			isPublic = true
+			publicURL = "https://" + pe.PublicHost
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"hostname":            ep.Hostname,
@@ -205,6 +215,9 @@ func handleShareAPI(w http.ResponseWriter, r *http.Request, email string, groups
 			"requests":            requests,
 			"can_mint_magic_link": canMint,
 			"magic_links":         mlOut,
+			"can_make_public":     canPub,
+			"is_public":           isPublic,
+			"public_url":          publicURL,
 		})
 	}
 

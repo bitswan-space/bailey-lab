@@ -28,6 +28,15 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := requestEndpointHost(r)
 
+		// Published public endpoints (#220) bypass the device-trust gate AND the
+		// chrome wrap entirely — no auth, no bottom bar. The request flows on to
+		// gateHandler, whose director serves the underlying app with a fixed
+		// anon@example.com identity.
+		if isPublicEndpointHost(host) {
+			inner.ServeHTTP(w, r)
+			return
+		}
+
 		// Bailey device-trust gate (phase 1). Runs before the console /
 		// inner / chrome branches so it covers the Server Console, the
 		// chrome wrap, AND the proxied apps (which flow through
