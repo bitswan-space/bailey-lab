@@ -15,6 +15,16 @@ import (
 // /2fa-gate/api/share/<host>, so the dialog works without page
 // reloads. The standalone share page (acl_share.go) reuses this exact
 // component, pre-opened.
+//
+// The dialog shows BOTH halves of who can open the endpoint (#251): a
+// boxed, clearly-labelled "workspace · inherited" row, expandable to the
+// actual member list, and below it the people granted on this endpoint
+// alone. It used to show only the latter, so an endpoint reachable by a
+// whole workspace read as "1 person, no additional people yet". The
+// inherited row is informational — that access is administered in the
+// workspace, not here. The add field is free text (any email or
+// /group/path) with a click-to-pick list of the server's people underneath
+// it, mirroring the workspace sidebar's "Add a member".
 
 const shareModalCSS = `
   /* shadcn/ui-inspired: neutral zinc palette, near-black primary, hairline
@@ -83,6 +93,9 @@ const shareModalCSS = `
     border: 1px solid var(--bl-border);
   }
   .bailey-share-avatar.group { background: #fafafa; }
+  /* .person is set wherever the JS overrides the background with a hash of the
+     display name (avatarColor): saturated fill needs light text and no border. */
+  .bailey-share-avatar.person { color: #fff; border-color: transparent; }
   .bailey-share-meta { flex: 1; min-width: 0; }
   .bailey-share-meta .name { font-size: 13px; font-weight: 500; color: var(--bl-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .bailey-share-meta .sub { font-size: 12px; color: var(--bl-muted-fg); }
@@ -112,6 +125,86 @@ const shareModalCSS = `
   .bailey-share-error { padding: 0 24px 8px; color: var(--bl-destructive); font-size: 13px; display: none; }
   .bailey-share-error.shown { display: block; }
   .bailey-share-empty { padding: 8px 24px 12px; color: var(--bl-muted-fg); font-size: 13px; }
+
+  /* --- Inherited workspace access (#251) --------------------------------
+     Workspace members can already open what their workspace deploys; this
+     row says so. Boxed so it reads as a statement about the workspace rather
+     than as one more individually-granted person. It is informational:
+     membership is managed in the workspace, not here. Uses the shadcn tokens
+     above — no accent colour of its own. */
+  .bailey-share-inherited {
+    margin: 2px 12px 10px; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid var(--bl-border); background: var(--bl-muted);
+  }
+  .bailey-share-inherited-head { display: flex; align-items: center; gap: 12px; }
+  .bailey-share-count {
+    font: inherit; font-size: 11px; font-weight: 500; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--bl-border); background: var(--bl-bg); color: var(--bl-muted-fg);
+    flex-shrink: 0; cursor: pointer; white-space: nowrap; transition: color .12s, border-color .12s;
+  }
+  .bailey-share-count:hover { color: var(--bl-fg); border-color: #a1a1aa; }
+  .bailey-share-count:focus-visible { outline: 0; box-shadow: 0 0 0 3px var(--bl-ring); }
+  .bailey-share-members {
+    display: none; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--bl-border);
+  }
+  .bailey-share-members.open { display: block; }
+  .bailey-share-member {
+    display: flex; align-items: center; gap: 10px; padding: 4px 0; min-width: 0;
+  }
+  /* .dot defaults to the same calm avatar the rows above use; personChip()
+     overrides the background with a hash of the display name, matching the
+     console's Avatar, so people stay individually recognisable. Groups keep
+     the default — a group is not a person. */
+  .bailey-share-member .dot {
+    width: 28px; height: 28px; border-radius: 999px; flex-shrink: 0;
+    background: var(--bl-bg); color: #52525b; border: 1px solid var(--bl-border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.2px;
+  }
+  .bailey-share-member .dot.person { color: #fff; border-color: transparent; }
+  .bailey-share-member .who { min-width: 0; }
+  .bailey-share-member .who .line {
+    font-size: 13px; font-weight: 500; color: var(--bl-fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bailey-share-member .who .mail {
+    font-size: 11.5px; color: var(--bl-muted-fg); font-family: ui-monospace, 'Geist Mono', monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bailey-share-members .note { font-size: 12px; color: var(--bl-muted-fg); padding-top: 8px; }
+  .bailey-share-subhead {
+    padding: 6px 12px 2px; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.05em; text-transform: uppercase; color: var(--bl-muted-fg);
+  }
+
+  /* --- People picker (#251) ---------------------------------------------
+     Click-to-pick over the server's people directory, mirroring the
+     workspace sidebar's "Add a member" list. The free-text field above
+     still accepts any email or /group/path. */
+  .bailey-share-picker {
+    display: none; margin: 0 24px 14px; border: 1px solid var(--bl-border);
+    border-radius: 8px; max-height: 168px; overflow-y: auto;
+  }
+  .bailey-share-picker.open { display: block; }
+  .bailey-share-pick {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 8px 10px; text-align: left; font: inherit; color: var(--bl-fg);
+    background: none; border: 0; border-bottom: 1px solid var(--bl-border); cursor: pointer;
+    transition: background .12s;
+  }
+  .bailey-share-pick:last-child { border-bottom: 0; }
+  .bailey-share-pick:hover { background: var(--bl-muted); }
+  .bailey-share-pick .who { flex: 1; min-width: 0; }
+  .bailey-share-pick .who .line {
+    font-size: 13px; font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bailey-share-pick .who .mail {
+    font-size: 11px; color: var(--bl-muted-fg);
+    font-family: ui-monospace, 'Geist Mono', monospace;
+  }
+  .bailey-share-pick .tag { font-size: 11px; color: var(--bl-muted-fg); flex-shrink: 0; }
+  .bailey-share-picker .note { padding: 8px 10px; font-size: 12px; color: var(--bl-muted-fg); }
 
   /* Secondary sharing actions: understated text links on one row. */
   .bailey-extras {
@@ -199,12 +292,15 @@ func shareModalHTML() string {
       <button type="button" id="bailey-share-add-btn" onclick="window.__baileyShareAdd()">Add</button>
     </div>
 
+    <div class="bailey-share-picker" id="bailey-share-picker"></div>
+
     <div class="bailey-share-error" id="bailey-share-error"></div>
 
     <div class="bailey-share-section-title" id="bailey-share-requests-title" style="display:none;">Pending access requests</div>
     <div class="bailey-share-list" id="bailey-share-requests" style="display:none;"></div>
 
     <div class="bailey-share-section-title">People with access</div>
+    <div id="bailey-share-workspace"></div>
     <div class="bailey-share-list" id="bailey-share-list">
       <p class="bailey-share-empty">Loading…</p>
     </div>
@@ -261,6 +357,15 @@ func shareModalJS(host, callerEmail, apiURL string) string {
   var apiURL = %q;
   var callerEmail = %q;
   var hostLabel = %q;
+  // People directory for the picker — the same endpoint the server console's
+  // "Add a member" list uses, routed under the gate prefix so it is reachable
+  // from an app host. Loaded lazily on first open; a failure degrades to
+  // free-text entry only.
+  var directoryURL = %q;
+  var directory = null;      // null = not loaded, [] = loaded/failed-empty
+  var directoryFailed = false;
+  var lastData = null;       // most recent listing, for the picker's filter
+  var membersOpen = false;   // is the inherited members list expanded?
 
   function $(id) { return document.getElementById(id); }
   function el(tag, props, children) {
@@ -275,12 +380,54 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     (children||[]).forEach(function(c) { if (c) n.appendChild(c); });
     return n;
   }
-  function initials(s) {
-    s = String(s || '').replace(/[^a-zA-Z0-9]/g,' ').trim();
-    if (!s) return '?';
-    var parts = s.split(/\s+/);
-    if (parts.length === 1) return parts[0].slice(0,2).toUpperCase();
-    return (parts[0][0]+parts[1][0]).toUpperCase();
+  // avatarColor / initialsFor are ported verbatim from the server console's
+  // Avatar (console-ui.jsx), so a person's chip looks the same here as in the
+  // workspace member list: a filled circle in a colour hashed from their
+  // display name, with up to two initials.
+  //
+  // The console additionally loads a real photo from the AOC and a real display
+  // name from its identity directory. Neither is reachable from this dialog:
+  // the chrome wrap's CSP is img-src 'self' data: <inner host> and connect-src
+  // 'self', so a cross-origin avatar/name fetch is blocked — and widening a
+  // security header on every protected page for a nicer avatar is not a trade
+  // worth making. Initials + the name Bailey knows is the honest rendering.
+  function avatarColor(s) {
+    var h = 0;
+    s = String(s || '');
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return 'hsl(' + (h %% 360) + ' 52%% 45%%)';
+  }
+  function initialsFor(s) {
+    // Split on spaces AND email/handle separators, so "jane@acme.com" → "JA".
+    // Character class and fallback match console-ui.jsx exactly — a different
+    // split would give the same person different initials in the two UIs.
+    var name = String(s || '');
+    var parts = name.split(/[\s@._-]+/).filter(Boolean);
+    var out = parts.map(function(w) { return w[0]; }).slice(0, 2).join('').toUpperCase();
+    return out || (name[0] || '?').toUpperCase();
+  }
+  // personChip builds the avatar + name/email pair used for every human in
+  // this dialog. displayName falls back to the email, and the mono email line
+  // is dropped when it would just repeat the name (same rule as UserChip).
+  function personChip(email, name) {
+    var display = name || email;
+    var dot = el('div', {class:'dot person', text: initialsFor(display)});
+    dot.style.background = avatarColor(display);
+    var lines = [el('div', {class:'line', text: display +
+      (String(email).toLowerCase() === callerEmail.toLowerCase() ? ' (you)' : '')})];
+    if (display !== email) lines.push(el('div', {class:'mail', text: email, title: email}));
+    return [dot, el('div', {class:'who'}, lines)];
+  }
+  // nameFor looks a person's display name up in the people directory the picker
+  // already loaded. Returns '' when unknown (directory still loading, failed,
+  // or the person isn't on this server) — callers then show the bare email.
+  function nameFor(email) {
+    if (!directory || !email) return '';
+    var key = String(email).toLowerCase();
+    for (var i = 0; i < directory.length; i++) {
+      if (String(directory[i].email).toLowerCase() === key) return directory[i].name || '';
+    }
+    return '';
   }
   function showError(msg) {
     var e = $('bailey-share-error');
@@ -301,10 +448,19 @@ func shareModalJS(host, callerEmail, apiURL string) string {
   }
   function render(data) {
     showError('');
+    lastData = data;
     $('bailey-share-title').textContent = 'Share "' + hostLabel + '"';
+    // Inherited workspace access goes ABOVE the individual rows, in its own
+    // box — it is a different kind of thing from a person you added.
+    renderWorkspace(data.workspace);
     var list = $('bailey-share-list');
     list.innerHTML = '';
     var ownerEmail = (data.owner_email || '').toLowerCase();
+    // With an inherited workspace row above, label what follows so the two
+    // halves of the union ACL can't be read as one flat list.
+    if (data.workspace) {
+      list.appendChild(el('div', {class:'bailey-share-subhead', text:'Added to this endpoint'}));
+    }
     // Owner is a role, not a fixed property: the recorded owner_email is shown
     // first and is editable exactly like any grant (promote/demote/remove).
     // The backend refuses to remove the last owner.
@@ -320,9 +476,12 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     if ((data.grants||[]).length === 0) {
       var p = document.createElement('p');
       p.className = 'bailey-share-empty';
-      p.textContent = 'No additional people or groups yet.';
+      p.textContent = data.workspace
+        ? 'No additional people yet — beyond the workspace above.'
+        : 'No additional people or groups yet.';
       list.appendChild(p);
     }
+    renderPicker();
     // Pending requests: people who hit the endpoint without a grant
     // and clicked "Request access" on the denied page. Rendered above
     // the access list with Approve / Deny buttons.
@@ -391,11 +550,170 @@ func shareModalJS(host, callerEmail, apiURL string) string {
       .then(function(r){ if(!r.ok) return readErr(r).then(function(m){throw new Error(m);}); return r.json(); })
       .then(load).catch(function(e){ showError('Failed to revoke link: '+e); });
   }
-  function requestRowFor(req) {
-    var avatar = el('div', {class: 'bailey-share-avatar', text: initials(req.email)});
+  // --- Inherited workspace access (#251) ---
+
+  // peopleLabel describes the size of the inherited set, groups included.
+  // Groups can't be expanded to individuals without querying Keycloak, so
+  // they are counted separately rather than folded into the head count.
+  function peopleLabel(n, groups) {
+    var parts = [];
+    if (n) parts.push(n + (n === 1 ? ' person' : ' people'));
+    if (groups) parts.push(groups + (groups === 1 ? ' group' : ' groups'));
+    if (!parts.length) return 'no members yet';
+    return parts.join(' + ');
+  }
+
+  function renderWorkspace(ws) {
+    var box = $('bailey-share-workspace');
+    box.innerHTML = '';
+    var sub = $('bailey-share-sub');
+    if (!ws) {
+      // Endpoint isn't part of a workspace — there is nothing inherited.
+      sub.textContent = 'Only people you invite can open this endpoint.';
+      return;
+    }
+    var members = ws.members || [];
+    var groups  = ws.groups  || [];
+    sub.textContent = 'Everyone in the ' + ws.label +
+      ' workspace can open this endpoint, plus anyone added below.';
+
+    var avatar = el('div', {class:'bailey-share-avatar group', text:'WS'});
     var meta = el('div', {class:'bailey-share-meta'}, [
-      el('div', {class:'name', text: req.email}),
-      el('div', {class:'sub',  text: 'Requested ' + (req.requested_at || '')})
+      el('div', {class:'name', text: 'Members of ' + ws.label + ' have access'}),
+      el('div', {class:'sub',  text: 'workspace · inherited from ' + ws.endpoint})
+    ]);
+    var panel = el('div', {class:'bailey-share-members' + (membersOpen ? ' open' : '')});
+    var countBtn = el('button', {
+      type:'button',
+      class:'bailey-share-count',
+      text: peopleLabel(members.length, groups.length),
+      title:'Show who that is',
+      onclick: function() {
+        membersOpen = !membersOpen;
+        if (membersOpen) panel.classList.add('open'); else panel.classList.remove('open');
+      }
+    });
+
+    // Enumerate the inherited set — the whole point of this row is that an
+    // admin can see exactly WHO "workspace members" means.
+    members.forEach(function(m) {
+      panel.appendChild(el('div', {class:'bailey-share-member'}, personChip(m, nameFor(m))));
+    });
+    groups.forEach(function(gp) {
+      // A group is not a person — keep the neutral marker, no hashed colour.
+      panel.appendChild(el('div', {class:'bailey-share-member'}, [
+        el('div', {class:'dot', text:'##'}),
+        el('div', {class:'who'}, [
+          el('div', {class:'line', text: gp}),
+          el('div', {class:'mail', text:'Keycloak group'})
+        ])
+      ]));
+    });
+    if (!members.length && !groups.length) {
+      panel.appendChild(el('div', {class:'note', text:'This workspace has no members recorded yet.'}));
+    }
+    // Say where this access is administered, since it can't be edited here.
+    panel.appendChild(el('div', {class:'note',
+      text:'Managed in the workspace, not here — removing someone from the workspace removes this access.'}));
+
+    var head = el('div', {class:'bailey-share-inherited-head'}, [avatar, meta, countBtn]);
+    box.appendChild(el('div', {class:'bailey-share-inherited'}, [head, panel]));
+  }
+
+  // --- People picker (#251) ---
+
+  function loadDirectory() {
+    if (directory !== null) return Promise.resolve(directory);
+    return fetch(directoryURL, {credentials:'same-origin'})
+      .then(function(r){ if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(d){ directory = (d && d.people) ? d.people : []; return directory; })
+      .catch(function(){ directory = []; directoryFailed = true; return directory; });
+  }
+
+  // renderPicker draws the click-to-pick list: everyone on this server who
+  // does not already have access here, narrowed by whatever is typed in the
+  // add field. The field itself stays free-text — an email that isn't on the
+  // server yet is still addable by typing it and pressing Add.
+  function renderPicker() {
+    var box = $('bailey-share-picker');
+    box.innerHTML = '';
+    if (directory === null) { box.classList.remove('open'); return; }
+    if (directoryFailed) {
+      box.appendChild(el('div', {class:'note',
+        text:'Could not load the people list — type an email address instead.'}));
+      box.classList.add('open');
+      return;
+    }
+    var taken = {};
+    if (lastData) {
+      if (lastData.owner_email) taken[lastData.owner_email.toLowerCase()] = true;
+      (lastData.grants || []).forEach(function(g) {
+        if (g.principal_type === 'email') taken[(g.principal_value||'').toLowerCase()] = true;
+      });
+      // Workspace members already reach this endpoint, so offering to add
+      // them again would be noise.
+      if (lastData.workspace) {
+        (lastData.workspace.members || []).forEach(function(m) { taken[m.toLowerCase()] = true; });
+      }
+    }
+    var q = $('bailey-share-input').value.trim().toLowerCase();
+    var matches = directory.filter(function(p) {
+      if (!p.email || taken[p.email.toLowerCase()]) return false;
+      if (!q) return true;
+      return p.email.toLowerCase().indexOf(q) >= 0 ||
+             (p.name || '').toLowerCase().indexOf(q) >= 0;
+    });
+    if (!matches.length) {
+      box.classList.remove('open');
+      return;
+    }
+    var shown = matches.slice(0, 8);
+    shown.forEach(function(p) {
+      var named = p.name && p.name !== p.email;
+      var who = el('div', {class:'who'}, [
+        el('div', {class:'line', text: named ? p.name : p.email}),
+        named ? el('div', {class:'mail', text: p.email}) : null
+      ]);
+      var pickAvatar = el('div', {class:'bailey-share-avatar person', text: initialsFor(p.name || p.email)});
+      pickAvatar.style.background = avatarColor(p.name || p.email);
+      box.appendChild(el('button', {
+        type:'button', class:'bailey-share-pick',
+        title:'Add ' + p.email,
+        onclick: function() { pick(p.email); }
+      }, [
+        pickAvatar,
+        who,
+        el('span', {class:'tag', text: p.invited ? 'Invited' : ''})
+      ]));
+    });
+    if (matches.length > shown.length) {
+      box.appendChild(el('div', {class:'note',
+        text: (matches.length - shown.length) + ' more — keep typing to narrow the list.'}));
+    }
+    box.classList.add('open');
+  }
+
+  // redrawWithNames re-renders the parts whose labels come from the people
+  // directory. No-op until the grant listing has arrived (render() draws them
+  // from scratch anyway, with whatever the directory holds by then).
+  function redrawWithNames() {
+    if (lastData) render(lastData); else renderPicker();
+  }
+
+  function pick(email) {
+    add('email', email, $('bailey-share-role').value).then(function() {
+      $('bailey-share-input').value = '';
+    });
+  }
+
+  function requestRowFor(req) {
+    var display = nameFor(req.email) || req.email;
+    var avatar = el('div', {class: 'bailey-share-avatar person', text: initialsFor(display)});
+    avatar.style.background = avatarColor(display);
+    var meta = el('div', {class:'bailey-share-meta'}, [
+      el('div', {class:'name', text: display}),
+      el('div', {class:'sub',  text: (display === req.email ? '' : req.email + ' · ') +
+                                     'requested ' + (req.requested_at || '')})
     ]);
     var approve = el('button', {
       class:'bailey-share-remove',
@@ -429,10 +747,16 @@ func shareModalJS(host, callerEmail, apiURL string) string {
   function rowFor(g) {
     var isGroup = g.principal_type === 'group';
     var isMe    = !isGroup && g.principal_value.toLowerCase() === callerEmail.toLowerCase();
-    var avatar  = el('div', {class: 'bailey-share-avatar' + (isGroup ? ' group' : ''), text: isGroup ? '##' : initials(g.principal_value)});
+    // Same identity chip as the inherited member list, so one dialog doesn't
+    // render two different kinds of person.
+    var display = (isGroup ? '' : nameFor(g.principal_value)) || g.principal_value;
+    var avatar  = el('div', {class: 'bailey-share-avatar' + (isGroup ? ' group' : ' person'),
+                             text: isGroup ? '##' : initialsFor(display)});
+    if (!isGroup) avatar.style.background = avatarColor(display);
     var meta    = el('div', {class:'bailey-share-meta'}, [
-      el('div', {class:'name', text: g.principal_value + (isMe ? ' (you)' : '')}),
-      el('div', {class:'sub',  text: isGroup ? 'Keycloak group' : 'Email'})
+      el('div', {class:'name', text: display + (isMe ? ' (you)' : '')}),
+      el('div', {class:'sub',  text: isGroup ? 'Keycloak group'
+                                            : (display === g.principal_value ? 'Email' : g.principal_value)})
     ]);
     var children = [avatar, meta];
     var sel = el('select', {class:'bailey-share-role-dropdown'}, [
@@ -488,7 +812,13 @@ func shareModalJS(host, callerEmail, apiURL string) string {
   window.__baileyShareOpen = function() {
     $('bailey-share-modal').classList.add('open');
     load();
-    setTimeout(function(){ $('bailey-share-input').focus(); }, 30);
+    // Picker data is independent of the grant listing, so fetch it in parallel.
+    // It also supplies the display names for the member/grant chips, so redraw
+    // those too once it lands — whichever request finishes second wins.
+    loadDirectory().then(redrawWithNames);
+    var inp = $('bailey-share-input');
+    inp.oninput = renderPicker;
+    setTimeout(function(){ inp.focus(); }, 30);
   };
   window.__baileyShareClose = function() {
     $('bailey-share-modal').classList.remove('open');
@@ -499,7 +829,10 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     if (!v) return;
     // Heuristic: starts with / → Keycloak group path, otherwise email.
     var pType = (v[0] === '/') ? 'group' : 'email';
-    add(pType, v, role).then(function(){ $('bailey-share-input').value = ''; });
+    add(pType, v, role).then(function(){
+      $('bailey-share-input').value = '';
+      renderPicker();
+    });
   };
   window.__baileyMagicConfirm = function(){ $('bailey-magic-confirm').classList.add('open'); };
   window.__baileyMagicCancel = function(){ $('bailey-magic-confirm').classList.remove('open'); };
@@ -556,5 +889,5 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     if ($('bailey-magic-confirm').classList.contains('open')) { window.__baileyMagicCancel(); return; }
     if ($('bailey-share-modal').classList.contains('open')) { window.__baileyShareClose(); }
   });
-})();`, apiURL, callerEmail, html.UnescapeString(host))
+})();`, apiURL, callerEmail, html.UnescapeString(host), gatePathPrefix+"/api/people/directory")
 }

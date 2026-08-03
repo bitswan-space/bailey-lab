@@ -340,8 +340,8 @@ func roleFor(hostname, email string, groups []string) (endpointRole, error) {
 	if err != nil || ep == nil {
 		return role, err
 	}
-	if ep.ParentEndpoint != "" && !strings.EqualFold(ep.ParentEndpoint, ep.Hostname) {
-		parentRole, err := directRoleFor(ep.ParentEndpoint, email, groups)
+	if surface := workspaceMembershipSurface(ep); surface != "" {
+		parentRole, err := directRoleFor(surface, email, groups)
 		if err != nil {
 			return role, err
 		}
@@ -354,6 +354,29 @@ func roleFor(hostname, email string, groups []string) (endpointRole, error) {
 		}
 	}
 	return role, nil
+}
+
+// workspaceMembershipSurface returns the endpoint whose ACL defines "the
+// members of this endpoint's workspace" — the recorded parent, i.e. the
+// workspace dashboard. Empty when there is none: a parentless endpoint (a
+// dashboard itself, or a standalone route), or a row that names itself as
+// its parent (which would recurse).
+//
+// This is explicit data only. We deliberately do NOT infer a workspace from
+// the hostname: an endpoint whose parent was never recorded has no
+// membership surface, and gets its own grants and nothing more.
+//
+// roleFor uses this to resolve the inherited half of the ACL, and the share
+// dialog uses it to describe that half (workspaceAccessFor) — one definition,
+// so what the dialog shows can't drift from what the gate enforces.
+func workspaceMembershipSurface(ep *endpointRecord) string {
+	if ep == nil || ep.ParentEndpoint == "" {
+		return ""
+	}
+	if strings.EqualFold(ep.ParentEndpoint, ep.Hostname) {
+		return ""
+	}
+	return ep.ParentEndpoint
 }
 
 // directRoleFor resolves the caller's role from the endpoint's own

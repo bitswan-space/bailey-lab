@@ -141,7 +141,10 @@ func handleShareIndex(w http.ResponseWriter, email string, groups []string) {
 // in-wrap modal calls so the user can manage grants without leaving
 // the page.
 //
-//	GET    /2fa-gate/api/share/<host> → {owner_email, grants, requests}
+//	GET    /2fa-gate/api/share/<host> → {owner_email, grants, requests,
+//	                                     workspace, can_mint_magic_link,
+//	                                     magic_links, can_make_public,
+//	                                     is_public, public_url}
 //	POST   /2fa-gate/api/share/<host> → add grant / deny-request
 //	       (form-encoded: principal_type, principal_value, role —
 //	        or action=deny-request&email=...) → returns updated GET
@@ -218,6 +221,9 @@ func handleShareAPI(w http.ResponseWriter, r *http.Request, email string, groups
 			"can_make_public":     canPub,
 			"is_public":           isPublic,
 			"public_url":          publicURL,
+			// nil when the endpoint has no workspace membership surface; the
+			// dialog then draws no inherited row.
+			"workspace": workspaceAccessFor(ep),
 		})
 	}
 
