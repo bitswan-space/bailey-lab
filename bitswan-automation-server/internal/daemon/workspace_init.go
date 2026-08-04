@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -796,22 +795,11 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 		fmt.Printf("Coding Agent container: %s-coding-agent\n", workspaceName)
 	}
 
-	printGitopsInfo(os.Stdout, workspaceName, domain, token)
+	fmt.Println("------------GITOPS INFO------------")
+	fmt.Printf("GitOps ID: %s\n", workspaceName)
+	fmt.Printf("GitOps URL: https://%s-gitops.%s\n", workspaceName, domain)
 
 	return nil
-}
-
-// printGitopsInfo prints the end-of-init GITOPS INFO summary. Init's stdout is
-// streamed verbatim to the Bailey console (handleWorkspaceInit pipes os.Stdout
-// into the NDJSON response), where viewers aren't authorized to hold the
-// gitops secret — so the summary must never contain it (#336). gitopsSecret is
-// accepted only so the regression test can pin that it never appears in the
-// output; operators retrieve it with `bitswan list --passwords` on the host.
-func printGitopsInfo(w io.Writer, workspaceName, domain, gitopsSecret string) {
-	fmt.Fprintln(w, "------------GITOPS INFO------------")
-	fmt.Fprintf(w, "GitOps ID: %s\n", workspaceName)
-	fmt.Fprintf(w, "GitOps URL: https://%s-gitops.%s\n", workspaceName, domain)
-	fmt.Fprintln(w, "GitOps Secret: (not shown; run `bitswan list --passwords` on the host to retrieve it)")
 }
 
 // resolveWorkspaceInitDomain decides the domain for a new workspace when the
