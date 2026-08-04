@@ -155,15 +155,6 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
 
-  const onRunAgent = (r: Requirement) => {
-    // Types the focused-requirement prompt into the BP's running agent, or
-    // seeds a fresh session with it when none is running.
-    sendPrompt(copy, bp, 'requirement', r.id).catch((err) => {
-      toast.error(`Failed to hand ${r.id} to the agent: ${String(err)}`);
-    });
-    onShowAgents();
-  };
-
   // Run the deterministic test(s) in the BP's live-dev container via the
   // server, which drives `bitswan-coding-agent requirements test`. The hook
   // adopts the canonical statuses the CLI wrote, so badges flip on resolve.
@@ -210,9 +201,8 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
 
-  // "Write tests" / "Build automation": same flow as onRunAgent but against
-  // the whole requirements set — the server picks the canned prompt from the
-  // kind.
+  // "Write tests" / "Build automation": hand the canned prompt to the BP's
+  // agent — typed into the running session, or seeding a fresh one.
   const onStartCanned = (kind: 'write-tests' | 'automation') => {
     sendPrompt(copy, bp, kind).catch((err) => {
       toast.error(`Failed to hand the task to the agent: ${String(err)}`);
@@ -359,7 +349,6 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
           onAddChild={(parent) => void onNew(parent)}
           onAddRoot={() => void onNew()}
           onDelete={(r) => setDeleteTarget(r)}
-          onRunAgent={(r) => void onRunAgent(r)}
           onRunTest={(r) => void onRunTest(r)}
           runningIds={runningIds}
         />

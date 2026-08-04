@@ -6,9 +6,7 @@ import { getAccessToken } from '@/lib/auth-token';
 interface Props {
   copy: string;
   bp: string;
-  kind: 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
-  /** Requirement id when kind === 'requirement'. The server reads the description from the TOML. */
-  requirementId?: string;
+  kind: 'claude' | 'sync' | 'write-tests' | 'automation';
   /** Claude session UUID. We control it client-side so we can `--resume` it later. */
   sessionId: string;
   /** When true, ssh into the agent with `claude --resume <sessionId>` instead of a fresh session. */
@@ -28,7 +26,6 @@ export function SessionTerminal({
   copy,
   bp,
   kind,
-  requirementId,
   sessionId,
   resume,
   hidden,
@@ -58,12 +55,11 @@ export function SessionTerminal({
       copy,
       bp,
       kind,
-      ...(requirementId ? { requirement_id: requirementId } : {}),
       ...(resume ? { resume: sessionId } : { session_id: sessionId }),
       access_token: token,
     });
     return `/ws/coding-agent?${params.toString()}`;
-  }, [copy, bp, kind, requirementId, sessionId, resume, token]);
+  }, [copy, bp, kind, sessionId, resume, token]);
 
   // Pasted/dropped files land in `.agent-uploads/` under the session's cwd
   // — the BP dir (mirrors the cd logic in server/src/routes/coding-agent.ts)

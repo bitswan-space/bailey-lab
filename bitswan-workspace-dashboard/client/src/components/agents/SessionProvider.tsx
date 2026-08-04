@@ -19,12 +19,12 @@ import { SessionTerminal } from './SessionTerminal';
  * users can switch between Deployments / a different copy / a different BP
  * without losing their live agent sessions — there is no remount.
  *
- * The canned flows (sync, per-requirement, write-tests, build-automation)
- * don't get sessions of their own: `sendPrompt` types their prompt into the
- * scope's running session, and only starts one (seeded with that prompt)
- * when none is running.
+ * The canned flows (sync, write-tests, build-automation) don't get sessions
+ * of their own: `sendPrompt` types their prompt into the scope's running
+ * session, and only starts one (seeded with that prompt) when none is
+ * running.
  */
-export type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
+export type SessionKind = 'claude' | 'sync' | 'write-tests' | 'automation';
 
 /** Kinds that carry a canned prompt — plain 'claude' sessions have none
  *  (their standing guidance is the CLAUDE.md baked into the agent image). */
@@ -41,12 +41,6 @@ export interface ActiveSession {
    * so this is always 'claude' for them.
    */
   kind: SessionKind;
-  /**
-   * Requirement id this session focuses on. Set for kind='requirement' so
-   * the WS URL carries it (the server looks up the description to build
-   * the prompt).
-   */
-  requirementId?: string;
   startedAt: number;
   /** True when started via Resume (claude --resume <uuid>). */
   resume: boolean;
@@ -78,7 +72,7 @@ interface SessionsContextValue {
    * prompt). No-op when one is already live — returns the running session's
    * id in that case.
    */
-  startSession(copy: string, bp: string, kind?: SessionKind, requirementId?: string): string;
+  startSession(copy: string, bp: string, kind?: SessionKind): string;
   /** Re-attach to an existing conversation (dtach socket / claude --resume). */
   resumeSession(copy: string, bp: string, claudeSessionId: string): string;
   /**
@@ -86,7 +80,7 @@ interface SessionsContextValue {
    * the running session's terminal, or — when nothing is running — used to
    * seed a fresh session.
    */
-  sendPrompt(copy: string, bp: string, kind: CannedPromptKind, requirementId?: string): Promise<void>;
+  sendPrompt(copy: string, bp: string, kind: CannedPromptKind): Promise<void>;
 
   /** Called by SessionTerminal when its WS closes. */
   markExited(id: string, exitCode?: number): void;
@@ -173,7 +167,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const startSession = useCallback(
-    (copy: string, bp: string, kind: SessionKind = 'claude', requirementId?: string) => {
+    (copy: string, bp: string, kind: SessionKind = 'claude') => {
       const key = scopeKey({ copy, bp });
       const existing = sessionsRef.current[key];
       if (existing) return existing.id;
@@ -185,7 +179,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           copy,
           bp,
           kind,
-          ...(requirementId ? { requirementId } : {}),
           startedAt: Date.now(),
           resume: false,
         },
@@ -217,21 +210,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const sendPrompt = useCallback(
-    async (copy: string, bp: string, kind: CannedPromptKind, requirementId?: string) => {
+    async (copy: string, bp: string, kind: CannedPromptKind) => {
       const key = scopeKey({ copy, bp });
       const live = sessionsRef.current[key];
       if (!live) {
         // Nothing running: seed a fresh conversation with the prompt (the
         // server embeds it into the launch command).
-        startSession(copy, bp, kind, requirementId);
+        startSession(copy, bp, kind);
         return;
       }
-      const params = new URLSearchParams({
-        copy,
-        bp,
-        kind,
-        ...(requirementId ? { requirement_id: requirementId } : {}),
-      });
+      const params = new URLSearchParams({ copy, bp, kind });
       const r = await fetch(`/api/coding-agent/prompt?${params.toString()}`, {
         credentials: 'include',
         cache: 'no-store',
@@ -438,7 +426,6 @@ function SessionsLayer({
               hidden={!visible}
               onExit={(info) => markExited(s.id, info.code)}
               onInputWriter={(write) => registerWriter(s.id, write)}
-              {...(s.requirementId ? { requirementId: s.requirementId } : {})}
             />
           </div>
         );

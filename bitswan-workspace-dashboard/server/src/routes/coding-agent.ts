@@ -10,29 +10,10 @@ import {
   SYNC_PROMPT,
   WRITE_TESTS_PROMPT,
 } from '../services/agent-prompts.js';
-import { listRequirements, type Requirement } from '../services/requirements.js';
 import { emailFromRequest } from '../lib/user.js';
 
 export interface CodingAgentRoutesOptions {
   gitops: GitopsClient | null;
-}
-
-/**
- * Per-requirement focused prompt. The user has clicked "Run agent on this
- * requirement" in the dashboard, so we point Claude at a single id and
- * instruct it on the canonical lifecycle. Apostrophes in the user-typed
- * description are escaped centrally in `buildAutoCmd` — write this prompt
- * naturally.
- */
-function buildRequirementPrompt(req: Requirement): string {
-  return (
-    `Work on requirement ${req.id}: ${req.description}. ` +
-    `Read the BP's README.md, process.toml, and any existing source first. ` +
-    `Use \`bitswan-coding-agent requirements list\` to see the full tree and ` +
-    `\`bitswan-coding-agent requirements next\` to confirm ordering. ` +
-    `When the requirement passes, run \`bitswan-coding-agent requirements update --id ${req.id} --status pass\`. ` +
-    `If it doesn't pass, set status to fail or retest as appropriate.`
-  );
 }
 
 /**
@@ -70,13 +51,12 @@ export function agentSshTarget(): AgentSshTarget {
   return { host: `${ws}-gitops`, port: 2222 };
 }
 
-type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
+type SessionKind = 'claude' | 'sync' | 'write-tests' | 'automation';
 
 function isSessionKind(value: unknown): value is SessionKind {
   return (
     value === 'claude' ||
     value === 'sync' ||
-    value === 'requirement' ||
     value === 'write-tests' ||
     value === 'automation'
   );
@@ -92,30 +72,11 @@ function isSessionKind(value: unknown): value is SessionKind {
  * comes from the CLAUDE.md baked into the coding-agent image, which Claude
  * loads on every session (fresh and resumed alike).
  */
-function promptForKind(kind: SessionKind, requirement?: Requirement): string | undefined {
+function promptForKind(kind: SessionKind): string | undefined {
   if (kind === 'sync') return SYNC_PROMPT;
-  if (kind === 'requirement' && requirement) return buildRequirementPrompt(requirement);
   if (kind === 'write-tests') return WRITE_TESTS_PROMPT;
   if (kind === 'automation') return BUILD_AUTOMATION_PROMPT;
   return undefined;
-}
-
-/**
- * Look up one requirement in the BP's testable-requirements.toml. Returns
- * `undefined` when the id isn't there — sessions and prompts against a stale
- * id would just confuse Claude, so callers refuse instead.
- */
-async function findRequirement(
-  copy: string,
-  bp: string,
-  requirementId: string,
-): Promise<Requirement | undefined> {
-  const reqs = await listRequirements({
-    workspaceRoot: process.env.WORKSPACE_ROOT ?? '/workspace/workspace',
-    copy,
-    bp,
-  });
-  return reqs.find((r) => r.id === requirementId);
 }
 
 /**
@@ -140,21 +101,18 @@ export function buildAutoCmd(opts: {
   sessionId: string;
   resume: boolean;
   kind: SessionKind;
-  /** Requirement to focus the agent on. Required when kind === 'requirement'. */
-  requirement?: Requirement;
 }): string {
   // Every session — sync included — works inside a BP's own clone: the copy
   // root is a plain directory (each BP under it is a separate git repo), so
   // there is nothing to run git against up there.
   const cd = `/workspace/copies/${opts.copy}/${opts.bp}`;
-  const prompt = promptForKind(opts.kind, opts.requirement);
+  const prompt = promptForKind(opts.kind);
   // Either continue a previous chat (--resume <uuid>) or start a fresh one
   // with a caller-provided UUID (--session-id <uuid>) so the dashboard can
   // resume it later. A canned prompt, when the kind carries one, rides as
   // the positional arg, embedded inside single quotes; any apostrophes in
-  // the requirement description (or in the canned prompt templates) would
-  // otherwise terminate the quoted region. Plain sessions launch bare and
-  // wait for the user.
+  // the canned prompt templates would otherwise terminate the quoted
+  // region. Plain sessions launch bare and wait for the user.
   const freshArgs =
     `--dangerously-skip-permissions --session-id ${opts.sessionId}` +
     (prompt ? ` '${bashSingleQuoteEscape(prompt)}'` : '');
@@ -298,10 +256,9 @@ export function registerCodingAgentRoutes(
       session_id?: string;
       resume?: string;
       kind?: string;
-      requirement_id?: string;
     };
   }>('/ws/coding-agent', { websocket: true }, async (socket, req) => {
-    const { copy, bp, session_id, resume, kind: kindRaw, requirement_id } = req.query;
+    const { copy, bp, session_id, resume, kind: kindRaw } = req.query;
     if (!copy || !isValidCopyName(copy)) {
       socket.send(JSON.stringify({ type: 'error', message: 'invalid copy' }));
       socket.close(1008, 'invalid copy');
@@ -314,38 +271,6 @@ export function registerCodingAgentRoutes(
       socket.send(JSON.stringify({ type: 'error', message: 'invalid bp' }));
       socket.close(1008, 'invalid bp');
       return;
-    }
-    // For requirement sessions, look up the description in the TOML so we
-    // can embed it in the prompt. Refuse to spawn if the id isn't there —
-    // running a session against a stale id would just confuse Claude.
-    let requirement: Requirement | undefined;
-    if (kind === 'requirement') {
-      if (!requirement_id) {
-        socket.send(
-          JSON.stringify({ type: 'error', message: 'requirement_id is required' }),
-        );
-        socket.close(1008, 'missing requirement_id');
-        return;
-      }
-      try {
-        requirement = await findRequirement(copy, bp, requirement_id);
-      } catch (err) {
-        socket.send(
-          JSON.stringify({
-            type: 'error',
-            message: `failed to load requirement: ${err instanceof Error ? err.message : String(err)}`,
-          }),
-        );
-        socket.close(1011, 'requirement load failed');
-        return;
-      }
-      if (!requirement) {
-        socket.send(
-          JSON.stringify({ type: 'error', message: `requirement ${requirement_id} not found` }),
-        );
-        socket.close(1008, 'unknown requirement');
-        return;
-      }
     }
     // Exactly one of session_id or resume is required and both must be UUIDs.
     // Resume wins when both are present, but mixing is a client bug — flag it.
@@ -379,7 +304,6 @@ export function registerCodingAgentRoutes(
       sessionId: claudeSessionId,
       resume: isResume,
       kind,
-      ...(requirement ? { requirement } : {}),
     });
     const { host, port } = agentSshTarget();
 
@@ -562,10 +486,10 @@ export function registerCodingAgentRoutes(
   // the same text `buildAutoCmd` embeds when it has to start a fresh one,
   // so both paths stay in lockstep.
   app.get<{
-    Querystring: { copy?: string; bp?: string; kind?: string; requirement_id?: string };
+    Querystring: { copy?: string; bp?: string; kind?: string };
   }>('/api/coding-agent/prompt', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    const { copy, bp, kind: kindRaw, requirement_id } = req.query;
+    const { copy, bp, kind: kindRaw } = req.query;
     if (!copy || !isValidCopyName(copy)) {
       return reply.code(400).send({ error: 'invalid copy' });
     }
@@ -577,22 +501,7 @@ export function registerCodingAgentRoutes(
       return reply.code(401).send({ error: 'not authenticated' });
     }
     const kind: SessionKind = isSessionKind(kindRaw) ? kindRaw : 'claude';
-    let requirement: Requirement | undefined;
-    if (kind === 'requirement') {
-      if (!requirement_id) {
-        return reply.code(400).send({ error: 'requirement_id is required' });
-      }
-      try {
-        requirement = await findRequirement(copy, bp, requirement_id);
-      } catch (err) {
-        app.log.warn({ err, copy, bp, requirement_id }, 'requirement load failed');
-        return reply.code(500).send({ error: 'requirement load failed' });
-      }
-      if (!requirement) {
-        return reply.code(404).send({ error: `requirement ${requirement_id} not found` });
-      }
-    }
-    const prompt = promptForKind(kind, requirement);
+    const prompt = promptForKind(kind);
     if (!prompt) {
       // Plain 'claude' sessions carry no canned prompt (the baked CLAUDE.md
       // is their standing guidance) — nothing to inject.
