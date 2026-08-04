@@ -17,7 +17,7 @@ process.env.AGENT_SESSIONS_DIR = dir;
 // AGENT_HOME_DIR stays unset → title lookups hit a nonexistent path and
 // resolve to '' without error; titles aren't under test here.
 
-const { latestSession, findSessionOwnerEmail } = await import('./agent-sessions.js');
+const { latestSession, findSessionMeta } = await import('./agent-sessions.js');
 
 const U1 = '11111111-1111-4111-8111-111111111111';
 const U2 = '22222222-2222-4222-8222-222222222222';
@@ -94,14 +94,20 @@ test('a scope with no sessions resolves to null', async () => {
   assert.equal(s, null);
 });
 
-test('owner lookup reads the per-UUID meta directly', async () => {
-  assert.equal(await findSessionOwnerEmail(U3), 'bob@example.com');
+test('meta lookup reads the per-UUID file directly (owner + scope)', async () => {
+  // Owner AND scope come back — the resume gate refuses another user's
+  // conversation and any (copy, bp) other than the one recorded (#333).
+  assert.deepEqual(await findSessionMeta(U3), {
+    userEmail: 'bob@example.com',
+    copy: 'copy-a',
+    bp: 'bp-1',
+  });
   // Unknown conversation (or a legacy one with only a timestamped meta):
-  // no recorded owner, same allowance legacy sessions always had.
+  // nothing recorded, same allowance legacy sessions always had.
   assert.equal(
-    await findSessionOwnerEmail('99999999-9999-4999-8999-999999999999'),
+    await findSessionMeta('99999999-9999-4999-8999-999999999999'),
     null,
   );
   // Non-UUID input never touches the filesystem.
-  assert.equal(await findSessionOwnerEmail('../../etc/passwd'), null);
+  assert.equal(await findSessionMeta('../../etc/passwd'), null);
 });

@@ -4,7 +4,7 @@ import { spawnPty } from '../services/pty.js';
 import { handleTerminalConnection } from '../services/terminal-session.js';
 import type { GitopsClient } from '../services/gitops.js';
 import { isValidBpId, isValidCopyName } from '../services/workspace.js';
-import { findSessionOwnerEmail, latestSession } from '../services/agent-sessions.js';
+import { findSessionMeta, latestSession } from '../services/agent-sessions.js';
 import {
   BUILD_AUTOMATION_PROMPT,
   SYNC_PROMPT,
@@ -349,14 +349,22 @@ export function registerCodingAgentRoutes(
       return;
     }
 
-    // Block resuming another user's session. The session list returns every
-    // session for the (copy, bp), so a malicious user could grab another
-    // user's claude session UUID and pass it as `resume`. Without this gate
-    // they'd attach to the still-running dtach socket
-    // (/tmp/.claude-dtach-<UUID>.sock) and end up driving Claude under the
-    // *original* user's CLAUDE_CONFIG_DIR — leaking that user's Anthropic
-    // account. Sessions with no recorded owner (pre-isolation legacy) fall
-    // through; new sessions always carry an email.
+    // Gate resumes against the conversation's recorded meta, two ways:
+    //
+    //   - OWNER: a malicious user could grab another user's claude session
+    //     UUID and pass it as `resume` — they'd attach to the still-running
+    //     dtach socket (/tmp/.claude-dtach-<UUID>.sock) and end up driving
+    //     Claude under the *original* user's CLAUDE_CONFIG_DIR, leaking that
+    //     user's Anthropic account.
+    //   - SCOPE: attaching a conversation under a different (copy, bp) than
+    //     it belongs to shows one BP's conversation in another BP's Agents
+    //     tab and silently migrates its meta there (the wrapper overwrites
+    //     the meta with the attach-time scope) — bailey-lab #333. The client
+    //     shouldn't ever ask for this; refusing makes a client bug loud
+    //     instead of cross-contaminating.
+    //
+    // Conversations with no meta (pre-single-session legacy) fall through;
+    // new sessions always write one.
     //
     // This check runs *after* firstFrame so the disk lookup doesn't race the
     // client's first message — `socket.once('message', …)` inside the
@@ -364,11 +372,11 @@ export function registerCodingAgentRoutes(
     // browser's open-time resize event arrives during the await with no
     // listener and is lost (the WS then times out after 5s with no spawn).
     if (isResume && resumeId) {
-      const ownerEmail = await findSessionOwnerEmail(resumeId);
+      const meta = await findSessionMeta(resumeId);
       if (
-        ownerEmail &&
-        ownerEmail !== 'unknown' &&
-        ownerEmail !== email
+        meta?.userEmail &&
+        meta.userEmail !== 'unknown' &&
+        meta.userEmail !== email
       ) {
         socket.send(
           JSON.stringify({
@@ -377,6 +385,16 @@ export function registerCodingAgentRoutes(
           }),
         );
         socket.close(1008, 'forbidden resume');
+        return;
+      }
+      if (meta && (meta.copy !== copy || meta.bp !== bp)) {
+        socket.send(
+          JSON.stringify({
+            type: 'error',
+            message: `session belongs to ${meta.copy}/${meta.bp ?? ''}, not ${copy}/${bp}`,
+          }),
+        );
+        socket.close(1008, 'wrong scope');
         return;
       }
     }

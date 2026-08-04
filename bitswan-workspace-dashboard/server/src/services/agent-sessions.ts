@@ -148,23 +148,37 @@ export async function latestSession(filter: {
   return latest;
 }
 
+export interface SessionMetaInfo {
+  userEmail: string | null;
+  copy: string | null;
+  bp: string | null;
+}
+
 /**
- * Look up the recorded `user_email` for a session by its Claude conversation
- * UUID. Returns null when no meta file references that UUID. Used to gate
- * `resume` requests so a user can't attach to (and steal) another user's
- * still-running claude process via the dtach socket.
+ * Look up a conversation's recorded owner + scope by its Claude UUID.
+ * Returns null when no meta file references that UUID. Used to gate
+ * `resume` requests two ways: a user must not attach to (and steal)
+ * another user's still-running claude process via the dtach socket, and a
+ * conversation must not be re-attached under a different (copy, bp) than
+ * it belongs to — that would show one BP's conversation in another BP's
+ * Agents tab and silently migrate its meta there (bailey-lab #333).
  *
  * The wrapper writes one `<uuid>.meta.json` per conversation, so this is a
  * direct read. Legacy timestamp-named metas aren't consulted — a missing
- * file reads as "no recorded owner", the same allowance legacy sessions
+ * file reads as "nothing recorded", the same allowance legacy sessions
  * always had.
  */
-export async function findSessionOwnerEmail(
+export async function findSessionMeta(
   claudeSessionId: string,
-): Promise<string | null> {
+): Promise<SessionMetaInfo | null> {
   if (!UUID_RE.test(claudeSessionId)) return null;
   const raw = await readMeta(`${claudeSessionId}.meta.json`);
-  return raw?.user_email ?? null;
+  if (!raw) return null;
+  return {
+    userEmail: raw.user_email ?? null,
+    copy: raw.worktree ?? null,
+    bp: raw.bp ?? null,
+  };
 }
 
 /**
