@@ -85,7 +85,12 @@ function BackupsView({ ctx }) {
   const [busy, setBusy] = useBS('');
   const [daily, setDaily] = useBS(null);
   const [monthly, setMonthly] = useBS(null);
+  // The key is fetched on demand and held here only while the manual save form
+  // is open, then dropped — it is never in component state at rest.
+  const [pmKey, setPmKey] = useBS('');
+  const [pmReveal, setPmReveal] = useBS(false);
   const pollRef = useBR(null);
+  const pmFormRef = useBR(null);
 
   // While a run is in flight, poll status in the background until it lands.
   useBE(() => {
@@ -143,9 +148,77 @@ function BackupsView({ ctx }) {
     setBusy('');
   };
 
+  // pmIdentity is the username the key is filed under. The hostname is already
+  // implicit in the origin a manager binds the entry to; spelling it out just
+  // makes the vault entry legible when an operator looks for it years later,
+  // under pressure, next to entries for every other server they run.
+  const pmIdentity = () => `backup-key@${window.location.hostname}`;
+
+  // Saving the key into the operator's own password manager — the custody path
+  // that replaces "download a .txt and remember where you put it".
+  //
+  // Two mechanisms, because the programmatic one is Chrome/Edge-only:
+  // navigator.credentials.store() raises the browser's own save prompt, and
+  // everywhere else the only reliable trigger is a real form with login
+  // semantics that a manager recognises, so we render one.
+  //
+  // Deliberately does NOT acknowledge. store() resolves whether the operator
+  // accepted the prompt or dismissed it, and no API reports which — so
+  // treating it as proof of custody would record a copy that may not exist.
+  // Confirming stays a separate, explicit claim by the operator.
+  const saveKeyToPasswordManager = async () => {
+    setBusy('key');
+    let key = '';
+    try {
+      key = (await BApi.backupsKey()).key;
+    } catch (e) {
+      toast(`Could not fetch key: ${e.message}`, 'danger');
+      setBusy('');
+      return;
+    }
+    if (window.PasswordCredential && navigator.credentials && navigator.credentials.store) {
+      try {
+        await navigator.credentials.store(new window.PasswordCredential({
+          id: pmIdentity(),
+          password: key,
+          name: `Bitswan backup encryption key — ${window.location.hostname}`,
+        }));
+        toast('Your browser should now offer to save the key — accept it, then confirm below.', 'success');
+        setBusy('');
+        return;
+      } catch (e) {
+        // Fall through to the form. A refused store() (browser policy, lost
+        // user gesture, no manager configured) is not a reason to leave the
+        // operator with no way to save the key.
+      }
+    }
+    setPmReveal(false);
+    setPmKey(key);
+    setBusy('');
+  };
+
+  const copyKey = async () => {
+    try {
+      await navigator.clipboard.writeText(pmKey);
+      toast('Key copied to clipboard', 'success');
+    } catch (e) {
+      toast('Could not copy — reveal the key and select it by hand', 'danger');
+    }
+  };
+
+  // Btn renders type="button", so nothing here submits by accident; the save
+  // action asks the form to submit explicitly. onSubmit preventDefaults, so the
+  // page never navigates — the submit event exists purely because that is what
+  // extension-based managers watch for to offer saving.
+  const offerToSave = () => {
+    const form = pmFormRef.current;
+    if (form && form.requestSubmit) form.requestSubmit();
+  };
+
   // With no escrow the key exists only on this server, so the operator
   // confirming they stored a copy is the only signal that it exists anywhere
-  // else. Downloading is what makes that true; this records it.
+  // else. Saving it to a password manager (or downloading) is what makes that
+  // true; this records it.
   const acknowledgeKey = async () => {
     const ok = window.confirm(
       'Confirm that you have stored the encryption key somewhere safe, OFF this server.\n\n' +
@@ -207,8 +280,8 @@ function BackupsView({ ctx }) {
           <WCard title="Encryption key" style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 12.5, color: WC.muted, padding: '2px 0 10px' }}>
               Backups include workspace secrets, so this key is the whole ballgame. It is stored
-              <strong> nowhere but this server</strong> — there is no escrow. Download it and keep it
-              somewhere safe: without your copy, losing this server makes every backup permanently
+              <strong> nowhere but this server</strong> — there is no escrow. Save it to your password
+              manager: without your copy, losing this server makes every backup permanently
               unreadable.
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -220,11 +293,45 @@ function BackupsView({ ctx }) {
               )}
               {!backups.has_key && <WPill tone="neutral">no key yet — generated on the first run</WPill>}
               <span style={{ flex: 1 }} />
-              <WBtn variant="primary" size="sm" leftIcon="download" disabled={busy !== '' || !backups.has_key} onClick={downloadKey}>Download</WBtn>
+              <WBtn variant="primary" size="sm" leftIcon="key-round" disabled={busy !== '' || !backups.has_key} onClick={saveKeyToPasswordManager}>
+                Save to password manager
+              </WBtn>
+              <WBtn variant="ghost" size="sm" leftIcon="download" disabled={busy !== '' || !backups.has_key} onClick={downloadKey}>Download</WBtn>
               {backups.has_key && !backups.key_acknowledged && (
                 <WBtn variant="ghost" size="sm" leftIcon="check" disabled={busy !== ''} onClick={acknowledgeKey}>I have saved it</WBtn>
               )}
             </div>
+
+            {pmKey && (
+              <div style={{ marginTop: 14, padding: 12, borderRadius: 8, border: `1px solid ${WC.surface2}`, background: WC.bg }}>
+                <div style={{ fontSize: 12.5, color: WC.muted, paddingBottom: 10 }}>
+                  Your password manager should offer to save this once you press <strong>Offer to save</strong>.
+                  If it does not, copy the key and add it by hand — then confirm you have saved it.
+                </div>
+                <form ref={pmFormRef} onSubmit={e => e.preventDefault()}
+                  style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 520 }}>
+                  <input
+                    type="text" name="username" autoComplete="username" readOnly
+                    aria-label="Password manager entry name" value={pmIdentity()}
+                    style={{ padding: '7px 9px', borderRadius: 8, border: `1px solid ${WC.surface2}`,
+                      background: WC.surface2, color: WC.muted, fontSize: 13 }}
+                  />
+                  <input
+                    type={pmReveal ? 'text' : 'password'} name="password" autoComplete="new-password" readOnly
+                    aria-label="Backup encryption key" value={pmKey}
+                    style={{ padding: '7px 9px', borderRadius: 8, border: `1px solid ${WC.surface2}`,
+                      background: WC.bg, color: WC.fg, fontSize: 13, fontFamily: 'Geist Mono, monospace' }}
+                  />
+                </form>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                  <WBtn variant="primary" size="sm" onClick={offerToSave}>Offer to save</WBtn>
+                  <WBtn variant="ghost" size="sm" leftIcon="copy" onClick={copyKey}>Copy</WBtn>
+                  <WBtn variant="ghost" size="sm" onClick={() => setPmReveal(!pmReveal)}>{pmReveal ? 'Hide' : 'Reveal'}</WBtn>
+                  <span style={{ flex: 1 }} />
+                  <WBtn variant="ghost" size="sm" onClick={() => { setPmKey(''); setPmReveal(false); }}>Done</WBtn>
+                </div>
+              </div>
+            )}
           </WCard>
 
           <WCard title="Retention">
