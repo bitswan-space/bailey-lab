@@ -712,8 +712,9 @@ function App() {
   };
 
   const loadPeople = useAR();
-  loadPeople.current = async () => {
-    setLoad('people', 'loading');
+  loadPeople.current = async (opts) => {
+    const bg = opts && opts.background;
+    if (!bg) setLoad('people', 'loading');
     try {
       const r = await withRetry(() => Api.people());
       // /people degrades gracefully: a 200 may carry an `error` describing a
@@ -725,7 +726,7 @@ function App() {
         peopleWarning: r.error || null,
       }));
       setLoad('people', 'ok'); setErr('people', null);
-    } catch (e) { setLoad('people', 'error'); setErr('people', e.message); }
+    } catch (e) { if (!bg) { setLoad('people', 'error'); setErr('people', e.message); } }
   };
 
   // refresh(list) re-fetches one (or all) live lists. Passed through ctx

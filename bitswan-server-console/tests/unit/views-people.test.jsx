@@ -1,11 +1,13 @@
 // views-people.test.jsx — UsersView + ApprovalsView (+ UserDevicesDrawer).
 import React from 'react';
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { SC_PEOPLE, installFetch } from './harness.js';
 import { makeData, Host, spies } from './ctx.js';
 
 const { UsersView, EndpointAccessView } = SC_PEOPLE;
+
+afterEach(() => vi.useRealTimers());
 
 const people = [
   { id: 'tomas@h', name: 'Tomas', email: 'tomas@h', role: 'admin', workspaceCount: 2, deviceCount: 3, lastActive: 'now', invited: false },
@@ -134,24 +136,52 @@ describe('UsersView — device approvals', () => {
     expect(screen.queryByText(/awaiting approval/)).toBeNull();
   });
 
-  it('approve success refreshes approvals + devices + people', async () => {
+  // #331: an approval only stamps the pending pair — the trusted device is
+  // minted when the user's device claims it on its next ~2s poll, so a single
+  // immediate refetch races the claim and leaves counts stale until a manual
+  // page reload. The view must refresh right away AND re-sync a bounded few
+  // times afterwards, all in the background (a foreground people refresh drops
+  // the whole roster to "Loading people…" — the #257 flash).
+  it('approve success refreshes in the background, then re-syncs after the claim delay (#331)', async () => {
     const s = spies();
     installFetch({ '/2fa-gate/approve': { status: 200, text: 'ok' } });
+    vi.useFakeTimers();
     render(<Host View={UsersView} data={withPending()} extra={s} />);
     fireEvent.change(codeInput(), { target: { value: '123456' } });
     fireEvent.click(screen.getByText('Trust this device'));
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Device trusted'), 'success'));
-    expect(s.refresh).toHaveBeenCalledWith('approvals');
-    expect(s.refresh).toHaveBeenCalledWith('devices');
-    expect(s.refresh).toHaveBeenCalledWith('people');
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Device trusted'), 'success');
+    // Every affected surface refreshes immediately: the pending bar + sidebar
+    // badge (approvals), device lists, roster counts, overview counts.
+    for (const k of ['approvals', 'devices', 'people', 'overview']) {
+      expect(s.refresh).toHaveBeenCalledWith(k, { background: true });
+    }
+    // Background only — a foreground refresh would unmount the roster.
+    for (const call of s.refresh.mock.calls) expect(call[1]).toEqual({ background: true });
+    // The delayed re-syncs (catching the moment the device record lands).
+    s.refresh.mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(13000); });
+    for (const k of ['approvals', 'devices', 'people', 'overview']) {
+      expect(s.refresh.mock.calls.filter((c) => c[0] === k).length).toBe(3);
+    }
+    for (const call of s.refresh.mock.calls) expect(call[1]).toEqual({ background: true });
+    // Bounded: no open-ended polling after the settle window.
+    s.refresh.mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+    expect(s.refresh).not.toHaveBeenCalled();
   });
 
-  it('approve 401 shows the mismatch message', async () => {
+  it('approve 401 shows the mismatch message and does NOT touch the lists', async () => {
+    const s = spies();
     installFetch({ '/2fa-gate/approve': { status: 401, text: 'unauthorized' } });
-    render(<Host View={UsersView} data={withPending()} />);
+    render(<Host View={UsersView} data={withPending()} extra={s} />);
     fireEvent.change(codeInput(), { target: { value: '123456' } });
     fireEvent.click(screen.getByText('Trust this device'));
     await waitFor(() => expect(screen.getByText(/Code didn't match/)).toBeTruthy());
+    // A failed approval must not refresh anything away — the pending row has
+    // to stay so the admin can retry (no optimistic removal).
+    expect(s.refresh).not.toHaveBeenCalled();
+    expect(screen.getByText('Device awaiting approval')).toBeTruthy();
   });
 
   it('dismiss denies the request server-side (persistent) then refreshes', async () => {

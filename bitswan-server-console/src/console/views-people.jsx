@@ -75,6 +75,24 @@ const P_ROLES = [
     desc: 'A signed-in identity with no elevated role; sees only workspaces they own or are added to.' },
 ];
 
+// A successful approval only STAMPS the pending pair server-side — the trusted
+// device record is minted later, when the user's device claims the approval on
+// its next ~2s poll (see the daemon's pending-pair flow). A refetch fired right
+// after the approve call therefore races that claim and still reads the old
+// device counts, which is exactly the reported staleness (#331): the roster
+// count / device lists never caught up until a manual page reload. So after
+// the immediate refresh, re-sync the affected lists a few more times, in the
+// background (rendered data stays on screen while refetching — #257). Bounded:
+// a handful of one-shot timers, never an open-ended poll. If the user's device
+// never claims (tab closed), the counts correctly stay as they are.
+const APPROVAL_SETTLE_DELAYS_MS = [2500, 6000, 12000];
+const APPROVAL_SETTLE_LISTS = ['approvals', 'devices', 'people', 'overview'];
+function scheduleApprovalSettle(refresh) {
+  APPROVAL_SETTLE_DELAYS_MS.forEach((ms) => setTimeout(() => {
+    APPROVAL_SETTLE_LISTS.forEach((k) => refresh(k, { background: true }));
+  }, ms));
+}
+
 // PendingApprovalBar — the device-trust step, inlined under the person it
 // belongs to in the roster. The admin reads the code off the user's screen and
 // types it here; the backend validates it (a mismatch is a 401). Shows whether
@@ -102,9 +120,14 @@ function PendingApprovalBar({ req, person, ctx }) {
     try {
       await PApi.approvePair(req.userEmail, codeNoSep(code));
       toast(`Device trusted for ${req.userName}`, 'success');
-      // Refresh approvals (clears this bar), devices, and the roster (device
-      // counts + a brand-new person now becomes a real device owner).
-      await Promise.all([refresh('approvals'), refresh('devices'), refresh('people')]);
+      // Refresh approvals (clears this bar + the sidebar badge), devices, the
+      // roster (device counts + a brand-new person now becomes a real device
+      // owner) and the overview counts. Background: the roster stays rendered
+      // while refetching instead of dropping to "Loading people…" (#257).
+      await Promise.all(APPROVAL_SETTLE_LISTS.map((k) => refresh(k, { background: true })));
+      // …and re-sync shortly after, once the user's device has claimed the
+      // approval and the trusted device actually exists (#331).
+      scheduleApprovalSettle(refresh);
     } catch (e) {
       setError(true);
       setErrMsg(e instanceof PApiError && e.status === 401
@@ -917,4 +940,6 @@ function EndpointAccessView({ ctx }) {
   );
 }
 
-window.SC_PEOPLE = { UsersView, EndpointAccessView };
+// scheduleApprovalSettle is shared with views-devices.jsx (the self-link row
+// approves through the same endpoint and has the same claim race).
+window.SC_PEOPLE = { UsersView, EndpointAccessView, scheduleApprovalSettle };
