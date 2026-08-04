@@ -3,13 +3,14 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import type { Readable } from 'node:stream';
 import { isBootstrapPrompt } from './agent-prompts.js';
 
 /**
- * Bind-mount target for the coding-agent's session transcripts. The agent
- * writes `<sessionId>.meta.json` and `<sessionId>.cast` here; we read both
- * for the dashboard's per-BP session list and asciinema playback.
+ * Bind-mount target for the coding-agent's session metadata. The agent's
+ * session wrapper writes one `<claudeSessionId>.meta.json` per conversation;
+ * we read them to find a scope's resume candidate and its owner. (Old
+ * timestamped meta files and `.cast` recordings from the pre-single-session
+ * era may still sit here — they parse fine and age out naturally.)
  */
 export const SESSIONS_DIR =
   process.env.AGENT_SESSIONS_DIR ?? '/workspace/agent-sessions';
@@ -43,188 +44,52 @@ export function sanitizeEmail(raw: string): string {
 const TITLE_MAX_LEN = 80;
 
 export interface AgentSession {
-  id: string;
   timestamp: string;
   userEmail: string;
   copy: string;
-  /** null when the session was created by the editor (no SSH_BP env var) or is a copy-level sync session. */
   bp: string | null;
-  /** Empty string when no `.cast` file exists alongside the metadata. */
-  castFile: string;
-  logged: boolean;
+  /** Claude conversation UUID — what `--resume <uuid>` takes. */
+  claudeSessionId: string;
   /**
-   * Claude conversation UUID — passed in by the dashboard via
-   * SSH_CLAUDE_SESSION_ID so we can `--resume <uuid>` later. May be null
-   * for legacy or editor-created sessions.
-   */
-  claudeSessionId: string | null;
-  /**
-   * "claude" for a regular BP-scoped chat (the default), "sync" for the
-   * copy-level git-sync flow, "requirement" for a per-requirement
-   * focused session, "write-tests" / "automation" for the Requirements
-   * tab's canned-prompt sessions, or null for legacy / editor-launched
-   * sessions where the wrapper didn't record a kind.
-   */
-  kind: 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation' | null;
-  /**
-   * First user prompt from Claude's transcript, truncated. Empty until the
-   * user has actually typed something into the session.
+   * Best human-readable name for the conversation (Claude's ai-title, a
+   * /rename, or the first real user prompt). Empty until one exists.
    */
   title: string;
 }
 
 interface RawMeta {
-  id?: string;
   user_email?: string;
-  userEmail?: string;
   /** Wire field written by the coding-agent's session wrapper (`"worktree": …`); read as the copy name. */
   worktree?: string;
   bp?: string | null;
   claude_session_id?: string | null;
-  claudeSessionId?: string | null;
-  kind?: string | null;
   started_at?: string;
-  timestamp?: string;
-  logged?: boolean;
 }
 
-/**
- * Scan `SESSIONS_DIR` and return parsed session metadata. When `bp` is
- * supplied the result is filtered to sessions started under that exact
- * (copy, bp) pair — editor sessions (which have `bp = null`) are
- * dropped from the per-BP view. When `userEmail` is supplied, only
- * sessions started by that user are returned (legacy sessions whose
- * meta has no recorded email are kept under the assumption they predate
- * per-user isolation).
- */
-export async function listSessions(filter: {
-  copy?: string;
-  bp?: string;
-  limit?: number;
-  userEmail?: string;
-}): Promise<AgentSession[]> {
-  let entries: string[];
+const UUID_RE =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+async function readMeta(entry: string): Promise<RawMeta | null> {
   try {
-    entries = await fs.readdir(SESSIONS_DIR);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') return [];
-    throw err;
+    const buf = await fs.readFile(path.join(SESSIONS_DIR, entry), 'utf8');
+    return JSON.parse(buf) as RawMeta;
+  } catch {
+    return null; // skip corrupt entries silently
   }
-
-  const sessions: AgentSession[] = [];
-  for (const entry of entries) {
-    if (!entry.endsWith('.meta.json')) continue;
-    let raw: RawMeta;
-    try {
-      const buf = await fs.readFile(path.join(SESSIONS_DIR, entry), 'utf8');
-      raw = JSON.parse(buf) as RawMeta;
-    } catch {
-      continue; // skip corrupt entries silently
-    }
-
-    const copy = raw.worktree ?? '';
-    const bp = raw.bp ?? null;
-    const kindRaw = raw.kind ?? null;
-    const kind: AgentSession['kind'] =
-      kindRaw === 'claude' ||
-      kindRaw === 'sync' ||
-      kindRaw === 'requirement' ||
-      kindRaw === 'write-tests' ||
-      kindRaw === 'automation'
-        ? kindRaw
-        : null;
-    const userEmail = raw.user_email ?? raw.userEmail ?? '';
-    if (filter.userEmail !== undefined) {
-      // Skip if this session belongs to someone else. Sessions with no
-      // recorded email (legacy / pre-isolation) are kept so users don't
-      // suddenly lose access to old sessions; new sessions always carry an
-      // email courtesy of the wrapper's hard-fail.
-      if (userEmail && userEmail !== 'unknown' && userEmail !== filter.userEmail) continue;
-    }
-    if (filter.copy !== undefined && copy !== filter.copy) continue;
-    if (filter.bp !== undefined) {
-      // Sync sessions are BP-scoped now (each BP is its own repo) and match
-      // by bp like any other kind. LEGACY copy-level sync sessions
-      // (bp=null, recorded before per-BP repos) still surface in any BP's
-      // Agents tab inside the copy — there's nowhere else for the user to
-      // see them. Other null-bp sessions (legacy / editor) stay filtered
-      // out so the dashboard view doesn't accidentally pick them up.
-      const matchesBp = bp === filter.bp;
-      const isSyncForCopy = kind === 'sync' && bp === null;
-      if (!matchesBp && !isSyncForCopy) continue;
-    }
-
-    const baseName = entry.slice(0, -'.meta.json'.length);
-    const castName = `${baseName}.cast`;
-    const castFile = fsSync.existsSync(path.join(SESSIONS_DIR, castName))
-      ? castName
-      : '';
-
-    const claudeSessionId = raw.claude_session_id ?? raw.claudeSessionId ?? null;
-    sessions.push({
-      id: raw.id ?? baseName,
-      timestamp: raw.started_at ?? raw.timestamp ?? '',
-      userEmail,
-      copy,
-      bp,
-      castFile,
-      logged: raw.logged !== false,
-      claudeSessionId,
-      kind,
-      title: '',
-    });
-  }
-
-  sessions.sort(
-    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-  );
-
-  // Dedupe by claudeSessionId. The wrapper writes a fresh .meta.json on
-  // every SSH connection, so each resume of the same conversation adds
-  // another row. Keep the most-recent meta (first after the sort above) so
-  // the cast filename and timestamp reflect the latest attempt; legacy /
-  // editor sessions without a UUID stay as-is since each is a distinct
-  // conversation.
-  const seenClaudeIds = new Set<string>();
-  const deduped: AgentSession[] = [];
-  for (const s of sessions) {
-    if (s.claudeSessionId) {
-      if (seenClaudeIds.has(s.claudeSessionId)) continue;
-      seenClaudeIds.add(s.claudeSessionId);
-    }
-    deduped.push(s);
-  }
-
-  const capped = deduped.slice(0, filter.limit ?? 50);
-
-  // Resolve titles in parallel. Each lookup is a single open+read+close on
-  // the JSONL; bounded by `capped` (≤50) so concurrent fan-out is fine.
-  // Each session's title path depends on its own scope — sync sessions
-  // (bp=null) live at the copy root, BP-scoped sessions inside the BP.
-  await Promise.all(
-    capped.map(async (s) => {
-      if (!s.claudeSessionId || !s.copy) return;
-      s.title = await readFirstPromptTitle({
-        copy: s.copy,
-        bp: s.bp ?? undefined,
-        claudeSessionId: s.claudeSessionId,
-        userEmail: s.userEmail,
-      });
-    }),
-  );
-  return capped;
 }
 
 /**
- * Look up the recorded `user_email` for a session by its Claude conversation
- * UUID. Returns null when no meta file references that UUID. Used to gate
- * `resume` requests so a user can't attach to (and steal) another user's
- * still-running claude process via the dtach socket.
+ * The most recent session for one (copy, bp) scope, or null when the scope
+ * has never run one. This is the dashboard's resume candidate: the Agents
+ * tab re-attaches to it (dtach socket / `claude --resume`) on visit.
+ * Sessions belonging to other users are skipped; sessions with no recorded
+ * email (legacy) are kept so old conversations stay reachable.
  */
-export async function findSessionOwnerEmail(
-  claudeSessionId: string,
-): Promise<string | null> {
+export async function latestSession(filter: {
+  copy: string;
+  bp: string;
+  userEmail?: string;
+}): Promise<AgentSession | null> {
   let entries: string[];
   try {
     entries = await fs.readdir(SESSIONS_DIR);
@@ -233,21 +98,73 @@ export async function findSessionOwnerEmail(
     if (code === 'ENOENT') return null;
     throw err;
   }
+
+  // eslint-disable-next-line no-restricted-syntax -- null = no session yet
+  let latest: AgentSession | null = null;
+  let latestAt = -Infinity;
   for (const entry of entries) {
     if (!entry.endsWith('.meta.json')) continue;
-    let raw: RawMeta;
-    try {
-      const buf = await fs.readFile(path.join(SESSIONS_DIR, entry), 'utf8');
-      raw = JSON.parse(buf) as RawMeta;
-    } catch {
-      continue;
+    const raw = await readMeta(entry);
+    if (!raw) continue;
+
+    const userEmail = raw.user_email ?? '';
+    if (filter.userEmail !== undefined) {
+      // Skip if this session belongs to someone else. Sessions with no
+      // recorded email (legacy) are kept so users don't suddenly lose access
+      // to old sessions; new sessions always carry an email courtesy of the
+      // wrapper's hard-fail.
+      if (userEmail && userEmail !== 'unknown' && userEmail !== filter.userEmail)
+        continue;
     }
-    const id = raw.claude_session_id ?? raw.claudeSessionId ?? null;
-    if (id === claudeSessionId) {
-      return raw.user_email ?? raw.userEmail ?? null;
-    }
+    if ((raw.worktree ?? '') !== filter.copy) continue;
+    if ((raw.bp ?? null) !== filter.bp) continue;
+    const claudeSessionId = raw.claude_session_id ?? null;
+    if (!claudeSessionId) continue;
+
+    const timestamp = raw.started_at ?? '';
+    // Unparseable timestamps sort oldest so a malformed meta never shadows
+    // a real session.
+    const at = Number.isFinite(Date.parse(timestamp)) ? Date.parse(timestamp) : 0;
+    if (latest && latestAt >= at) continue;
+    latestAt = at;
+    latest = {
+      timestamp,
+      userEmail,
+      copy: filter.copy,
+      bp: raw.bp ?? null,
+      claudeSessionId,
+      title: '',
+    };
   }
-  return null;
+
+  if (latest) {
+    latest.title = await readFirstPromptTitle({
+      copy: latest.copy,
+      bp: latest.bp ?? undefined,
+      claudeSessionId: latest.claudeSessionId,
+      userEmail: latest.userEmail,
+    });
+  }
+  return latest;
+}
+
+/**
+ * Look up the recorded `user_email` for a session by its Claude conversation
+ * UUID. Returns null when no meta file references that UUID. Used to gate
+ * `resume` requests so a user can't attach to (and steal) another user's
+ * still-running claude process via the dtach socket.
+ *
+ * The wrapper writes one `<uuid>.meta.json` per conversation, so this is a
+ * direct read. Legacy timestamp-named metas aren't consulted — a missing
+ * file reads as "no recorded owner", the same allowance legacy sessions
+ * always had.
+ */
+export async function findSessionOwnerEmail(
+  claudeSessionId: string,
+): Promise<string | null> {
+  if (!UUID_RE.test(claudeSessionId)) return null;
+  const raw = await readMeta(`${claudeSessionId}.meta.json`);
+  return raw?.user_email ?? null;
 }
 
 /**
@@ -267,10 +184,9 @@ function encodeClaudeProjectDir(absoluteCwd: string): string {
  *   - `ai-title` / `aiTitle` — Claude's auto-generated summary, refreshed as
  *     the conversation evolves (e.g. "Extend lorem ipsum text for REQ-004").
  *     Preferred because it actually describes what the conversation is
- *     *about* — the dashboard's default `-n` name (custom-title) is just
- *     "Claude · wt/bp", which is what we'd fall back to anyway.
- *   - `custom-title` / `customTitle` — name set by `-n` on start, or
- *     overwritten by `/rename` inside Claude. Used when no ai-title exists yet.
+ *     *about*.
+ *   - `custom-title` / `customTitle` — name set by `/rename` inside Claude.
+ *     Used when no ai-title exists yet.
  *   - `user` messages — first user prompt, after skipping our own bootstrap
  *     and the local-command-caveat wrapper. Last resort.
  *
@@ -284,10 +200,8 @@ async function readFirstPromptTitle(opts: {
   claudeSessionId: string;
   userEmail?: string;
 }): Promise<string> {
-  // The agent runs claude with cwd = `/workspace/copies/<c>/<bp>` for
-  // a regular BP-scoped session, or `/workspace/copies/<c>` for a
-  // copy-level sync session (see routes/coding-agent.ts → buildAutoCmd).
-  // Claude encodes that path into its own projects/ subdirectory name.
+  // The agent runs claude with cwd = `/workspace/copies/<c>/<bp>`. Claude
+  // encodes that path into its own projects/ subdirectory name.
   const cwd = opts.bp
     ? `/workspace/copies/${opts.copy}/${opts.bp}`
     : `/workspace/copies/${opts.copy}`;
@@ -366,9 +280,10 @@ async function readFirstPromptTitle(opts: {
         // Skip Claude's own command-caveat wrapper; it's not a real prompt.
         if (cleaned.startsWith('<local-command-caveat>')) continue;
         // Skip the dashboard's own bootstrap prompts (the canned text we
-        // pass to Claude on session start). Without this every session
-        // row reads the same generic "You are a BitSwan coding agent…"
-        // until the user types their first real message.
+        // pass to Claude on session start or inject into a live one).
+        // Without this every session reads the same generic "You are a
+        // BitSwan coding agent…" until the user types their first real
+        // message.
         if (isBootstrapPrompt(cleaned)) continue;
         firstPrompt = cleaned;
       }
@@ -388,23 +303,4 @@ async function readFirstPromptTitle(opts: {
   return chosen.length > TITLE_MAX_LEN
     ? chosen.slice(0, TITLE_MAX_LEN - 1) + '…'
     : chosen;
-}
-
-/**
- * Resolve a `.cast` filename to a read stream. Path-traversal-safe: the
- * basename is reduced to its tail, must end in `.cast`, and the file must
- * actually exist under `SESSIONS_DIR`.
- */
-export function castStream(name: string): Readable {
-  const base = path.basename(name);
-  if (base !== name || !base.endsWith('.cast')) {
-    throw new Error('invalid cast filename');
-  }
-  const full = path.join(SESSIONS_DIR, base);
-  // existsSync is sufficient — the createReadStream will surface
-  // permission / race-condition errors on its 'error' event.
-  if (!fsSync.existsSync(full)) {
-    throw new Error('cast not found');
-  }
-  return fsSync.createReadStream(full);
 }

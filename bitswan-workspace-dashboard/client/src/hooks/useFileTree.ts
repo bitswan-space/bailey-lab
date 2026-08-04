@@ -18,7 +18,7 @@ export function useFileTree(copy: string): Result {
       const data = await api.copyFiles.tree(copy);
       if (aliveRef.current) setTree(data);
     } catch {
-      // see useRequirements / useAgentSessions — non-fatal
+      // see useRequirements / useLatestAgentSession — non-fatal
     } finally {
       if (aliveRef.current) setLoading(false);
     }

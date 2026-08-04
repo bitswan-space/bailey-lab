@@ -48,7 +48,7 @@ export function handleTerminalConnection(
   // Claude, possibly wrapped in dtach inside the agent container) to exit,
   // then close the WS. We can't just SIGINT the local ssh — under dtach
   // that only detaches from a still-running Claude. Sending Ctrl+C bytes
-  // flows through ssh → asciinema → dtach → claude, and a double Ctrl+C
+  // flows through ssh → dtach → claude, and a double Ctrl+C
   // is Claude's exit gesture. The combined output+input silence signal
   // avoids false positives during long tool calls where Claude has no
   // output but is still working.

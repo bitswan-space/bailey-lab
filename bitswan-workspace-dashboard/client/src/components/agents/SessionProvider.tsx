@@ -8,58 +8,44 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { authHeader } from '@/lib/auth-token';
 import { SessionTerminal } from './SessionTerminal';
 
 /**
- * Lifecycle of the coding-agent container, tracked at the provider level
- * so multiple AgentsTabs see the same state. Cold-starts are slow (docker
- * spawn + sshd boot + DNS register) so we kick the ensure call off as soon
- * as the dashboard knows the user cares about agents, and gate the Start
- * button on it.
- */
-export type AgentStatus = 'idle' | 'pending' | 'ready' | 'failed';
-
-/**
- * Per-Claude-conversation row tracked in app-level state. Sessions are
- * rendered at the SessionProvider level (not inside AgentsTab), and the
- * provider visually positions the rendering over whichever AgentsTab pane
- * is currently bound. That way users can switch between Deployments / a
- * different copy / a different BP without losing their live agent
- * sessions — there is no remount.
+ * One live Claude conversation per (user, copy, BP) — that's the whole
+ * model. The provider tracks that single session per scope, renders its
+ * terminal at the app level (not inside AgentsTab), and visually positions
+ * the rendering over whichever AgentsTab pane is currently bound. That way
+ * users can switch between Deployments / a different copy / a different BP
+ * without losing their live agent sessions — there is no remount.
+ *
+ * The canned flows (sync, per-requirement, write-tests, build-automation)
+ * don't get sessions of their own: `sendPrompt` types their prompt into the
+ * scope's running session, and only starts one (seeded with that prompt)
+ * when none is running.
  */
 export type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
-
-/**
- * BP-scoped kinds that differ from a plain claude session only by the
- * canned prompt the server passes on first run. `startSession` accepts
- * these directly — no dedicated start helper needed per kind.
- */
-export type BpSessionKind = 'claude' | 'write-tests' | 'automation';
 
 export interface ActiveSession {
   /** Stable ID — doubles as the Claude session UUID we pass via SSH. */
   id: string;
   copy: string;
-  /** BP-scoped sessions set this; copy-level (sync) sessions leave it null. */
-  bp: string | null;
+  bp: string;
+  /**
+   * Selects the prompt a FRESH conversation is seeded with (the server
+   * embeds it into the launch command). Resumed sessions carry no prompt,
+   * so this is always 'claude' for them.
+   */
   kind: SessionKind;
   /**
    * Requirement id this session focuses on. Set for kind='requirement' so
-   * the WS URL can be re-built on resume (we need to re-look-up the
-   * description on the server).
+   * the WS URL carries it (the server looks up the description to build
+   * the prompt).
    */
   requirementId?: string;
   startedAt: number;
-  exited: boolean;
   /** True when started via Resume (claude --resume <uuid>). */
   resume: boolean;
-  /**
-   * WebSocket close code, set once the session has exited. 1008/1011 mean
-   * the server refused to spawn the agent at all (bad request, not
-   * authenticated, coding-agent host unreachable) — those aren't fixed by
-   * trying again. A normal 1000/1005 means the remote process ended.
-   */
-  exitCode?: number;
 }
 
 interface Scope {
@@ -67,45 +53,49 @@ interface Scope {
   bp: string;
 }
 
+/** Exit info forwarded to `onExit` listeners when a session's WS closes. */
+export interface ExitedSession extends ActiveSession {
+  exited: true;
+  /**
+   * WebSocket close code. 1008/1011 mean the server refused to spawn the
+   * agent at all (bad request, not authenticated, coding-agent host
+   * unreachable) — those aren't fixed by trying again. A normal 1000/1005
+   * means the remote process ended.
+   */
+  exitCode?: number;
+}
+
 interface SessionsContextValue {
-  /** All sessions across every (copy, bp) — the AgentsTab filters by scope. */
-  sessions: ActiveSession[];
+  /** The scope's live session, if any. */
+  sessionFor(scope: Scope): ActiveSession | undefined;
 
   /**
-   * Start a BP-scoped session. `kind` defaults to a plain claude chat;
-   * 'write-tests' / 'automation' run the same way but with the matching
-   * canned prompt embedded by the server.
+   * Start the scope's session (fresh conversation, seeded with `kind`'s
+   * prompt). No-op when one is already live — returns the running session's
+   * id in that case.
    */
-  startSession(copy: string, bp: string, kind?: BpSessionKind): string;
+  startSession(copy: string, bp: string, kind?: SessionKind, requirementId?: string): string;
+  /** Re-attach to an existing conversation (dtach socket / claude --resume). */
+  resumeSession(copy: string, bp: string, claudeSessionId: string): string;
   /**
-   * Start a git-sync session for one business process. Each BP is its own
-   * repo, so the auto-cmd cd's into the BP's clone and runs the git
-   * rebase/conflict-resolution flow (SYNC_PROMPT) there.
+   * Hand a canned prompt to the scope's agent: typed (and submitted) into
+   * the running session's terminal, or — when nothing is running — used to
+   * seed a fresh session.
    */
-  startSyncSession(copy: string, bp: string): string;
-  /**
-   * Start a focused session against a single requirement. The server reads
-   * the requirement's description from the BP's testable-requirements.toml
-   * and embeds it in Claude's prompt.
-   */
-  startRequirementSession(copy: string, bp: string, requirementId: string): string;
-  resumeSession(copy: string, bp: string | null, claudeSessionId: string, kind: SessionKind): string;
+  sendPrompt(copy: string, bp: string, kind: SessionKind, requirementId?: string): Promise<void>;
+
   /** Called by SessionTerminal when its WS closes. */
   markExited(id: string, exitCode?: number): void;
   /** Subscribed-to by hooks that want to invalidate caches when a session ends. */
-  onExit(handler: (session: ActiveSession) => void): () => void;
+  onExit(handler: (session: ExitedSession) => void): () => void;
 
   /**
-   * Which (copy, bp) is currently being viewed. The provider shows
-   * sessions in this scope on top of the bound pane; everything else stays
+   * Which (copy, bp) is currently being viewed. The provider shows this
+   * scope's session on top of the bound pane; other scopes' sessions stay
    * mounted but hidden.
    */
   currentScope: Scope | null;
   setCurrentScope(scope: Scope | null): void;
-
-  /** Per-scope visible session id. */
-  selectedFor(scope: Scope): string | null;
-  setSelectedFor(scope: Scope, id: string | null): void;
 
   /**
    * The AgentsTab's pane DOM node. The provider tracks this element's
@@ -113,15 +103,6 @@ interface SessionsContextValue {
    * Pass `null` to hide the layer entirely.
    */
   setPaneEl(el: HTMLElement | null): void;
-
-  /** Current status of the upstream coding-agent container. */
-  agentStatus: AgentStatus;
-  /**
-   * Force the warm-up call to (re-)run. Auto-fires once on the first
-   * AgentsTab mount but the Start button calls it again if it lands in
-   * `failed` state.
-   */
-  ensureAgent(): Promise<void>;
 }
 
 const SessionsContext = createContext<SessionsContextValue | null>(null);
@@ -156,174 +137,170 @@ interface PaneRect {
 }
 
 export function SessionProvider({ children }: { children: ReactNode }) {
-  const [sessions, setSessions] = useState<ActiveSession[]>([]);
+  // One session per scope key. An entry exists while its terminal is
+  // mounted; markExited removes it (after notifying listeners), which
+  // unmounts the terminal and lets the AgentsTab's autostart take over.
+  const [sessions, setSessions] = useState<Record<string, ActiveSession>>({});
+  // Mirror for async callbacks (sendPrompt) that need the current map
+  // without re-subscribing.
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   // eslint-disable-next-line no-restricted-syntax -- null = not viewing an Agents tab
   const [currentScope, setCurrentScope] = useState<Scope | null>(null);
-  const [selectedByScope, setSelectedByScope] = useState<Record<string, string | null>>({});
   // eslint-disable-next-line no-restricted-syntax -- null = no AgentsTab mounted
   const [paneEl, setPaneEl] = useState<HTMLElement | null>(null);
   // eslint-disable-next-line no-restricted-syntax -- null = no pane bounds yet
   const [paneRect, setPaneRect] = useState<PaneRect | null>(null);
-  const [agentStatus, setAgentStatus] = useState<AgentStatus>('idle');
   // eslint-disable-next-line no-restricted-syntax -- imperative subscriber list
-  const exitListeners = useRef<Set<(s: ActiveSession) => void>>(new Set());
-  const ensureAgent = useCallback(async () => {
-    // The coding-agent container is provisioned and started by the
-    // automation-server during workspace init, so the dashboard no longer
-    // needs to ask gitops to ensure it. The /ws/coding-agent path still
-    // polls SSH readiness, which covers the case where the container is
-    // briefly unavailable.
-    setAgentStatus('ready');
-  }, []);
+  const exitListeners = useRef<Set<(s: ExitedSession) => void>>(new Set());
+  // Live PTY input writers, registered by each terminal while its WS is
+  // open. This is the injection channel sendPrompt types prompts through.
+  // eslint-disable-next-line no-restricted-syntax -- imperative registry
+  const writersRef = useRef<Map<string, (data: string) => void>>(new Map());
+  // Prompts sent while the scope's session was still connecting (no writer
+  // yet). Flushed the moment its writer registers — the PTY buffers
+  // type-ahead until Claude reads stdin, so nothing is lost.
+  // eslint-disable-next-line no-restricted-syntax -- imperative queue, keyed by scope
+  const pendingPromptsRef = useRef<Map<string, string[]>>(new Map());
 
-  // Auto-warm when the user is *actually looking* at the Coding Agent tab —
-  // not merely when the agent pane is mounted hidden in the background
-  // (WorkspaceView keeps it mounted across tab switches). The hidden pane
-  // has display:none and so a
-  // zero-sized rect; only fire when the pane has real dimensions. Without
-  // this, a fresh copy visit would silently cold-start the coding-agent
-  // container, Traefik would reconfigure mid-session, and Vite's HMR client
-  // would reload the page from under the user.
-  useEffect(() => {
-    if (!paneRect || paneRect.width === 0 || paneRect.height === 0) return;
-    if (agentStatus === 'idle') {
-      void ensureAgent();
-    }
-  }, [paneRect, agentStatus, ensureAgent]);
-
-  const setSelectedFor = useCallback((scope: Scope, id: string | null) => {
-    const key = scopeKey(scope);
-    setSelectedByScope((prev) => ({ ...prev, [key]: id }));
-  }, []);
-
-  const selectedFor = useCallback(
-    (scope: Scope) => selectedByScope[scopeKey(scope)] ?? null,
-    [selectedByScope],
+  const sessionFor = useCallback(
+    (scope: Scope) => sessions[scopeKey(scope)],
+    [sessions],
   );
 
   const startSession = useCallback(
-    (copy: string, bp: string, kind: BpSessionKind = 'claude') => {
+    (copy: string, bp: string, kind: SessionKind = 'claude', requirementId?: string) => {
+      const key = scopeKey({ copy, bp });
+      const existing = sessionsRef.current[key];
+      if (existing) return existing.id;
       const id = newSessionId();
-      setSessions((prev) => [
+      setSessions((prev) => ({
         ...prev,
-        {
+        [key]: {
           id,
           copy,
           bp,
           kind,
+          ...(requirementId ? { requirementId } : {}),
           startedAt: Date.now(),
-          exited: false,
           resume: false,
         },
-      ]);
-      setSelectedFor({ copy, bp }, id);
+      }));
       return id;
     },
-    [setSelectedFor],
-  );
-
-  const startSyncSession = useCallback(
-    (copy: string, bp: string) => {
-      const id = newSessionId();
-      setSessions((prev) => [
-        ...prev,
-        {
-          id,
-          copy,
-          bp,
-          kind: 'sync',
-          startedAt: Date.now(),
-          exited: false,
-          resume: false,
-        },
-      ]);
-      setSelectedFor({ copy, bp }, id);
-      return id;
-    },
-    [setSelectedFor],
-  );
-
-  const startRequirementSession = useCallback(
-    (copy: string, bp: string, requirementId: string) => {
-      const id = newSessionId();
-      setSessions((prev) => [
-        ...prev,
-        {
-          id,
-          copy,
-          bp,
-          kind: 'requirement',
-          requirementId,
-          startedAt: Date.now(),
-          exited: false,
-          resume: false,
-        },
-      ]);
-      // Pre-select for the BP scope so flipping to the Agents tab lands on
-      // the new session immediately.
-      setSelectedFor({ copy, bp }, id);
-      return id;
-    },
-    [setSelectedFor],
+    [],
   );
 
   const resumeSession = useCallback(
-    (copy: string, bp: string | null, claudeSessionId: string, kind: SessionKind) => {
-      setSessions((prev) => {
-        const live = prev.find(
-          (s) =>
-            s.id === claudeSessionId &&
-            !s.exited &&
-            s.copy === copy &&
-            (s.bp ?? null) === bp,
-        );
-        if (live) return prev;
-        return [
-          ...prev,
-          {
-            id: claudeSessionId,
-            copy,
-            bp,
-            kind,
-            startedAt: Date.now(),
-            exited: false,
-            resume: true,
-          },
-        ];
-      });
-      if (bp) setSelectedFor({ copy, bp }, claudeSessionId);
+    (copy: string, bp: string, claudeSessionId: string) => {
+      const key = scopeKey({ copy, bp });
+      const existing = sessionsRef.current[key];
+      if (existing) return existing.id;
+      setSessions((prev) => ({
+        ...prev,
+        [key]: {
+          id: claudeSessionId,
+          copy,
+          bp,
+          kind: 'claude',
+          startedAt: Date.now(),
+          resume: true,
+        },
+      }));
       return claudeSessionId;
     },
-    [setSelectedFor],
+    [],
+  );
+
+  const sendPrompt = useCallback(
+    async (copy: string, bp: string, kind: SessionKind, requirementId?: string) => {
+      const key = scopeKey({ copy, bp });
+      const live = sessionsRef.current[key];
+      if (!live) {
+        // Nothing running: seed a fresh conversation with the prompt (the
+        // server embeds it into the launch command).
+        startSession(copy, bp, kind, requirementId);
+        return;
+      }
+      const params = new URLSearchParams({
+        copy,
+        bp,
+        kind,
+        ...(requirementId ? { requirement_id: requirementId } : {}),
+      });
+      const r = await fetch(`/api/coding-agent/prompt?${params.toString()}`, {
+        credentials: 'include',
+        cache: 'no-store',
+        headers: await authHeader(),
+      });
+      if (!r.ok) throw new Error(`prompt fetch failed: HTTP ${r.status}`);
+      const { prompt } = (await r.json()) as { prompt: string };
+      // Bracketed paste so the TUI takes the text as one block, then CR to
+      // submit — same channel as keystrokes, end to end.
+      const data = `\x1b[200~${prompt}\x1b[201~\r`;
+      const writer = writersRef.current.get(live.id);
+      if (writer) {
+        writer(data);
+        return;
+      }
+      // Session exists but its WS hasn't opened yet — queue for the flush
+      // in registerWriter rather than dropping the prompt.
+      const queue = pendingPromptsRef.current.get(key) ?? [];
+      queue.push(data);
+      pendingPromptsRef.current.set(key, queue);
+    },
+    [startSession],
+  );
+
+  const registerWriter = useCallback(
+    (id: string, write: ((data: string) => void) | null) => {
+      if (!write) {
+        writersRef.current.delete(id);
+        return;
+      }
+      writersRef.current.set(id, write);
+      const key = Object.keys(sessionsRef.current).find(
+        (k) => sessionsRef.current[k]?.id === id,
+      );
+      if (!key) return;
+      const queued = pendingPromptsRef.current.get(key);
+      if (!queued) return;
+      pendingPromptsRef.current.delete(key);
+      for (const data of queued) write(data);
+    },
+    [],
   );
 
   const markExited = useCallback((id: string, exitCode?: number) => {
+    writersRef.current.delete(id);
+    // Drop any prompt queued for the dying session — its replacement starts
+    // from the user's explicit action, not a stale injection.
+    for (const [key, s] of Object.entries(sessionsRef.current)) {
+      if (s.id === id) pendingPromptsRef.current.delete(key);
+    }
     setSessions((prev) => {
-      let exited: ActiveSession | undefined;
-      const next = prev.map((s) => {
-        if (s.id !== id) return s;
-        const updated = {
-          ...s,
-          exited: true,
-          ...(exitCode === undefined ? {} : { exitCode }),
-        };
-        exited = updated;
-        return updated;
-      });
-      if (exited) {
-        for (const fn of exitListeners.current) {
-          try {
-            fn(exited);
-          } catch {
-            // listener errors should not affect other listeners
-          }
+      const key = Object.keys(prev).find((k) => prev[k]?.id === id);
+      const session = key ? prev[key] : undefined;
+      if (!key || !session) return prev;
+      const exited: ExitedSession = {
+        ...session,
+        exited: true,
+        ...(exitCode === undefined ? {} : { exitCode }),
+      };
+      for (const fn of exitListeners.current) {
+        try {
+          fn(exited);
+        } catch {
+          // listener errors should not affect other listeners
         }
       }
+      const next = { ...prev };
+      delete next[key];
       return next;
     });
   }, []);
 
-  const onExit = useCallback((handler: (s: ActiveSession) => void) => {
+  const onExit = useCallback((handler: (s: ExitedSession) => void) => {
     exitListeners.current.add(handler);
     return () => {
       exitListeners.current.delete(handler);
@@ -358,34 +335,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<SessionsContextValue>(
     () => ({
-      sessions,
+      sessionFor,
       startSession,
-      startSyncSession,
-      startRequirementSession,
       resumeSession,
+      sendPrompt,
       markExited,
       onExit,
       currentScope,
       setCurrentScope,
-      selectedFor,
-      setSelectedFor,
       setPaneEl,
-      agentStatus,
-      ensureAgent,
     }),
     [
-      sessions,
+      sessionFor,
       startSession,
-      startSyncSession,
-      startRequirementSession,
       resumeSession,
+      sendPrompt,
       markExited,
       onExit,
       currentScope,
-      selectedFor,
-      setSelectedFor,
-      agentStatus,
-      ensureAgent,
     ],
   );
 
@@ -395,8 +362,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       <SessionsLayer
         sessions={sessions}
         currentScope={currentScope}
-        selectedByScope={selectedByScope}
         markExited={markExited}
+        registerWriter={registerWriter}
         rect={paneRect}
       />
     </SessionsContext.Provider>
@@ -404,7 +371,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 }
 
 /**
- * Renders every non-exited session as an absolutely-positioned terminal,
+ * Renders every scope's session as an absolutely-positioned terminal,
  * inside a fixed-position container that overlays the AgentsTab's pane
  * (`rect`). When no pane is bound the container is `display: none` — the
  * SessionTerminal trees stay mounted, just invisible, so their WebSockets
@@ -417,15 +384,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 function SessionsLayer({
   sessions,
   currentScope,
-  selectedByScope,
   markExited,
+  registerWriter,
   rect,
 }: {
-  sessions: ActiveSession[];
+  sessions: Record<string, ActiveSession>;
   // eslint-disable-next-line no-restricted-syntax -- discriminated scope state
   currentScope: Scope | null;
-  selectedByScope: Record<string, string | null>;
   markExited: (id: string, exitCode?: number) => void;
+  registerWriter: (id: string, write: ((data: string) => void) | null) => void;
   // eslint-disable-next-line no-restricted-syntax -- null = nowhere to overlay
   rect: PaneRect | null;
 }) {
@@ -438,58 +405,40 @@ function SessionsLayer({
         height: rect.height,
         overflow: 'hidden',
         // pointer-events on the container itself: none, so clicks fall
-        // through to the AgentsTab pane underneath when nothing is selected.
-        // Individual SessionTerminals re-enable pointer events for themselves.
+        // through to the AgentsTab pane underneath when nothing is shown.
+        // The visible SessionTerminal re-enables pointer events for itself.
         pointerEvents: 'none',
       }
     : { display: 'none' };
 
   return (
     <div style={containerStyle}>
-      {sessions
-        .filter((s) => !s.exited)
-        .map((s) => {
-          // A session is "in scope" for the currently-viewed AgentsTab if
-          // (a) it matches this exact (copy, bp) — sync sessions included,
-          //     they're BP-scoped now that each BP is its own repo — or
-          // (b) it's a LEGACY copy-level sync session (bp === null, recorded
-          //     before per-BP repos): those still surface in any BP's Agents
-          //     tab inside the same copy so old rows stay reachable.
-          const inScope =
-            !!currentScope &&
-            currentScope.copy === s.copy &&
-            (currentScope.bp === s.bp || (s.kind === 'sync' && s.bp === null));
-          // Selection is per (copy, bp) so switching BPs preserves what
-          // the user had selected in each. We always look up against the
-          // *current* scope (not the session's intrinsic scope) — that lets
-          // a user click a sync session while viewing BP-A and have it show
-          // up there without polluting BP-B's selection.
-          const selected =
-            inScope &&
-            !!currentScope &&
-            selectedByScope[scopeKey(currentScope)] === s.id;
-          return (
-            <div
-              key={s.id}
-              className="absolute inset-0"
-              style={{
-                display: selected ? 'block' : 'none',
-                pointerEvents: selected ? 'auto' : 'none',
-              }}
-            >
-              <SessionTerminal
-                copy={s.copy}
-                bp={s.bp}
-                sessionId={s.id}
-                kind={s.kind}
-                resume={s.resume}
-                hidden={!selected}
-                onExit={(info) => markExited(s.id, info.code)}
-                {...(s.requirementId ? { requirementId: s.requirementId } : {})}
-              />
-            </div>
-          );
-        })}
+      {Object.values(sessions).map((s) => {
+        const visible =
+          !!currentScope && currentScope.copy === s.copy && currentScope.bp === s.bp;
+        return (
+          <div
+            key={s.id}
+            className="absolute inset-0"
+            style={{
+              display: visible ? 'block' : 'none',
+              pointerEvents: visible ? 'auto' : 'none',
+            }}
+          >
+            <SessionTerminal
+              copy={s.copy}
+              bp={s.bp}
+              sessionId={s.id}
+              kind={s.kind}
+              resume={s.resume}
+              hidden={!visible}
+              onExit={(info) => markExited(s.id, info.code)}
+              onInputWriter={(write) => registerWriter(s.id, write)}
+              {...(s.requirementId ? { requirementId: s.requirementId } : {})}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }

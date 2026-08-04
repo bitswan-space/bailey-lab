@@ -23,7 +23,6 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-venv \
     jq \
-    tmux \
     dtach \
     vim \
     gnupg \
@@ -34,9 +33,6 @@ RUN apt-get update && apt-get install -y \
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
-
-# Install asciinema
-RUN apt-get update && apt-get install -y asciinema && rm -rf /var/lib/apt/lists/*
 
 # Create agent user
 RUN useradd -m -s /bin/bash -u 1000 agent \
@@ -82,11 +78,12 @@ RUN printf 'PATH="%s"\n' "$PATH" > /etc/environment
 # Copy bitswan-coding-agent binary from builder
 COPY --from=builder /bitswan-coding-agent /usr/local/bin/bitswan-coding-agent
 
-# SSH configuration
+# SSH configuration. Key-only auth: the dashboard (the container's only SSH
+# client) authenticates with the workspace keypair installed by the entrypoint.
 RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
-    && sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+    && sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
     && echo "AllowUsers agent" >> /etc/ssh/sshd_config \
-    && echo "AcceptEnv SSH_USER_EMAIL SSH_LOGGED SSH_WORKTREE SSH_BP SSH_CLAUDE_SESSION_ID SSH_SESSION_KIND SSH_AUTO_CMD" >> /etc/ssh/sshd_config \
+    && echo "AcceptEnv SSH_USER_EMAIL SSH_WORKTREE SSH_BP SSH_CLAUDE_SESSION_ID SSH_AUTO_CMD" >> /etc/ssh/sshd_config \
     && echo "ForceCommand /usr/local/bin/agent-session-wrapper" >> /etc/ssh/sshd_config
 
 # Create workspace directories

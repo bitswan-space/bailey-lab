@@ -36,9 +36,17 @@ export interface TerminalProps {
    * only form in which a file can cross this socket.
    */
   onUploadFiles?: (files: File[]) => Promise<string[]>;
+  /**
+   * Hands the parent a writer that types text into the PTY on the user's
+   * behalf (same channel as keystrokes and the upload-path injection).
+   * Called with the writer once the WebSocket is open, and with `null` when
+   * the connection goes away. SessionProvider uses this to inject canned
+   * prompts into an already-running agent session.
+   */
+  onInputWriter?: (write: ((data: string) => void) | null) => void;
 }
 
-export function Terminal({ wsUrl, onExit, onUploadFiles }: TerminalProps) {
+export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Pin the latest onExit in a ref so the effect doesn't tear down + rebuild
   // the xterm/WebSocket pair every time the parent passes a new closure.
@@ -46,6 +54,8 @@ export function Terminal({ wsUrl, onExit, onUploadFiles }: TerminalProps) {
   onExitRef.current = onExit;
   const onUploadFilesRef = useRef(onUploadFiles);
   onUploadFilesRef.current = onUploadFiles;
+  const onInputWriterRef = useRef(onInputWriter);
+  onInputWriterRef.current = onInputWriter;
 
   // Upload feedback pill. Written from inside the effect closure (setState
   // identity is stable), rendered as an overlay so nothing touches the PTY
@@ -205,6 +215,10 @@ export function Terminal({ wsUrl, onExit, onUploadFiles }: TerminalProps) {
       wasOpened = true;
       term.focus();
       sendResize();
+      // Expose the PTY input channel to the parent (prompt injection).
+      onInputWriterRef.current?.((data) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(data));
+      });
       // Redraw nudge: when reconnecting to a still-running session (the agent
       // persists server-side in dtach across browser close / refresh), the
       // remote full-screen TUI — Claude is an Ink/React app — only repaints on
@@ -251,6 +265,7 @@ export function Terminal({ wsUrl, onExit, onUploadFiles }: TerminalProps) {
 
     ws.addEventListener('close', (ev) => {
       term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
+      if (wasOpened) onInputWriterRef.current?.(null);
       if (wasOpened) onExitRef.current?.({ code: ev.code, reason: ev.reason });
     });
 
@@ -345,6 +360,7 @@ export function Terminal({ wsUrl, onExit, onUploadFiles }: TerminalProps) {
         host.removeEventListener('drop', onDrop);
         observer.disconnect();
         dataDisposable.dispose();
+        if (wasOpened) onInputWriterRef.current?.(null);
         ws.close();
         term.dispose();
       };

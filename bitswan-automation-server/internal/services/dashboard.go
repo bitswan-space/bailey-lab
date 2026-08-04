@@ -92,9 +92,9 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			// bridge deliberately (it trusts X-Forwarded-Email, and the
 			// agent runs untrusted code).
 			wsVolume("ssh", "/workspace/.ssh", true),
-			// Read-only view of session transcripts (.meta.json + .cast)
-			// written by the coding-agent wrapper, for the dashboard's
-			// session list + asciinema playback.
+			// Read-only view of per-conversation session metadata
+			// (<uuid>.meta.json) written by the coding-agent wrapper, for
+			// the dashboard's resume-candidate lookup.
 			wsVolume("coding-agent-sessions", "/workspace/agent-sessions", true),
 			// Read-only view of the coding-agent's $HOME so the dashboard can
 			// resolve per-user Claude transcripts (`.claude_<slug>/projects/...`)

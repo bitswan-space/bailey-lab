@@ -1,11 +1,10 @@
-import path from 'node:path';
 import { promises as dns } from 'node:dns';
 import type { FastifyInstance } from 'fastify';
 import { spawnPty } from '../services/pty.js';
 import { handleTerminalConnection } from '../services/terminal-session.js';
 import type { GitopsClient } from '../services/gitops.js';
 import { isValidBpId, isValidCopyName } from '../services/workspace.js';
-import { castStream, findSessionOwnerEmail, listSessions } from '../services/agent-sessions.js';
+import { findSessionOwnerEmail, latestSession } from '../services/agent-sessions.js';
 import {
   BUILD_AUTOMATION_PROMPT,
   DEFAULT_PROMPT,
@@ -74,44 +73,46 @@ export function agentSshTarget(): AgentSshTarget {
 
 type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
 
+function isSessionKind(value: unknown): value is SessionKind {
+  return (
+    value === 'claude' ||
+    value === 'sync' ||
+    value === 'requirement' ||
+    value === 'write-tests' ||
+    value === 'automation'
+  );
+}
+
 /**
- * Default name passed to Claude via `-n`. Shown in Claude's `/resume`
- * picker and in its own UI/terminal title; survives session resumption.
- * Users can rename via Claude's `/rename` at any time. We don't bake the
- * timestamp into the name because it represents the *conversation*, not a
- * specific ssh attempt — multiple resumes of the same conversation share
- * the same name.
+ * The prompt each session kind carries. Used both to seed a fresh
+ * conversation (embedded into the launch command by `buildAutoCmd`) and to
+ * serve `/api/coding-agent/prompt`, where the client fetches the same text
+ * to inject into an already-running session.
  */
-function defaultSessionName(opts: {
-  kind: SessionKind;
-  copy: string;
-  bp?: string;
-  requirement?: Requirement;
-}): string {
-  switch (opts.kind) {
-    case 'sync':
-      return opts.bp
-        ? `Sync · ${opts.copy}/${opts.bp}`
-        : `Sync · ${opts.copy}`;
-    case 'requirement': {
-      const id = opts.requirement?.id ?? 'requirement';
-      return opts.bp
-        ? `Req ${id} · ${opts.copy}/${opts.bp}`
-        : `Req ${id} · ${opts.copy}`;
-    }
-    case 'write-tests':
-      return opts.bp
-        ? `Write tests · ${opts.copy}/${opts.bp}`
-        : `Write tests · ${opts.copy}`;
-    case 'automation':
-      return opts.bp
-        ? `Build automation · ${opts.copy}/${opts.bp}`
-        : `Build automation · ${opts.copy}`;
-    default:
-      return opts.bp
-        ? `Claude · ${opts.copy}/${opts.bp}`
-        : `Claude · ${opts.copy}`;
-  }
+function promptForKind(kind: SessionKind, requirement?: Requirement): string {
+  if (kind === 'sync') return SYNC_PROMPT;
+  if (kind === 'requirement' && requirement) return buildRequirementPrompt(requirement);
+  if (kind === 'write-tests') return WRITE_TESTS_PROMPT;
+  if (kind === 'automation') return BUILD_AUTOMATION_PROMPT;
+  return DEFAULT_PROMPT;
+}
+
+/**
+ * Look up one requirement in the BP's testable-requirements.toml. Returns
+ * `undefined` when the id isn't there — sessions and prompts against a stale
+ * id would just confuse Claude, so callers refuse instead.
+ */
+async function findRequirement(
+  copy: string,
+  bp: string,
+  requirementId: string,
+): Promise<Requirement | undefined> {
+  const reqs = await listRequirements({
+    workspaceRoot: process.env.WORKSPACE_ROOT ?? '/workspace/workspace',
+    copy,
+    bp,
+  });
+  return reqs.find((r) => r.id === requirementId);
 }
 
 /**
@@ -143,34 +144,14 @@ export function buildAutoCmd(opts: {
   // root is a plain directory (each BP under it is a separate git repo), so
   // there is nothing to run git against up there.
   const cd = `/workspace/copies/${opts.copy}/${opts.bp}`;
-  let prompt: string;
-  if (opts.kind === 'sync') prompt = SYNC_PROMPT;
-  else if (opts.kind === 'requirement' && opts.requirement) {
-    prompt = buildRequirementPrompt(opts.requirement);
-  } else if (opts.kind === 'write-tests') prompt = WRITE_TESTS_PROMPT;
-  else if (opts.kind === 'automation') prompt = BUILD_AUTOMATION_PROMPT;
-  else prompt = DEFAULT_PROMPT;
+  const prompt = promptForKind(opts.kind, opts.requirement);
   // Either continue a previous chat (--resume <uuid>) or start a fresh one
   // with a caller-provided UUID (--session-id <uuid>) so the dashboard can
   // resume it later. The prompt is embedded inside single quotes; any
   // apostrophes in the requirement description (or in the canned prompt
   // templates) would otherwise terminate the quoted region.
   const safePrompt = bashSingleQuoteEscape(prompt);
-  // Pass a default display name on the *first* run of a conversation —
-  // `--resume` reattaches an existing conversation that already has a name
-  // (either the one we set on first run or whatever the user has changed
-  // it to via Claude's /rename). The name surfaces in Claude's /resume
-  // picker so the user has something better than "You are a BitSwan coding
-  // agent…" when picking sessions from inside Claude.
-  const safeName = bashSingleQuoteEscape(
-    defaultSessionName({
-      kind: opts.kind,
-      copy: opts.copy,
-      ...(opts.bp ? { bp: opts.bp } : {}),
-      ...(opts.requirement ? { requirement: opts.requirement } : {}),
-    }),
-  );
-  const freshArgs = `--dangerously-skip-permissions --session-id ${opts.sessionId} -n '${safeName}' '${safePrompt}'`;
+  const freshArgs = `--dangerously-skip-permissions --session-id ${opts.sessionId} '${safePrompt}'`;
   const resumeArgs = `--dangerously-skip-permissions --resume ${opts.sessionId}`;
   // Stale-session recovery. The dashboard remembers a conversation UUID for
   // this (copy, bp) forever, but the transcript that backs it lives inside
@@ -293,11 +274,12 @@ async function waitForAgentDns(host: string, attempts = 15, delayMs = 1000): Pro
  *   - `/ws/coding-agent?copy=…&bp=…` opens an SSH session to the
  *     `${WS}-coding-agent` container (via the gitops agent-ssh proxy — see
  *     agentSshTarget), scoped to a (copy, bp) pair, and always runs Claude.
- *     The wrapper inside the agent container handles cd + asciinema + the
+ *     The wrapper inside the agent container handles cd + dtach + the
  *     launched command.
- *   - `/api/coding-agent/sessions` lists past sessions for one (copy, bp).
- *   - `/api/coding-agent/sessions/:cast/content` streams a .cast file for
- *     asciinema playback.
+ *   - `/api/coding-agent/session/latest` returns the scope's resume
+ *     candidate (one conversation per user × copy × BP).
+ *   - `/api/coding-agent/prompt` serves the canned prompt for a session
+ *     kind, for injection into a live session.
  */
 export function registerCodingAgentRoutes(
   app: FastifyInstance,
@@ -319,13 +301,7 @@ export function registerCodingAgentRoutes(
       socket.close(1008, 'invalid copy');
       return;
     }
-    const kind: SessionKind =
-      kindRaw === 'sync' ||
-      kindRaw === 'requirement' ||
-      kindRaw === 'write-tests' ||
-      kindRaw === 'automation'
-        ? kindRaw
-        : 'claude';
+    const kind: SessionKind = isSessionKind(kindRaw) ? kindRaw : 'claude';
     // `bp` is required for every session kind — sync sessions are BP-scoped
     // too: each business process is its own repo, and the copy root isn't one.
     if (!bp || !isValidBpId(bp)) {
@@ -346,12 +322,7 @@ export function registerCodingAgentRoutes(
         return;
       }
       try {
-        const reqs = await listRequirements({
-          workspaceRoot: process.env.WORKSPACE_ROOT ?? '/workspace/workspace',
-          copy,
-          bp: bp!,
-        });
-        requirement = reqs.find((r) => r.id === requirement_id);
+        requirement = await findRequirement(copy, bp, requirement_id);
       } catch (err) {
         socket.send(
           JSON.stringify({
@@ -528,7 +499,7 @@ export function registerCodingAgentRoutes(
           '-o',
           'UserKnownHostsFile=/dev/null',
           '-o',
-          'SendEnv=SSH_USER_EMAIL SSH_LOGGED SSH_WORKTREE SSH_BP SSH_CLAUDE_SESSION_ID SSH_SESSION_KIND SSH_AUTO_CMD',
+          'SendEnv=SSH_USER_EMAIL SSH_WORKTREE SSH_BP SSH_CLAUDE_SESSION_ID SSH_AUTO_CMD',
           `agent@${host}`,
         ],
         cwd: undefined,
@@ -536,13 +507,11 @@ export function registerCodingAgentRoutes(
         rows,
         extraEnv: {
           SSH_USER_EMAIL: email,
-          SSH_LOGGED: 'true',
           SSH_WORKTREE: copy,
           // Every session is BP-scoped (each BP is its own repo); the
           // wrapper cds into the BP clone and records the bp in the meta.
           ...(bp ? { SSH_BP: bp } : {}),
           SSH_CLAUDE_SESSION_ID: claudeSessionId,
-          SSH_SESSION_KIND: kind,
           SSH_AUTO_CMD: autoCmd,
         },
       });
@@ -559,7 +528,7 @@ export function registerCodingAgentRoutes(
 
   app.get<{
     Querystring: { copy?: string; bp?: string };
-  }>('/api/coding-agent/sessions', async (req, reply) => {
+  }>('/api/coding-agent/session/latest', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     const { copy, bp } = req.query;
     if (!copy || !isValidCopyName(copy)) {
@@ -573,33 +542,50 @@ export function registerCodingAgentRoutes(
       return reply.code(401).send({ error: 'not authenticated' });
     }
     try {
-      const sessions = await listSessions({ copy, bp, userEmail });
-      return sessions;
+      // null when the scope has no session yet — the client starts fresh.
+      const session = await latestSession({ copy, bp, userEmail });
+      return { session };
     } catch (err) {
-      app.log.warn({ err, copy, bp }, 'list sessions failed');
-      return reply.code(500).send({ error: 'list failed' });
+      app.log.warn({ err, copy, bp }, 'latest session lookup failed');
+      return reply.code(500).send({ error: 'lookup failed' });
     }
   });
 
-  app.get<{ Params: { cast: string } }>(
-    '/api/coding-agent/sessions/:cast/content',
-    async (req, reply) => {
-      reply.header('Cache-Control', 'no-store');
-      const cast = path.basename(req.params.cast);
-      if (cast !== req.params.cast) {
-        return reply.code(400).send({ error: 'invalid cast filename' });
+  // The canned prompt for one session kind, as plain text. The client
+  // fetches this to inject into an already-running session's terminal —
+  // the same text `buildAutoCmd` embeds when it has to start a fresh one,
+  // so both paths stay in lockstep.
+  app.get<{
+    Querystring: { copy?: string; bp?: string; kind?: string; requirement_id?: string };
+  }>('/api/coding-agent/prompt', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const { copy, bp, kind: kindRaw, requirement_id } = req.query;
+    if (!copy || !isValidCopyName(copy)) {
+      return reply.code(400).send({ error: 'invalid copy' });
+    }
+    if (!bp || !isValidBpId(bp)) {
+      return reply.code(400).send({ error: 'invalid bp' });
+    }
+    const userEmail = await emailFromRequest(req, app.log);
+    if (!userEmail) {
+      return reply.code(401).send({ error: 'not authenticated' });
+    }
+    const kind: SessionKind = isSessionKind(kindRaw) ? kindRaw : 'claude';
+    let requirement: Requirement | undefined;
+    if (kind === 'requirement') {
+      if (!requirement_id) {
+        return reply.code(400).send({ error: 'requirement_id is required' });
       }
       try {
-        const stream = castStream(cast);
-        reply.header('Content-Type', 'application/octet-stream');
-        return reply.send(stream);
+        requirement = await findRequirement(copy, bp, requirement_id);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg === 'cast not found') {
-          return reply.code(404).send({ error: msg });
-        }
-        return reply.code(400).send({ error: msg });
+        app.log.warn({ err, copy, bp, requirement_id }, 'requirement load failed');
+        return reply.code(500).send({ error: 'requirement load failed' });
       }
-    },
-  );
+      if (!requirement) {
+        return reply.code(404).send({ error: `requirement ${requirement_id} not found` });
+      }
+    }
+    return { prompt: promptForKind(kind, requirement) };
+  });
 }

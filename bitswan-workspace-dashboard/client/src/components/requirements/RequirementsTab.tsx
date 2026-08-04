@@ -19,7 +19,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useRequirements } from '@/hooks/useRequirements';
-import { useSessions, type BpSessionKind } from '@/components/agents/SessionProvider';
+import { useSessions } from '@/components/agents/SessionProvider';
 import { nextStatus } from './StatusBadge';
 import { RequirementsTable } from './RequirementsTable';
 import { useUrlEnum, useUrlParam } from '@/lib/urlState';
@@ -63,13 +63,7 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     remove,
     runTests,
   } = useRequirements(copy, bp);
-  const {
-    startSession,
-    startRequirementSession,
-    setSelectedFor,
-    agentStatus,
-    ensureAgent,
-  } = useSessions();
+  const { sendPrompt } = useSessions();
 
   // Search term and status filter live in the URL so a filtered view is
   // deep-linkable (?filter=fail&q=auth).
@@ -161,16 +155,12 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
 
-  const onRunAgent = async (r: Requirement) => {
-    if (agentStatus === 'idle' || agentStatus === 'failed') {
-      try {
-        await ensureAgent();
-      } catch {
-        // surfaces via agentStatus; the session will still attempt to spawn
-      }
-    }
-    const id = startRequirementSession(copy, bp, r.id);
-    setSelectedFor({ copy, bp }, id);
+  const onRunAgent = (r: Requirement) => {
+    // Types the focused-requirement prompt into the BP's running agent, or
+    // seeds a fresh session with it when none is running.
+    sendPrompt(copy, bp, 'requirement', r.id).catch((err) => {
+      toast.error(`Failed to hand ${r.id} to the agent: ${String(err)}`);
+    });
     onShowAgents();
   };
 
@@ -220,18 +210,13 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
 
-  // "Write tests" / "Build automation": same launch flow as onRunAgent but
-  // against the whole requirements set — the server picks the canned prompt
-  // from the kind.
-  const onStartCanned = async (kind: BpSessionKind) => {
-    if (agentStatus === 'idle' || agentStatus === 'failed') {
-      try {
-        await ensureAgent();
-      } catch {
-        // surfaces via agentStatus; the session will still attempt to spawn
-      }
-    }
-    startSession(copy, bp, kind);
+  // "Write tests" / "Build automation": same flow as onRunAgent but against
+  // the whole requirements set — the server picks the canned prompt from the
+  // kind.
+  const onStartCanned = (kind: 'write-tests' | 'automation') => {
+    sendPrompt(copy, bp, kind).catch((err) => {
+      toast.error(`Failed to hand the task to the agent: ${String(err)}`);
+    });
     onShowAgents();
   };
 
