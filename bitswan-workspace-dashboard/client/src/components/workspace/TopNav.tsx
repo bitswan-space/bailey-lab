@@ -152,13 +152,20 @@ export function TopNav({
   );
 
   // Picking a business process keeps the (BP, copy) selection consistent: if
-  // the current copy doesn't carry the new BP, jump to the first copy that does.
+  // the current copy doesn't carry the new BP, jump to the user's OWN copy
+  // whenever it carries it — never land someone on a colleague's copy just
+  // because it sorts first. Another user's copy is only a last resort, for
+  // BPs that exist nowhere else yet (e.g. freshly created there and not
+  // synced to main).
   const handleSelectBp = (id: string) => {
     onSelectBp(id);
     const bp = bps.find((b) => b.id === id);
     if (bp && (!copy || !bp.copies.includes(copy))) {
-      const first = copies.find((c) => bp.copies.includes(c.name));
-      if (first) onSelectCopy(first.name);
+      const target =
+        myCopy && bp.copies.includes(myCopy)
+          ? myCopy
+          : copies.find((c) => bp.copies.includes(c.name))?.name;
+      if (target) onSelectCopy(target);
     }
   };
 
