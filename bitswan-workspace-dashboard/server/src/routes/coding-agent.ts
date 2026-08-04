@@ -159,9 +159,15 @@ export function buildAutoCmd(opts: {
   // the whole node -e stays safely single-quoted for the shell +
   // SSH_AUTO_CMD transport.
   //
-  // settings.json: skip the dangerous-mode re-prompt on every session, and
-  // drop the Co-Authored-By trailer — the wrapper already attributes commits
-  // to the real user via GIT_AUTHOR_*/GIT_COMMITTER_*.
+  // settings.json: skip the dangerous-mode re-prompt on every session, drop
+  // the Co-Authored-By trailer (the wrapper already attributes commits to
+  // the real user via GIT_AUTHOR_*/GIT_COMMITTER_*), and pin
+  // permissions.defaultMode so every session — fresh, resumed, or
+  // reattached — comes up in bypass mode. The CLI flag alone proved
+  // unreliable across browser close/reopen (bailey-lab #329: a resumed
+  // agent started asking for per-edit approval); the settings-level default
+  // governs the mode at the source, independent of how the session was
+  // entered.
   const settingsCmd =
     `node -e 'const fs=require("fs"),os=require("os");` +
     `const dir=process.env.CLAUDE_CONFIG_DIR||os.homedir()+"/.claude";` +
@@ -169,6 +175,7 @@ export function buildAutoCmd(opts: {
     `const p=dir+"/settings.json";` +
     `let s={};try{s=JSON.parse(fs.readFileSync(p,"utf8"))}catch(e){}` +
     `Object.assign(s,{skipDangerousModePermissionPrompt:true,includeCoAuthoredBy:false});` +
+    `s.permissions=Object.assign({},s.permissions,{defaultMode:"bypassPermissions"});` +
     `fs.writeFileSync(p,JSON.stringify(s))'`;
   // .claude.json: pre-trust the working directory and mark onboarding
   // complete. Claude's "trust this folder" dialog is tracked PER directory
