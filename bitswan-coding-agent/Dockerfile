@@ -90,6 +90,13 @@ RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
 RUN mkdir -p /workspace/copies /var/log/agent-sessions \
     && chown -R agent:agent /workspace /var/log/agent-sessions
 
+# Standing agent guidance. Sessions run with cwd /workspace/copies/<copy>/<bp>
+# and Claude reads CLAUDE.md from every ancestor directory, so this one file
+# reaches every session in every copy — always current with the image, never
+# copied into (or drifting inside) user working trees. Teams can layer their
+# own CLAUDE.md at the copy or BP level; Claude merges all levels.
+COPY CLAUDE.md /workspace/CLAUDE.md
+
 # Copy session wrapper script
 COPY agent-session-wrapper /usr/local/bin/agent-session-wrapper
 RUN chmod +x /usr/local/bin/agent-session-wrapper

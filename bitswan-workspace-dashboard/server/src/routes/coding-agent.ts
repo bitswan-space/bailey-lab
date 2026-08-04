@@ -7,7 +7,6 @@ import { isValidBpId, isValidCopyName } from '../services/workspace.js';
 import { findSessionOwnerEmail, latestSession } from '../services/agent-sessions.js';
 import {
   BUILD_AUTOMATION_PROMPT,
-  DEFAULT_PROMPT,
   SYNC_PROMPT,
   WRITE_TESTS_PROMPT,
 } from '../services/agent-prompts.js';
@@ -84,17 +83,21 @@ function isSessionKind(value: unknown): value is SessionKind {
 }
 
 /**
- * The prompt each session kind carries. Used both to seed a fresh
+ * The canned prompt each session kind carries. Used both to seed a fresh
  * conversation (embedded into the launch command by `buildAutoCmd`) and to
  * serve `/api/coding-agent/prompt`, where the client fetches the same text
  * to inject into an already-running session.
+ *
+ * Plain 'claude' sessions have NO prompt — the agent's standing guidance
+ * comes from the CLAUDE.md baked into the coding-agent image, which Claude
+ * loads on every session (fresh and resumed alike).
  */
-function promptForKind(kind: SessionKind, requirement?: Requirement): string {
+function promptForKind(kind: SessionKind, requirement?: Requirement): string | undefined {
   if (kind === 'sync') return SYNC_PROMPT;
   if (kind === 'requirement' && requirement) return buildRequirementPrompt(requirement);
   if (kind === 'write-tests') return WRITE_TESTS_PROMPT;
   if (kind === 'automation') return BUILD_AUTOMATION_PROMPT;
-  return DEFAULT_PROMPT;
+  return undefined;
 }
 
 /**
@@ -147,11 +150,14 @@ export function buildAutoCmd(opts: {
   const prompt = promptForKind(opts.kind, opts.requirement);
   // Either continue a previous chat (--resume <uuid>) or start a fresh one
   // with a caller-provided UUID (--session-id <uuid>) so the dashboard can
-  // resume it later. The prompt is embedded inside single quotes; any
-  // apostrophes in the requirement description (or in the canned prompt
-  // templates) would otherwise terminate the quoted region.
-  const safePrompt = bashSingleQuoteEscape(prompt);
-  const freshArgs = `--dangerously-skip-permissions --session-id ${opts.sessionId} '${safePrompt}'`;
+  // resume it later. A canned prompt, when the kind carries one, rides as
+  // the positional arg, embedded inside single quotes; any apostrophes in
+  // the requirement description (or in the canned prompt templates) would
+  // otherwise terminate the quoted region. Plain sessions launch bare and
+  // wait for the user.
+  const freshArgs =
+    `--dangerously-skip-permissions --session-id ${opts.sessionId}` +
+    (prompt ? ` '${bashSingleQuoteEscape(prompt)}'` : '');
   const resumeArgs = `--dangerously-skip-permissions --resume ${opts.sessionId}`;
   // Stale-session recovery. The dashboard remembers a conversation UUID for
   // this (copy, bp) forever, but the transcript that backs it lives inside
@@ -586,6 +592,12 @@ export function registerCodingAgentRoutes(
         return reply.code(404).send({ error: `requirement ${requirement_id} not found` });
       }
     }
-    return { prompt: promptForKind(kind, requirement) };
+    const prompt = promptForKind(kind, requirement);
+    if (!prompt) {
+      // Plain 'claude' sessions carry no canned prompt (the baked CLAUDE.md
+      // is their standing guidance) — nothing to inject.
+      return reply.code(400).send({ error: `kind ${kind} has no canned prompt` });
+    }
+    return { prompt };
   });
 }

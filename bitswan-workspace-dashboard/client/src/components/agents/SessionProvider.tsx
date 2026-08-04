@@ -26,6 +26,10 @@ import { SessionTerminal } from './SessionTerminal';
  */
 export type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
 
+/** Kinds that carry a canned prompt — plain 'claude' sessions have none
+ *  (their standing guidance is the CLAUDE.md baked into the agent image). */
+export type CannedPromptKind = Exclude<SessionKind, 'claude'>;
+
 export interface ActiveSession {
   /** Stable ID — doubles as the Claude session UUID we pass via SSH. */
   id: string;
@@ -82,7 +86,7 @@ interface SessionsContextValue {
    * the running session's terminal, or — when nothing is running — used to
    * seed a fresh session.
    */
-  sendPrompt(copy: string, bp: string, kind: SessionKind, requirementId?: string): Promise<void>;
+  sendPrompt(copy: string, bp: string, kind: CannedPromptKind, requirementId?: string): Promise<void>;
 
   /** Called by SessionTerminal when its WS closes. */
   markExited(id: string, exitCode?: number): void;
@@ -213,7 +217,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const sendPrompt = useCallback(
-    async (copy: string, bp: string, kind: SessionKind, requirementId?: string) => {
+    async (copy: string, bp: string, kind: CannedPromptKind, requirementId?: string) => {
       const key = scopeKey({ copy, bp });
       const live = sessionsRef.current[key];
       if (!live) {

@@ -1,12 +1,22 @@
 /**
- * Bootstrap prompts the dashboard passes to Claude on session creation.
- * Exported from a single module so the title-extraction logic in
- * `agent-sessions.ts` can recognise (and skip) them when scanning Claude's
- * JSONL for a real first user message — otherwise every session row reads
- * "You are a BitSwan coding agent…" as its title.
+ * Canned task prompts the dashboard hands to Claude — seeded into a fresh
+ * conversation or typed into a running one (sendPrompt). Exported from a
+ * single module so the title-extraction logic in `agent-sessions.ts` can
+ * recognise (and skip) them when scanning Claude's JSONL for a real first
+ * user message — otherwise every session row reads "Sync this business
+ * process…" as its title.
+ *
+ * The agent's standing identity/orientation text is NOT here: it lives in
+ * the CLAUDE.md baked into the coding-agent image at /workspace/CLAUDE.md,
+ * which Claude loads on every session (ancestor-directory memory), so plain
+ * sessions start with no prompt at all.
  */
 
-export const DEFAULT_PROMPT =
+/**
+ * The pre-CLAUDE.md bootstrap prompt. Kept ONLY so title scanning of old
+ * session transcripts still skips it (see LEGACY_SYNC_PROMPT).
+ */
+const LEGACY_DEFAULT_PROMPT =
   'You are a BitSwan coding agent. Start by running: bitswan-coding-agent --help. ' +
   'Read the BP\'s README.md, process.toml, and bitswan.yaml to orient yourself before ' +
   'making changes. Ask for clarification when the user\'s request is ambiguous.';
@@ -74,7 +84,7 @@ export const BUILD_AUTOMATION_PROMPT =
   'Otherwise implement what the README describes and propose requirements for it.';
 
 const BOOTSTRAP_PROMPTS = [
-  DEFAULT_PROMPT,
+  LEGACY_DEFAULT_PROMPT,
   SYNC_PROMPT,
   LEGACY_SYNC_PROMPT,
   WRITE_TESTS_PROMPT,
