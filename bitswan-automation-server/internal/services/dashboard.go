@@ -86,7 +86,11 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			wsVolume("copies", "/workspace/workspace/copies", false),
 			// SSH key for connecting to the coding-agent container. The
 			// dashboard authenticates as the same principal that's already
-			// in the agent's authorized_keys.
+			// in the agent's authorized_keys. The TCP path runs through the
+			// gitops agent-ssh proxy (:2222) because the agent sits on the
+			// isolated <ws>-agent network — the dashboard stays off that
+			// bridge deliberately (it trusts X-Forwarded-Email, and the
+			// agent runs untrusted code).
 			wsVolume("ssh", "/workspace/.ssh", true),
 			// Read-only view of session transcripts (.meta.json + .cast)
 			// written by the coding-agent wrapper, for the dashboard's

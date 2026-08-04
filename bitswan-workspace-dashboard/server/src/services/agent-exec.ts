@@ -24,13 +24,17 @@ const SSH_KEY = '/workspace/.ssh/id_ed25519';
 // failing-assert detail usually is) and mark the truncation.
 const MAX_OUTPUT_BYTES = 256 * 1024;
 
-/** Mirrors `agentHost()` in routes/coding-agent.ts (kept local so the
- *  interactive WS path is untouched by changes here). */
-function agentHost(): string {
+/** Mirrors `agentSshTarget()` in routes/coding-agent.ts (kept local so the
+ *  interactive WS path is untouched by changes here). The agent's sshd is
+ *  reached through the gitops agent-ssh proxy (:2222) because the agent
+ *  lives on the isolated `<ws>-agent` network this container is not on. */
+function agentSshTarget(): { host: string; port: number } {
   const override = process.env.CODING_AGENT_HOST;
-  if (override) return override;
+  if (override) {
+    return { host: override, port: Number(process.env.CODING_AGENT_SSH_PORT ?? 22) };
+  }
   const ws = process.env.BITSWAN_WORKSPACE_NAME ?? 'default';
-  return `${ws}-coding-agent`;
+  return { host: `${ws}-gitops`, port: 2222 };
 }
 
 export interface AgentExecResult {
@@ -47,8 +51,10 @@ function sshExec(opts: {
   email: string;
   timeoutMs: number;
 }): Promise<AgentExecResult> {
-  const host = agentHost();
+  const { host, port } = agentSshTarget();
   const args = [
+    '-p',
+    String(port),
     '-i',
     SSH_KEY,
     '-o',

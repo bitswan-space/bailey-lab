@@ -754,6 +754,18 @@ async def lifespan(app: FastAPI):
         )
     )
 
+    # SSH path dashboard → coding agent: the agent sits alone with gitops on
+    # the isolated <ws>-agent bridge, so the dashboard (bitswan_network only)
+    # reaches its sshd through this raw TCP proxy on gitops, which is
+    # dual-homed. See app/services/agent_ssh_proxy.py for the security story.
+    from app.services.agent_ssh_proxy import start_agent_ssh_proxy
+
+    agent_ssh_proxy = None
+    try:
+        agent_ssh_proxy = await start_agent_ssh_proxy()
+    except Exception as e:
+        logger.warning("agent-ssh-proxy failed to start: %s", e)
+
     # Bridge the git task queue onto the SSE feed: forward every queue change to
     # the existing /events/stream as a `task_queue` event, so the dashboard's
     # activity log renders the queue on the connection it already holds.
@@ -781,6 +793,9 @@ async def lifespan(app: FastAPI):
     finally:
         _events_task.cancel()
         queue_relay.cancel()
+        if agent_ssh_proxy is not None:
+            agent_ssh_proxy.close()
+            await agent_ssh_proxy.wait_closed()
         if observer:
             observer.stop()
             # Run blocking join in executor to avoid blocking event loop

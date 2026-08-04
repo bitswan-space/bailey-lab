@@ -49,14 +49,27 @@ function bashSingleQuoteEscape(s: string): string {
 
 const SSH_KEY = '/workspace/.ssh/id_ed25519';
 
-function agentHost(): string {
-  // Allow an explicit override for setups whose coding-agent container
-  // doesn't follow the `${ws}-coding-agent` convention (e.g. when launched
-  // by a different docker-compose project name).
+export interface AgentSshTarget {
+  host: string;
+  port: number;
+}
+
+export function agentSshTarget(): AgentSshTarget {
+  // Allow an explicit override for setups where the coding-agent's sshd is
+  // directly reachable (e.g. a dev compose without the isolated networks).
   const override = process.env.CODING_AGENT_HOST;
-  if (override) return override;
+  if (override) {
+    return { host: override, port: Number(process.env.CODING_AGENT_SSH_PORT ?? 22) };
+  }
+  // The agent sits on the isolated `<ws>-agent` bridge (shared only with
+  // gitops) that this dashboard is deliberately NOT part of — the agent runs
+  // untrusted code and the dashboard trusts X-Forwarded-Email, so putting
+  // them on one network would let the agent forge identities. Instead gitops
+  // (dual-homed) runs a raw TCP proxy on :2222 to the agent's sshd; SSH auth
+  // and encryption stay end-to-end. See bitswan-gitops
+  // app/services/agent_ssh_proxy.py.
   const ws = process.env.BITSWAN_WORKSPACE_NAME ?? 'default';
-  return `${ws}-coding-agent`;
+  return { host: `${ws}-gitops`, port: 2222 };
 }
 
 type SessionKind = 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
@@ -255,10 +268,12 @@ function idleTimeoutMs(): number {
 }
 
 /**
- * Wait until DNS resolves the agent hostname. The container takes a moment
- * to register with docker's embedded DNS after it starts — without this poll,
- * the first session attempt after a cold start can fail with "Could not
- * resolve hostname".
+ * Wait until DNS resolves the SSH target hostname (normally the gitops
+ * container carrying the agent-ssh proxy; the agent itself is on a network
+ * this container can't see). The container takes a moment to register with
+ * docker's embedded DNS after it starts — without this poll, the first
+ * session attempt after a cold start can fail with "Could not resolve
+ * hostname".
  */
 async function waitForAgentDns(host: string, attempts = 15, delayMs = 1000): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
@@ -276,9 +291,10 @@ async function waitForAgentDns(host: string, attempts = 15, delayMs = 1000): Pro
  * WebSocket + REST surface for the dashboard's Agents tab.
  *
  *   - `/ws/coding-agent?copy=…&bp=…` opens an SSH session to the
- *     `${WS}-coding-agent` container, scoped to a (copy, bp) pair, and
- *     always runs Claude. The wrapper inside the agent container handles
- *     cd + asciinema + the launched command.
+ *     `${WS}-coding-agent` container (via the gitops agent-ssh proxy — see
+ *     agentSshTarget), scoped to a (copy, bp) pair, and always runs Claude.
+ *     The wrapper inside the agent container handles cd + asciinema + the
+ *     launched command.
  *   - `/api/coding-agent/sessions` lists past sessions for one (copy, bp).
  *   - `/api/coding-agent/sessions/:cast/content` streams a .cast file for
  *     asciinema playback.
@@ -388,7 +404,7 @@ export function registerCodingAgentRoutes(
       kind,
       ...(requirement ? { requirement } : {}),
     });
-    const host = agentHost();
+    const { host, port } = agentSshTarget();
 
     // React 18 strict mode (dev only) opens this WS, calls close() on
     // cleanup, then re-opens a fresh one. The cleanup happens *before* the
@@ -469,9 +485,10 @@ export function registerCodingAgentRoutes(
       aborted = true;
     });
 
-    // The coding-agent container is provisioned by the automation-server
-    // during workspace init. Poll DNS once so we don't race the brief gap
-    // between container start and Docker's embedded DNS publishing the host.
+    // The SSH target (gitops, carrying the agent-ssh proxy) is provisioned by
+    // the automation-server during workspace init. Poll DNS once so we don't
+    // race the brief gap between container start and Docker's embedded DNS
+    // publishing the host.
     try {
       const ready = await waitForAgentDns(host);
       if (aborted) return;
@@ -502,6 +519,8 @@ export function registerCodingAgentRoutes(
         shell: 'ssh',
         args: [
           '-tt',
+          '-p',
+          String(port),
           '-i',
           SSH_KEY,
           '-o',
