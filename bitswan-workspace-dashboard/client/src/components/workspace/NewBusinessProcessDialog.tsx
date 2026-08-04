@@ -154,8 +154,8 @@ export function NewBusinessProcessDialog({
           <DialogTitle>New business process</DialogTitle>
           <DialogDescription>
             {copy
-              ? `Creates a new business-process directory under copies/${copy}/ with a process.toml and a starter README.`
-              : 'Creates a new business-process directory in the main workspace with a process.toml and a starter README.'}
+              ? `Creates a new business process in the copy “${copy}”, with a starter README.`
+              : 'Creates a new business process in the main workspace, with a starter README.'}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="flex flex-col gap-2">
