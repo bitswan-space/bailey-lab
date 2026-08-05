@@ -16,7 +16,6 @@ interface Props {
   /** Create a new root-level requirement (the dashed add-row at the bottom). */
   onAddRoot: () => void;
   onDelete: (req: Requirement) => void;
-  onRunAgent: (req: Requirement) => void;
   onRunTest: (req: Requirement) => void;
   /** Ids whose test is currently running (per-row or part of an all-run). */
   runningIds: ReadonlySet<string>;
@@ -63,7 +62,6 @@ export function RequirementsTable({
   onAddChild,
   onAddRoot,
   onDelete,
-  onRunAgent,
   onRunTest,
   runningIds,
 }: Props) {
@@ -98,7 +96,6 @@ export function RequirementsTable({
             onUpdateDescription={(text) => onUpdateDescription(req, text)}
             onAddChild={() => onAddChild(req)}
             onDelete={() => onDelete(req)}
-            onRunAgent={() => onRunAgent(req)}
             onRunTest={() => onRunTest(req)}
             running={runningIds.has(req.id)}
           />

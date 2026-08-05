@@ -1075,40 +1075,37 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   await chapter('coding-agent', async () => {
     await clickTopTab(/Coding Agent/i);
     // The session auto-warms on this tab: the coding-agent container boots and a
-    // Claude Code session connects over the WS. SessionTerminal shows a
+    // Claude Code session connects over the WS (dashboard → gitops agent-ssh
+    // proxy → agent sshd → dtach → claude). SessionTerminal shows a
     // "Connecting…" placeholder ONLY until the access token resolves and the
     // WebSocket URL is built — it clears the instant the xterm mounts, which is
     // LONG before Claude has actually booted inside the terminal. So
     // "Connecting… gone + .xterm visible" is far too weak a signal (it catches a
     // blank/empty terminal). The authoritative "Claude is up" signal is Claude
-    // Code's own TUI: once its interactive prompt renders, the xterm paints the
-    // persistent footer hint "? for shortcuts" (and the prompt box). We read the
-    // xterm's rendered rows text and WAIT GENEROUSLY for that to appear — the
-    // agent is launched with an initial prompt (server SSH_AUTO_CMD: `claude
-    // --dangerously-skip-permissions … '<prompt>'`), so its prompt + first
-    // response render once it boots. This is a plain on-screen visibility wait
-    // (a container boot + ssh + Claude start), NOT a deploy long-op, and it is
-    // BEST-EFFORT/NON-ABORTING: a slow Claude boot must not abort the whole run,
-    // so we wait long (several minutes) and then capture whatever the terminal
-    // shows — but we wait long enough that it normally captures a loaded session.
+    // Code's own TUI: sessions launch bare (no initial prompt — the standing
+    // guidance is the CLAUDE.md baked into the agent image), so once the
+    // interactive prompt renders, the xterm paints the input box and the
+    // persistent footer hint "? for shortcuts" (or, unauthenticated, the
+    // "Welcome to Claude" login screen — either proves the whole launch
+    // pipeline delivered a running Claude). This is a plain on-screen
+    // visibility wait (container boot + ssh + Claude start), NOT a deploy
+    // long-op, so we wait generously.
     const connecting = d.getByText(/^Connecting…$/).first();
     const term = d.locator('.xterm').first();
     await connecting.waitFor({ state: 'hidden', timeout: 5 * 60_000 }).catch(() => {});
-    await term.waitFor({ state: 'visible', timeout: 5 * 60_000 }).catch(() => {});
-    // The xterm paints visible glyphs into .xterm-rows. Claude Code's interactive
-    // prompt is "up" once its footer/help affordances render — poll the rows text
-    // for Claude's stable prompt markers. Several minutes, non-aborting.
+    await term.waitFor({ state: 'visible', timeout: 5 * 60_000 });
+    // The xterm paints visible glyphs into .xterm-rows. Poll the rows text for
+    // Claude's stable TUI markers — and HARD-FAIL when they never appear: a
+    // terminal that connects but never shows Claude is exactly the regression
+    // this chapter exists to catch (broken proxy path, wrapper refusing the
+    // session, claude exiting on boot). chapter() rethrows, so this fails CI.
     const xtermText = d.locator('.xterm-rows').first();
-    try {
-      await expect
-        .poll(async () => (await xtermText.textContent().catch(() => '')) ?? '', {
-          timeout: 6 * 60_000,
-          intervals: [1000, 2000, 5000],
-        })
-        .toMatch(/\? for shortcuts|shortcuts|Welcome to Claude|bypass permissions|Bypassing Permissions/i);
-    } catch {
-      // Slow Claude boot — capture whatever the terminal shows rather than abort.
-    }
+    await expect
+      .poll(async () => (await xtermText.textContent().catch(() => '')) ?? '', {
+        timeout: 6 * 60_000,
+        intervals: [1000, 2000, 5000],
+      })
+      .toMatch(/\? for shortcuts|shortcuts|Welcome to Claude|bypass permissions|Bypassing Permissions/i);
     await capture(dashPage, 'coding-agent');
   });
   await chapter('live-dev', async () => {

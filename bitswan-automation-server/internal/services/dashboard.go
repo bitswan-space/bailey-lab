@@ -86,19 +86,18 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			wsVolume("copies", "/workspace/workspace/copies", false),
 			// SSH key for connecting to the coding-agent container. The
 			// dashboard authenticates as the same principal that's already
-			// in the agent's authorized_keys.
+			// in the agent's authorized_keys. The TCP path runs through the
+			// gitops agent-ssh proxy (:2222) because the agent sits on the
+			// isolated <ws>-agent network — the dashboard stays off that
+			// bridge deliberately (it trusts X-Forwarded-Email, and the
+			// agent runs untrusted code).
 			wsVolume("ssh", "/workspace/.ssh", true),
-			// Read-only view of session transcripts (.meta.json + .cast)
-			// written by the coding-agent wrapper, for the dashboard's
-			// session list + asciinema playback.
+			// Read-only view of per-conversation session metadata
+			// (<uuid>.meta.json) written by the coding-agent wrapper, for
+			// the dashboard's resume-candidate lookup. (The agent's $HOME is
+			// deliberately NOT mounted any more — it was only ever read to
+			// extract conversation titles, a feature that is gone.)
 			wsVolume("coding-agent-sessions", "/workspace/agent-sessions", true),
-			// Read-only view of the coding-agent's $HOME so the dashboard can
-			// resolve per-user Claude transcripts (`.claude_<slug>/projects/...`)
-			// as well as the legacy shared `.claude/projects/...` for session
-			// titles. Mounting the whole home rather than just `.claude` lets
-			// the dashboard see every user's config dir without us hard-coding
-			// the slug set.
-			wsVolume("coding-agent-home", "/workspace/agent-home", true),
 		},
 	}
 

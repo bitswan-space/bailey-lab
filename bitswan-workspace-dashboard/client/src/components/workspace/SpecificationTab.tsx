@@ -271,7 +271,7 @@ function serializeDoc(state: EditorState): string {
  * the coding agent sees everything the user authored.
  */
 export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabProps) {
-  const { startSession, agentStatus, ensureAgent } = useSessions();
+  const { sendPrompt } = useSessions();
   const [editorState, setEditorState] = useState<EditorState>();
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' });
   const [save, setSave] = useState<SaveState>({ kind: 'clean' });
@@ -597,17 +597,11 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
 
   // "Build automation" sends the description to the coding agent: flush
   // any unsaved edits first (the agent reads README.md from disk), then
-  // launch an automation-kind session and flip to the Coding Agent tab.
-  const onBuildAutomation = async () => {
+  // hand the automation prompt to the BP's agent — typed into the running
+  // session, or seeding a fresh one — and flip to the Coding Agent tab.
+  const onBuildAutomation = () => {
     void doSave(false);
-    if (agentStatus === 'idle' || agentStatus === 'failed') {
-      try {
-        await ensureAgent();
-      } catch {
-        // surfaces via agentStatus; the session will still attempt to spawn
-      }
-    }
-    startSession(copy, bp.name, 'automation');
+    void sendPrompt(copy, bp.name, 'automation');
     onShowAgents();
   };
 

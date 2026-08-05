@@ -13,7 +13,7 @@ import { DiffTab } from '@/components/diff/DiffTab';
 import { ContainersPane } from '@/components/agents/ContainersPane';
 import { Button } from '@/components/ui/button';
 import { useSessions } from '@/components/agents/SessionProvider';
-import { useAgentSessions } from '@/hooks/useAgentSessions';
+import { useLatestAgentSession } from '@/hooks/useLatestAgentSession';
 import { cn } from '@/lib/utils';
 import { useUrlEnum, useUrlFlag } from '@/lib/urlState';
 
@@ -74,18 +74,14 @@ type LaunchState =
  */
 export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: AgentFilesTabProps) {
   const {
-    sessions: allSessions,
+    sessionFor,
     startSession,
     resumeSession,
     setCurrentScope,
     setPaneEl,
-    selectedFor,
-    setSelectedFor,
-    agentStatus,
-    ensureAgent,
     onExit,
   } = useSessions();
-  const { sessions: past, loading: pastLoading } = useAgentSessions(copy, bp);
+  const { session: latest, loading: pastLoading } = useLatestAgentSession(copy, bp);
 
   // Sub-tab and the Diff toggle live in the URL so the Agents view is
   // deep-linkable (?sub=files&diff=1).
@@ -115,28 +111,9 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     return () => setPaneEl(null);
   }, [setPaneEl]);
 
-  // The BP's live sessions. One agent per BP: the selected active session, or
-  // the first running one. Sync sessions are copy-level and bp-less.
-  const active = useMemo(
-    () =>
-      allSessions.filter(
-        (s) =>
-          !s.exited &&
-          s.copy === copy &&
-          (s.bp === bp || (s.kind === 'sync' && s.bp === null)),
-      ),
-    [allSessions, copy, bp],
-  );
-  const selectedId = selectedFor({ copy, bp });
-  const agent = active.find((s) => s.id === selectedId) ?? active[0];
-
-  // Keep the scope selection pointed at the live agent so the provider shows
-  // the right terminal.
-  useEffect(() => {
-    if (agent && agent.id !== selectedId) {
-      setSelectedFor({ copy, bp }, agent.id);
-    }
-  }, [agent, selectedId, setSelectedFor, copy, bp]);
+  // The BP's live agent — one session per (user, copy, BP), tracked by the
+  // provider.
+  const agent = sessionFor({ copy, bp });
 
   // ---------------------------------------------------------------------
   // Autostart. There is no manual "Start agent" step (bailey-lab #246): an
@@ -197,11 +174,8 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     const token = `${copy}/${bp}#${launchGen}`;
     if (launchedToken.current === token) return;
     launchedToken.current = token;
-    const resumable = past
-      .filter((s) => s.claudeSessionId && s.kind !== 'sync')
-      .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
-    if (resumable?.claudeSessionId) {
-      resumeSession(copy, bp, resumable.claudeSessionId, resumable.kind ?? 'claude');
+    if (latest?.claudeSessionId) {
+      resumeSession(copy, bp, latest.claudeSessionId);
     } else {
       startSession(copy, bp);
     }
@@ -212,7 +186,7 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     agent,
     launchFailed,
     launchGen,
-    past,
+    latest,
     copy,
     bp,
     resumeSession,
@@ -233,9 +207,7 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
   useEffect(
     () =>
       onExit((s) => {
-        const inScope =
-          s.copy === copy && (s.bp === bp || (s.kind === 'sync' && s.bp === null));
-        if (!inScope) return;
+        if (s.copy !== copy || s.bp !== bp) return;
         if (s.exitCode === 1008 || s.exitCode === 1011) {
           cancelRelaunch();
           setLaunchState('refused');
@@ -262,36 +234,24 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     [onExit, copy, bp, cancelRelaunch],
   );
 
-  // A friendly name for the agent chip: the conversation title once the poll
-  // has one, else a stable fallback.
-  const title = useMemo(() => {
-    if (!agent) return null;
-    const p = past.find((x) => x.claudeSessionId === agent.id);
-    return p?.title || 'Coding agent';
-  }, [agent, past]);
-
-  // Manual escape hatch for the exhausted-attempts state: re-warm the
-  // container and hand the attempt budget back to the autostart effect.
-  const retry = useCallback(async () => {
+  // Manual escape hatch for the exhausted-attempts state: hand the attempt
+  // budget back to the autostart effect.
+  const retry = useCallback(() => {
     cancelRelaunch();
     failedAttempts.current = 0;
     setLaunchState('launching');
     setLaunchGen((g) => g + 1);
-    if (agentStatus === 'idle' || agentStatus === 'failed') {
-      try {
-        await ensureAgent();
-      } catch {
-        // ensureAgent surfaces failure via agentStatus.
-      }
-    }
-  }, [agentStatus, ensureAgent, cancelRelaunch]);
+  }, [cancelRelaunch]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Header: agent chip + sub-tabs */}
+      {/* Header: agent status dot + sub-tabs. No session name — one
+          conversation per (user, copy, BP), so there is nothing to tell
+          apart; the dot alone carries running / failed / starting. */}
       <div className="flex h-10 shrink-0 items-center gap-4 border-b border-border bg-background px-5">
-        <div className="flex items-center gap-2 border-r border-border pr-4">
+        <div className="flex items-center border-r border-border pr-4">
           <span
+            title={agent ? 'Agent running' : launchFailed ? 'Agent unavailable' : 'Starting agent…'}
             className={cn(
               'size-1.5 rounded-full',
               agent
@@ -301,9 +261,6 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
                   : 'bg-muted-foreground/40',
             )}
           />
-          <span className="text-[13px] font-semibold text-foreground">
-            {title ?? (launchFailed ? 'Agent unavailable' : 'Starting agent…')}
-          </span>
         </div>
         <SubTab
           active={sub === 'chat'}

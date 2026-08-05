@@ -138,6 +138,13 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 		// the authenticated gitops API (/agent, Bearer token) + git (/git). See
 		// dockercompose.go (gitops also joins <ws>-agent) and StartContainer
 		// (network ensured + gitops attached at bring-up).
+		//
+		// The workspace dashboard (bitswan_network only — it trusts
+		// X-Forwarded-Email, so it must never share a network with the agent)
+		// reaches the agent's sshd through a raw TCP proxy gitops runs on
+		// :2222 (bitswan-gitops app/services/agent_ssh_proxy.py). Only
+		// inbound-to-agent connections flow through it; do NOT "fix" dashboard
+		// connectivity by attaching either container to the other's network.
 		"networks":    []string{workspaceName + "-agent"},
 		"environment": envVars,
 		"volumes":     volumes,

@@ -5,17 +5,16 @@ import { getAccessToken } from '@/lib/auth-token';
 
 interface Props {
   copy: string;
-  /** Null for copy-level sync sessions; the WS route handles missing bp. */
-  bp: string | null;
-  kind: 'claude' | 'sync' | 'requirement' | 'write-tests' | 'automation';
-  /** Requirement id when kind === 'requirement'. The server reads the description from the TOML. */
-  requirementId?: string;
+  bp: string;
+  kind: 'claude' | 'sync' | 'write-tests' | 'automation';
   /** Claude session UUID. We control it client-side so we can `--resume` it later. */
   sessionId: string;
   /** When true, ssh into the agent with `claude --resume <sessionId>` instead of a fresh session. */
   resume: boolean;
   hidden: boolean;
   onExit: (info: TerminalExitInfo) => void;
+  /** Receives the PTY input writer while connected (null when it drops) — see Terminal.onInputWriter. */
+  onInputWriter?: (write: ((data: string) => void) | null) => void;
 }
 
 /**
@@ -27,11 +26,11 @@ export function SessionTerminal({
   copy,
   bp,
   kind,
-  requirementId,
   sessionId,
   resume,
   hidden,
   onExit,
+  onInputWriter,
 }: Props) {
   // The Bailey gate strips identity headers and WebSockets can't send an
   // Authorization header, so we pass the Keycloak access token as a query
@@ -54,19 +53,18 @@ export function SessionTerminal({
     if (!token) return null;
     const params = new URLSearchParams({
       copy,
+      bp,
       kind,
-      ...(bp ? { bp } : {}),
-      ...(requirementId ? { requirement_id: requirementId } : {}),
       ...(resume ? { resume: sessionId } : { session_id: sessionId }),
       access_token: token,
     });
     return `/ws/coding-agent?${params.toString()}`;
-  }, [copy, bp, kind, requirementId, sessionId, resume, token]);
+  }, [copy, bp, kind, sessionId, resume, token]);
 
   // Pasted/dropped files land in `.agent-uploads/` under the session's cwd
-  // — the BP dir for claude/requirement sessions, the copy root for sync
-  // (mirrors the cd logic in server/src/routes/coding-agent.ts) — so the
-  // path we hand back resolves relative to where Claude is running. Names
+  // — the BP dir (mirrors the cd logic in server/src/routes/coding-agent.ts)
+  // — so the path we hand back resolves relative to where Claude is running.
+  // Names
   // are timestamp-prefixed because clipboard pastes all arrive as
   // "image.png" and the upload endpoint overwrites on name collision; the
   // original name rides along (it tells the agent what the file IS),
@@ -74,7 +72,7 @@ export function SessionTerminal({
   // as a space-separated token.
   const onUploadFiles = useCallback(
     async (files: File[]) => {
-      const dir = bp ? `${bp}/.agent-uploads` : '.agent-uploads';
+      const dir = `${bp}/.agent-uploads`;
       const stamped = files.map((f, i) => {
         const safe = f.name.replace(/[^A-Za-z0-9._-]+/g, '-');
         return new File([f], `paste-${Date.now()}-${i}-${safe || 'file'}`, {
@@ -97,7 +95,12 @@ export function SessionTerminal({
   return (
     <div className="h-full w-full" style={{ display: hidden ? 'none' : 'block' }}>
       {wsUrl ? (
-        <Terminal wsUrl={wsUrl} onExit={onExit} onUploadFiles={onUploadFiles} />
+        <Terminal
+          wsUrl={wsUrl}
+          onExit={onExit}
+          onUploadFiles={onUploadFiles}
+          {...(onInputWriter ? { onInputWriter } : {})}
+        />
       ) : (
         <div className="grid h-full place-items-center text-sm text-muted-foreground">
           Connecting…

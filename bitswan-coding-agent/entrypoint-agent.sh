@@ -50,16 +50,6 @@ if [ -n "$BITSWAN_GIT_REMOTE" ] && [ -n "$BITSWAN_GITOPS_AGENT_SECRET" ]; then
     chmod 600 /home/agent/.git-credentials
 fi
 
-# Copy CLAUDE.md to copies that don't have it yet
-if [ -f /etc/bitswan/CLAUDE.md ]; then
-    for wt in /workspace/copies/*/; do
-        if [ -d "$wt" ] && [ ! -f "$wt/CLAUDE.md" ]; then
-            cp /etc/bitswan/CLAUDE.md "$wt/CLAUDE.md"
-            chown agent:agent "$wt/CLAUDE.md"
-        fi
-    done
-fi
-
 # Ensure correct permissions
 chown -R agent:agent /home/agent
 chown -R agent:agent /var/log/agent-sessions

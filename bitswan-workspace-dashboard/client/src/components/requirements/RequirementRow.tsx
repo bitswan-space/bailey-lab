@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { Bot, Loader2, Pencil, Play, Plus, Trash2 } from 'lucide-react';
+import { Loader2, Pencil, Play, Plus, Trash2 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Requirement } from '@/lib/api';
 import { StatusBadge, nextStatus } from './StatusBadge';
@@ -18,7 +18,6 @@ interface Props {
   onUpdateDescription: (text: string) => void;
   onAddChild: () => void;
   onDelete: () => void;
-  onRunAgent: () => void;
   /** Run the deterministic test for this requirement in the live-dev container. */
   onRunTest: () => void;
   /** True while this row's test (or an all-run that includes it) is executing. */
@@ -39,7 +38,6 @@ export function RequirementRow({
   onUpdateDescription,
   onAddChild,
   onDelete,
-  onRunAgent,
   onRunTest,
   running = false,
 }: Props) {
@@ -169,9 +167,6 @@ export function RequirementRow({
                 : 'No test written for this requirement yet — write one first (the “Write tests” agent can do it)'}
           </TooltipContent>
         </Tooltip>
-        <IconButton title="Run agent on this requirement" onClick={onRunAgent}>
-          <Bot className="size-3.5" />
-        </IconButton>
         <IconButton
           title="Delete requirement"
           onClick={onDelete}

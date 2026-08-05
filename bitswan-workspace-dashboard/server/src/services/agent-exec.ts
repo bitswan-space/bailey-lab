@@ -6,9 +6,9 @@ import { spawn } from 'node:child_process';
  * interactive Claude sessions (key at `/workspace/.ssh/id_ed25519`, user
  * `agent`). Unlike the interactive path (which spawns a PTY and lets the
  * container's `agent-session-wrapper` launch Claude), this sends a command
- * string as SSH_ORIGINAL_COMMAND with SSH_LOGGED=false, which the wrapper
- * runs via `exec bash -c "$cmd"` and pipes straight back — so we get the
- * command's stdout/stderr + exit code with no asciinema recording in the way.
+ * string as SSH_ORIGINAL_COMMAND, which the wrapper runs via
+ * `exec bash -c "$cmd"` and pipes straight back — so we get the command's
+ * stdout/stderr + exit code.
  *
  * This is how the dashboard drives the deterministic
  * `bitswan-coding-agent requirements test` command (the binary, BITSWAN_GITOPS_URL
@@ -24,13 +24,17 @@ const SSH_KEY = '/workspace/.ssh/id_ed25519';
 // failing-assert detail usually is) and mark the truncation.
 const MAX_OUTPUT_BYTES = 256 * 1024;
 
-/** Mirrors `agentHost()` in routes/coding-agent.ts (kept local so the
- *  interactive WS path is untouched by changes here). */
-function agentHost(): string {
+/** Mirrors `agentSshTarget()` in routes/coding-agent.ts (kept local so the
+ *  interactive WS path is untouched by changes here). The agent's sshd is
+ *  reached through the gitops agent-ssh proxy (:2222) because the agent
+ *  lives on the isolated `<ws>-agent` network this container is not on. */
+function agentSshTarget(): { host: string; port: number } {
   const override = process.env.CODING_AGENT_HOST;
-  if (override) return override;
+  if (override) {
+    return { host: override, port: Number(process.env.CODING_AGENT_SSH_PORT ?? 22) };
+  }
   const ws = process.env.BITSWAN_WORKSPACE_NAME ?? 'default';
-  return `${ws}-coding-agent`;
+  return { host: `${ws}-gitops`, port: 2222 };
 }
 
 export interface AgentExecResult {
@@ -47,8 +51,10 @@ function sshExec(opts: {
   email: string;
   timeoutMs: number;
 }): Promise<AgentExecResult> {
-  const host = agentHost();
+  const { host, port } = agentSshTarget();
   const args = [
+    '-p',
+    String(port),
     '-i',
     SSH_KEY,
     '-o',
@@ -60,13 +66,10 @@ function sshExec(opts: {
     'BatchMode=yes',
     '-o',
     'ConnectTimeout=10',
-    // The container's sshd only AcceptEnv's this fixed set; SSH_LOGGED=false
-    // is what makes the wrapper run our command non-interactively and pipe it
-    // back rather than recording it with asciinema.
+    // The container's sshd only AcceptEnv's this fixed set; the wrapper cds
+    // into the (copy, bp) clone before exec'ing the command.
     '-o',
     'SendEnv=SSH_USER_EMAIL',
-    '-o',
-    'SendEnv=SSH_LOGGED',
     '-o',
     'SendEnv=SSH_WORKTREE',
     '-o',
@@ -80,7 +83,6 @@ function sshExec(opts: {
       env: {
         ...process.env,
         SSH_USER_EMAIL: opts.email,
-        SSH_LOGGED: 'false',
         SSH_WORKTREE: opts.copy,
         ...(opts.bp ? { SSH_BP: opts.bp } : {}),
       },

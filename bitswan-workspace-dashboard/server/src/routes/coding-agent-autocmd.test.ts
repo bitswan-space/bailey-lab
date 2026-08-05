@@ -60,6 +60,9 @@ test('a fresh session execs claude with the caller-provided session id', () => {
   const cmd = autoCmd(false);
   assert.match(cmd, new RegExp(`exec claude [^\\n]*--session-id ${UUID}`));
   assert.doesNotMatch(cmd, /--resume/);
+  // No display name: one conversation per (user, copy, BP) — naming was for
+  // the removed multi-session list.
+  assert.doesNotMatch(cmd, / -n /);
 });
 
 test('the stale-session fallback is gated on the resume failing fast', () => {

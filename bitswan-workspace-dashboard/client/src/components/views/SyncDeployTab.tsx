@@ -66,8 +66,7 @@ export function SyncDeployTab({
   onManageDeployments,
 }: SyncDeployTabProps) {
   const { changed } = useCopyStatus(wt.name);
-  const { startSyncSession, agentStatus, ensureAgent } =
-    useSessions();
+  const { sendPrompt } = useSessions();
   const [busy, setBusy] = useState(false);
   // True after a sync returns needs_rebase: opens the "automerge failed" dialog
   // so the user chooses whether to repair with a coding-agent session.
@@ -132,26 +131,15 @@ export function SyncDeployTab({
   const bpUpToDate = aheadBp === 0 && behindBp === 0 && !dirty;
   const actionable = !bpUpToDate;
 
-  const handoffToAgent = useCallback(async () => {
-    if (agentStatus === 'idle' || agentStatus === 'failed') {
-      try {
-        await ensureAgent();
-      } catch {
-        // surfaces via agentStatus; the session will still attempt to spawn
-      }
-    }
-    // BP-scoped: the agent lands inside this BP's own clone and rebases just
-    // this business process (startSyncSession pre-selects it for this scope).
-    startSyncSession(wt.name, bp.name);
+  const handoffToAgent = useCallback(() => {
+    // BP-scoped: the sync prompt lands in this BP's agent session (typed
+    // into the running one, or seeding a fresh one), which rebases just
+    // this business process.
+    sendPrompt(wt.name, bp.name, 'sync').catch((err) => {
+      toast.error(`Failed to hand the rebase to the agent: ${String(err)}`);
+    });
     onShowAgents();
-  }, [
-    agentStatus,
-    ensureAgent,
-    startSyncSession,
-    wt.name,
-    bp.name,
-    onShowAgents,
-  ]);
+  }, [sendPrompt, wt.name, bp.name, onShowAgents]);
 
   const runSyncDeploy = useCallback(async () => {
     setBusy(true);
