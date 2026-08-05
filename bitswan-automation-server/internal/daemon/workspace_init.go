@@ -798,7 +798,6 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 	fmt.Println("------------GITOPS INFO------------")
 	fmt.Printf("GitOps ID: %s\n", workspaceName)
 	fmt.Printf("GitOps URL: https://%s-gitops.%s\n", workspaceName, domain)
-	fmt.Printf("GitOps Secret: %s\n", token)
 
 	return nil
 }
