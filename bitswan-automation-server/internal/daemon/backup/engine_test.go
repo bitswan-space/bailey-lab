@@ -96,6 +96,8 @@ func TestEngineRunAll(t *testing.T) {
 	defer aoc.Close()
 	writeServerConfig(t, aoc.URL)
 	argvFile, _ := fakeRestic(t, 0, "")
+	savedTags := fakeInternalImages(t,
+		"aaa111\tinternal/ws1-bp-backend:sha1\naaa111\tinternal/ws1-other-backend:sha1\nbbb222\tinternal/ws1-bp-frontend:sha2\n")
 
 	writeWorkspace(t, "ws1", true)
 	driver := fakeDriver(t, "ws1")
@@ -126,6 +128,21 @@ func TestEngineRunAll(t *testing.T) {
 	}
 	if !report.ServerState.Success {
 		t.Errorf("server state step failed: %+v", report.ServerState)
+	}
+
+	// Images are on by default, and every TAG must reach docker save even where
+	// several alias one image: the archive's tag mappings are what put the exact
+	// names bitswan.yaml pins back on a rebuilt host, and docker writes the shared
+	// layers once regardless.
+	if !report.Images.Success {
+		t.Errorf("images step failed: %+v", report.Images)
+	}
+	if !strings.Contains(report.Images.Output, "2 image(s), 3 tag(s)") {
+		t.Errorf("images step should count distinct images and tags: %+v", report.Images)
+	}
+	want := "internal/ws1-bp-backend:sha1 internal/ws1-bp-frontend:sha2 internal/ws1-other-backend:sha1"
+	if got := strings.Join(*savedTags, " "); got != want {
+		t.Errorf("docker save tags = %q, want all three sorted: %q", got, want)
 	}
 
 	argv, err := os.ReadFile(argvFile)
@@ -181,6 +198,7 @@ func TestEngineRunIsolatesWorkspaceFailures(t *testing.T) {
 	defer aoc.Close()
 	writeServerConfig(t, aoc.URL)
 	fakeRestic(t, 0, "")
+	fakeInternalImages(t, "aaa111\tinternal/ws1-bp-backend:sha1\n")
 
 	writeWorkspace(t, "ws-good", false) // no services enabled
 	writeWorkspace(t, "ws-bad", true)   // postgres enabled, driver unreachable
@@ -231,6 +249,7 @@ func TestRunAllReportsTheVersion(t *testing.T) {
 	defer aoc.Close()
 	writeServerConfig(t, aoc.URL)
 	fakeRestic(t, 0, "")
+	fakeInternalImages(t, "aaa111\tinternal/ws1-bp-backend:sha1\n")
 
 	writeWorkspace(t, "ws1", true)
 	driver := fakeDriver(t, "ws1")
@@ -258,6 +277,7 @@ func TestRunAllWithoutAVersionReporter(t *testing.T) {
 	defer aoc.Close()
 	writeServerConfig(t, aoc.URL)
 	fakeRestic(t, 0, "")
+	fakeInternalImages(t, "aaa111\tinternal/ws1-bp-backend:sha1\n")
 
 	var engine Engine
 	if _, err := engine.RunAll(context.Background(), func(string) {}); err != nil {

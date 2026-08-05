@@ -35,7 +35,10 @@ type RunReport struct {
 	OK          bool                       `json:"ok"`
 	Workspaces  map[string]WorkspaceReport `json:"workspaces"`
 	ServerState StepResult                 `json:"server_state"`
-	Retention   StepResult                 `json:"retention"`
+	// Images is the built business-process image archive. Omitted when image
+	// backups are switched off, so an older report deserialises unchanged.
+	Images    StepResult `json:"images,omitempty"`
+	Retention StepResult `json:"retention"`
 }
 
 // Engine serializes backup runs (nightly vs run-now) and executes them.
@@ -218,11 +221,23 @@ func (e *Engine) RunAll(ctx context.Context, log func(string)) (*RunReport, erro
 	log("Backing up server state")
 	report.ServerState = e.backupServerState(ctx, restic)
 
+	// After the workspaces, whose file trees hold the sources these images were
+	// built from: a snapshot set where the archive is newer than the trees can be
+	// reconciled (the tags say which revision they came from), one where it is
+	// older cannot.
+	if cfg.Images {
+		log("Backing up business-process images")
+		report.Images = e.backupImages(ctx, restic)
+	}
+
 	log("Applying retention policy")
 	report.Retention = applyRetention(ctx, restic, cfg.Retention)
 
 	report.FinishedAt = time.Now().UTC()
 	report.OK = report.ServerState.Success && report.Retention.Success
+	if cfg.Images {
+		report.OK = report.OK && report.Images.Success
+	}
 	for _, wr := range report.Workspaces {
 		for _, step := range wr {
 			report.OK = report.OK && step.Success

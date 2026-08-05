@@ -38,9 +38,28 @@ server, captured at **real absolute paths** so a recovery can
 decides "in sync" from `bailey.db` alone — so every route looks fine and none
 gets re-pushed.
 
+Business-process images (tag `images`) — one `docker save` of every named
+`internal/*` image, streamed straight into the repo as `internal-images.tar`.
+
+gitops can already rebuild a missing image from the revision `bitswan.yaml`
+records, and lands on the same tag because the tag hashes the *source tree*.
+That is provenance, not content: if a workspace's `image/Dockerfile` does an
+unpinned `pip install`, if `build.sh` fetches, or if an upstream `FROM` moves,
+the rebuild reproduces the tag over different bytes — and it needs working
+network egress at the worst possible moment. Saving the archive makes a recovery
+restore *the* image rather than *an* image. Both paths stay: an archive is
+architecture-specific, so recovering onto different hardware still rebuilds.
+
+Cheaper than it looks, because tags alias heavily — one live server had 103
+`internal/*` tags behind 26 distinct images, ~2.4 GB of unique layers. `docker
+save` given every tag at once writes each layer once and records all the tag
+mappings, so one archive restores all 103 names. The tags are content-addressed
+and never change, so restic dedupes later runs to near nothing: the first
+snapshot after enabling is the only expensive one. Switch it off with
+`{"images": false}` in `backup/config.json`; absent means on.
+
 **Not** backed up: Kafka data, physical DB volumes (logical dumps only),
-build-proxy caches, the grype DB, per-BP images (local image store only — a
-fresh host needs a rebuild pass), and **the mkcert CA** (`bitswan-mkcert`)
+build-proxy caches, the grype DB, and **the mkcert CA** (`bitswan-mkcert`)
 — a CA signing key stays out of off-site storage by policy. After a rebuild,
 `.localhost` certs are re-minted under a new CA that developers must re-trust;
 the manifest records the old CA's fingerprint so a mismatch is detectable.
@@ -266,7 +285,7 @@ unattended run), then works through six phases, printing each step:
 | state | creates the `bitswan` volume and restores the server's own state into it, **before any daemon exists** |
 | daemon | re-applies the recorded image pins, then deploys the daemon |
 | ingress | stores the new token, brings Traefik up on the restored route table, waits for it to serve, provisions the protected proxy, and tells the AOC where this server now lives |
-| workspaces | recovers each workspace — files, secrets, databases, object storage — rebuilding business-process images first |
+| workspaces | loads the saved business-process images, then recovers each workspace — files, secrets, databases, object storage — rebuilding any image the archive did not carry |
 | verify | confirms the world is served this server's own certificate |
 
 Useful flags: `--dry-run` (print the plan and stop), `--skip-workspaces`,
@@ -297,15 +316,26 @@ version cannot be honoured: nothing was ever reported, it is a build from source
 
 ### How business-process images come back
 
-Per-BP images are in no backup — they only ever existed in the lost machine's
-local image store — and the ordinary converge does not build, so a missing image
-fails it outright. Recovery rebuilds each one **from the revision its deployment
-records**: `bitswan.yaml` carries `source_commit` per deployment (and `git_commit`
+Two ways, tried in that order, because the ordinary converge does not build and a
+missing image fails it outright.
+
+**Loaded from the backup.** Runs first, before any workspace converges — a load
+afterwards would never be reached. `restic dump` streams `internal-images.tar` out
+of the newest `images` snapshot and pipes it into `docker load`, which restores
+every tag the archive recorded. A backup with no archive (older than the feature,
+or images switched off) is not an error: the step says so and the rebuild takes
+over. So is a failed load — it is recorded red, the report warns that images will
+be rebuilt, and the recovery continues.
+
+**Rebuilt from the recorded revision.** For everything the archive did not carry,
+including any recovery onto a different CPU architecture, where a saved archive is
+useless. `bitswan.yaml` carries `source_commit` per deployment (and `git_commit`
 per BP stage), and the BP's canonical bare repo lives inside the workspace tree
 the backup captures, so the full source history is restored with it. The image tag
 is a pure content address of the source tree, so extracting that commit reproduces
 the pinned tag exactly — for promoted stages as much as for dev, and regardless of
-how far the working copy has moved on since.
+how far the working copy has moved on since. Note this reproduces the *tag*, not
+necessarily the bytes: see the `images` tag above for when that distinction bites.
 
 Where a rebuild produces a *different* tag, the tree that was deployed was not the
 tree that was committed (untracked files at deploy time, or a hand-built image).

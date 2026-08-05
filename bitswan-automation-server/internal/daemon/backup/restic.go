@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -66,6 +67,31 @@ func (r *Restic) envNames() []string {
 // stderr; err is non-nil on non-zero exit (stderr is folded into the error
 // message for direct surfacing in run reports).
 func (r *Restic) Run(ctx context.Context, args ...string) (stdout, stderr string, err error) {
+	return r.run(ctx, nil, nil, args...)
+}
+
+// RunStdin is Run with restic's stdin attached to in — for `backup --stdin`,
+// where the thing being backed up is a stream rather than a path (image
+// archives; see images.go).
+//
+// Pass an *os.File to get it handed to the child as fd 0 directly. Any other
+// io.Reader makes os/exec spawn a copying goroutine that cmd.Wait then waits
+// for, which turns a broken pipe into a hang instead of an error.
+func (r *Restic) RunStdin(ctx context.Context, in io.Reader, args ...string) (stdout, stderr string, err error) {
+	return r.run(ctx, in, nil, args...)
+}
+
+// RunStdout is Run with restic's stdout attached to out instead of buffered —
+// for `dump` of something too large to hold in memory, piped straight into
+// another process.
+func (r *Restic) RunStdout(ctx context.Context, out io.Writer, args ...string) (stderr string, err error) {
+	_, stderr, err = r.run(ctx, nil, out, args...)
+	return stderr, err
+}
+
+func (r *Restic) run(
+	ctx context.Context, in io.Reader, out io.Writer, args ...string,
+) (stdout, stderr string, err error) {
 	binary, argv := resticBinary, args
 	if r.Container != nil {
 		binary, argv = dockerBinary, r.Container.argv(r.envNames(), args)
@@ -76,7 +102,12 @@ func (r *Restic) Run(ctx context.Context, args ...string) (stdout, stderr string
 	// than putting secrets in the process table.
 	cmd.Env = r.Env()
 	var outBuf, errBuf bytes.Buffer
-	cmd.Stdout = &outBuf
+	cmd.Stdin = in
+	if out != nil {
+		cmd.Stdout = out
+	} else {
+		cmd.Stdout = &outBuf
+	}
 	cmd.Stderr = &errBuf
 	err = cmd.Run()
 	stdout = outBuf.String()

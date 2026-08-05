@@ -2,13 +2,33 @@ package backup
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestMain poisons the image backup's docker touch-points for the whole package.
+//
+// Any test that reaches RunAll without calling fakeInternalImages would otherwise
+// inventory and `docker save` every real image on the host: gigabytes of IO inside a
+// unit test, a different result on every machine, and no failure to point at it.
+// Three tests did exactly that before this existed. Failing loudly with the name of
+// the fix is the difference between noticing and not.
+func TestMain(m *testing.M) {
+	dockerImagesLister = func(context.Context) (string, error) {
+		return "", fmt.Errorf("this test reaches the image backup without stubbing it — " +
+			"call fakeInternalImages(t, …)")
+	}
+	dockerSaveCommand = func(ctx context.Context, _ []string) *exec.Cmd {
+		return exec.CommandContext(ctx, "false")
+	}
+	os.Exit(m.Run())
+}
 
 // writeServerConfig makes $HOME/.config/bitswan/automation_server_config.toml
 // with an AOC registration, matching what LoadAOCTarget reads.
@@ -37,7 +57,13 @@ func fakeRestic(t *testing.T, exitCode int, stderr string) (argvFile, envFile st
 	envFile = filepath.Join(binDir, "env")
 	script := "#!/bin/sh\n" +
 		"echo \"$@\" >> " + argvFile + "\n" +
-		"env > " + envFile + "\n"
+		"env > " + envFile + "\n" +
+		// Real `restic backup --stdin` reads its input to EOF. A fake that exits
+		// without draining leaves the writer holding a full pipe and killed by
+		// SIGPIPE, so the caller correctly reports a truncated archive -- a fake
+		// failure that looks exactly like a real one. Reading nothing is fine for
+		// every other invocation: stdin is /dev/null there, so cat returns at once.
+		"cat >/dev/null 2>/dev/null || true\n"
 	if stderr != "" {
 		script += "echo '" + stderr + "' >&2\n"
 	}
@@ -47,6 +73,27 @@ func fakeRestic(t *testing.T, exitCode int, stderr string) (argvFile, envFile st
 	}
 	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
 	return argvFile, envFile
+}
+
+// fakeInternalImages replaces the two docker touch-points of the image backup:
+// the inventory, and the command that produces the archive. Without it a test that
+// reaches RunAll streams every real image on the host through restic -- gigabytes
+// of IO in a unit test, and a different result on every machine.
+//
+// `inventory` is raw `docker images` output ("<id>\t<repo>:<tag>" lines).
+func fakeInternalImages(t *testing.T, inventory string) *[]string {
+	t.Helper()
+	savedList, savedSave := dockerImagesLister, dockerSaveCommand
+	t.Cleanup(func() { dockerImagesLister, dockerSaveCommand = savedList, savedSave })
+
+	var savedTags []string
+	dockerImagesLister = func(context.Context) (string, error) { return inventory, nil }
+	dockerSaveCommand = func(ctx context.Context, tags []string) *exec.Cmd {
+		savedTags = append([]string{}, tags...)
+		// Stands in for a real archive: a few bytes on stdout, exit 0.
+		return exec.CommandContext(ctx, "sh", "-c", "printf 'fake-image-archive'")
+	}
+	return &savedTags
 }
 
 func TestLoadAOCTarget(t *testing.T) {

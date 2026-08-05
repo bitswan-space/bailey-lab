@@ -19,7 +19,19 @@ type Retention struct {
 // self-enable semantics gitops had (an explicit enabled:false is the only
 // off switch).
 type Config struct {
-	Enabled   bool      `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// Images includes the built business-process images in each run, so a
+	// recovery can load the bytes that were actually running instead of relying
+	// on gitops rebuilding them from the recorded revision (see images.go for
+	// why those are not the same thing).
+	//
+	// On by default, including for servers whose config file predates the field:
+	// LoadConfig unmarshals over DefaultConfig(), so an absent key keeps the
+	// default and only an explicit false switches it off. That does grow the repo
+	// on the first run after an upgrade — a few GB on a busy server — but the
+	// tags are content-addressed and never change, so every run after that
+	// dedupes to near nothing, and a DR feature nobody enabled protects nobody.
+	Images    bool      `json:"images"`
 	Retention Retention `json:"retention"`
 }
 
@@ -27,7 +39,7 @@ type Config struct {
 var DefaultRetention = Retention{Daily: 30, Monthly: 12}
 
 func DefaultConfig() Config {
-	return Config{Enabled: true, Retention: DefaultRetention}
+	return Config{Enabled: true, Images: true, Retention: DefaultRetention}
 }
 
 // Dir is the daemon-side backup state directory (config, key, staging,

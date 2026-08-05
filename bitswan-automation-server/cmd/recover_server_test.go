@@ -34,6 +34,7 @@ type recoverServerFakes struct {
 	manifest    backup.ServerManifest
 	manifestErr error
 	probeErr    error
+	imagesErr   error
 	recovered   []string
 	failOn      string
 
@@ -56,13 +57,15 @@ func installRecoverServerFakes(t *testing.T, f *recoverServerFakes) *recoverServ
 		readToken       func(context.Context, string) (string, error)
 		readManifest    func(context.Context, string, string, string, string, string, string, string) (backup.ServerManifest, string, error)
 		probeKey        func(context.Context, string, string, string, string, string, string) error
+		loadImages      func(context.Context, *recoverServerState) (string, error)
 		exchangeOTP     func(string, string, string) (string, string, error)
 		tokenWorks      func(string, string, string) bool
 		recoverOne      func(*daemon.Client, daemon.RecoverRequest) error
 	}{
 		recoverServerDockerAvailable, recoverServerVolumeExists, recoverServerReadServerID,
 		recoverServerReadToken, recoverServerReadManifest, recoverServerProbeKey,
-		recoverServerExchangeOTP, recoverServerTokenWorks, recoverServerRecoverOneWorkspace,
+		recoverServerLoadImages, recoverServerExchangeOTP, recoverServerTokenWorks,
+		recoverServerRecoverOneWorkspace,
 	}
 	t.Cleanup(func() {
 		recoverServerDockerAvailable = saved.dockerAvailable
@@ -71,6 +74,7 @@ func installRecoverServerFakes(t *testing.T, f *recoverServerFakes) *recoverServ
 		recoverServerReadToken = saved.readToken
 		recoverServerReadManifest = saved.readManifest
 		recoverServerProbeKey = saved.probeKey
+		recoverServerLoadImages = saved.loadImages
 		recoverServerExchangeOTP = saved.exchangeOTP
 		recoverServerTokenWorks = saved.tokenWorks
 		recoverServerRecoverOneWorkspace = saved.recoverOne
@@ -99,7 +103,15 @@ func installRecoverServerFakes(t *testing.T, f *recoverServerFakes) *recoverServ
 		f.manifestCred = cred
 		return f.manifest, "", f.manifestErr
 	}
+	recoverServerLoadImages = func(context.Context, *recoverServerState) (string, error) {
+		f.calls = append(f.calls, "load-images")
+		if f.imagesErr != nil {
+			return "", f.imagesErr
+		}
+		return "3 image tag(s) loaded", nil
+	}
 	recoverServerRecoverOneWorkspace = func(_ *daemon.Client, req daemon.RecoverRequest) error {
+		f.calls = append(f.calls, "ws:"+req.Workspace)
 		f.recovered = append(f.recovered, req.Workspace)
 		if req.Workspace == f.failOn {
 			return fmt.Errorf("snapshot unreadable")
@@ -374,6 +386,67 @@ func TestRecoverServerProbeFailuresAreDistinguishable(t *testing.T) {
 	}
 }
 
+// Saved images must be loaded BEFORE the first workspace converges. The compiler
+// emits `image:` for BP app services with no `build:` and no `pull_policy`, so a
+// missing image makes compose try to pull `internal/…` from Docker Hub and the
+// converge fails outright — a load afterwards would never be reached.
+func TestRecoverServerLoadsImagesBeforeAnyWorkspace(t *testing.T) {
+	f := installRecoverServerFakes(t, &recoverServerFakes{
+		dockerOK: true, volume: true, serverID: "srv-123",
+		token: "STORED-token", tokenWorks: true,
+	})
+	st := &recoverServerState{
+		opts: recoverServerOpts{serverID: "srv-123"},
+		manifest: backup.ServerManifest{Workspaces: []backup.ManifestWorkspace{
+			{Name: "first"}, {Name: "second"},
+		}},
+		report: &daemon.RecoverReport{},
+	}
+
+	if err := recoverServerWorkspaces(context.Background(), st, newStepPrinter(st.report)); err != nil {
+		t.Fatalf("workspace phase failed: %v", err)
+	}
+	if got := strings.Join(f.calls, ","); got != "load-images,ws:first,ws:second" {
+		t.Errorf("calls = %q, want the image load first", got)
+	}
+}
+
+// A missing or broken archive must not stop a recovery: every image is still
+// reachable through gitops's rebuild-from-revision pass, which is the whole reason
+// that path exists.
+func TestRecoverServerCarriesOnWhenImagesCannotBeLoaded(t *testing.T) {
+	f := installRecoverServerFakes(t, &recoverServerFakes{
+		dockerOK: true, volume: true, serverID: "srv-123",
+		token: "STORED-token", tokenWorks: true,
+		imagesErr: fmt.Errorf("repository unreachable"),
+	})
+	st := &recoverServerState{
+		opts: recoverServerOpts{serverID: "srv-123"},
+		manifest: backup.ServerManifest{Workspaces: []backup.ManifestWorkspace{
+			{Name: "first"},
+		}},
+		report: &daemon.RecoverReport{},
+	}
+
+	if err := recoverServerWorkspaces(context.Background(), st, newStepPrinter(st.report)); err != nil {
+		t.Fatalf("a failed image load must not fail the recovery: %v", err)
+	}
+	if got := strings.Join(f.calls, ","); got != "load-images,ws:first" {
+		t.Errorf("calls = %q, want the workspace recovered anyway", got)
+	}
+	// Silently swallowing it would leave an operator wondering why the converge
+	// spent ten minutes rebuilding.
+	var warned bool
+	for _, w := range st.report.Warnings {
+		if strings.Contains(w, "rebuilt") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("the report should say the images will be rebuilt: %v", st.report.Warnings)
+	}
+}
+
 // The probe runs before the OTP is exchanged, so it authenticates with the OTP —
 // which the AOC allows reads only. restic locks even to read, and taking a lock is
 // a write, so without --no-lock the probe dies on a 403 that says nothing about the
@@ -456,7 +529,15 @@ func TestRecoverServerRebuildsImagesUnlessOptedOut(t *testing.T) {
 	// them — otherwise the converge fails on a pull of a local-only tag.
 	var reqs []daemon.RecoverRequest
 	f := installRecoverServerFakes(t, &recoverServerFakes{})
+	recoverServerLoadImages = func(context.Context, *recoverServerState) (string, error) {
+		f.calls = append(f.calls, "load-images")
+		if f.imagesErr != nil {
+			return "", f.imagesErr
+		}
+		return "3 image tag(s) loaded", nil
+	}
 	recoverServerRecoverOneWorkspace = func(_ *daemon.Client, req daemon.RecoverRequest) error {
+		f.calls = append(f.calls, "ws:"+req.Workspace)
 		reqs = append(reqs, req)
 		f.recovered = append(f.recovered, req.Workspace)
 		return nil

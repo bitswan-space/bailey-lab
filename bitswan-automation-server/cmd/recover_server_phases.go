@@ -281,10 +281,52 @@ func listWorkspacesForRecovery(st *recoverServerState) (*daemon.WorkspaceListRes
 	return st.client.ListWorkspaces(false, false)
 }
 
+// recoverServerLoadImages loads the saved business-process images back onto this
+// machine, so the workspace converges find the tags their bitswan.yaml pins already
+// present. A seam so the phase order can be tested without docker.
+var recoverServerLoadImages = func(ctx context.Context, st *recoverServerState) (string, error) {
+	o := st.opts
+	image := o.image
+	if image == "" {
+		image = st.manifest.DaemonImage
+	}
+	loadCtx, cancel := context.WithTimeout(ctx, recoverServerRestoreWait)
+	defer cancel()
+
+	restic := newDaemonlessRestic(o.aocAPI, o.serverID, st.token, st.key, image, o.network)
+	result, err := backup.RestoreImages(loadCtx, restic, o.snapshot)
+	if err != nil {
+		return "", err
+	}
+	if result.Missing {
+		// A snapshot from before image backups existed, or a server with them
+		// switched off. Every image is still reachable through a rebuild.
+		return "the backup holds no image archive — images will be rebuilt", nil
+	}
+	return fmt.Sprintf("%d image tag(s) loaded", len(result.Loaded)), nil
+}
+
 func recoverServerWorkspaces(ctx context.Context, st *recoverServerState, step stepFunc) error {
 	if st.opts.skipWS {
 		skipStep(st.report, "workspaces", "--skip-workspaces")
 		return nil
+	}
+
+	// Before any workspace converges. The compiler emits `image:` for BP app
+	// services with no `build:` and no `pull_policy`, so a missing image makes
+	// compose try to pull `internal/…` from Docker Hub and the whole converge
+	// fails — a load afterwards would never be reached. gitops still rebuilds
+	// whatever is not in the archive, so this step never blocks the recovery.
+	if !step("images", func() (string, error) {
+		return recoverServerLoadImages(ctx, st)
+	}) {
+		// Recorded red and carried on deliberately: everything here is
+		// reconstructible from the recorded revisions, which is what the rebuild
+		// pass is for.
+		fmt.Println("Note: continuing without the saved images — gitops will rebuild " +
+			"what the deployments pin.")
+		st.report.Warnings = append(st.report.Warnings,
+			"saved business-process images could not be loaded; they will be rebuilt")
 	}
 
 	names := recoverServerWorkspaceNames(st)
