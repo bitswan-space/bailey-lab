@@ -127,6 +127,29 @@ function scopeKey(s: Scope): string {
   return `${s.copy} ${s.bp}`;
 }
 
+/** Let the TUI settle a paste before submitting it. */
+const SUBMIT_DELAY_MS = 500;
+/** Second-chance submit for a slow paste that absorbed the first CR. */
+const SUBMIT_RETRY_MS = 1500;
+
+/**
+ * Type a prompt into a live PTY and submit it. The paste and the Enter MUST
+ * be separate writes with a pause between them: Claude's TUI debounces
+ * bursty input while a paste is being processed, and a CR arriving in the
+ * same burst is absorbed into the pasted text instead of registering as a
+ * keystroke — long prompts (all the canned ones) then sit in the input box
+ * unsubmitted. Verified against a live agent: an ~950-char paste with the
+ * CR in the same PTY chunk never submits; the same paste with a delayed CR
+ * does. The second CR is a belt-and-suspenders retry: a no-op when the
+ * first one landed (Enter on an empty input does nothing), it submits the
+ * text on machines where the paste settles slower than SUBMIT_DELAY_MS.
+ */
+function typeAndSubmit(write: (data: string) => void, prompt: string): void {
+  write(`\x1b[200~${prompt}\x1b[201~`);
+  setTimeout(() => write('\r'), SUBMIT_DELAY_MS);
+  setTimeout(() => write('\r'), SUBMIT_RETRY_MS);
+}
+
 interface PaneRect {
   top: number;
   left: number;
@@ -227,18 +250,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       });
       if (!r.ok) throw new Error(`prompt fetch failed: HTTP ${r.status}`);
       const { prompt } = (await r.json()) as { prompt: string };
-      // Bracketed paste so the TUI takes the text as one block, then CR to
-      // submit — same channel as keystrokes, end to end.
-      const data = `\x1b[200~${prompt}\x1b[201~\r`;
       const writer = writersRef.current.get(live.id);
       if (writer) {
-        writer(data);
+        typeAndSubmit(writer, prompt);
         return;
       }
       // Session exists but its WS hasn't opened yet — queue for the flush
       // in registerWriter rather than dropping the prompt.
       const queue = pendingPromptsRef.current.get(key) ?? [];
-      queue.push(data);
+      queue.push(prompt);
       pendingPromptsRef.current.set(key, queue);
     },
     [startSession],
@@ -258,7 +278,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const queued = pendingPromptsRef.current.get(key);
       if (!queued) return;
       pendingPromptsRef.current.delete(key);
-      for (const data of queued) write(data);
+      // Stagger multiple queued prompts so each one's paste + submits finish
+      // before the next paste begins.
+      queued.forEach((prompt, i) => {
+        setTimeout(() => typeAndSubmit(write, prompt), i * (SUBMIT_RETRY_MS + 500));
+      });
     },
     [],
   );
