@@ -87,7 +87,12 @@ func ReadServerManifest(ctx context.Context, restic *Restic, snapshotID string) 
 	}
 	// Scope "latest" to the server series, or it would resolve to whatever
 	// snapshot happens to be newest (usually a workspace's).
-	args := []string{"dump"}
+	// --no-lock because this is a pure read and restic would otherwise create a
+	// lock object — a WRITE. A recovery reads the manifest before it has exchanged
+	// its one-time password, authenticating with the OTP, and the AOC allows an OTP
+	// reads only: taking the lock would fail with a 403 that looks like a
+	// permissions bug rather than what it is.
+	args := []string{"dump", "--no-lock"}
 	if snapshotID == "latest" {
 		args = append(args, "--tag", "server-config")
 	}

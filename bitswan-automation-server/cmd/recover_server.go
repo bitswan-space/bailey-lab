@@ -155,8 +155,13 @@ var (
 
 // recoverServerState is what the phases hand each other.
 type recoverServerState struct {
-	opts     recoverServerOpts
-	key      string
+	opts recoverServerOpts
+	key  string
+	// readCred authenticates the read-only preflight (the key probe and the
+	// manifest read). It is the recovery OTP until the exchange happens, or a
+	// stored access token when resuming — the AOC's restic proxy accepts either,
+	// the OTP for reads only.
+	readCred string
 	token    string
 	expires  string
 	manifest backup.ServerManifest
@@ -270,30 +275,23 @@ func recoverServerPreflight(ctx context.Context, st *recoverServerState, step st
 		return failedPhase(st.report, "refusing to recover onto this machine")
 	}
 
-	// Credentials. A stored token that still works means a previous run got this
-	// far, so resume rather than demanding another OTP — they are single-use and
-	// expire in ten minutes, and needing a new one mid-incident is a bad trade.
-	if !step("credentials", func() (string, error) {
+	// Resume. A stored token that still works means a previous run got this far, so
+	// carry on with it rather than demanding another OTP — they are single-use, and
+	// needing a fresh one mid-incident is a real cost.
+	//
+	// Split out from the exchange (which now happens last) so the read-only
+	// preflight below knows which credential to read with.
+	if !step("resume", func() (string, error) {
 		if token := existingWorkingToken(ctx, o); token != "" {
-			st.token, st.resumed = token, true
+			st.token, st.readCred, st.resumed = token, token, true
 			return "the stored token still authenticates — resuming without an OTP", nil
 		}
 		if o.otp == "" {
 			return "", fmt.Errorf("--otp is required (no usable token is stored on this " +
 				"machine). Take a fresh one from the \"Disaster recovery\" action on the AOC card")
 		}
-		if err := confirmRecovery(o); err != nil {
-			return "", err
-		}
-		token, expires, err := recoverServerExchangeOTP(o.aocAPI, o.otp, o.serverID)
-		if err != nil {
-			return "", fmt.Errorf("could not exchange the recovery OTP: %w", err)
-		}
-		st.token, st.expires = token, expires
-		if st.token == "" {
-			return "", fmt.Errorf("the AOC returned no access token for this server")
-		}
-		return "recovery OTP exchanged for an access token", nil
+		st.readCred = o.otp
+		return "no usable stored token — the recovery OTP will be used", nil
 	}) {
 		return failedPhase(st.report, "could not authenticate to the AOC")
 	}
@@ -309,11 +307,29 @@ func recoverServerPreflight(ctx context.Context, st *recoverServerState, step st
 		return failedPhase(st.report, "the backup encryption key is required")
 	}
 
-	// One call proves the key, the repo and the server all line up — and yields
-	// everything else the recovery needs to know about the server it is rebuilding.
+	// Prove the key before anything mutates. This is why the OTP has not been
+	// exchanged yet: the exchange REPLACES the server's access token, so an
+	// operator with the wrong key would otherwise cut a possibly-still-live server
+	// off the AOC and only then find out. A failure here costs nothing.
+	if !step("probe", func() (string, error) {
+		err := recoverServerProbeKey(
+			ctx, o.aocAPI, o.serverID, st.readCred, st.key, o.image, o.network)
+		if err != nil {
+			return "", explainProbeFailure(err, o.serverID)
+		}
+		// Says only what was proven. Whether a given snapshot restores is a
+		// separate question, answered later and sometimes differently.
+		return "the key opens this server's backup repository", nil
+	}) {
+		return failedPhase(st.report, "the backup encryption key could not be verified")
+	}
+
+	// Still read-only, still on the OTP: this yields everything the recovery needs
+	// to know about the server it is rebuilding, so the operator can see the actual
+	// plan before consenting to the one irreversible step.
 	if !step("manifest", func() (string, error) {
 		manifest, warning, err := recoverServerReadManifest(
-			ctx, o.aocAPI, o.serverID, st.token, st.key, o.snapshot, o.image, o.network)
+			ctx, o.aocAPI, o.serverID, st.readCred, st.key, o.snapshot, o.image, o.network)
 		if err != nil {
 			return "", err
 		}
@@ -330,6 +346,38 @@ func recoverServerPreflight(ctx context.Context, st *recoverServerState, step st
 	}
 
 	printRecoveryPlan(st)
+
+	// The first mutation, and the last thing in the preflight. Everything above was
+	// read-only, so up to this point an aborted recovery has changed nothing.
+	if st.resumed {
+		return nil
+	}
+	// A dry run reads and reports, so it needs no access token — and exchanging
+	// would rotate a live server's token for a run that changes nothing. Only
+	// possible now that the exchange comes last; before, --dry-run spent the OTP.
+	if o.dryRun {
+		return nil
+	}
+	if !step("credentials", func() (string, error) {
+		if err := confirmRecovery(o); err != nil {
+			return "", err
+		}
+		token, expires, err := recoverServerExchangeOTP(o.aocAPI, o.otp, o.serverID)
+		if err != nil {
+			return "", fmt.Errorf("could not exchange the recovery OTP: %w.\n\n"+
+				"The encryption key is verified and nothing has been changed. If the OTP "+
+				"expired while you were reading the plan, take a fresh one from the "+
+				"\"Disaster recovery\" action on the AOC card and re-run", err)
+		}
+		st.token, st.expires = token, expires
+		if st.token == "" {
+			return "", fmt.Errorf("the AOC returned no access token for this server")
+		}
+		return "recovery OTP exchanged for an access token", nil
+	}) {
+		return failedPhase(st.report, "could not authenticate to the AOC")
+	}
+
 	return nil
 }
 

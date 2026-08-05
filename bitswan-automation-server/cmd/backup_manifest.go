@@ -121,6 +121,28 @@ func readKeyFile(path string) (string, error) {
 	return key, nil
 }
 
+// newDaemonlessRestic builds a restic runner for a machine with no daemon and no
+// restic binary: credentials come from the command line rather than a config file,
+// and restic itself runs in a throwaway container from the runtime image.
+//
+// `cred` is whatever authenticates to the AOC's restic proxy. Normally that is the
+// server's access token; during a recovery's read-only preflight it is the recovery
+// OTP instead, which works unchanged because the proxy takes either as the REST
+// password (see backup.NewAOCTarget).
+func newDaemonlessRestic(aocAPI, serverID, cred, key, image, network string) *backup.Restic {
+	target := backup.NewAOCTarget(aocAPI, serverID, cred)
+	exec := backup.NewContainerExec(image)
+	switch {
+	case network != "":
+		exec.Network = network
+	case target.InDockerNetwork():
+		exec.OnBitswanNetwork()
+	}
+	restic := backup.NewRestic(target, key)
+	restic.Container = exec
+	return restic
+}
+
 // readManifestWithoutDaemon is the bare-machine bootstrap: build the AOC target
 // from supplied values and read the manifest with restic in a container.
 func readManifestWithoutDaemon(
@@ -132,16 +154,7 @@ func readManifestWithoutDaemon(
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	target := backup.NewAOCTarget(aocAPI, serverID, token)
-	exec := backup.NewContainerExec(image)
-	switch {
-	case network != "":
-		exec.Network = network
-	case target.InDockerNetwork():
-		exec.OnBitswanNetwork()
-	}
-	restic := backup.NewRestic(target, key)
-	restic.Container = exec
+	restic := newDaemonlessRestic(aocAPI, serverID, token, key, image, network)
 
 	manifest, err := backup.ReadServerManifest(ctx, restic, snapshot)
 	if err != nil {

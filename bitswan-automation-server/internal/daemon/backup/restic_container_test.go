@@ -152,8 +152,14 @@ func TestReadServerManifestThroughContainer(t *testing.T) {
 	argv := readFile(t, argvFile)
 	// "latest" must be scoped to the server series, or it resolves to whatever
 	// snapshot is newest — usually a workspace's, which has no manifest.
-	if !strings.Contains(argv, "dump --tag server-config latest") {
+	if !strings.Contains(argv, "--tag server-config latest") {
 		t.Errorf("expected a server-scoped dump, got: %s", argv)
+	}
+	// --no-lock is load-bearing: a recovery reads the manifest while authenticated
+	// with its one-time password, which the AOC allows reads only, and taking a
+	// lock is a write. Without it the read fails with a 403.
+	if !strings.Contains(argv, "dump --no-lock") {
+		t.Errorf("the manifest read must not take a lock, got: %s", argv)
 	}
 
 	if warning := CheckVersionSkew(manifest, "1.2.3"); warning != "" {

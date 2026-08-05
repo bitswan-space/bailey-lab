@@ -233,8 +233,16 @@ Two things to know before you run it:
   dialog says so before you commit to a rebuild you cannot finish.
 - **Redeeming the OTP replaces the server's access token**, which cuts off a
   server that is still alive (its own backups included) until it re-registers.
-  Issuing the OTP does *not* — the swap happens when the command runs. The
-  card warns when the target still holds a live token.
+  Issuing the OTP does *not*, and neither does the recovery's preflight — the
+  swap happens only after your key has been proven to open the repository and
+  you have confirmed the plan. The card warns when the target still holds a
+  live token.
+- **A wrong key costs nothing.** The preflight opens the repository with the key
+  you supply *before* exchanging the OTP, authenticating to the AOC with the OTP
+  itself (which grants reads only). A key that does not work, a `--server-id`
+  with no repo, or a repo still locked by a live server all stop the run with
+  nothing changed and the OTP still valid — so you can retry with the right key.
+  `--dry-run` likewise spends nothing.
 
 Every issue is recorded in AOC (`DisasterRecoveryRequest`: who asked, which
 server, when, whether it was redeemed, and whether it displaced a live token).
@@ -254,7 +262,7 @@ unattended run), then works through six phases, printing each step:
 
 | Phase | What it does |
 |---|---|
-| preflight | checks docker, refuses if this machine is already a *different* server, exchanges the OTP, reads the backup's manifest — nothing is written yet |
+| preflight | checks docker; refuses if this machine is already a *different* server; verifies your key opens the repository; reads the manifest and prints the plan — all read-only, then exchanges the OTP as its last act |
 | state | creates the `bitswan` volume and restores the server's own state into it, **before any daemon exists** |
 | daemon | re-applies the recorded image pins, then deploys the daemon |
 | ingress | stores the new token, brings Traefik up on the restored route table, waits for it to serve, provisions the protected proxy, and tells the AOC where this server now lives |
@@ -266,9 +274,11 @@ Useful flags: `--dry-run` (print the plan and stop), `--skip-workspaces`,
 that is not publicly resolvable), `--snapshot` (recover from an older point).
 
 **If it fails partway, re-run it.** A token that still authenticates is detected
-and reused, so a retry does not need a fresh OTP — and OTPs are single-use with a
-ten-minute life. Workspaces are fail-fast: the run stops at the first one that
-fails rather than burying the cause.
+and reused, so a retry does not need a fresh OTP — and OTPs are single-use, with a
+thirty-minute life for recovery (long enough to verify the key, read the plan and
+decide). A run that failed *before* the exchange has not spent the OTP at all, so
+re-run with the same one. Workspaces are fail-fast: the run stops at the first one
+that fails rather than burying the cause.
 
 ### Which CLI version a recovery installs
 
