@@ -96,14 +96,24 @@ describe('DevicesView', () => {
     installFetch({ '/2fa-gate/approve': { status: 200, text: 'ok' } });
     // A new browser signed in as the current user → pending pair for them.
     const data = makeData({ pending: [{ id: 'me@example.test', userEmail: 'me@example.test', userName: 'me@example.test' }] });
+    vi.useFakeTimers();
     render(<Host View={DevicesView} data={data} extra={s} />);
     expect(screen.getByText('New device waiting to be linked')).toBeTruthy();
     expect(screen.queryByText('Simulate scan')).toBeNull();
     // Enter the 6-digit code shown on the new device and link it.
     fireEvent.change(document.querySelector('input'), { target: { value: '497722' } });
     fireEvent.click(screen.getByText('Link device'));
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith('New device linked and trusted', 'success'));
-    expect(s.refresh).toHaveBeenCalledWith('devices');
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    expect(s.toast).toHaveBeenCalledWith('New device linked and trusted', 'success');
+    // Background refresh (rows stay rendered — #257)…
+    expect(s.refresh).toHaveBeenCalledWith('devices', { background: true });
+    expect(s.refresh).toHaveBeenCalledWith('approvals', { background: true });
+    // …plus the delayed re-syncs that catch the device record once the new
+    // browser claims the approval (#331) — roster counts included.
+    s.refresh.mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(13000); });
+    expect(s.refresh).toHaveBeenCalledWith('people', { background: true });
+    expect(s.refresh).toHaveBeenCalledWith('devices', { background: true });
   });
 
   it('a bad pending-device code surfaces the backend error', async () => {

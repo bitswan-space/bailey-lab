@@ -161,6 +161,52 @@ describe('App live-data loading + adapters + routing', () => {
     await waitFor(() => expect(screen.queryByText('Server overview')).toBeNull());
   });
 
+  // #331: approving a device left the console stale — the pending bar cleared
+  // only on reload, and the roster's device count never caught up because the
+  // trusted device record is minted a couple of seconds AFTER the approve call
+  // (when the user's device claims the approval on its next poll). The console
+  // must converge on its own: badge + bar clear immediately, and the count
+  // updates once the delayed re-sync sees the claimed device — no page reload.
+  it('approving a device updates the pending bar, badge, and device count without a reload (#331)', async () => {
+    let approved = false;
+    let peopleFetchesAfterApprove = 0;
+    setLocation({ pathname: '/users' });
+    installFetch(fullRoutes({
+      '/bailey/api/people/invites': { json: { invites: [] } },
+      '/bailey/api/approvals': () => ({ json: { pending: approved ? [] : [{ email: 'a@h', age_seconds: 120 }] } }),
+      '/2fa-gate/approve': () => { approved = true; return { status: 200, text: 'ok' }; },
+      '/bailey/api/people': () => {
+        // The device record exists only after the user's device claims the
+        // approval — the refetch fired right after approve still sees count 0.
+        const claimed = approved && ++peopleFetchesAfterApprove > 1;
+        return { json: { people: [
+          { email: 'tomas@h', role: 'admin', workspace_count: 1, device_count: 2, last_active: '2026-01-01T00:00:00Z' },
+          { email: 'a@h', role: 'member', workspace_count: 0, device_count: claimed ? 1 : 0 },
+        ] } };
+      },
+    }));
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('Device awaiting approval')).toBeTruthy());
+    // Sidebar badge counts the pending approval; a@h has no devices yet.
+    // ("People & roles" is both the nav label and the page <h1> — the nav
+    // one is the only match inside a button.)
+    const navItem = () => screen.getAllByText('People & roles').map((el) => el.closest('button')).find((b) => b);
+    expect(navItem().textContent).toContain('1');
+    expect(screen.getAllByTitle('Manage devices').length).toBe(1); // tomas only
+    // Approve with the code read off the user's screen.
+    fireEvent.change(document.querySelector('input[autocapitalize="characters"]'), { target: { value: '123456' } });
+    fireEvent.click(screen.getByText('Trust this device'));
+    // The pending bar and the badge clear right away (approvals refetch)…
+    await waitFor(() => expect(screen.queryByText('Device awaiting approval')).toBeNull());
+    expect(navItem().textContent).not.toContain('1');
+    // …and the roster count converges once the claim lands (the delayed
+    // re-sync), while the roster itself stays rendered the whole time.
+    await waitFor(() => {
+      expect(screen.queryByText('Loading people…')).toBeNull();
+      expect(screen.getAllByTitle('Manage devices').length).toBe(2);
+    }, { timeout: 8000 });
+  }, 15000);
+
   // #248: the sidebar card is an IDENTITY slot — it used to spell the role
   // ("Administrator") under the name, which read as "who am I?" answered with
   // "what am I?". The email is the second line now; the role is just a badge.

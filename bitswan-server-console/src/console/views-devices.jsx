@@ -82,7 +82,14 @@ function DevicesView({ ctx }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {myPending.map(p => (
           <PendingDeviceRow key={p.id} email={currentUser.email} toast={toast}
-            onLinked={() => Promise.all([refresh('devices'), refresh('approvals')])} />
+            onLinked={async () => {
+              // Background: rows stay rendered while refetching (#257). The
+              // linked device is only minted once the new browser claims the
+              // approval on its next poll, so also re-sync shortly after —
+              // otherwise lists/counts stay stale until a reload (#331).
+              await Promise.all([refresh('devices', { background: true }), refresh('approvals', { background: true })]);
+              window.SC_PEOPLE.scheduleApprovalSettle(refresh);
+            }} />
         ))}
         {data.myDevices.map(dev => {
           const badge = TRUST_BADGE[dev.trustOrigin] || TRUST_BADGE.linked;
