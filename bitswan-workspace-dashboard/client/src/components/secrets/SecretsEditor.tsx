@@ -3,6 +3,16 @@ import { AlertTriangle, Check, Eye, EyeOff, Loader2, Plus, Trash2 } from 'lucide
 import { toast } from '@/lib/notify';
 import { api, type BpSecrets } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 /**
  * Secrets editor — wireframe `SecretsEditor` (Deployments → Secrets, and the
@@ -101,6 +111,8 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
   const [reveal, setReveal] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [applying, setApplying] = useState(false);
+  /** Secret name pending delete confirmation (issue #332). */
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -275,7 +287,7 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
   const deleteBtn = (key: string, small = false) => (
     <button
       type="button"
-      onClick={() => removeKey(key)}
+      onClick={() => setDeleteTarget(key)}
       title="Delete secret (removes from every stage)"
       className={cn(
         'flex shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-red-600',
@@ -408,6 +420,39 @@ export function SecretsEditor({ bp, stage, stageLabel, compact = false }: Props)
           </span>
         )}
       </div>
+
+      {/* Same confirm pattern as the requirements tab's "Delete requirement …?"
+          dialog. Rendered in a portal, so the ~280px Environment sidebar can't
+          clip or cramp it (issue #261's layout constraints don't apply). */}
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete secret &quot;{deleteTarget}&quot;?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes <code>{deleteTarget}</code> and its values from{' '}
+              <strong>every stage</strong> (dev, staging and production), not just{' '}
+              {stageLabel}. The change stays local until you press Apply — if you
+              leave without applying, the secret is kept.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                if (deleteTarget) removeKey(deleteTarget);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </form>
   );
 }
