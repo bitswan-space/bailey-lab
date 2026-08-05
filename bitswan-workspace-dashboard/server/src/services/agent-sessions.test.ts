@@ -14,8 +14,6 @@ import { test } from 'node:test';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-sessions-'));
 process.env.AGENT_SESSIONS_DIR = dir;
-// AGENT_HOME_DIR stays unset → title lookups hit a nonexistent path and
-// resolve to '' without error; titles aren't under test here.
 
 const { latestSession, findSessionMeta } = await import('./agent-sessions.js');
 

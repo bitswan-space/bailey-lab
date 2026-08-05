@@ -23,9 +23,7 @@ fi
 # Per-user Claude config dir keyed off the oauth2-proxy email. Without it,
 # whichever user logs into `claude` first leaks their account to every other
 # user of this container. Email is sanitized + hashed to defang RFC-valid
-# local parts that can contain `/` or `..`. MUST stay byte-identical with
-# `sanitizeEmail` in the dashboard server (services/agent-sessions.ts) — both
-# sides have to produce the same slug for the same email.
+# local parts that can contain `/` or `..`.
 sanitize_email() {
     local raw="$1"
     local clean hash

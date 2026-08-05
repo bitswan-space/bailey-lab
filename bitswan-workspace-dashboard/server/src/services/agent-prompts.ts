@@ -1,25 +1,12 @@
 /**
  * Canned task prompts the dashboard hands to Claude — seeded into a fresh
- * conversation or typed into a running one (sendPrompt). Exported from a
- * single module so the title-extraction logic in `agent-sessions.ts` can
- * recognise (and skip) them when scanning Claude's JSONL for a real first
- * user message — otherwise every session row reads "Sync this business
- * process…" as its title.
+ * conversation or typed into a running one (sendPrompt).
  *
  * The agent's standing identity/orientation text is NOT here: it lives in
  * the CLAUDE.md baked into the coding-agent image at /workspace/CLAUDE.md,
  * which Claude loads on every session (ancestor-directory memory), so plain
  * sessions start with no prompt at all.
  */
-
-/**
- * The pre-CLAUDE.md bootstrap prompt. Kept ONLY so title scanning of old
- * session transcripts still skips it (see LEGACY_SYNC_PROMPT).
- */
-const LEGACY_DEFAULT_PROMPT =
-  'You are a BitSwan coding agent. Start by running: bitswan-coding-agent --help. ' +
-  'Read the BP\'s README.md, process.toml, and bitswan.yaml to orient yourself before ' +
-  'making changes. Ask for clarification when the user\'s request is ambiguous.';
 
 /**
  * Per-BP sync flow. Every business process is its OWN git repo; the session's
@@ -39,19 +26,6 @@ export const SYNC_PROMPT =
   '3) If there are conflicts, resolve them, then `git add` the resolved files and `git rebase --continue`. ' +
   '4) Publish your branch: `git push origin HEAD` (the server accepts fast-forward pushes only). ' +
   'Do not run git in other business-process directories. Tell me when the sync is complete.';
-
-/**
- * The pre-per-BP-repos sync prompt. Kept ONLY so title scanning of old
- * session transcripts still recognises it as a bootstrap prompt (see
- * `isBootstrapPrompt`); never sent to new sessions.
- */
-const LEGACY_SYNC_PROMPT =
-  'Sync this copy with main using git. ' +
-  '1) Commit your work in progress: `git add -A && git commit -m "wip"` (skip if there is nothing to commit). ' +
-  '2) Rebase onto the latest main: `git pull --rebase origin main`. ' +
-  '3) If there are conflicts, resolve them, then `git add` the resolved files and `git rebase --continue`. ' +
-  '4) Publish your branch: `git push origin HEAD` (the server accepts fast-forward pushes only). ' +
-  'Tell me when the sync is complete.';
 
 /**
  * "Write tests" button in the Requirements tab. The agent turns the BP's
@@ -83,19 +57,3 @@ export const BUILD_AUTOMATION_PROMPT =
   '`bitswan-coding-agent requirements update --id <id> --status <pass|fail>` as you go. ' +
   'Otherwise implement what the README describes and propose requirements for it.';
 
-const BOOTSTRAP_PROMPTS = [
-  LEGACY_DEFAULT_PROMPT,
-  SYNC_PROMPT,
-  LEGACY_SYNC_PROMPT,
-  WRITE_TESTS_PROMPT,
-  BUILD_AUTOMATION_PROMPT,
-];
-
-/**
- * True when the given (already-trimmed, single-line) user message is one of
- * the prompts the dashboard itself sent to bootstrap a session, so a title
- * scanner should keep walking the JSONL for the next user turn.
- */
-export function isBootstrapPrompt(text: string): boolean {
-  return BOOTSTRAP_PROMPTS.includes(text);
-}

@@ -234,13 +234,6 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     [onExit, copy, bp, cancelRelaunch],
   );
 
-  // A friendly name for the agent chip: the conversation title once one
-  // exists, else a stable fallback.
-  const title = useMemo(() => {
-    if (!agent) return null;
-    return (latest?.claudeSessionId === agent.id ? latest.title : '') || 'Coding agent';
-  }, [agent, latest]);
-
   // Manual escape hatch for the exhausted-attempts state: hand the attempt
   // budget back to the autostart effect.
   const retry = useCallback(() => {
@@ -252,10 +245,13 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Header: agent chip + sub-tabs */}
+      {/* Header: agent status dot + sub-tabs. No session name — one
+          conversation per (user, copy, BP), so there is nothing to tell
+          apart; the dot alone carries running / failed / starting. */}
       <div className="flex h-10 shrink-0 items-center gap-4 border-b border-border bg-background px-5">
-        <div className="flex items-center gap-2 border-r border-border pr-4">
+        <div className="flex items-center border-r border-border pr-4">
           <span
+            title={agent ? 'Agent running' : launchFailed ? 'Agent unavailable' : 'Starting agent…'}
             className={cn(
               'size-1.5 rounded-full',
               agent
@@ -265,9 +261,6 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
                   : 'bg-muted-foreground/40',
             )}
           />
-          <span className="text-[13px] font-semibold text-foreground">
-            {title ?? (launchFailed ? 'Agent unavailable' : 'Starting agent…')}
-          </span>
         </div>
         <SubTab
           active={sub === 'chat'}
