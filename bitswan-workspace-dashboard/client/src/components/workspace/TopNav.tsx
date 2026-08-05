@@ -16,6 +16,7 @@ import { CopySelector } from '@/components/workspace/CopySelector';
 import { DeleteBusinessProcessDialog } from '@/components/workspace/DeleteBusinessProcessDialog';
 import { NewBusinessProcessDialog } from '@/components/workspace/NewBusinessProcessDialog';
 import { RenameBusinessProcessDialog } from '@/components/workspace/RenameBusinessProcessDialog';
+import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess, FlowTab, Copy } from '@/types';
 
@@ -151,22 +152,42 @@ export function TopNav({
     [bps, copy],
   );
 
-  // Picking a business process keeps the (BP, copy) selection consistent: if
-  // the current copy doesn't carry the new BP, jump to the user's OWN copy
-  // whenever it carries it — never land someone on a colleague's copy just
-  // because it sorts first. Another user's copy is only a last resort, for
-  // BPs that exist nowhere else yet (e.g. freshly created there and not
-  // synced to main).
+  // Picking a business process keeps the (BP, copy) selection consistent
+  // WITHOUT ever moving the user onto a colleague's copy: the user's own
+  // copy is the default home for every BP. If the current copy carries the
+  // BP, stay put. Otherwise land on the user's own copy — materializing the
+  // BP into it from main first when it isn't there yet (the same ensureBp
+  // flow behind the copy switcher's "+ from main" rows; BPs are created in
+  // main, so this covers processes other users created too). Another user's
+  // copy is only the last resort, for copy-only BPs that exist nowhere else.
   const handleSelectBp = (id: string) => {
     onSelectBp(id);
     const bp = bps.find((b) => b.id === id);
-    if (bp && (!copy || !bp.copies.includes(copy))) {
-      const target =
-        myCopy && bp.copies.includes(myCopy)
-          ? myCopy
-          : copies.find((c) => bp.copies.includes(c.name))?.name;
-      if (target) onSelectCopy(target);
+    if (!bp || (copy && bp.copies.includes(copy))) return;
+    const fallbackCopy = () => {
+      const other = copies.find((c) => bp.copies.includes(c.name))?.name;
+      if (other) onSelectCopy(other);
+    };
+    if (!myCopy) {
+      fallbackCopy();
+      return;
     }
+    if (bp.copies.includes(myCopy)) {
+      onSelectCopy(myCopy);
+      return;
+    }
+    if (bp.inMain) {
+      // Materialize first, switch after — never land on a copy whose BP
+      // tree isn't there (mirrors CopySelector.handleSelect). While the
+      // clone runs the view shows the transient copy gate.
+      const mine = myCopy;
+      void api.copyFiles
+        .ensureBp(mine, bp.name)
+        .then(() => onSelectCopy(mine))
+        .catch(fallbackCopy);
+      return;
+    }
+    fallbackCopy();
   };
 
   const renderStep = (step: FlowStep) => {
