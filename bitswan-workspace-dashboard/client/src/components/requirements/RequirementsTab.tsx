@@ -390,10 +390,8 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
               Delete requirement &quot;{deleteTarget?.id}&quot;?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              The requirement is removed from the TOML. Children of this
-              requirement are kept but become orphans (rendered at the
-              root) — same behaviour as{' '}
-              <code>bitswan-coding-agent requirements remove</code>.
+              This requirement will be deleted. Its sub-requirements are
+              kept and will move to the top level of the list.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
