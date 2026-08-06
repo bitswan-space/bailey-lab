@@ -45,6 +45,16 @@ func newClientFor(hc *http.Client, base string) *Client {
 	return &Client{http: hc, base: strings.TrimRight(base, "/")}
 }
 
+// NewHTTPClient dials the driver over TCP with a bearer token — how the
+// daemon reaches a workspace's driver on the docker network
+// (http://<ws>-infra-driver:9090) for server-level backup dumps. Exec/copy
+// streams can run for as long as a DB dump takes, so no client timeout.
+func NewHTTPClient(baseURL, token string) *Client {
+	c := newClientFor(&http.Client{}, baseURL)
+	c.SetToken(token)
+	return c
+}
+
 // ContainerList returns the workspace's containers (optionally filtered).
 func (c *Client) ContainerList(ctx context.Context, wctx WorkspaceContext, filter ContainerFilter) ([]Container, error) {
 	var out ContainerListResult

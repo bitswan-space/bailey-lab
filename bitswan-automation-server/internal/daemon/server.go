@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/daemon/backup"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
 	"github.com/dchest/uniuri"
 )
@@ -54,6 +55,10 @@ type Server struct {
 	// serverUpdateMu serializes browser-driven server self-updates so two admins
 	// can't race on the download/swap at once (TryLock → reject the second).
 	serverUpdateMu sync.Mutex
+
+	// backupEngine serializes server-level backup runs (nightly scheduler vs
+	// run-now) — see internal/daemon/backup.
+	backupEngine backup.Engine
 }
 
 // LoadToken reads the token from the config file
@@ -72,10 +77,20 @@ type StatusResponse struct {
 
 // NewServer creates a new daemon server
 func NewServer(version string) *Server {
-	return &Server{
+	s := &Server{
 		version:   version,
 		startTime: time.Now(),
 	}
+	// The backup engine stamps the binary version into the server manifest so a
+	// recovery can warn about version skew, and calls back for the manifest
+	// itself (which needs workspace/route/image data only this package has).
+	s.backupEngine.Version = version
+	s.backupEngine.ManifestBuilder = s.buildServerManifest
+	// Every run re-reports the running version: the copy the AOC keeps is the only
+	// one a recovery can read before it has a binary, and a run is exactly when
+	// what a recovery would restore changes.
+	s.backupEngine.VersionReporter = s.reportVersionToAOC
+	return s
 }
 
 // authMiddleware wraps a handler with bearer token authentication.
@@ -192,6 +207,10 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// Job endpoints for interactive operations (authenticated)
 	mux.HandleFunc("/jobs", s.authMiddleware(s.handleJobs))
 	mux.HandleFunc("/jobs/", s.authMiddleware(s.handleJobs))
+
+	// Server-level backup endpoints (authenticated; key/snapshot access
+	// additionally demands the admin token — see backup_api.go).
+	mux.HandleFunc("/backup/", s.authMiddleware(s.handleBackup))
 
 	// Bailey device-trust admin (authenticated; socket-trusted). Backs the
 	// `bitswan bailey devices` CLI — approve a pending "trust this device"
@@ -449,6 +468,44 @@ func (s *Server) Run() error {
 		setupBaileyRoutes()
 	}()
 
+	// Everything that needs the AOC — or needs our own ingress to be serving
+	// before it can reach the AOC — waits for Traefik first.
+	//
+	// These used to fire at t=0, racing the Traefik container that the goroutine
+	// above only *starts creating* at t+2s. All of them are single-shot with no
+	// retry, so losing that race left the work undone until the next restart:
+	// the relay tunnel never came up, and a stale protected-proxy config was
+	// never reconciled. A recovered server is the worst case, since the AOC may
+	// itself be reached through the ingress being restored (see ingress_wait.go).
+	go func() {
+		if err := s.waitForOwnIngress(ingressWaitDefault); err != nil {
+			// Not fatal: proceed and let these fail as they used to rather than
+			// skipping them entirely, so behaviour never gets *worse* than before.
+			fmt.Printf("Warning: %v; continuing with AOC-dependent startup anyway\n", err)
+		}
+
+		// Bring an already-running protected-proxy up to the current config if
+		// it's stale — e.g. one provisioned before the CSRF per-request cap,
+		// which otherwise lets _oauth2_proxy_*_csrf cookies pile up until
+		// requests 431. A daemon update never re-provisions the proxy on its
+		// own; this closes that gap on boot. Best-effort (see
+		// protected_proxy_reconcile.go). Note it only reconciles a proxy that
+		// already exists — nothing here creates one.
+		reconcileProtectedProxyConfig()
+
+		// If this server is on the AOC reverse-proxy path (NAT'd or
+		// --force-proxy), keep an outbound tunnel to the relay so the public URL
+		// reaches us. No-op otherwise, and idempotent.
+		s.startRelayTunnel()
+
+		// Tell the AOC which build we are, so a disaster recovery can rebuild
+		// this server on the same version. Last, because it is the least urgent
+		// thing here and must not delay the tunnel. Every subsequent report rides
+		// on a backup run (Engine.VersionReporter); this one exists so a server
+		// that has not backed up yet is still on record.
+		s.reportVersionInBackground()
+	}()
+
 	// Memory governance sweep: every 5 minutes shed the oldest on-demand
 	// instances that push the on-demand pool over budget, and emit over-reservation
 	// SIEM events. Always-on services are never touched; evicted ones wake on access.
@@ -470,31 +527,30 @@ func (s *Server) Run() error {
 	// service_reconcile.go).
 	go startServiceReconciler()
 
-	// Bring an already-running protected-proxy up to the current config if it's
-	// stale — e.g. one provisioned before the CSRF per-request cap, which
-	// otherwise lets _oauth2_proxy_*_csrf cookies pile up until requests 431. A
-	// daemon update never re-provisions the proxy on its own; this closes that
-	// gap on boot. Backgrounded + best-effort (see protected_proxy_reconcile.go).
-	go reconcileProtectedProxyConfig()
-
 	// Own the shared grype vulnerability DB: create its volume now, download it
 	// in the background, and refresh daily. Keeps the ~40s DB download off every
 	// workspace's first interactive CVE scan (see grype_db.go).
 	startGrypeDBRefresher()
+
+	// Nightly server-level backups (whole workspace trees incl. secrets +
+	// DB dumps + server state → one restic repo per server via AOC). Self-
+	// enables on AOC-registered servers; catch-up run when the last one is
+	// stale (see backup_scheduler.go).
+	s.startBackupScheduler(&s.backupEngine)
 
 	// Own the shared read-through build proxies (Go module + npm) so per-BP image
 	// builds pull common packages from a warm, persistent, cross-workspace cache
 	// instead of the internet (see build_proxy.go). No-op if externally managed.
 	startBuildProxies()
 
-	// If this server is on the AOC reverse-proxy path (NAT'd or --force-proxy),
-	// keep an outbound tunnel to the relay so the public URL reaches us. No-op
-	// otherwise.
-	s.startRelayTunnel()
-
 	// Re-assert published public endpoints (issue #220): warm the gate's
 	// public-host cache and re-register each public host's traefik route so a
 	// restart restores public serving. Idempotent; no-op when none are set.
+	//
+	// Stays at t=0, unlike the AOC-dependent steps moved into the ingress-gated
+	// goroutine above: registering a route only writes rest-state.json and
+	// re-renders dynamic.yml, which Traefik picks up through the file provider's
+	// watch. It never has to reach Traefik, so it cannot lose the race they did.
 	reapplyPublicEndpoints()
 
 	// Paranoid end-to-end-TLS self-check for EVERY server with a public domain

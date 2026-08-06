@@ -12,7 +12,6 @@ import {
   Trash2,
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
-import { OffsiteBackupsCard } from '@/components/backups/OffsiteBackupsCard';
 import {
   CloneDialog,
   CreateSnapshotDialog,
@@ -57,8 +56,15 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-/** The services captured in a snapshot, e.g. "Postgres + Object storage". */
-function servicesLabel(s: Snapshot): string {
+/** The services captured in a snapshot, e.g. "Postgres + Object storage".
+ *
+ * null when the snapshot does not record them, which is every `remote_only`
+ * entry: those are synthesised from the server's backup repo, which knows an id,
+ * a stage and a timestamp and nothing else. Callers omit the field rather than
+ * print "no services", which would claim the snapshot captured nothing when the
+ * truth is that we cannot tell from here. */
+function servicesLabel(s: Snapshot): string | null {
+  if (!s.services) return null;
   const names: Record<string, string> = {
     postgres: 'Postgres',
     couchdb: 'CouchDB',
@@ -73,6 +79,14 @@ function servicesLabel(s: Snapshot): string {
 interface StageSnapshotsSectionProps {
   bp: BusinessProcess;
   stage: SnapshotStage;
+  /** Bumped by the Deployments view whenever a deploy/promote/rollback lands.
+   *
+   *  Snapshot eligibility is decided per (BP, realm) at first deploy TO that
+   *  realm, so promoting to Staging is what registers Staging. Without this the
+   *  panel keeps the answer it fetched on mount and goes on claiming Staging
+   *  needs enabling long after the promote enabled it — offering a button that
+   *  warns about losing data the BP does not have. */
+  reloadKey?: number;
 }
 
 /**
@@ -86,7 +100,7 @@ interface StageSnapshotsSectionProps {
  * the async operations is polled from the snapshot-task endpoint
  * (`lib/snapshotTask.ts`); an in-flight task found on mount is resumed.
  */
-export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps) {
+export function StageSnapshotsSection({ bp, stage, reloadKey }: StageSnapshotsSectionProps) {
   // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
   const [data, setData] = useState<SnapshotListResponse | null>(null);
   // eslint-disable-next-line no-restricted-syntax -- null = no load error
@@ -153,26 +167,8 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
         watchTask(active.task_id);
       }
     })();
-  }, [refresh, watchTask]);
+  }, [refresh, watchTask, reloadKey]);
 
-  // The off-site push runs fire-and-forget on the server — its completion
-  // doesn't flow through a watchable task. While any row is still
-  // "uploading…", poll the list until it settles (synced/failed). Capped;
-  // a straggler is retried by the server's nightly job anyway.
-  const pendingPolls = useRef(0);
-  useEffect(() => {
-    const hasPending = (data?.snapshots ?? []).some((s) => s.offsite === 'pending');
-    if (!hasPending) {
-      pendingPolls.current = 0;
-      return;
-    }
-    if (pendingPolls.current >= 45) return; // ~3 minutes
-    const timer = setTimeout(() => {
-      pendingPolls.current += 1;
-      void refresh();
-    }, 4000);
-    return () => clearTimeout(timer);
-  }, [data, refresh]);
 
   const bpSlug = data?.bp ?? bp.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const eligibility = data?.eligibility;
@@ -288,9 +284,6 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Workspace-wide off-site (restic) backups — hidden without AOC. */}
-      <OffsiteBackupsCard />
-
       {/* Production: retention policy + live/standby slot + audit log. */}
       {stage === 'production' && <ProductionBackupCard bp={bp.name} />}
 
@@ -383,22 +376,35 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
                     <Badge variant="secondary" className="shrink-0">
                       auto
                     </Badge>
-                  ) : (
+                  ) : s.kind ? (
                     <Badge
                       variant="outline"
                       className="shrink-0 border-sky-200 bg-sky-50 text-sky-700"
                     >
                       manual
                     </Badge>
-                  )}
-                  <OffsiteBadge snapshot={s} />
+                  ) : null}
                 </div>
                 <div className="mt-0.5 flex items-center gap-2 font-mono text-xs text-muted-foreground">
                   <RelativeTime value={s.created_at} />
-                  <span aria-hidden>·</span>
-                  <span>{formatBytes(s.total_size_bytes)}</span>
-                  <span aria-hidden>·</span>
-                  <span>{servicesLabel(s)}</span>
+                  {s.total_size_bytes !== undefined && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>{formatBytes(s.total_size_bytes)}</span>
+                    </>
+                  )}
+                  {servicesLabel(s) && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>{servicesLabel(s)}</span>
+                    </>
+                  )}
+                  {s.remote_only && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>off-site only — Fetch to see details</span>
+                    </>
+                  )}
                 </div>
               </div>
               {s.local === false && (
@@ -477,7 +483,7 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
             <AlertDialogTitle>Delete snapshot?</AlertDialogTitle>
             <AlertDialogDescription>
               {deleteTarget
-                ? `This permanently deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}, ${formatBytes(deleteTarget.total_size_bytes)}) from this server. The stage's live data is not affected.${deleteTarget.offsite === 'synced' ? ' The off-site copy is kept and stays restorable until the retention policy prunes it.' : ''}`
+                ? `This permanently deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}${deleteTarget.total_size_bytes !== undefined ? `, ${formatBytes(deleteTarget.total_size_bytes)}` : ''}) from this server. The stage's live data is not affected. Any copy already captured by the server's nightly backup is kept and stays restorable until its retention policy prunes it.`
                 : ''}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -503,48 +509,6 @@ const OPERATION_LABEL: Record<SnapshotTask['operation'], string> = {
   clone: 'Cloning stage data',
   fetch: 'Fetching snapshot from off-site',
 };
-
-/** Off-site mirror state pill: synced / uploading / failed; nothing when
- *  the snapshot was never pushed (auto snapshots, no AOC). */
-function OffsiteBadge({ snapshot }: { snapshot: Snapshot }) {
-  switch (snapshot.offsite) {
-    case 'synced':
-      return (
-        <Badge
-          variant="outline"
-          className="shrink-0 gap-1 border-emerald-200 bg-emerald-50 text-emerald-700"
-          title="A copy of this snapshot is stored off-site"
-        >
-          <Cloud className="size-3" aria-hidden />
-          off-site
-        </Badge>
-      );
-    case 'pending':
-      return (
-        <Badge
-          variant="outline"
-          className="shrink-0 gap-1 text-muted-foreground"
-          title="Uploading to off-site storage"
-        >
-          <CloudUpload className="size-3" aria-hidden />
-          uploading…
-        </Badge>
-      );
-    case 'failed':
-      return (
-        <Badge
-          variant="outline"
-          className="shrink-0 gap-1 border-amber-200 bg-amber-50 text-amber-700"
-          title="Upload to off-site storage failed — retried automatically overnight"
-        >
-          <CloudAlert className="size-3" aria-hidden />
-          off-site failed
-        </Badge>
-      );
-    default:
-      return null;
-  }
-}
 
 function TaskProgressCard({ task }: { task: SnapshotTask }) {
   const pct = snapshotTaskProgress(task);

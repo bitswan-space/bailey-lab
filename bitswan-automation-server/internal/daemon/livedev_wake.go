@@ -8,8 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -71,11 +69,8 @@ func workspaceGitOpsEndpoint(host string) (baseURL, secret string, ok bool) {
 	if ws == "" {
 		return "", "", false
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", "", false
-	}
-	secret, err = getGitOpsSecret(ws, filepath.Join(home, ".config", "bitswan", "workspaces"))
+	var err error
+	secret, err = getGitOpsSecret(ws)
 	if err != nil || secret == "" {
 		return "", "", false
 	}

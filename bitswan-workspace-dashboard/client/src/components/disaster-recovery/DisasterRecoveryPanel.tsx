@@ -382,7 +382,8 @@ export function DisasterRecoveryPanel({
                     )}
                   </div>
                   <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-                    <RelativeTime value={s.created_at} /> · {fmtSize(s.total_size_bytes)}
+                    <RelativeTime value={s.created_at} />
+                    {s.total_size_bytes !== undefined && <> · {fmtSize(s.total_size_bytes)}</>}
                     {test && !isInDr && (
                       <span className="ml-2 font-sans text-emerald-700">
                         ✓ tested <RelativeTime value={test.at} />

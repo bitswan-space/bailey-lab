@@ -139,28 +139,23 @@ async def spawn_create_snapshot(bp: str, stage: str, label: str = "") -> dict:
     db = get_automation_service().live_db(bp) if stage == "production" else None
 
     async def run(progress):
-        manifest = await service.create_snapshot(
+        # No off-site push here: the automation-server daemon's nightly
+        # backup captures this workspace's whole snapshots directory, so a
+        # manual snapshot reaches off-site storage with the next run (and
+        # can be fetched back through the daemon once pruned locally).
+        return await service.create_snapshot(
             bp, stage, label=label, kind="manual", progress=progress, db=db
         )
-        # Mirror manual snapshots off-site (fire-and-forget; no-op without
-        # AOC, and a push failure never affects the snapshot itself). Auto
-        # snapshots are transient and deliberately stay local-only. The
-        # pending state is recorded BEFORE this task completes so the
-        # dashboard's post-create refresh can't race the background push.
-        from app.services import snapshot_offsite
-
-        await snapshot_offsite.mark_pending(bp, stage, manifest["id"], manifest)
-        snapshot_offsite.spawn_push(bp, stage, manifest["id"], manifest)
-        return manifest
 
     _spawn_bg(_run_task(task.task_id, f"Snapshot of {bp} ({stage})", run))
     return {"task_id": task.task_id}
 
 
 async def spawn_fetch_snapshot(bp: str, stage: str, snapshot_id: str) -> dict:
-    """Reserve bp×stage and materialize an off-site snapshot locally in the
-    background (without restoring it)."""
-    from app.services import snapshot_offsite
+    """Reserve bp×stage and materialize a snapshot from the server's backup
+    locally in the background (without restoring it)."""
+    from app.services.snapshot_service import get_snapshot_service
+    from app.utils import daemon_fetch_offsite_snapshot
 
     task, conflict = await snapshot_manager.create_task(
         "fetch", bp, [stage], source_stage=stage, snapshot_id=snapshot_id
@@ -171,9 +166,10 @@ async def spawn_fetch_snapshot(bp: str, stage: str, snapshot_id: str) -> dict:
         )
 
     async def run(progress):
-        return await snapshot_offsite.fetch_snapshot(
-            bp, stage, snapshot_id, progress=progress
-        )
+        if progress:
+            await progress("fetch_offsite", "Fetching from off-site storage…")
+        await asyncio.to_thread(daemon_fetch_offsite_snapshot, bp, stage, snapshot_id)
+        return get_snapshot_service().get_snapshot(bp, stage, snapshot_id)
 
     _spawn_bg(_run_task(task.task_id, f"Off-site fetch of {bp}/{snapshot_id}", run))
     return {"task_id": task.task_id}
@@ -195,9 +191,9 @@ async def spawn_restore_snapshot(
     "currently restored" pointer is recorded only after the restore succeeds,
     so a failed restore never marks DR as loaded with this backup.
     """
-    from app.services import snapshot_offsite
     from app.services.snapshot_service import get_snapshot_service
     from app.dependencies import get_automation_service
+    from app.utils import daemon_fetch_offsite_snapshot, daemon_list_offsite_snapshots
 
     service = get_snapshot_service()
     # Existence check up-front so the route can 404 before a task is created.
@@ -209,8 +205,10 @@ async def spawn_restore_snapshot(
         service.get_snapshot(bp, source_stage, snapshot_id)
     except LookupError:
         local = False
-        offsite_entry = snapshot_offsite.offsite_status_for(bp).get(snapshot_id)
-        if not offsite_entry or offsite_entry.get("status") != "synced":
+        remote = await asyncio.to_thread(
+            daemon_list_offsite_snapshots, bp, source_stage
+        )
+        if not any(r.get("snapshot_id") == snapshot_id for r in remote):
             raise
 
     stages = sorted({source_stage, target_stage})
@@ -235,10 +233,12 @@ async def spawn_restore_snapshot(
 
     async def run(progress):
         if not local:
-            # A dead AOC aborts here, before validation and the pre-restore
-            # snapshot — zero side effects.
-            await snapshot_offsite.fetch_snapshot(
-                bp, source_stage, snapshot_id, progress=progress
+            # A dead daemon/AOC aborts here, before validation and the
+            # pre-restore snapshot — zero side effects.
+            if progress:
+                await progress("fetch_offsite", "Fetching from off-site storage…")
+            await asyncio.to_thread(
+                daemon_fetch_offsite_snapshot, bp, source_stage, snapshot_id
             )
         result = await service.restore_snapshot(
             bp, snapshot_id, source_stage, target_stage, progress=progress, db=db

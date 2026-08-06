@@ -1,7 +1,6 @@
 import type {
   DockerInspect,
   GitTask,
-  OffsiteBackupConfig,
   Snapshot,
   SnapshotListResponse,
   SnapshotEligibility,
@@ -1323,30 +1322,6 @@ export const api = {
       ),
   },
 
-  /** Workspace-level off-site (restic) backups — /api/offsite-backups/*. */
-  offsiteBackups: {
-    config: () => getJson<OffsiteBackupConfig>('/api/offsite-backups/config'),
-    saveConfig: (body: {
-      enabled: boolean;
-      retention_daily?: number;
-      retention_monthly?: number;
-    }) =>
-      postJson<{ status: string; message?: string }>(
-        '/api/offsite-backups/config',
-        body,
-      ),
-    /** Start a whole-server backup (202; 409 while one is running). */
-    run: () => postJson<{ status: string }>('/api/offsite-backups/run', {}),
-    key: () => getJson<{ key: string }>('/api/offsite-backups/key'),
-    keyStatus: () => getJson<{ on_s3: boolean }>('/api/offsite-backups/key/status'),
-    mirrorKey: () =>
-      postJson<{ status: string }>('/api/offsite-backups/key/mirror', {}),
-    deleteKeyMirror: () =>
-      delJson<{ status: string; message?: string }>(
-        '/api/offsite-backups/key/mirror',
-        {},
-      ),
-  },
 
   requirements: {
     list: (bpId: string, copy: string) =>

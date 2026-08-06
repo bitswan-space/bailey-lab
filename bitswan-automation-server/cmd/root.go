@@ -44,7 +44,15 @@ Contact BitSwan for licensing information:
 	},
 }
 
+// cliVersion is this binary's version, kept for the commands that run without
+// a daemon to ask — notably the disaster-recovery paths, which compare it
+// against the version recorded in the backup.
+var cliVersion = "dev"
+
+func rootCmdVersion() string { return cliVersion }
+
 func newRootCmd(version string) *cobra.Command {
+	cliVersion = version
 	cmd := &cobra.Command{
 		Use:   "bitswan",
 		Short: "Deploy and manage your bitswan automations",
@@ -65,6 +73,8 @@ func newRootCmd(version string) *cobra.Command {
 	cmd.AddCommand(automationserverdaemon.NewAutomationServerDaemonCmd()) // automation server daemon subcommand
 	cmd.AddCommand(automation.NewAutomationCmd())                         // automation subcommand
 	cmd.AddCommand(newBaileyCmd())                                        // bailey subcommand (device trust)
+	cmd.AddCommand(newBackupCmd())                                        // backup subcommand (server-level backups)
+	cmd.AddCommand(newRecoverCmd())                                       // recover subcommand (whole-server disaster recovery)
 	cmd.AddCommand(test.NewTestCmd())                                     // _test subcommand (hidden)
 	cmd.AddCommand(newCompletionCmd())                                    // completion subcommand
 

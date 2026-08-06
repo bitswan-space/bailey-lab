@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -160,14 +159,15 @@ func latestServerRelease() string {
 	return serverLatestVal
 }
 
-// fetchAOCBinaryVersion asks the AOC which binary version it serves for this
-// server's architecture (GET /api/automation_server/bitswan/version).
+// fetchAOCBinaryVersion asks the AOC which binary version it serves
+// (GET /api/automation_server/bitswan/version). The mirror is linux/amd64-only,
+// so the arch this used to send is gone.
 func fetchAOCBinaryVersion() string {
 	settings, err := config.NewAutomationServerConfig().GetAutomationOperationsCenterSettings()
 	if err != nil || settings.AOCUrl == "" {
 		return ""
 	}
-	url := strings.TrimRight(settings.AOCUrl, "/") + "/api/automation_server/bitswan/version?arch=" + runtime.GOARCH
+	url := strings.TrimRight(settings.AOCUrl, "/") + "/api/automation_server/bitswan/version"
 	// Bounded timeout: this runs on the console version-display path, so a
 	// black-holed AOC must not hang the caller (matches the other AOC calls).
 	client := &http.Client{Timeout: 15 * time.Second}

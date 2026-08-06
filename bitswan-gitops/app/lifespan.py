@@ -611,51 +611,6 @@ async def lifespan(app: FastAPI):
         name="cleanup_snapshot_tasks",
     )
 
-    # Daily backup at 2 AM UTC (if configured)
-    async def _scheduled_backup():
-        from app.services.backup_service import (
-            get_backup_config,
-            is_configured,
-            run_backup,
-        )
-
-        if not is_configured():
-            return  # Not configured, skip
-        try:
-            await run_backup(get_backup_config())
-            print("Scheduled backup completed successfully")
-        except Exception as e:
-            print(f"Scheduled backup failed: {e}")
-
-    scheduler.add_job(
-        _scheduled_backup,
-        trigger="cron",
-        hour=2,
-        minute=0,
-        name="daily_backup",
-    )
-
-    # Off-site retention for per-BP snapshot mirrors (snapshot_offsite):
-    # per-BP `restic forget` by the bitswan.yaml retention policy + index
-    # reconcile + failed-push retry. At 2:30 so the 2:00 whole-server run
-    # has usually released the repo lock; a collision just fails one night's
-    # run harmlessly.
-    async def _scheduled_snapshot_retention():
-        from app.services import snapshot_offsite
-
-        try:
-            await snapshot_offsite.apply_offsite_retention()
-        except Exception as e:
-            print(f"Off-site snapshot retention failed: {e}")
-
-    scheduler.add_job(
-        _scheduled_snapshot_retention,
-        trigger="cron",
-        hour=2,
-        minute=30,
-        name="bp_snapshot_offsite_retention",
-    )
-
     # Daily supply-chain re-scan at 3 AM UTC: refresh grype's vuln DB and re-run
     # it against every deployed image's cached SBOM so newly-disclosed CVEs against
     # unchanged images surface without a rebuild.
@@ -695,26 +650,6 @@ async def lifespan(app: FastAPI):
     )
 
     scheduler.start()
-
-    # Self-enable backups when this workspace is connected to an AOC:
-    # write a default config, recover/generate the encryption key and
-    # init the restic repo through the AOC backup proxy (which lazily
-    # creates the bucket). No-op without AOC env or when explicitly
-    # disabled via POST /backups/config {"enabled": false}.
-    from app.services import backup_service
-
-    async def _ensure_backups():
-        ok, msg = await backup_service.ensure_backups_enabled()
-        logger.info("Backup self-enable: %s", msg)
-
-    _backups_task = asyncio.create_task(_ensure_backups())
-    _backups_task.add_done_callback(
-        lambda t: (
-            logger.warning("backup self-enable failed: %s", t.exception())
-            if not t.cancelled() and t.exception()
-            else None
-        )
-    )
 
     # Warm the history cache in the background so first requests are fast
     _cache_task = asyncio.create_task(get_automation_service().warm_history_cache())

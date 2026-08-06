@@ -40,6 +40,11 @@ type DockerComposeConfig struct {
 	LocalRemotePath    string // Host path to local repository (if using local remote)
 	LocalRemoteName    string // Mount name for local repository (used for mount point path)
 	CodingAgentSecret  string // Bearer token gitops uses to verify coding-agent requests
+	// InfraDriverToken authenticates callers of the workspace's infra-driver.
+	// Set it to reuse an existing token (from metadata.yaml) across re-renders;
+	// left empty, a fresh one is generated and written back to this field so
+	// the caller can persist it.
+	InfraDriverToken string
 }
 
 // CreateDockerComposeFile creates a docker-compose YAML content and returns it along with the generated secret token
@@ -93,11 +98,15 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		gitopsSecretToken = uniuri.NewLen(64)
 	}
 
-	// The infra-driver gets its OWN token, distinct from the gitops API secret.
-	// gitops and its driver are a pair (generated together, so it need not be
-	// persisted), but keeping it separate means a leak of the gitops secret does
-	// not grant driver (push + exec = docker.sock) access, and vice versa.
-	driverToken := uniuri.NewLen(64)
+	// The infra-driver gets its OWN token, distinct from the gitops API secret:
+	// a leak of the gitops secret does not grant driver (push + exec =
+	// docker.sock) access, and vice versa. Reused across re-renders when the
+	// caller provides it (persisted in metadata.yaml so the daemon can call the
+	// driver for server-level backups); generated and handed back otherwise.
+	if config.InfraDriverToken == "" {
+		config.InfraDriverToken = uniuri.NewLen(64)
+	}
+	driverToken := config.InfraDriverToken
 
 	gitopsService := map[string]interface{}{
 		"image":    config.GitopsImage,

@@ -103,6 +103,16 @@ def _capture_apply(svc, monkeypatch):
         return {"deployment_ids": list(deployment_ids)}
 
     monkeypatch.setattr(svc, "apply_compose_for_deployments", _apply)
+
+    # A rollback now also rebuilds any pinned image missing from the local store
+    # before it converges, and these fixtures pin images — so without this the
+    # scope tests reach the real infra-driver and fail on its absent URL. Stubbed
+    # here beside the apply it precedes: both are the driver-touching half of a
+    # rollback, and these tests are about which deployments get re-applied.
+    async def _resolve(deployment_ids=None, progress_callback=None):
+        return {"missing": 0, "rebuilt": [], "failures": []}
+
+    monkeypatch.setattr(svc, "resolve_missing_pinned_images", _resolve)
     return applied
 
 

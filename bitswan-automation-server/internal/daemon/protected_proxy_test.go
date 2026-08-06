@@ -61,7 +61,7 @@ func TestProtectedProxyOAuthEnv(t *testing.T) {
 		// Issue #127: the gate passes client-sent Authorization through to
 		// BP upstreams, which is safe only while oauth2-proxy never
 		// injects an Authorization header of its own.
-		"OAUTH2_PROXY_PASS_BASIC_AUTH": "false",
+		"OAUTH2_PROXY_PASS_BASIC_AUTH":   "false",
 		"OAUTH2_PROXY_OIDC_GROUPS_CLAIM": "group_membership",
 		// Concurrent logins must not share one CSRF/state cookie (issue #47)...
 		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST": "true",

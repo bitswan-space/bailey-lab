@@ -59,6 +59,12 @@ func reconcileEnabledServices() {
 		return
 	}
 	for _, ws := range workspaces {
+		// A recovery replaces the workspace directory. Starting a sidecar in
+		// that window binds it to a stale or missing mount (the drill's
+		// "coding-agent SSH asks for a password" symptom), so stand aside.
+		if workspaceUnderRecovery(ws) {
+			continue
+		}
 		if svc, err := services.NewCodingAgentService(ws); err == nil {
 			reconcileSidecar("coding-agent", ws, svc)
 		}

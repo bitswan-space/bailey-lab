@@ -30,6 +30,17 @@ RUN install -m 0755 -d /etc/apt/keyrings && \
 RUN curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
         | sh -s -- -b /usr/local/bin
 
+# restic: the daemon makes the nightly server-level backups (whole workspace
+# trees + DB dumps) through the AOC restic REST proxy. From upstream releases:
+# the proxy auth uses RESTIC_REST_USERNAME/PASSWORD, which needs
+# restic >= 0.16 (Debian ships older).
+RUN apt-get install -y --no-install-recommends bzip2 && \
+    ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL -o /tmp/restic.bz2 "https://github.com/restic/restic/releases/download/v0.17.3/restic_0.17.3_linux_${ARCH}.bz2" && \
+    bunzip2 /tmp/restic.bz2 && \
+    install -m 755 /tmp/restic /usr/local/bin/restic && \
+    rm -f /tmp/restic
+
 # The binary will be mounted at runtime
 # Just create a placeholder to ensure the directory exists
 RUN mkdir -p /usr/local/bin

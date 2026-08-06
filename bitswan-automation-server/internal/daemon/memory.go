@@ -28,7 +28,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -710,11 +709,7 @@ var gitopsEvictURL = func(ws string) string {
 }
 
 var gitopsSecretForWorkspace = func(ws string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return getGitOpsSecret(ws, filepath.Join(home, ".config", "bitswan", "workspaces"))
+	return getGitOpsSecret(ws)
 }
 
 // evictViaGitops asks a workspace's gitops to evict (sleep) the given

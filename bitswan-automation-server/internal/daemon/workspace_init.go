@@ -662,8 +662,9 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 		fmt.Println("Automation server config not found, skipping workspace registration.")
 	} else {
 		fmt.Println("Getting automation server token...")
-		automationServerToken, err := aocClient.GetAutomationServerToken()
-		if err != nil {
+		// The token authorizes THIS daemon's own AOC calls (registration
+		// below); it is deliberately never passed down to the workspace.
+		if _, err := aocClient.GetAutomationServerToken(); err != nil {
 			fmt.Println("No automation server token available, skipping workspace registration.")
 		} else {
 			fmt.Println("Automation server token received successfully!")
@@ -674,7 +675,9 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 			}
 			fmt.Println("Workspace registered successfully!")
 
-			aocEnvVars = aocClient.GetAOCEnvironmentVariables(workspaceId, automationServerToken)
+			// Identity env only — a workspace container never receives the
+			// server's AOC credential (the daemon owns backups).
+			aocEnvVars = aocClient.GetWorkspaceIdentityEnv()
 		}
 	}
 
@@ -716,7 +719,7 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 	fmt.Println("GitOps deployment set up successfully!")
 
 	// Save metadata to file
-	if err := saveMetadata(gitopsConfig, workspaceName, token, domain, noDashboard, noCodingAgent, &workspaceId, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret); err != nil {
+	if err := saveMetadata(gitopsConfig, workspaceName, token, domain, noDashboard, noCodingAgent, &workspaceId, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret, config.InfraDriverToken); err != nil {
 		fmt.Printf("Warning: Failed to save metadata: %v\n", err)
 	}
 
@@ -861,11 +864,12 @@ func setHostsFile(workspaceName, domain string) error {
 	return nil
 }
 
-func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret string) error {
+func saveMetadata(gitopsConfig, workspaceName, token, domain string, noDashboard, noCodingAgent bool, workspaceId *string, gitopsDevSourceDir, dashboardDevSourceDir, codingAgentSecret, infraDriverToken string) error {
 	metadata := config.WorkspaceMetadata{
-		Domain:       domain,
-		GitopsURL:    fmt.Sprintf("https://%s-gitops.%s", workspaceName, domain),
-		GitopsSecret: token,
+		Domain:           domain,
+		GitopsURL:        fmt.Sprintf("https://%s-gitops.%s", workspaceName, domain),
+		GitopsSecret:     token,
+		InfraDriverToken: infraDriverToken,
 	}
 
 	if workspaceId != nil {

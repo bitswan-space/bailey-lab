@@ -1,6 +1,7 @@
 package automations
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -220,6 +221,12 @@ func (a *Automation) GetLogs(lines int) (*AutomationLog, error) {
 }
 
 func SendAutomationRequest(method, requestURL string, workspaceSecret string) (*http.Response, error) {
+	return SendAutomationRequestCtx(context.Background(), method, requestURL, workspaceSecret)
+}
+
+// SendAutomationRequestCtx is SendAutomationRequest bound to a context so a
+// long apply can be cancelled (the gitops side has no timeout of its own).
+func SendAutomationRequestCtx(ctx context.Context, method, requestURL string, workspaceSecret string) (*http.Response, error) {
 	// Create a new request
 	req, err := httpReq.NewRequest(method, requestURL, nil)
 	if err != nil {
@@ -229,6 +236,7 @@ func SendAutomationRequest(method, requestURL string, workspaceSecret string) (*
 	// Add headers
 	req.Header.Add("Accept", "application/json")
 	req.Header.Add("Authorization", "Bearer "+workspaceSecret)
+	req = req.WithContext(ctx)
 
 	// Check if URL is a public URL (contains .localhost or https://)
 	// Public URLs need localhost resolution even when running in daemon

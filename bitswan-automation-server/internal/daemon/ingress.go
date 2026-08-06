@@ -138,9 +138,45 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 		s.handleIngressUpdate(w, r)
 	case path == "provision-protected-proxy":
 		s.handleIngressProvisionProtectedProxy(w, r)
+	case path == "wait":
+		s.handleIngressWait(w, r)
 	default:
 		writeJSONError(w, "not found", http.StatusNotFound)
 	}
+}
+
+// handleIngressWait handles POST /ingress/wait — block until Traefik serves the
+// given hostname, or the timeout expires.
+//
+// The probe has to run in the daemon: it dials Traefik by its container name on
+// the docker network, which the host cannot resolve. Disaster recovery gates the
+// steps that need the AOC on this, and register could too.
+func (s *Server) handleIngressWait(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Hostname string `json:"hostname"`
+		Seconds  int    `json:"seconds,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Hostname == "" {
+		writeJSONError(w, "hostname is required", http.StatusBadRequest)
+		return
+	}
+	timeout := ingressWaitDefault
+	if req.Seconds > 0 {
+		timeout = time.Duration(req.Seconds) * time.Second
+	}
+	if err := waitForIngress(req.Hostname, timeout); err != nil {
+		writeJSONError(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"serving": true, "hostname": req.Hostname})
 }
 
 // handleIngressUpdate handles POST /ingress/update — updates the ingress proxy to the latest version

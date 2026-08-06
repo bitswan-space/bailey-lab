@@ -53,7 +53,7 @@ func GetWorkspaceList(long, showPasswords bool) (*WorkspaceListResponse, error) 
 
 				if showPasswords {
 					// Get GitOps secret
-					gitopsSecret, _ := getGitOpsSecret(workspaceName, workspacesDir)
+					gitopsSecret, _ := getGitOpsSecret(workspaceName)
 					workspaceInfo.GitopsSecret = gitopsSecret
 				}
 
@@ -100,51 +100,6 @@ func getMetaData(workspaceName string, workspacesDir string) (string, string) {
 	return metadata.Domain, metadata.GitopsURL
 }
 
-func getGitOpsSecret(workspace string, workspacesDir string) (string, error) {
-	// Read docker-compose.yml file
-	composeFilePath := filepath.Join(workspacesDir, workspace, "deployment", "docker-compose.yml")
-
-	data, err := os.ReadFile(composeFilePath)
-	if err != nil {
-		return "", err
-	}
-
-	// Parse YAML to extract the secret
-	var composeConfig map[string]interface{}
-	if err := yaml.Unmarshal(data, &composeConfig); err != nil {
-		return "", err
-	}
-
-	// Navigate through the YAML structure to find the secret
-	services, ok := composeConfig["services"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("services section not found")
-	}
-
-	editorService, ok := services["bitswan-gitops"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("editor service not found")
-	}
-
-	env, ok := editorService["environment"].([]interface{})
-	if !ok {
-		return "", fmt.Errorf("environment section not found")
-	}
-
-	// Look for the BITSWAN_GITOPS_SECRET in the environment variables
-	for _, item := range env {
-		envVar, ok := item.(string)
-		if !ok {
-			continue
-		}
-
-		if strings.HasPrefix(envVar, "BITSWAN_GITOPS_SECRET=") {
-			parts := strings.SplitN(envVar, "=", 2)
-			if len(parts) == 2 {
-				return parts[1], nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("GitOps secret not found")
+func getGitOpsSecret(workspace string) (string, error) {
+	return config.ComposeGitopsEnvValue(workspace, "BITSWAN_GITOPS_SECRET")
 }

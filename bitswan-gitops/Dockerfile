@@ -42,15 +42,9 @@ RUN git config --global init.defaultBranch main
 
 USER root
 
-# Runtime tooling (snapshots/backups). restic comes from upstream releases:
-# the AOC backup proxy uses RESTIC_REST_USERNAME/PASSWORD, which need
-# restic >= 0.16 (Debian bookworm ships 0.14).
-RUN apt-get update && apt-get install -y curl jq tar bzip2 && rm -rf /var/lib/apt/lists/* \
- && ARCH=$(dpkg --print-architecture) \
- && curl -fsSL -o /tmp/restic.bz2 "https://github.com/restic/restic/releases/download/v0.17.3/restic_0.17.3_linux_${ARCH}.bz2" \
- && bunzip2 /tmp/restic.bz2 \
- && install -m 755 /tmp/restic /usr/local/bin/restic \
- && rm -f /tmp/restic
+# Runtime tooling for local snapshots. No restic here: off-site backups are
+# made by the automation-server daemon (whole-server repo), not per workspace.
+RUN apt-get update && apt-get install -y curl jq tar && rm -rf /var/lib/apt/lists/*
 
 # Supply-chain scanning: syft (SBOM) + grype (CVEs). Static Go binaries; grype
 # downloads its vuln DB on first run (and the daily re-scan job refreshes it).

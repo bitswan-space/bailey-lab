@@ -1,0 +1,208 @@
+package daemon
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+
+	"github.com/bitswan-space/bitswan-workspaces/internal/daemon/backup"
+)
+
+// Client methods for the server-level backup API (/backup/*). All calls ride
+// the unix socket; key/snapshot calls also carry the host-admin bearer token
+// (doRequest always sends it), which the daemon verifies for those routes.
+
+// backupJSON performs a /backup request and decodes the JSON response into
+// out (or returns the error body's message on non-2xx).
+func (c *Client) backupJSON(method, path string, body interface{}, out interface{}) error {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("failed to marshal request: %w", err)
+		}
+		reader = strings.NewReader(string(data))
+	}
+	req, err := http.NewRequest(method, "http://unix"+path, reader)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.doStreamingRequest(req) // no client timeout: snapshot listings hit the network
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errResp ErrorResponse
+		if json.Unmarshal(data, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(data))
+	}
+	if out != nil {
+		if err := json.Unmarshal(data, out); err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+	}
+	return nil
+}
+
+// BackupStatus fetches GET /backup/status.
+func (c *Client) BackupStatus() (*BackupStatusResponse, error) {
+	var status BackupStatusResponse
+	if err := c.backupJSON(http.MethodGet, "/backup/status", nil, &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
+}
+
+// BackupRun starts a backup run; with wait=true it streams the job's
+// progress to stdout until completion.
+func (c *Client) BackupRun(wait bool) error {
+	var resp struct {
+		JobID string `json:"job_id"`
+	}
+	if err := c.backupJSON(http.MethodPost, "/backup/run", nil, &resp); err != nil {
+		return err
+	}
+	if !wait {
+		fmt.Printf("Backup run started (job %s). Follow it with the console or last-run status.\n", resp.JobID)
+		return nil
+	}
+	return c.StreamJobOutput(resp.JobID, os.Stdout, os.Stdin)
+}
+
+// BackupSetConfig updates enabled/retention (nil fields untouched).
+func (c *Client) BackupSetConfig(enabled *bool, daily, monthly *int) error {
+	payload := map[string]interface{}{}
+	if enabled != nil {
+		payload["enabled"] = *enabled
+	}
+	if daily != nil {
+		payload["retention_daily"] = *daily
+	}
+	if monthly != nil {
+		payload["retention_monthly"] = *monthly
+	}
+	return c.backupJSON(http.MethodPost, "/backup/config", payload, nil)
+}
+
+// BackupKey returns the restic encryption key (admin token verified daemon-side).
+func (c *Client) BackupKey() (string, error) {
+	var resp struct {
+		Key string `json:"key"`
+	}
+	if err := c.backupJSON(http.MethodGet, "/backup/key", nil, &resp); err != nil {
+		return "", err
+	}
+	return resp.Key, nil
+}
+
+// BackupKeyAcknowledge records that the key has been stored off this server.
+func (c *Client) BackupKeyAcknowledge() error {
+	return c.backupJSON(http.MethodPost, "/backup/key/acknowledge", nil, nil)
+}
+
+// BackupRestore runs a targeted restore (files | postgres | couchdb) and
+// streams the job's progress to stdout.
+func (c *Client) BackupRestore(restoreType, workspace, stage, snapshotID string, mirror bool) error {
+	var resp struct {
+		JobID string `json:"job_id"`
+	}
+	payload := map[string]interface{}{
+		"type":        restoreType,
+		"workspace":   workspace,
+		"stage":       stage,
+		"snapshot_id": snapshotID,
+		"mirror":      mirror,
+	}
+	if err := c.backupJSON(http.MethodPost, "/backup/restore", payload, &resp); err != nil {
+		return err
+	}
+	return c.StreamJobOutput(resp.JobID, os.Stdout, os.Stdin)
+}
+
+// BackupSnapshots lists restic snapshots (optionally one workspace's) as raw
+// restic JSON.
+func (c *Client) BackupSnapshots(workspace, tag string) (json.RawMessage, error) {
+	query := url.Values{}
+	if workspace != "" {
+		query.Set("workspace", workspace)
+	}
+	if tag != "" {
+		query.Set("tag", tag)
+	}
+	path := "/backup/snapshots"
+	if len(query) > 0 {
+		path += "?" + query.Encode()
+	}
+	var raw json.RawMessage
+	if err := c.backupJSON(http.MethodGet, path, nil, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// SetServerRecovery opens or closes the whole-server recovery window, which
+// suppresses the AOC workspace-list sync and the scheduler's catch-up backup for
+// its duration. `bitswan recover server` holds it across the whole run.
+func (c *Client) SetServerRecovery(active bool) error {
+	path := "/backup/recover/server/end"
+	if active {
+		path = "/backup/recover/server/begin"
+	}
+	var resp struct {
+		InProgress bool `json:"server_recovery_in_progress"`
+	}
+	if err := c.backupJSON(http.MethodPost, path, nil, &resp); err != nil {
+		return err
+	}
+	if resp.InProgress != active {
+		return fmt.Errorf("daemon reports server_recovery_in_progress=%v, wanted %v",
+			resp.InProgress, active)
+	}
+	return nil
+}
+
+// BackupManifest reads the server manifest recorded inside a snapshot, plus a
+// version-skew warning against the daemon's own binary.
+func (c *Client) BackupManifest(snapshotID string) (backup.ServerManifest, string, error) {
+	path := "/backup/manifest"
+	if snapshotID != "" {
+		path += "?" + url.Values{"snapshot": []string{snapshotID}}.Encode()
+	}
+	var resp struct {
+		Manifest       backup.ServerManifest `json:"manifest"`
+		VersionWarning string                `json:"version_warning"`
+	}
+	if err := c.backupJSON(http.MethodGet, path, nil, &resp); err != nil {
+		return backup.ServerManifest{}, "", err
+	}
+	return resp.Manifest, resp.VersionWarning, nil
+}
+
+// BackupRecoverWorkspace runs a full workspace recovery and streams the job's
+// step-by-step progress. Recovery replaces the workspace's tree and recreates
+// every one of its containers, so the daemon requires the admin token (which
+// doRequest always sends).
+func (c *Client) BackupRecoverWorkspace(req RecoverRequest) error {
+	var resp struct {
+		JobID string `json:"job_id"`
+	}
+	if err := c.backupJSON(http.MethodPost, "/backup/recover/workspace", req, &resp); err != nil {
+		return err
+	}
+	return c.StreamJobOutput(resp.JobID, os.Stdout, os.Stdin)
+}

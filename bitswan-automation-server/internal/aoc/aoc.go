@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 )
@@ -81,6 +80,26 @@ func NewAOCClient() (*AOCClient, error) {
 	return &AOCClient{
 		config:   cfg,
 		settings: settings,
+	}, nil
+}
+
+// NewAOCClientWithToken creates a client from values supplied directly, without
+// reading any config file.
+//
+// For disaster recovery, which runs before a daemon exists and needs to ask the
+// AOC whether a token it found in a restored config still works — the "resume a
+// half-finished recovery" check, which must not spend another one-time password.
+func NewAOCClientWithToken(aocUrl, automationServerId, accessToken string) (*AOCClient, error) {
+	if aocUrl == "" || automationServerId == "" || accessToken == "" {
+		return nil, fmt.Errorf("aoc url, server id and access token are all required")
+	}
+	return &AOCClient{
+		config: config.NewAutomationServerConfig(),
+		settings: &config.AutomationOperationsCenterSettings{
+			AOCUrl:             aocUrl,
+			AutomationServerId: automationServerId,
+			AccessToken:        accessToken,
+		},
 	}, nil
 }
 
@@ -211,6 +230,40 @@ func (c *AOCClient) ReportBaileyURL(baileyURL string, forceProxy bool) (string, 
 	body, _ := io.ReadAll(resp.Body)
 	_ = json.Unmarshal(body, &out) // best-effort: older AOC omits domain_status
 	return out.DomainStatus, nil
+}
+
+// ReportServerVersion tells the AOC which CLI build this server runs.
+//
+// The version is already recorded inside every backup (the server manifest), but
+// restic encrypts contents and metadata and the key is never escrowed — so the
+// AOC cannot read it there, and neither can a recovery in progress: it would need
+// a running binary to discover which binary to fetch. Reporting it here is what
+// lets the AOC hand out a recovery command pinned to this exact release.
+//
+// supportsRecovery says whether THIS build can perform a whole-server recovery.
+// The AOC pins the version only when it can, so a recorded version whose binary
+// predates `bitswan recover server` never becomes a command that cannot run.
+func (c *AOCClient) ReportServerVersion(version string, supportsRecovery bool) error {
+	payload := map[string]interface{}{
+		"bailey_version":           version,
+		"supports_server_recovery": supportsRecovery,
+	}
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal version report: %w", err)
+	}
+
+	resp, err := c.sendRequest("PATCH", fmt.Sprintf("%s/api/automation_server/info", c.settings.AOCUrl), jsonBytes)
+	if err != nil {
+		return fmt.Errorf("error sending version report: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to report version: %s - %s", resp.Status, string(body))
+	}
+	return nil
 }
 
 // GetAutomationServerToken gets the automation server token (deprecated, use GetAutomationServerInfo)
@@ -518,20 +571,18 @@ func (c *AOCClient) SendInviteEmail(req InviteEmailRequest) error {
 	return &InviteEmailError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("%s - %s", resp.Status, string(body))}
 }
 
-// GetAOCEnvironmentVariables creates AOC environment variables
-func (c *AOCClient) GetAOCEnvironmentVariables(workspaceId, automationServerToken string) []string {
-	aocUrl := c.settings.AOCUrl
-	// Replace .localhost hostname with Docker service name for internal communication
-	if strings.Contains(aocUrl, ".localhost") {
-		aocUrl = "http://api.bitswan.localhost"
-	}
-
-	vars := []string{
-		"BITSWAN_WORKSPACE_ID=" + workspaceId,
-		"BITSWAN_AOC_URL=" + aocUrl,
-		"BITSWAN_AOC_TOKEN=" + automationServerToken,
-	}
-	return append(vars, c.workerIdentityEnv()...)
+// GetWorkspaceIdentityEnv is the AOC-derived env a workspace's containers
+// receive: the worker identity contract, and nothing else.
+//
+// It deliberately does NOT hand out BITSWAN_AOC_URL/TOKEN/WORKSPACE_ID any
+// more. That token is the SERVER's credential — it authorizes every
+// server-scoped AOC endpoint and every sibling workspace's backup bucket —
+// and it used to sit in every workspace's gitops env purely so gitops could
+// run its own backups. The daemon owns backups now (internal/daemon/backup),
+// so no workspace container needs an AOC credential at all. Workspaces shed
+// the old env on their next `workspace update`.
+func (c *AOCClient) GetWorkspaceIdentityEnv() []string {
+	return c.workerIdentityEnv()
 }
 
 // workerIdentityEnv resolves the identity contract every deployed worker

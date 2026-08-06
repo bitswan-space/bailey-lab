@@ -19,6 +19,11 @@ type WorkspaceMetadata struct {
 	DevMode            bool    `yaml:"dev-mode,omitempty"`
 	CodingAgentEnabled bool    `yaml:"coding-agent-enabled,omitempty"`
 	CodingAgentSecret  string  `yaml:"coding-agent-secret,omitempty"`
+	// InfraDriverToken authenticates against the workspace's infra-driver
+	// (exec/copy primitives). Historically render-ephemeral (gitops and the
+	// driver got it as a generated pair); persisted so the daemon can drive
+	// per-workspace DB dumps during server-level backups.
+	InfraDriverToken string `yaml:"infra-driver-token,omitempty"`
 }
 
 func GetWorkspaceMetadata(workspaceName string) (WorkspaceMetadata, error) {

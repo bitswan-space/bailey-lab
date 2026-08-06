@@ -17,6 +17,12 @@ func isBaileyDataPath(p string) bool {
 		strings.HasPrefix(p, "/bailey/static/") ||
 		p == "/bailey/favicon.svg" ||
 		p == "/bailey/signout" ||
+		// Server-rendered, and must stay that way: it is opened top-level so a
+		// password manager will actually offer to save the key, which the SPA
+		// cannot achieve from inside the console's cross-origin iframe. Falling
+		// through to index.html here would silently restore the broken
+		// behaviour (see bailey_key_save_page.go).
+		p == keySavePagePath ||
 		strings.HasPrefix(p, gatePathPrefix+"/")
 }
 
@@ -326,6 +332,54 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups":
+		if r.Method == http.MethodGet {
+			s.handleAdminBackupsStatus(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups/run":
+		if r.Method == http.MethodPost {
+			s.handleAdminBackupsRun(w, r, email)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups/retention":
+		if r.Method == http.MethodPost {
+			s.handleAdminBackupsRetention(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups/enabled":
+		if r.Method == http.MethodPost {
+			s.handleAdminBackupsEnabled(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups/key":
+		if r.Method == http.MethodGet {
+			s.handleAdminBackupsKey(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case "/bailey/api/admin/backups/key/acknowledge":
+		if r.Method == http.MethodPost {
+			s.handleAdminBackupsKeyAcknowledge(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	case keySavePagePath:
+		// HTML, not JSON: the console opens it in a top-level window so the
+		// browser will offer to save the key. Admin-gated like the key endpoint
+		// above — it puts the same secret on screen.
+		s.handleBaileyKeySavePage(w, r)
 		return
 	case "/bailey/api/admin/server-update":
 		if r.Method == http.MethodPost {

@@ -132,6 +132,19 @@ func (c *Client) doLongRunningRequest(req *http.Request) (*http.Response, error)
 	return longRunningClient.Do(req)
 }
 
+// doRequestWithTimeout performs a request with an explicit client timeout, for
+// endpoints whose duration the CALLER decides — e.g. /ingress/wait, where the
+// daemon blocks for as long as the requested wait and the fixed
+// doLongRunningRequest ceiling would cut it short.
+func (c *Client) doRequestWithTimeout(req *http.Request, timeout time.Duration) (*http.Response, error) {
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	client := &http.Client{
+		Transport: c.httpClient.Transport,
+		Timeout:   timeout,
+	}
+	return client.Do(req)
+}
+
 // Ping checks if the daemon is running
 func (c *Client) Ping() error {
 	req, err := http.NewRequest("GET", "http://unix/ping", nil)
@@ -1403,6 +1416,80 @@ func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt
 		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
+	return nil
+}
+
+// WaitForIngress blocks until the daemon's Traefik serves the given hostname.
+//
+// The probe runs daemon-side because it dials Traefik by container name on the
+// docker network, which the host cannot resolve.
+func (c *Client) WaitForIngress(hostname string, timeout time.Duration) error {
+	bodyBytes, err := json.Marshal(map[string]interface{}{
+		"hostname": hostname,
+		"seconds":  int(timeout.Seconds()),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "http://unix/ingress/wait", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// The daemon holds the request open for the whole wait, so the client budget
+	// has to exceed it rather than use any fixed ceiling.
+	resp, err := c.doRequestWithTimeout(req, timeout+30*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// SetAOCCredentials swaps in a new access token, leaving the rest of the stored
+// registration untouched. Used by disaster recovery, where the config restored
+// from the backup is right about everything except the token — redeeming the
+// recovery OTP minted a fresh one.
+func (c *Client) SetAOCCredentials(accessToken, expiresAt string) error {
+	bodyBytes, err := json.Marshal(AOCCredentialsRequest{
+		AccessToken: accessToken,
+		ExpiresAt:   expiresAt,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "http://unix/aoc/credentials", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
 	return nil
 }
 
