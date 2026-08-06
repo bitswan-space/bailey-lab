@@ -482,6 +482,24 @@ class AutomationService:
         self._infra_driver = None
         # Cache full history per deployment_id: {deployment_id: (commit_hash, [entries])}
         self._history_cache: dict[str, tuple[str, list]] = {}
+        # `deployments` mapping of bitswan.yaml AS OF a git ref, keyed by that
+        # ref ("<sha>" and "<sha>^"). A commit is immutable, so this cache is
+        # never invalidated — only bounded (oldest insertion evicted past
+        # _YAML_AT_REF_CACHE_MAX).
+        #
+        # It exists because history is derived per deployment but read per
+        # commit: building 289 deployments' histories over 140 commits used to
+        # run `git show <ref>:bitswan.yaml` + a full yaml parse once PER
+        # (deployment, commit) pair — ~81k git subprocess spawns and ~162k yaml
+        # parses, all on the event loop, which pinned it at ~60% CPU for the
+        # lifetime of the warm-up and made every unrelated request slow.
+        # Reading each ref ONCE makes that 2×N_commits regardless of how many
+        # deployments there are.
+        self._deployments_at_ref: dict[str, dict] = {}
+        # (HEAD sha, commits touching bitswan.yaml) — the commit LIST does
+        # change, but only when HEAD moves, so it is keyed by HEAD rather than
+        # re-derived once per deployment.
+        self._commits_at_head: tuple[str, list[dict]] | None = None
         # Scope-keyed cache mirroring ProcessService._cache. Key = copy
         # name, or None for main. Holds STATIC entries (yaml + filesystem
         # scan); Docker container state is overlaid live by get_automations()
@@ -512,7 +530,16 @@ class AutomationService:
         )
 
     async def warm_history_cache(self):
-        """Pre-warm the history cache for all known deployments."""
+        """Pre-warm the history cache for all known deployments.
+
+        Every deployment's history is derived from the SAME set of commits, so
+        the commit reads happen once here, up front, and the per-deployment pass
+        below is then pure in-memory work over the cached parses. Before that,
+        each deployment re-read and re-parsed every commit for itself
+        (O(deployments x commits) subprocess spawns on the event loop) — with a
+        few hundred deployments the warm-up never finished and starved every
+        other request in the process.
+        """
         logger = logging.getLogger(__name__)
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
         if not bs_yaml or "deployments" not in bs_yaml:
@@ -520,9 +547,22 @@ class AutomationService:
             return
 
         deployment_ids = list(bs_yaml["deployments"].keys())
-        logger.info(
-            f"History cache warm-up: warming {len(deployment_ids)} deployment(s)"
+        bitswan_dir = self._history_bitswan_dir()
+        commits = await self._commits_touching_bitswan_yaml(
+            bitswan_dir, head=await self._get_latest_commit_hash(bitswan_dir)
         )
+        logger.info(
+            "History cache warm-up: %d deployment(s) over %d commit(s)",
+            len(deployment_ids),
+            len(commits),
+        )
+
+        refs: list[str] = []
+        for c in commits:
+            refs.append(c["commit"])
+            refs.append(c["commit"] + "^")
+        await self._load_deployments_at_refs(refs, bitswan_dir)
+
         for deployment_id in deployment_ids:
             try:
                 await self.get_automation_history(deployment_id)
@@ -530,6 +570,9 @@ class AutomationService:
                 logger.warning(
                     f"History cache warm-up: failed for {deployment_id}: {e}"
                 )
+            # Hand the loop back between deployments so a warm-up can never
+            # monopolise it, however many deployments there are.
+            await asyncio.sleep(0)
         logger.info("History cache warm-up: done")
 
     async def get_container(self, deployment_id) -> list[dict]:
@@ -4423,6 +4466,104 @@ class AutomationService:
             return commit_hash, None
         return commit_hash, stdout
 
+    # How many `git show` reads of bitswan.yaml run concurrently when filling
+    # the per-ref cache. Each is a subprocess spawn on the event loop, so this
+    # bounds how long the loop stays busy in one gather.
+    _YAML_AT_REF_FANOUT = 8
+    # Cap on the per-ref cache (see `_deployments_at_ref`). Entries are keyed by
+    # immutable commit refs, so eviction only costs a re-read.
+    _YAML_AT_REF_CACHE_MAX = 4096
+
+    async def _load_deployments_at_refs(
+        self, refs: list[str], bitswan_dir: str
+    ) -> dict[str, dict]:
+        """The `deployments` mapping of bitswan.yaml at each git ref.
+
+        Reads and parses each ref exactly once across the whole process (see
+        `_deployments_at_ref`). A ref that has no bitswan.yaml (or whose yaml
+        does not parse, or which has no parent — `<root-sha>^`) maps to `{}`:
+        "nothing was deployed as far as this ref is concerned", which is what
+        every caller compares against. That is the absence of data, not a
+        fallback masking an error.
+        """
+        wanted = list(dict.fromkeys(refs))
+        missing = [r for r in wanted if r not in self._deployments_at_ref]
+
+        if missing:
+            sem = asyncio.Semaphore(self._YAML_AT_REF_FANOUT)
+
+            async def _one(ref: str) -> tuple[str, dict]:
+                async with sem:
+                    _, content = await self._fetch_yaml_at_commit(ref, bitswan_dir)
+                if content is None:
+                    return ref, {}
+                try:
+                    parsed = yaml.safe_load(content)
+                except yaml.YAMLError:
+                    # A commit that recorded an unparseable bitswan.yaml is a
+                    # fact about history, not an error to raise now.
+                    return ref, {}
+                if not isinstance(parsed, dict):
+                    return ref, {}
+                deployments = parsed.get("deployments")
+                return ref, deployments if isinstance(deployments, dict) else {}
+
+            for ref, deployments in await asyncio.gather(*(_one(r) for r in missing)):
+                self._deployments_at_ref[ref] = deployments
+
+            overflow = len(self._deployments_at_ref) - self._YAML_AT_REF_CACHE_MAX
+            for stale in list(self._deployments_at_ref)[:overflow]:
+                del self._deployments_at_ref[stale]
+
+        return {r: self._deployments_at_ref.get(r, {}) for r in wanted}
+
+    async def _commits_touching_bitswan_yaml(
+        self, bitswan_dir: str, head: str | None = None
+    ) -> list[dict]:
+        """Commits that modified bitswan.yaml, newest first.
+
+        `head` is the commit the answer is valid for; passing it reuses the
+        cached list until HEAD moves, so warming N deployments runs `git log`
+        once rather than N times.
+        """
+        if head is not None and self._commits_at_head is not None:
+            cached_head, cached_commits = self._commits_at_head
+            if cached_head == head:
+                return cached_commits
+
+        log_format = (
+            '{"commit": "%H", "author": "%an", "author_email": "%ae", '
+            '"date": "%ai", "message": "%s"}'
+        )
+        stdout, stderr, return_code = await call_git_command_with_output(
+            "git",
+            "log",
+            "--format=" + log_format,
+            "--date=iso",
+            "--",
+            "bitswan.yaml",
+            cwd=bitswan_dir,
+        )
+        if return_code != 0:
+            raise HTTPException(
+                status_code=500, detail=f"Error getting git history: {stderr}"
+            )
+
+        commits = []
+        for line in stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                commits.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        if head is not None:
+            self._commits_at_head = (head, commits)
+        return commits
+
+    def _history_bitswan_dir(self) -> str:
+        return self.gitops_dir_host if os.environ.get("HOST_PATH") else self.gitops_dir
+
     async def get_automation_history(
         self, deployment_id: str, page: int = 1, page_size: int = 20
     ):
@@ -4432,11 +4573,7 @@ class AutomationService:
         Cached responses are invalidated when the commit hash changes.
         """
 
-        host_path = os.environ.get("HOST_PATH")
-        if host_path:
-            bitswan_dir = self.gitops_dir_host
-        else:
-            bitswan_dir = self.gitops_dir
+        bitswan_dir = self._history_bitswan_dir()
 
         # Get the latest commit hash
         current_commit_hash = await self._get_latest_commit_hash(bitswan_dir)
@@ -4449,32 +4586,9 @@ class AutomationService:
             else:
                 self._history_cache.clear()
 
-        # Get commits that modified bitswan.yaml
-        log_format = '{"commit": "%H", "author": "%an", "author_email": "%ae", "date": "%ai", "message": "%s"}'
-        stdout, stderr, return_code = await call_git_command_with_output(
-            "git",
-            "log",
-            "--format=" + log_format,
-            "--date=iso",
-            "--",
-            "bitswan.yaml",
-            cwd=bitswan_dir,
+        commits = await self._commits_touching_bitswan_yaml(
+            bitswan_dir, head=current_commit_hash
         )
-
-        if return_code != 0:
-            raise HTTPException(
-                status_code=500, detail=f"Error getting git history: {stderr}"
-            )
-
-        commits = []
-        for line in stdout.strip().split("\n"):
-            if not line.strip():
-                continue
-            try:
-                commit_data = json.loads(line)
-                commits.append(commit_data)
-            except json.JSONDecodeError:
-                continue
 
         # Process commits in batches — stop early when we have enough entries.
         # Only cache the result if we processed ALL commits (complete history).
@@ -4489,60 +4603,39 @@ class AutomationService:
         for batch_start in range(0, len(commits), BATCH_SIZE):
             batch = commits[batch_start : batch_start + BATCH_SIZE]
 
-            # Fetch bitswan.yaml for each commit AND its parent in parallel
-            fetch_tasks = []
+            # Read this batch's commits AND their parents. Shared across every
+            # deployment via the per-ref cache, so a warm process does no git
+            # work here at all.
+            refs: list[str] = []
             for c in batch:
-                fetch_tasks.append(self._fetch_yaml_at_commit(c["commit"], bitswan_dir))
-                fetch_tasks.append(
-                    self._fetch_yaml_at_commit(c["commit"] + "^", bitswan_dir)
-                )
-            results = await asyncio.gather(*fetch_tasks)
-            content_by_key = dict(results)
+                refs.append(c["commit"])
+                refs.append(c["commit"] + "^")
+            deployments_at = await self._load_deployments_at_refs(refs, bitswan_dir)
 
             for commit in batch:
                 commit_hash = commit["commit"]
-                content = content_by_key.get(commit_hash)
-                if content is None:
+                deployment_config = deployments_at[commit_hash].get(deployment_id)
+                if deployment_config is None:
                     continue
 
-                try:
-                    commit_yaml = yaml.safe_load(content)
-                    if not commit_yaml or "deployments" not in commit_yaml:
-                        continue
+                current_checksum = deployment_config.get("checksum")
+                current_replicas = deployment_config.get("replicas", 1)
 
-                    deployment_config = commit_yaml.get("deployments", {}).get(
-                        deployment_id
-                    )
+                # Compare with parent commit to see if THIS commit
+                # actually changed this deployment
+                parent_config = deployments_at[commit_hash + "^"].get(deployment_id)
+                parent_checksum = None
+                parent_replicas = None
+                if parent_config:
+                    parent_checksum = parent_config.get("checksum")
+                    parent_replicas = parent_config.get("replicas", 1)
 
-                    if deployment_config is None:
-                        continue
+                checksum_changed = current_checksum != parent_checksum
+                replicas_changed = current_replicas != parent_replicas
 
-                    current_checksum = deployment_config.get("checksum")
-                    current_replicas = deployment_config.get("replicas", 1)
-
-                    # Compare with parent commit to see if THIS commit
-                    # actually changed this deployment
-                    parent_content = content_by_key.get(commit_hash + "^")
-                    parent_checksum = None
-                    parent_replicas = None
-                    if parent_content:
-                        try:
-                            parent_yaml = yaml.safe_load(parent_content)
-                            if parent_yaml and "deployments" in parent_yaml:
-                                parent_config = parent_yaml.get("deployments", {}).get(
-                                    deployment_id
-                                )
-                                if parent_config:
-                                    parent_checksum = parent_config.get("checksum")
-                                    parent_replicas = parent_config.get("replicas", 1)
-                        except yaml.YAMLError:
-                            pass
-
-                    checksum_changed = current_checksum != parent_checksum
-                    replicas_changed = current_replicas != parent_replicas
-
-                    if checksum_changed or replicas_changed:
-                        entry = {
+                if checksum_changed or replicas_changed:
+                    history_entries.append(
+                        {
                             "commit": commit_hash,
                             "author": commit["author"],
                             "author_email": commit.get("author_email"),
@@ -4555,10 +4648,7 @@ class AutomationService:
                             "tag_checksum": deployment_config.get("tag_checksum"),
                             "replicas": current_replicas,
                         }
-                        history_entries.append(entry)
-
-                except yaml.YAMLError:
-                    continue
+                    )
 
             # Early exit: we have enough entries for the requested page
             if len(history_entries) >= entries_needed:
