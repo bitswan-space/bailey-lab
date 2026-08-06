@@ -19,6 +19,7 @@ function makeBackups(overrides = {}) {
     configured: true,
     has_key: true,
     key_acknowledged: true,
+    images: true,
     running: false,
     retention: { daily: 30, monthly: 12 },
     last_run: {
@@ -123,6 +124,20 @@ describe('BackupsView', () => {
     fireEvent.click(screen.getByText('1 of 7 steps failed'));
     fireEvent.click(screen.getByText('Automation server'));
     expect(screen.getByText('30 image(s), 105 tag(s)')).toBeTruthy();
+  });
+
+  // Image archives are on by default and are the biggest thing in the repo, so
+  // the status has to say whether they are being made — otherwise the only way to
+  // find out is reading backup/config.json over SSH.
+  it('says whether business-process images are included', () => {
+    render(<Host View={BackupsView} data={dataWith(makeBackups())} />);
+    expect(screen.getByText('+ BP images')).toBeTruthy();
+  });
+
+  it('says so when image archives are switched off', () => {
+    render(<Host View={BackupsView} data={dataWith(makeBackups({ images: false }))} />);
+    expect(screen.getByText('images excluded')).toBeTruthy();
+    expect(screen.queryByText('+ BP images')).toBeNull();
   });
 
   it('shows the not-connected state without any controls', () => {

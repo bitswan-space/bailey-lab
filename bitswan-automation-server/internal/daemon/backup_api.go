@@ -33,7 +33,12 @@ type BackupStatusResponse struct {
 	KeyWarning      string           `json:"key_warning,omitempty"` // set while the key is unsaved
 	Running         bool             `json:"running"`
 	Retention       backup.Retention `json:"retention"`
-	Reason          string           `json:"reason,omitempty"` // why not runnable
+	// Images reports whether each run also archives the built business-process
+	// images. On by default and worth surfacing: it is the difference between a
+	// backup that restores the bytes that were running and one that has gitops
+	// rebuild them, and it is the largest single thing in the repo.
+	Images bool   `json:"images"`
+	Reason string `json:"reason,omitempty"` // why not runnable
 	// ServerRecoveryUntil is set while a whole-server recovery holds the marker
 	// that stands the AOC list sync and the catch-up backup down. Reported so an
 	// abandoned marker is visible: both of those go quiet without saying why.
@@ -47,6 +52,7 @@ func (s *Server) backupStatus(ctx context.Context) BackupStatusResponse {
 		Enabled:    cfg.Enabled,
 		Configured: exists,
 		Retention:  cfg.Retention,
+		Images:     cfg.Images,
 		Running:    s.backupEngine.Running(),
 	}
 
@@ -380,6 +386,7 @@ func (s *Server) handleBackupOffsiteSnapshots(w http.ResponseWriter, r *http.Req
 func (s *Server) handleBackupConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Enabled          *bool `json:"enabled"`
+		Images           *bool `json:"images"`
 		RetentionDaily   *int  `json:"retention_daily"`
 		RetentionMonthly *int  `json:"retention_monthly"`
 	}
@@ -394,6 +401,9 @@ func (s *Server) handleBackupConfigUpdate(w http.ResponseWriter, r *http.Request
 	}
 	if req.Enabled != nil {
 		cfg.Enabled = *req.Enabled
+	}
+	if req.Images != nil {
+		cfg.Images = *req.Images
 	}
 	if req.RetentionDaily != nil {
 		if *req.RetentionDaily < 1 {

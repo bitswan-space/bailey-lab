@@ -182,6 +182,9 @@ func newBackupStatusCmd() *cobra.Command {
 				fmt.Printf("\n!! %s\n\n", status.KeyWarning)
 			}
 			fmt.Printf("Retention:      %d daily, %d monthly\n", status.Retention.Daily, status.Retention.Monthly)
+			// The single largest thing in the repo, and on by default — an operator
+			// surprised by their storage bill should be able to see it here.
+			fmt.Printf("BP images:      %s\n", onOff(status.Images))
 			if status.Running {
 				fmt.Println("A backup run is in progress.")
 			}

@@ -282,7 +282,13 @@ function BackupsView({ ctx }) {
               {backups.enabled
                 ? <WPill tone="success" leftIcon="check">enabled</WPill>
                 : <WPill tone="danger" leftIcon="pause">disabled</WPill>}
-              {backups.running && <WPill tone="info" leftIcon="loader">backing up…</WPill>}
+              {backups.running && <WPill tone="info">backing up…</WPill>}
+              {/* On by default and the largest single thing in the repo, so an
+                  operator surprised by their storage should be able to see it
+                  without reading backup/config.json over SSH. */}
+              {backups.images
+                ? <WPill tone="neutral">+ BP images</WPill>
+                : <WPill tone="neutral">images excluded</WPill>}
               <span style={{ flex: 1 }} />
               {backups.enabled
                 ? <WBtn variant="ghost" size="sm" disabled={busy !== ''} onClick={() => setEnabled(false)}>Disable</WBtn>
