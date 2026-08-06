@@ -79,6 +79,14 @@ function servicesLabel(s: Snapshot): string | null {
 interface StageSnapshotsSectionProps {
   bp: BusinessProcess;
   stage: SnapshotStage;
+  /** Bumped by the Deployments view whenever a deploy/promote/rollback lands.
+   *
+   *  Snapshot eligibility is decided per (BP, realm) at first deploy TO that
+   *  realm, so promoting to Staging is what registers Staging. Without this the
+   *  panel keeps the answer it fetched on mount and goes on claiming Staging
+   *  needs enabling long after the promote enabled it — offering a button that
+   *  warns about losing data the BP does not have. */
+  reloadKey?: number;
 }
 
 /**
@@ -92,7 +100,7 @@ interface StageSnapshotsSectionProps {
  * the async operations is polled from the snapshot-task endpoint
  * (`lib/snapshotTask.ts`); an in-flight task found on mount is resumed.
  */
-export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps) {
+export function StageSnapshotsSection({ bp, stage, reloadKey }: StageSnapshotsSectionProps) {
   // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
   const [data, setData] = useState<SnapshotListResponse | null>(null);
   // eslint-disable-next-line no-restricted-syntax -- null = no load error
@@ -159,7 +167,7 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
         watchTask(active.task_id);
       }
     })();
-  }, [refresh, watchTask]);
+  }, [refresh, watchTask, reloadKey]);
 
 
   const bpSlug = data?.bp ?? bp.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');

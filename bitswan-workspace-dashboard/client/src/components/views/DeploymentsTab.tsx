@@ -3029,7 +3029,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 />
               )
             ) : visibleSection === 'backups' ? (
-              <StageSnapshotsSection bp={bp} stage={snapshotStage} />
+              <StageSnapshotsSection bp={bp} stage={snapshotStage} reloadKey={reloadKey} />
             ) : visibleSection === 'firewall' ? (
               <FirewallPanel
                 bp={bp.name}
