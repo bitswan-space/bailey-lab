@@ -126,6 +126,15 @@ async def list_bp_snapshots(bp: str):
             if not snapshot_id or snapshot_id in local_ids:
                 continue
             local_ids.add(snapshot_id)
+            # Deliberately partial. The backup repo records an id, a stage and a
+            # timestamp for an off-site copy and nothing else — not which
+            # services it holds, not its size, not its label or kind. Inventing
+            # zeros for those would be worse than omitting them: the UI would
+            # confidently report "no services, 0 B" for a snapshot that may hold
+            # everything. The dashboard's Snapshot type marks exactly these
+            # fields optional so the compiler forces callers to handle it (they
+            # were once required, and the first remote-only snapshot took the
+            # whole Backups page down with it).
             snapshots.append(
                 {
                     "id": snapshot_id,

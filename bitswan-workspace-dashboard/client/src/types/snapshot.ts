@@ -20,18 +20,31 @@ export interface SnapshotServiceMeta {
 }
 
 /** One snapshot's manifest.json. */
+/**
+ * A snapshot in the list.
+ *
+ * Everything below `id`/`bp`/`stage`/`created_at` is OPTIONAL, because a
+ * `remote_only` entry has none of it. Those are synthesised by gitops from what
+ * the server's backup repo knows about an off-site copy — an id, a stage and a
+ * timestamp — and the repo simply does not record which services the snapshot
+ * held or how large it was. gitops does not invent values it cannot know.
+ *
+ * These were once declared required, which is why `Object.entries(s.services)`
+ * type-checked and then crashed the whole Backups page on the first remote-only
+ * snapshot. Keep them optional: the compiler is what stops that recurring.
+ */
 export interface Snapshot {
-  version: number;
   id: string;
   bp: string;
-  bp_name: string;
   stage: SnapshotStage;
-  label: string;
-  kind: SnapshotKind;
   created_at: string;
+  version?: number;
+  bp_name?: string;
+  label?: string;
+  kind?: SnapshotKind;
   workspace?: string;
-  services: Partial<Record<'postgres' | 'couchdb' | 'garage', SnapshotServiceMeta>>;
-  total_size_bytes: number;
+  services?: Partial<Record<'postgres' | 'couchdb' | 'garage', SnapshotServiceMeta>>;
+  total_size_bytes?: number;
   /** Provenance for auto-snapshots (pre-restore / clone source). */
   source?: {
     reason?: string;

@@ -56,8 +56,15 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-/** The services captured in a snapshot, e.g. "Postgres + Object storage". */
-function servicesLabel(s: Snapshot): string {
+/** The services captured in a snapshot, e.g. "Postgres + Object storage".
+ *
+ * null when the snapshot does not record them, which is every `remote_only`
+ * entry: those are synthesised from the server's backup repo, which knows an id,
+ * a stage and a timestamp and nothing else. Callers omit the field rather than
+ * print "no services", which would claim the snapshot captured nothing when the
+ * truth is that we cannot tell from here. */
+function servicesLabel(s: Snapshot): string | null {
+  if (!s.services) return null;
   const names: Record<string, string> = {
     postgres: 'Postgres',
     couchdb: 'CouchDB',
@@ -361,21 +368,35 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
                     <Badge variant="secondary" className="shrink-0">
                       auto
                     </Badge>
-                  ) : (
+                  ) : s.kind ? (
                     <Badge
                       variant="outline"
                       className="shrink-0 border-sky-200 bg-sky-50 text-sky-700"
                     >
                       manual
                     </Badge>
-                  )}
+                  ) : null}
                 </div>
                 <div className="mt-0.5 flex items-center gap-2 font-mono text-xs text-muted-foreground">
                   <RelativeTime value={s.created_at} />
-                  <span aria-hidden>·</span>
-                  <span>{formatBytes(s.total_size_bytes)}</span>
-                  <span aria-hidden>·</span>
-                  <span>{servicesLabel(s)}</span>
+                  {s.total_size_bytes !== undefined && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>{formatBytes(s.total_size_bytes)}</span>
+                    </>
+                  )}
+                  {servicesLabel(s) && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>{servicesLabel(s)}</span>
+                    </>
+                  )}
+                  {s.remote_only && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>off-site only — Fetch to see details</span>
+                    </>
+                  )}
                 </div>
               </div>
               {s.local === false && (
@@ -454,7 +475,7 @@ export function StageSnapshotsSection({ bp, stage }: StageSnapshotsSectionProps)
             <AlertDialogTitle>Delete snapshot?</AlertDialogTitle>
             <AlertDialogDescription>
               {deleteTarget
-                ? `This permanently deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}, ${formatBytes(deleteTarget.total_size_bytes)}) from this server. The stage's live data is not affected. Any copy already captured by the server's nightly backup is kept and stays restorable until its retention policy prunes it.`
+                ? `This permanently deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}${deleteTarget.total_size_bytes !== undefined ? `, ${formatBytes(deleteTarget.total_size_bytes)}` : ''}) from this server. The stage's live data is not affected. Any copy already captured by the server's nightly backup is kept and stays restorable until its retention policy prunes it.`
                 : ''}
             </AlertDialogDescription>
           </AlertDialogHeader>
