@@ -120,113 +120,59 @@ describe('BackupsView', () => {
     expect(screen.queryByText('I have saved it')).toBeNull();
   });
 
-  // Saving the key into the operator's password manager. jsdom has neither
-  // PasswordCredential nor navigator.credentials, so each test installs exactly
-  // the capability it is exercising and removes it again.
+  // Saving the key into the operator's password manager.
+  //
+  // The console lives on the inner host inside a cross-origin iframe, where no
+  // browser will offer to save a credential: navigator.credentials.store()
+  // rejects outside a top-level browsing context and native prompts are
+  // suppressed in cross-origin frames. An in-page form was tried and produced
+  // nothing in Firefox and nothing in Chrome until it later unmounted. So the
+  // only thing this button may do is open the server-rendered page TOP-LEVEL.
   describe('save to password manager', () => {
-    const KEY = 'SUPER-SECRET-KEY-abc123';
+    it('opens the server-rendered save page in a top-level window', () => {
+      const open = vi.fn().mockReturnValue({ focus: vi.fn() });
+      vi.stubGlobal('open', open);
+      render(<Host View={BackupsView} data={dataWith(makeBackups())} />);
 
-    function withCredentialStore(store) {
-      window.PasswordCredential = class {
-        constructor(opts) { Object.assign(this, opts); }
-      };
-      Object.defineProperty(navigator, 'credentials', {
-        value: { store }, configurable: true, writable: true,
-      });
-    }
+      fireEvent.click(screen.getByText('Save to password manager'));
 
-    afterEach(() => {
-      delete window.PasswordCredential;
-      delete navigator.credentials;
-      delete navigator.clipboard;
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open.mock.calls[0][0]).toBe('/bailey/key-save');
+      // A named target, so repeated clicks reuse the tab rather than stacking
+      // windows that each hold the key.
+      expect(open.mock.calls[0][1]).toBe('bitswan-save-backup-key');
     });
 
-    it('hands the key to the browser credential store when available', async () => {
+    it('never renders the key inside the console itself', async () => {
+      // The iframe is why the in-page form could not work; putting the key back
+      // into this document would reintroduce it without the button changing.
+      const open = vi.fn().mockReturnValue({ focus: vi.fn() });
+      vi.stubGlobal('open', open);
+      const fetchMock = installFetch({ '/bailey/api/admin/backups/key': { json: { key: 'SECRET' } } });
+      const { container } = render(<Host View={BackupsView} data={dataWith(makeBackups())} />);
+
+      fireEvent.click(screen.getByText('Save to password manager'));
+
+      expect(container.querySelector('input[type="password"]')).toBeNull();
+      expect(container.textContent).not.toContain('SECRET');
+      // It must not even fetch the key: the save page loads it server-side.
+      expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/backups/key'))).toBe(false);
+    });
+
+    it('says so when the popup is blocked', async () => {
       const s = spies();
-      const store = vi.fn().mockResolvedValue(undefined);
-      withCredentialStore(store);
-      const fetchMock = installFetch({ '/bailey/api/admin/backups/key': { json: { key: KEY } } });
-      render(<Host View={BackupsView} data={dataWith(makeBackups({ key_acknowledged: false }))} extra={s} />);
-
-      fireEvent.click(screen.getByText('Save to password manager'));
-      await waitFor(() => expect(store).toHaveBeenCalled());
-      expect(store.mock.calls[0][0].password).toBe(KEY);
-      expect(store.mock.calls[0][0].id).toContain('backup-key@');
-
-      // The browser prompt was raised, so the manual form stays away.
-      expect(screen.queryByLabelText('Backup encryption key')).toBeNull();
-      // store() resolves whether or not the operator accepted, so custody must
-      // NOT be recorded off the back of it.
-      expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/key/acknowledge'))).toBe(false);
-      expect(screen.getByText(/NOT SAVED/)).toBeTruthy();
-    });
-
-    it('falls back to a manager-readable form when the browser has no credential store', async () => {
-      installFetch({ '/bailey/api/admin/backups/key': { json: { key: KEY } } });
-      render(<Host View={BackupsView} data={dataWith(makeBackups())} />);
-
-      fireEvent.click(screen.getByText('Save to password manager'));
-      const field = await waitFor(() => screen.getByLabelText('Backup encryption key'));
-
-      // The semantics are the whole point: managers key off a form holding a
-      // username and a new-password field, so assert them rather than the look.
-      expect(field.value).toBe(KEY);
-      expect(field.getAttribute('autocomplete')).toBe('new-password');
-      expect(field.type).toBe('password');
-      expect(field.closest('form')).toBeTruthy();
-      const user = screen.getByLabelText('Password manager entry name');
-      expect(user.getAttribute('autocomplete')).toBe('username');
-      expect(field.closest('form')).toBe(user.closest('form'));
-    });
-
-    it('falls back to the form when the credential store refuses', async () => {
-      withCredentialStore(vi.fn().mockRejectedValue(new Error('policy')));
-      installFetch({ '/bailey/api/admin/backups/key': { json: { key: KEY } } });
-      render(<Host View={BackupsView} data={dataWith(makeBackups())} />);
-
-      fireEvent.click(screen.getByText('Save to password manager'));
-      const field = await waitFor(() => screen.getByLabelText('Backup encryption key'));
-      expect(field.value).toBe(KEY);
-    });
-
-    it('reveal unmasks the key and Done drops it from the page', async () => {
-      installFetch({ '/bailey/api/admin/backups/key': { json: { key: KEY } } });
-      render(<Host View={BackupsView} data={dataWith(makeBackups())} />);
-      fireEvent.click(screen.getByText('Save to password manager'));
-      await waitFor(() => screen.getByLabelText('Backup encryption key'));
-
-      fireEvent.click(screen.getByText('Reveal'));
-      expect(screen.getByLabelText('Backup encryption key').type).toBe('text');
-      fireEvent.click(screen.getByText('Hide'));
-      expect(screen.getByLabelText('Backup encryption key').type).toBe('password');
-
-      fireEvent.click(screen.getByText('Done'));
-      expect(screen.queryByLabelText('Backup encryption key')).toBeNull();
-    });
-
-    it('copy puts the key on the clipboard', async () => {
-      const s = spies();
-      const writeText = vi.fn().mockResolvedValue(undefined);
-      Object.defineProperty(navigator, 'clipboard', {
-        value: { writeText }, configurable: true, writable: true,
-      });
-      installFetch({ '/bailey/api/admin/backups/key': { json: { key: KEY } } });
+      vi.stubGlobal('open', vi.fn().mockReturnValue(null));
       render(<Host View={BackupsView} data={dataWith(makeBackups())} extra={s} />);
-      fireEvent.click(screen.getByText('Save to password manager'));
-      await waitFor(() => screen.getByLabelText('Backup encryption key'));
 
-      fireEvent.click(screen.getByText('Copy'));
-      await waitFor(() => expect(writeText).toHaveBeenCalledWith(KEY));
-      expect(s.toast).toHaveBeenCalledWith('Key copied to clipboard', 'success');
+      fireEvent.click(screen.getByText('Save to password manager'));
+
+      await waitFor(() => expect(s.toast).toHaveBeenCalledWith(
+        expect.stringContaining('blocked the popup'), 'danger'));
     });
 
-    it('a failed key fetch surfaces the error and shows no form', async () => {
-      const s = spies();
-      installFetch({ '/bailey/api/admin/backups/key': { status: 500, json: { error: 'boom' } } });
-      render(<Host View={BackupsView} data={dataWith(makeBackups())} extra={s} />);
-      fireEvent.click(screen.getByText('Save to password manager'));
-      await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Could not fetch key'), 'danger'));
-      expect(screen.queryByLabelText('Backup encryption key')).toBeNull();
+    it('is disabled until a key exists', () => {
+      render(<Host View={BackupsView} data={dataWith(makeBackups({ has_key: false }))} />);
+      expect(screen.getByText('Save to password manager').closest('button').disabled).toBe(true);
     });
   });
 
