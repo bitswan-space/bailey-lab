@@ -51,13 +51,78 @@ function dataWith(backups, extra = {}) {
 }
 
 describe('BackupsView', () => {
-  it('renders the last-run breakdown with per-step outcomes', () => {
+  // The last run collapses to one status line. A backup report is something you
+  // check, not read: the answer is nearly always "fine", and a run over a dozen
+  // workspaces was a fifty-row flat table where one red cell was easy to miss.
+  it('collapses the last run to a status line', () => {
     render(<Host View={BackupsView} data={dataWith(makeBackups())} />);
     expect(screen.getByText('Backups')).toBeTruthy();
-    expect(screen.getAllByText('tenant-a', { selector: 'td' }).length).toBe(4); // one row per step
-    // The failed garage step surfaces its reason.
+
+    // The status is visible without opening anything, failure count included —
+    // collapsing must not hide the one thing worth knowing at a glance.
+    expect(screen.getByText('finished with errors')).toBeTruthy();
+    expect(screen.getByText('1 of 6 steps failed')).toBeTruthy();
+
+    // ...and the breakdown is not rendered until asked for.
+    expect(screen.queryByText('Automation server')).toBeNull();
+    expect(screen.queryByText(/no _system Garage key/)).toBeNull();
+  });
+
+  it('separates the automation server from the workspaces, failures first', () => {
+    // 'aaa-clean' sorts before 'tenant-a' alphabetically, so if it appears second
+    // the ordering is being driven by failure rather than by name.
+    const backups = makeBackups();
+    backups.last_run.workspaces['aaa-clean'] = {
+      files: { success: true, output: 'snapshot ok' },
+    };
+    render(<Host View={BackupsView} data={dataWith(backups)} />);
+
+    fireEvent.click(screen.getByText('1 of 7 steps failed'));
+
+    const headings = screen.getAllByRole('button')
+      .map(b => b.textContent)
+      .filter(t => /Automation server|tenant-a|aaa-clean/.test(t));
+    expect(headings[0]).toMatch(/tenant-a/);   // the only group with a failure
+    expect(headings.slice(1).join(' ')).toMatch(/Automation server/);
+    expect(headings.slice(1).join(' ')).toMatch(/aaa-clean/);
+  });
+
+  it('opens the group that failed and leaves the clean ones shut', () => {
+    const backups = makeBackups();
+    backups.last_run.workspaces['aaa-clean'] = {
+      files: { success: true, output: 'snapshot ok' },
+    };
+    render(<Host View={BackupsView} data={dataWith(backups)} />);
+    fireEvent.click(screen.getByText('1 of 7 steps failed'));
+
+    // The failing workspace is already expanded, reason showing: the point is
+    // that a problem needs no hunting for.
     expect(screen.getByText(/no _system Garage key/)).toBeTruthy();
-    expect(screen.getByText('saved off-server')).toBeTruthy();
+    // The clean groups stay collapsed to a count.
+    expect(screen.queryByText('snapshot ok')).toBeNull();
+    expect(screen.getByText('1 ok')).toBeTruthy();
+
+    fireEvent.click(screen.getByText('aaa-clean'));
+    expect(screen.getByText('snapshot ok')).toBeTruthy();
+  });
+
+  it('says all clear when nothing failed', () => {
+    const backups = makeBackups();
+    backups.last_run.workspaces['tenant-a'].garage = { success: true, output: 'ok' };
+    render(<Host View={BackupsView} data={dataWith(backups)} />);
+    expect(screen.getByText('completed')).toBeTruthy();
+    expect(screen.getByText('all 6 steps ok')).toBeTruthy();
+  });
+
+  it('groups the images step under the automation server, not a workspace', () => {
+    // Image archives are the server's own work; before grouping they sat in the
+    // same flat list as every workspace's files/postgres/garage rows.
+    const backups = makeBackups();
+    backups.last_run.images = { success: true, output: '30 image(s), 105 tag(s)' };
+    render(<Host View={BackupsView} data={dataWith(backups)} />);
+    fireEvent.click(screen.getByText('1 of 7 steps failed'));
+    fireEvent.click(screen.getByText('Automation server'));
+    expect(screen.getByText('30 image(s), 105 tag(s)')).toBeTruthy();
   });
 
   it('shows the not-connected state without any controls', () => {

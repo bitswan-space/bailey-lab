@@ -26,25 +26,103 @@ function fmtWhen(iso) {
   } catch (e) { return iso; }
 }
 
-function stepRow(ws, step, result) {
+const STEP_LABELS = {
+  files: 'Files',
+  postgres: 'Postgres',
+  couchdb: 'CouchDB',
+  garage: 'Object storage',
+  state: 'Server state',
+  images: 'Business-process images',
+  retention: 'Retention',
+};
+
+// A run's steps, grouped so the automation server's own work is not interleaved
+// with the workspaces'. A run over a dozen workspaces is otherwise a fifty-row
+// flat table in which one red cell is easy to miss.
+//
+// Ordered by failure, twice over: groups that failed come first, and inside a
+// group the failed steps come first. Opening the panel therefore puts the
+// problem at the top without anyone scanning for it.
+function runGroups(lastRun) {
+  const groups = [];
+
+  const serverSteps = [];
+  for (const [name, result] of [
+    ['state', lastRun.server_state],
+    ['images', lastRun.images],
+    ['retention', lastRun.retention],
+  ]) {
+    if (result) serverSteps.push({ name, result });
+  }
+  if (serverSteps.length) {
+    groups.push({ key: 'server', title: 'Automation server', icon: 'server', steps: serverSteps });
+  }
+
+  for (const ws of Object.keys(lastRun.workspaces || {}).sort()) {
+    const report = lastRun.workspaces[ws] || {};
+    const steps = Object.keys(report).sort().map(name => ({ name, result: report[name] }));
+    if (steps.length) groups.push({ key: `ws:${ws}`, title: ws, icon: 'folder', steps });
+  }
+
+  for (const g of groups) {
+    g.failed = g.steps.filter(s => !s.result || !s.result.success).length;
+    g.steps.sort((a, b) =>
+      (Number(!!(a.result && a.result.success)) - Number(!!(b.result && b.result.success)))
+      || a.name.localeCompare(b.name));
+  }
+  // Stable sort, so ties keep insertion order: the server group stays ahead of
+  // the workspaces within each failure class.
+  return groups.sort((a, b) => (b.failed > 0) - (a.failed > 0));
+}
+
+function StepRow({ name, result }) {
+  const ok = !!(result && result.success);
   return (
-    <tr key={`${ws}/${step}`}>
-      <td style={{ padding: '7px 12px', fontSize: 12.5, color: WC.fg, fontFamily: 'Geist Mono, monospace' }}>{ws}</td>
-      <td style={{ padding: '7px 12px', fontSize: 12.5, color: WC.muted }}>{step}</td>
-      <td style={{ padding: '7px 12px' }}>
-        {result.success
-          ? <WPill tone="success">ok</WPill>
-          : <WPill tone="danger">failed</WPill>}
-      </td>
-      <td style={{ padding: '7px 12px', fontSize: 12, color: result.success ? WC.muted : WC.red,
-        maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={result.output}>
-        {result.output || ''}
-      </td>
-    </tr>
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '5px 0 5px 30px' }}>
+      <WIcon name={ok ? 'check' : 'alert-triangle'} size={13} color={ok ? WC.green : WC.red}
+        style={{ marginTop: 2 }} />
+      <span style={{ fontSize: 12.5, color: WC.fg, flex: '0 0 168px' }}>
+        {STEP_LABELS[name] || name}
+      </span>
+      <span style={{ fontSize: 12, color: ok ? WC.muted : WC.red, flex: 1, wordBreak: 'break-word' }}>
+        {(result && result.output) || (ok ? '' : 'failed')}
+      </span>
+    </div>
   );
 }
 
-function LastRunTable({ lastRun }) {
+function RunGroup({ group }) {
+  // Open iff something in it failed. A clean group is a line and a count; the
+  // detail only earns its space when there is something wrong in it.
+  const [open, setOpen] = useBS(group.failed > 0);
+  return (
+    <div style={{ borderTop: `1px solid ${WC.surface2}` }}>
+      <button type="button" onClick={() => setOpen(!open)}
+        style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '9px 0',
+          background: 'transparent', border: 'none', cursor: 'pointer', fontFamily: 'inherit',
+          textAlign: 'left' }}>
+        <WIcon name={open ? 'chevron-down' : 'chevron-right'} size={14} color={WC.mutedFg} />
+        <WIcon name={group.icon} size={14} color={WC.muted} />
+        <span style={{ fontSize: 13, fontWeight: 600, color: WC.fg }}>{group.title}</span>
+        <span style={{ flex: 1 }} />
+        {group.failed > 0
+          ? <WPill tone="danger">{group.failed} failed</WPill>
+          : <WPill tone="success">{group.steps.length} ok</WPill>}
+      </button>
+      {open && (
+        <div style={{ paddingBottom: 8 }}>
+          {group.steps.map(s => <StepRow key={s.name} name={s.name} result={s.result} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The last run, collapsed to a single status line until asked for. Backups are
+// something you check rather than read: the answer is almost always "fine", and
+// the breakdown is only interesting when it is not.
+function LastRunPanel({ lastRun }) {
+  const [open, setOpen] = useBS(false);
   if (!lastRun) {
     return (
       <div style={{ fontSize: 13, color: WC.muted, padding: '10px 0' }}>
@@ -52,35 +130,28 @@ function LastRunTable({ lastRun }) {
       </div>
     );
   }
-  const workspaces = Object.keys(lastRun.workspaces || {}).sort();
+  const groups = runGroups(lastRun);
+  const total = groups.reduce((n, g) => n + g.steps.length, 0);
+  const failed = groups.reduce((n, g) => n + g.failed, 0);
+
   return (
-    <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0 10px' }}>
-        {lastRun.ok
-          ? <WPill tone="success" leftIcon="check">completed</WPill>
-          : <WPill tone="danger" leftIcon="alert-triangle">finished with errors</WPill>}
+    <div style={{ borderTop: `1px solid ${WC.surface2}`, marginTop: 4 }}>
+      <button type="button" onClick={() => setOpen(!open)}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '11px 0',
+          background: 'transparent', border: 'none', cursor: 'pointer', fontFamily: 'inherit',
+          textAlign: 'left', flexWrap: 'wrap' }}>
+        <WIcon name={open ? 'chevron-down' : 'chevron-right'} size={15} color={WC.mutedFg} />
+        {failed > 0
+          ? <WPill tone="danger">finished with errors</WPill>
+          : <WPill tone="success">completed</WPill>}
+        <span style={{ fontSize: 12.5, color: failed > 0 ? WC.red : WC.muted, fontWeight: failed > 0 ? 600 : 400 }}>
+          {failed > 0 ? `${failed} of ${total} steps failed` : `all ${total} steps ok`}
+        </span>
+        <span style={{ flex: 1 }} />
         <span style={{ fontSize: 12.5, color: WC.muted }}>finished {fmtWhen(lastRun.finished_at)}</span>
-      </div>
-      <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr style={{ borderBottom: `1px solid ${WC.surface2}` }}>
-              {['Workspace', 'Step', 'Result', 'Detail'].map(h => (
-                <th key={h} style={{ textAlign: 'left', padding: '6px 12px', fontSize: 11.5, color: WC.muted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {workspaces.flatMap(ws => {
-              const report = lastRun.workspaces[ws] || {};
-              return Object.keys(report).sort().map(step => stepRow(ws, step, report[step]));
-            })}
-            {lastRun.server_state ? stepRow('(server)', 'state', lastRun.server_state) : null}
-            {lastRun.retention ? stepRow('(repo)', 'retention', lastRun.retention) : null}
-          </tbody>
-        </table>
-      </div>
-    </>
+      </button>
+      {open && <div>{groups.map(g => <RunGroup key={g.key} group={g} />)}</div>}
+    </div>
   );
 }
 
@@ -225,7 +296,7 @@ function BackupsView({ ctx }) {
             {backups.reason && !backups.running && (
               <div style={{ fontSize: 12.5, color: WC.muted, paddingBottom: 8 }}>{backups.reason}</div>
             )}
-            <LastRunTable lastRun={backups.last_run} />
+            <LastRunPanel lastRun={backups.last_run} />
           </WCard>
 
           <WCard title="Encryption key" style={{ marginBottom: 16 }}>
