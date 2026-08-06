@@ -6,7 +6,9 @@ import { getAccessToken } from '@/lib/auth-token';
 interface Props {
   copy: string;
   bp: string;
-  kind: 'claude' | 'sync' | 'write-tests' | 'automation';
+  kind: 'claude' | 'sync' | 'merge-parent' | 'write-tests' | 'automation';
+  /** 'merge-parent' only: the branch the canned prompt rebases onto. */
+  parent?: string;
   /** Claude session UUID. We control it client-side so we can `--resume` it later. */
   sessionId: string;
   /** When true, ssh into the agent with `claude --resume <sessionId>` instead of a fresh session. */
@@ -26,6 +28,7 @@ export function SessionTerminal({
   copy,
   bp,
   kind,
+  parent,
   sessionId,
   resume,
   hidden,
@@ -55,11 +58,12 @@ export function SessionTerminal({
       copy,
       bp,
       kind,
+      ...(parent ? { parent } : {}),
       ...(resume ? { resume: sessionId } : { session_id: sessionId }),
       access_token: token,
     });
     return `/ws/coding-agent?${params.toString()}`;
-  }, [copy, bp, kind, sessionId, resume, token]);
+  }, [copy, bp, kind, parent, sessionId, resume, token]);
 
   // Pasted/dropped files land in `.agent-uploads/` under the session's cwd
   // — the BP dir (mirrors the cd logic in server/src/routes/coding-agent.ts)
@@ -81,7 +85,7 @@ export function SessionTerminal({
       });
       // Ship a self-ignoring .gitignore with every batch so pasted files
       // never show up in the copy's git status or ride along with a
-      // Sync & Deploy. Re-sent each time (2 bytes) rather than tracked,
+      // Deploy. Re-sent each time (2 bytes) rather than tracked,
       // since the cleanup sweeper may remove the whole directory.
       const gitignore = new File(['*\n'], '.gitignore', { type: 'text/plain' });
       const r = await api.copyFiles.upload(copy, dir, [gitignore, ...stamped]);

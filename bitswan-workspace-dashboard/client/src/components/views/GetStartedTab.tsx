@@ -75,10 +75,10 @@ const STEPS: Step[] = [
   {
     n: 5,
     Icon: Rocket,
-    title: 'Sync & Deploy to development',
-    body: 'Syncs what you’ve been working on into the deployment pipeline and rolls out to Development — with the live build log streaming. The tab also shows the Diff of what will change, the commit History with deploy markers, and a Supply Chain Security view listing the CVEs found in the image this deploy would build — plus the out-of-scope markings, versioned in your source tree.',
-    tab: 'sync-deploy',
-    cta: 'Open Sync & Deploy',
+    title: 'Deploy to development',
+    body: 'Publishes what you’ve been working on into the deployment pipeline and rolls out to Development — with the live build log streaming. The tab also shows the Diff of what will change, the commit History with deploy markers, and a Supply Chain Security view listing the CVEs found in the image this deploy would build — plus the out-of-scope markings, versioned in your source tree. It deploys only when your copy is a clean continuation of main; when main has moved on, the Sync tab pulls those changes in first.',
+    tab: 'deploy',
+    cta: 'Open Deploy',
   },
   {
     n: 6,
@@ -198,12 +198,13 @@ export function GetStartedTab({ onTab, onNewBp }: GetStartedTabProps) {
             Everything you do happens in your own{' '}
             <strong className="font-medium text-foreground">copy</strong> — a private
             branch of the workspace. Nothing you touch reaches the shared main, or
-            anyone else’s work, until you deliberately Sync &amp; Deploy. So experiment
-            freely: spin up a copy, try an idea, rebuild it, even break it on purpose to
-            see what happens — and if you don’t like where it went, just discard the copy.
-            Nothing was ever at stake, and there’s nothing to clean up. Make as many as you
-            like from the switcher in the bar above; each one is an isolated sandbox to
-            build in without worrying about breaking a thing.
+            anyone else’s work, until you deliberately Deploy. So experiment
+            freely: try an idea, rebuild it, even break it on purpose to
+            see what happens. Want to keep your copy tidy while you do? Start an{' '}
+            <strong className="font-medium text-foreground">experiment</strong> from
+            Advanced in the bar above — a side branch off your copy that you merge back
+            when you like the result, or discard when you don’t. Nothing was ever at
+            stake, and there’s nothing to clean up.
           </p>
         </section>
 

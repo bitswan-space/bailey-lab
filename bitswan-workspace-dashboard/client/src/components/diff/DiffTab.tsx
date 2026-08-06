@@ -8,7 +8,7 @@ import { DiffView } from './DiffView';
 interface Props {
   copy: string;
   /** When set, only show changes under this directory (e.g. the BP being
-   *  synced) — the diff that will actually become main on Sync & Deploy. */
+   *  synced) — the diff that will actually become main on Deploy. */
   pathPrefix?: string;
 }
 

@@ -268,7 +268,7 @@ export function SupplyChainPanel({
               Packages in the image{report.image_count > 1 ? 's' : ''} deployed to {stageLabel} and
               known vulnerabilities (CVEs) against them.{' '}
               {readOnly
-                ? 'Out-of-scope decisions are made from Sync & Deploy → Supply Chain Security and ship with the code.'
+                ? 'Out-of-scope decisions are made from Deploy → Supply Chain Security and ship with the code.'
                 : 'Click a CVE to view it or mark it out of scope.'}
             </>
           )}
@@ -459,7 +459,7 @@ export function SupplyChainPanel({
                   <p className="text-[12px] leading-relaxed text-muted-foreground">
                     Excludes this CVE from the risk rollup. The decision is saved in the source tree
                     (<code>cve-waivers.yaml</code>) with your justification and name, and ships to all
-                    stages on Sync &amp; Deploy.
+                    stages on Deploy.
                   </p>
                   <textarea
                     value={comment}

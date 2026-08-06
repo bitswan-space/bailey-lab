@@ -1,6 +1,7 @@
+import { randomBytes } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { GitopsClient } from '../services/gitops.js';
-import { emailFromRequest } from '../lib/user.js';
+import { copyNameForEmail, emailFromRequest } from '../lib/user.js';
 
 export interface CopyRoutesOptions {
   gitops: GitopsClient | null;
@@ -12,21 +13,91 @@ export interface CopyRoutesOptions {
  * mutating endpoints. Validation of the branch name is delegated to
  * gitops, which has the canonical regex.
  *
- * Copy deletion IS a user-facing action (it used to be operator-only):
- * the client shows a warn+confirm dialog listing unmerged/uncommitted work
- * before calling DELETE, and gitops tears down the whole copy — live-dev
+ * Copy deletion is EXPERIMENTS-ONLY: a person may discard their own
+ * experiment copies (Advanced menu → Discard experiment), but their personal
+ * copy and main are undeletable — gitops enforces this via the copy's
+ * `.copy.json` metadata (kind + owner), never by parsing the name, so a
+ * legacy metadata-less copy is undeletable too. The client shows a
+ * warn+confirm dialog listing unmerged/uncommitted work before calling
+ * DELETE, and gitops tears down the whole experiment — live-dev
  * deployments, per-copy databases, its branch in every BP repo, and the
- * directory tree. Deleting your own copy is allowed; a fresh one is
- * recreated from main on next use (via /api/me).
+ * directory tree.
  */
+// Gitops's copy-name allowlist (mirrors `_COPY_NAME_RE` in
+// bitswan-gitops/app/routes/copies.py and the client's own copy, kept here
+// so a malformed generated name 400s at the BFF instead of round-tripping to
+// gitops first).
+const COPY_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9-]*$/;
+
+// `-copy-` is reserved: automation_service.py parses a deployment id's copy
+// scope by splitting on this literal separator, so a copy name containing it
+// would make that parsing ambiguous (risk-sweep finding, adopted into the
+// design doc). gitops re-validates this too — this is belt-and-suspenders so
+// a bad title 400s immediately instead of after a round trip.
+const RESERVED_NAME_SEPARATOR = '-copy-';
+
+// Budget for the whole generated name, chosen so `copy_<name>_bp_<bp>` stays
+// clear of the 63-char truncation `copy_bp_resource_names` applies to
+// per-(copy, BP) live-dev resource names (postgres db, bucket, …) — gitops
+// computes its own (workspace-specific) budget from the actual BP slugs and
+// re-validates, so this is a conservative client-side pre-check, not the
+// authority.
+/**
+ * Turn an experiment title into the opaque branch/dir name
+ * `exp-<slug>-<4hex>`: lowercased, non-alphanumeric runs collapsed to a
+ * single hyphen, leading/trailing hyphens trimmed, and the SLUG trimmed (never
+ * the fixed `exp-`/hex parts) so the whole name fits `maxLen`. The name is
+ * opaque by design (classification is via `.copy.json` metadata, never by
+ * parsing it) — the title is what's actually displayed everywhere.
+ *
+ * `maxLen` is gitops' own budget for THIS workspace, fetched per request. It
+ * used to be a hard-coded 40, but the real limit is derived from the longest
+ * business-process slug (`copy_<name>_bp_<bp>` is truncated at 63 chars), so it
+ * is smaller on a workspace with a long-named business process. A workspace
+ * whose only process was `invoice-processing` had a budget of 36, so every
+ * title long enough to reach 40 produced a name gitops rejected with a 400 —
+ * "creating an experiment sometimes fails", where "sometimes" meant "depending
+ * on this workspace's longest business-process name and your title".
+ */
+export function experimentNameFromTitle(title: string, maxLen: number): string {
+  const rawSlug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '');
+  const hex = randomBytes(2).toString('hex'); // 4 hex chars
+  const fixedLen = 'exp-'.length + '-'.length + hex.length;
+  const slugBudget = Math.max(1, maxLen - fixedLen);
+  const trimmed = rawSlug.slice(0, slugBudget).replace(/-+$/, '') || 'experiment';
+  // `-copy-` is the deployment-id separator, so a name containing it would make
+  // deployment ids ambiguous and gitops rejects it. "copy" is an ordinary word
+  // in this product ("Try the new copy layout"), and the name is opaque anyway
+  // — everything the user sees is the title — so rewrite the segment rather
+  // than telling someone their title is unacceptable.
+  const slug = trimmed
+    .split('-')
+    .map((segment) => (segment === 'copy' ? 'cpy' : segment))
+    .join('-');
+  return `exp-${slug}-${hex}`;
+}
+
+/**
+ * Budget used when gitops reports none (`max_length: null` — a workspace with
+ * no business processes yet, so nothing can collide). Only the copy-name regex
+ * applies then; this keeps the generated name a sane length.
+ */
+const UNCONSTRAINED_EXPERIMENT_NAME_LEN = 40;
+
 export function registerCopyRoutes(
   app: FastifyInstance,
   { gitops }: CopyRoutesOptions,
 ): void {
-  // Delete a whole copy. Gitops answers 202 + a task id and runs the
-  // teardown on its queue; the `copies` SSE snapshot dropping the copy is
-  // the completion signal. The unmerged-work warning is a CLIENT concern —
-  // the server never blocks on divergence.
+  // Delete a whole copy. EXPERIMENTS-ONLY: gitops 400s for main, user copies,
+  // and legacy copies (no metadata or kind != experiment), and 403s unless
+  // the requester is the experiment's owner. Answers 202 + a task id and
+  // runs the teardown on its queue; the `copies` SSE snapshot dropping the
+  // copy is the completion signal. The unmerged-work warning is a CLIENT
+  // concern — the server never blocks on divergence.
   app.delete<{ Params: { name: string } }>(
     '/api/copies/:name',
     async (req, reply) => {
@@ -119,6 +190,41 @@ export function registerCopyRoutes(
     },
   );
 
+  // Merge an experiment back into the copy it branched from. Clone of the
+  // rebase route above: same guard-free shape (gitops owns the kind==
+  // experiment + owner checks), same 4xx passthrough / 502-on-unreachable
+  // pattern. Never touches main and deploys nothing new — it fast-forwards
+  // the PARENT's branch and redeploys only the parent's live-dev.
+  app.post<{ Params: { name: string } }>(
+    '/api/copies/:name/merge-to-parent',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      const { name } = req.params;
+      if (!name) {
+        return reply.code(400).send({ error: 'name is required' });
+      }
+      // The deployer recorded on any follow-up parent redeploy is the
+      // validated token email, never a client-supplied value — it can't be
+      // spoofed.
+      const deployer = await emailFromRequest(req, app.log);
+      try {
+        const r = await gitops.mergeCopyToParent(name, deployer ?? undefined);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name }, 'copy merge-to-parent failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   app.post<{ Params: { name: string; bp: string } }>(
     '/api/copies/:name/bp/:bp/ensure',
     async (req, reply) => {
@@ -167,6 +273,32 @@ export function registerCopyRoutes(
     },
   );
 
+  // What merging an experiment back would carry into its parent copy. The
+  // experiment banner asks this instead of /status: /status measures the copy
+  // against MAIN, and an experiment inherits its parent's whole divergence
+  // from main, so it can never say "nothing left to merge".
+  app.get<{ Params: { name: string } }>(
+    '/api/copies/:name/merge-preview',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      try {
+        const r = await gitops.copyMergePreview(req.params.name);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name: req.params.name }, 'copy merge-preview failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   app.get<{ Params: { name: string } }>(
     '/api/copies/:name/divergence-all',
     async (req, reply) => {
@@ -187,6 +319,32 @@ export function registerCopyRoutes(
           { err, name: req.params.name },
           'copy divergence-all failed',
         );
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  // How far behind main this copy is — total and per business process. The
+  // `copies` snapshot no longer carries any divergence at all (it was a
+  // fetch per copy × BP on every git event), so this is what the shell asks,
+  // for the one copy on screen, to decide whether the Sync step exists.
+  app.get<{ Params: { name: string } }>(
+    '/api/copies/:name/behind',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      try {
+        const r = await gitops.copyBehind(req.params.name);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name: req.params.name }, 'copy behind failed');
         return reply.code(502).send({ error: 'gitops unreachable' });
       }
     },
@@ -244,4 +402,98 @@ export function registerCopyRoutes(
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   });
+
+  // Start an experiment off the caller's own copy. The parent and owner are
+  // both derived from the verified identity — never client-supplied — and
+  // the name is a generated opaque slug; the user only names the thing
+  // they're trying out (`title`) and the business process they're trying it
+  // out ON (`bp`).
+  //
+  // `bp` is REQUIRED. An experiment is a side branch off one business process,
+  // and gitops clones exactly the ones it is given: a missing `bp` would
+  // create a real but EMPTY experiment (nothing cloned, nothing to work on)
+  // and look like a bug in whatever the user does next. So the omission is
+  // rejected here rather than papered over with a default.
+  app.post<{ Body: { title?: string; bp?: string } }>(
+    '/api/experiments',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+      if (!title) {
+        return reply.code(400).send({ error: 'title is required' });
+      }
+      const bp = typeof req.body?.bp === 'string' ? req.body.bp.trim() : '';
+      if (!bp) {
+        return reply.code(400).send({
+          error:
+            'bp is required — an experiment is started on a business process, ' +
+            'and it is the only one cloned into it',
+        });
+      }
+      const email = await emailFromRequest(req, app.log);
+      if (!email) {
+        return reply.code(401).send({ error: 'not authenticated' });
+      }
+      const parent = copyNameForEmail(email);
+      // Ask gitops how long a copy name may be HERE. The limit depends on this
+      // workspace's longest business-process name, so a generator carrying its
+      // own number produces names gitops rejects on some workspaces.
+      const budget = await gitops.copyNameBudget();
+      if (!budget.ok) {
+        return reply.code(budget.status >= 400 && budget.status < 500 ? budget.status : 502).send({
+          error: 'could not read the copy-name limit from gitops',
+          status: budget.status,
+          body: budget.body,
+        });
+      }
+      const reported = (budget.body as { max_length?: number | null } | null)
+        ?.max_length;
+      if (reported !== null && reported !== undefined && typeof reported !== 'number') {
+        return reply.code(502).send({
+          error: 'gitops reported a copy-name limit that is not a number',
+          body: budget.body,
+        });
+      }
+      const maxLen = reported ?? UNCONSTRAINED_EXPERIMENT_NAME_LEN;
+      const name = experimentNameFromTitle(title, maxLen);
+      if (!COPY_NAME_RE.test(name)) {
+        // Unreachable in practice — the generator only ever emits allowed
+        // characters — kept as defense in depth, mirroring gitops's own check.
+        return reply
+          .code(400)
+          .send({ error: 'generated experiment name is invalid' });
+      }
+      if (name.includes(RESERVED_NAME_SEPARATOR)) {
+        return reply
+          .code(400)
+          .send({ error: 'that title produces a reserved name; please rephrase it' });
+      }
+      try {
+        const r = await gitops.createCopy({
+          branch_name: name,
+          kind: 'experiment',
+          parent,
+          owner: email,
+          title,
+          // Exactly the one business process being tried out. gitops 400s with
+          // actionable text ("<bp> is not in <parent>") when the parent copy
+          // doesn't carry it — relayed below verbatim, since it names the fix.
+          bps: [bp],
+        });
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        const body = r.body && typeof r.body === 'object' ? r.body : {};
+        return { ...body, name };
+      } catch (err) {
+        app.log.warn({ err, name, parent, bp }, 'experiment create failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
 }

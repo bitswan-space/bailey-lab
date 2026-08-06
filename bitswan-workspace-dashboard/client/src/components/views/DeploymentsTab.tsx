@@ -2167,7 +2167,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
 
   // A deploy finished somewhere — this tab's own actions call refresh()
-  // themselves, but a deploy started OUTSIDE it (Sync & Deploy on a copy,
+  // themselves, but a deploy started OUTSIDE it (Deploy on a copy,
   // another browser tab, the gitops API) used to leave the stage cards stale
   // until a manual page reload. `deploy_progress` terminal events flow over
   // the shared SSE feed; refetch when the finished deploy concerns this BP.
@@ -2979,7 +2979,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   <div className="mt-2 font-semibold text-foreground">Not deployed yet</div>
                   <div className="mt-1">
                     {activeStage === 'dev'
-                      ? 'Deploy from Sync & Deploy to start a history.'
+                      ? 'Deploy from the Deploy tab to start a history.'
                       : 'Promote from a previous stage to start a deployment history.'}
                   </div>
                 </div>
