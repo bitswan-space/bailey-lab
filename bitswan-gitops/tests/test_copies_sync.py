@@ -12,6 +12,7 @@ import os
 import subprocess
 
 import pytest
+from fastapi import HTTPException
 
 from app.routes import copies
 from app.routes.copies import (
@@ -331,6 +332,47 @@ def test_rebase_pulls_main_into_copy(env):
     assert res.status == "success"
     with open(os.path.join(u2, "bpa", "file.txt")) as f:
         assert f.read() == "a1\n"
+
+
+def test_rebase_failure_that_is_not_a_conflict_is_not_reported_as_one(env, monkeypatch):
+    """A pull that fails BEFORE any rebase starts must not claim a conflict.
+
+    Every non-zero `git rebase` used to return `needs_rebase`, which the UI
+    presents as "hand off to the coding agent to resolve conflicts". When the
+    rebase never started (a lock, a bad ref — anything that is not a conflict)
+    that message sends the user to resolve conflicts that do not exist, and the
+    unconditional `rebase --abort` that followed logged
+    `fatal: No rebase in progress?`. Git leaves a rebase-in-progress directory
+    only for a real conflict, so that is what decides it.
+    """
+    u1 = env["make_copy"]("u1")
+    u2 = env["make_copy"]("u2")
+    _commit(os.path.join(u1, "bpa"), "file.txt", "a1\n", "u1 bpa")
+    assert (
+        asyncio.run(sync_copy("u1", SyncCopyRequest(deployer="d@x", bp="bpa"))).status
+        == "success"
+    )
+
+    real = copies.call_git_command_with_output
+
+    async def _fail_the_rebase(*command, **kwargs):
+        if "rebase" in command and "--abort" not in command:
+            return "", "fatal: could not lock the index", 128
+        return await real(*command, **kwargs)
+
+    monkeypatch.setattr(copies, "call_git_command_with_output", _fail_the_rebase)
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(rebase_copy("u2", SyncCopyRequest(deployer="d@x", bp="bpa")))
+    assert ei.value.status_code == 500
+    assert "could not lock the index" in ei.value.detail
+    assert "nothing was changed" in ei.value.detail
+    assert "conflict" not in ei.value.detail.lower()
+
+    # …and the copy really was left alone.
+    monkeypatch.undo()
+    with open(os.path.join(u2, "bpa", "file.txt")) as f:
+        assert f.read() == "a0\n"
 
 
 def test_rebase_materializes_missing_bp_clone(env):

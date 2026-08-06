@@ -1140,15 +1140,42 @@ async def _rebase_one_bp(
     if behind == 0:
         return {"bp": bp, "status": "noop", "pulled": 0, "changed_paths": []}
 
-    _, _rb_err, rb_rc = await call_git_command_with_output(
+    _, rb_err, rb_rc = await call_git_command_with_output(
         "git", *_ident_args(deployer), "rebase", "FETCH_HEAD", cwd=clone
     )
     if rb_rc != 0:
-        await call_git_command("git", "rebase", "--abort", cwd=clone)
+        # A non-zero rebase is NOT automatically a conflict. Git leaves a
+        # rebase-in-progress directory behind only when it actually started and
+        # stopped on one; anything else (it never started — a lock, a bad ref, a
+        # dirty tree) exits non-zero with no rebase in progress. Reporting those
+        # as `needs_rebase` sent the user to the coding agent to "resolve
+        # conflicts" that did not exist, and the abort below then logged
+        # `fatal: No rebase in progress?` — the tell that nothing had started.
+        # Ask git which happened instead of guessing.
+        conflicted = any(
+            os.path.isdir(os.path.join(clone, ".git", d))
+            for d in ("rebase-merge", "rebase-apply")
+        )
+        if conflicted:
+            await call_git_command("git", "rebase", "--abort", cwd=clone)
         await call_git_command_with_output(
             "git", "reset", "--hard", orig_head, cwd=clone
         )
-        return {"bp": bp, "status": "needs_rebase", "pulled": 0, "changed_paths": []}
+        if conflicted:
+            return {
+                "bp": bp,
+                "status": "needs_rebase",
+                "pulled": 0,
+                "changed_paths": [],
+            }
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Pulling main into '{bp}' failed before any rebase started "
+                f"(nothing was changed): {rb_err.strip() or 'git rebase exited '
+                f'{rb_rc} with no output'}"
+            ),
+        )
 
     new_out, _, _ = await call_git_command_with_output(
         "git", "rev-parse", "HEAD", cwd=clone
