@@ -55,8 +55,8 @@ func installRecoverServerFakes(t *testing.T, f *recoverServerFakes) *recoverServ
 		volumeExists    func(context.Context) bool
 		readServerID    func(context.Context, string) (string, error)
 		readToken       func(context.Context, string) (string, error)
-		readManifest    func(context.Context, string, string, string, string, string, string, string) (backup.ServerManifest, string, error)
-		probeKey        func(context.Context, string, string, string, string, string, string) error
+		readManifest    func(context.Context, string, string, string, string, string, string) (backup.ServerManifest, string, error)
+		probeKey        func(context.Context, string, string, string, string, string) error
 		loadImages      func(context.Context, *recoverServerState) (string, error)
 		exchangeOTP     func(string, string, string) (string, string, error)
 		tokenWorks      func(string, string, string) bool
@@ -93,12 +93,12 @@ func installRecoverServerFakes(t *testing.T, f *recoverServerFakes) *recoverServ
 		f.calls = append(f.calls, "exchange")
 		return "FRESH-token", "2027-01-01T00:00:00Z", nil
 	}
-	recoverServerProbeKey = func(_ context.Context, _, _, cred, _, _, _ string) error {
+	recoverServerProbeKey = func(_ context.Context, _, _, cred, _, _ string) error {
 		f.calls = append(f.calls, "probe")
 		f.probeCred = cred
 		return f.probeErr
 	}
-	recoverServerReadManifest = func(_ context.Context, _, _, cred, _, _, _, _ string) (backup.ServerManifest, string, error) {
+	recoverServerReadManifest = func(_ context.Context, _, _, cred, _, _, _ string) (backup.ServerManifest, string, error) {
 		f.calls = append(f.calls, "manifest")
 		f.manifestCred = cred
 		return f.manifest, "", f.manifestErr

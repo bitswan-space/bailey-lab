@@ -289,8 +289,8 @@ unattended run), then works through six phases, printing each step:
 | verify | confirms the world is served this server's own certificate |
 
 Useful flags: `--dry-run` (print the plan and stop), `--skip-workspaces`,
-`--workspace W` (repeatable), `--skip-image-rebuild`, `--docker-network` (an AOC
-that is not publicly resolvable), `--snapshot` (recover from an older point).
+`--workspace W` (repeatable), `--skip-image-rebuild`, `--snapshot` (recover from
+an older point).
 
 **If it fails partway, re-run it.** A token that still authenticates is detected
 and reused, so a retry does not need a fresh OTP — and OTPs are single-use, with a
@@ -442,9 +442,8 @@ then the single command. **2m43s, zero manual steps.** What it proved:
 - the recovered server backed itself up green immediately afterwards.
 
 The one sandbox-only concession: this host runs the AOC behind the very Traefik
-being wiped, so the drill pointed `--aoc-api` at the AOC container over the docker
-network (`--docker-network`). In production the AOC is on other hardware and
-reachable normally, which is the case the flag exists to stand in for.
+being wiped, so the drill left Traefik in place to keep the AOC reachable. In
+production the AOC is on other hardware and is unaffected by the rebuild.
 
 **Do NOT use `bitswan workspace remove` to rehearse this.** It is a hard
 teardown (volumes, networks, ingress routes, TLS, images, files) and on

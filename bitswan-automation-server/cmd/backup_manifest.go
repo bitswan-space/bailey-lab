@@ -29,7 +29,7 @@ import (
 // docker, BEFORE committing to a rebuild.
 
 func newBackupManifestCmd() *cobra.Command {
-	var aocAPI, serverID, token, keyFile, snapshot, image, network string
+	var aocAPI, serverID, token, keyFile, snapshot, image string
 
 	cmd := &cobra.Command{
 		Use:   "manifest",
@@ -81,7 +81,7 @@ func newBackupManifestCmd() *cobra.Command {
 			}
 
 			manifest, warning, err := readManifestWithoutDaemon(
-				cmd.Context(), aocAPI, serverID, token, key, snapshot, image, network)
+				cmd.Context(), aocAPI, serverID, token, key, snapshot, image)
 			if err != nil {
 				return err
 			}
@@ -98,11 +98,6 @@ func newBackupManifestCmd() *cobra.Command {
 	f.StringVar(&keyFile, "key-file", "", "file holding the backup encryption key (daemon-less mode)")
 	f.StringVar(&image, "runtime-image", "",
 		"image providing restic (default: the pin recorded in the backup, else "+backup.DefaultRuntimeImage+")")
-	// restic runs in a container, so a privately-reachable AOC (one behind the
-	// ingress this very server provides, or on an internal network) needs the
-	// container attached to that network — the host's DNS cannot see it.
-	f.StringVar(&network, "docker-network", "",
-		"docker network to attach restic to, when the AOC is not publicly resolvable")
 	return cmd
 }
 
@@ -129,13 +124,14 @@ func readKeyFile(path string) (string, error) {
 // server's access token; during a recovery's read-only preflight it is the recovery
 // OTP instead, which works unchanged because the proxy takes either as the REST
 // password (see backup.NewAOCTarget).
-func newDaemonlessRestic(aocAPI, serverID, cred, key, image, network string) *backup.Restic {
+func newDaemonlessRestic(aocAPI, serverID, cred, key, image string) *backup.Restic {
 	target := backup.NewAOCTarget(aocAPI, serverID, cred)
 	exec := backup.NewContainerExec(image)
-	switch {
-	case network != "":
-		exec.Network = network
-	case target.InDockerNetwork():
+	// A .localhost AOC is only reachable over the docker network — the same dev
+	// rewrite AOCClient.GetAOCEnvironmentVariables applies for workspace
+	// containers. Automatic and dev-only: a real AOC is resolved by DNS like
+	// anything else.
+	if target.InDockerNetwork() {
 		exec.OnBitswanNetwork()
 	}
 	restic := backup.NewRestic(target, key)
@@ -146,7 +142,7 @@ func newDaemonlessRestic(aocAPI, serverID, cred, key, image, network string) *ba
 // readManifestWithoutDaemon is the bare-machine bootstrap: build the AOC target
 // from supplied values and read the manifest with restic in a container.
 func readManifestWithoutDaemon(
-	ctx context.Context, aocAPI, serverID, token, key, snapshot, image, network string,
+	ctx context.Context, aocAPI, serverID, token, key, snapshot, image string,
 ) (backup.ServerManifest, string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -154,7 +150,7 @@ func readManifestWithoutDaemon(
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	restic := newDaemonlessRestic(aocAPI, serverID, token, key, image, network)
+	restic := newDaemonlessRestic(aocAPI, serverID, token, key, image)
 
 	manifest, err := backup.ReadServerManifest(ctx, restic, snapshot)
 	if err != nil {

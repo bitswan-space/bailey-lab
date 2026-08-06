@@ -51,7 +51,7 @@ var resticProbeArgs = []string{"cat", "config", "--no-lock"}
 // authenticating with `cred` (the recovery OTP, or a stored token when resuming).
 // A seam so the preflight ordering can be tested without docker or an AOC.
 var recoverServerProbeKey = func(
-	ctx context.Context, aocAPI, serverID, cred, key, image, network string,
+	ctx context.Context, aocAPI, serverID, cred, key, image string,
 ) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -59,7 +59,7 @@ var recoverServerProbeKey = func(
 	ctx, cancel := context.WithTimeout(ctx, recoverServerProbeLimit)
 	defer cancel()
 
-	restic := newDaemonlessRestic(aocAPI, serverID, cred, key, image, network)
+	restic := newDaemonlessRestic(aocAPI, serverID, cred, key, image)
 	_, _, err := restic.Run(ctx, resticProbeArgs...)
 	return err
 }

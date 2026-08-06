@@ -51,7 +51,6 @@ type recoverServerOpts struct {
 	otp       string
 	keyFile   string
 	snapshot  string
-	network   string
 	image     string
 	only      []string
 	skipWS    bool
@@ -105,7 +104,6 @@ func newRecoverServerCmd() *cobra.Command {
 	f.StringVar(&o.otp, "otp", "", "the recovery one-time password from the AOC card")
 	f.StringVar(&o.keyFile, "key-file", "", "file holding the backup encryption key (prompted for if omitted)")
 	f.StringVar(&o.snapshot, "snapshot", "", "server-state snapshot to restore (default: the newest)")
-	f.StringVar(&o.network, "docker-network", "", "docker network to reach the AOC on, when it is not publicly resolvable")
 	f.StringVar(&o.image, "runtime-image", "", "image providing restic (default: the one recorded in the backup)")
 	f.StringSliceVar(&o.only, "workspace", nil, "only recover this workspace (repeatable)")
 	f.BoolVar(&o.skipWS, "skip-workspaces", false, "restore the server and its ingress, then stop")
@@ -313,7 +311,7 @@ func recoverServerPreflight(ctx context.Context, st *recoverServerState, step st
 	// off the AOC and only then find out. A failure here costs nothing.
 	if !step("probe", func() (string, error) {
 		err := recoverServerProbeKey(
-			ctx, o.aocAPI, o.serverID, st.readCred, st.key, o.image, o.network)
+			ctx, o.aocAPI, o.serverID, st.readCred, st.key, o.image)
 		if err != nil {
 			return "", explainProbeFailure(err, o.serverID)
 		}
@@ -329,7 +327,7 @@ func recoverServerPreflight(ctx context.Context, st *recoverServerState, step st
 	// plan before consenting to the one irreversible step.
 	if !step("manifest", func() (string, error) {
 		manifest, warning, err := recoverServerReadManifest(
-			ctx, o.aocAPI, o.serverID, st.readCred, st.key, o.snapshot, o.image, o.network)
+			ctx, o.aocAPI, o.serverID, st.readCred, st.key, o.snapshot, o.image)
 		if err != nil {
 			return "", err
 		}
