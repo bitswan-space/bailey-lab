@@ -1773,9 +1773,15 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       'Admin',
     ].sort((a, b) => b.length - a.length);
     const barText = ((await topBarEl().innerText()) || '').replace(/\s+/g, ' ').trim();
-    let residue = barText;
-    for (const label of ALLOWED_TOP_BAR) residue = residue.split(label).join('');
-    residue = residue.replace(/[\s·|›>]/g, '');
+    // Compare case-insensitively: `innerText` returns text as RENDERED, and the
+    // section label is upper-cased by CSS ("PROCESS"), which no allow-list
+    // spelling would match. Lower-casing both sides keeps the check strict
+    // about CONTENT while ignoring presentation.
+    let residue = barText.toLowerCase();
+    for (const label of ALLOWED_TOP_BAR) {
+      residue = residue.split(label.toLowerCase()).join('');
+    }
+    residue = residue.replace(/[\s·|›>&]/g, '');
     expect(
       residue,
       `the top bar carries text beyond the pipeline labels — the copy name/chip is back in the bar (bar read: "${barText}")`,
