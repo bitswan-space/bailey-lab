@@ -1168,12 +1168,12 @@ async def _rebase_one_bp(
                 "pulled": 0,
                 "changed_paths": [],
             }
+        why = rb_err.strip() or f"git rebase exited {rb_rc} with no output"
         raise HTTPException(
             status_code=500,
             detail=(
                 f"Pulling main into '{bp}' failed before any rebase started "
-                f"(nothing was changed): {rb_err.strip() or 'git rebase exited '
-                f'{rb_rc} with no output'}"
+                f"(nothing was changed): {why}"
             ),
         )
 

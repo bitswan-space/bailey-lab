@@ -2,6 +2,13 @@
 version = "0.1.0"
 name = "bitswan-gitops-server"
 description = "Bitswan gitops makes it easy to deploy bitswan pipelines and automations on any server"
+# The runtime image is python:3.11-bookworm (see Dockerfile). Declaring the
+# floor stops uv defaulting the workspace to >=3.12; it does NOT pin the
+# interpreter the tests run on, so the actual guard against using syntax the
+# runtime can't parse is `RUN python -m compileall -q app` in the Dockerfile,
+# which runs on 3.11 itself. Run the suite with `uv run --python 3.11 …` to
+# reproduce the runtime exactly.
+requires-python = ">=3.11"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = {file = "LICENSE"}
 authors = [

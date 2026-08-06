@@ -33,6 +33,14 @@ COPY bitswan-gitops/start.sh .
 
 RUN pip install -e .
 
+# Fail the BUILD on anything the runtime interpreter can't parse. The test suite
+# runs under whatever interpreter uv resolves (3.12 on the dev boxes), while
+# this image is python:3.11 — so a 3.12-only construct sails through a fully
+# green `pytest`/`ruff` and then crash-loops the container at import time, with
+# the workspace down. This runs on the exact interpreter that will serve
+# traffic, costs a second, and makes an unparseable image impossible to ship.
+RUN python -m compileall -q app
+
 
 # Create user 1000 and set up permissions
 RUN useradd -u 1000 -m -s /bin/bash user1000
