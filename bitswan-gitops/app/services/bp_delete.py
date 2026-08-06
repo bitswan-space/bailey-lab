@@ -353,8 +353,17 @@ async def delete_copy(name: str, deleted_by: str | None, service) -> dict:
         for conf in entries.values()
     }
     copy_path = os.path.join(bp_git.copies_dir(), name)
-    affected_bps = sorted(
+    # BPs whose deploy-state slice mentions this copy — the only ones the driver
+    # has anything to prune for. An experiment that never deployed anything has
+    # none, and pushing a slice per checked-out BP would be ~20 driver
+    # round-trips of pure no-op (minutes of teardown for nothing).
+    deployed_bps = sorted(
         {deployment_bp(conf) for conf in entries.values() if deployment_bp(conf)}
+    )
+    # Every BP the copy carried: per-(copy, BP) databases can outlive a
+    # deployment entry, so those are dropped on the wider set.
+    affected_bps = sorted(
+        set(deployed_bps)
         | {sanitize_automation_name(bp) for bp in bp_git.list_bp_clones(copy_path)}
     )
 
@@ -388,8 +397,9 @@ async def delete_copy(name: str, deleted_by: str | None, service) -> dict:
     await _remove_gateways(service, read_bitswan_yaml(service.gitops_dir), groups)
     _unlink_lru_markers(service, (ctx for ctx, _ in groups))
 
-    # 4. Push each affected BP's slice so the driver prunes the copy's routes.
-    for bp in affected_bps:
+    # 4. Push the slice of each BP this copy actually deployed in, so the driver
+    #    prunes the copy's routes and containers there.
+    for bp in deployed_bps:
         try:
             await service.push_bp_state(bp, f"delete copy {name}", deleted_by)
             results[f"reconcile-push:{bp}"] = "ok"

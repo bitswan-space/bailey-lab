@@ -420,7 +420,7 @@ class ProcessService:
             commit_in_bp_clone,
             publish_main_from_clone,
         )
-        from app.services.git_server import bp_main_has_content, ensure_bp_bare_repo
+        from app.services.git_server import bp_name_is_taken, ensure_bp_bare_repo
 
         # Collapse whitespace runs; the display name is stored verbatim
         # otherwise. Slugification confines the filesystem/git name to
@@ -435,7 +435,7 @@ class ProcessService:
         # The BP's own repo (idempotent — reused if it already exists as an empty
         # seed from a failed earlier attempt).
         await ensure_bp_bare_repo(clean, author=created_by)
-        if await bp_main_has_content(clean):
+        if await bp_name_is_taken(clean):
             raise FileExistsError(f"a business process named '{clean}' already exists")
 
         main_scope = os.path.join(_copies_dir(), "main")
@@ -509,7 +509,7 @@ class ProcessService:
             commit_in_bp_clone,
             publish_main_from_clone,
         )
-        from app.services.git_server import bp_main_has_content, ensure_bp_bare_repo
+        from app.services.git_server import bp_name_is_taken, ensure_bp_bare_repo
         from app.utils import bitswan_extract_filter
 
         tmp = tempfile.mkdtemp(prefix=".bp-bundle-")
@@ -556,7 +556,7 @@ class ProcessService:
 
             # Same born-in-main dance as create_business_process.
             await ensure_bp_bare_repo(clean, author=created_by)
-            if await bp_main_has_content(clean):
+            if await bp_name_is_taken(clean):
                 raise FileExistsError(
                     f"a business process named '{clean}' already exists"
                 )

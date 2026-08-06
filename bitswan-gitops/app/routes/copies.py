@@ -15,9 +15,30 @@ shapes are unchanged from the single-repo era.
 Each clone's ``origin`` points at the embedded smart-HTTP git server so agents
 push/pull with normal git (fast-forward only; main is deploy-only).
 The router is served under ``/copies``.
+
+**The listing carries no git state.** ``_copy_facts`` — what the ``copies`` SSE
+event and its cache are built from — is filesystem metadata only: name, branch,
+``.copy.json`` (kind/owner/parent/title), whether requirements exist. It
+deliberately runs NO git commands, and a test enforces that.
+
+Divergence is answered ON DEMAND, for the one copy (and usually the one
+business process) the user is actually looking at:
+
+* ``GET /{name}/behind``        — does main carry work this copy lacks (Sync step)
+* ``GET /{name}/divergence``    — one business process vs main (Deploy gate)
+* ``GET /{name}/divergence-all``— per-business-process breakdown for a copy
+* ``GET /{name}/merge-preview`` — an experiment vs its parent (merge-back gate)
+* ``GET /{name}/status``        — per-file changes, including uncommitted
+
+Computing any of it eagerly means a ``git fetch`` per (copy, business process)
+pair on every git event: on a real workspace that was 75 seconds per pass, and
+because the scan's own fetches wrote inside the copy trees it kept retriggering
+itself. Please keep new state out of the listing and behind an endpoint.
 """
 
+import asyncio
 import datetime
+import json
 import logging
 import os
 import re
@@ -27,6 +48,7 @@ from pydantic import BaseModel
 
 from app.deploy_runner import spawn_set_deploy
 from app.services.automation_service import scan_workspace_sources
+from app.services.bp_databases import copy_bp_resource_names
 from app.services.bp_git import (
     copies_dir as _copies_dir,
 )
@@ -36,6 +58,7 @@ from app.services.bp_git import (
 from app.services.bp_git import (
     _rm_rf_as_root_in_container,
     fetch_main,
+    ff_branch_to_ref,
     ff_main_to_ref,
     list_bp_clones,
     refresh_main_bp_checkout,
@@ -108,9 +131,249 @@ def _validate_bp_dir(bp: str) -> None:
         raise HTTPException(status_code=400, detail="invalid business process name")
 
 
+# ── copy metadata (.copy.json) ──────────────────────────────────────────────
+# A copy's kind/ownership/parentage is EXPLICIT stored data, never inferred
+# from its name. The sidecar is a dot-file, so it is invisible to
+# `list_bp_clones` (bp_git) and to the copy scan in `_compute_copies`.
+
+COPY_META_FILE = ".copy.json"
+COPY_META_VERSION = 1
+
+# The two kinds of copy that carry metadata. A copy without a sidecar is a
+# LEGACY copy: operator-created, unowned, and never an experiment.
+COPY_KIND_USER = "user"
+COPY_KIND_EXPERIMENT = "experiment"
+COPY_KINDS = (COPY_KIND_USER, COPY_KIND_EXPERIMENT)
+
+
+def _copy_meta_path(copy_path: str) -> str:
+    """Path of a copy's metadata sidecar."""
+    return os.path.join(copy_path, COPY_META_FILE)
+
+
+def read_copy_meta(copy_path: str) -> dict | None:
+    """Read a copy's `.copy.json`, or None when the copy has no metadata
+    (legacy copies predate it). A file that exists but cannot be parsed is a
+    hard error — silently treating a corrupt sidecar as "legacy" would demote
+    an experiment to an ordinary copy and let the delete/merge guards through
+    for the wrong reason."""
+    path = _copy_meta_path(copy_path)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        raw = f.read()
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=500, detail=f"Corrupt copy metadata at {path}: {e}"
+        ) from e
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=500, detail=f"Corrupt copy metadata at {path}: not an object"
+        )
+    return data
+
+
+def write_copy_meta(copy_path: str, meta: dict) -> None:
+    """Write a copy's `.copy.json` atomically (temp file + rename), so a reader
+    never sees a half-written sidecar."""
+    path = _copy_meta_path(copy_path)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(meta, f, indent=2, sort_keys=True)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+# Deployment ids embed the copy name as `<automation>-copy-<copy>-<bp>-<stage>`
+# and automation_service classifies/prunes entries by testing for this
+# separator (automation_service: `"-copy-" in deployment_id`). A copy whose own
+# name contains it would make that parsing ambiguous.
+_DEPLOYMENT_ID_COPY_SEPARATOR = "-copy-"
+
+# Per-(copy, BP) live-dev resource names are truncated at 63 chars by
+# `copy_bp_resource_names`; a truncated name can collide with another copy's.
+# The overhead is measured from that very function (single source of truth)
+# against the BPs that exist NOW. Deliberately no speculative reserve for
+# future BPs: email-derived user-copy names are routinely ~30 chars, so any
+# fixed reserve either rejects real users' copies (a reserve of 32 capped
+# names at ~22 chars and broke every /api/me copy create) or is too small to
+# guarantee anything. A BP created later that would overflow gets the same
+# pre-existing truncation behaviour user copies have always had.
+
+
+def _copy_name_budget(bp_slug: str) -> int:
+    """Longest copy name whose `copy_<name>_bp_<bp>` postgres db name survives
+    `copy_bp_resource_names`' 63-char truncation, measured from that function
+    rather than re-deriving its format."""
+    probe = copy_bp_resource_names("x", bp_slug)["postgres_db"]
+    overhead = len(probe) - 1  # everything except the 1-char copy name
+    return 63 - overhead
+
+
+def copy_name_budget() -> int | None:
+    """Longest name a NEW copy may have right now, or None when nothing
+    constrains it yet (no business processes).
+
+    It depends on the LONGEST business-process slug in the workspace, because
+    the limit comes from `copy_<name>_bp_<bp>` being truncated at 63 characters
+    — so it shrinks when someone creates a business process with a long name,
+    and a caller that hard-codes a number is wrong on some workspaces and right
+    on others. Exposed over the API (`GET /copies/name-budget`) so name
+    generators ask instead of guessing.
+    """
+    slugs = list_bp_repos()
+    if not slugs:
+        return None
+    return min(_copy_name_budget(s) for s in slugs)
+
+
+def _validate_new_copy_name(name: str) -> None:
+    """Extra rules applied when a copy is CREATED (existing copies keep
+    working): no deployment-id separator, and a length that keeps the
+    per-(copy, BP) resource names collision-free."""
+    _validate_copy_name(name)
+    if _DEPLOYMENT_ID_COPY_SEPARATOR in name:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid copy name: must not contain "
+                f"'{_DEPLOYMENT_ID_COPY_SEPARATOR}' (it would make deployment "
+                "ids ambiguous)."
+            ),
+        )
+    budget = copy_name_budget()
+    if budget is None:
+        return  # no BPs yet — nothing to collide with
+    if len(name) > budget:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid copy name: at most {budget} characters (longer names "
+                "collide once truncated into per-copy database names)."
+            ),
+        )
+
+
+def _require_experiment_owner(
+    name: str, copy_path: str, not_experiment_detail: str
+) -> dict:
+    """Guard for the destructive experiment operations (merge-back, discard):
+    the copy must carry `kind == "experiment"` metadata and the gate-verified
+    requester must be its recorded owner. Fails closed — no metadata, no
+    owner recorded, or no forwarded identity all deny."""
+    from app.task_queue import current_requester
+
+    meta = read_copy_meta(copy_path)
+    if not meta or meta.get("kind") != COPY_KIND_EXPERIMENT:
+        raise HTTPException(status_code=400, detail=not_experiment_detail)
+    owner = (meta.get("owner") or "").strip()
+    requester = (current_requester.get() or "").strip()
+    if not owner or not requester or owner != requester:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only the owner of experiment '{name}' can do this.",
+        )
+    return meta
+
+
 class CreateCopyRequest(BaseModel):
     branch_name: str
     base_branch: str = None  # defaults to main
+    # Explicit copy metadata (written to `.copy.json`). Omitted entirely =>
+    # a legacy, metadata-less copy (the operator-only surface).
+    kind: str | None = None  # "user" | "experiment"
+    parent: str | None = None  # experiments only: the user copy they branch off
+    owner: str | None = None  # email; defaults to the gate-verified requester
+    title: str | None = None  # human label (experiments display this, not the name)
+    # EXPERIMENTS ONLY: the business processes to materialise up front — in
+    # practice the one the user is looking at when they start the experiment.
+    # Everything else is materialised from the parent on first open
+    # (`ensure_bp_in_copy`), so starting an experiment costs one clone rather
+    # than one per business process in the workspace. Ignored for user copies:
+    # a person's copy is their whole working environment and carries everything.
+    bps: list[str] | None = None
+
+
+# Every business process is its own bare repo and its own clone directory, so
+# per-BP git work is independent and runs concurrently. Bounded so a workspace
+# with dozens of business processes doesn't fork dozens of git processes at
+# once. Sequentially, creating a copy in a 20-BP workspace took two minutes —
+# past the ingress timeout, so the user saw "failed" for a copy that was in
+# fact being created.
+_BP_FANOUT = 8
+
+
+async def _map_each_bp(bps: list[str], run) -> list:
+    """Run `run(bp)` for every BP concurrently, at most `_BP_FANOUT` at a time,
+    and return the results IN THE ORDER OF `bps`. The first failure propagates
+    — nothing here is best-effort."""
+    sem = asyncio.Semaphore(_BP_FANOUT)
+
+    async def _one(bp):
+        async with sem:
+            return await run(bp)
+
+    return list(await asyncio.gather(*(_one(bp) for bp in bps)))
+
+
+async def _for_each_bp(bps: list[str], run) -> None:
+    """`_map_each_bp` for callers that don't need the results."""
+    await _map_each_bp(bps, run)
+
+
+async def _publish_copy_bp_tip(
+    copy_path: str, name: str, bp: str, author: str | None
+) -> None:
+    """Commit ONE BP clone's working-tree state in copy `name` and push its
+    branch to the bare repo, so the copy's CURRENT state for that business
+    process is what other clones branch from.
+
+    This is what makes an experiment start from what its parent looks like right
+    now, including edits the dashboard wrote straight to disk without
+    committing. It runs per business process because an experiment materialises
+    per business process (see `ensure_bp_in_copy`) — publishing all of them up
+    front meant a commit + push for every BP in the parent whether or not the
+    experiment would ever touch it.
+    """
+    clone = os.path.join(copy_path, bp)
+    await _wip_commit(
+        clone,
+        author,
+        ["-A"],
+        bp,
+        f"Commit work in progress before branching an experiment ({bp})",
+    )
+    p_out, p_err, p_rc = await call_git_command_with_output(
+        "git", "push", bp_bare_repo_path(bp), f"HEAD:refs/heads/{name}", cwd=clone
+    )
+    if p_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to publish '{bp}' branch '{name}': {(p_err or p_out).strip()}"
+            ),
+        )
+
+
+@router.get("/name-budget")
+async def get_copy_name_budget():
+    """`{max_length: N|null}` — the longest name a new copy may have.
+
+    Registered before the `/{name}/…` routes so the literal path wins.
+
+    Name GENERATORS (the dashboard turns an experiment's title into a slug) must
+    read this rather than carry their own number: the limit is derived from the
+    longest business-process slug in the workspace, so it differs per workspace
+    and shrinks when a long-named business process is created. A hard-coded
+    budget made "Start a new experiment" fail with a 400 on exactly those
+    workspaces, which is what "creating an experiment sometimes fails" was.
+    `null` means nothing constrains it yet (no business processes).
+    """
+    return {"max_length": copy_name_budget()}
 
 
 @router.post("/create")
@@ -120,10 +383,30 @@ async def create_copy(body: CreateCopyRequest):
 
     Eagerly clones every BP whose main has content (matching the old
     "a new copy starts from main" semantics); BPs that exist only in other
-    copies appear here after they are synced into main (or via a pull)."""
-    _validate_copy_name(body.branch_name)
+    copies appear here after they are synced into main (or via a pull).
+
+    With ``kind`` (and friends) the copy records explicit metadata in
+    `.copy.json`. ``kind="experiment"`` requires ``parent`` — an existing,
+    non-experiment copy (the tree is single-level): the base branch is forced
+    to the parent's, and the parent's current work is committed + published
+    first so the experiment starts from what its owner sees right now.
+    """
+    from app.task_queue import current_requester
 
     name = body.branch_name
+    _validate_new_copy_name(name)
+
+    kind = body.kind
+    if kind is not None and kind not in COPY_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid copy kind '{kind}': expected one of {', '.join(COPY_KINDS)}",
+        )
+    if body.parent and kind != COPY_KIND_EXPERIMENT:
+        raise HTTPException(
+            status_code=400, detail="Only experiments can have a parent copy"
+        )
+
     copy_path = os.path.join(_copies_dir(), name)
     if os.path.exists(copy_path):
         raise HTTPException(status_code=409, detail=f"Copy '{name}' already exists")
@@ -133,11 +416,71 @@ async def create_copy(body: CreateCopyRequest):
         _validate_ref_name(body.base_branch)
         base = body.base_branch
 
+    owner = (body.owner or "").strip() or (current_requester.get() or "").strip()
+    parent = None
+    if kind == COPY_KIND_EXPERIMENT:
+        parent = (body.parent or "").strip()
+        if not parent:
+            raise HTTPException(
+                status_code=400, detail="An experiment needs a parent copy"
+            )
+        parent_path = _resolve_copy_path(parent)
+        if not os.path.isdir(parent_path):
+            raise HTTPException(
+                status_code=400, detail=f"Parent copy '{parent}' not found"
+            )
+        parent_meta = read_copy_meta(parent_path)
+        if parent_meta and parent_meta.get("kind") == COPY_KIND_EXPERIMENT:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"'{parent}' is itself an experiment — experiments branch "
+                    "off a person's copy, not off another experiment."
+                ),
+            )
+        base = parent
+
     os.makedirs(copy_path, exist_ok=True)
 
     try:
-        for bp in list_bp_repos():
-            await _clone_bp_into_copy(copy_path, name, bp, base)
+        if kind is not None or body.owner or body.title:
+            write_copy_meta(
+                copy_path,
+                {
+                    "version": COPY_META_VERSION,
+                    "kind": kind or COPY_KIND_USER,
+                    "owner": owner or None,
+                    "parent": parent,
+                    "title": body.title or name,
+                    "created_at": datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat(),
+                },
+            )
+        if kind == COPY_KIND_EXPERIMENT:
+            # Only the business processes the caller asked for. An experiment is
+            # a side branch off the one business process being tried out, so
+            # cloning all of them (a full git clone + working tree each) cost
+            # over two minutes on a 20-BP workspace for work the user never
+            # asked for. Everything else materialises from the parent on first
+            # open, via `ensure_bp_in_copy`.
+            for bp in body.bps or []:
+                _validate_bp_dir(bp)
+                if not os.path.isdir(os.path.join(parent_path, bp, ".git")):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"'{bp}' is not in '{parent}', so an experiment on "
+                            "it has nothing to branch from"
+                        ),
+                    )
+                await _publish_copy_bp_tip(parent_path, parent, bp, owner or None)
+                await _clone_bp_into_copy(copy_path, name, bp, base)
+        else:
+            await _for_each_bp(
+                list_bp_repos(),
+                lambda bp: _clone_bp_into_copy(copy_path, name, bp, base),
+            )
     except HTTPException:
         await _rm_rf_as_root_in_container(copy_path)
         raise
@@ -145,21 +488,27 @@ async def create_copy(body: CreateCopyRequest):
     result = {"name": name, "path": copy_path}
 
     # Auto-start live-dev for every automation in the new copy (best-effort).
-    try:
-        members = scan_workspace_sources(_copies_dir(), copy=name)
-        res = await spawn_set_deploy(
-            label=f"copy:{name}",
-            members=members,
-            stage="live-dev",
-            copy=name,
-        )
-        if res.get("deploy"):
-            result["deploy_task_id"] = res["deploy"]["task_id"]
-        elif res.get("error"):
-            result["deploy_error"] = res["error"]
-    except Exception as e:
-        logger.warning("Copy auto-deploy spawn failed for '%s': %s", name, e)
-        result["deploy_error"] = str(e)
+    # A person's copy is their whole working environment, so everything in it
+    # comes up front. An EXPERIMENT is a side branch off ONE business process:
+    # standing up a live-dev for all of them would run dozens of containers
+    # nobody asked for and tear them all down again on discard. The BP the user
+    # actually opens is deployed lazily by the wake-on-access path instead.
+    if kind != COPY_KIND_EXPERIMENT:
+        try:
+            members = scan_workspace_sources(_copies_dir(), copy=name)
+            res = await spawn_set_deploy(
+                label=f"copy:{name}",
+                members=members,
+                stage="live-dev",
+                copy=name,
+            )
+            if res.get("deploy"):
+                result["deploy_task_id"] = res["deploy"]["task_id"]
+            elif res.get("error"):
+                result["deploy_error"] = res["error"]
+        except Exception as e:
+            logger.warning("Copy auto-deploy spawn failed for '%s': %s", name, e)
+            result["deploy_error"] = str(e)
 
     return result
 
@@ -169,83 +518,62 @@ async def create_copy(body: CreateCopyRequest):
 _copies_cache: list[dict] | None = None
 
 
-async def _bp_clone_state(clone_path: str, bp: str) -> dict:
-    """Git state of one BP clone: last commit, dirtiness, ahead/behind vs the
-    BP repo's main."""
-    commit_hash = ""
-    commit_message = ""
-    commit_ts = 0
-    log_out, _, log_rc = await call_git_command_with_output(
-        "git", "log", "-1", "--format=%H%x1f%ct%x1f%s", cwd=clone_path
-    )
-    if log_rc == 0 and log_out.strip():
-        f = log_out.strip().split("\x1f")
-        if len(f) == 3:
-            commit_hash = f[0]
-            commit_ts = int(f[1]) if f[1].isdigit() else 0
-            commit_message = f[2]
+async def _bp_clone_parent_divergence(
+    clone_path: str, bp: str, parent: str
+) -> tuple[int, int]:
+    """(ahead, behind) of one experiment clone vs its PARENT copy's branch in
+    the bare repo. (0, 0) when the parent has no branch for this BP (the BP
+    exists only in the experiment) — a merge-back publishes it instead.
 
-    status_out, _, _ = await call_git_command_with_output(
-        "git", "status", "--porcelain", cwd=clone_path
-    )
-    has_changes = bool(status_out and status_out.strip())
-
-    ahead = behind = 0
-    await fetch_main(clone_path, bp)
-    ahead_out, _, ahead_rc = await call_git_command_with_output(
-        "git", "rev-list", "--count", "FETCH_HEAD..HEAD", cwd=clone_path
-    )
-    if ahead_rc == 0 and ahead_out.strip().isdigit():
-        ahead = int(ahead_out.strip())
-    behind_out, _, behind_rc = await call_git_command_with_output(
-        "git", "rev-list", "--count", "HEAD..FETCH_HEAD", cwd=clone_path
-    )
-    if behind_rc == 0 and behind_out.strip().isdigit():
-        behind = int(behind_out.strip())
-
-    return {
-        "bp": bp,
-        "commit_hash": commit_hash,
-        "commit_message": commit_message,
-        "commit_ts": commit_ts,
-        "has_changes": has_changes,
-        "ahead": ahead,
-        "behind": behind,
-    }
-
-
-async def _git_state(copy_path: str, name: str) -> dict:
-    """Aggregate git state of a copy across its per-BP clones.
-
-    ahead/behind are sums, has_changes is any, synced is all — the wire shape
-    matches the single-repo era so the dashboard needs no change. The commit
-    shown is the newest across the copy's clones.
+    On-demand only: this is what `/{name}/merge-preview` reads for the ONE
+    experiment being looked at. It is deliberately NOT part of the copies
+    listing (see `_copy_facts`).
     """
-    states = []
-    for bp in list_bp_clones(copy_path):
-        try:
-            states.append(await _bp_clone_state(os.path.join(copy_path, bp), bp))
-        except Exception as e:
-            logger.warning("Failed to read state of %s/%s: %s", name, bp, e)
+    if not await call_git_command(
+        "git", "fetch", bp_bare_repo_path(bp), parent, cwd=clone_path
+    ):
+        return 0, 0
 
-    newest = max(states, key=lambda s: s["commit_ts"], default=None)
-    ahead = sum(s["ahead"] for s in states)
-    behind = sum(s["behind"] for s in states)
-    has_changes = any(s["has_changes"] for s in states)
+    async def _count(rng: str) -> int:
+        out, _, rc = await call_git_command_with_output(
+            "git", "rev-list", "--count", rng, cwd=clone_path
+        )
+        return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
 
-    has_requirements = os.path.exists(os.path.join(copy_path, ".requirements.json"))
+    return await _count("FETCH_HEAD..HEAD"), await _count("HEAD..FETCH_HEAD")
 
-    return {
+
+def _copy_facts(copy_path: str, name: str) -> dict:
+    """What a copy IS: its identity and its stored metadata. No git.
+
+    Deliberately excludes every divergence figure (ahead / behind / synced /
+    parent_ahead / parent_behind) and the working-tree state (has_changes,
+    last commit). Those used to be computed here, for EVERY copy and every
+    business process inside it, on every git event — a `git fetch` per
+    (copy, BP) pair. On a workspace with 13 copies of ~21 business processes
+    that one scan took 75 seconds, and while it ran the `behind` counter the
+    Sync step is gated on stayed wrong.
+
+    The UI only ever asks about ONE copy and ONE business process: the copy the
+    user is in. So divergence is answered on demand, scoped to what is on
+    screen, by endpoints that already exist for exactly that
+    (`/{name}/behind`, `/{name}/divergence`, `/{name}/divergence-all`,
+    `/{name}/merge-preview`) — never eagerly for everything.
+    """
+    facts = {
         "name": name,
         "branch": name,
-        "commit_hash": newest["commit_hash"] if newest else "",
-        "commit_message": newest["commit_message"] if newest else "",
-        "has_requirements": has_requirements,
-        "synced": not has_changes and ahead == 0 and behind == 0,
-        "ahead": ahead,
-        "behind": behind,
-        "has_changes": has_changes,
+        "has_requirements": os.path.exists(
+            os.path.join(copy_path, ".requirements.json")
+        ),
     }
+    meta = read_copy_meta(copy_path)
+    if meta:
+        facts["kind"] = meta.get("kind")
+        facts["owner"] = meta.get("owner")
+        facts["parent"] = meta.get("parent")
+        facts["title"] = meta.get("title")
+    return facts
 
 
 async def _compute_copies() -> list[dict]:
@@ -259,18 +587,13 @@ async def _compute_copies() -> list[dict]:
     if not os.path.isdir(copies_base):
         return []
 
-    result = []
-    for entry in sorted(os.listdir(copies_base)):
-        if entry.startswith(".") or entry == "main":
-            continue
-        copy_path = os.path.join(copies_base, entry)
-        if not os.path.isdir(copy_path):
-            continue
-        try:
-            result.append(await _git_state(copy_path, entry))
-        except Exception as e:
-            logger.warning("Failed to read git state for copy '%s': %s", entry, e)
-    return result
+    return [
+        _copy_facts(os.path.join(copies_base, entry), entry)
+        for entry in sorted(os.listdir(copies_base))
+        if not entry.startswith(".")
+        and entry != "main"
+        and os.path.isdir(os.path.join(copies_base, entry))
+    ]
 
 
 async def get_cached_copies() -> list[dict]:
@@ -286,6 +609,28 @@ async def refresh_copies() -> list[dict]:
     global _copies_cache
     _copies_cache = await _compute_copies()
     return _copies_cache
+
+
+async def refresh_one_copy(name: str) -> list[dict]:
+    """Refresh ONE copy's entry in the cache and broadcast the list.
+
+    The targeted counterpart to :func:`refresh_copies`. Both are now cheap —
+    the listing is filesystem metadata only (see :func:`_copy_facts`) — but a
+    single copy's entry is all that changes when one copy's git state moves, and
+    keeping the write narrow keeps the broadcast honest about what happened.
+    """
+    global _copies_cache
+    from app.event_broadcaster import event_broadcaster
+
+    copy_path = _resolve_copy_path(name)
+    if not os.path.isdir(copy_path):
+        return await get_cached_copies()
+    cache = [c for c in await get_cached_copies() if c.get("name") != name]
+    cache.append(_copy_facts(copy_path, name))
+    cache.sort(key=lambda c: c.get("name") or "")
+    _copies_cache = cache
+    await event_broadcaster.broadcast("copies", cache)
+    return cache
 
 
 class SyncCopyResponse(BaseModel):
@@ -604,6 +949,15 @@ async def sync_copy(name: str, body: SyncCopyRequest | None = None):
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
 
+    # Defense in depth behind the hidden Deploy tab: an experiment never
+    # publishes to main — its work travels through its parent copy.
+    meta = read_copy_meta(copy_path)
+    if meta and meta.get("kind") == COPY_KIND_EXPERIMENT:
+        raise HTTPException(
+            status_code=400,
+            detail="Experiments merge back into their parent copy",
+        )
+
     deployer = body.deployer if body else None
     bp = body.bp if body else None
 
@@ -717,6 +1071,42 @@ def _image_changed_bps(changed_paths: list[str]) -> list[str]:
     return sorted(bps)
 
 
+async def _redeploy_changed_live_dev(
+    copy: str, changed_paths: list[str], deployer: str | None
+) -> tuple[list[str], list[str]]:
+    """Redeploy live-dev in `copy` for the BPs whose image dir changed.
+
+    We never spin up a NEW deployment — only members that already have a
+    live-dev deployment entry (matched by deployment_id against bitswan.yaml)
+    are refreshed. Shared by "pull main into a copy" and "merge an experiment
+    back into its parent"; both change files under the copy and must leave the
+    running live-dev serving the new code. Returns (redeployed_bps, task_ids).
+    """
+    changed_bps = _image_changed_bps(changed_paths)
+    if not changed_bps:
+        return [], []
+    from app.dependencies import get_automation_service
+
+    service = get_automation_service()
+    bs = read_bitswan_yaml(service.gitops_dir) or {}
+    deployed_ids = set((bs.get("deployments") or {}).keys())
+    redeployed: list[str] = []
+    task_ids: list[str] = []
+    for bp in changed_bps:
+        members = [
+            m
+            for m in service.members_for_bp(bp, copy=copy, stage="live-dev")
+            if m.get("deployment_id") in deployed_ids
+        ]
+        if not members:
+            continue  # this BP isn't running live-dev in the copy — nothing to do
+        tid = await _spawn_live_dev_deploy(members, bp, copy, deployer)
+        redeployed.append(bp)
+        if tid:
+            task_ids.append(tid)
+    return redeployed, task_ids
+
+
 async def _rebase_one_bp(
     name: str, copy_path: str, bp: str, deployer: str | None
 ) -> dict:
@@ -801,7 +1191,17 @@ async def ensure_bp_in_copy(name: str, bp: str):
     (``already: True``) when the clone is already there. This is what lets the
     copy switcher offer EVERY copy for a BP: selecting a copy that lacks the BP
     materializes it here instead of the copy being hidden. 404 only when the BP
-    has no repo content on main to clone from."""
+    has no repo content on main to clone from.
+
+    Inside an EXPERIMENT the BP is materialized from the parent copy's branch
+    (an experiment's world is its parent's, not main's); main is the fallback
+    only when the parent doesn't carry the BP either. The parent's CURRENT state
+    for that business process — including edits the dashboard wrote to disk
+    without committing — is published first, so opening a business process in an
+    experiment later gives the same starting point as creating the experiment on
+    it would have."""
+    from app.task_queue import current_requester
+
     _validate_copy_name(name)
     _validate_bp_dir(bp)
     copy_path = _resolve_copy_path(name)
@@ -809,7 +1209,19 @@ async def ensure_bp_in_copy(name: str, bp: str):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
     if os.path.isdir(os.path.join(copy_path, bp, ".git")):
         return {"ok": True, "already": True, "copy": name, "bp": bp}
-    if not await _clone_bp_into_copy(copy_path, name, bp):
+    meta = read_copy_meta(copy_path)
+    base = "main"
+    if meta and meta.get("kind") == COPY_KIND_EXPERIMENT and meta.get("parent"):
+        base = meta["parent"]
+        parent_clone = os.path.join(_resolve_copy_path(base), bp)
+        if os.path.isdir(os.path.join(parent_clone, ".git")):
+            await _publish_copy_bp_tip(
+                _resolve_copy_path(base),
+                base,
+                bp,
+                (meta.get("owner") or current_requester.get() or "").strip() or None,
+            )
+    if not await _clone_bp_into_copy(copy_path, name, bp, base):
         raise HTTPException(
             status_code=404,
             detail=f"'{bp}' has no repo content on main to clone into '{name}'",
@@ -859,36 +1271,25 @@ async def rebase_copy(name: str, body: SyncCopyRequest | None = None):
                 await _clone_bp_into_copy(copy_path, name, candidate)
         bps = list_bp_clones(copy_path)
 
-    results = [await _rebase_one_bp(name, copy_path, b, deployer) for b in bps]
+    results = await _map_each_bp(
+        bps, lambda b: _rebase_one_bp(name, copy_path, b, deployer)
+    )
 
     conflicts = [r["bp"] for r in results if r["status"] == "needs_rebase"]
     pulled_total = sum(r["pulled"] for r in results)
     changed_paths = [p for r in results for p in r["changed_paths"]]
 
-    # Redeploy live-dev ONLY for BPs whose image dir changed in the pull AND
-    # that already run live-dev in THIS copy. We never spin up a new
-    # deployment — we only refresh members that already have a live-dev
-    # deployment entry (matched by deployment_id against bitswan.yaml).
-    changed_bps = _image_changed_bps(changed_paths)
-    from app.dependencies import get_automation_service
+    # The copy's ahead/behind just changed. Recompute and broadcast THIS copy
+    # now instead of waiting for the watcher's full rescan: the Sync step lives
+    # or dies on `behind`, and a stale counter leaves the user on a tab whose
+    # button does nothing.
+    await refresh_one_copy(name)
 
-    service = get_automation_service()
-    bs = read_bitswan_yaml(service.gitops_dir) or {}
-    deployed_ids = set((bs.get("deployments") or {}).keys())
-    redeployed: list[str] = []
-    task_ids: list[str] = []
-    for bp in changed_bps:
-        members = [
-            m
-            for m in service.members_for_bp(bp, copy=name, stage="live-dev")
-            if m.get("deployment_id") in deployed_ids
-        ]
-        if not members:
-            continue  # this BP isn't running live-dev in the copy — nothing to do
-        tid = await _spawn_live_dev_deploy(members, bp, name, deployer)
-        redeployed.append(bp)
-        if tid:
-            task_ids.append(tid)
+    # Redeploy live-dev ONLY for BPs whose image dir changed in the pull AND
+    # that already run live-dev in THIS copy.
+    redeployed, task_ids = await _redeploy_changed_live_dev(
+        name, changed_paths, deployer
+    )
 
     if conflicts:
         return RebaseCopyResponse(
@@ -916,6 +1317,461 @@ async def rebase_copy(name: str, body: SyncCopyRequest | None = None):
     )
 
 
+class MergeToParentResponse(BaseModel):
+    status: str  # "success" | "needs_rebase" | "noop"
+    message: str
+    # Per-BP outcomes: [{bp, status, method, message}]
+    bp_results: list[dict] = []
+    # BPs whose image dir changed in the parent and were therefore redeployed.
+    redeployed_bps: list[str] = []
+    # Task ids of the parent's live-dev redeploys.
+    deploy_task_ids: list[str] = []
+
+
+async def _rebase_experiment_onto_parent(
+    exp_clone: str, bare: str, name: str, parent: str, deployer: str | None
+) -> bool:
+    """Rebase an experiment's clone onto the parent copy's branch tip.
+
+    True on a clean rebase — the rewritten branch is published to the bare (a
+    rewrite is not a fast-forward, so the objects travel via a temp ref and the
+    branch is moved server-side, exactly as ``_rebase_one_bp`` does for main).
+    False on a conflict: the rebase is aborted, the clone reset to where it
+    was, nothing is published and the PARENT is not touched at all — the caller
+    turns that into ``needs_rebase`` and hands off to the coding agent.
+    """
+    if not await call_git_command("git", "fetch", bare, parent, cwd=exp_clone):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch '{parent}' into the experiment clone",
+        )
+    orig_out, _, _ = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=exp_clone
+    )
+    orig_head = orig_out.strip()
+
+    _, _, rb_rc = await call_git_command_with_output(
+        "git", *_ident_args(deployer), "rebase", "FETCH_HEAD", cwd=exp_clone
+    )
+    if rb_rc != 0:
+        await call_git_command("git", "rebase", "--abort", cwd=exp_clone)
+        await call_git_command_with_output(
+            "git", "reset", "--hard", orig_head, cwd=exp_clone
+        )
+        return False
+
+    new_out, _, _ = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=exp_clone
+    )
+    new_tip = new_out.strip()
+    tmp_ref = f"refs/merge-tmp/{name}"
+    _, tp_err, tp_rc = await call_git_command_with_output(
+        "git", "push", bare, f"HEAD:{tmp_ref}", cwd=exp_clone
+    )
+    if tp_rc != 0:
+        await call_git_command_with_output(
+            "git", "reset", "--hard", orig_head, cwd=exp_clone
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to publish the rebased experiment branch: {tp_err.strip()}",
+        )
+    await call_git_command_with_output(
+        "git", "-C", bare, "update-ref", f"refs/heads/{name}", new_tip
+    )
+    await call_git_command_with_output("git", "-C", bare, "update-ref", "-d", tmp_ref)
+    return True
+
+
+async def _merge_one_bp_to_parent(
+    name: str,
+    copy_path: str,
+    parent: str,
+    parent_path: str,
+    bp: str,
+    deployer: str | None,
+    title: str,
+) -> dict:
+    """Merge ONE business process of an experiment back into its parent copy.
+
+    The merge happens in the PARENT'S CLONE (wip-commit the parent → merge →
+    push): the parent is somebody's live working tree, so its uncommitted work
+    is captured first and never reset away. Main is not involved — no deploy
+    tags, no dev-stage deploy: this is copy → copy.
+
+    Returns {bp, status, method, message, changed_paths} with changed_paths
+    copy-root-relative (``<bp>/…``) for the parent's live-dev redeploy.
+    """
+    exp_clone = os.path.join(copy_path, bp)
+    bare = bp_bare_repo_path(bp)
+
+    await _wip_commit(
+        exp_clone,
+        deployer,
+        ["-A"],
+        bp,
+        f"Merge: commit work in progress in experiment {title} ({bp})",
+    )
+
+    async def _publish_experiment_branch() -> None:
+        p_out, p_err, p_rc = await call_git_command_with_output(
+            "git", "push", bare, f"HEAD:refs/heads/{name}", cwd=exp_clone
+        )
+        if p_rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Failed to push '{bp}' branch '{name}': "
+                    f"{(p_err or p_out).strip()}"
+                ),
+            )
+
+    await _publish_experiment_branch()
+
+    parent_clone = os.path.join(parent_path, bp)
+    if not os.path.isdir(os.path.join(parent_clone, ".git")):
+        # A BP born inside the experiment: the parent gains it wholesale — the
+        # experiment's tip BECOMES the parent's branch, then the parent's
+        # working clone is materialized from it.
+        head_out, _, hrc = await call_git_command_with_output(
+            "git", "rev-parse", "HEAD", cwd=exp_clone
+        )
+        if hrc != 0:
+            raise HTTPException(
+                status_code=500, detail=f"cannot resolve HEAD in {exp_clone}"
+            )
+        # Create-only compare-and-swap: the empty <oldvalue> makes update-ref
+        # fail if the parent branch appeared meanwhile.
+        u_out, u_err, u_rc = await call_git_command_with_output(
+            "git",
+            "-C",
+            bare,
+            "update-ref",
+            f"refs/heads/{parent}",
+            head_out.strip(),
+            "",
+        )
+        if u_rc != 0:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{parent}' gained a branch for '{bp}' during the merge — "
+                    f"retry: {(u_err or u_out).strip()}"
+                ),
+            )
+        if not await _clone_bp_into_copy(parent_path, parent, bp, name):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to materialize '{bp}' in copy '{parent}'",
+            )
+        return {
+            "bp": bp,
+            "status": "success",
+            "method": "published",
+            "message": f"'{bp}' was created in this experiment and now exists in '{parent}'.",
+            # A BP the parent never had cannot be running live-dev there.
+            "changed_paths": [],
+        }
+
+    await _wip_commit(
+        parent_clone,
+        deployer,
+        ["-A"],
+        bp,
+        f"WIP before merging experiment {title} ({bp})",
+    )
+    pp_out, pp_err, pp_rc = await call_git_command_with_output(
+        "git", "push", bare, f"HEAD:refs/heads/{parent}", cwd=parent_clone
+    )
+    if pp_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to push '{bp}' branch '{parent}': "
+                f"{(pp_err or pp_out).strip()}"
+            ),
+        )
+
+    before_out, _, _ = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=parent_clone
+    )
+    before = before_out.strip()
+
+    async def _fetch_experiment() -> None:
+        if not await call_git_command("git", "fetch", bare, name, cwd=parent_clone):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch '{name}' into the '{parent}' clone",
+            )
+
+    await _fetch_experiment()
+
+    async def _ahead() -> int:
+        out, _, rc = await call_git_command_with_output(
+            "git", "rev-list", "--count", "HEAD..FETCH_HEAD", cwd=parent_clone
+        )
+        return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
+
+    if await _ahead() == 0:
+        return {
+            "bp": bp,
+            "status": "noop",
+            "method": "noop",
+            "message": f"No changes to '{bp}' to merge into '{parent}'.",
+            "changed_paths": [],
+        }
+
+    async def _parent_is_ancestor() -> bool:
+        _, _, rc = await call_git_command_with_output(
+            "git", "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD", cwd=parent_clone
+        )
+        return rc == 0
+
+    if not await _parent_is_ancestor():
+        # The parent moved on since the experiment branched: replay the
+        # experiment on top of the parent first, so the merge stays a
+        # fast-forward and the parent's history is never rewritten.
+        if not await _rebase_experiment_onto_parent(
+            exp_clone, bare, name, parent, deployer
+        ):
+            return {
+                "bp": bp,
+                "status": "needs_rebase",
+                "method": None,
+                "message": (
+                    f"'{bp}' conflicts with '{parent}'; a rebase is required. "
+                    "Hand off to the coding agent."
+                ),
+                "changed_paths": [],
+            }
+        await _fetch_experiment()
+        if not await _parent_is_ancestor():
+            return {
+                "bp": bp,
+                "status": "needs_rebase",
+                "method": None,
+                "message": (
+                    f"'{parent}' moved while '{bp}' was being rebased — retry the "
+                    "merge."
+                ),
+                "changed_paths": [],
+            }
+
+    m_out, m_err, m_rc = await call_git_command_with_output(
+        "git", "merge", "--ff-only", "FETCH_HEAD", cwd=parent_clone
+    )
+    if m_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to merge '{bp}' into '{parent}': {(m_err or m_out).strip()}",
+        )
+    mp_out, mp_err, mp_rc = await call_git_command_with_output(
+        "git", "push", bare, f"HEAD:refs/heads/{parent}", cwd=parent_clone
+    )
+    if mp_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to publish '{parent}' for '{bp}': "
+                f"{(mp_err or mp_out).strip()}"
+            ),
+        )
+    # Server-side compare-and-swap: the sanctioned way a branch advances in a
+    # bare repo (idempotent after the push above, which sent the objects).
+    await ff_branch_to_ref(bp, parent, f"refs/heads/{name}")
+
+    after_out, _, _ = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=parent_clone
+    )
+    after = after_out.strip()
+    diff_out, _, _ = await call_git_command_with_output(
+        "git", "diff", "--name-only", f"{before}..{after}", cwd=parent_clone
+    )
+    return {
+        "bp": bp,
+        "status": "success",
+        "method": "fast-forward",
+        "message": f"Merged '{bp}' into '{parent}' (fast-forward).",
+        "changed_paths": [f"{bp}/{p}" for p in diff_out.splitlines() if p.strip()],
+    }
+
+
+@router.post("/{name}/merge-to-parent")
+async def merge_copy_to_parent(name: str, body: SyncCopyRequest | None = None):
+    """Merge an EXPERIMENT back into the copy it branched from.
+
+    Experiments never publish to main: their work travels back into their
+    parent copy, and the parent's owner deploys it from there. So this endpoint
+    writes nothing on main, tags no deploy and touches no dev stage — it is a
+    copy → copy fast-forward performed inside the parent's own clone (its
+    uncommitted work is committed first, never reset away).
+
+    Guards: the copy must be an experiment (`.copy.json` kind) and the
+    gate-verified requester must be its owner. Per BP: nothing to merge →
+    ``noop``; the parent has moved on → the EXPERIMENT is rebased onto it
+    first, and a conflict there leaves the parent byte-identical and reports
+    ``needs_rebase`` (hand off to the coding agent, on the experiment); a BP
+    that exists only in the experiment is published into the parent. After the
+    merge, the PARENT's live-dev is redeployed for every BP whose image dir
+    changed.
+    """
+    from app.task_queue import current_requester
+
+    _validate_copy_name(name)
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    meta = _require_experiment_owner(
+        name, copy_path, "Only experiments can be merged into a parent copy"
+    )
+    parent = meta.get("parent") or ""
+    _validate_copy_name(parent)
+    parent_path = _resolve_copy_path(parent)
+    if not os.path.isdir(parent_path):
+        raise HTTPException(status_code=404, detail=f"Parent copy '{parent}' not found")
+    title = meta.get("title") or name
+
+    deployer = (body.deployer if body else None) or current_requester.get()
+    only_bp = body.bp if body else None
+
+    if only_bp:
+        _validate_bp_dir(only_bp)
+        if not os.path.isdir(os.path.join(copy_path, only_bp, ".git")):
+            raise HTTPException(
+                status_code=404,
+                detail=f"'{only_bp}' is not checked out in copy '{name}'",
+            )
+        bps = [only_bp]
+    else:
+        bps = list_bp_clones(copy_path)
+
+    if not bps:
+        return MergeToParentResponse(
+            status="noop", message="This experiment has no business processes to merge."
+        )
+
+    results = await _map_each_bp(
+        bps,
+        lambda bp: _merge_one_bp_to_parent(
+            name, copy_path, parent, parent_path, bp, deployer, title
+        ),
+    )
+
+    changed_paths = [p for r in results for p in r["changed_paths"]]
+    redeployed, task_ids = await _redeploy_changed_live_dev(
+        parent, changed_paths, deployer
+    )
+
+    wire = [{k: v for k, v in r.items() if k != "changed_paths"} for r in results]
+    needs = [r for r in results if r["status"] == "needs_rebase"]
+    merged = [r for r in results if r["status"] == "success"]
+
+    if needs:
+        parts = []
+        if merged:
+            parts.append(f"merged: {', '.join(r['bp'] for r in merged)}")
+        parts.append(f"needs rebase: {', '.join(r['bp'] for r in needs)}")
+        return MergeToParentResponse(
+            status="needs_rebase",
+            message=(
+                f"{'; '.join(parts)}. Hand off to the coding agent to rebase the "
+                f"experiment onto '{parent}' and resolve."
+            ),
+            bp_results=wire,
+            redeployed_bps=redeployed,
+            deploy_task_ids=task_ids,
+        )
+    if not merged:
+        return MergeToParentResponse(
+            status="noop",
+            message=f"Nothing to merge — '{parent}' already has this experiment's work.",
+            bp_results=wire,
+        )
+    msg = f"Merged {', '.join(r['bp'] for r in merged)} into '{parent}'."
+    if redeployed:
+        msg += f" Redeploying live-dev for: {', '.join(redeployed)}."
+    return MergeToParentResponse(
+        status="success",
+        message=msg,
+        bp_results=wire,
+        redeployed_bps=redeployed,
+        deploy_task_ids=task_ids,
+    )
+
+
+@router.get("/{name}/merge-preview")
+async def get_merge_to_parent_preview(name: str):
+    """What "Merge back into my copy" would actually carry into the parent.
+
+    Read live, and measured against the PARENT copy — never against main. An
+    experiment inherits its parent's whole divergence from main, so a
+    main-based signal (``/status``) reports changes forever, even for an
+    experiment whose work is already in the parent: the merge button would
+    stay lit and every press would come back ``noop``.
+
+    ``ahead`` counts commits the parent's branch lacks, ``uncommitted`` lists
+    the working-tree edits the merge commits first, and ``new_bps`` names the
+    business processes born in this experiment (the merge publishes those into
+    the parent wholesale). All three empty means the merge is a no-op.
+    """
+    _validate_copy_name(name)
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    meta = read_copy_meta(copy_path)
+    if not meta or meta.get("kind") != COPY_KIND_EXPERIMENT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Copy '{name}' is not an experiment — it has no parent to merge into",
+        )
+    parent = meta.get("parent") or ""
+    _validate_copy_name(parent)
+
+    async def _preview_one(bp: str) -> dict:
+        clone_path = os.path.join(copy_path, bp)
+        _, _, ref_rc = await call_git_command_with_output(
+            "git",
+            "-C",
+            bp_bare_repo_path(bp),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{parent}",
+        )
+        if ref_rc != 0:
+            # The parent has no branch for this BP: it was created inside the
+            # experiment and the merge publishes it.
+            one = {"bp": bp, "new": True, "ahead": 0, "behind": 0}
+        else:
+            a, b = await _bp_clone_parent_divergence(clone_path, bp, parent)
+            one = {"bp": bp, "new": False, "ahead": a, "behind": b}
+        st_out, _, _ = await call_git_command_with_output(
+            "git", "status", "--porcelain", cwd=clone_path
+        )
+        one["uncommitted"] = [
+            f"{bp}/{line[3:].strip()}"
+            for line in st_out.splitlines()
+            if line[3:].strip()
+        ]
+        return one
+
+    per_bp = await _map_each_bp(list_bp_clones(copy_path), _preview_one)
+    ahead = sum(o["ahead"] for o in per_bp)
+    behind = sum(o["behind"] for o in per_bp)
+    new_bps = [o["bp"] for o in per_bp if o["new"]]
+    uncommitted = [p for o in per_bp for p in o["uncommitted"]]
+
+    return {
+        "parent": parent,
+        "ahead": ahead,
+        "behind": behind,
+        "uncommitted": uncommitted,
+        "new_bps": new_bps,
+    }
+
+
 def _is_safe_relative_path(p: str) -> bool:
     if not p:
         return False
@@ -935,10 +1791,10 @@ _NAME_STATUS_KIND = {
 }
 
 
-async def _clone_status(clone_path: str, bp: str, by_path: dict) -> None:
-    """Collect one BP clone's change list into `by_path`, with paths prefixed
-    ``<bp>/…`` so they stay copy-root-relative (the wire shape of the
-    single-repo era)."""
+async def _clone_status_of(clone_path: str, bp: str) -> dict:
+    """One BP clone's change list, keyed by path and prefixed ``<bp>/…`` so the
+    paths stay copy-root-relative (the wire shape of the single-repo era)."""
+    by_path: dict[str, dict] = {}
     await fetch_main(clone_path, bp)
 
     # Tracked delta vs main (commits ahead of main + staged/unstaged edits).
@@ -985,16 +1841,25 @@ async def _clone_status(clone_path: str, bp: str, by_path: dict) -> None:
         full = f"{bp}/{p}"
         if full not in by_path:
             by_path[full] = {"path": full, "kind": "added", "adds": 0, "dels": 0}
+    return by_path
 
 
 class DeleteCopyRequest(BaseModel):
-    # Injected by the dashboard proxy from the validated token.
+    # Injected by the dashboard proxy from the validated token. ATTRIBUTION
+    # only — authorization comes from the gate-forwarded identity header
+    # (`current_requester`) matched against the experiment's recorded owner.
     deleted_by: str | None = None
 
 
 @router.delete("/{name}", status_code=202)
 async def delete_copy_route(name: str, body: DeleteCopyRequest | None = None) -> dict:
-    """Delete a WHOLE copy — asynchronous, idempotent.
+    """Discard an EXPERIMENT — asynchronous, idempotent.
+
+    Only experiments are deletable, and only by their owner: a person's own
+    copy (and a legacy, metadata-less copy) is their working environment and
+    has no delete affordance at all — 400. `main` likewise. The requester is
+    the gate-verified identity (`X-Forwarded-Email`), compared against the
+    `owner` recorded in the experiment's `.copy.json`; anything else is 403.
 
     Removes the copy's live-dev deployments + containers + gateways, its
     per-(copy, BP) databases, its branch in every BP bare repo (server-side
@@ -1003,7 +1868,8 @@ async def delete_copy_route(name: str, body: DeleteCopyRequest | None = None) ->
     and requires confirmation) — the server never blocks on divergence.
     404 only when nothing of the copy remains (dir, yaml entries, branches),
     so re-issuing after a partial failure finishes the teardown. 202 +
-    task_queue task id otherwise.
+    task_queue task id otherwise; the teardown itself runs ON THE GIT TASK
+    QUEUE, serialized with every other git-mutating operation.
     """
     from app.dependencies import get_automation_service
     from app.services import bp_delete
@@ -1012,12 +1878,17 @@ async def delete_copy_route(name: str, body: DeleteCopyRequest | None = None) ->
     _validate_copy_name(name)
     if name == "main":
         raise HTTPException(status_code=400, detail="The main copy cannot be deleted")
+    copy_path = _resolve_copy_path(name)
     deleted_by = (body.deleted_by or None) if body else None
 
     service = get_automation_service()
     bs_yaml = read_bitswan_yaml(service.gitops_dir) or {}
     if not await bp_delete.copy_has_remnants(bs_yaml, name):
         raise HTTPException(status_code=404, detail=f"No copy '{name}' found")
+
+    # Kind + ownership come from stored metadata, never from the name. No
+    # sidecar => a user or legacy copy => not deletable through the API.
+    _require_experiment_owner(name, copy_path, "Only experiments can be deleted")
 
     async def _run() -> dict:
         return await bp_delete.delete_copy(name, deleted_by, service)
@@ -1046,9 +1917,12 @@ async def get_copy_status(name: str, bp: str | None = None):
     else:
         bps = list_bp_clones(copy_path)
 
+    per_bp = await _map_each_bp(
+        bps, lambda b: _clone_status_of(os.path.join(copy_path, b), b)
+    )
     by_path: dict[str, dict] = {}
-    for b in bps:
-        await _clone_status(os.path.join(copy_path, b), b, by_path)
+    for one in per_bp:
+        by_path.update(one)
     return {"changed": list(by_path.values())}
 
 
@@ -1098,13 +1972,12 @@ async def get_bp_divergence(name: str, bp: str = Query(...)):
     else:
         ahead_bp = behind_bp = 0
 
-    ahead_other = behind_other = 0
-    for other in clones:
-        if other == bp:
-            continue
-        a, b = await _clone_divergence(os.path.join(copy_path, other), other)
-        ahead_other += a
-        behind_other += b
+    others = [o for o in clones if o != bp]
+    pairs = await _map_each_bp(
+        others, lambda o: _clone_divergence(os.path.join(copy_path, o), o)
+    )
+    ahead_other = sum(a for a, _ in pairs)
+    behind_other = sum(b for _, b in pairs)
 
     return {
         "bp": bp,
@@ -1113,6 +1986,41 @@ async def get_bp_divergence(name: str, bp: str = Query(...)):
         "behind_bp": behind_bp,
         "behind_other": behind_other,
     }
+
+
+@router.get("/{name}/behind")
+async def get_copy_behind(name: str):
+    """How far behind main this copy is: `{behind: <total>, bps: {bp: n}}`.
+
+    The question the Sync step is gated on ("does main carry work my copy
+    doesn't have?"), answered for ONE copy at the moment the UI asks it. The
+    copies listing deliberately no longer carries this (see `_copy_facts`) —
+    computing it eagerly for every copy on every git event was the single
+    biggest source of latency in gitops.
+
+    Only business processes that ARE behind appear in `bps`; a BP the copy has
+    not checked out at all counts (pulling materialises it).
+    """
+    _validate_copy_name(name)
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    clones = list_bp_clones(copy_path)
+    pairs = await _map_each_bp(
+        clones, lambda bp: _clone_divergence(os.path.join(copy_path, bp), bp)
+    )
+    bps = {bp: behind for bp, (_, behind) in zip(clones, pairs) if behind}
+
+    for bp in list_bp_repos():
+        if bp in clones:
+            continue
+        if await bp_main_has_content(bp):
+            behind = await _missing_clone_behind(bp)
+            if behind:
+                bps[bp] = behind
+
+    return {"behind": sum(bps.values()), "bps": bps}
 
 
 @router.get("/{name}/divergence-all")
@@ -1131,8 +2039,10 @@ async def get_all_bp_divergence(name: str):
 
     result: dict[str, dict] = {}
     clones = list_bp_clones(copy_path)
-    for bp in clones:
-        ahead, behind = await _clone_divergence(os.path.join(copy_path, bp), bp)
+    pairs = await _map_each_bp(
+        clones, lambda bp: _clone_divergence(os.path.join(copy_path, bp), bp)
+    )
+    for bp, (ahead, behind) in zip(clones, pairs):
         if ahead or behind:
             result[bp] = {"ahead": ahead, "behind": behind}
     for bp in list_bp_repos():

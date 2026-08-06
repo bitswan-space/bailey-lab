@@ -15,7 +15,7 @@ from .deploy_manager import deploy_manager
 from .snapshot_manager import snapshot_manager
 from .event_broadcaster import event_broadcaster
 from .services.process_service import process_service
-from .routes.copies import refresh_copies
+from .routes.copies import refresh_copies, refresh_one_copy
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,19 @@ async def _broadcast_copies() -> None:
         await event_broadcaster.broadcast("copies", copies)
     except Exception as e:
         logger.warning("Failed to broadcast copies: %s", e)
+
+
+async def _broadcast_one_copy(name: str) -> None:
+    """Recompute and broadcast a SINGLE copy's state.
+
+    `refresh_one_copy` patches the cache and broadcasts the whole list, so
+    subscribers see the same wire shape as a full rescan while the work stays
+    proportional to the one copy whose git state actually moved.
+    """
+    try:
+        await refresh_one_copy(name)
+    except Exception as e:
+        logger.warning("Failed to broadcast copy '%s': %s", name, e)
 
 
 async def _broadcast_automations() -> None:
@@ -184,6 +197,23 @@ class CopyChangeHandler(FileSystemEventHandler):
     _GIT_STATE_SUFFIXES = ("/.git/HEAD", "/.git/index", "/.git/ORIG_HEAD")
     _GIT_REFS_SEGMENT = "/.git/refs/heads/"
 
+    # How long a burst of events settles before a copy is recomputed.
+    _COPIES_DEBOUNCE_SECONDS = 1.0
+
+    # Path segments whose contents can never change anything we publish, but
+    # which git writes to in bulk: a single `git fetch` creates hundreds of
+    # loose-object and log events. Dropping them at the very top of `_handle`
+    # keeps the dispatch cost off the watcher thread — this tree holds every
+    # copy's full working tree plus its `.git`, so the event rate during any
+    # git operation is high.
+    _IGNORED_SEGMENTS = (
+        "/.git/objects/",
+        "/.git/logs/",
+        "/.git/lfs/",
+        "/.git/hooks/",
+        "/node_modules/",
+    )
+
     def __init__(self, event_loop, copies_root: str):
         super().__init__()
         self.event_loop = event_loop
@@ -193,15 +223,25 @@ class CopyChangeHandler(FileSystemEventHandler):
         # Per-copy debounce timers, one set per refresh pipeline.
         self._process_tasks: dict[str | None, asyncio.Task] = {}
         self._automation_tasks: dict[str | None, asyncio.Task] = {}
-        # Single timer for the "ping" copies-list broadcast.
+        # Single drain task for copy-state refreshes, plus the set of copies
+        # waiting to be recomputed (`None` = the copy set itself changed, so a
+        # full rescan is needed). See `_schedule_copies_ping`.
         self._copy_ping_task: asyncio.Task | None = None
+        self._copies_dirty: set[str | None] = set()
 
     def _copy_from_path(self, path: str) -> str | None:
         """Return the name of the copy containing `path`, or None when the
         event is at the copies root (e.g. a copy being added / removed) or
-        within the `main` copy (the main scope is keyed None everywhere)."""
+        within the `main` copy (the main scope is keyed None everywhere).
+
+        Pure path arithmetic: `copies_root` is already resolved and watchdog
+        reports paths built from that same watched root, so there is nothing
+        left to resolve. It used to call `os.path.realpath` on every event,
+        which is a readlink syscall per path component at the full event rate of
+        every copy's working tree.
+        """
         try:
-            rel = os.path.relpath(os.path.realpath(path), self.copies_root)
+            rel = os.path.relpath(path, self.copies_root)
         except ValueError:
             return None
         if rel == "." or rel.startswith(".."):
@@ -215,6 +255,18 @@ class CopyChangeHandler(FileSystemEventHandler):
             return None
         return first or None
 
+    def _is_copies_root_path(self, path: str) -> bool:
+        """True when the event is the copies root itself or a direct child of it
+        — i.e. a copy directory appearing or disappearing, which changes the SET
+        of copies rather than one copy's state."""
+        try:
+            rel = os.path.relpath(path, self.copies_root)
+        except ValueError:
+            return False
+        if rel.startswith(".."):
+            return False
+        return rel == "." or len(rel.replace("\\", "/").split("/")) == 1
+
     def _is_git_state_change(self, path: str) -> bool:
         """True for paths whose change can flip `synced` / `commit_hash`."""
         if not path:
@@ -224,19 +276,48 @@ class CopyChangeHandler(FileSystemEventHandler):
             return True
         return self._GIT_REFS_SEGMENT in norm
 
-    def _schedule_copies_ping(self):
-        """Refresh the cached copy list and broadcast it over SSE."""
+    def _schedule_copies_ping(self, copy: str | None):
+        """Queue a copy-state refresh, coalescing bursts.
 
-        async def _broadcast():
-            await asyncio.sleep(1)
-            await _broadcast_copies()
+        Two properties matter here, and the previous
+        cancel-and-restart-on-every-event scheduler had neither:
+
+        1. **An in-flight refresh is never cancelled, only coalesced.** Back
+           when the scan itself did the git work, its own `git fetch`es wrote
+           inside the copy trees, which the watcher saw as more events — so
+           cancel-and-restart kept restarting the scan and emitted no `copies`
+           event at all while anything was happening (observed: 75s from a
+           commit to the UI updating). Marking dirty and letting the running
+           drain pick it up cannot livelock that way, whatever generates events.
+        2. **The work is scoped to what changed.** `copy` names the copy whose
+           git state moved, so only that entry is refreshed; `None` (an event at
+           the copies root: a copy added or removed) means the set of copies
+           itself changed and needs a full rescan.
+        """
 
         def _run():
+            self._copies_dirty.add(copy)
             if self._copy_ping_task and not self._copy_ping_task.done():
-                self._copy_ping_task.cancel()
-            self._copy_ping_task = asyncio.ensure_future(_broadcast())
+                # The running drain will pick up what we just marked dirty.
+                return
+            self._copy_ping_task = asyncio.ensure_future(self._drain_copies_dirty())
 
         self.event_loop.call_soon_threadsafe(_run)
+
+    async def _drain_copies_dirty(self):
+        """Refresh every copy marked dirty, then anything marked while we ran."""
+        while self._copies_dirty:
+            # Let the burst that woke us settle before broadcasting.
+            await asyncio.sleep(self._COPIES_DEBOUNCE_SECONDS)
+            pending = self._copies_dirty
+            self._copies_dirty = set()
+            if None in pending:
+                # The copy set changed — rescan everything (this also drops
+                # copies that were deleted).
+                await _broadcast_copies()
+                continue
+            for name in sorted(pending):
+                await _broadcast_one_copy(name)
 
     def _schedule_process_refresh(self, copy: str | None):
         """Debounced refresh + SSE broadcast for one copy's BP cache.
@@ -304,14 +385,26 @@ class CopyChangeHandler(FileSystemEventHandler):
 
     def _handle(self, event):
         src = getattr(event, "src_path", "") or ""
+
+        # Drop the bulk-write noise before doing any work with the path.
+        norm = src.replace("\\", "/")
+        for segment in self._IGNORED_SEGMENTS:
+            if segment in norm:
+                return
+
         copy = self._copy_from_path(src) if src else None
         basename = os.path.basename(src)
 
-        # 1. Copy-list ping: only on root events (add/remove) or git
-        #    state changes (commit, index write, ref update) — NOT on every
-        #    code edit inside a copy.
-        if copy is None or self._is_git_state_change(src):
-            self._schedule_copies_ping()
+        # 1. Copy-list ping: only on root events (a copy added / removed) or git
+        #    state changes (commit, index write, ref update) — NOT on every code
+        #    edit inside a copy. A git state change inside a copy refreshes just
+        #    that copy; anything at the root, or in `main` (whose tip is what
+        #    every copy's `behind` is measured against), refreshes them all.
+        if copy is None:
+            if self._is_copies_root_path(src) or self._is_git_state_change(src):
+                self._schedule_copies_ping(None)
+        elif self._is_git_state_change(src):
+            self._schedule_copies_ping(copy)
 
         # 2. Copy directory itself appearing / disappearing → full
         #    refresh of both pipelines so the new scope is picked up (or

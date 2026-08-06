@@ -261,3 +261,33 @@ async def bp_main_has_content(bp: str) -> bool:
         "git", "-C", repo_path, "ls-tree", "main"
     )
     return rc == 0 and bool(out.strip())
+
+
+async def bp_name_is_taken(bp: str) -> bool:
+    """True when this business-process name already belongs to something.
+
+    A business process is ONE repo for the whole workspace — the name is
+    workspace-wide, not per copy. So the name is taken if main carries content
+    OR if any copy branch exists, which is the case for a business process that
+    was created inside someone's copy or experiment and has not been deployed to
+    main yet. Checking only main let a second person create a business process
+    with the same name, landing two unrelated histories in one repo.
+
+    An empty seed with no branches at all is NOT taken — that is the leftover of
+    a failed earlier attempt, which creation deliberately reuses.
+    """
+    if await bp_main_has_content(bp):
+        return True
+    out, _, rc = await call_git_command_with_output(
+        "git",
+        "-C",
+        bp_bare_repo_path(bp),
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/heads/",
+    )
+    if rc != 0:
+        return False
+    return any(
+        ref.strip() and ref.strip() != "refs/heads/main" for ref in out.splitlines()
+    )

@@ -8,7 +8,6 @@ git-persist + broadcast edges.
 """
 
 import asyncio
-import os
 
 import pytest
 import yaml

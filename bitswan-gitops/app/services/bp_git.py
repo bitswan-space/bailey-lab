@@ -109,13 +109,17 @@ async def commit_in_bp_clone(
     return True
 
 
-async def ff_main_to_ref(bp: str, ref_or_sha: str) -> None:
-    """Fast-forward the BP repo's ``main`` to `ref_or_sha`, append-only.
+async def ff_branch_to_ref(bp: str, branch: str, ref_or_sha: str) -> None:
+    """Fast-forward one branch of a BP's bare repo to `ref_or_sha`, append-only.
 
-    Verifies the target exists in the bare, checks main is an ancestor (a true
-    fast-forward), then advances the ref with a compare-and-swap ``update-ref``
-    (the expected old value guards against a concurrent advance). 409 when the
-    target isn't a fast-forward or main moved concurrently.
+    Verifies the target exists in the bare, checks `branch` is an ancestor (a
+    true fast-forward), then advances the ref with a compare-and-swap
+    ``update-ref`` (the expected old value guards against a concurrent
+    advance). 409 when the target isn't a fast-forward or the branch moved
+    concurrently.
+
+    Used for ``main`` (copy → main sync, where clients can never push main) and
+    for a parent copy's branch (experiment → parent merge-back).
     """
     bare = bp_bare_repo_path(bp)
 
@@ -129,36 +133,49 @@ async def ff_main_to_ref(bp: str, ref_or_sha: str) -> None:
     target = target_out.strip()
 
     old_out, _, old_rc = await call_git_command_with_output(
-        "git", "-C", bare, "rev-parse", "--verify", "refs/heads/main"
+        "git", "-C", bare, "rev-parse", "--verify", f"refs/heads/{branch}"
     )
     if old_rc != 0:
-        raise HTTPException(status_code=500, detail=f"{bp}.git has no main branch")
+        raise HTTPException(status_code=500, detail=f"{bp}.git has no {branch} branch")
     old = old_out.strip()
 
     _, _, ff_rc = await call_git_command_with_output(
-        "git", "-C", bare, "merge-base", "--is-ancestor", "refs/heads/main", target
+        "git",
+        "-C",
+        bare,
+        "merge-base",
+        "--is-ancestor",
+        f"refs/heads/{branch}",
+        target,
     )
     if ff_rc != 0:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"'{ref_or_sha}' is not a fast-forward of {bp}'s main. Rebase "
-                "onto the latest main and push, then retry."
+                f"'{ref_or_sha}' is not a fast-forward of {bp}'s {branch}. "
+                f"Rebase onto the latest {branch} and push, then retry."
             ),
         )
 
-    # Compare-and-swap: the trailing <oldvalue> makes update-ref fail if main
-    # moved between the ancestry check and here.
+    # Compare-and-swap: the trailing <oldvalue> makes update-ref fail if the
+    # branch moved between the ancestry check and here.
     out, err, rc = await call_git_command_with_output(
-        "git", "-C", bare, "update-ref", "refs/heads/main", target, old
+        "git", "-C", bare, "update-ref", f"refs/heads/{branch}", target, old
     )
     if rc != 0:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"{bp}'s main moved during the sync — retry: " f"{(err or out).strip()}"
+                f"{bp}'s {branch} moved during the sync — retry: "
+                f"{(err or out).strip()}"
             ),
         )
+
+
+async def ff_main_to_ref(bp: str, ref_or_sha: str) -> None:
+    """Fast-forward the BP repo's deploy-only ``main`` to `ref_or_sha`
+    (thin wrapper over :func:`ff_branch_to_ref`)."""
+    await ff_branch_to_ref(bp, "main", ref_or_sha)
 
 
 async def publish_main_from_clone(clone_path: str, bp: str) -> None:
