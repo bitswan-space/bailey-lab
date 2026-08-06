@@ -107,6 +107,48 @@ describe('BackupsView', () => {
     expect(screen.getByText('snapshot ok')).toBeTruthy();
   });
 
+  // A step that ran but captured nothing — a configured service whose container
+  // was down — is neither ok nor failed. Showing it green is how a backup grows
+  // a hole nobody notices until a restore needs it.
+  it('marks a step that captured nothing as incomplete, not ok', () => {
+    const backups = makeBackups();
+    backups.last_run.workspaces['tenant-a'].garage = { success: true, output: 'ok' };
+    backups.last_run.workspaces['tenant-a'].postgres = {
+      success: true,
+      warning: true,
+      output: "container not running — this stage's data is NOT in this backup",
+    };
+    render(<Host View={BackupsView} data={dataWith(backups)} />);
+
+    // The run did not fail, so it must not claim errors...
+    expect(screen.queryByText('finished with errors')).toBeNull();
+    // ...but it must not read as a clean pass either.
+    expect(screen.getByText('completed with gaps')).toBeTruthy();
+    expect(screen.getByText('1 of 6 steps captured nothing')).toBeTruthy();
+
+    fireEvent.click(screen.getByText('1 of 6 steps captured nothing'));
+    expect(screen.getByText('1 incomplete')).toBeTruthy();
+    // Its group is open on arrival — a caveat folded behind a chevron is exactly
+    // as easy to miss as a failure.
+    expect(screen.getByText(/NOT in this backup/)).toBeTruthy();
+  });
+
+  it('ranks failures above gaps above clean groups', () => {
+    const backups = makeBackups();
+    backups.last_run.workspaces['aaa-warn'] = {
+      files: { success: true, warning: true, output: 'container not running' },
+    };
+    backups.last_run.workspaces['aab-clean'] = { files: { success: true, output: 'ok' } };
+    render(<Host View={BackupsView} data={dataWith(backups)} />);
+
+    fireEvent.click(screen.getByText('1 of 8 steps failed'));
+    const headings = screen.getAllByRole('button').map(b => b.textContent)
+      .filter(t => /tenant-a|aaa-warn|aab-clean/.test(t));
+    expect(headings[0]).toMatch(/tenant-a/);   // has the failure
+    expect(headings[1]).toMatch(/aaa-warn/);   // has the gap
+    expect(headings[2]).toMatch(/aab-clean/);  // nothing to see
+  });
+
   it('says all clear when nothing failed', () => {
     const backups = makeBackups();
     backups.last_run.workspaces['tenant-a'].garage = { success: true, output: 'ok' };

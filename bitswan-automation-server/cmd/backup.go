@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
+	"github.com/bitswan-space/bitswan-workspaces/internal/daemon/backup"
 	"github.com/spf13/cobra"
 )
 
@@ -203,6 +204,9 @@ func newBackupStatusCmd() *cobra.Command {
 			}
 			last := status.LastRun
 			outcome := "ok"
+			if backupRunHasWarnings(last) {
+				outcome = "ok, with warnings"
+			}
 			if !last.OK {
 				outcome = "FINISHED WITH ERRORS"
 			}
@@ -221,19 +225,13 @@ func newBackupStatusCmd() *cobra.Command {
 				}
 				sort.Strings(steps)
 				for _, step := range steps {
-					result := report[step]
-					mark := "ok"
-					if !result.Success {
-						mark = "FAILED: " + result.Output
-					}
-					fmt.Printf("  %-20s %-10s %s\n", ws, step, mark)
+					fmt.Printf("  %-20s %-10s %s\n", ws, step, stepMark(report[step]))
 				}
 			}
-			serverMark := "ok"
-			if !last.ServerState.Success {
-				serverMark = "FAILED: " + last.ServerState.Output
+			fmt.Printf("  %-20s %-10s %s\n", "(server)", "state", stepMark(last.ServerState))
+			if last.Images.Output != "" {
+				fmt.Printf("  %-20s %-10s %s\n", "(server)", "images", stepMark(last.Images))
 			}
-			fmt.Printf("  %-20s %-10s %s\n", "(server)", "state", serverMark)
 			return nil
 		},
 	}
@@ -367,4 +365,37 @@ func newBackupSnapshotsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&workspace, "workspace", "", "only this workspace's snapshots")
 	cmd.Flags().StringVar(&tag, "tag", "", "extra restic tag filter (e.g. postgres)")
 	return cmd
+}
+
+// stepMark renders one step's outcome. A warning is neither ok nor failed: the
+// step ran, but something it was asked to capture is not in the backup — most
+// often a configured service whose container was down. Calling that "ok" is how
+// a backup grows a hole nobody notices until a restore needs it.
+func stepMark(r backup.StepResult) string {
+	switch {
+	case !r.Success:
+		return "FAILED: " + r.Output
+	case r.Warning:
+		return "WARNING: " + r.Output
+	}
+	return "ok"
+}
+
+// backupRunHasWarnings reports whether any step in a run carried a caveat, so the
+// one-line outcome does not read as a clean pass when it was not.
+func backupRunHasWarnings(run *backup.RunReport) bool {
+	if run == nil {
+		return false
+	}
+	if run.ServerState.Warning || run.Images.Warning || run.Retention.Warning {
+		return true
+	}
+	for _, ws := range run.Workspaces {
+		for _, step := range ws {
+			if step.Warning {
+				return true
+			}
+		}
+	}
+	return false
 }

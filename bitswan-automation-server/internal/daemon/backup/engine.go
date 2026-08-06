@@ -20,7 +20,17 @@ import (
 // StepResult is one backed-up unit's outcome, shaped like gitops's per-step
 // results so consumers (console, CLI) render the same way.
 type StepResult struct {
-	Success bool   `json:"success"`
+	Success bool `json:"success"`
+	// Warning marks a step that did not fail but did not capture everything it
+	// was asked to either.
+	//
+	// The case that forced this: a service whose stage IS configured (its secrets
+	// file exists) but whose container was down when the run reached it. Its data
+	// is simply not in this backup. Reporting that green is how a backup grows a
+	// hole nobody notices until a restore; reporting it red would make every
+	// deliberately-stopped workspace cry wolf every night. Neither is the truth,
+	// so there is a third state.
+	Warning bool   `json:"warning,omitempty"`
 	Output  string `json:"output"`
 }
 
@@ -330,7 +340,14 @@ func (e *Engine) backupServiceStages(ctx context.Context, restic *Restic, ws, se
 		case err != nil:
 			perStage[stage] = StepResult{Success: false, Output: err.Error()}
 		case artifact == "":
-			perStage[stage] = StepResult{Success: true, Output: "container not running, skipped"}
+			// Not "disabled" — the enabled check above already passed, so this
+			// stage is configured and its container is simply down. Say what that
+			// costs rather than the neutral "skipped" it used to report.
+			perStage[stage] = StepResult{
+				Success: true,
+				Warning: true,
+				Output:  "container not running — this stage's data is NOT in this backup",
+			}
 		default:
 			perStage[stage] = resticStep(ctx, restic,
 				[]string{service, "ws:" + ws, "stage:" + stage}, artifact)
@@ -342,6 +359,7 @@ func (e *Engine) backupServiceStages(ctx context.Context, restic *Restic, ws, se
 		return StepResult{Success: true, Output: service + " not enabled on any stage, skipped"}
 	}
 	success := true
+	warning := false
 	var stageNames []string
 	for stage := range perStage {
 		stageNames = append(stageNames, stage)
@@ -351,6 +369,10 @@ func (e *Engine) backupServiceStages(ctx context.Context, restic *Restic, ws, se
 	for _, stage := range stageNames {
 		r := perStage[stage]
 		success = success && r.Success
+		// One caveated stage caveats the service: the aggregate is what the
+		// console renders, and a hole in production is not cancelled out by dev
+		// having gone fine.
+		warning = warning || r.Warning
 		tail := r.Output
 		if parts := strings.Split(strings.TrimSpace(tail), "\n"); len(parts) > 0 {
 			tail = parts[len(parts)-1]
@@ -360,7 +382,7 @@ func (e *Engine) backupServiceStages(ctx context.Context, restic *Restic, ws, se
 		}
 		lines = append(lines, stage+": "+tail)
 	}
-	return StepResult{Success: success, Output: strings.Join(lines, "; ")}
+	return StepResult{Success: success, Warning: warning, Output: strings.Join(lines, "; ")}
 }
 
 // bitswanConfigDir is the daemon's state root (the `bitswan` volume).
@@ -509,7 +531,7 @@ func (e *Engine) resticServerStep(ctx context.Context, restic *Restic, warning s
 	if lines := strings.Split(summary, "\n"); len(lines) > 1 {
 		summary = strings.TrimSpace(lines[len(lines)-1])
 	}
-	return StepResult{Success: true, Output: detail + "; " + summary}
+	return StepResult{Success: true, Warning: warning != "", Output: detail + "; " + summary}
 }
 
 func copyFile(src, dst string) error {

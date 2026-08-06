@@ -64,28 +64,35 @@ function runGroups(lastRun) {
     if (steps.length) groups.push({ key: `ws:${ws}`, title: ws, icon: 'folder', steps });
   }
 
+  // Three states, ranked. A warning is a step that ran but did not capture
+  // everything — most often a configured service whose container was down, so
+  // that stage's data is simply not in the backup. It is not a failure and must
+  // not be shown as one, but calling it "ok" is how a hole goes unnoticed.
+  const rank = (s) => (!s.result || !s.result.success ? 2 : s.result.warning ? 1 : 0);
   for (const g of groups) {
-    g.failed = g.steps.filter(s => !s.result || !s.result.success).length;
-    g.steps.sort((a, b) =>
-      (Number(!!(a.result && a.result.success)) - Number(!!(b.result && b.result.success)))
-      || a.name.localeCompare(b.name));
+    g.failed = g.steps.filter(s => rank(s) === 2).length;
+    g.warned = g.steps.filter(s => rank(s) === 1).length;
+    g.steps.sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name));
   }
   // Stable sort, so ties keep insertion order: the server group stays ahead of
-  // the workspaces within each failure class.
-  return groups.sort((a, b) => (b.failed > 0) - (a.failed > 0));
+  // the workspaces within each class.
+  const groupRank = (g) => (g.failed > 0 ? 2 : g.warned > 0 ? 1 : 0);
+  return groups.sort((a, b) => groupRank(b) - groupRank(a));
 }
 
 function StepRow({ name, result }) {
-  const ok = !!(result && result.success);
+  const failed = !(result && result.success);
+  const warned = !failed && !!(result && result.warning);
+  const tone = failed ? WC.red : warned ? WC.amber : WC.green;
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '5px 0 5px 30px' }}>
-      <WIcon name={ok ? 'check' : 'alert-triangle'} size={13} color={ok ? WC.green : WC.red}
+      <WIcon name={failed || warned ? 'alert-triangle' : 'check'} size={13} color={tone}
         style={{ marginTop: 2 }} />
       <span style={{ fontSize: 12.5, color: WC.fg, flex: '0 0 168px' }}>
         {STEP_LABELS[name] || name}
       </span>
-      <span style={{ fontSize: 12, color: ok ? WC.muted : WC.red, flex: 1, wordBreak: 'break-word' }}>
-        {(result && result.output) || (ok ? '' : 'failed')}
+      <span style={{ fontSize: 12, color: failed || warned ? tone : WC.muted, flex: 1, wordBreak: 'break-word' }}>
+        {(result && result.output) || (failed ? 'failed' : '')}
       </span>
     </div>
   );
@@ -94,7 +101,9 @@ function StepRow({ name, result }) {
 function RunGroup({ group }) {
   // Open iff something in it failed. A clean group is a line and a count; the
   // detail only earns its space when there is something wrong in it.
-  const [open, setOpen] = useBS(group.failed > 0);
+  // Open for anything that needs looking at — a caveat is exactly as easy to
+  // miss as a failure when it is folded behind a chevron.
+  const [open, setOpen] = useBS(group.failed > 0 || group.warned > 0);
   return (
     <div style={{ borderTop: `1px solid ${WC.surface2}` }}>
       <button type="button" onClick={() => setOpen(!open)}
@@ -105,9 +114,11 @@ function RunGroup({ group }) {
         <WIcon name={group.icon} size={14} color={WC.muted} />
         <span style={{ fontSize: 13, fontWeight: 600, color: WC.fg }}>{group.title}</span>
         <span style={{ flex: 1 }} />
-        {group.failed > 0
-          ? <WPill tone="danger">{group.failed} failed</WPill>
-          : <WPill tone="success">{group.steps.length} ok</WPill>}
+        {group.failed > 0 && <WPill tone="danger">{group.failed} failed</WPill>}
+        {group.warned > 0 && <WPill tone="warning">{group.warned} incomplete</WPill>}
+        {group.failed === 0 && group.warned === 0 && (
+          <WPill tone="success">{group.steps.length} ok</WPill>
+        )}
       </button>
       {open && (
         <div style={{ paddingBottom: 8 }}>
@@ -133,6 +144,7 @@ function LastRunPanel({ lastRun }) {
   const groups = runGroups(lastRun);
   const total = groups.reduce((n, g) => n + g.steps.length, 0);
   const failed = groups.reduce((n, g) => n + g.failed, 0);
+  const warned = groups.reduce((n, g) => n + g.warned, 0);
 
   return (
     <div style={{ borderTop: `1px solid ${WC.surface2}`, marginTop: 4 }}>
@@ -143,9 +155,17 @@ function LastRunPanel({ lastRun }) {
         <WIcon name={open ? 'chevron-down' : 'chevron-right'} size={15} color={WC.mutedFg} />
         {failed > 0
           ? <WPill tone="danger">finished with errors</WPill>
-          : <WPill tone="success">completed</WPill>}
-        <span style={{ fontSize: 12.5, color: failed > 0 ? WC.red : WC.muted, fontWeight: failed > 0 ? 600 : 400 }}>
-          {failed > 0 ? `${failed} of ${total} steps failed` : `all ${total} steps ok`}
+          : warned > 0
+            ? <WPill tone="warning">completed with gaps</WPill>
+            : <WPill tone="success">completed</WPill>}
+        <span style={{ fontSize: 12.5,
+          color: failed > 0 ? WC.red : warned > 0 ? WC.amber : WC.muted,
+          fontWeight: failed > 0 || warned > 0 ? 600 : 400 }}>
+          {failed > 0
+            ? `${failed} of ${total} steps failed`
+            : warned > 0
+              ? `${warned} of ${total} steps captured nothing`
+              : `all ${total} steps ok`}
         </span>
         <span style={{ flex: 1 }} />
         <span style={{ fontSize: 12.5, color: WC.muted }}>finished {fmtWhen(lastRun.finished_at)}</span>
