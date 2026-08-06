@@ -32,9 +32,16 @@ import (
 // Cost is far lower than it looks, because the tags heavily alias. Measured on a
 // live server: 103 internal tags behind 26 distinct images, ~2.4GB of unique layer
 // bytes. `docker save` given every tag at once writes each layer once and records
-// all tag mappings, so one stream restores all 103 names. And since the tags are
-// content-addressed they never change, so restic dedupes every later run to
-// approximately nothing — the first snapshot is the only expensive one.
+// all tag mappings, so one stream restores all 103 names.
+//
+// Later runs then cost almost nothing. NOT because the archive is byte-stable —
+// a multi-image `docker save` is measurably not: two runs over the same six
+// images produce different SHA-256. It is because restic chunks by content and
+// addresses chunks by hash, so an identical layer dedupes wherever it lands in
+// the stream. Measured into a scratch repo: first run added 529MiB, an immediate
+// second run over the same images added 22.7KiB. Sorting the tag list is still
+// worth doing — it keeps the argv deterministic — but it is not what makes this
+// cheap, and assuming a stable stream would be the wrong thing to preserve.
 
 // internalImageRef is the reference filter for BP images. Everything gitops builds
 // for a business process is tagged under this prefix (see the tag format in

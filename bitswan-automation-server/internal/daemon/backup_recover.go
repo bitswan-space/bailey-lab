@@ -109,12 +109,28 @@ var (
 	recoveryMu sync.Mutex
 	// recoveringWS holds the workspaces currently mid-recovery.
 	recoveringWS = map[string]bool{}
-	// serverRecovering covers a WHOLE-server recovery, which spans many
-	// per-workspace recoveries with gaps between them. Without it those gaps are
-	// windows in which the AOC list sync would see a half-restored server (see
-	// anyRecoveryInProgress).
-	serverRecovering bool
+	// serverRecoveryUntil is the DEADLINE of a whole-server recovery, or the zero
+	// time when none is running. A whole-server recovery spans many per-workspace
+	// recoveries with gaps between them; without covering the gaps, the AOC list
+	// sync would see a half-restored server (see anyRecoveryInProgress).
+	//
+	// A deadline rather than a bool because the marker is opened and closed by a
+	// CLI over HTTP, and the close is a deferred call in a process that can be
+	// SIGKILLed, lose its network or have its terminal shut. The daemon it is
+	// talking to was deployed BY that recovery, so it will not restart and clear
+	// the flag on its own. A marker stuck on silently disables the AOC list sync
+	// and the backup catch-up run — silently, because neither logs when it stands
+	// aside. Expiry makes that self-healing.
+	serverRecoveryUntil time.Time
 )
+
+// serverRecoveryWindow bounds how long the marker may hold without being closed.
+//
+// Generous on purpose: a recovery that rebuilds many workspaces legitimately
+// runs for hours, and cutting one short would let the catch-up backup snapshot a
+// half-restored server — the exact thing the marker prevents. It only has to be
+// short enough that an abandoned marker heals well inside a day.
+const serverRecoveryWindow = 6 * time.Hour
 
 func beginRecovery(ws string) error {
 	recoveryMu.Lock()
@@ -149,7 +165,7 @@ func workspaceUnderRecovery(ws string) bool {
 // server the newest recovery point.
 func beginServerRecovery() {
 	recoveryMu.Lock()
-	serverRecovering = true
+	serverRecoveryUntil = time.Now().Add(serverRecoveryWindow)
 	recoveryMu.Unlock()
 }
 
@@ -157,15 +173,39 @@ func beginServerRecovery() {
 // stuck marker silently disables the AOC list sync.
 func endServerRecovery() {
 	recoveryMu.Lock()
-	serverRecovering = false
+	serverRecoveryUntil = time.Time{}
 	recoveryMu.Unlock()
 }
 
 // serverRecoveryInProgress reports whether a whole-server recovery is running.
 func serverRecoveryInProgress() bool {
 	recoveryMu.Lock()
+	deadline := serverRecoveryUntil
+	expired := !deadline.IsZero() && time.Now().After(deadline)
+	if expired {
+		serverRecoveryUntil = time.Time{}
+	}
+	recoveryMu.Unlock()
+
+	if expired {
+		// Said out loud, once. The states this marker suppresses are both silent,
+		// so an abandoned recovery would otherwise leave no trace of why the AOC
+		// stopped seeing workspace changes.
+		fmt.Printf("Server-recovery marker expired after %s without being closed — "+
+			"the recovery command probably died. Resuming normal AOC sync and backups.\n",
+			serverRecoveryWindow)
+	}
+	return !deadline.IsZero() && !expired
+}
+
+// ServerRecoveryDeadline is when the current whole-server recovery marker lapses,
+// or the zero time when none is held. Surfaced in backup status so an abandoned
+// marker is visible rather than something an operator has to infer from backups
+// quietly not happening.
+func ServerRecoveryDeadline() time.Time {
+	recoveryMu.Lock()
 	defer recoveryMu.Unlock()
-	return serverRecovering
+	return serverRecoveryUntil
 }
 
 // anyRecoveryInProgress reports whether ANY recovery is in flight. The AOC list
@@ -174,9 +214,14 @@ func serverRecoveryInProgress() bool {
 // Keycloak client, editor group and MQTT topics — state that is NOT in the
 // backup. A deferred sync is harmless; a wrong one is not.
 func anyRecoveryInProgress() bool {
+	// serverRecoveryInProgress takes the lock itself (and may expire the marker),
+	// so it must be called before we take it here.
+	if serverRecoveryInProgress() {
+		return true
+	}
 	recoveryMu.Lock()
 	defer recoveryMu.Unlock()
-	return serverRecovering || len(recoveringWS) > 0
+	return len(recoveringWS) > 0
 }
 
 // Seams: every external effect goes through a var so tests need no docker.

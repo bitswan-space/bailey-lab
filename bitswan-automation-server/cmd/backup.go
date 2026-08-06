@@ -185,6 +185,11 @@ func newBackupStatusCmd() *cobra.Command {
 			if status.Running {
 				fmt.Println("A backup run is in progress.")
 			}
+			if status.ServerRecoveryUntil != nil {
+				fmt.Printf("Server recovery: in progress — the AOC workspace sync and the "+
+					"catch-up backup stand aside until it finishes (or until %s)\n",
+					status.ServerRecoveryUntil.Local().Format(time.RFC1123))
+			}
 			if status.Reason != "" {
 				fmt.Printf("Inactive:       %s\n", status.Reason)
 			}

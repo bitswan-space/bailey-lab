@@ -139,6 +139,18 @@ func newDaemonlessRestic(aocAPI, serverID, cred, key, image string) *backup.Rest
 	return restic
 }
 
+// newDaemonlessResticWithVolume is newDaemonlessRestic for the operations that
+// write into the server's config volume — the server-state restore, which lands
+// the tree the daemon will boot from. Split out rather than duplicated: the
+// caller previously assembled the target, the exec and the .localhost network
+// choice by hand, so the two copies could drift on exactly the detail that is
+// easiest to get wrong and hardest to notice.
+func newDaemonlessResticWithVolume(aocAPI, serverID, cred, key, image string) *backup.Restic {
+	restic := newDaemonlessRestic(aocAPI, serverID, cred, key, image)
+	restic.Container = restic.Container.WithConfigVolume()
+	return restic
+}
+
 // readManifestWithoutDaemon is the bare-machine bootstrap: build the AOC target
 // from supplied values and read the manifest with restic in a container.
 func readManifestWithoutDaemon(

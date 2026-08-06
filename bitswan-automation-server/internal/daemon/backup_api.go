@@ -25,16 +25,20 @@ import (
 // BackupStatusResponse is GET /backup/status — shaped close to gitops's old
 // GET /backups/config so console/CLI rendering stays familiar.
 type BackupStatusResponse struct {
-	AOCConnected    bool              `json:"aoc_connected"`
-	Enabled         bool              `json:"enabled"`
-	Configured      bool              `json:"configured"` // config file exists
-	HasKey          bool              `json:"has_key"`
-	KeyAcknowledged bool              `json:"key_acknowledged"`
-	KeyWarning      string            `json:"key_warning,omitempty"` // set while the key is unsaved
-	Running         bool              `json:"running"`
-	Retention       backup.Retention  `json:"retention"`
-	Reason          string            `json:"reason,omitempty"` // why not runnable
-	LastRun         *backup.RunReport `json:"last_run,omitempty"`
+	AOCConnected    bool             `json:"aoc_connected"`
+	Enabled         bool             `json:"enabled"`
+	Configured      bool             `json:"configured"` // config file exists
+	HasKey          bool             `json:"has_key"`
+	KeyAcknowledged bool             `json:"key_acknowledged"`
+	KeyWarning      string           `json:"key_warning,omitempty"` // set while the key is unsaved
+	Running         bool             `json:"running"`
+	Retention       backup.Retention `json:"retention"`
+	Reason          string           `json:"reason,omitempty"` // why not runnable
+	// ServerRecoveryUntil is set while a whole-server recovery holds the marker
+	// that stands the AOC list sync and the catch-up backup down. Reported so an
+	// abandoned marker is visible: both of those go quiet without saying why.
+	ServerRecoveryUntil *time.Time        `json:"server_recovery_until,omitempty"`
+	LastRun             *backup.RunReport `json:"last_run,omitempty"`
 }
 
 func (s *Server) backupStatus(ctx context.Context) BackupStatusResponse {
@@ -56,6 +60,10 @@ func (s *Server) backupStatus(ctx context.Context) BackupStatusResponse {
 	resp.HasKey = key != ""
 	resp.KeyAcknowledged = backup.KeyAcknowledged()
 	resp.KeyWarning = backup.UnsavedKeyWarning()
+
+	if deadline := ServerRecoveryDeadline(); !deadline.IsZero() {
+		resp.ServerRecoveryUntil = &deadline
+	}
 
 	if last, err := backup.LoadLastRun(); err == nil && last != nil {
 		resp.LastRun = last

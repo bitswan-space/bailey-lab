@@ -104,13 +104,8 @@ func recoverServerRestoreState(ctx context.Context, st *recoverServerState, step
 		restoreCtx, cancel := context.WithTimeout(ctx, recoverServerRestoreWait)
 		defer cancel()
 
-		restic := backup.NewRestic(
-			backup.NewAOCTarget(o.aocAPI, o.serverID, st.token), st.key)
-		exec := backup.NewContainerExec(image).WithConfigVolume()
-		if restic.Target.InDockerNetwork() {
-			exec.OnBitswanNetwork()
-		}
-		restic.Container = exec
+		restic := newDaemonlessResticWithVolume(
+			o.aocAPI, o.serverID, st.token, st.key, image)
 
 		summary, err := backup.RestoreServerState(restoreCtx, restic, o.snapshot)
 		if err != nil {
