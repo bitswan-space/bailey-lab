@@ -10,6 +10,11 @@ COPY bitswan-automation-server/ ./
 RUN CGO_ENABLED=0 go build -ldflags "-w -s" -o /out/bitswan .
 
 FROM python:3.11-bookworm
+# NOTE: the application source is BAKED into /src here (pyproject.toml + app/).
+# So /src, and /src/pyproject.toml, exist in EVERY image — production included.
+# Nothing may treat their presence as a sign that a developer bind-mounted a
+# live checkout: dev mode is declared explicitly via BITSWAN_GITOPS_DEV_SOURCE
+# (see start.sh and app/uvicorn.py). A dev mount shadows this whole directory.
 WORKDIR /src
 
 ENV VERSION=27.3.1

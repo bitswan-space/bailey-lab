@@ -56,7 +56,7 @@ The `bitswan workspace update` command supports development mode flags that enab
 |------|-------------|
 | `--dev-mode` | Enable development mode with live-reloading for gitops and editor extension |
 | `--disable-dev-mode` | Disable development mode |
-| `--gitops-dev-source-dir <path>` | Directory to mount as `/src/app` in gitops container for development |
+| `--gitops-dev-source-dir <path>` | Directory holding a live bitswan-gitops checkout. Bind-mounted at `/src` in the gitops container, which also sets `BITSWAN_GITOPS_DEV_SOURCE=/src` + `DEBUG=true` there to enable hot reload |
 | `--editor-dev-source-dir <path>` | Directory to mount as `/opt/bitswan-extension-dev` in editor container for development |
 
 ### Enabling Dev Mode

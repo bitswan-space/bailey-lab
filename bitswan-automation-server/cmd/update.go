@@ -74,7 +74,7 @@ func newUpdateCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&o.trustCA, "trust-ca", false, "Install custom certificates from the default CA certificates directory.")
 	cmd.Flags().BoolVar(&o.devMode, "dev-mode", false, "Enable development mode with live-reloading for gitops")
 	cmd.Flags().BoolVar(&o.disableDevMode, "disable-dev-mode", false, "Disable development mode")
-	cmd.Flags().StringVar(&o.gitopsDevSourceDir, "gitops-dev-source-dir", "", "Directory to mount as /src/app in gitops container for development")
+	cmd.Flags().StringVar(&o.gitopsDevSourceDir, "gitops-dev-source-dir", "", "Directory holding a live bitswan-gitops checkout; bind-mounted at /src in the gitops container and declared via BITSWAN_GITOPS_DEV_SOURCE to enable hot reload")
 	cmd.Flags().StringVar(&o.dashboardDevSourceDir, "dashboard-dev-source-dir", "", "Directory to mount as /workspace/dashboard-src in the workspace-dashboard container for hot-reload development")
 
 	cmd.ValidArgsFunction = validWorkspaceArgs
