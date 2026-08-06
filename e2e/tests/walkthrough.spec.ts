@@ -4,8 +4,40 @@
  *
  * Journey: onboarding (OIDC → claim → device trust) → create the Meridian Foods
  * workspace via the Server Console → create the invoice-processing BP → describe
- * it → Coding Agent → Sync & Deploy (+ Supply Chain Security scan) → deploy to dev → promote to
+ * it → Coding Agent → Deploy (+ Supply Chain Security scan) → deploy to dev → promote to
  * production → backups → rehearse recovery into DR.
+ *
+ * THE COPY TREE. Everyone works in their OWN copy: it is auto-created (by
+ * GET /api/me) and auto-selected on load. The top bar names NOTHING about it —
+ * there is no copy dropdown, no copy chip, not even the copy's name: the
+ * everyday answer to "whose copy is this?" is always "mine", so the bar spends
+ * its width on the pipeline instead. We ASSERT that absence (below) rather than
+ * merely stop using the old switcher.
+ *
+ * Everything else about copies lives behind the far-right "Advanced" menu:
+ * "See a colleague's version" (their copy — or, expanded, one of their
+ * experiments — under an amber "You are viewing …" banner with one click back)
+ * and "Experiments" — throwaway branches OFF YOUR OWN copy that you either
+ * merge back into it or discard. In your own experiment a green banner says so
+ * and carries exactly those two ways out; merging back AUTO-DISCARDS the
+ * experiment and lands you on your own copy.
+ *
+ * THE PIPELINE. Description › Coding Agent ↻ Requirements › Deploy all happen
+ * inside the copy; Deployments sits outside it (main's shared area). Two tabs
+ * are CONDITIONAL, and this walkthrough asserts the condition each way:
+ *  - "Sync" leads the pipeline (before Description) only on your OWN copy and
+ *    only while main carries commits it lacks. This run is a SINGLE user, so
+ *    main only ever advances through this copy's own deploys — the tab must
+ *    never appear, and we assert that in `deploy-tab`.
+ *  - "Deploy" is absent INSIDE an experiment (an experiment merges back into
+ *    its parent copy, never into main) — asserted in `experiment`.
+ * Deploying is FAST-FORWARD-PUSH-ONLY: while the copy is behind main the Deploy
+ * button is replaced by "Main has changes you don't have yet — sync first." plus
+ * a "Go to Sync" link; it succeeds exactly when the push is a fast-forward.
+ * (The legacy `?tab=sync-deploy` link still lands on Deploy via App.tsx's
+ * LEGACY_TAB_ALIASES. That is a URL-level alias, and the pure-browser rules
+ * below forbid navigating by URL, so it is NOT driven here — it lives in the
+ * dashboard's own unit coverage.)
  *
  * PURE-BROWSER RULES (a human with a mouse + keyboard could do every step):
  *  - ONLY click and type. No URL navigation except the single initial load of
@@ -90,7 +122,17 @@ const timings: { name: string; seconds: number }[] = [];
 // so its ~70s chapter total is NOT a single user-interaction latency (it's the
 // sum of the whole spree + editor open/persist overhead). Excluded so it doesn't
 // falsely dominate the interaction max/p95.
-const LONG_OP = /workspace|deploy|promote|sync|snapshot|backup|recover|disaster|coding.?agent|wake|first.?load|build|live-?dev|create-bp|supply-chain|cve|scan|flowchart|deps-|prod-rollback/i;
+// NOTE: the `experiment*` chapters are LONG_OPs for the same reason `workspace`
+// is — the duration is container work, not the latency of the click. Starting an
+// experiment publishes the parent's tip for the ONE business process it is about
+// and clones just that one (the rest materialize from the parent on first open),
+// so creation itself is quick; what makes the chapter long is the business
+// process then being woken into its own live-dev. Merging back is the same shape
+// in reverse (a push + fast-forward in the parent's clone, the parent's live-dev
+// redeployed, then the experiment's whole teardown). The CLICK a human actually
+// waits on (Advanced → the menu) is covered by the `advanced-menu` interactive
+// chapter.
+const LONG_OP = /workspace|deploy|promote|sync|snapshot|backup|recover|disaster|coding.?agent|wake|first.?load|build|live-?dev|create-bp|supply-chain|cve|scan|flowchart|deps-|prod-rollback|experiment/i;
 function isInteractive(name: string): boolean {
   return !LONG_OP.test(name);
 }
@@ -492,11 +534,22 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   const clickTopTab = async (re: RegExp) => {
     await topTab(re).click({ timeout: NAV });
   };
+  // The top bar as an ELEMENT, without reaching for a class name: it is the
+  // innermost element that contains BOTH the business-process selector and the
+  // Advanced menu. Ancestors precede descendants in document order, so among
+  // the divs that qualify (the shell root and the bar itself) the LAST is the
+  // bar. Used by the "there is no copy chip in the bar" assertions.
+  const topBarEl = () =>
+    d
+      .locator('div')
+      .filter({ has: d.getByRole('button', { name: /^Process\b/ }) })
+      .filter({ has: d.getByRole('button', { name: /^Advanced$/ }) })
+      .last();
   // ── The live progress signature ──────────────────────────────────────────
   // Everything the product tells the operator about an in-flight long op, read
   // straight off the screen and concatenated. The deploy/promote pipeline
   // surfaces progress as a single sonner toast that updates in place (its title
-  // is [data-sonner-toast] [data-title]); the Sync & Deploy button also flips to
+  // is [data-sonner-toast] [data-title]); the Deploy button also flips to
   // "Working…"; the stage card carries a status line. We watch ALL of them so
   // any one moving counts as progress. (No network/log inspection — only DOM.)
   const progressSignature = async (): Promise<string> => {
@@ -513,12 +566,16 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       const t = await toasts.nth(i).textContent().catch(() => '');
       if (t && t.trim()) parts.push('toast:' + t.trim());
     }
-    // The action button label ("Working…" vs "Sync & Deploy"/"Promote"). Use a
+    // The action button label ("Working…" vs "Deploy"/"Promote"). Use a
     // SHORT per-read timeout: when the element is absent (e.g. on a tab that
     // doesn't show it), textContent() otherwise blocks the full default timeout
     // (and the .catch hides it) — turning a single signature read into a 60s
     // stall and breaking the watchdog's timing. A quick miss → empty part.
-    const btn = await d.getByRole('button', { name: /Working|Sync & Deploy|Promote|Switching|Starting/i }).first().textContent({ timeout: 1500 }).catch(() => '');
+    // The Deploy alternative is ANCHORED (/^Deploy$/): an unanchored /Deploy/
+    // would also match the "Deployments" TAB, which is on screen the whole time
+    // and would pin the signature to a constant — the watchdog would then read
+    // "the screen is moving" forever and never notice a dark stall.
+    const btn = await d.getByRole('button', { name: /Working|^Deploy$|Promote|Switching|Starting/i }).first().textContent({ timeout: 1500 }).catch(() => '');
     if (btn && btn.trim()) parts.push('btn:' + btn.trim());
     // The stage card status line + version (changes when a deploy lands).
     const status = await d.getByText(/Healthy|services? not running|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|Generating|Configuring|Reconciling|Provisioning|Installing|Recording|Updating|updated|never deployed/i).first().textContent({ timeout: 1500 }).catch(() => '');
@@ -632,18 +689,144 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await expect(closer, 'a modal stayed open and would block later clicks').toBeHidden({ timeout: SLA });
   };
 
+  // ---- Append a real block to the Description, and make it STICK -----------
+  // The Description editor is ProseMirror, and it REMOUNTS from the server copy
+  // whenever a status refresh lands — silently dropping an in-flight draft. So
+  // type-and-save in a bounded retype loop gated on a marker that SURVIVES the
+  // remount window, exactly as the v2 deploy chapter proved is necessary. The
+  // marker also makes the whole edit idempotent (already present ⇒ skip), which
+  // is what lets a re-run of the suite pass. Assumes the Description tab is the
+  // active tab and the copy in view is the one to edit.
+  const appendToDescription = async (md: string, marker: RegExp, why: string) => {
+    const editor = d.locator('.ProseMirror, [contenteditable="true"]').first();
+    // The editor only mounts once the business process is materialized in the
+    // copy in view (WorkspaceView gates on bp.copies.includes(copy), fed by the
+    // processes SSE feed) — in a freshly created experiment that can lag the
+    // copy itself, so allow well past the interaction SLA here.
+    await expect(editor, `${why} — the Description editor never mounted`).toBeVisible({
+      timeout: 5 * 60_000,
+    });
+    const mark = editor.getByText(marker).first();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await mark.isVisible().catch(() => false)) {
+        // Seeing the text is not enough: the doc shows the draft before the save
+        // round-trip settles. Only trust a marker that outlives the remount
+        // window — a status refresh remounts ProseMirror from the server copy
+        // and drops anything that never actually saved.
+        const clobbered = await mark
+          .waitFor({ state: 'hidden', timeout: 5_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!clobbered) break;
+      }
+      // Click near the top-left of the editor, NOT its center: the doc embeds
+      // the flowchart drawn earlier, and the pane's center can land on that
+      // mermaid preview — whose whole surface is click-to-edit, so a center
+      // click opens the Flowchart editor modal and blocks every later click.
+      // The caret position is irrelevant (Control+End moves it to the doc end);
+      // the click only needs to focus the editor without hitting the embed.
+      await editor.click({ position: { x: 24, y: 16 } });
+      await dashPage.keyboard.press('Control+End');
+      // Control+End leaves the caret at the END of the doc — after the README +
+      // flowchart embed that is INSIDE the trailing markdown list item (or right
+      // after the diagram block). Typing a new block there folds it into that
+      // list (#94), so break out into a clean empty paragraph first: Enter twice
+      // exits a list. (typeMarkdown skips a leading blank line of its own; these
+      // explicit Enters are what breaks the structure.)
+      await dashPage.keyboard.press('Enter').catch(() => {});
+      await dashPage.keyboard.press('Enter').catch(() => {});
+      await typeMarkdown(dashPage, md);
+      await dashPage.keyboard.press('Control+s');
+      await d.getByRole('button', { name: /Saving/i }).first()
+        .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+      // Let any post-save toast clear before the caller reads the top bar or a
+      // header button — a lingering toast over a control makes a click never land.
+      await d.locator('[data-sonner-toast]').first()
+        .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
+    }
+    await expect(mark, why).toBeVisible({ timeout: SLA });
+  };
+
   // The personal copy is auto-created + auto-selected on load — we never create
-  // or name one for navigation. We DO open the copy switcher once to screenshot
-  // it (a real thing a user can do), then close it without creating anything.
-  await chapter('copy-switcher', async () => {
-    const copyBtn = d.getByRole('button', { name: /^Copy/ }).first();
-    await copyBtn.click();
-    // The popover lists the copies (or "Setting up your copy…" while it lands)
-    // and a "New copy" action. Shoot it open — a real thing a user can do — then
-    // close it without creating anything.
-    await d.getByText(/New copy|Setting up your copy/i).first()
-      .waitFor({ state: 'visible', timeout: SLA }).catch(() => {});
-    await capture(dashPage, 'copy-switcher');
+  // or name one for navigation, and there is NO copy control in the top bar at
+  // all: no dropdown, no chip, not even the copy's name. The two things you CAN
+  // do with the copy tree — look at a colleague's version, or branch an
+  // experiment off your own copy — live behind the far-right "Advanced" menu.
+  // Open it once to screenshot it (a real thing a user can do), then close it
+  // without changing anything.
+  await chapter('advanced-menu', async () => {
+    // ---- The old copy combobox is GONE, and its absence is the requirement ---
+    // CopySelector.tsx (trigger: an uppercase "Copy" label + the owner's
+    // identity, title="Switch copy …") and NewCopyDialog.tsx ("New copy") are
+    // deleted. A regression that reinstated either — or that put the copy's name
+    // back in the bar — would still let every OTHER assertion in this file pass,
+    // so assert the absence here instead of merely not using it.
+    const bar = topBarEl();
+    await expect(
+      bar,
+      'the top bar never rendered (no element carrying both the Process selector and Advanced)',
+    ).toBeVisible({ timeout: SLA });
+    await expect(
+      bar.getByRole('combobox'),
+      'a combobox is back in the top bar — the copy picker was reinstated',
+    ).toHaveCount(0);
+    await expect(
+      d.getByRole('button', { name: /^Copy\b/ }),
+      'a "Copy …" trigger is back — the deleted copy switcher was reinstated',
+    ).toHaveCount(0);
+    await expect(
+      d.getByRole('button', { name: /New copy/i }),
+      'a "New copy" action is back — copies are per-person and created for you, never by hand',
+    ).toHaveCount(0);
+    // Not even the word: no "Copy" label, chip or count anywhere in the bar. The
+    // copy's NAME is asserted absent in `deploy-tab`, where the full set of
+    // labels the bar is allowed to carry is known.
+    await expect(
+      bar,
+      'the top bar mentions a copy — the product deliberately names no copy there',
+    ).not.toContainText(/\bcopy\b/i);
+
+    await d.getByRole('button', { name: /^Advanced$/ }).first().click();
+    // The popover has exactly two sections. Wait for BOTH labels before the
+    // shutter so the shot can never catch a half-populated menu (the colleague
+    // list and the experiment list are filled from the copies SSE feed).
+    // (The apostrophe class covers both the ASCII and the typographic form —
+    // the label is prose, and a curly quote must not be a selector failure.)
+    await expect(
+      d.getByText(/See a colleague[’']s version/i).first(),
+      'the Advanced menu never listed the colleague-view section',
+    ).toBeVisible({ timeout: SLA });
+    await expect(
+      d.getByText(/^Experiments$/i).first(),
+      'the Advanced menu never listed the Experiments section',
+    ).toBeVisible({ timeout: SLA });
+    // ---- The colleague view, as this cast actually stands -------------------
+    // "See a colleague's version" lists a row per OTHER person's copy. In this
+    // workspace Tomáš is the only member who has ever opened the dashboard —
+    // Marek's story (chapters onboard-*) stops at the device-trust gate and never
+    // reaches a workspace, so no second personal copy exists to switch into.
+    // The truthful state is therefore the product's own honest empty line, and
+    // that is what we assert: NOT a screenshot of a colleague list we would have
+    // to fabricate. (Give a colleague a copy and this line is replaced by their
+    // row, expandable to their experiments — same menu, same click.)
+    await expect(
+      d.getByText(/No one else has a copy yet/i).first(),
+      "the colleague section didn't show its honest empty state — someone else has a copy in a workspace only the operator has ever opened",
+    ).toBeVisible({ timeout: SLA });
+    // ---- Experiments: mine, and the way to start one ------------------------
+    // "Start a new experiment" only renders once GET /api/me has resolved the
+    // user's own copy (before that the section reads "Setting up your copy…"),
+    // so waiting on it is the resolved signal — after which "you have none yet"
+    // is a real assertion rather than a race.
+    await expect(
+      d.getByRole('button', { name: /Start a new experiment/i }).first(),
+      'the Advanced menu never offered "Start a new experiment" (the signed-in user never got their own copy)',
+    ).toBeVisible({ timeout: SLA });
+    await expect(
+      d.getByText(/You have no experiments running/i).first(),
+      'the Experiments section listed an experiment before the walkthrough started one',
+    ).toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'advanced-menu');
     await dashPage.keyboard.press('Escape');
   });
 
@@ -710,7 +893,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // deliberately NOT walked here. A BP is born in main, so a rename is a
   // MAIN-scope commit (RenameBusinessProcessDialog: copy = inMain ? undefined
   // : …) — it advances the BP repo's main and leaves this copy behind, so the
-  // later Sync & Deploy stops being a fast-forward and the product hands the
+  // later Deploy stops being a fast-forward and the product hands the
   // rebase to a live coding-agent session ("main has moved on…") this
   // screenshot walkthrough can't drive deterministically. Rename has its own
   // coverage in bitswan-gitops/tests/test_bp_creation.py; keeping it out of the
@@ -1384,20 +1567,228 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'file-editor-saved');
   });
 
-  // ---- Sync & Deploy: the Diff / History / Supply Chain Security sub-tabs ----
+  // ---- Experiments: a throwaway branch off YOUR OWN copy --------------------
+  // The other half of the copy tree. An experiment is a copy whose PARENT is
+  // your copy: creating it COMMITS + publishes your copy's current tip (so the
+  // automation.toml edit above rides into it) and branches from there. It offers
+  // exactly two ways out — "Merge back into my copy" or "Discard experiment" —
+  // and it can never reach main: the Deploy tab is not even rendered inside one.
+  // We start one for real and shoot the state it puts the operator in (the green
+  // banner naming the experiment by its TITLE — the copy name itself is an
+  // opaque slug the user never sees).
+  const EXPERIMENT_TITLE = 'Check vendor VAT-IDs against ARES';
+  const expBanner = () => d.getByText(/You are in an experiment/i).first();
+  await chapter('experiment', async () => {
+    // Leave the Coding Agent tab FIRST. The agent pane autostarts a session for
+    // whatever (copy, business process) it is mounted on, so creating the
+    // experiment while that tab is active would spin a coding-agent container up
+    // inside the experiment — real work nobody asked for, and a needless
+    // dependency for a chapter about the copy tree. A human who is about to try
+    // something out looks at the spec; do the same.
+    await clickTopTab(/Description/i);
+    await d.getByRole('button', { name: /^Advanced$/ }).first().click();
+    // The "Start a new experiment" row under the menu's Experiments section.
+    // Accept either widget role: a popover renders its rows as buttons, a
+    // dropdown as menuitems — the row a human clicks is the same either way.
+    await d.getByRole('button', { name: /Start a new experiment/i })
+      .or(d.getByRole('menuitem', { name: /Start a new experiment/i }))
+      .first()
+      .click({ timeout: NAV });
+    // The "Start an experiment" dialog: one title field, one action. (The action
+    // is the dialog's only non-Cancel button; we name the label rather than
+    // picking "the last button", because a Radix dialog's own × close control
+    // would otherwise be a candidate.)
+    const dlg = d.getByRole('dialog');
+    await expect(
+      dlg.getByText(/Start an experiment/i).first(),
+      'Advanced → Start a new experiment did not open the experiment dialog',
+    ).toBeVisible({ timeout: SLA });
+    const titleInput = dlg.getByRole('textbox').first();
+    await titleInput.waitFor({ state: 'visible', timeout: SLA });
+    // The user names WHAT THEY ARE TRYING, never a branch — gitops derives the
+    // slug, the parent and the ownership from the verified identity.
+    await titleInput.fill(EXPERIMENT_TITLE);
+    await dlg.getByRole('button', { name: /^(Start experiment|Start|Create experiment|Create)$/i })
+      .first()
+      .click({ timeout: NAV });
+    // READINESS SIGNAL (no sleeps): creation publishes the parent's tip for this
+    // one business process and clones just it, then the client selects the new
+    // experiment — quick, but still past the short-interaction SLA. The product
+    // tells us when we are IN it: the green banner. Its appearance is the
+    // authoritative "the experiment exists and is selected" signal, so we wait on
+    // it (bounded generously, since a first live-dev wake can ride along) and
+    // hard-fail if it never lands.
+    await expect(
+      expBanner(),
+      'creating an experiment never landed us in it (the green experiment banner never appeared)',
+    ).toBeVisible({ timeout: 8 * 60_000 });
+    // The BANNER ITSELF identifies the experiment by the TITLE we typed, never by
+    // its slug (an opaque name the user never sees) — that is the whole point of
+    // asking "what are you trying out?". Asserted on the banner element, not on
+    // the page, so a create toast carrying the same title can't stand in for it.
+    await expect(
+      expBanner(),
+      'the experiment banner does not name the experiment by the title we gave it',
+    ).toContainText(EXPERIMENT_TITLE, { timeout: SLA });
+    // An experiment merges back into its parent copy and NEVER into main, so the
+    // Deploy step is absent from the pipeline in here (TopNav omits DEPLOY_STEP
+    // when the copy in view is one of your own experiments). This is the
+    // conditional-tab assertion in the opposite direction to `deploy-tab`'s
+    // Sync check — and it is exactly the guard that would catch an experiment
+    // being handed a path to main.
+    await expect(
+      d.getByRole('button', { name: /^Deploy$/ }),
+      'the Deploy tab is present inside an experiment — an experiment must reach main only through its parent copy',
+    ).toHaveCount(0);
+    await capture(dashPage, 'experiment');
+  });
+
+  // ---- The experiment's whole point: do work in it, then merge it back ------
+  // The lifecycle a real operator runs: try something in the experiment, like
+  // the result, merge it into your own copy — and the experiment DISAPPEARS.
+  // "Merge back into my copy" fast-forwards the work into the parent copy,
+  // redeploys the parent's live-dev, then deletes the experiment outright and
+  // puts you back on your own copy. Nothing here touches main; the merged work
+  // reaches main later, from your own copy, through Deploy.
+  //
+  // We need real work to merge: the button is correctly DISABLED on an
+  // experiment with nothing the parent lacks ("Nothing to merge yet"), so the
+  // edit below is not decoration — it is what makes the merge a merge. The edit
+  // is the vendor VAT-ID rule (scenario.BP.readmeExperimentAddition), and after
+  // the merge we assert it is present in OUR OWN copy: that is the proof the
+  // work actually travelled, which no banner state can give us.
+  await chapter('experiment-merge', async () => {
+    await clickTopTab(/Description/i);
+    await appendToDescription(
+      BP.readmeExperimentAddition,
+      /Vendor VAT-ID validation/i,
+      'the experiment edit did not survive in the Description editor (draft dropped by a mid-edit refresh) — there would be nothing to merge back',
+    );
+    // The merge button arms itself off a LIVE merge-preview of the parent (not
+    // the SSE snapshot), and the shell nudges that preview on every editor save.
+    // So gate on the button being enabled — the product's own "there is
+    // something to merge" signal — rather than assuming the save was enough.
+    const mergeBtn = d.getByRole('button', { name: /^Merge back into my copy$/i }).first();
+    await expect(
+      mergeBtn,
+      'the experiment never offered a merge back into the copy, even after a saved edit',
+    ).toBeEnabled({ timeout: SLA });
+    await capture(dashPage, 'experiment-merge');
+    await mergeBtn.click({ timeout: NAV });
+    // MERGING IS HOW AN EXPERIMENT ENDS. A successful merge auto-discards it and
+    // switches us back to our own copy, so the completion signal is the green
+    // banner going away — and, distinctly, the Deploy tab coming BACK (it exists
+    // only outside an experiment, so its return proves WHICH copy we landed on,
+    // not merely that we left). Both bounded and fatal: a stranded experiment
+    // would poison every later chapter.
+    await expect(
+      expBanner(),
+      'merging the experiment back never ended it (the green experiment banner stayed up)',
+    ).toBeHidden({ timeout: 8 * 60_000 });
+    await expect(
+      d.getByText(/You are viewing/i),
+      'the merge left us on somebody else’s copy instead of our own',
+    ).toHaveCount(0);
+    await expect(
+      topTab(/^Deploy$/),
+      'the Deploy tab did not come back after the merge — we are not on our own copy',
+    ).toBeVisible({ timeout: SLA });
+    // THE PAYOFF: the work the experiment carried is now in our own copy. Read
+    // it off our own copy's Description — the same tab, a different copy.
+    await clickTopTab(/Description/i);
+    await expect(
+      d.locator('.ProseMirror, [contenteditable="true"]').first().getByText(/Vendor VAT-ID validation/i).first(),
+      'the merge reported success but the experiment’s work is not in our own copy',
+    ).toBeVisible({ timeout: 5 * 60_000 });
+    // AUTO-DISCARD: the experiment is not merely deselected, it is DELETED — its
+    // branch, its files and its live-dev containers. The teardown runs in the
+    // background and the copies feed drops it when it finishes, so the honest
+    // completion signal is the Experiments section going empty again. The menu is
+    // a popover, so we re-open it each pass rather than hold it open for minutes
+    // (an open popover is exactly the kind of thing that closes under a re-render
+    // and turns a real wait into a stuck one). Bounded; fatal if it never clears
+    // — an experiment that survives its own merge is the bug this flow exists to
+    // avoid.
+    const noExperiments = d.getByText(/You have no experiments running/i).first();
+    const advanced = () => d.getByRole('button', { name: /^Advanced$/ }).first();
+    let discarded = false;
+    const discardDeadline = Date.now() + 8 * 60_000;
+    for (;;) {
+      await advanced().click().catch(() => {});
+      discarded = await noExperiments
+        .waitFor({ state: 'visible', timeout: 15_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (discarded || Date.now() > discardDeadline) break;
+      // Close it again so the next iteration's click re-opens rather than toggles.
+      await dashPage.keyboard.press('Escape').catch(() => {});
+    }
+    expect(
+      discarded,
+      'the merged experiment was not discarded — it is still listed under Advanced → Experiments',
+    ).toBe(true);
+    await dashPage.keyboard.press('Escape');
+  });
+
+  // ---- Deploy: the Diff / History / Supply Chain Security sub-tabs ----
   // Every sub-tab a real operator inspects before shipping: the Diff (what
   // becomes main), the History (copy + main commits with deploy tags), and the
   // Supply Chain Security tab (the CVE scan of the image this deploy would build).
-  await chapter('sync-deploy', async () => {
-    await clickTopTab(/Sync & Deploy/i);
-    await capture(dashPage, 'sync-deploy');
-    // (The redundant 'sync-deploy-diff' capture was removed — it duplicated the
-    // Sync & Deploy shot above. The matching content slot is removed too.) We
+  await chapter('deploy-tab', async () => {
+    // The conditional "Sync" tab (first, before Description) exists ONLY while
+    // main carries commits this copy doesn't have yet. This walkthrough is a
+    // SINGLE user: main advances only through THIS copy's own deploys, so the
+    // copy can never fall behind main and the Sync tab must never appear. If it
+    // ever does here, something advanced main behind our back — which would also
+    // turn the deploy below into a non-fast-forward (a rebase handed to the
+    // coding agent), so catch it now rather than three chapters later.
+    await expect(
+      d.getByRole('button', { name: /^Sync$/ }),
+      'a "Sync" tab appeared for a single user — nothing but this copy should be advancing main',
+    ).toHaveCount(0);
+    // ---- NO copy name in the top bar, by exhaustion --------------------------
+    // The stronger half of the "the copy combobox is gone" requirement: not only
+    // is there no picker, there is NO COPY NAME in the bar at all. With a
+    // business process selected, on our own copy, not behind main and not in an
+    // experiment, the bar's text is a CLOSED SET of labels — so strip them and
+    // require nothing to be left over. That catches a reinstated identity chip,
+    // a slug, an owner's name or a "3 ahead" badge, none of which a
+    // getByRole/getByText absence check would name in advance. (Longest label
+    // first, so stripping "Deployments" can't leave an orphan "ments" behind
+    // after "Deploy".)
+    const ALLOWED_TOP_BAR = [
+      'Requirements & tests',
+      'Deployments',
+      'Coding Agent',
+      'Get started',
+      'Description',
+      'Advanced',
+      BP.title,
+      'Process',
+      'Deploy',
+      // The role chip. Any of the three is fine — the role is not what this
+      // assertion is about, so all three are allowed rather than pinned.
+      'Auditor',
+      'Member',
+      'Admin',
+    ].sort((a, b) => b.length - a.length);
+    const barText = ((await topBarEl().innerText()) || '').replace(/\s+/g, ' ').trim();
+    let residue = barText;
+    for (const label of ALLOWED_TOP_BAR) residue = residue.split(label).join('');
+    residue = residue.replace(/[\s·|›>]/g, '');
+    expect(
+      residue,
+      `the top bar carries text beyond the pipeline labels — the copy name/chip is back in the bar (bar read: "${barText}")`,
+    ).toBe('');
+    await clickTopTab(/^Deploy$/);
+    await capture(dashPage, 'deploy-tab');
+    // (The redundant 'deploy-tab-diff' capture was removed — it duplicated the
+    // Deploy shot above. The matching content slot is removed too.) We
     // still bounce through the Diff sub-tab so History/Supply Chain Security below start clean.
     await d.getByRole('button', { name: /^diff$/i }).first().click().catch(() => {});
     // History sub-tab — the copy + main commit timeline with deploy markers.
     await d.getByRole('button', { name: /^history$/i }).first().click().catch(() => {});
-    await capture(dashPage, 'sync-deploy-history');
+    await capture(dashPage, 'deploy-tab-history');
     // Supply Chain Security sub-tab — the pre-deploy supply-chain scan of the image this
     // deploy WOULD build. The scan bakes an ephemeral image then scans it, so
     // it can be "pending" right after a BP is scaffolded; we capture the REAL
@@ -1410,24 +1801,30 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   });
 
   // ---- Deploy the copy onto main + dev ----
-  // One press of Sync & Deploy commits the copy onto main and deploys this BP's
+  // One press of Deploy commits the copy onto main and deploys this BP's
   // containers to dev. Driven + observed ENTIRELY through the screen: the button
-  // reads "Sync & Deploy" → "Working…" while it commits/builds/deploys, then the
+  // reads "Deploy" → "Working…" while it commits/builds/deploys, then the
   // app flips to Deployments. We confirm the Development stage reports Healthy on
   // screen. The "Add automations" scaffold lands ASYNCHRONOUSLY after the BP is
   // created, so the very first press can fast-forward main a beat before the BP's
   // containers are indexed and deploy nothing; the README the editor re-serialises
-  // leaves the BP actionable again, so a human simply presses Sync & Deploy once
+  // leaves the BP actionable again, so a human simply presses Deploy once
   // more. We do the same: press while actionable until the dev stage is Healthy.
-  // Press Sync & Deploy and ride the deploy with the progress watchdog. The
+  // Press Deploy and ride the deploy with the progress watchdog. The
   // button commits work-in-progress, rebases onto main, fast-forwards and
   // deploys to dev — flipping to "Working…" while it runs. We DON'T cap on a
   // flat SLA; we wait for the button to leave "Working…" while requiring the
   // on-screen progress to keep moving (the watchdog), so a long real image
   // build is fine but a silent stall fails.
-  const pressSyncDeploy = async () => {
-    await clickTopTab(/Sync & Deploy/i);
-    const btn = d.getByRole('button', { name: /Sync & Deploy|Working/ }).last();
+  // EVERY "Deploy" matcher below is ANCHORED (/^Deploy$/): the "Deployments" tab
+  // is on screen at the same time, and an unanchored /Deploy/ would match it —
+  // clicking the wrong tab, or worse, reading an always-enabled tab as "the
+  // deploy button armed". The tab and the primary action share the name
+  // "Deploy", so we keep the file's existing convention: .first() = the top tab,
+  // .last() = the primary action button in the tab body.
+  const pressDeploy = async () => {
+    await clickTopTab(/^Deploy$/);
+    const btn = d.getByRole('button', { name: /^Deploy$|Working/ }).last();
     await expect(btn).toBeEnabled({ timeout: SLA });
     await btn.click();
     const working = d.getByRole('button', { name: /Working/i }).first();
@@ -1439,7 +1836,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const deadline = Date.now() + 30 * 60_000;
     for (;;) {
       if (!(await working.isVisible().catch(() => false))) return; // finished
-      if (Date.now() > deadline) throw new Error('Sync & Deploy exceeded 30min backstop');
+      if (Date.now() > deadline) throw new Error('Deploy exceeded 30min backstop');
       try {
         await expect
           .poll(
@@ -1448,7 +1845,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
           )
           .not.toBe(last);
       } catch {
-        // The Sync & Deploy progress toast is a COSMETIC live-progress animation.
+        // The Deploy progress toast is a COSMETIC live-progress animation.
         // In the headless walkthrough it can stop updating even though the deploy
         // is still running fine server-side (verified live: the deploy completes
         // and the Development stage renders normally once it does). A quiet toast
@@ -1460,7 +1857,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         // long-op watchdogs are unchanged.
         // eslint-disable-next-line no-console
         console.warn(
-          `Sync & Deploy: progress toast quiet >${PROGRESS / 1000}s (last: "${last.slice(0, 120)}") — waiting for "Working…" to clear instead`,
+          `Deploy: progress toast quiet >${PROGRESS / 1000}s (last: "${last.slice(0, 120)}") — waiting for "Working…" to clear instead`,
         );
         await working
           .waitFor({ state: 'hidden', timeout: Math.max(1000, deadline - Date.now()) })
@@ -1470,14 +1867,14 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       last = await progressSignature();
     }
   };
-  // After a working-tree EDIT, re-arm the Sync & Deploy button. The button gates
+  // After a working-tree EDIT, re-arm the Deploy button. The button gates
   // on `!bpUpToDate` where `bpUpToDate = ahead==0 && behind==0 && !dirty`
   // (SyncDeployTab.tsx). The header only refetches its `/status` snapshot on
   // (re)mount or window-focus, so right after an edit it can still hold the
   // PRE-save (clean) snapshot — "Up to date with main", button disabled — even
   // while the freshly-mounted Diff panel already lists the changed file. Gate on
   // the SAME on-screen signal the button keys off: bounce the tab
-  // (Deployments → Sync & Deploy remounts + refetches), click the Diff ⟳
+  // (Deployments → Deploy remounts + refetches), click the Diff ⟳
   // refresh, and poll the header badge until it reports pending work (an
   // uncommitted file / N ahead / N behind). Bounded; never sleeps.
   const armAfterEdit = async () => {
@@ -1486,7 +1883,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const armDeadline = Date.now() + SLA;
     for (;;) {
       await clickTopTab(/Deployments/i);
-      await clickTopTab(/Sync & Deploy/i);
+      await clickTopTab(/^Deploy$/);
       await d.getByRole('button', { name: /^Refresh$/i }).first().click().catch(() => {});
       const armed = await Promise.race([
         pending.waitFor({ state: 'visible', timeout: 5_000 }).then(() => true).catch(() => false),
@@ -1501,11 +1898,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // Development stage is Healthy (the deploy-v2 press-while-actionable shape,
   // factored out). Fails loudly if Development never goes Healthy.
   const deployToDevHealthy = async (why: string) => {
-    const btn = d.getByRole('button', { name: /^Sync & Deploy$|Working/ }).last();
-    await expect(btn, `Sync & Deploy never armed (${why})`).toBeEnabled({ timeout: SLA });
+    const btn = d.getByRole('button', { name: /^Deploy$|Working/ }).last();
+    await expect(btn, `Deploy never armed (${why})`).toBeEnabled({ timeout: SLA });
     let healthy = false;
     for (let attempt = 0; attempt < 3 && !healthy; attempt++) {
-      await pressSyncDeploy();
+      await pressDeploy();
       await clickTopTab(/Deployments/i);
       await selectStage(/Development/i);
       const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
@@ -1516,7 +1913,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       ]);
       healthy = await ok.isVisible().catch(() => false);
       if (!healthy) {
-        await clickTopTab(/Sync & Deploy/i);
+        await clickTopTab(/^Deploy$/);
         if (!(await btn.isEnabled().catch(() => false))) break;
       }
     }
@@ -1632,16 +2029,16 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       .toBeVisible({ timeout: SLA });
   };
   await chapter('deploy', async () => {
-    await clickTopTab(/Sync & Deploy/i);
+    await clickTopTab(/^Deploy$/);
     // Gate on there being something to ship: the BP shows pending work
     // ("N uncommitted file(s)" — the scaffold + README the editor wrote — and/or
-    // "N ahead" of main). The Sync & Deploy button being ENABLED is the
+    // "N ahead" of main). The Deploy button being ENABLED is the
     // authoritative on-screen signal that a deploy will do something.
-    const btn = d.getByRole('button', { name: /^Sync & Deploy$|Working/ }).last();
-    await expect(btn, 'Sync & Deploy never became actionable (nothing to deploy)').toBeEnabled({ timeout: SLA });
-    await pressSyncDeploy();
+    const btn = d.getByRole('button', { name: /^Deploy$|Working/ }).last();
+    await expect(btn, 'Deploy never became actionable (nothing to deploy)').toBeEnabled({ timeout: SLA });
+    await pressDeploy();
     await clickTopTab(/Deployments/i);
-    // Sync & Deploy merges the copy into main and surfaces the Development stage
+    // Deploy merges the copy into main and surfaces the Development stage
     // ONLY after the dev image BUILD succeeds — minutes, the same build the
     // live-dev chapter rides. Until then the Deployments tab reads "Not in main
     // yet" with no stage buttons. So poll, with a BUILD-SIZED budget, re-opening
@@ -1652,7 +2049,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
     const devStage = d.getByRole('button', { name: /Development/i }).first();
     // Ride the deploy the way an operator does: keep waiting AS LONG AS the screen
-    // shows progress, with NO flat cap. Sync & Deploy builds the dev image
+    // shows progress, with NO flat cap. Deploy builds the dev image
     // (minutes — the same build live-dev rides) and only merges the copy into main
     // + surfaces the Development stage when that build succeeds; throughout, the
     // deploy streams progress (the sonner toast steps through "Building image …",
@@ -1754,11 +2151,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   });
 
   // ---- Supply Chain Security (real CVEs) — now that a built image for this BP exists, the
-  // Sync & Deploy → Supply Chain Security preview resolves to a real SBOM/CVE scan. Wait for
+  // Deploy → Supply Chain Security preview resolves to a real SBOM/CVE scan. Wait for
   // the scan to leave its loading/pending states and show actual rows before
   // shooting, so the manual prints real advisories, not an empty placeholder.
   await chapter('checks-cve', async () => {
-    await clickTopTab(/Sync & Deploy/i);
+    await clickTopTab(/^Deploy$/);
     // The Supply Chain Security preview bakes the image this BP would build and runs
     // syft+grype on it in the background, re-fetching the panel periodically. We
     // re-open the Supply Chain Security sub-tab a few times, each time waiting a BOUNDED window
@@ -1811,7 +2208,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // rule and ship it. We make a MEANINGFUL source change — append the "Manager
   // approval tier (v2)" block to the Description (a new business rule + two new
   // recorded fields, per scenario.BP.readmeV2Addition) — so it produces a
-  // NON-TRIVIAL diff, then Sync & Deploy AGAIN to land v2. This demotes v1 to a
+  // NON-TRIVIAL diff, then Deploy AGAIN to land v2. This demotes v1 to a
   // prior, non-current entry, so by the time `history`/`inspect-diff`/`rollback`
   // run, Development carries MULTIPLE deploy-history entries and a real diff. We
   // reuse the Description editor mechanics, the armAfterEdit re-arm pattern, and
@@ -1836,71 +2233,26 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         timeout: SLA,
       })
       .toMatch(/^[0-9a-f]{6,}$/i);
-    // 1) Make the real, meaningful source edit in the Description editor.
+    // 1) Make the real, meaningful source edit in the Description editor. The
+    // retype-until-it-sticks mechanics (a ProseMirror remount on a mid-edit
+    // status refresh silently drops the draft, and the later Deploy would then
+    // ship v1's content again) live in appendToDescription — the experiment
+    // chapter runs the same shape against its own copy.
     await clickTopTab(/Description/i);
-    const editor = d.locator('.ProseMirror, [contenteditable="true"]').first();
-    await editor.waitFor({ state: 'visible', timeout: SLA });
-    // The editor is the same remount-on-refresh surface the requirements
-    // chapter guards against: a status refresh landing mid-edit remounts
-    // ProseMirror from the server copy and silently drops the draft — the
-    // typed v2 block vanishes, and the later Sync & Deploy ships v1's content
-    // again. Type-and-save in a bounded retype loop, gated on the v2 heading
-    // actually SURVIVING in the doc once the save round-trip settles. (The
-    // marker also makes the whole edit idempotent: already present ⇒ skip.)
-    const v2Mark = editor.getByText(/Manager approval tier \(v2\)/i).first();
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (await v2Mark.isVisible().catch(() => false)) {
-        // Seeing the heading is not enough — the doc shows the draft before
-        // the save round-trip settles (same optimistic-render trap as the
-        // requirements rows). Only trust a marker that SURVIVES the remount
-        // window: a status refresh remounts ProseMirror from the server copy,
-        // dropping anything that never actually saved.
-        const clobbered = await v2Mark
-          .waitFor({ state: 'hidden', timeout: 5_000 })
-          .then(() => true)
-          .catch(() => false);
-        if (!clobbered) break;
-      }
-      // Click near the top-left of the editor, NOT its center: the doc embeds the
-      // flowchart drawn earlier, and the pane's center can land on that mermaid
-      // preview — whose whole surface is click-to-edit, so a center click opens
-      // the Flowchart editor modal and blocks every tab click that follows. The
-      // caret position is irrelevant here (Control+End moves it to the doc end);
-      // the click only needs to focus the editor without hitting the embed.
-      await editor.click({ position: { x: 24, y: 16 } });
-      await dashPage.keyboard.press('Control+End');
-      // Control+End leaves the caret at the END of the existing doc — which, after
-      // the README + flowchart embed, is inside the trailing markdown LIST item (or
-      // right after the diagram block). Typing the v2 block there folds its heading
-      // and bullets into that list/block, producing the garbled README in #94.
-      // Break out into a clean empty paragraph FIRST (Enter twice exits the list),
-      // so the appended "## Manager approval tier (v2)" block renders as a proper
-      // heading + list with correct spacing. (typeMarkdown skips readmeV2Addition's
-      // leading blank line; these explicit Enters are what breaks the structure.)
-      await dashPage.keyboard.press('Enter').catch(() => {});
-      await dashPage.keyboard.press('Enter').catch(() => {});
-      await typeMarkdown(dashPage, BP.readmeV2Addition);
-      await dashPage.keyboard.press('Control+s');
-      await d.getByRole('button', { name: /Saving/i }).first()
-        .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
-      // Let any post-save toast clear before we read the Sync & Deploy header (a
-      // lingering toast over the top-right button can make a click never land).
-      await d.locator('[data-sonner-toast]').first()
-        .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
-    }
-    await expect(
-      v2Mark,
+    await appendToDescription(
+      BP.readmeV2Addition,
+      /Manager approval tier \(v2\)/i,
       'the v2 README edit did not survive in the Description editor (draft dropped by a mid-edit refresh)',
-    ).toBeVisible({ timeout: SLA });
+    );
     // 2) Re-arm the button on the same on-screen "pending work" signal it gates on.
     await armAfterEdit();
     // 3) Ship v2: gate on actionable, then ride the deploy with the watchdog —
     // press while actionable until Development is Healthy on screen (bounded).
-    const btn = d.getByRole('button', { name: /^Sync & Deploy$|Working/ }).last();
-    await expect(btn, 'Sync & Deploy never re-armed after the v2 edit').toBeEnabled({ timeout: SLA });
+    const btn = d.getByRole('button', { name: /^Deploy$|Working/ }).last();
+    await expect(btn, 'Deploy never re-armed after the v2 edit').toBeEnabled({ timeout: SLA });
     let healthy = false;
     for (let attempt = 0; attempt < 3 && !healthy; attempt++) {
-      await pressSyncDeploy();
+      await pressDeploy();
       await clickTopTab(/Deployments/i);
       await selectStage(/Development/i);
       const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
@@ -1911,7 +2263,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       ]);
       healthy = await ok.isVisible().catch(() => false);
       if (!healthy) {
-        await clickTopTab(/Sync & Deploy/i);
+        await clickTopTab(/^Deploy$/);
         if (!(await btn.isEnabled().catch(() => false))) break;
       }
     }
@@ -1931,7 +2283,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
           return /^[0-9a-f]{6,}$/i.test(v) ? v : v1Version;
         },
         {
-          message: `Sync & Deploy finished but Development still serves v1 (${v1Version}) — the v2 edit never reached the merge`,
+          message: `Deploy finished but Development still serves v1 (${v1Version}) — the v2 edit never reached the merge`,
           timeout: SLA,
         },
       )
@@ -2392,7 +2744,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // ---- Firewall & data processing (N): the invoice BP makes REAL outbound
   // calls to the integration hosts declared in the dev-secrets chapter
   // (BITSWAN_EGRESS_PROBES — injected into the backend by the dev deploys the
-  // sync-deploy chapter ran), which the firewall observes. On the Development
+  // deploy chapters ran), which the firewall observes. On the Development
   // stage the firewall runs in MONITOR mode, so those destinations surface
   // under "Needs review". We open Firewall (WAIT for it to finish loading —
   // never a "Loading firewall…" frame), find a detected egress host, open its

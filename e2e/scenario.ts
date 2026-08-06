@@ -74,6 +74,21 @@ export const BP = {
     '- New field: `approving_manager` — the manager who must sign off a held invoice.',
     '- New field: `approved_at` — when the hold was cleared (null while pending).',
   ].join('\n'),
+  // The change the walkthrough tries out INSIDE AN EXPERIMENT — a side branch
+  // off the operator's own copy — and then merges back into that copy. It has to
+  // be a real, self-evidently useful rule, because the merge-back only exists to
+  // carry work: an experiment with nothing in it correctly offers no merge (the
+  // button reads "Nothing to merge yet"). Kept here with the rest of the
+  // editorial content rather than inline in the spec.
+  readmeExperimentAddition: [
+    '',
+    '## Vendor VAT-ID validation (tried in an experiment)',
+    '',
+    'Every vendor VAT-ID on an incoming invoice is checked against the Czech',
+    'business register (`ares.gov.cz`) before the invoice is posted. An invoice',
+    'whose VAT-ID does not resolve to an active registration is held for a human',
+    'rather than rejected outright.',
+  ].join('\n'),
 };
 
 /** The workspace created via the Bailey Server Console. Workspaces are THEMATIC,
