@@ -29,6 +29,14 @@ func (s *Server) handleAdminBackupsStatus(w http.ResponseWriter, r *http.Request
 	writeJSON(w, s.backupStatus(r.Context()))
 }
 
+// adminBackupRun performs the run a console "Run backup now" kicks off. A seam,
+// like the rest of the daemon's external effects, so the handler's accept-and-
+// detach behaviour can be tested without a real backup escaping into a test.
+var adminBackupRun = func(ctx context.Context, e *backup.Engine, log func(string)) error {
+	_, err := e.RunAll(ctx, log)
+	return err
+}
+
 func (s *Server) handleAdminBackupsRun(w http.ResponseWriter, r *http.Request, by string) {
 	if s.backupEngine.Running() {
 		writeJSONError(w, "a backup run is already in progress", http.StatusConflict)
@@ -37,7 +45,7 @@ func (s *Server) handleAdminBackupsRun(w http.ResponseWriter, r *http.Request, b
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), backupRunTimeout)
 		defer cancel()
-		if _, err := s.backupEngine.RunAll(ctx, func(line string) {
+		if err := adminBackupRun(ctx, &s.backupEngine, func(line string) {
 			fmt.Println("[backup] " + line)
 		}); err != nil {
 			fmt.Printf("Warning: console-triggered backup run (by %s) failed: %v\n", by, err)

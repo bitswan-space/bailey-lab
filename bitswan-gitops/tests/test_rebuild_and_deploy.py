@@ -91,9 +91,7 @@ def _install(monkeypatch, svc, present=(), rebuild=None):
         if rebuild is not None:
             return rebuild(target)
         # Same shape the real one returns, so the tests exercise the real keys.
-        return dict(
-            svc._image_outcome(target), image=target["image"], reproduced=True
-        )
+        return dict(svc._image_outcome(target), image=target["image"], reproduced=True)
 
     async def fake_deploy():
         calls["deployed"] += 1
@@ -130,7 +128,10 @@ async def test_each_stage_is_rebuilt_from_its_own_commit(svc, monkeypatch):
         "bp",
         {
             "dev": ("cNEW", {"backend-bp-dev": dep("img:shaNEW", "cNEW")}),
-            "production": ("cOLD", {"backend-bp-production": dep("img:shaOLD", "cOLD")}),
+            "production": (
+                "cOLD",
+                {"backend-bp-production": dep("img:shaOLD", "cOLD")},
+            ),
         },
     )
     calls = _install(monkeypatch, svc, present=[])
@@ -258,9 +259,7 @@ async def test_one_failure_does_not_cost_the_rest(svc, monkeypatch):
     def rebuild(target):
         if target["deployment_id"] == "broken":
             raise RuntimeError("Image build failed: missing base")
-        return dict(
-            svc._image_outcome(target), image=target["image"], reproduced=True
-        )
+        return dict(svc._image_outcome(target), image=target["image"], reproduced=True)
 
     _install(monkeypatch, svc, present=[], rebuild=rebuild)
 
@@ -323,14 +322,17 @@ async def test_rollback_resolves_images_before_converging(svc, monkeypatch):
     # Without this, a rollback to a commit whose image is no longer in the local
     # store fails the same way a bare-host converge does — compose tries to pull
     # an `internal/…` tag from Docker Hub.
+    #
+    # Rolls back DEV deliberately: production carries a separate admin/auditor
+    # role gate, and this test is about ordering, not authorization.
     order = []
 
     async def fake_resolve(deployment_ids=None, progress_callback=None):
-        order.append(("resolve", tuple(deployment_ids or ())))
+        order.append(("resolve", tuple(sorted(deployment_ids or ()))))
         return {"missing": 1, "rebuilt": [{"deployment_id": "d1"}], "failures": []}
 
     async def fake_apply(deployment_ids, deployed_by=None, report=None):
-        order.append(("apply", tuple(deployment_ids)))
+        order.append(("apply", tuple(sorted(deployment_ids))))
         return {"ok": True}
 
     async def fake_git(*_a, **_k):
@@ -343,9 +345,32 @@ async def test_rollback_resolves_images_before_converging(svc, monkeypatch):
         "app.services.automation_service.validate_bp_name", lambda _bp: None
     )
 
+    # The rollback selects which deployments to re-apply from the TOP-LEVEL
+    # bitswan.yaml, scoped to this BP at this stage — not from the restored
+    # per-BP file. "d2" is the control: same BP, different stage, must be left
+    # alone so a dev rollback cannot disturb staging.
+    with open(os.path.join(svc.gitops_dir, "bitswan.yaml"), "w") as f:
+        yaml.dump(
+            {
+                "deployments": {
+                    "d1": {
+                        "context": "bp",
+                        "stage": "dev",
+                        "relative_path": "copies/main/bp",
+                    },
+                    "d2": {
+                        "context": "bp",
+                        "stage": "staging",
+                        "relative_path": "copies/main/bp",
+                    },
+                }
+            },
+            f,
+        )
+
     restored = {
         "business_processes": {
-            "bp": {"production": {"git_commit": "cOLD", "deployments": {"d1": {}}}}
+            "bp": {"dev": {"git_commit": "cOLD", "deployments": {"d1": {}}}}
         }
     }
 
@@ -358,10 +383,15 @@ async def test_rollback_resolves_images_before_converging(svc, monkeypatch):
     bp_dir = os.path.join(svc.gitops_dir, "bp", "bp")
     os.makedirs(bp_dir, exist_ok=True)
 
-    out = await svc.rollback_business_process("bp", "production", "cOLD" * 10)
+    out = await svc.rollback_business_process("bp", "dev", "cOLD" * 10)
 
-    assert [step for step, _ in order] == ["resolve", "apply"], (
-        "images must exist before the converge that starts their containers"
-    )
+    assert [step for step, _ in order] == [
+        "resolve",
+        "apply",
+    ], "images must exist before the converge that starts their containers"
+    # Both steps see the same stage-scoped set — resolving images for a stage the
+    # rollback is not touching would rebuild artifacts nobody asked for.
+    assert order[0][1] == ("d1",)
+    assert order[1][1] == ("d1",)
     assert out["rebuilt_images"] == [{"deployment_id": "d1"}]
     assert out["unrecoverable_images"] == []

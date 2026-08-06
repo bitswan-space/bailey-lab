@@ -168,9 +168,7 @@ async def spawn_fetch_snapshot(bp: str, stage: str, snapshot_id: str) -> dict:
     async def run(progress):
         if progress:
             await progress("fetch_offsite", "Fetching from off-site storage…")
-        await asyncio.to_thread(
-            daemon_fetch_offsite_snapshot, bp, stage, snapshot_id
-        )
+        await asyncio.to_thread(daemon_fetch_offsite_snapshot, bp, stage, snapshot_id)
         return get_snapshot_service().get_snapshot(bp, stage, snapshot_id)
 
     _spawn_bg(_run_task(task.task_id, f"Off-site fetch of {bp}/{snapshot_id}", run))

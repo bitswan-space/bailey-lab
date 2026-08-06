@@ -5066,7 +5066,7 @@ class AutomationService:
             if not os.path.isdir(bp_path):
                 continue
             y = read_bitswan_yaml(bp_path) or {}
-            stages = ((y.get("business_processes") or {}).get(bp) or {})
+            stages = (y.get("business_processes") or {}).get(bp) or {}
             for stage, node in stages.items():
                 node = node or {}
                 for dep_id, conf in (node.get("deployments") or {}).items():
@@ -5131,7 +5131,12 @@ class AutomationService:
             read_fd, write_fd = os.pipe()
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "git", "--git-dir", bare, "archive", "--format=tar", commit,
+                    "git",
+                    "--git-dir",
+                    bare,
+                    "archive",
+                    "--format=tar",
+                    commit,
                     stdout=write_fd,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -5139,7 +5144,10 @@ class AutomationService:
                 os.close(write_fd)
             try:
                 untar = await asyncio.create_subprocess_exec(
-                    "tar", "-x", "-C", tmp,
+                    "tar",
+                    "-x",
+                    "-C",
+                    tmp,
                     stdin=read_fd,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -5297,7 +5305,9 @@ class AutomationService:
         failures: list[dict] = []
         # Group by revision so one extraction serves every deployment built from
         # it, and so a BP's stages are handled together.
-        for target in sorted(missing, key=lambda t: (t["source_commit"] or "", t["bp"])):
+        for target in sorted(
+            missing, key=lambda t: (t["source_commit"] or "", t["bp"])
+        ):
             try:
                 result = await self._rebuild_pinned_image(
                     target, progress_callback=progress_callback

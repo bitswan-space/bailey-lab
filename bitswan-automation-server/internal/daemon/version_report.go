@@ -81,8 +81,15 @@ func (s *Server) reportVersionToAOC() {
 	// Bounded rather than simply awaited: this runs inside a backup run, and the
 	// AOC client has no request timeout of its own. The goroutine may outlive the
 	// wait — one abandoned request per run, which is the cheaper failure.
+	//
+	// The seam is read HERE, not inside the goroutine. Because the goroutine is
+	// abandoned on timeout and never joined, a read in there has no happens-before
+	// edge to anything that later assigns the var — which a test restoring its
+	// stub does, and which -race correctly reports. Buffered so the abandoned
+	// goroutine can always finish rather than block on the send forever.
+	report := reportVersionOnce
 	done := make(chan error, 1)
-	go func() { done <- reportVersionOnce(s.version) }()
+	go func() { done <- report(s.version) }()
 
 	select {
 	case err := <-done:

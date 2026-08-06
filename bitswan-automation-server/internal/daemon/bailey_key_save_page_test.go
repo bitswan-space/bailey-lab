@@ -3,6 +3,8 @@ package daemon
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -101,5 +103,44 @@ func TestKeySavePageWithoutAKeyExplainsItself(t *testing.T) {
 func TestKeySavePageIsRoutedToTheDaemonNotTheSPA(t *testing.T) {
 	if !isBaileyDataPath(keySavePagePath) {
 		t.Error("the save page must bypass the SPA index.html fallback")
+	}
+}
+
+func TestKeySavePageRefusesOtherMethods(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var s Server
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		w := httptest.NewRecorder()
+		s.handleBaileyKeySavePage(w, httptest.NewRequest(method, keySavePagePath, nil))
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s: code = %d, want 405", method, w.Code)
+		}
+	}
+}
+
+// The vault entry is named after the server the operator knows, not the internal
+// --inner host this page happens to be served from — that name is what they will
+// search their password manager for during a disaster.
+func TestKeySaveEntryIsNamedAfterTheServersOwnDomain(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "bitswan")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toml := "[aoc]\naoc_url = \"https://api.acme.example\"\nautomation_server_id = \"srv-1\"\naccess_token = \"t\"\ndomain = \"acme.example\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "automation_server_config.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.SaveKey("K"); err != nil {
+		t.Fatal(err)
+	}
+
+	var s Server
+	w := httptest.NewRecorder()
+	s.handleBaileyKeySavePage(w, httptest.NewRequest(http.MethodGet, keySavePagePath, nil))
+
+	if !strings.Contains(w.Body.String(), "backup-key@acme.example") {
+		t.Errorf("entry name should carry the server's domain, got:\n%s", w.Body.String())
 	}
 }

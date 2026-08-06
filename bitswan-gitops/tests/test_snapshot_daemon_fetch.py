@@ -67,7 +67,11 @@ def daemon(monkeypatch):
 def test_list_offsite_snapshots_sends_workspace_proof(daemon):
     daemon.get_payload = {
         "snapshots": [
-            {"snapshot_id": "snap-1", "restic_snapshot": "abc", "backed_up_at": "2026-07-28T02:00:00Z"},
+            {
+                "snapshot_id": "snap-1",
+                "restic_snapshot": "abc",
+                "backed_up_at": "2026-07-28T02:00:00Z",
+            },
         ]
     }
     refs = utils.daemon_list_offsite_snapshots("bp1", "production")
@@ -75,7 +79,11 @@ def test_list_offsite_snapshots_sends_workspace_proof(daemon):
     assert [r["snapshot_id"] for r in refs] == ["snap-1"]
     call = daemon.gets[0]
     assert call["url"].endswith("/backup/offsite-snapshots")
-    assert call["params"] == {"workspace": "tenant-a", "bp": "bp1", "stage": "production"}
+    assert call["params"] == {
+        "workspace": "tenant-a",
+        "bp": "bp1",
+        "stage": "production",
+    }
     # The workspace's own secret is what distinguishes us from a sibling.
     assert call["headers"]["X-Bitswan-Workspace-Secret"] == "ws-secret-a"
     assert daemon.closed

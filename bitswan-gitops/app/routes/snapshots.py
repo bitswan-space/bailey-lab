@@ -119,9 +119,7 @@ async def list_bp_snapshots(bp: str):
     for s in snapshots:
         s["local"] = True
     for stage in sorted(SERVICE_REALMS):
-        for ref in await asyncio.to_thread(
-            daemon_list_offsite_snapshots, slug, stage
-        ):
+        for ref in await asyncio.to_thread(daemon_list_offsite_snapshots, slug, stage):
             snapshot_id = ref.get("snapshot_id")
             if not snapshot_id or snapshot_id in local_ids:
                 continue
@@ -413,7 +411,5 @@ async def delete_snapshot(bp: str, stage: str, snapshot_id: str):
         "bp": slug,
         "stage": stage,
         "snapshot_id": snapshot_id,
-        "offsite_retained": any(
-            r.get("snapshot_id") == snapshot_id for r in remote
-        ),
+        "offsite_retained": any(r.get("snapshot_id") == snapshot_id for r in remote),
     }
