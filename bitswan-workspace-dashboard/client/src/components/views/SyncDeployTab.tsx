@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
+import { useCopies, useDeployDone } from '@/components/workspace/WorkspaceProvider';
 import { DiffTab } from '@/components/diff/DiffTab';
 import { CopyHistoryView } from '@/components/views/CopyHistoryView';
 import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
@@ -96,32 +97,63 @@ export function SyncDeployTab({
 
   // The copy as a whole can be far ahead/behind main purely from work on OTHER
   // business processes, while THIS one is identical to main. Split the
-  // divergence so the screen reflects the BP you're actually on. Re-fetched
-  // whenever the change list updates (i.e. after a sync).
+  // divergence so the screen reflects the BP you're actually on.
   // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
   const [divergence, setDivergence] = useState<import('@/lib/api').BpDivergence | null>(
     null,
   );
+  // eslint-disable-next-line no-restricted-syntax -- null = no error
+  const [divergenceError, setDivergenceError] = useState<string | null>(null);
+
+  // WHEN this is re-read is load-bearing, because the fast-forward-only rule is
+  // enforced from it. Our own edits (`changed`) are not the only thing that
+  // moves it: main moves when SOMEONE ELSE deploys, and nothing about this
+  // component changes when they do. Watching only [copy, bp, changed] left the
+  // screen showing "↑ 1 ahead" with a live Deploy button 45s after a colleague
+  // had published — the behind-guard silently did not apply, and pressing
+  // Deploy posted a non-fast-forward sync that came back `needs_rebase`.
+  //
+  // So take the same signals the shell's Sync-step check takes: the `copies`
+  // SSE snapshot (its identity changes on every git event, including main's
+  // refs moving) and the completion of any deploy.
+  const { copies: copiesSnapshot } = useCopies();
+  const deployDone = useDeployDone();
   useEffect(() => {
     let alive = true;
     api.copyFiles
       .divergence(wt.name, bp.name)
-      .then((d) => alive && setDivergence(d))
-      .catch(() => alive && setDivergence(null));
+      .then((d) => {
+        if (!alive) return;
+        setDivergence(d);
+        setDivergenceError(null);
+      })
+      .catch((err: unknown) => {
+        if (!alive) return;
+        // Do NOT fall back to zeros: "we could not read it" must never render
+        // as "up to date with main".
+        setDivergence(null);
+        setDivergenceError(errorMessage(err));
+      });
     return () => {
       alive = false;
     };
-  }, [wt.name, bp.name, changed]);
+  }, [wt.name, bp.name, changed, copiesSnapshot, deployDone]);
 
+  // `null` means NOT KNOWN — never 0. Everything derived from it is gated on
+  // `divergenceKnown`, so a pending or failed read cannot masquerade as a clean
+  // copy (the silent default this screen used to have: `?? 0` turned both into
+  // "All deployed and up to date").
+  const divergenceKnown = divergence !== null;
   const aheadBp = divergence?.ahead_bp ?? 0;
   const behindBp = divergence?.behind_bp ?? 0;
   const aheadOther = divergence?.ahead_other ?? 0;
   const behindOther = divergence?.behind_other ?? 0;
   // This BP is up to date with main when it has no un-merged commits, isn't
-  // behind main, and has no uncommitted edits. Other BPs' divergence does NOT
-  // count — they deploy from their own Deploy screen. Uncommitted work is
-  // still actionable (Deploy auto-commits it).
-  const bpUpToDate = aheadBp === 0 && behindBp === 0 && !dirty;
+  // behind main, and has no uncommitted edits — and we have actually READ the
+  // divergence. Other BPs' divergence does NOT count — they deploy from their
+  // own Deploy screen. Uncommitted work is still actionable (Deploy
+  // auto-commits it).
+  const bpUpToDate = divergenceKnown && aheadBp === 0 && behindBp === 0 && !dirty;
   const actionable = !bpUpToDate;
   // Deploying is fast-forward only. Anything main has that this copy lacks is
   // pulled in on the Sync tab first — never repaired from here.
@@ -203,7 +235,22 @@ export function SyncDeployTab({
               <span className="w-44 shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 This business process
               </span>
-              {bpUpToDate ? (
+              {!divergenceKnown ? (
+                // Say WHICH it is. Rendering this state as "up to date" is the
+                // silent default that made a stale screen look authoritative.
+                divergenceError !== null ? (
+                  <span
+                    className="font-medium text-destructive"
+                    title={divergenceError}
+                  >
+                    {`Couldn't check this against main — ${divergenceError}`}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground">
+                    Checking this against main…
+                  </span>
+                )
+              ) : bpUpToDate ? (
                 <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
                   Up to date with main
                 </span>
