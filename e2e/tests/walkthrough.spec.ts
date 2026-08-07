@@ -1688,6 +1688,48 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'experiment');
   });
 
+  // ---- The FOURTH way out: take this version, don't merge it ---------------
+  // Merging asks "combine these two versions". Often the honest answer is "no,
+  // use that one" — and until this existed the only route to it was a conflict
+  // fought by hand. The dialog is the interesting part, because the promise it
+  // makes is what makes the button safe to press: whatever your copy holds for
+  // this business process is PARKED as an experiment of its own first.
+  //
+  // We open it and cancel: actually taking the version would consume this
+  // experiment, and the chapters below need it. What is asserted is that the
+  // way out exists and that it says what happens to the work being replaced.
+  await chapter('experiment-adopt', async () => {
+    const takeBtn = d
+      .getByRole('button', { name: /^Use this version without merging$/i })
+      .first();
+    await expect(
+      takeBtn,
+      'the experiment banner offers no way to TAKE this version — only to merge it, which is a different question',
+    ).toBeVisible({ timeout: SLA });
+    await takeBtn.click({ timeout: NAV });
+    const dlg = d.getByRole('alertdialog').first();
+    await expect(
+      dlg,
+      'pressing "Use this version without merging" opened no confirmation',
+    ).toBeVisible({ timeout: SLA });
+    // The promise, in the dialog's own words. A button that replaces the
+    // contents of a copy has to say where the previous contents went.
+    await expect(
+      dlg,
+      'the dialog does not promise that the work being replaced is saved first',
+    ).toContainText(/saved first as a new experiment/i, { timeout: SLA });
+    await expect(
+      dlg,
+      'the dialog does not name the business process it is about',
+    ).toContainText(BP.title, { timeout: SLA });
+    await capture(dashPage, 'experiment-adopt');
+    await dlg.getByRole('button', { name: /^Cancel$/ }).first().click({ timeout: NAV });
+    await expect(
+      dlg,
+      'cancelling the take-this-version dialog did not close it',
+    ).toBeHidden({ timeout: SLA });
+  });
+
   // ---- The experiment's whole point: do work in it, then merge it back ------
   // The lifecycle a real operator runs: try something in the experiment, like
   // the result, merge it into your own copy — and the experiment DISAPPEARS.
