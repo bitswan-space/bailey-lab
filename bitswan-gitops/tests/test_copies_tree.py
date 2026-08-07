@@ -1357,11 +1357,12 @@ def test_a_failed_adopt_leaves_the_parked_work_and_says_so(env, monkeypatch):
                 experiment="exp-try-ab12",
                 park_name="exp-my-previous-bpa-cd34",
                 park_title="My previous work",
+                bp_label="Compost",
             ),
         )
 
     assert ei.value.status_code == 500
-    assert "your previous work on 'bpa' is safe" in ei.value.detail
+    assert "your previous work on Compost is safe" in ei.value.detail
     assert "My previous work" in ei.value.detail
     # And it really is there.
     parked = os.path.join(env["copies_dir"], "exp-my-previous-bpa-cd34")

@@ -620,6 +620,7 @@ export class GitopsClient {
       commit: string | null;
       park_name: string;
       park_title: string;
+      bp_label: string;
       deployer: string;
     },
   ): Promise<{ ok: boolean; status: number; body: unknown }> {

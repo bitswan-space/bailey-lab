@@ -558,6 +558,7 @@ export function registerCopyRoutes(
         commit: req.body?.commit ?? null,
         park_name: experimentNameFromTitle(parkTitle, maxLen),
         park_title: parkTitle,
+        bp_label: bpLabel,
         deployer: email,
       });
       if (!r.ok) {

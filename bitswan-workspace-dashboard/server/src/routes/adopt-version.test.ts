@@ -81,9 +81,16 @@ test('the parked experiment is attributed to the verified identity', async () =>
     },
   });
   assert.equal(res.statusCode, 200);
-  const body = calls[0]?.args[1] as { deployer: string; park_title: string };
+  const body = calls[0]?.args[1] as {
+    deployer: string;
+    park_title: string;
+    bp_label: string;
+  };
   assert.equal(body.deployer, ALICE);
   assert.match(body.park_title, /^My previous Compost work — /);
+  // gitops stores directory slugs; everything a person reads goes through the
+  // display name, so it has to travel with the request.
+  assert.equal(body.bp_label, 'Compost');
   await app.close();
 });
 

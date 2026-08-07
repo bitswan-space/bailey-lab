@@ -2308,6 +2308,10 @@ class AdoptRequest(BaseModel):
     # process's DISPLAY NAME to put in the title, which gitops does not).
     park_name: str | None = None
     park_title: str | None = None
+    # The business process's DISPLAY NAME, for every message a person reads.
+    # gitops stores directory slugs and has no idea what the process is called;
+    # sending back "'test33' in your copy is now …" put the slug in a toast.
+    bp_label: str | None = None
     deployer: str | None = None
 
 
@@ -2412,6 +2416,7 @@ async def adopt_version(name: str, body: AdoptRequest):
         )
 
     deployer = (body.deployer or "").strip() or requester
+    label = (body.bp_label or "").strip() or bp
     bare = bp_bare_repo_path(bp)
 
     # ── where the new state comes from ───────────────────────────────────────
@@ -2566,7 +2571,7 @@ async def adopt_version(name: str, body: AdoptRequest):
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"'{name}' has {losing} commit(s) on '{bp}' that "
+                    f"'{name}' has {losing} commit(s) on {label} that "
                     f"{source_label} does not, so they must be parked as an "
                     "experiment — park_name and park_title are required."
                 ),
@@ -2609,7 +2614,7 @@ async def adopt_version(name: str, body: AdoptRequest):
                     main_tip,
                     source_tip,
                     deployer,
-                    f"Restore {bp} to {source_label}",
+                    f"Restore {label} to {source_label}",
                     f"{source_label} in '{name}'",
                 )
                 if committed:
@@ -2631,7 +2636,7 @@ async def adopt_version(name: str, body: AdoptRequest):
             raise HTTPException(
                 status_code=e.status_code,
                 detail=(
-                    f"{e.detail} — your previous work on '{bp}' is safe: it was "
+                    f"{e.detail} — your previous work on {label} is safe: it was "
                     f"saved as the experiment '{parked['title']}'. Nothing was "
                     "adopted; open it under Advanced and try again."
                 ),
@@ -2676,12 +2681,12 @@ async def adopt_version(name: str, body: AdoptRequest):
     }[method]
     if parked:
         msg = (
-            f"'{bp}' in your copy is now {source_label}. Your previous work on "
+            f"Your copy of {label} is now {source_label}. Your previous work on "
             f"it is saved as the experiment '{parked['title']}'.{how}"
         )
     else:
         msg = (
-            f"'{bp}' in your copy is now {source_label}. Nothing needed saving "
+            f"Your copy of {label} is now {source_label}. Nothing needed saving "
             f"— your copy had no work of its own that it lacks.{how}"
         )
     return AdoptResponse(
