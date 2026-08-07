@@ -34,6 +34,10 @@ interface SyncDeployTabProps {
   /** Why that reading failed. null = it is trustworthy. */
   // eslint-disable-next-line no-restricted-syntax -- null = no error
   divergenceError: string | null;
+  /** The reading is about the copy BEFORE an action this user just took, and a
+   *  fresh one is on its way. This screen ASSERTS from the reading ("up to
+   *  date", "sync first"), so it must treat stale as not-yet-known. */
+  divergenceStale: boolean;
   /** Bumped by the shell on every editor save. An editor save moves no git
    *  ref, so nothing else on this screen would notice that the copy now holds
    *  unpublished work. */
@@ -80,6 +84,7 @@ export function SyncDeployTab({
   wt,
   divergence,
   divergenceError,
+  divergenceStale,
   editNonce,
   onDeployed,
   onManageDeployments,
@@ -130,7 +135,7 @@ export function SyncDeployTab({
   // from a reading you have not taken") is unit-tested rather than buried in
   // a render.
   const readiness = deployReadiness({
-    divergence,
+    divergence: divergenceStale ? null : divergence,
     changed,
     changedUnknown: changedLoading || !!changedError,
     bpDir: bp.name,
@@ -152,7 +157,7 @@ export function SyncDeployTab({
   // `divergenceKnown`, so a pending or failed read cannot masquerade as a clean
   // copy (the silent default this screen used to have: `?? 0` turned both into
   // "All deployed and up to date").
-  const divergenceKnown = divergence !== null;
+  const divergenceKnown = divergence !== null && !divergenceStale;
   const aheadBp = divergence?.ahead_bp ?? 0;
   const behindBp = divergence?.behind_bp ?? 0;
   const aheadOther = divergence?.ahead_other ?? 0;

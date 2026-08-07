@@ -648,6 +648,7 @@ function Shell() {
     divergence: bpDivergence,
     error: divergenceError,
     resolved: divergenceResolved,
+    stale: divergenceStale,
     recheck: recheckDivergence,
   } = useBpDivergence(copy, bpId, copyEditNonce);
   const behindBp = bpDivergence?.behind_bp ?? null;
@@ -1109,6 +1110,7 @@ function Shell() {
           isMyExperiment={isMyExperiment}
           divergence={bpDivergence}
           divergenceError={divergenceError}
+          divergenceStale={divergenceStale}
           onPullBp={handlePullBp}
           onMergeBack={() => void handleMergeBack()}
           {...(isMyCopy && bp

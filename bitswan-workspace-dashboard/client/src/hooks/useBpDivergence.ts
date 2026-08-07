@@ -44,6 +44,10 @@ export interface BpDivergenceReading {
   /** True once we have either a reading or an error — i.e. we are no longer
    *  guessing. Screens wait on this before evicting a user from a step. */
   resolved: boolean;
+  /** The reading is about the world BEFORE an action this user just took, and
+   *  a fresh one is on its way. Screens may keep OFFERING routes from it; they
+   *  may not ASSERT anything from it. */
+  stale: boolean;
   /** Re-read now (coalesced). */
   recheck: () => void;
 }
@@ -144,6 +148,7 @@ export function useBpDivergence(
           // five numbers; when they are the same, nothing happened.
           setDivergence((prev) => (sameDivergence(prev, d) ? prev : d));
           setError(null);
+          setStale(false);
         })
         .catch((err: unknown) => {
           if (targetRef.current !== k) return;
@@ -171,6 +176,7 @@ export function useBpDivergence(
           }
           setDivergence(null);
           setError(errorMessage(err));
+          setStale(false);
         })
         .finally(() => {
           const next = againRef.current ? targetRef.current : '';
@@ -203,22 +209,26 @@ export function useBpDivergence(
 
   useEffect(() => () => window.clearTimeout(edgeRetryRef.current), []);
 
-  // So does one of OUR OWN actions moving the refs. Whatever we are holding is
-  // an answer about the world before it, and the user is standing there waiting
-  // for the result — so the screen must go back to saying it is checking rather
-  // than present the pre-action answer as current. Live consequence of not
-  // doing this: take a version from the Deployments tab, open Deploy, and be
-  // told the copy is up to date over the commit that was just made.
+  // One of OUR OWN actions moving the refs makes what we hold an answer about
+  // the world BEFORE it. That is marked STALE rather than thrown away, and the
+  // difference matters in both directions:
   //
-  // Deliberately NOT done for the `copies` snapshot: that changes on every git
-  // event anywhere in the workspace, and blanking the reading each time would
-  // replace a stale answer with an unreadable one. This fires only on discrete
-  // things this user did.
+  //   * a screen that ASSERTS something from it must not — "up to date" over
+  //     the commit a hotpatch just made is the bug this exists for;
+  //   * a screen that OFFERS A ROUTE from it still should. The Sync step is the
+  //     only way to pull, and blanking the count made it vanish the instant a
+  //     pull was requested — before anything had confirmed the pull worked. A
+  //     step that disappears because we stopped knowing is worse than one that
+  //     lingers for a second after it is done.
+  //
+  // Deliberately not marked stale by the `copies` snapshot: that changes on
+  // every git event anywhere in the workspace, and treating all of them as
+  // invalidating would leave the Deploy screen permanently mid-check.
+  const [stale, setStale] = useState(false);
   const refsMovedAtMount = useRef(copyRefsMoved);
   useEffect(() => {
     if (copyRefsMoved === refsMovedAtMount.current) return;
-    setDivergence(null);
-    setError(null);
+    setStale(true);
   }, [copyRefsMoved]);
 
   useEffect(() => {
@@ -229,6 +239,7 @@ export function useBpDivergence(
     divergence,
     error,
     resolved: key === '' || divergence !== null || error !== null,
+    stale,
     recheck,
   };
 }

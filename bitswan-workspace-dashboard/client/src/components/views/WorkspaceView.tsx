@@ -49,6 +49,10 @@ interface WorkspaceViewProps {
    *  Deploy screens can never disagree about how this process stands. */
   // eslint-disable-next-line no-restricted-syntax -- null = not known
   divergence: BpDivergence | null;
+  /** The reading describes the copy BEFORE an action this user just took. The
+   *  Deploy screen must not assert from it; the Sync step may still offer a
+   *  pull from it. */
+  divergenceStale: boolean;
   /** Why that reading failed. null = it is trustworthy. */
   // eslint-disable-next-line no-restricted-syntax -- null = no error
   divergenceError: string | null;
@@ -82,6 +86,7 @@ export function WorkspaceView({
   isMyExperiment,
   divergence,
   divergenceError,
+  divergenceStale,
   onPullBp,
   onMergeBack,
   onTakeMain,
@@ -186,6 +191,7 @@ export function WorkspaceView({
             wt={wt}
             divergence={divergence}
             divergenceError={divergenceError}
+            divergenceStale={divergenceStale}
             editNonce={editNonce}
             onDeployed={() => onTab('deployments')}
             onManageDeployments={() => onTab('deployments')}

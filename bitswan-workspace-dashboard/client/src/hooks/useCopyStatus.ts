@@ -108,8 +108,8 @@ export function useCopyStatus(copy: string, nonce = 0): Result {
     setLoading(true);
   }, [copy]);
   // …and after one of our own ref-moving actions, for the same reason the
-  // divergence reading drops its answer there: what we hold describes the copy
-  // before the action, and the user is waiting to see the result of it.
+  // divergence reading marks itself stale there: what we hold describes the
+  // copy before the action, and the user is waiting to see the result of it.
   const refsMovedAtMount = useRef(copyRefsMoved);
   useEffect(() => {
     if (copyRefsMoved === refsMovedAtMount.current) return;
