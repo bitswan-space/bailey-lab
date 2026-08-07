@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   SlidersHorizontal,
   Terminal,
+  TriangleAlert,
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
@@ -17,6 +18,8 @@ import { Button } from '@/components/ui/button';
 import { api, errorMessage, type BpDivergence } from '@/lib/api';
 import { watchDeployTask } from '@/lib/deployBp';
 import { useUrlEnum } from '@/lib/urlState';
+import { PublishOverMainDialog } from '@/components/workspace/PublishOverMainDialog';
+import type { PublishMode } from '@/lib/publishOverMain';
 
 interface SyncDeployTabProps {
   bp: BusinessProcess;
@@ -41,6 +44,9 @@ interface SyncDeployTabProps {
    *  the copy in view (the user's own copy) — on a colleague's copy the
    *  "behind main" note stands on its own. */
   onGoToSync?: () => void;
+  /** True when the copy in view is the signed-in user's own — the only case in
+   *  which publishing over main is even offered (it publishes YOUR version). */
+  isMyCopy?: boolean;
 }
 
 /**
@@ -73,9 +79,15 @@ export function SyncDeployTab({
   onDeployed,
   onManageDeployments,
   onGoToSync,
+  isMyCopy,
 }: SyncDeployTabProps) {
   const { changed } = useCopyStatus(wt.name);
   const [busy, setBusy] = useState(false);
+  // The Advanced way out of a blocked Deploy: publish this copy's version even
+  // though main moved on. Confirmation lives in its own dialog, which reads
+  // live whose commits it would supersede.
+  const [publishOverOpen, setPublishOverOpen] = useState(false);
+  const [publishingOver, setPublishingOver] = useState(false);
   // Append-only build log for the in-flight (or just-finished) deploy: every
   // line gitops emits — image build steps, build.sh output (vite/go build),
   // per-member "Prepared N/M" — not just the latest line the toast shows.
@@ -184,6 +196,51 @@ export function SyncDeployTab({
     }
   }, [wt.name, bp.name, onDeployed]);
 
+  // Publishing over main. `expectedMain` is the tip the dialog described: if
+  // main moved in between, gitops 409s rather than superseding commits the
+  // user was never shown. A conflict no rule can decide changes NOTHING and
+  // comes back as `needs_rebase` — the coding-agent handoff, same as Sync.
+  const runPublishOver = useCallback(
+    async (mode: PublishMode, expectedMain: string) => {
+      setPublishingOver(true);
+      const id = `publish-over-main-${bp.name}`;
+      toast.loading(`Publishing your version of ${bp.displayName} over main…`, {
+        id,
+        duration: Infinity,
+      });
+      try {
+        const res = await api.copyFiles.deployOverMain(wt.name, {
+          bp: bp.name,
+          mode,
+          expectedMain,
+        });
+        if (res.status === 'needs_rebase') {
+          toast.error(res.message, { id, duration: 14000 });
+          return;
+        }
+        setPublishOverOpen(false);
+        toast.success(res.message, { id, duration: 10000 });
+        if (res.deploy_task_id) {
+          const outcome = await watchDeployTask(res.deploy_task_id, `${id}-deploy`, {
+            loading: `Deploying ${bp.displayName} to dev…`,
+            success: `${bp.displayName} published and deployed to dev`,
+            failurePrefix: `Published into main, but deploy to dev failed for ${bp.displayName}`,
+            onLog: setDeployLog,
+          });
+          if (outcome === 'completed') onDeployed();
+        }
+      } catch (err) {
+        toast.error(`Publishing over main failed: ${errorMessage(err)}`, {
+          id,
+          duration: 14000,
+        });
+      } finally {
+        setPublishingOver(false);
+      }
+    },
+    [wt.name, bp.name, bp.displayName, onDeployed],
+  );
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-background">
       {/* Explainer header + the one primary action. */}
@@ -284,6 +341,24 @@ export function SyncDeployTab({
                 Go to Sync
               </Button>
             )}
+            {/* The other way out, and it is deliberately not a peer of the
+                first: syncing is how work normally travels, and this takes the
+                decision away from whoever made the changes on main. It is
+                offered because the alternative — a user who genuinely means
+                "mine is the right one" having no move at all — is what sends
+                people to force-push behind the product's back. */}
+            {isMyCopy && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-muted-foreground"
+                title={`Publish your version of ${bp.displayName} over main, superseding what other people changed`}
+                onClick={() => setPublishOverOpen(true)}
+              >
+                <TriangleAlert className="size-3.5" aria-hidden />
+                Deploy this version, overwriting main…
+              </Button>
+            )}
           </div>
         ) : actionable ? (
           <Button
@@ -318,6 +393,16 @@ export function SyncDeployTab({
           </div>
         )}
       </div>
+
+      <PublishOverMainDialog
+        open={publishOverOpen}
+        copy={wt.name}
+        bp={bp.name}
+        bpLabel={bp.displayName}
+        busy={publishingOver}
+        onConfirm={(mode, expectedMain) => void runPublishOver(mode, expectedMain)}
+        onCancel={() => !publishingOver && setPublishOverOpen(false)}
+      />
 
       {/* Live build log — every line gitops emits during the deploy, appended
           (not overwritten like the toast), so the image build steps and

@@ -15,6 +15,10 @@ import { BusyOverlay } from '@/components/workspace/BusyOverlay';
 import { ExperimentBanner } from '@/components/workspace/ExperimentBanner';
 import { TaskQueuePanel } from '@/components/workspace/TaskQueuePanel';
 import { ViewingBanner } from '@/components/workspace/ViewingBanner';
+import {
+  TakeVersionDialog,
+  type TakeVersionSource,
+} from '@/components/workspace/TakeVersionDialog';
 import { api, errorMessage } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { watchDeployTask } from '@/lib/deployBp';
@@ -220,6 +224,18 @@ function Shell() {
   const [discardTarget, setDiscardTarget] = useState<Copy | null>(null);
   // A merge-back is in flight (the experiment banner's button is busy).
   const [merging, setMerging] = useState(false);
+  // The "take this version wholesale" confirmation, and what it is about.
+  // null = closed. `source` is what the copy would become; `experiment` names
+  // it when the version comes from one.
+  const [takeVersion, setTakeVersion] = useState<{
+    source: TakeVersionSource;
+    bp: string;
+    bpLabel: string;
+    sourceLabel: string;
+    experiment?: string;
+  // eslint-disable-next-line no-restricted-syntax -- null = dialog closed
+  } | null>(null);
+  const [taking, setTaking] = useState(false);
   // Bumped on every editor save so copy-dirtiness consumers refetch (the
   // SSE snapshot only refreshes on git events, not file writes).
   const [copyEditNonce, setCopyEditNonce] = useState(0);
@@ -813,6 +829,91 @@ function Shell() {
     unlock,
   ]);
 
+  // ── take a version wholesale ──────────────────────────────────────────────
+  // The fourth thing that can happen to an experiment (merge it, discard it,
+  // leave it running — or take it), and the escape hatch from the Sync step
+  // ("edit the main version without merging my changes"). Both are the same
+  // gitops primitive: park what my copy has for this ONE business process as
+  // an experiment of its own, then make my copy the chosen version.
+  //
+  // Taking an EXPERIMENT is a copy transition — the experiment is consumed and
+  // the user lands back on their own copy — so it locks the interface like
+  // every other one. Taking MAIN happens where the user already is, so it does
+  // not.
+  const runTakeVersion = useCallback(async () => {
+    const req = takeVersion;
+    if (!req || !myCopy || taking) return;
+    const { source, bp: bpDir, bpLabel: label, sourceLabel, experiment } = req;
+    const id = `take-version-${bpDir}`;
+    const moving = source === 'experiment';
+    setTaking(true);
+    if (moving) {
+      lock(`Taking “${sourceLabel}” into your copy…`, BUSY_TIMEOUT_CREATE_MS, myCopy);
+    }
+    toast.loading(
+      moving
+        ? `Taking “${sourceLabel}” into your copy…`
+        : `Taking the main version of ${label}…`,
+      { id, duration: Infinity },
+    );
+    try {
+      const res = await api.copyFiles.adopt(myCopy, {
+        bp: bpDir,
+        source,
+        bpLabel: label,
+        ...(experiment ? { experiment } : {}),
+      });
+      setTakeVersion(null);
+      if (moving) {
+        // Land on the copy first — the work is there now — and only then
+        // tombstone the consumed experiment so the selection cannot drift back
+        // onto a copy that is mid-teardown while the feed still lists it.
+        setCopy(myCopy);
+        lockSettling();
+        if (experiment) handleCopyDeleted(experiment);
+      }
+      toast.success(res.message, { id, duration: 8000 });
+      // Parking is silent by design when there was nothing to park; when there
+      // WAS, the user needs to know where it went, by the name they will see.
+      if (res.parked) {
+        toast.info(`Your previous work is saved as “${res.parked.title}”`, {
+          description: 'Open it again under Advanced → Experiments.',
+          duration: 10000,
+        });
+      }
+      (res.deploy_task_ids ?? []).forEach((tid, i) => {
+        void watchDeployTask(tid, `${id}-deploy-${i}`, {
+          loading: `Redeploying your copy's live-dev…`,
+          success: `Your copy's live-dev updated`,
+          failurePrefix: `Live-dev redeploy failed`,
+        });
+      });
+    } catch (err) {
+      // Nothing moved, or the parked work is named in the error itself — take
+      // the sheet down and let the message speak.
+      if (moving) unlock();
+      if (err instanceof SessionExpiredError) {
+        toast.dismiss?.(id);
+        return;
+      }
+      toast.error(`Couldn't take that version: ${errorMessage(err)}`, {
+        id,
+        duration: 12000,
+      });
+    } finally {
+      setTaking(false);
+      setSyncCheckNonce((n) => n + 1);
+    }
+  }, [
+    takeVersion,
+    myCopy,
+    taking,
+    lock,
+    lockSettling,
+    unlock,
+    handleCopyDeleted,
+  ]);
+
   // Discarding an experiment is a real delete (branch, checkout, live-dev
   // containers), so it goes through the same warn+confirm dialog as any other
   // copy delete; handleCopyDeleted then moves the selection back to my copy.
@@ -965,6 +1066,16 @@ function Shell() {
           refreshKey={copyEditNonce}
           onMergeBack={() => void handleMergeBack()}
           onDiscard={handleDiscardExperiment}
+          onUseThisVersion={() =>
+            wt.bp &&
+            setTakeVersion({
+              source: 'experiment',
+              bp: wt.bp,
+              bpLabel: experimentBpLabel || wt.bp,
+              sourceLabel: wt.title ?? wt.name,
+              experiment: wt.name,
+            })
+          }
         />
       )}
       {isLoading ? (
@@ -987,8 +1098,32 @@ function Shell() {
           divergenceError={divergenceError}
           onPullBp={handlePullBp}
           onMergeBack={() => void handleMergeBack()}
+          {...(isMyCopy && bp
+            ? {
+                // "Edit the main version without merging my changes" — the
+                // other way past a Sync step, offered where the Sync step is.
+                onTakeMain: () =>
+                  setTakeVersion({
+                    source: 'main',
+                    bp: bp.name,
+                    bpLabel: bp.displayName,
+                    sourceLabel: 'main',
+                  }),
+              }
+            : {})}
         />
       )}
+      {/* Taking a version wholesale, from an experiment or from main. The
+          dialog's whole job is the promise that what you have is kept. */}
+      <TakeVersionDialog
+        open={takeVersion !== null}
+        source={takeVersion?.source ?? 'main'}
+        bpLabel={takeVersion?.bpLabel ?? ''}
+        {...(takeVersion?.sourceLabel ? { sourceLabel: takeVersion.sourceLabel } : {})}
+        busy={taking}
+        onConfirm={() => void runTakeVersion()}
+        onCancel={() => !taking && setTakeVersion(null)}
+      />
       {/* Discarding an experiment: the same warn+confirm delete dialog every
           copy delete goes through — it names the unmerged and uncommitted work
           the discard would destroy. */}

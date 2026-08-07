@@ -43,6 +43,7 @@ import {
   Snowflake,
   Square,
   Terminal,
+  Pencil,
   Undo2,
   User,
   X,
@@ -65,10 +66,11 @@ import { FirewallPanel } from '@/components/firewall/FirewallPanel';
 import { LogsPane } from '@/components/automations/inspect/LogsPane';
 import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import type { ServiceType, StagingGate, StagingLogEntry, StagingSignoff } from '@/lib/api';
-import { promoteBpWithToast } from '@/lib/deployBp';
+import { promoteBpWithToast, watchDeployTask } from '@/lib/deployBp';
 import { STATUS_META, stateToDisplay, type DisplayStatus } from '@/lib/status';
 import {
   api,
+  errorMessage,
   isTransientNetworkError,
   type BpHistory,
   type BpHistoryEntry,
@@ -87,6 +89,9 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { useBpLabel } from '@/hooks/useBpLabel';
+import { useMyCopy } from '@/hooks/useMyCopy';
+import { TakeVersionDialog } from '@/components/workspace/TakeVersionDialog';
+import { RevertDevDialog } from '@/components/workspace/RevertDevDialog';
 import { cn } from '@/lib/utils';
 import { RelativeTime } from '@/components/shared/RelativeTime';
 import { formatAbsolute, formatRelative } from '@/lib/format-date';
@@ -1418,6 +1423,84 @@ function InspectModal({
   // eslint-disable-next-line no-restricted-syntax -- null = no error
   const [secretsError, setSecretsError] = useState<string | null>(null);
   const [revealSecrets, setRevealSecrets] = useState(false);
+  // ── the two things you can DO with an old version ───────────────────────
+  // Both write outside this modal (one into the user's copy, one into main),
+  // so both go behind a confirmation that says what actually happens.
+  const myCopy = useMyCopy();
+  const [takeOpen, setTakeOpen] = useState(false);
+  const [taking, setTaking] = useState(false);
+  const [revertOpen, setRevertOpen] = useState(false);
+  const [reverting, setReverting] = useState(false);
+
+  /** "Edit this version": adopt this deployed commit into MY copy, as a
+   *  restore commit on top of main — so the copy ends one ahead and none
+   *  behind, and the fix can be deployed without a Sync detour. */
+  const runTakeVersion = useCallback(async () => {
+    if (!myCopy || !commit || taking) return;
+    const id = `take-deployed-${bp}-${commit}`;
+    setTaking(true);
+    toast.loading(`Taking ${short(commit, 7)} into your copy…`, {
+      id,
+      duration: Infinity,
+    });
+    try {
+      const res = await api.copyFiles.adopt(myCopy, {
+        bp,
+        source: 'commit',
+        commit,
+        bpLabel: label,
+      });
+      setTakeOpen(false);
+      toast.success(res.message, { id, duration: 10000 });
+      if (res.parked) {
+        toast.info(`Your previous work is saved as “${res.parked.title}”`, {
+          description: 'Open it again under Advanced → Experiments.',
+          duration: 10000,
+        });
+      }
+      onClose();
+    } catch (err) {
+      toast.error(`Couldn't take that version: ${errorMessage(err)}`, {
+        id,
+        duration: 14000,
+      });
+    } finally {
+      setTaking(false);
+    }
+  }, [myCopy, commit, taking, bp, label, onClose]);
+
+  /** "Revert dev to this version": ONE commit on top of main, then dev is
+   *  redeployed from the new tip. Everyone else's copy goes a commit behind —
+   *  the dialog says so before this runs. */
+  const runRevertDev = useCallback(async () => {
+    if (!commit || reverting) return;
+    const id = `revert-dev-${bp}-${commit}`;
+    setReverting(true);
+    toast.loading(`Putting dev back to ${short(commit, 7)}…`, {
+      id,
+      duration: Infinity,
+    });
+    try {
+      const res = await api.copyFiles.revertDev(bp, { commit, bpLabel: label });
+      setRevertOpen(false);
+      toast.success(res.message, { id, duration: 12000 });
+      if (res.deploy_task_id) {
+        void watchDeployTask(res.deploy_task_id, `${id}-deploy`, {
+          loading: `Redeploying ${label} to dev…`,
+          success: `${label} on dev is back to ${short(commit, 7)}`,
+          failurePrefix: `Main was reverted, but the dev redeploy failed for ${label}`,
+        });
+      }
+      onClose();
+    } catch (err) {
+      toast.error(`Couldn't revert dev: ${errorMessage(err)}`, {
+        id,
+        duration: 14000,
+      });
+    } finally {
+      setReverting(false);
+    }
+  }, [commit, reverting, bp, label, onClose]);
 
   useEffect(() => {
     if (panel !== 'diff' || !current?.source_commit || !entry.source_commit) return;
@@ -1794,8 +1877,78 @@ function InspectModal({
               </div>
             )}
           </div>
+          {/* ── what you can DO with this version ──────────────────────────
+              A deployment record is not only something to read. Two things
+              a person actually wants from an old version live here, and
+              nowhere else in the product:
+
+                Edit this version — the hotpatch. Your copy becomes this
+                  version (on top of main, so Deploy fast-forwards), what you
+                  had is parked, and you fix it from where it broke rather
+                  than from a tip that has moved on.
+                Revert dev to this version — dev only. Staging and production
+                  go back through promote and rollback, which are gated
+                  differently; dev is the shared scratch stage, and putting it
+                  back is a change to main that everyone then syncs.
+
+              Only for a version that was actually DEPLOYED (a firewall or
+              secret record has no source commit to take). */}
+          {commit && (
+            <div className="flex shrink-0 items-center gap-2 border-t border-border px-4 py-2.5">
+              <span className="flex-1 text-[12px] text-muted-foreground">
+                {isCurrent
+                  ? `This is what ${stageLabel} is running now.`
+                  : `Deployed to ${stageLabel} ${entry.deployed_at ? new Date(entry.deployed_at).toLocaleString() : ''}`}
+              </span>
+              {stage === 'dev' && !isCurrent && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={reverting}
+                  title={`Put dev back to ${short(commit, 7)} — everyone will see this in their Sync`}
+                  onClick={() => setRevertOpen(true)}
+                >
+                  <Undo2 className="size-3.5" aria-hidden />
+                  Revert dev to this version
+                </Button>
+              )}
+              <Button
+                size="sm"
+                disabled={!myCopy || taking}
+                title={
+                  myCopy
+                    ? `Your copy of ${label} becomes this version, ready to fix and deploy`
+                    : 'Working out which copy is yours…'
+                }
+                onClick={() => setTakeOpen(true)}
+              >
+                <Pencil className="size-3.5" aria-hidden />
+                Edit this version
+              </Button>
+            </div>
+          )}
         </div>
       </div>
+      <TakeVersionDialog
+        open={takeOpen}
+        source="commit"
+        bpLabel={label}
+        sourceLabel={`${short(commit, 7)} — deployed to ${stageLabel}`}
+        busy={taking}
+        onConfirm={() => void runTakeVersion()}
+        onCancel={() => !taking && setTakeOpen(false)}
+      />
+      <RevertDevDialog
+        open={revertOpen}
+        bpLabel={label}
+        commit={short(commit, 7)}
+        deployedAt={
+          entry.deployed_at ? new Date(entry.deployed_at).toLocaleDateString() : ''
+        }
+        busy={reverting}
+        onConfirm={() => void runRevertDev()}
+        onCancel={() => !reverting && setRevertOpen(false)}
+      />
     </div>
   );
 }

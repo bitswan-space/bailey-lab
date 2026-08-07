@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { ArrowLeft, FlaskConical, GitMerge, Trash2 } from 'lucide-react';
+import { ArrowLeft, Check, FlaskConical, GitMerge, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useMergePreview } from '@/hooks/useMergePreview';
 import type { Copy } from '@/types';
@@ -19,6 +19,10 @@ export interface ExperimentBannerProps {
   onMergeBack: () => void;
   /** Open the discard (delete) confirmation for this experiment. */
   onDiscard: () => void;
+  /** Take this experiment's version WHOLESALE into the parent copy, instead of
+   *  merging: the copy's own work on this business process is parked as a new
+   *  experiment, the copy becomes this, and this experiment is consumed. */
+  onUseThisVersion: () => void;
   /** A merge-back is in flight. */
   merging: boolean;
   /** Bumped by the shell whenever an editor save lands in this copy, so the
@@ -50,6 +54,7 @@ export function ExperimentBanner({
   onLeave,
   onMergeBack,
   onDiscard,
+  onUseThisVersion,
   merging,
   refreshKey,
 }: ExperimentBannerProps) {
@@ -150,6 +155,23 @@ export function ExperimentBanner({
           {merging ? 'Merging…' : 'Merge back into my copy'}
         </Button>
       </span>
+      {/* The FOURTH way out, and the one the model was missing: this version
+          turned out to be the right one, so take it — don't try to merge it
+          into the copy it disagrees with. Merging asks "combine these"; often
+          the honest answer is "no, use that one". Quiet, because it is not the
+          everyday move, but present, because otherwise the only way to keep an
+          experiment that diverged was to fight a conflict. */}
+      <Button
+        size="sm"
+        variant="outline"
+        className="shrink-0 border-emerald-400 bg-white text-emerald-900 hover:bg-emerald-100"
+        title="Your copy becomes this version. What your copy has now is saved as a new experiment first."
+        disabled={merging}
+        onClick={onUseThisVersion}
+      >
+        <Check className="size-3.5" aria-hidden />
+        Use this version without merging
+      </Button>
       <Button
         size="sm"
         variant="destructive"

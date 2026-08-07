@@ -54,6 +54,10 @@ interface WorkspaceViewProps {
   /** Merge the experiment in view back into its parent copy — the same action
    *  the experiment banner carries. */
   onMergeBack: () => void;
+  /** Take MAIN wholesale into the copy for the business process on screen, as
+   *  the alternative to pulling it. Absent unless this is the user's own copy
+   *  (main only ever flows into a person's own copy). */
+  onTakeMain?: () => void;
 }
 
 /**
@@ -76,6 +80,7 @@ export function WorkspaceView({
   divergenceError,
   onPullBp,
   onMergeBack,
+  onTakeMain,
 }: WorkspaceViewProps) {
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
 
@@ -164,6 +169,7 @@ export function WorkspaceView({
             divergenceError={divergenceError}
             onPull={onPullBp}
             onNothingToPull={() => onTab('description')}
+            {...(onTakeMain ? { onTakeMain } : {})}
           />
         ) : (
           <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="sync with main" />
@@ -178,7 +184,7 @@ export function WorkspaceView({
             divergenceError={divergenceError}
             onDeployed={() => onTab('deployments')}
             onManageDeployments={() => onTab('deployments')}
-            {...(isMyCopy ? { onGoToSync: () => onTab('sync') } : {})}
+            {...(isMyCopy ? { onGoToSync: () => onTab('sync'), isMyCopy: true } : {})}
           />
         ) : (
           <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="deploy" />

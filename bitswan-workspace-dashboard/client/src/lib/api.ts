@@ -435,6 +435,64 @@ export interface HistoryCommit {
 }
 
 /** Gitops `GET /copies/{name}/history` response. */
+/** One commit as a confirm dialog needs to show it: who wrote it, and what
+ *  they said they were doing. */
+export interface CommitRow {
+  sha: string;
+  subject: string;
+  /** The author's email (or name, when git recorded no email). */
+  author: string;
+  author_name: string;
+  date: string;
+}
+
+export interface AdoptResult {
+  /** The experiment your previous work was saved as, or null when there was
+   *  nothing to save. Never invented. */
+  parked: { name: string; title: string } | null;
+  adopted: 'main' | 'experiment' | 'commit';
+  /** "fast-forward" (the source's own commits came across), "restore" (one
+   *  commit on top of main carries its content), "already-main", or
+   *  "unchanged" (your copy already held exactly this). */
+  method: 'fast-forward' | 'restore' | 'already-main' | 'unchanged';
+  bp: string;
+  message: string;
+  teardown_task_id: string | null;
+  redeployed_bps: string[];
+  deploy_task_ids: string[];
+}
+
+export interface RevertDevResult {
+  status: string;
+  method: 'restore' | 'already-main';
+  bp: string;
+  commit: string;
+  subject: string | null;
+  message: string;
+  deploy_task_id: string | null;
+}
+
+export interface DeployOverMainPreview {
+  bp: string;
+  /** Main's tip as the dialog saw it — sent back on confirm so a main that
+   *  moved in between is a 409 rather than a silent superseding of work the
+   *  user was never shown. */
+  main: string;
+  blocked: boolean;
+  superseded: CommitRow[];
+  mine: CommitRow[];
+}
+
+export interface DeployOverMainResult {
+  status: 'success' | 'needs_rebase';
+  method: 'rebase' | 'exact' | 'fast-forward' | 'noop' | null;
+  bp: string;
+  message: string;
+  superseded: CommitRow[];
+  replayed: CommitRow[];
+  deploy_task_id: string | null;
+}
+
 export interface CopyHistory {
   copy: HistoryCommit[];
   main: HistoryCommit[];
@@ -1459,6 +1517,55 @@ export const api = {
     history: (name: string, bp: string) =>
       getJson<CopyHistory>(
         `/api/copies/${encodeURIComponent(name)}/history?bp=${encodeURIComponent(bp)}`,
+      ),
+    /**
+     * TAKE A VERSION WHOLESALE into your copy, for ONE business process,
+     * instead of merging it — from an experiment (which is then consumed by
+     * becoming your copy), from main, or from a version this workspace
+     * DEPLOYED (the hotpatch: "edit this version").
+     *
+     * Whatever your copy had that nothing else does is PARKED as a new
+     * experiment first, so nothing here can lose work; `parked` is null when
+     * there was genuinely nothing to save. Your copy always ends up on top of
+     * main, so the next Deploy is a plain fast-forward.
+     */
+    adopt: (
+      name: string,
+      body: {
+        bp: string;
+        source: 'main' | 'experiment' | 'commit';
+        experiment?: string;
+        commit?: string;
+        /** The business process's display name, for the parked experiment's
+         *  title — gitops stores slugs and cannot invent this. */
+        bpLabel: string;
+      },
+    ) => postJson<AdoptResult>(`/api/copies/${encodeURIComponent(name)}/adopt`, body),
+    /**
+     * Put the DEV stage back to a version it ran before. Dev deploys from
+     * main, so this adds ONE commit on top of main and redeploys dev — which
+     * means everybody else's copy goes one behind on this business process and
+     * carries the revert on their next Sync. Dev only.
+     */
+    revertDev: (bp: string, body: { commit: string; bpLabel: string }) =>
+      postJson<RevertDevResult>(
+        `/api/copies/main/bp/${encodeURIComponent(bp)}/revert-dev`,
+        body,
+      ),
+    /** Whose work publishing over main would supersede — main's commits this
+     *  copy does not have, with their authors. */
+    deployOverMainPreview: (name: string, bp: string) =>
+      getJson<DeployOverMainPreview>(
+        `/api/copies/${encodeURIComponent(name)}/deploy-over-main-preview?bp=${encodeURIComponent(bp)}`,
+      ),
+    /** Publish this copy's version over a main that moved on. */
+    deployOverMain: (
+      name: string,
+      body: { bp: string; mode: 'rebase' | 'exact'; expectedMain?: string },
+    ) =>
+      postJson<DeployOverMainResult>(
+        `/api/copies/${encodeURIComponent(name)}/deploy-over-main`,
+        body,
       ),
   },
 
