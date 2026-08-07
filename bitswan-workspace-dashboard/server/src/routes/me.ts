@@ -55,7 +55,10 @@ export function registerMeRoutes(
           // The SSE feed or a concurrent /api/me may have created it meanwhile.
           if (g.hasCopy(copy)) return;
           try {
-            const r = await g.createCopy({ branch_name: copy });
+            // `email` is captured from the outer request-handling scope —
+            // this retry closure outlives the request itself, so the body
+            // fields (not a header) are how the owner identity survives.
+            const r = await g.createCopy({ branch_name: copy, kind: 'user', owner: email });
             if (r.ok || r.status === 409) return; // created, or already exists
             if (r.status >= 400 && r.status < 500) {
               app.log.warn(

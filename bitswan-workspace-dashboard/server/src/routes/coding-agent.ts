@@ -7,6 +7,7 @@ import { isValidBpId, isValidCopyName } from '../services/workspace.js';
 import { findSessionMeta, latestSession } from '../services/agent-sessions.js';
 import {
   BUILD_AUTOMATION_PROMPT,
+  mergeBackPrompt,
   SYNC_PROMPT,
   WRITE_TESTS_PROMPT,
 } from '../services/agent-prompts.js';
@@ -51,12 +52,13 @@ export function agentSshTarget(): AgentSshTarget {
   return { host: `${ws}-gitops`, port: 2222 };
 }
 
-type SessionKind = 'claude' | 'sync' | 'write-tests' | 'automation';
+type SessionKind = 'claude' | 'sync' | 'merge-parent' | 'write-tests' | 'automation';
 
 function isSessionKind(value: unknown): value is SessionKind {
   return (
     value === 'claude' ||
     value === 'sync' ||
+    value === 'merge-parent' ||
     value === 'write-tests' ||
     value === 'automation'
   );
@@ -71,9 +73,15 @@ function isSessionKind(value: unknown): value is SessionKind {
  * Plain 'claude' sessions have NO prompt — the agent's standing guidance
  * comes from the CLAUDE.md baked into the coding-agent image, which Claude
  * loads on every session (fresh and resumed alike).
+ *
+ * `'merge-parent'` carries no FIXED prompt: its text is parameterized by
+ * `parent` (the experiment's parent copy, the branch it rebases onto), so
+ * `parent` is required for it — see `mergeBackPrompt`. Missing it yields no
+ * prompt, same as any kind with nothing to say.
  */
-function promptForKind(kind: SessionKind): string | undefined {
+function promptForKind(kind: SessionKind, parent?: string): string | undefined {
   if (kind === 'sync') return SYNC_PROMPT;
+  if (kind === 'merge-parent') return parent ? mergeBackPrompt(parent) : undefined;
   if (kind === 'write-tests') return WRITE_TESTS_PROMPT;
   if (kind === 'automation') return BUILD_AUTOMATION_PROMPT;
   return undefined;
@@ -101,12 +109,15 @@ export function buildAutoCmd(opts: {
   sessionId: string;
   resume: boolean;
   kind: SessionKind;
+  /** 'merge-parent' only: the branch the canned prompt rebases onto (the
+   *  experiment's parent copy). */
+  parent?: string;
 }): string {
   // Every session — sync included — works inside a BP's own clone: the copy
   // root is a plain directory (each BP under it is a separate git repo), so
   // there is nothing to run git against up there.
   const cd = `/workspace/copies/${opts.copy}/${opts.bp}`;
-  const prompt = promptForKind(opts.kind);
+  const prompt = promptForKind(opts.kind, opts.parent);
   // Either continue a previous chat (--resume <uuid>) or start a fresh one
   // with a caller-provided UUID (--session-id <uuid>) so the dashboard can
   // resume it later. A canned prompt, when the kind carries one, rides as
@@ -263,9 +274,10 @@ export function registerCodingAgentRoutes(
       session_id?: string;
       resume?: string;
       kind?: string;
+      parent?: string;
     };
   }>('/ws/coding-agent', { websocket: true }, async (socket, req) => {
-    const { copy, bp, session_id, resume, kind: kindRaw } = req.query;
+    const { copy, bp, session_id, resume, kind: kindRaw, parent } = req.query;
     if (!copy || !isValidCopyName(copy)) {
       socket.send(JSON.stringify({ type: 'error', message: 'invalid copy' }));
       socket.close(1008, 'invalid copy');
@@ -277,6 +289,14 @@ export function registerCodingAgentRoutes(
     if (!bp || !isValidBpId(bp)) {
       socket.send(JSON.stringify({ type: 'error', message: 'invalid bp' }));
       socket.close(1008, 'invalid bp');
+      return;
+    }
+    // 'merge-parent' sessions rebase onto the experiment's parent branch —
+    // the canned prompt is parameterized by it, so it's required for this
+    // kind and validated the same way `copy`/`bp` are.
+    if (kind === 'merge-parent' && (!parent || !isValidCopyName(parent))) {
+      socket.send(JSON.stringify({ type: 'error', message: 'invalid parent' }));
+      socket.close(1008, 'invalid parent');
       return;
     }
     // Exactly one of session_id or resume is required and both must be UUIDs.
@@ -311,6 +331,7 @@ export function registerCodingAgentRoutes(
       sessionId: claudeSessionId,
       resume: isResume,
       kind,
+      ...(parent ? { parent } : {}),
     });
     const { host, port } = agentSshTarget();
 
@@ -511,10 +532,10 @@ export function registerCodingAgentRoutes(
   // the same text `buildAutoCmd` embeds when it has to start a fresh one,
   // so both paths stay in lockstep.
   app.get<{
-    Querystring: { copy?: string; bp?: string; kind?: string };
+    Querystring: { copy?: string; bp?: string; kind?: string; parent?: string };
   }>('/api/coding-agent/prompt', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
-    const { copy, bp, kind: kindRaw } = req.query;
+    const { copy, bp, kind: kindRaw, parent } = req.query;
     if (!copy || !isValidCopyName(copy)) {
       return reply.code(400).send({ error: 'invalid copy' });
     }
@@ -526,7 +547,12 @@ export function registerCodingAgentRoutes(
       return reply.code(401).send({ error: 'not authenticated' });
     }
     const kind: SessionKind = isSessionKind(kindRaw) ? kindRaw : 'claude';
-    const prompt = promptForKind(kind);
+    // 'merge-parent' prompts are parameterized by the parent branch — validate
+    // it the same way `copy`/`bp` are.
+    if (kind === 'merge-parent' && (!parent || !isValidCopyName(parent))) {
+      return reply.code(400).send({ error: 'invalid parent' });
+    }
+    const prompt = promptForKind(kind, parent);
     if (!prompt) {
       // Plain 'claude' sessions carry no canned prompt (the baked CLAUDE.md
       // is their standing guidance) — nothing to inject.

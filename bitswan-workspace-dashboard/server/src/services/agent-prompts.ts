@@ -28,6 +28,44 @@ export const SYNC_PROMPT =
   'Do not run git in other business-process directories. Tell me when the sync is complete.';
 
 /**
+ * Fixed opening sentence shared by every `mergeBackPrompt` instance,
+ * regardless of the parent branch it targets. `SYNC_PROMPT` above is a
+ * single unchanging constant a caller can match with `===`; a merge-back
+ * prompt's text varies by `parentBranch`, so this lets a caller recognize
+ * one with `startsWith` instead.
+ */
+export const MERGE_BACK_PROMPT_PREFIX =
+  'Merge this experiment back into its parent copy using git.';
+
+/**
+ * Conflict-resolution path for an experiment's "Merge back into my copy"
+ * action — the rebase-onto-`<parentBranch>` variant of {@link SYNC_PROMPT}.
+ * Experiments merge back into the copy they branched from, never main, so
+ * this rebases onto `parentBranch` instead of main; everything else
+ * (per-BP clone, fast-forward-only push, scope) is identical. The
+ * merge-to-parent endpoint hands off here only when it reports
+ * `needs_rebase` (the parent moved ahead of what the experiment branched
+ * from) — the same way sync hands off to SYNC_PROMPT only on a real conflict.
+ */
+export function mergeBackPrompt(parentBranch: string): string {
+  return (
+    MERGE_BACK_PROMPT_PREFIX +
+    " You are inside the business process's own git clone — each business " +
+    'process under this copy is a separate repository, so nothing you do ' +
+    'here touches the other business processes. ' +
+    '1) Commit your work in progress: `git add -A && git commit -m "wip"` (skip if there is nothing to commit). ' +
+    '2) Rebase onto the latest ' +
+    parentBranch +
+    ': `git pull --rebase origin ' +
+    parentBranch +
+    '`. ' +
+    '3) If there are conflicts, resolve them, then `git add` the resolved files and `git rebase --continue`. ' +
+    '4) Publish your branch: `git push origin HEAD` (the server accepts fast-forward pushes only). ' +
+    'Do not run git in other business-process directories. Tell me when the merge is complete.'
+  );
+}
+
+/**
  * "Write tests" button in the Requirements tab. The agent turns the BP's
  * testable requirements into mechanically-verifiable tests.
  */

@@ -440,6 +440,28 @@ export class GitopsClient {
   }
 
   /**
+   * `GET /copies/{name}/merge-preview` — what merging an EXPERIMENT back would
+   * carry into its parent copy: `{parent, ahead, behind, uncommitted, new_bps}`.
+   * Measured against the parent's branch, not main, so "nothing left to merge"
+   * is a signal the experiment banner can trust. 400 for a non-experiment.
+   */
+  async copyMergePreview(
+    name: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/merge-preview`,
+      { headers: { ...this.authHeaders() } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // ignore
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
    * `GET /copies/{name}/diff[?path=<rel>]` — unified diff of the
    * copy's working tree vs. its own HEAD. Optional path filter
    * narrows the diff to one file. Drives the dashboard's Diff tab.
@@ -491,10 +513,33 @@ export class GitopsClient {
    * workspace's `copies/` directory and check out a branch into it.
    * The new copy is picked up by gitops's filesystem watcher and
    * surfaces in the `copies` SSE event without a follow-up REST call.
+   *
+   * `kind`/`parent`/`owner`/`title` write the copy's explicit `.copy.json`
+   * metadata: `kind: 'experiment'` requires `parent` (the user copy it
+   * branches off — base is forced to it server-side) and is how
+   * `/api/experiments` creates experiment copies; `kind: 'user'` is what
+   * `/api/me`'s lazy personal-copy create passes. Omitting `kind` keeps the
+   * legacy, metadata-less create path.
+   *
+   * `bps` is EXPERIMENTS-ONLY and scopes the clone: gitops publishes the
+   * parent's current tip and clones only the business processes named there
+   * (omitted/empty ⇒ none). Everything else materializes from the parent on
+   * first open via `POST /copies/{name}/bp/{bp}/ensure`. That is the whole
+   * point of an experiment — a side branch off the ONE process being tried
+   * out; cloning all ~20 (a git clone + working tree + a publish commit each)
+   * is what made "Start experiment" take minutes. It is ignored for user
+   * copies, which are a person's whole working environment. A BP not present
+   * in the parent is a gitops 400 — an experiment's world is its parent's, so
+   * it never silently branches off main.
    */
   async createCopy(input: {
     branch_name: string;
     base_branch?: string;
+    kind?: 'user' | 'experiment';
+    parent?: string;
+    owner?: string;
+    title?: string;
+    bps?: string[];
   }): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(`${this.baseUrl}/copies/create`, {
       method: 'POST',
@@ -533,9 +578,30 @@ export class GitopsClient {
    *  (rebase the whole copy onto main). Opposite direction from syncCopy. */
   async rebaseCopy(
     name: string,
+    bp: string,
     deployer?: string,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     return this.postJson(`/copies/${encodeURIComponent(name)}/rebase`, {
+      deployer: deployer ?? null,
+      // ALWAYS scoped to one business process. Each is its own repository, so
+      // "behind main" is a per-process fact and so is pulling: an unscoped
+      // pull would drag in processes the user never asked about and was never
+      // shown. gitops still accepts an unscoped pull for operators.
+      bp,
+    });
+  }
+
+  /** `POST /copies/{name}/merge-to-parent` — merge an EXPERIMENT back into
+   *  the copy it branched from (ff-only, performed inside the parent's own
+   *  clone; never touches main, never deploys a dev stage). Response mirrors
+   *  syncCopy/rebaseCopy: `needs_rebase` means the parent moved on and the
+   *  EXPERIMENT must be rebased onto it first (coding-agent handoff);
+   *  `noop` means the parent already has the experiment's work. */
+  async mergeCopyToParent(
+    name: string,
+    deployer?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(`/copies/${encodeURIComponent(name)}/merge-to-parent`, {
       deployer: deployer ?? null,
     });
   }
@@ -583,6 +649,32 @@ export class GitopsClient {
       `${this.baseUrl}/copies/${encodeURIComponent(name)}/divergence-all`,
       { headers: { ...this.authHeaders() } },
     );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * The longest name a NEW copy may have, as gitops computes it for THIS
+   * workspace (`{max_length: number|null}`; null = nothing constrains it yet).
+   *
+   * It is derived from the longest business-process slug, so it differs per
+   * workspace and shrinks when a long-named business process is created —
+   * which is why the experiment-name generator asks for it instead of carrying
+   * its own constant.
+   */
+  async copyNameBudget(): Promise<{
+    ok: boolean;
+    status: number;
+    body: unknown;
+  }> {
+    const r = await fetch(`${this.baseUrl}/copies/name-budget`, {
+      headers: { ...this.authHeaders() },
+    });
     let body: unknown = null;
     try {
       body = await r.json();
