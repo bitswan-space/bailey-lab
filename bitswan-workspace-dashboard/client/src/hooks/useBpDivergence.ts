@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useCopies, useDeployDone } from '@/components/workspace/WorkspaceProvider';
+import {
+  useCopies,
+  useCopyRefsMoved,
+  useDeployDone,
+} from '@/components/workspace/WorkspaceProvider';
 import {
   api,
   EdgeUnavailableError,
@@ -101,6 +105,12 @@ export function useBpDivergence(
 
   const { copies: copiesSnapshot } = useCopies();
   const deployDone = useDeployDone();
+  // Our OWN ref-moving actions, whoever ran them: a pull, a merge-back, a
+  // version taken wholesale, a dev revert. The `copies` snapshot says the same
+  // thing eventually, and "eventually" is exactly the bug — a hotpatch taken
+  // from the Deployments tab left this screen reporting 0 ahead over a copy
+  // that was one commit ahead on the server.
+  const { copyRefsMoved } = useCopyRefsMoved();
 
   // One string, so the pair is a single dependency AND a single "is this
   // answer still about what I asked?" comparison. A space can occur in neither
@@ -193,9 +203,27 @@ export function useBpDivergence(
 
   useEffect(() => () => window.clearTimeout(edgeRetryRef.current), []);
 
+  // So does one of OUR OWN actions moving the refs. Whatever we are holding is
+  // an answer about the world before it, and the user is standing there waiting
+  // for the result — so the screen must go back to saying it is checking rather
+  // than present the pre-action answer as current. Live consequence of not
+  // doing this: take a version from the Deployments tab, open Deploy, and be
+  // told the copy is up to date over the commit that was just made.
+  //
+  // Deliberately NOT done for the `copies` snapshot: that changes on every git
+  // event anywhere in the workspace, and blanking the reading each time would
+  // replace a stale answer with an unreadable one. This fires only on discrete
+  // things this user did.
+  const refsMovedAtMount = useRef(copyRefsMoved);
+  useEffect(() => {
+    if (copyRefsMoved === refsMovedAtMount.current) return;
+    setDivergence(null);
+    setError(null);
+  }, [copyRefsMoved]);
+
   useEffect(() => {
     recheck();
-  }, [recheck, key, copiesSnapshot, deployDone, nonce]);
+  }, [recheck, key, copiesSnapshot, deployDone, copyRefsMoved, nonce]);
 
   return {
     divergence,

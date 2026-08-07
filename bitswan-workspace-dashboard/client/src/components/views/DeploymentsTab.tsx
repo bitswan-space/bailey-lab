@@ -53,6 +53,7 @@ import { toast } from '@/lib/notify';
 import {
   useAutomations,
   useActiveDeploys,
+  useCopyRefsMoved,
   useDeployDone,
   type ActiveDeploy,
 } from '@/components/workspace/WorkspaceProvider';
@@ -1427,6 +1428,7 @@ function InspectModal({
   // Both write outside this modal (one into the user's copy, one into main),
   // so both go behind a confirmation that says what actually happens.
   const myCopy = useMyCopy();
+  const { notifyCopyRefsMoved } = useCopyRefsMoved();
   const [takeOpen, setTakeOpen] = useState(false);
   const [taking, setTaking] = useState(false);
   const [revertOpen, setRevertOpen] = useState(false);
@@ -1458,6 +1460,10 @@ function InspectModal({
           duration: 10000,
         });
       }
+      // My copy's branch just moved. Say so, or the Deploy screen behind this
+      // modal keeps the divergence it read before the hotpatch and tells the
+      // user their copy is up to date — over the commit this just made.
+      notifyCopyRefsMoved();
       onClose();
     } catch (err) {
       toast.error(`Couldn't take that version: ${errorMessage(err)}`, {
@@ -1467,7 +1473,7 @@ function InspectModal({
     } finally {
       setTaking(false);
     }
-  }, [myCopy, commit, taking, bp, label, onClose]);
+  }, [myCopy, commit, taking, bp, label, onClose, notifyCopyRefsMoved]);
 
   /** "Revert dev to this version": ONE commit on top of main, then dev is
    *  redeployed from the new tip. Everyone else's copy goes a commit behind —
@@ -1484,6 +1490,9 @@ function InspectModal({
       const res = await api.copyFiles.revertDev(bp, { commit, bpLabel: label });
       setRevertOpen(false);
       toast.success(res.message, { id, duration: 12000 });
+      // Main moved, so EVERY copy is now a commit behind on this process —
+      // including the one on screen. Re-read rather than wait for the event.
+      notifyCopyRefsMoved();
       if (res.deploy_task_id) {
         void watchDeployTask(res.deploy_task_id, `${id}-deploy`, {
           loading: `Redeploying ${label} to dev…`,
@@ -1500,7 +1509,7 @@ function InspectModal({
     } finally {
       setReverting(false);
     }
-  }, [commit, reverting, bp, label, onClose]);
+  }, [commit, reverting, bp, label, onClose, notifyCopyRefsMoved]);
 
   useEffect(() => {
     if (panel !== 'diff' || !current?.source_commit || !entry.source_commit) return;

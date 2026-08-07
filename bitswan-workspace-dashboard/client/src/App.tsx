@@ -6,6 +6,7 @@ import {
   WorkspaceProvider,
   useProcesses,
   useCopies,
+  useCopyRefsMoved,
   useDeployDone,
 } from '@/components/workspace/WorkspaceProvider';
 import { SessionProvider, useSessions } from '@/components/agents/SessionProvider';
@@ -239,10 +240,13 @@ function Shell() {
   // Bumped on every editor save so copy-dirtiness consumers refetch (the
   // SSE snapshot only refreshes on git events, not file writes).
   const [copyEditNonce, setCopyEditNonce] = useState(0);
-  // Bumped when one of the user's OWN git actions finishes (pull, merge-back)
-  // so the behind-main check re-reads immediately instead of waiting for the
-  // next event — that's what makes the Sync step disappear right after a pull.
-  const [syncCheckNonce, setSyncCheckNonce] = useState(0);
+  // One of the user's OWN git actions finishing (pull, merge-back, taking a
+  // version) re-reads the behind-main check immediately instead of waiting for
+  // the next event — that's what makes the Sync step disappear right after a
+  // pull. It lives in the workspace provider rather than here because the
+  // Deployments tab's inspect modal moves refs too (the hotpatch, the dev
+  // revert) and has no channel back to this component.
+  const { notifyCopyRefsMoved } = useCopyRefsMoved();
   // The copy transition currently locking the interface. null = the app is
   // live. See `Busy` and `BusyOverlay`.
   // eslint-disable-next-line no-restricted-syntax -- null = not locked
@@ -526,10 +530,10 @@ function Shell() {
         // divergence now so the Sync step goes away without waiting for the
         // next SSE event. Also correct on failure: the pull may have got
         // part-way.
-        setSyncCheckNonce((n) => n + 1);
+        notifyCopyRefsMoved();
       }
     },
-    [handleTab, sendPrompt],
+    [handleTab, sendPrompt, notifyCopyRefsMoved],
   );
 
   const bp = useMemo(
@@ -640,7 +644,7 @@ function Shell() {
     error: divergenceError,
     resolved: divergenceResolved,
     recheck: recheckDivergence,
-  } = useBpDivergence(copy, bpId, syncCheckNonce + copyEditNonce);
+  } = useBpDivergence(copy, bpId, copyEditNonce);
   const behindBp = bpDivergence?.behind_bp ?? null;
 
   // OPENING one of the two screens that live off this reading re-takes it.
@@ -815,7 +819,7 @@ function Shell() {
       setMerging(false);
       // The parent copy (the user's own) has just taken the experiment's
       // commits — re-read its behind-main count.
-      setSyncCheckNonce((n) => n + 1);
+      notifyCopyRefsMoved();
     }
   }, [
     wt,
@@ -827,6 +831,7 @@ function Shell() {
     lock,
     lockSettling,
     unlock,
+    notifyCopyRefsMoved,
   ]);
 
   // ── take a version wholesale ──────────────────────────────────────────────
@@ -902,7 +907,7 @@ function Shell() {
       });
     } finally {
       setTaking(false);
-      setSyncCheckNonce((n) => n + 1);
+      notifyCopyRefsMoved();
     }
   }, [
     takeVersion,
@@ -912,6 +917,7 @@ function Shell() {
     lockSettling,
     unlock,
     handleCopyDeleted,
+    notifyCopyRefsMoved,
   ]);
 
   // Discarding an experiment is a real delete (branch, checkout, live-dev

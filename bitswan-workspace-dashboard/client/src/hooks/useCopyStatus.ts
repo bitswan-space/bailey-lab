@@ -1,7 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useCopies } from '@/components/workspace/WorkspaceProvider';
+import { useCopies, useCopyRefsMoved } from '@/components/workspace/WorkspaceProvider';
 import { api, errorMessage, type ChangedFile } from '@/lib/api';
 import { SessionExpiredError } from '@/lib/session';
+
+/** Two change lists that say the same thing. Compared by value so an unchanged
+ *  answer can be dropped rather than re-rendered — see `setChanged` below. */
+function sameChanged(a: ChangedFile[], b: ChangedFile[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((x, i) => {
+      const y = b[i];
+      return (
+        !!y &&
+        x.path === y.path &&
+        x.kind === y.kind &&
+        x.adds === y.adds &&
+        x.dels === y.dels
+      );
+    })
+  );
+}
 
 interface Result {
   changed: ChangedFile[];
@@ -43,13 +61,21 @@ export function useCopyStatus(copy: string, nonce = 0): Result {
   copyRef.current = copy;
 
   const { copies: copiesSnapshot } = useCopies();
+  const { copyRefsMoved } = useCopyRefsMoved();
 
   const refresh = useCallback(async () => {
     const asked = copyRef.current;
     try {
       const r = await api.copyFiles.status(asked);
       if (!aliveRef.current || copyRef.current !== asked) return;
-      setChanged(r.changed);
+      // KEEP THE PREVIOUS ARRAY when the answer is unchanged. This is re-read
+      // on every `copies` SSE event, and a fresh array each time re-renders
+      // every screen derived from it at the rate git events arrive — which
+      // during a deploy is constantly. The divergence reading learned the same
+      // lesson the hard way (elements re-created under the pointer, clicks
+      // landing on detached nodes); when the files are the same, nothing
+      // happened.
+      setChanged((prev) => (sameChanged(prev, r.changed) ? prev : r.changed));
       setError('');
     } catch (err) {
       if (!aliveRef.current || copyRef.current !== asked) return;
@@ -69,10 +95,25 @@ export function useCopyStatus(copy: string, nonce = 0): Result {
     };
   }, []);
 
+  // Only the FIRST read for a given copy is a "loading" state. Re-reads happen
+  // on every git event, and resetting `loading` each time would flicker the
+  // Deploy screen back to "Checking this against main…" at the rate events
+  // arrive — replacing a wrong answer with an unreadable one. The previous
+  // list stands until a newer one replaces it.
   useEffect(() => {
     setLoading(true);
+  }, [copy]);
+  // …and after one of our own ref-moving actions, for the same reason the
+  // divergence reading drops its answer there: what we hold describes the copy
+  // before the action, and the user is waiting to see the result of it.
+  const refsMovedAtMount = useRef(copyRefsMoved);
+  useEffect(() => {
+    if (copyRefsMoved === refsMovedAtMount.current) return;
+    setLoading(true);
+  }, [copyRefsMoved]);
+  useEffect(() => {
     void refresh();
-  }, [refresh, copiesSnapshot, nonce]);
+  }, [refresh, copiesSnapshot, copyRefsMoved, nonce]);
 
   useEffect(() => {
     const onFocus = () => void refresh();
