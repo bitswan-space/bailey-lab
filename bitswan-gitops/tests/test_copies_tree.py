@@ -901,6 +901,38 @@ def test_merge_to_parent_fast_forwards_parent_and_leaves_main_alone(env):
     assert [(r["bp"], r["status"]) for r in res.bp_results] == [("bpa", "success")]
 
 
+def test_the_parent_reads_as_ahead_of_main_the_instant_the_merge_returns(env):
+    """THE fact the Deploy screen is built on, asserted at the moment it is
+    asked for.
+
+    A user merges an experiment back and immediately opens Deploy. If the
+    divergence read answers "0 ahead" there — for any reason, on either side of
+    the wire — the screen tells them there is nothing to publish while their
+    work sits unpublished in their copy. They reported exactly that.
+
+    So: no waiting, no event, no second call. The merge returns, and the very
+    next divergence read already counts the merged commit. This pins the SERVER
+    half of that promise; the client half (re-reading at all, and not showing
+    the pre-merge answer as authoritative in the meantime) is pinned by
+    `useBpDivergence`'s own tests."""
+    alice = env["user_copy"]("alice")
+    exp = env["experiment"]("exp-pricing-ab12", "alice")
+    _commit(os.path.join(exp, "bpa"), "file.txt", "exp1\n", "exp bpa")
+
+    before = asyncio.run(copies.get_bp_divergence("alice", bp="bpa"))
+    assert before["ahead_bp"] == 0, "nothing to publish before the merge"
+
+    res = _as(OWNER, lambda: merge_copy_to_parent("exp-pricing-ab12"))
+    assert res.status == "success"
+
+    after = asyncio.run(copies.get_bp_divergence("alice", bp="bpa"))
+    assert after["ahead_bp"] == 1, (
+        "the merged commit must be publishable immediately — a Deploy screen "
+        "opened now would otherwise say 'up to date' over unpublished work"
+    )
+    assert after["behind_bp"] == 0
+
+
 def test_merge_to_parent_rebases_when_the_parent_moved_on(env):
     """Divergent but non-conflicting: the EXPERIMENT is replayed on top of the
     parent, then merged fast-forward — the parent's history is never rewritten."""
@@ -2004,11 +2036,18 @@ def test_a_dev_revert_that_cannot_reproduce_the_version_changes_nothing(
 
 # ── publishing over main ────────────────────────────────────────────────────
 #
-# The second way out of a blocked Deploy. A specifically designed REBASE, not a
-# snapshot: my commits are replayed onto main's tip and survive individually,
-# main's own commits stay reachable underneath, and main's untouched additions
-# are kept. The alternative — "make main exactly my version" — is the same
-# restore-commit helper the adopts use, and it is a separate, explicit choice.
+# The second way out of a blocked Deploy, and it has exactly ONE outcome:
+# **main ends up holding exactly what my copy holds.** No modes, no merge rule
+# for the user to pick — "overwriting main" means what it says, down to
+# dropping files main had that I do not.
+#
+# CONTENT and HISTORY are separate promises and both are kept. My commits are
+# REPLAYED onto main's tip so they survive individually and main's own commits
+# stay reachable underneath (nothing rewritten, nothing force-pushed); the
+# replay alone would leave main's untouched additions behind, so one
+# reconciling commit then makes the tree exactly mine. The tests below pin both
+# halves, and the third one — that the two together are byte-exact — is the
+# contract the button's wording rests on.
 
 
 def _deploy_over(copy, **kw):
@@ -2048,28 +2087,40 @@ def test_publishing_over_main_resolves_conflicts_in_my_favour_not_mains(env, tmp
     alice = env["user_copy"]("alice")
     _main_and_mine_diverge(env, tmp_path, alice)
 
-    res = _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+    res = _as(OWNER, _deploy_over("alice", bp="bpa", deployer=OWNER))
 
-    assert res.status == "success" and res.method == "rebase"
+    assert res.status == "success" and res.method == "replay+reconcile"
     published = _git("-C", env["bares"]["bpa"], "show", "main:shared.txt").stdout
     assert published == "MINE\n"
     assert published != "THEIRS\n"
 
 
-def test_publishing_over_main_keeps_what_main_added_and_i_never_touched(env, tmp_path):
-    """ "Overwriting main" means my version wins where we both touched
-    something — NOT that a colleague's unrelated file disappears. The dialog
-    says so, so it had better be true."""
+def test_publishing_over_main_drops_what_main_added_and_i_do_not_have(env, tmp_path):
+    """ "Overwriting main" means main ends up holding MY version — so a file a
+    colleague added and I never had goes too.
+
+    This is the deliberate reversal of what this action used to do. Keeping
+    main's untouched additions made the outcome depend on a merge rule the user
+    could not see, and left main holding a version that existed in nobody's
+    copy. The loss is real, which is why the confirm dialog states it and why
+    the superseded commits stay reachable in main's history."""
     alice = env["user_copy"]("alice")
     clone = _main_and_mine_diverge(env, tmp_path, alice)
 
-    _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+    _as(OWNER, _deploy_over("alice", bp="bpa", deployer=OWNER))
 
     assert (
-        _git("-C", env["bares"]["bpa"], "show", "main:theirs-only.txt").stdout
-        == "theirs\n"
-    )
-    assert _read(os.path.join(clone, "theirs-only.txt")) == "theirs\n"
+        _git(
+            "-C",
+            env["bares"]["bpa"],
+            "cat-file",
+            "-e",
+            "main:theirs-only.txt",
+            check=False,
+        ).returncode
+        != 0
+    ), "the colleague's untouched addition is gone from main, as the dialog says"
+    assert not os.path.exists(os.path.join(clone, "theirs-only.txt"))
     assert _read(os.path.join(clone, "mine-only.txt")) == "mine\n"
 
 
@@ -2080,17 +2131,20 @@ def test_publishing_over_main_keeps_my_commits_individually(env, tmp_path):
     alice = env["user_copy"]("alice")
     _main_and_mine_diverge(env, tmp_path, alice)
 
-    res = _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+    res = _as(OWNER, _deploy_over("alice", bp="bpa", deployer=OWNER))
 
     subjects = [c["subject"] for c in res.replayed]
-    assert subjects == [
+    assert subjects[1:] == [
         "and add one of my own",
         "I change the shared file",
     ], "both of my commits, each still itself"
+    # …and, on top, the ONE commit that makes the tree exactly mine. It is a
+    # commit rather than a rewrite precisely so the drop is visible in the log.
+    assert subjects[0] == "Make main's bpa exactly the version from 'alice'"
     on_main = _git(
-        "-C", env["bares"]["bpa"], "log", "-2", "--format=%s", "refs/heads/main"
+        "-C", env["bares"]["bpa"], "log", "-3", "--format=%s", "refs/heads/main"
     ).stdout.split("\n")
-    assert on_main[:2] == subjects
+    assert on_main[:3] == subjects
 
 
 def test_publishing_over_main_leaves_mains_own_commits_reachable(env, tmp_path):
@@ -2100,7 +2154,7 @@ def test_publishing_over_main_leaves_mains_own_commits_reachable(env, tmp_path):
     _main_and_mine_diverge(env, tmp_path, alice)
     main_before = _main_tip(env, "bpa")
 
-    _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+    _as(OWNER, _deploy_over("alice", bp="bpa", deployer=OWNER))
 
     assert (
         _git(
@@ -2121,7 +2175,7 @@ def test_publishing_over_main_leaves_my_copy_level_with_main(env, tmp_path):
     alice = env["user_copy"]("alice")
     clone = _main_and_mine_diverge(env, tmp_path, alice)
 
-    _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+    _as(OWNER, _deploy_over("alice", bp="bpa", deployer=OWNER))
 
     assert _ahead_behind(clone, env["bares"]["bpa"]) == (0, 0)
     assert _head(clone) == _main_tip(env, "bpa")
@@ -2162,7 +2216,7 @@ def test_publishing_over_main_refuses_when_main_moved_since_the_dialog(env, tmp_
     with pytest.raises(HTTPException) as ei:
         _as(
             OWNER,
-            _deploy_over("alice", bp="bpa", mode="rebase", expected_main=stale),
+            _deploy_over("alice", bp="bpa", expected_main=stale),
         )
 
     assert ei.value.status_code == 409
@@ -2192,9 +2246,7 @@ def test_a_conflict_no_rule_can_decide_changes_nothing_at_all(env, tmp_path):
 
     res = _as(
         OWNER,
-        _deploy_over(
-            "alice", bp="bpa", mode="rebase", deployer=OWNER, bp_label="Compost"
-        ),
+        _deploy_over("alice", bp="bpa", deployer=OWNER, bp_label="Compost"),
     )
 
     assert res.status == "needs_rebase"
@@ -2207,31 +2259,70 @@ def test_a_conflict_no_rule_can_decide_changes_nothing_at_all(env, tmp_path):
     assert not os.path.exists(os.path.join(clone, "shared.txt"))
 
 
-def test_making_main_exactly_my_version_reproduces_my_tree_byte_for_byte(env, tmp_path):
-    """The other option in the dialog, and it means what it says: main ends up
-    holding exactly what my copy held — the colleague's untouched additions
-    included in the loss."""
+def test_publishing_over_main_makes_main_byte_identical_to_my_copy(env, tmp_path):
+    """THE contract of the button, and the one assertion that covers content,
+    history and the promise made in the dialog at once.
+
+    Afterwards: main's tree is byte-for-byte the tree my copy had; each of my
+    commits is on main as itself; and every commit main already had is still
+    reachable underneath. Nothing about that depends on what the two sides
+    happened to touch."""
     alice = env["user_copy"]("alice")
     clone = _main_and_mine_diverge(env, tmp_path, alice)
     my_tree_before = _tree(clone)
+    my_commits = _git("-C", clone, "log", "-2", "--format=%s").stdout.split("\n")[:2]
+    main_before = _main_tip(env, "bpa")
 
-    res = _as(OWNER, _deploy_over("alice", bp="bpa", mode="exact", deployer=OWNER))
+    res = _as(OWNER, _deploy_over("alice", bp="bpa", deployer=OWNER))
 
-    assert res.method == "exact"
+    assert res.status == "success"
+    # CONTENT: exactly mine.
     assert _tree(env["bares"]["bpa"], "refs/heads/main") == my_tree_before
-    assert not os.path.exists(os.path.join(clone, "theirs-only.txt"))
-    assert _ahead_behind(clone, env["bares"]["bpa"]) == (0, 0)
-    # Still forward-only: one commit on top of what main had.
+    assert _tree(clone) == my_tree_before
+    # HISTORY: my commits individually, main's own still reachable.
+    on_main = _git(
+        "-C", env["bares"]["bpa"], "log", "--format=%s", "refs/heads/main"
+    ).stdout.split("\n")
+    for subject in my_commits:
+        assert subject in on_main
     assert (
         _git(
             "-C",
             env["bares"]["bpa"],
-            "rev-list",
-            "--count",
-            f"{res.superseded[0]['sha']}..refs/heads/main",
-        ).stdout.strip()
-        == "1"
-    )
+            "merge-base",
+            "--is-ancestor",
+            main_before,
+            "refs/heads/main",
+            check=False,
+        ).returncode
+        == 0
+    ), "forward-only: nothing main had was rewritten away"
+    assert _ahead_behind(clone, env["bares"]["bpa"]) == (0, 0)
+
+
+def test_publishing_over_main_adds_no_reconciling_commit_when_it_is_not_needed(
+    env, tmp_path
+):
+    """When the replay already lands on exactly my tree — main moved, but only
+    in ways my commits overwrite — there is nothing to reconcile, and an empty
+    commit claiming to have dropped something would be a lie in the log."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "shared.txt", "base\n", "the shared file")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    _commit(clone, "shared.txt", "MINE\n", "I change the shared file")
+    my_tree_before = _tree(clone)
+
+    other = tmp_path / "colleague"
+    _git("clone", "-q", env["bares"]["bpa"], str(other))
+    _commit(str(other), "shared.txt", "THEIRS\n", "a colleague changes the same line")
+    asyncio.run(bp_git.publish_main_from_clone(str(other), "bpa"))
+
+    res = _as(OWNER, _deploy_over("alice", bp="bpa", deployer=OWNER))
+
+    assert res.method == "replay", "a plain replay, with nothing left to drop"
+    assert [c["subject"] for c in res.replayed] == ["I change the shared file"]
+    assert _tree(env["bares"]["bpa"], "refs/heads/main") == my_tree_before
 
 
 def test_publishing_over_main_twice_is_an_ordinary_deploy_the_second_time(
@@ -2241,10 +2332,10 @@ def test_publishing_over_main_twice_is_an_ordinary_deploy_the_second_time(
     behaves as Deploy does."""
     alice = env["user_copy"]("alice")
     _main_and_mine_diverge(env, tmp_path, alice)
-    _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+    _as(OWNER, _deploy_over("alice", bp="bpa", deployer=OWNER))
     main_after_first = _main_tip(env, "bpa")
 
-    second = _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+    second = _as(OWNER, _deploy_over("alice", bp="bpa", deployer=OWNER))
 
     assert second.status == "success"
     assert second.method == "noop"
@@ -2265,11 +2356,6 @@ def test_publishing_over_main_requires_the_owner_and_refuses_an_experiment(env):
     assert ei.value.status_code == 400
     assert "Experiments merge back" in ei.value.detail
 
-    with pytest.raises(HTTPException) as ei:
-        _as(OWNER, _deploy_over("alice", bp="bpa", mode="squash"))
-    assert ei.value.status_code == 400
-    assert "Invalid mode" in ei.value.detail
-
 
 def test_publishing_over_main_touches_no_other_business_process(env, tmp_path):
     alice = env["user_copy"]("alice")
@@ -2279,7 +2365,7 @@ def test_publishing_over_main_touches_no_other_business_process(env, tmp_path):
     ).stdout
     _main_and_mine_diverge(env, tmp_path, alice)
 
-    _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+    _as(OWNER, _deploy_over("alice", bp="bpa", deployer=OWNER))
 
     after = _git(
         "-C", env["bares"]["bpb"], "for-each-ref", "--format=%(refname) %(objectname)"

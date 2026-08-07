@@ -2822,10 +2822,6 @@ async def revert_dev_to_version(bp: str, body: RevertDevRequest):
 
 class DeployOverMainRequest(BaseModel):
     bp: str
-    # "rebase" — replay MY commits onto main's tip, my side winning wherever we
-    #            both touched the same lines, main's untouched additions kept.
-    # "exact"  — make main hold exactly what my copy holds, byte for byte.
-    mode: str = "rebase"
     deployer: str | None = None
     # Main's tip as the confirm dialog described it. The dialog names the
     # commits that will be superseded and who wrote them; if main moved since
@@ -2837,12 +2833,14 @@ class DeployOverMainRequest(BaseModel):
     bp_label: str | None = None
 
 
-DEPLOY_OVER_MODES = ("rebase", "exact")
-
-
 class DeployOverMainResponse(BaseModel):
     status: str  # "success" | "needs_rebase"
-    method: str | None  # "rebase" | "exact" | "fast-forward" | "noop"
+    # "replay"           — my commits replayed onto main, tree already exactly
+    #                      mine afterwards.
+    # "replay+reconcile" — the same, plus the one commit that drops what main
+    #                      had added and I do not.
+    # "fast-forward" | "noop" — main had not actually moved; an ordinary Deploy.
+    method: str | None
     bp: str
     message: str
     # Main commits that were not in my copy — whose work this went over.
@@ -2893,23 +2891,29 @@ async def deploy_over_main(name: str, body: DeployOverMainRequest):
     """Publish this copy's version of ONE business process even though main has
     moved on — the second way out of a blocked Deploy, the first being Sync.
 
-    Two modes, and the difference matters enough to be a choice in the dialog:
+    ONE outcome, always: **main ends up holding exactly what my copy holds.**
+    There is no mode, no merge rule for the user to pick, and no per-hunk
+    semantics to reason about — "overwriting main" means what it says, down to
+    dropping files main had that I do not.
 
-    * ``rebase`` (the default) — MY commits are replayed onto main's tip with
-      conflicting hunks resolved MY way, and main is then fast-forwarded to the
-      result. **My version wins where we both touched something; anything main
-      added that I did not touch is KEPT.** My commits survive individually
-      rather than being flattened into one — needlessly discarding history is
-      not a thing to do on a user's behalf — and main's own commits stay
-      reachable underneath.
-    * ``exact`` — main ends up holding EXACTLY what my copy holds, byte for
-      byte, as one restore commit on top of main. Main's additions go too. This
-      is the honest way to say "no, I mean mine, all of it".
+    History is a separate question from content, and it is preserved:
+
+    1. My commits are REPLAYED onto main's tip (``rebase -X theirs``), so they
+       survive individually rather than being flattened into one snapshot, and
+       main's own commits stay reachable underneath. Nothing is force-pushed
+       and nothing moves backwards.
+    2. The replay alone does not give the promised content — anything main
+       added that I never touched would survive it — so when the resulting tree
+       still differs from my copy's, ONE reconciling commit puts my tree on
+       top. That commit is what drops main's additions, visibly, in the log.
+    3. The final tree is then asserted byte-identical to my copy's. A promise
+       nobody could check by looking is checked here, and a mismatch is a loud
+       500 rather than a quietly wrong main.
 
     Conflicts a merge strategy cannot decide (a file one side deleted and the
-    other edited) ABORT: nothing is changed anywhere, and the answer is
-    ``needs_rebase`` — the same handoff to the coding agent an ordinary blocked
-    Sync gets, because resolving that needs a person's judgement.
+    other edited) ABORT the replay: nothing is changed anywhere, and the answer
+    is ``needs_rebase`` — the same handoff to the coding agent an ordinary
+    blocked Sync gets, because resolving that needs a person's judgement.
     """
     from app.task_queue import current_requester
 
@@ -2919,14 +2923,6 @@ async def deploy_over_main(name: str, body: DeployOverMainRequest):
     if name == "main":
         raise HTTPException(
             status_code=400, detail="the main copy cannot be published over itself"
-        )
-    if body.mode not in DEPLOY_OVER_MODES:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Invalid mode '{body.mode}': expected one of "
-                f"{', '.join(DEPLOY_OVER_MODES)}"
-            ),
         )
     copy_path = _resolve_copy_path(name)
     if not os.path.isdir(copy_path):
@@ -2985,69 +2981,91 @@ async def deploy_over_main(name: str, body: DeployOverMainRequest):
             replayed=await _commit_rows(f"{main_tip}..{mine}", clone),
         )
 
-    if body.mode == "rebase":
-        # -X theirs, and the direction is the opposite of the intuition: a
-        # rebase checks out the UPSTREAM and replays your commits onto it, so
-        # "ours" is main (the side being replayed onto) and "theirs" is the
-        # commit being replayed — MINE. `test_rebasing_over_main_resolves_
-        # conflicts_in_my_favour_not_mains` pins this down with real git,
-        # because getting it backwards would silently publish main's version of
-        # every conflicting line under a button that promised the opposite.
-        _, rb_err, rb_rc = await call_git_command_with_output(
-            "git", *_ident_args(deployer), "rebase", "-X", "theirs", MAIN_REF, cwd=clone
+    # ── 1. replay my commits onto main's tip ────────────────────────────────
+    # -X theirs, and the direction is the opposite of the intuition: a rebase
+    # checks out the UPSTREAM and replays your commits onto it, so "ours" is
+    # main (the side being replayed onto) and "theirs" is the commit being
+    # replayed — MINE. `test_publishing_over_main_resolves_conflicts_in_my_
+    # favour_not_mains` pins this down with real git, because getting it
+    # backwards would silently publish main's version of every conflicting line
+    # under a button that promised the opposite.
+    #
+    # This step is about HISTORY: it is what keeps my commits individual and
+    # main's reachable. It is NOT what makes the content mine — step 2 is.
+    _, rb_err, rb_rc = await call_git_command_with_output(
+        "git", *_ident_args(deployer), "rebase", "-X", "theirs", MAIN_REF, cwd=clone
+    )
+    if rb_rc != 0:
+        conflicted = any(
+            os.path.isdir(os.path.join(clone, ".git", d))
+            for d in ("rebase-merge", "rebase-apply")
         )
-        if rb_rc != 0:
-            conflicted = any(
-                os.path.isdir(os.path.join(clone, ".git", d))
-                for d in ("rebase-merge", "rebase-apply")
-            )
-            if conflicted:
-                await call_git_command("git", "rebase", "--abort", cwd=clone)
-            await call_git_command_with_output(
-                "git", "reset", "--hard", mine, cwd=clone
-            )
-            await call_git_command("git", "clean", "-fd", cwd=clone)
-            if conflicted:
-                return DeployOverMainResponse(
-                    status="needs_rebase",
-                    method=None,
-                    bp=bp,
-                    message=(
-                        f"{label} cannot be replayed onto main automatically — a "
-                        "file was changed on one side and deleted on the other, "
-                        "which no rule can decide. NOTHING was changed. Hand off "
-                        "to the coding agent to resolve it."
-                    ),
-                    superseded=superseded,
-                )
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    f"Replaying '{bp}' onto main failed before the rebase "
-                    f"started (nothing was changed): "
-                    f"{rb_err.strip() or f'git rebase exited {rb_rc}'}"
+        if conflicted:
+            await call_git_command("git", "rebase", "--abort", cwd=clone)
+        await call_git_command_with_output("git", "reset", "--hard", mine, cwd=clone)
+        await call_git_command("git", "clean", "-fd", cwd=clone)
+        if conflicted:
+            return DeployOverMainResponse(
+                status="needs_rebase",
+                method=None,
+                bp=bp,
+                message=(
+                    f"{label} cannot be replayed onto main automatically — a "
+                    "file was changed on one side and deleted on the other, "
+                    "which no rule can decide. NOTHING was changed. Hand off "
+                    "to the coding agent to resolve it."
                 ),
+                superseded=superseded,
             )
-        new_tip = await _bp_tip(clone)
-        method = "rebase"
-    else:
-        new_tip, committed = await _restore_tree_commit(
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Replaying '{bp}' onto main failed before the rebase "
+                f"started (nothing was changed): "
+                f"{rb_err.strip() or f'git rebase exited {rb_rc}'}"
+            ),
+        )
+    new_tip = await _bp_tip(clone)
+
+    # ── 2. make the CONTENT exactly mine ────────────────────────────────────
+    # The replay keeps whatever main added and I never touched; the promise on
+    # the button is that main ends up holding exactly my version, so when the
+    # replayed tree still differs from mine, one commit reconciles it. When it
+    # does not differ, nothing is committed — an empty commit claiming to have
+    # dropped something is worse than no commit.
+    try:
+        new_tip, reconciled = await _restore_tree_commit(
             clone,
-            main_tip,
+            new_tip,
             mine,
             deployer,
-            f"Replace {label} on main with the version from '{name}'",
+            f"Make main's {label} exactly the version from '{name}'",
             f"your version of '{bp}'",
         )
-        if not committed:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    f"Main's {label} is already byte-identical to yours, yet it "
-                    "reported changes to publish. Nothing was changed."
-                ),
-            )
-        method = "exact"
+    except HTTPException:
+        await call_git_command_with_output("git", "reset", "--hard", mine, cwd=clone)
+        await call_git_command("git", "clean", "-fd", cwd=clone)
+        raise
+
+    # ── 3. prove it ─────────────────────────────────────────────────────────
+    # "Main will hold exactly your version" is the whole contract of this
+    # button. Check it against my copy's original tip before anything is
+    # published, and put the clone back if it does not hold.
+    _, _, exact_rc = await call_git_command_with_output(
+        "git", "diff", "--quiet", mine, new_tip, cwd=clone
+    )
+    if exact_rc != 0:
+        await call_git_command_with_output("git", "reset", "--hard", mine, cwd=clone)
+        await call_git_command("git", "clean", "-fd", cwd=clone)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Publishing {label} over main did not reproduce your version "
+                "exactly — refusing to publish a version that is not yours. "
+                "Nothing was changed."
+            ),
+        )
+    method = "replay+reconcile" if reconciled else "replay"
 
     try:
         await _move_copy_branch(clone, bare, name, new_tip, "the version you published")
@@ -3063,10 +3081,10 @@ async def deploy_over_main(name: str, body: DeployOverMainRequest):
     task_id = await _spawn_dev_deploy(bp, deployer)
     await refresh_one_copy(name)
     replayed = await _commit_rows(f"{main_tip}..{new_tip}", clone)
-    kept = (
-        "Anything main added that you had not touched is still there."
-        if method == "rebase"
-        else "Main now holds exactly your version, and nothing else."
+    dropped = (
+        " What main had added and you did not have has been dropped."
+        if reconciled
+        else ""
     )
     return DeployOverMainResponse(
         status="success",
@@ -3074,7 +3092,8 @@ async def deploy_over_main(name: str, body: DeployOverMainRequest):
         bp=bp,
         message=(
             f"Published your version of {label} over main, superseding "
-            f"{len(superseded)} commit(s) from other people. {kept}"
+            f"{len(superseded)} commit(s) from other people. Main now holds "
+            f"exactly your version of {label}.{dropped}"
         ),
         superseded=superseded,
         replayed=replayed,
