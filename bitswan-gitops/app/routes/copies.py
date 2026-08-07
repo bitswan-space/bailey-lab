@@ -7,6 +7,24 @@ an independent ``git clone`` of that BP's own canonical bare repo
 ``<name>``. The ``main`` copy is the default-branch scope: each of its BP dirs
 is a checkout of that repo's ``main``.
 
+**THE LOAD-BEARING RULE OF THE COPY TREE.** A ``user`` copy is a PERSON'S
+environment and is WORKSPACE-WIDE: it carries every business process. An
+``experiment`` is a side branch of ONE BUSINESS PROCESS, recorded as ``bp`` in
+its ``.copy.json``, and it can never hold a second one. That follows from the
+storage: each business process is its OWN git repo, so "an experiment" that
+spanned several would be several unrelated branches in several unrelated
+repos, merged back and discarded together for no reason other than that one
+directory happens to contain them. ``ensure_bp_in_copy`` therefore REFUSES any
+business process but the experiment's own (409), and every copy-wide operation
+on an experiment (merge-back, pull, status, divergence, history, diff) is
+scoped to that single ``bp`` rather than to whatever clones the directory
+happens to contain — see :func:`copy_scope_bps`.
+
+Experiments created BEFORE this rule carry no ``bp``. They are not guessed at:
+:func:`copy_scope_bps` keeps their historical whole-directory behaviour, the
+listing reports ``bp_legacy: true`` so the dashboard can group and label them
+honestly, and gitops logs each one once (:func:`_note_legacy_experiment`).
+
 Because every BP has its own repo, syncing one BP is a plain push +
 fast-forward of that repo's main — it can never entangle another BP's
 changes. Copy-level endpoints aggregate over the copy's BP clones so the API
@@ -176,6 +194,115 @@ def read_copy_meta(copy_path: str) -> dict | None:
     return data
 
 
+def experiment_bp(meta: dict | None) -> str | None:
+    """The ONE business process an experiment belongs to, from its stored
+    metadata — or None when the copy is not an experiment, or is an experiment
+    that predates the per-business-process rule.
+
+    Explicit data only. There is deliberately no fallback to "the only clone in
+    the directory" or to the copy's name: a legacy experiment whose directory
+    grew three clones has no recoverable answer, and inventing one would pick a
+    business process the user never chose."""
+    if not meta or meta.get("kind") != COPY_KIND_EXPERIMENT:
+        return None
+    bp = (meta.get("bp") or "").strip()
+    return bp or None
+
+
+# Legacy experiments (no `bp`) are reported once each, not on every scan: the
+# copies listing is recomputed on every git event, and a per-event line would
+# bury the log for a condition that is static until somebody deletes the copy.
+_legacy_experiments_logged: set[str] = set()
+
+
+def _note_legacy_experiment(name: str) -> None:
+    """Log ONCE that an experiment predates the per-business-process rule."""
+    if name in _legacy_experiments_logged:
+        return
+    _legacy_experiments_logged.add(name)
+    logger.warning(
+        "Experiment '%s' has no 'bp' in its .copy.json: it was started before "
+        "experiments were per-business-process, so which process it is about "
+        "is not recorded. It is listed as legacy and cannot take on another "
+        "business process; discard it and start a new experiment.",
+        name,
+    )
+
+
+def copy_scope_bps(copy_path: str, meta: dict | None = None) -> list[str]:
+    """The business processes a COPY-WIDE operation covers.
+
+    For an experiment that is exactly the one business process it is about (and
+    nothing, if that clone is somehow missing) — never "every clone in the
+    directory". Before the per-process rule an experiment could accumulate
+    clones through the business-process switcher, and every copy-wide
+    operation then silently spanned them: a merge-back carried three unrelated
+    repos into the parent, and the divergence figures summed processes the user
+    had never opted into.
+
+    For a user copy — a person's whole environment — and for a LEGACY
+    experiment with no recorded ``bp``, it is the clones on disk. The legacy
+    case is not a guess: it is the behaviour those copies were created under,
+    kept unchanged so their contents stay reachable until they are discarded.
+    """
+    if meta is None:
+        meta = read_copy_meta(copy_path)
+    bp = experiment_bp(meta)
+    if not bp:
+        return list_bp_clones(copy_path)
+    return [bp] if os.path.isdir(os.path.join(copy_path, bp, ".git")) else []
+
+
+def assert_copy_can_hold_bp(
+    name: str,
+    bp: str,
+    copy_path: str | None = None,
+    meta: dict | None = None,
+) -> None:
+    """Raise 409 unless copy `name` may carry business process `bp`.
+
+    A person's copy may carry anything — it IS the workspace. An experiment is
+    a side branch of exactly one business process and may carry only that one:
+    every route that can add a clone to a copy (materialize on switch, create a
+    new business process into a copy) goes through here, because an experiment
+    that grows a second clone stops being an experiment ON something and
+    becomes a whole-workspace copy that merely started from one process.
+
+    The message is actionable rather than a bare refusal: the place to do that
+    work is the person's own copy, so it names it.
+    """
+    if copy_path is None:
+        copy_path = _resolve_copy_path(name)
+    if meta is None:
+        meta = read_copy_meta(copy_path)
+    if not meta or meta.get("kind") != COPY_KIND_EXPERIMENT:
+        return
+    own = experiment_bp(meta)
+    title = meta.get("title") or name
+    parent = meta.get("parent") or "your own copy"
+    if own is None:
+        # A legacy experiment: which process it is about was never recorded, so
+        # there is no honest answer to "is this its own?". It keeps what it has
+        # and gains nothing — no guessing in either direction.
+        _note_legacy_experiment(name)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{title}' is an experiment from before experiments were "
+                f"per-business-process, so it cannot take on '{bp}'. Switch "
+                f"back to '{parent}' to work on '{bp}'."
+            ),
+        )
+    if bp != own:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{title}' is an experiment on '{own}'; switch back to "
+                f"'{parent}' to work on '{bp}'."
+            ),
+        )
+
+
 def write_copy_meta(copy_path: str, meta: dict) -> None:
     """Write a copy's `.copy.json` atomically (temp file + rename), so a reader
     never sees a half-written sidecar."""
@@ -290,12 +417,15 @@ class CreateCopyRequest(BaseModel):
     parent: str | None = None  # experiments only: the user copy they branch off
     owner: str | None = None  # email; defaults to the gate-verified requester
     title: str | None = None  # human label (experiments display this, not the name)
-    # EXPERIMENTS ONLY: the business processes to materialise up front — in
-    # practice the one the user is looking at when they start the experiment.
-    # Everything else is materialised from the parent on first open
-    # (`ensure_bp_in_copy`), so starting an experiment costs one clone rather
-    # than one per business process in the workspace. Ignored for user copies:
-    # a person's copy is their whole working environment and carries everything.
+    # EXPERIMENTS ONLY, and EXACTLY ONE: the business process the experiment is
+    # about — the one the user is looking at when they start it. It is recorded
+    # as `bp` in the sidecar and is the only process the experiment will ever
+    # hold (`ensure_bp_in_copy` refuses the rest). A list rather than a scalar
+    # only because that is the wire shape callers already send; more than one
+    # element is a 400, not a silent truncation.
+    #
+    # Ignored for user copies: a person's copy is their whole working
+    # environment and carries every business process.
     bps: list[str] | None = None
 
 
@@ -417,6 +547,10 @@ async def create_copy(body: CreateCopyRequest):
     non-experiment copy (the tree is single-level): the base branch is forced
     to the parent's, and the parent's current work is committed + published
     first so the experiment starts from what its owner sees right now.
+
+    An experiment also requires ``bps`` naming EXACTLY ONE business process —
+    the one it is about. It is recorded as ``bp`` in the sidecar and is the only
+    process the experiment will ever hold.
     """
     from app.task_queue import current_requester
 
@@ -445,7 +579,38 @@ async def create_copy(body: CreateCopyRequest):
 
     owner = (body.owner or "").strip() or (current_requester.get() or "").strip()
     parent = None
+    # The one business process an experiment is about. None for a user copy,
+    # which carries every business process by definition.
+    exp_bp = None
     if kind == COPY_KIND_EXPERIMENT:
+        # WHICH business process is not optional and not plural: each one is its
+        # own git repo, so an experiment spanning two would be two unrelated
+        # branches merged back and thrown away together. Reject rather than
+        # default — an experiment with no process is a real but empty copy the
+        # user can do nothing in, and one with several is the workspace-wide
+        # copy this rule exists to stop.
+        requested = body.bps or []
+        if len(requested) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "An experiment is started on a business process: name "
+                    "exactly one in 'bps'."
+                ),
+            )
+        if len(requested) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "An experiment belongs to exactly one business process "
+                    f"(got {len(requested)}: {', '.join(requested)}). Each "
+                    "business process is its own repository, so start one "
+                    "experiment per process."
+                ),
+            )
+        exp_bp = requested[0]
+        _validate_bp_dir(exp_bp)
+
         parent = (body.parent or "").strip()
         if not parent:
             raise HTTPException(
@@ -471,38 +636,37 @@ async def create_copy(body: CreateCopyRequest):
 
     try:
         if kind is not None or body.owner or body.title:
-            write_copy_meta(
-                copy_path,
-                {
-                    "version": COPY_META_VERSION,
-                    "kind": kind or COPY_KIND_USER,
-                    "owner": owner or None,
-                    "parent": parent,
-                    "title": body.title or name,
-                    "created_at": datetime.datetime.now(
-                        datetime.timezone.utc
-                    ).isoformat(),
-                },
-            )
+            meta = {
+                "version": COPY_META_VERSION,
+                "kind": kind or COPY_KIND_USER,
+                "owner": owner or None,
+                "parent": parent,
+                "title": body.title or name,
+                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+            # The business process an experiment belongs to, recorded EXPLICITLY
+            # — every later guard (ensure, merge-back, divergence) reads it from
+            # here rather than inspecting what the directory happens to hold.
+            if exp_bp:
+                meta["bp"] = exp_bp
+            write_copy_meta(copy_path, meta)
         if kind == COPY_KIND_EXPERIMENT:
-            # Only the business processes the caller asked for. An experiment is
-            # a side branch off the one business process being tried out, so
-            # cloning all of them (a full git clone + working tree each) cost
-            # over two minutes on a 20-BP workspace for work the user never
-            # asked for. Everything else materialises from the parent on first
-            # open, via `ensure_bp_in_copy`.
-            for bp in body.bps or []:
-                _validate_bp_dir(bp)
-                if not os.path.isdir(os.path.join(parent_path, bp, ".git")):
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"'{bp}' is not in '{parent}', so an experiment on "
-                            "it has nothing to branch from"
-                        ),
-                    )
-                await _publish_copy_bp_tip(parent_path, parent, bp, owner or None)
-                await _clone_bp_into_copy(copy_path, name, bp, base)
+            # Exactly the one business process the experiment is about — a full
+            # git clone + working tree each, so cloning all of them cost over
+            # two minutes on a 20-BP workspace for work the user never asked
+            # for. There is no "everything else, later": the rest of the
+            # workspace belongs to the parent copy, and `ensure_bp_in_copy`
+            # refuses to bring it in here.
+            if not os.path.isdir(os.path.join(parent_path, exp_bp, ".git")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"'{exp_bp}' is not in '{parent}', so an experiment on "
+                        "it has nothing to branch from"
+                    ),
+                )
+            await _publish_copy_bp_tip(parent_path, parent, exp_bp, owner or None)
+            await _clone_bp_into_copy(copy_path, name, exp_bp, base)
         else:
             await _for_each_bp(
                 list_bp_repos(),
@@ -626,6 +790,17 @@ def _copy_facts(copy_path: str, name: str) -> dict:
         facts["owner"] = meta.get("owner")
         facts["parent"] = meta.get("parent")
         facts["title"] = meta.get("title")
+        if meta.get("kind") == COPY_KIND_EXPERIMENT:
+            bp = experiment_bp(meta)
+            if bp:
+                facts["bp"] = bp
+            else:
+                # An experiment from before experiments were per-business
+                # process. Reported as such rather than omitted: the dashboard
+                # filters experiments by `bp`, and one silently missing from
+                # every list is a copy the user can neither find nor discard.
+                facts["bp_legacy"] = True
+                _note_legacy_experiment(name)
     return facts
 
 
@@ -1273,13 +1448,13 @@ async def ensure_bp_in_copy(name: str, bp: str):
     materializes it here instead of the copy being hidden. 404 only when the BP
     has no repo content on main to clone from.
 
-    Inside an EXPERIMENT the BP is materialized from the parent copy's branch
-    (an experiment's world is its parent's, not main's); main is the fallback
-    only when the parent doesn't carry the BP either. The parent's CURRENT state
-    for that business process — including edits the dashboard wrote to disk
-    without committing — is published first, so opening a business process in an
-    experiment later gives the same starting point as creating the experiment on
-    it would have."""
+    AN EXPERIMENT REFUSES EVERY BUSINESS PROCESS BUT ITS OWN (409). An
+    experiment is a side branch of the ONE process recorded in its
+    `.copy.json`; materializing another here is what turned experiments into
+    whole-workspace copies that merely started from one process (live-seen: an
+    experiment started on one business process ended up holding three clones,
+    because the process switcher called this endpoint inside it). The work
+    belongs in the person's own copy, and the message says so."""
     from app.task_queue import current_requester
 
     _validate_copy_name(name)
@@ -1287,9 +1462,10 @@ async def ensure_bp_in_copy(name: str, bp: str):
     copy_path = _resolve_copy_path(name)
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+    meta = read_copy_meta(copy_path)
+    assert_copy_can_hold_bp(name, bp, copy_path=copy_path, meta=meta)
     if os.path.isdir(os.path.join(copy_path, bp, ".git")):
         return {"ok": True, "already": True, "copy": name, "bp": bp}
-    meta = read_copy_meta(copy_path)
     base = "main"
     if meta and meta.get("kind") == COPY_KIND_EXPERIMENT and meta.get("parent"):
         base = meta["parent"]
@@ -1322,7 +1498,11 @@ async def rebase_copy(name: str, body: SyncCopyRequest | None = None):
     process whose *image dir* changed in the pull gets its live-dev stage
     redeployed (a config-only change needs no rebuild). A conflict in a BP
     touches nothing in that BP and reports ``needs_rebase`` so the caller hands
-    off to the coding agent."""
+    off to the coding agent.
+
+    In an EXPERIMENT this is scoped to the one business process the experiment
+    is about, and materializes nothing: "gain every business process main
+    carries" is what a person's copy is for."""
     _validate_copy_name(name)
     if name == "main":
         raise HTTPException(
@@ -1334,9 +1514,19 @@ async def rebase_copy(name: str, body: SyncCopyRequest | None = None):
 
     deployer = body.deployer if body else None
     only_bp = body.bp if body else None
+    meta = read_copy_meta(copy_path)
+    own_bp = experiment_bp(meta)
 
     if only_bp:
         _validate_bp_dir(only_bp)
+        if own_bp and only_bp != own_bp:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{meta.get('title') or name}' is an experiment on "
+                    f"'{own_bp}'; it has no '{only_bp}' to pull into."
+                ),
+            )
         if not os.path.isdir(os.path.join(copy_path, only_bp, ".git")):
             if not await _clone_bp_into_copy(copy_path, name, only_bp):
                 raise HTTPException(
@@ -1344,6 +1534,8 @@ async def rebase_copy(name: str, body: SyncCopyRequest | None = None):
                     detail=f"'{only_bp}' has no repo content to pull",
                 )
         bps = [only_bp]
+    elif own_bp:
+        bps = copy_scope_bps(copy_path, meta)
     else:
         existing = set(list_bp_clones(copy_path))
         for candidate in list_bp_repos():
@@ -1715,8 +1907,23 @@ async def merge_copy_to_parent(name: str, body: SyncCopyRequest | None = None):
     deployer = (body.deployer if body else None) or current_requester.get()
     only_bp = body.bp if body else None
 
+    # An experiment merges back exactly what it is about. Not `list_bp_clones`:
+    # a legacy experiment's directory can hold clones of processes it was never
+    # started on, and carrying those into the parent is the whole-workspace
+    # merge this rule exists to stop. `copy_scope_bps` keeps the historical
+    # behaviour for legacy experiments (nothing else can be honest about them)
+    # and is the single recorded process for every experiment made since.
     if only_bp:
         _validate_bp_dir(only_bp)
+        own_bp = experiment_bp(meta)
+        if own_bp and only_bp != own_bp:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{title}' is an experiment on '{own_bp}'; it has no "
+                    f"'{only_bp}' to merge."
+                ),
+            )
         if not os.path.isdir(os.path.join(copy_path, only_bp, ".git")):
             raise HTTPException(
                 status_code=404,
@@ -1724,7 +1931,7 @@ async def merge_copy_to_parent(name: str, body: SyncCopyRequest | None = None):
             )
         bps = [only_bp]
     else:
-        bps = list_bp_clones(copy_path)
+        bps = copy_scope_bps(copy_path, meta)
 
     if not bps:
         return MergeToParentResponse(
@@ -1837,7 +2044,7 @@ async def get_merge_to_parent_preview(name: str):
         ]
         return one
 
-    per_bp = await _map_each_bp(list_bp_clones(copy_path), _preview_one)
+    per_bp = await _map_each_bp(copy_scope_bps(copy_path, meta), _preview_one)
     ahead = sum(o["ahead"] for o in per_bp)
     behind = sum(o["behind"] for o in per_bp)
     new_bps = [o["bp"] for o in per_bp if o["new"]]
@@ -1984,7 +2191,8 @@ async def get_copy_status(name: str, bp: str | None = None):
     """Per-file change list for a copy: everything that pressing Sync & Deploy
     will make the new main — commits ahead of main, plus uncommitted edits,
     plus new untracked files. Paths are copy-root-relative (``<bp>/…``).
-    Optional ``?bp=`` scopes the list to one business process."""
+    Optional ``?bp=`` scopes the list to one business process; in an experiment
+    the unscoped list is its own business process, never the whole directory."""
     copy_path = _resolve_copy_path(name)
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
@@ -1995,7 +2203,7 @@ async def get_copy_status(name: str, bp: str | None = None):
             return {"changed": []}
         bps = [bp]
     else:
-        bps = list_bp_clones(copy_path)
+        bps = copy_scope_bps(copy_path)
 
     per_bp = await _map_each_bp(
         bps, lambda b: _clone_status_of(os.path.join(copy_path, b), b)
@@ -2037,13 +2245,14 @@ async def get_bp_divergence(name: str, bp: str = Query(...)):
     Each BP is its own repo, so "this BP" is simply its clone's ahead/behind;
     the ``_other`` fields sum the remaining clones so the Sync & Deploy screen
     can say "other business processes have unsynced work" without mixing it
-    into this BP's counts."""
+    into this BP's counts. An experiment HAS no other business processes, so
+    there the ``_other`` figures are always zero."""
     _validate_bp_dir(bp)
     copy_path = _resolve_copy_path(name)
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
 
-    clones = list_bp_clones(copy_path)
+    clones = copy_scope_bps(copy_path)
 
     if bp in clones:
         ahead_bp, behind_bp = await _clone_divergence(os.path.join(copy_path, bp), bp)
@@ -2079,26 +2288,30 @@ async def get_copy_behind(name: str):
     biggest source of latency in gitops.
 
     Only business processes that ARE behind appear in `bps`; a BP the copy has
-    not checked out at all counts (pulling materialises it).
+    not checked out at all counts (pulling materialises it) — but only for a
+    person's copy, which is workspace-wide. An experiment is one business
+    process, so a process it does not carry is not "missing" from it.
     """
     _validate_copy_name(name)
     copy_path = _resolve_copy_path(name)
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
 
-    clones = list_bp_clones(copy_path)
+    meta = read_copy_meta(copy_path)
+    clones = copy_scope_bps(copy_path, meta)
     pairs = await _map_each_bp(
         clones, lambda bp: _clone_divergence(os.path.join(copy_path, bp), bp)
     )
     bps = {bp: behind for bp, (_, behind) in zip(clones, pairs) if behind}
 
-    for bp in list_bp_repos():
-        if bp in clones:
-            continue
-        if await bp_main_has_content(bp):
-            behind = await _missing_clone_behind(bp)
-            if behind:
-                bps[bp] = behind
+    if not experiment_bp(meta):
+        for bp in list_bp_repos():
+            if bp in clones:
+                continue
+            if await bp_main_has_content(bp):
+                behind = await _missing_clone_behind(bp)
+                if behind:
+                    bps[bp] = behind
 
     return {"behind": sum(bps.values()), "bps": bps}
 
@@ -2117,21 +2330,25 @@ async def get_all_bp_divergence(name: str):
     if not os.path.exists(copy_path):
         raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
 
+    meta = read_copy_meta(copy_path)
     result: dict[str, dict] = {}
-    clones = list_bp_clones(copy_path)
+    clones = copy_scope_bps(copy_path, meta)
     pairs = await _map_each_bp(
         clones, lambda bp: _clone_divergence(os.path.join(copy_path, bp), bp)
     )
     for bp, (ahead, behind) in zip(clones, pairs):
         if ahead or behind:
             result[bp] = {"ahead": ahead, "behind": behind}
-    for bp in list_bp_repos():
-        if bp in clones:
-            continue
-        if await bp_main_has_content(bp):
-            behind = await _missing_clone_behind(bp)
-            if behind:
-                result[bp] = {"ahead": 0, "behind": behind}
+    # Only a person's copy is workspace-wide, so only there is a business
+    # process it lacks a thing it is behind on. An experiment is ONE process.
+    if not experiment_bp(meta):
+        for bp in list_bp_repos():
+            if bp in clones:
+                continue
+            if await bp_main_has_content(bp):
+                behind = await _missing_clone_behind(bp)
+                if behind:
+                    result[bp] = {"ahead": 0, "behind": behind}
     return result
 
 
@@ -2209,7 +2426,7 @@ async def get_copy_history(name: str, bp: str | None = None):
             )
         bps = [bp]
     else:
-        bps = list_bp_clones(copy_path)
+        bps = copy_scope_bps(copy_path)
 
     copy_commits: list[dict] = []
     main_commits: list[dict] = []
@@ -2289,7 +2506,7 @@ async def get_copy_diff(name: str, path: str | None = None):
         return {"diff": await _clone_diff(clone, bp, rest or None)}
 
     parts: list[str] = []
-    for bp in list_bp_clones(copy_path):
+    for bp in copy_scope_bps(copy_path):
         clone = os.path.join(copy_path, bp)
         await fetch_main(clone, bp)
         d = await _clone_diff(clone, bp, None)
@@ -2314,7 +2531,7 @@ async def get_commit_diff(name: str, sha: str, bp: str | None = None):
         _validate_bp_dir(bp)
         bps = [bp]
     else:
-        bps = list_bp_clones(copy_path)
+        bps = copy_scope_bps(copy_path)
 
     for b in bps:
         clone = os.path.join(copy_path, b)

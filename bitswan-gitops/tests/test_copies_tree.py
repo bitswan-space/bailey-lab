@@ -126,11 +126,12 @@ def env(tmp_path, monkeypatch):
         return str(copies_dir / name)
 
     def experiment(name, parent, owner=OWNER, title="Try new pricing", bps=None):
-        """`bps` defaults to everything the parent carries, so tests that
-        exercise merge mechanics get real clones. Production passes just the
-        business process the user is on; pass `bps=[]` to exercise that."""
+        """An experiment is started ON one business process and carries only
+        that one, so `bps` defaults to a single element — the same shape the
+        dashboard sends. Pass an explicit list to exercise the rejections
+        (none, or more than one)."""
         if bps is None:
-            bps = bp_git.list_bp_clones(str(copies_dir / parent))
+            bps = ["bpa"]
         _as(
             owner,
             lambda: copies.create_copy(
@@ -188,6 +189,10 @@ def test_experiment_writes_metadata_sidecar(env):
     assert meta["owner"] == OWNER
     assert meta["parent"] == "alice"
     assert meta["title"] == "Try new pricing"
+    # WHICH business process the experiment is about is recorded EXPLICITLY —
+    # every later guard reads it from here rather than looking at what the
+    # directory happens to contain.
+    assert meta["bp"] == "bpa"
     assert meta["created_at"]
     # The sidecar is a dot-file: invisible to the BP scan.
     assert "bpa" in bp_git.list_bp_clones(exp)
@@ -306,6 +311,12 @@ def test_copy_wire_state_carries_kind_owner_parent(env):
     assert exp_state["owner"] == OWNER
     assert exp_state["parent"] == "alice"
     assert exp_state["title"] == "Try new pricing"
+    # The business process the experiment is on — the dashboard lists
+    # experiments under it, and shows nothing under any other.
+    assert exp_state["bp"] == "bpa"
+    assert "bp_legacy" not in exp_state
+    # A person's copy is workspace-wide, so it has no single business process.
+    assert "bp" not in alice_state
 
 
 def test_copy_listing_carries_no_divergence_and_runs_no_git(env, monkeypatch):
@@ -466,28 +477,117 @@ def test_name_budget_is_published_and_matches_what_create_enforces(env):
     assert shrunk < published
 
 
-def test_experiment_defaults_to_cloning_nothing(env):
-    """No `bps` means nothing is materialised up front; the business process the
-    user opens is materialised then, from the parent."""
+def test_experiment_without_a_business_process_is_rejected(env):
+    """An experiment is a side branch of ONE business process, so which one is
+    not optional: without it the create would make a real but EMPTY copy the
+    user can do nothing in, and the failure would surface as whatever they
+    tried next."""
     env["user_copy"]("alice")
-    exp = env["experiment"]("exp-pricing-ab12", "alice", bps=[])
-    assert bp_git.list_bp_clones(exp) == []
+    with pytest.raises(HTTPException) as ei:
+        env["experiment"]("exp-pricing-ab12", "alice", bps=[])
+    assert ei.value.status_code == 400
+    assert "exactly one" in ei.value.detail
+    assert (
+        bp_git.list_bp_clones(os.path.join(env["copies_dir"], "exp-pricing-ab12")) == []
+    )
 
 
-def test_opening_a_bp_in_an_experiment_takes_the_parents_current_state(env):
-    """The lazy path must give the same starting point the eager one did —
-    including the parent's uncommitted edits."""
+def test_experiment_on_more_than_one_business_process_is_rejected(env):
+    """Each business process is its own repository. An "experiment" spanning
+    two is two unrelated branches merged back and discarded together — which is
+    the workspace-wide copy this rule exists to stop. Reject rather than
+    silently keeping the first."""
+    env["user_copy"]("alice")
+    with pytest.raises(HTTPException) as ei:
+        env["experiment"]("exp-pricing-ab12", "alice", bps=["bpa", "bpb"])
+    assert ei.value.status_code == 400
+    assert "exactly one business process" in ei.value.detail
+    assert "bpa, bpb" in ei.value.detail
+
+
+def test_experiment_records_only_its_own_business_process(env):
+    """The experiment carries exactly the one process it was started on — not
+    the parent's whole world."""
+    alice = env["user_copy"]("alice")
+    assert set(bp_git.list_bp_clones(alice)) == {"bpa", "bpb"}
+    exp = env["experiment"]("exp-pricing-ab12", "alice", bps=["bpb"])
+    assert bp_git.list_bp_clones(exp) == ["bpb"]
+    assert json.loads(_read(os.path.join(exp, COPY_META_FILE)))["bp"] == "bpb"
+
+
+def test_an_experiment_refuses_a_business_process_that_is_not_its_own(env):
+    """THE rule. The business-process switcher calls `ensure` for whatever is
+    selected, and inside an experiment that quietly grew it a second clone —
+    live-seen: an experiment started on one process ended up holding three, so
+    it was really a whole-workspace copy that merely began on one. It must
+    refuse, and say where the work belongs."""
     alice = env["user_copy"]("alice")
     _commit(os.path.join(alice, "bpb"), "file.txt", "alice-committed\n", "alice work")
-    _write(os.path.join(alice, "bpb"), "wip.txt", "alice-wip\n")
-
     exp = env["experiment"]("exp-pricing-ab12", "alice", bps=["bpa"])
-    assert "bpb" not in bp_git.list_bp_clones(exp)
 
-    res = _as(OWNER, lambda: ensure_bp_in_copy("exp-pricing-ab12", "bpb"))
-    assert res["already"] is False
-    assert _read(os.path.join(exp, "bpb", "file.txt")) == "alice-committed\n"
-    assert _read(os.path.join(exp, "bpb", "wip.txt")) == "alice-wip\n"
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, lambda: ensure_bp_in_copy("exp-pricing-ab12", "bpb"))
+    assert ei.value.status_code == 409
+    # Actionable: it names the experiment, the process it IS on, the process
+    # asked for, and the copy to go to instead.
+    for part in ("Try new pricing", "bpa", "bpb", "alice"):
+        assert part in ei.value.detail
+    # And nothing was created: the experiment still holds exactly its own.
+    assert bp_git.list_bp_clones(exp) == ["bpa"]
+
+
+def test_an_experiment_accepts_its_own_business_process_idempotently(env):
+    """The switcher selecting the process the experiment IS on must still be a
+    plain no-op, not a refusal."""
+    env["user_copy"]("alice")
+    env["experiment"]("exp-pricing-ab12", "alice", bps=["bpa"])
+    res = _as(OWNER, lambda: ensure_bp_in_copy("exp-pricing-ab12", "bpa"))
+    assert res == {"ok": True, "already": True, "copy": "exp-pricing-ab12", "bp": "bpa"}
+
+
+def test_a_legacy_experiment_without_bp_is_handled_deterministically(env):
+    """An experiment created before the rule records no `bp`. It is NOT guessed
+    at — not from the directory's single clone, not from the name. It is
+    reported as legacy in the listing (so the dashboard can group and label it
+    rather than hide it), it keeps the clones it has, and it gains none."""
+    alice = env["user_copy"]("alice")
+    exp = env["experiment"]("exp-legacy-ab12", "alice", bps=["bpa"])
+    # Rewrite the sidecar the way a pre-rule gitops wrote it.
+    meta = json.loads(_read(os.path.join(exp, COPY_META_FILE)))
+    del meta["bp"]
+    copies.write_copy_meta(exp, meta)
+
+    assert copies.experiment_bp(copies.read_copy_meta(exp)) is None
+    # No guessing from the one clone that happens to be there.
+    assert bp_git.list_bp_clones(exp) == ["bpa"]
+
+    state = {c["name"]: c for c in asyncio.run(copies.refresh_copies())}[
+        "exp-legacy-ab12"
+    ]
+    assert state["bp_legacy"] is True
+    assert "bp" not in state
+
+    # It gains nothing — including the process its parent has and it does not.
+    _commit(os.path.join(alice, "bpb"), "file.txt", "alice\n", "alice work")
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, lambda: ensure_bp_in_copy("exp-legacy-ab12", "bpb"))
+    assert ei.value.status_code == 409
+    assert "before experiments were per-business-process" in ei.value.detail
+    assert bp_git.list_bp_clones(exp) == ["bpa"]
+
+
+def test_a_new_business_process_cannot_be_born_in_an_experiment(env):
+    """The other way a copy gains a clone. An experiment holds the one process
+    it is about, so creating a brand-new one INTO it is refused for the same
+    reason materializing an existing one is."""
+    env["user_copy"]("alice")
+    env["experiment"]("exp-pricing-ab12", "alice", bps=["bpa"])
+    with pytest.raises(HTTPException) as ei:
+        copies.assert_copy_can_hold_bp("exp-pricing-ab12", "brand-new")
+    assert ei.value.status_code == 409
+    assert "bpa" in ei.value.detail
+    # A person's copy carries anything: that is what a copy IS.
+    copies.assert_copy_can_hold_bp("alice", "brand-new")
 
 
 def test_experiment_on_a_bp_the_parent_lacks_is_rejected(env):
@@ -543,13 +643,11 @@ def test_behind_endpoint_reports_only_what_main_carries(env, tmp_path):
 
 
 def test_ensure_bp_in_experiment_materializes_from_the_parent(env):
-    """Inside an experiment, a BP is materialized from the PARENT's branch —
-    the experiment's world is its parent's, not main's."""
+    """An experiment's world is its PARENT's, not main's: when its own clone
+    has to be (re)materialized it comes from the parent's branch, including
+    work that never reached main."""
     alice = env["user_copy"]("alice")
-    exp = env["experiment"]("exp-pricing-ab12", "alice")
-
-    # A BP the experiment does not carry, whose parent branch has work that
-    # never reached main.
+    # A business process whose parent branch has work main has never seen.
     asyncio.run(git_server.ensure_bp_bare_repo("bpc"))
     asyncio.run(copies._clone_bp_into_copy(alice, "alice", "bpc", allow_empty=True))
     _commit(os.path.join(alice, "bpc"), "process.toml", "id='parent'\n", "alice bpc")
@@ -561,14 +659,27 @@ def test_ensure_bp_in_experiment_materializes_from_the_parent(env):
         cwd=os.path.join(alice, "bpc"),
     )
 
-    res = asyncio.run(ensure_bp_in_copy("exp-pricing-ab12", "bpc"))
-    assert res["already"] is False
+    exp = env["experiment"]("exp-pricing-ab12", "alice", bps=["bpc"])
     clone = os.path.join(exp, "bpc")
     assert "parent" in _read(os.path.join(clone, "process.toml"))
     assert (
         _git("rev-parse", "--abbrev-ref", "HEAD", cwd=clone).stdout.strip()
         == "exp-pricing-ab12"
     )
+    # The experiment is on bpc and holds nothing else — not even the processes
+    # its parent carries.
+    assert bp_git.list_bp_clones(exp) == ["bpc"]
+
+
+def _make_legacy(exp_path):
+    """Turn an experiment into a LEGACY one: drop the recorded `bp`, exactly as
+    an experiment created before experiments were per-business-process looks on
+    disk. Those keep their historical whole-directory scope (nothing else can
+    be honest about them — which process they were about was never written
+    down), and that scope is what the tests below pin."""
+    meta = json.loads(_read(os.path.join(exp_path, COPY_META_FILE)))
+    meta.pop("bp", None)
+    copies.write_copy_meta(exp_path, meta)
 
 
 def env_bare(env, bp):
@@ -596,8 +707,9 @@ def test_merge_to_parent_fast_forwards_parent_and_leaves_main_alone(env):
     # main is untouched and got no deploy tag: this is copy → copy.
     assert _head(bare, "refs/heads/main") == main_before
     assert not _git("-C", bare, "tag", "-l", "deploy/*").stdout.strip()
-    by_bp = {r["bp"]: r["status"] for r in res.bp_results}
-    assert by_bp["bpa"] == "success" and by_bp["bpb"] == "noop"
+    # The merge covers the ONE business process the experiment is on, and
+    # nothing else in the workspace.
+    assert [(r["bp"], r["status"]) for r in res.bp_results] == [("bpa", "success")]
 
 
 def test_merge_to_parent_rebases_when_the_parent_moved_on(env):
@@ -672,9 +784,15 @@ def test_merge_to_parent_noop_when_nothing_changed(env):
     assert all(r["status"] == "noop" for r in res.bp_results)
 
 
-def test_merge_publishes_a_bp_that_exists_only_in_the_experiment(env):
+def test_merge_publishes_a_bp_that_exists_only_in_a_legacy_experiment(env):
+    """A business process can only be inside an experiment and not inside its
+    parent on a LEGACY experiment — the per-process rule refuses both routes
+    that could put one there (materialize, and create-into-a-copy). Legacy
+    experiments still have to merge back cleanly, so the publish-wholesale path
+    stays, scoped to exactly the copies it can still apply to."""
     alice = env["user_copy"]("alice")
     exp = env["experiment"]("exp-pricing-ab12", "alice")
+    _make_legacy(exp)
     asyncio.run(git_server.ensure_bp_bare_repo("bpc"))
     asyncio.run(
         copies._clone_bp_into_copy(exp, "exp-pricing-ab12", "bpc", allow_empty=True)
@@ -729,8 +847,12 @@ def test_merge_preview_is_quiet_once_the_work_is_in_the_parent(env):
 
 
 def test_merge_preview_counts_commits_and_bps_the_parent_lacks(env):
+    """The whole-directory shape, on the only copies that can still have one:
+    a legacy experiment (see `_make_legacy`)."""
     alice = env["user_copy"]("alice")
     exp = env["experiment"]("exp-pricing-ab12", "alice")
+    _make_legacy(exp)
+    asyncio.run(copies._clone_bp_into_copy(exp, "exp-pricing-ab12", "bpb", "alice"))
     _commit(os.path.join(exp, "bpa"), "file.txt", "exp-1\n", "exp work")
     # A BP born inside the experiment: the merge publishes it wholesale.
     asyncio.run(git_server.ensure_bp_bare_repo("bpc"))
@@ -769,6 +891,88 @@ def test_merge_to_parent_rejects_a_non_owner(env):
     with pytest.raises(HTTPException) as ei:
         _as(OTHER, lambda: merge_copy_to_parent("exp-pricing-ab12"))
     assert ei.value.status_code == 403
+
+
+# ── scope: every copy-wide read is the experiment's ONE business process ────
+
+
+def test_experiment_divergence_and_status_cover_only_its_own_bp(env, tmp_path):
+    """A copy-wide read on an experiment answers for the process it is about
+    and no other. Before the rule these iterated the directory, so an
+    experiment that had grown clones reported ahead/behind/changed files for
+    business processes the user had never opted into — and, worse, counted
+    processes it did NOT carry as "behind main", offering a pull that would
+    have materialized them."""
+    env["user_copy"]("alice")
+    exp = env["experiment"]("exp-pricing-ab12", "alice", bps=["bpa"])
+    _commit(os.path.join(exp, "bpa"), "file.txt", "exp\n", "exp work")
+
+    # Main moves ahead on the OTHER business process — nothing to do with this
+    # experiment, and it must not show up anywhere in its figures.
+    other = tmp_path / "other-clone"
+    _git("clone", "-q", git_server.bp_bare_repo_path("bpb"), str(other))
+    _commit(str(other), "file.txt", "b1\n", "main moves on bpb")
+    asyncio.run(bp_git.publish_main_from_clone(str(other), "bpb"))
+
+    assert copies.copy_scope_bps(exp) == ["bpa"]
+    assert asyncio.run(copies.get_all_bp_divergence("exp-pricing-ab12")).keys() == {
+        "bpa"
+    }
+    assert asyncio.run(copies.get_copy_behind("exp-pricing-ab12")) == {
+        "behind": 0,
+        "bps": {},
+    }
+    changed = asyncio.run(copies.get_copy_status("exp-pricing-ab12"))["changed"]
+    assert {c["path"].split("/")[0] for c in changed} == {"bpa"}
+    # …while the parent copy, which IS workspace-wide, does see bpb move.
+    assert asyncio.run(copies.get_copy_behind("alice")) == {
+        "behind": 1,
+        "bps": {"bpb": 1},
+    }
+
+
+def test_experiment_divergence_reports_no_other_business_processes(env):
+    """The Deploy/divergence screen's "other business processes" figures are
+    always zero in an experiment: it HAS no others."""
+    env["user_copy"]("alice")
+    exp = env["experiment"]("exp-pricing-ab12", "alice", bps=["bpa"])
+    _commit(os.path.join(exp, "bpa"), "file.txt", "exp\n", "exp work")
+
+    d = asyncio.run(copies.get_bp_divergence("exp-pricing-ab12", bp="bpa"))
+    assert d["ahead_bp"] == 1
+    assert d["ahead_other"] == 0 and d["behind_other"] == 0
+
+
+def test_pulling_main_into_an_experiment_cannot_materialize_other_bps(env):
+    """`/rebase` without a `bp` materializes every business process main
+    carries — that is how a PERSON's copy gains one somebody else created. In
+    an experiment it would be a second clone by another name."""
+    env["user_copy"]("alice")
+    exp = env["experiment"]("exp-pricing-ab12", "alice", bps=["bpa"])
+
+    res = _as(OWNER, lambda: copies.rebase_copy("exp-pricing-ab12"))
+    assert res.status == "noop"
+    assert bp_git.list_bp_clones(exp) == ["bpa"]
+
+    with pytest.raises(HTTPException) as ei:
+        _as(
+            OWNER,
+            lambda: copies.rebase_copy("exp-pricing-ab12", SyncCopyRequest(bp="bpb")),
+        )
+    assert ei.value.status_code == 409
+    assert bp_git.list_bp_clones(exp) == ["bpa"]
+
+
+def test_merge_to_parent_refuses_a_bp_that_is_not_the_experiments(env):
+    env["user_copy"]("alice")
+    env["experiment"]("exp-pricing-ab12", "alice", bps=["bpa"])
+    with pytest.raises(HTTPException) as ei:
+        _as(
+            OWNER,
+            lambda: merge_copy_to_parent("exp-pricing-ab12", SyncCopyRequest(bp="bpb")),
+        )
+    assert ei.value.status_code == 409
+    assert "bpa" in ei.value.detail
 
 
 # ── sync guard ──────────────────────────────────────────────────────────────
