@@ -347,14 +347,40 @@ async def _publish_copy_bp_tip(
         bp,
         f"Commit work in progress before branching an experiment ({bp})",
     )
+    # NOT a plain push: pulling main into a copy REBASES it, which rewrites the
+    # copy's history, so its clone is routinely not a fast-forward of the branch
+    # the bare still holds — a plain push is then rejected non-fast-forward and
+    # starting an experiment fails on exactly the copies that are most up to
+    # date (live-seen). A copy's clone is the sole authority for its own branch
+    # (nobody else writes refs/heads/<copy>), so publish it the way the rebase
+    # route already does: objects travel via a temp ref, then the branch is
+    # moved server-side with update-ref, which the ff-only push hook doesn't
+    # gate.
+    bare = bp_bare_repo_path(bp)
+    tip_out, _, _ = await call_git_command_with_output(
+        "git", "rev-parse", "HEAD", cwd=clone
+    )
+    tip = tip_out.strip()
+    tmp_ref = f"refs/publish-tmp/{name}"
     p_out, p_err, p_rc = await call_git_command_with_output(
-        "git", "push", bp_bare_repo_path(bp), f"HEAD:refs/heads/{name}", cwd=clone
+        "git", "push", bare, f"HEAD:{tmp_ref}", cwd=clone
     )
     if p_rc != 0:
         raise HTTPException(
             status_code=500,
             detail=(
                 f"Failed to publish '{bp}' branch '{name}': {(p_err or p_out).strip()}"
+            ),
+        )
+    u_out, u_err, u_rc = await call_git_command_with_output(
+        "git", "-C", bare, "update-ref", f"refs/heads/{name}", tip
+    )
+    await call_git_command_with_output("git", "-C", bare, "update-ref", "-d", tmp_ref)
+    if u_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to publish '{bp}' branch '{name}': {(u_err or u_out).strip()}"
             ),
         )
 

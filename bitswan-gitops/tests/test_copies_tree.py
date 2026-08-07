@@ -863,3 +863,32 @@ def test_delete_404s_when_nothing_remains(env, delete_env):
     with pytest.raises(HTTPException) as ei:
         _as(OWNER, lambda: delete_copy_route("exp-ghost-ab12"))
     assert ei.value.status_code == 404
+
+
+def test_experiment_can_start_from_a_parent_whose_history_was_rebased(env):
+    """Pulling main into a copy REBASES it, rewriting its history — so the copy
+    clone stops being a fast-forward of the branch the bare still holds. A plain
+    push then fails non-fast-forward, and starting an experiment broke on
+    exactly the copies that had most recently pulled (live-seen). The copy owns
+    its own branch, so publishing must move the ref rather than fast-forward it.
+    """
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "file.txt", "alice-1\n", "alice work")
+    # Publish once so the bare carries this history…
+    asyncio.run(copies._publish_copy_bp_tip(alice, "alice", "bpa", OWNER))
+    published = _head(env["bares"]["bpa"], "refs/heads/alice")
+    # …then rewrite it, exactly as a pull-from-main rebase does.
+    _git("reset", "--hard", "HEAD~1", cwd=clone)
+    _commit(clone, "file.txt", "alice-rebased\n", "alice work, rebased onto main")
+    rewritten = _head(clone)
+    assert rewritten != published
+
+    exp = env["experiment"]("exp-after-rebase-ab12", "alice")
+
+    # The bare followed the rewrite, and the experiment branched from it.
+    assert _head(env["bares"]["bpa"], "refs/heads/alice") == rewritten
+    assert _read(os.path.join(exp, "bpa", "file.txt")) == "alice-rebased\n"
+    # No temp ref left behind.
+    refs = _git("-C", env["bares"]["bpa"], "for-each-ref", "--format=%(refname)").stdout
+    assert "publish-tmp" not in refs
