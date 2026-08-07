@@ -9,9 +9,20 @@ The suite drives the genuine operator journey with Playwright:
 
 > OIDC sign-in → **claim the server** (device trust) → create the **Meridian
 > Foods** workspace through the Server Console UI → create the `invoice-processing`
-> business process → describe it → **Sync & Deploy** (with the pre-deploy CVE
-> **Checks**) → promote dev → staging → **production** (blue-green) → snapshot →
-> **rehearse recovery into DR** → walk People & roles, Endpoint access, devices.
+> business process → describe it → build it with the **Coding Agent** → try a
+> change in an **experiment** off your own copy and **merge it back** →
+> **Deploy** (with the pre-deploy CVE **Checks**) → promote dev → staging →
+> **production** (blue-green) → snapshot → **rehearse recovery into DR** → walk
+> People & roles, Endpoint access, devices.
+
+Everyone works in their **own copy**, created for them on first visit — the top
+bar carries no copy picker and no copy name, and the suite **asserts that
+absence**. The rest of the copy tree lives behind the top bar's **Advanced**
+menu: a colleague's version (amber "you are viewing" banner), and **experiments**
+— throwaway branches off your own copy that you either merge back (which
+auto-discards them) or discard. `Deploy` publishes your copy into main
+**fast-forward-only**; the conditional `Sync` step is what pulls main in first,
+and it exists only while your own copy is behind.
 
 Each beat is screenshotted into `manual/build/shots/<slot>.png`; the generator
 assembles them into `manual/build/handbook.html` + `handbook.pdf`. The manual
@@ -80,7 +91,7 @@ The walkthrough only fills screenshot slots by id — copy is decoupled from the
 
 `.github/workflows/bp-lifecycle-e2e.yml` runs the suite on a fresh `docker:dind`
 runner (clean per run) and uploads the handbook + Playwright report as artifacts.
-dind is fine for onboarding/console/Sync-&-Deploy coverage, but the heavy
+dind is fine for onboarding/console/Deploy coverage, but the heavy
 multi-stage **deploys are slow there** — for the full manual (live production /
 blue-green / DR shots) run it in a KVM VM (above), or trigger the KVM build on a
 capable host (see `bp-lifecycle-e2e-vm.yml`, which SSHes to a KVM host and runs
