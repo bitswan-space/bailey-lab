@@ -18,10 +18,13 @@
  * "See a colleague's version" (their copy — or, expanded, one of their
  * experiments — under an amber "You are viewing …" banner with one click back)
  * and "Experiments on <business process>" — throwaway branches OFF YOUR OWN
- * copy. In your own experiment a green banner says so and carries THREE ways
+ * copy. In your own experiment a green banner says so and carries FOUR ways
  * out: "Back to my copy" steps out and LEAVES IT RUNNING (it is waiting under
- * Advanced when you want it again), while merging back and discarding both END
- * it — merging AUTO-DISCARDS the experiment and lands you on your own copy.
+ * Advanced when you want it again), while the other three END it — merging back
+ * AUTO-DISCARDS the experiment and lands you on your own copy, discarding is a
+ * real delete, and "Use this version without merging" makes your copy BECOME
+ * the experiment (your own work parked as a dated experiment of its own, the
+ * source consumed).
  *
  * A COPY AND AN EXPERIMENT ARE DIFFERENT SHAPES. A copy is a person's
  * WORKSPACE-WIDE environment; an experiment belongs to exactly ONE business
@@ -1588,8 +1591,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // The other half of the copy tree. An experiment is a copy whose PARENT is
   // your copy: creating it COMMITS + publishes your copy's current tip (so the
   // automation.toml edit above rides into it) and branches from there. It offers
-  // exactly two ways out — "Merge back into my copy" or "Discard experiment" —
-  // and it can never reach main: the Deploy tab is not even rendered inside one.
+  // four ways out — leave it running ("Back to my copy"), "Merge back into my
+  // copy", "Discard experiment", or "Use this version without merging" (your
+  // copy becomes it) — and it can never reach main: the Deploy tab is not even
+  // rendered inside one.
   // We start one for real and shoot the state it puts the operator in (the green
   // banner naming the experiment by its TITLE — the copy name itself is an
   // opaque slug the user never sees).
