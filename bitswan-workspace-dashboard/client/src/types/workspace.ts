@@ -49,6 +49,25 @@ export interface Copy {
   /** Experiments only: the user copy this experiment branched off, and the
    *  only place it merges back into. */
   parent?: string;
+  /**
+   * EXPERIMENTS ONLY: the directory name of the ONE business process this
+   * experiment is about. A copy is a person's workspace-wide environment; an
+   * experiment is a side branch of a single business process, because each
+   * business process is its own git repository. gitops refuses to materialize
+   * any other process into an experiment (409), so this never changes.
+   *
+   * The experiments list is filtered on it: an experiment is only offered
+   * while you are looking at the process it belongs to.
+   */
+  bp?: string;
+  /**
+   * True for an experiment created BEFORE experiments were per-business
+   * process, whose `bp` was therefore never recorded. Which process it is
+   * about is not recoverable and is deliberately not guessed — the UI groups
+   * these separately and labels them, rather than hiding a copy its owner can
+   * still open and discard.
+   */
+  bp_legacy?: boolean;
   /** Display name. An experiment's `name` is an opaque slug — everything the
    *  user sees is this title. */
   title?: string;

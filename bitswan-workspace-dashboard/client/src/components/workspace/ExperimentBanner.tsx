@@ -7,6 +7,10 @@ import type { Copy } from '@/types';
 export interface ExperimentBannerProps {
   /** The experiment in view — always one the signed-in user owns. */
   copy: Copy;
+  /** Display name of the ONE business process this experiment is on, resolved
+   *  from `copy.bp`. Empty for a legacy experiment, whose process was never
+   *  recorded — the banner then says so rather than naming a guess. */
+  bpLabel: string;
   /** Fast-forward the experiment's work into the parent copy. */
   onMergeBack: () => void;
   /** Open the discard (delete) confirmation for this experiment. */
@@ -21,12 +25,17 @@ export interface ExperimentBannerProps {
 
 /**
  * The "you are somewhere else" banner for your own experiment: a side branch
- * off your copy that merges back into it (never into main — that's why the
- * Deploy tab is hidden in here). Carries the two ways out: merge the work
- * back, or throw the whole experiment away.
+ * off your copy, on ONE business process, that merges back into your copy
+ * (never into main — that's why the Deploy tab is hidden in here). Carries the
+ * two ways out: merge the work back, or throw the whole experiment away.
+ *
+ * It NAMES THE PROCESS, because that is what an experiment is scoped to: an
+ * experiment is not a second copy of the workspace, and the banner saying only
+ * its title left the scope invisible.
  */
 export function ExperimentBanner({
   copy,
+  bpLabel,
   onMergeBack,
   onDiscard,
   merging,
@@ -65,9 +74,20 @@ export function ExperimentBanner({
       <FlaskConical className="mt-1 size-4 shrink-0 text-emerald-700" aria-hidden />
       <div className="min-w-0 flex-1">
         <div className="truncate font-medium">
-          {`You are in an experiment: ${copy.title ?? copy.name}`}
+          {bpLabel
+            ? `You are in an experiment on ${bpLabel}: ${copy.title ?? copy.name}`
+            : `You are in an experiment: ${copy.title ?? copy.name}`}
         </div>
         <div className="text-[12px] text-emerald-800/80">
+          {/* An experiment from before experiments were per-business-process.
+              Which one it is on was never recorded and is not guessed — say
+              that, so the missing process name reads as history rather than as
+              a bug. */}
+          {copy.bp_legacy && (
+            <span>
+              {`This experiment was started before experiments belonged to one business process, so which one it is on isn't recorded. Merge back what you want to keep and discard it. `}
+            </span>
+          )}
           {parentMovedOn && (
             <span>
               {`Your copy has moved on since this experiment started — merging may need a rebase. `}

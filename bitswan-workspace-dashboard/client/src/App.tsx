@@ -11,6 +11,7 @@ import {
 import { SessionProvider, useSessions } from '@/components/agents/SessionProvider';
 import { WorkspaceView } from '@/components/views/WorkspaceView';
 import { DeleteCopyDialog } from '@/components/workspace/DeleteCopyDialog';
+import { BusyOverlay } from '@/components/workspace/BusyOverlay';
 import { ExperimentBanner } from '@/components/workspace/ExperimentBanner';
 import { TaskQueuePanel } from '@/components/workspace/TaskQueuePanel';
 import { ViewingBanner } from '@/components/workspace/ViewingBanner';
@@ -19,7 +20,7 @@ import { toast } from '@/lib/notify';
 import { watchDeployTask } from '@/lib/deployBp';
 import { SessionExpiredError } from '@/lib/session';
 import { getUrlParam, setUrlParams } from '@/lib/urlState';
-import type { Copy, FlowTab } from '@/types';
+import type { BusinessProcess, Copy, FlowTab } from '@/types';
 
 export function App() {
   return (
@@ -217,6 +218,61 @@ function useBehindMain(
   return { behind, error, recheck };
 }
 
+/**
+ * A copy transition in progress, and the exact condition that ends it.
+ *
+ * The app is locked (see `BusyOverlay`) for as long as one of these is set,
+ * because between the click and the destination being fully renderable the
+ * chrome can only show half of the answer. The lock lifts on a STATE
+ * condition, not on a promise resolving: the request landing is necessary but
+ * not sufficient — the copies feed still has to carry the destination before
+ * the banner and the pipeline can agree about it.
+ */
+interface Busy {
+  /** What the user is waiting for, named: "Starting experiment on Compost…". */
+  label: string;
+  /** The copy that must be both selected and present in the copies snapshot
+   *  before the lock lifts. null while the server is still naming it — a new
+   *  experiment's slug is generated server-side. */
+  // eslint-disable-next-line no-restricted-syntax -- null = not named yet
+  target: string | null;
+  /** The request is still running. Set false by the caller when it resolves. */
+  inFlight: boolean;
+  /** Epoch ms the lock went up; the timeout below is measured from it. */
+  startedAt: number;
+  /** How long the destination may take to arrive before we stop waiting and
+   *  say so. A lock with no cap is a hung app with a nicer sheet over it. */
+  timeoutMs: number;
+}
+
+/**
+ * The interface lock, handed to whatever starts a copy transition.
+ *
+ * ONE mechanism for all of them — start an experiment, enter a colleague's copy
+ * or an experiment, switch back, merge back, discard — so a transition can
+ * never half-render in one place because a component grew its own spinner.
+ */
+interface UiLock {
+  /** Put the sheet up NOW, on the click frame. `target` is the copy that must
+   *  become renderable, or null when the server still has to name it. */
+  // eslint-disable-next-line no-restricted-syntax -- null = not named yet
+  lock: (label: string, timeoutMs: number, target: string | null) => void;
+  /** The server named the destination (a new experiment's slug). */
+  target: (name: string) => void;
+  /** The request is done; only the copies feed is still awaited. */
+  settling: () => void;
+  /** Take the sheet down now — the transition failed, or there is nothing
+   *  left to wait for. The caller has already said why. */
+  release: () => void;
+}
+
+// A local git clone plus a copies-feed round trip. Generous, because a first
+// experiment on a big workspace really can take a while — but finite.
+const BUSY_TIMEOUT_CREATE_MS = 5 * 60_000;
+// Selecting a copy that already exists: at most a business process being
+// materialized into it.
+const BUSY_TIMEOUT_SWITCH_MS = 2 * 60_000;
+
 function Shell() {
   const { processes } = useProcesses();
   const { copies: copiesSnapshot } = useCopies();
@@ -263,6 +319,10 @@ function Shell() {
   // so the behind-main check re-reads immediately instead of waiting for the
   // next event — that's what makes the Sync step disappear right after a pull.
   const [syncCheckNonce, setSyncCheckNonce] = useState(0);
+  // The copy transition currently locking the interface. null = the app is
+  // live. See `Busy` and `BusyOverlay`.
+  // eslint-disable-next-line no-restricted-syntax -- null = not locked
+  const [busy, setBusy] = useState<Busy | null>(null);
 
   // On load, resolve the user's personal copy (creating it on first login).
   useEffect(() => {
@@ -411,6 +471,14 @@ function Shell() {
   // one. Tombstones clear once the feed confirms the copy is gone (so a
   // recreated same-name personal copy isn't excluded forever).
   const deletedCopiesRef = useRef<Set<string>>(new Set());
+  // A copy we have just created (an experiment) and selected. The copies feed
+  // has not delivered it yet, so the consistency effect below would otherwise
+  // decide the selection names nothing and snap it back to the user's own
+  // copy — leaving them outside the experiment they just started, and (since
+  // the interface lock waits for exactly this copy to become renderable)
+  // leaving the app locked until the timeout. Mirrors `justCreatedBpRef`.
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing just created
+  const justCreatedCopyRef = useRef<string | null>(null);
   const handleCopyDeleted = useCallback(
     (name: string) => {
       deletedCopiesRef.current.add(name);
@@ -445,11 +513,22 @@ function Shell() {
     const available = copiesSnapshot.filter(
       (w) => !deletedCopiesRef.current.has(w.name),
     );
+    // Stop protecting a just-created copy once the feed actually carries it.
+    if (
+      justCreatedCopyRef.current &&
+      available.some((w) => w.name === justCreatedCopyRef.current)
+    )
+      justCreatedCopyRef.current = null;
     setCopy((cur) => {
       // A selection on a mid-teardown copy must move off it now, not when the
       // snapshot finally drops it.
       const kept = cur && !deletedCopiesRef.current.has(cur) ? cur : null;
-      if (kept && (available.some((w) => w.name === kept) || kept === myCopy))
+      if (
+        kept &&
+        (available.some((w) => w.name === kept) ||
+          kept === myCopy ||
+          kept === justCreatedCopyRef.current)
+      )
         return kept;
       // Prefer the user's own copy (even before it appears in the snapshot, so
       // first-login selection sticks); otherwise fall back to the first copy.
@@ -522,6 +601,77 @@ function Shell() {
     () => (copy ? copies.find((w) => w.name === copy) ?? null : null),
     [copy, copies],
   );
+
+  // ── the interface lock ────────────────────────────────────────────────────
+  // Put the sheet up on the click frame, take it down when the destination is
+  // fully renderable — never in between, and never on a timer.
+  const lock = useCallback((label: string, timeoutMs: number, target: string | null) => {
+    setBusy({ label, target, inFlight: true, startedAt: Date.now(), timeoutMs });
+  }, []);
+  /** The server has named the destination (a new experiment's slug). */
+  const lockTarget = useCallback((target: string) => {
+    setBusy((b) => (b ? { ...b, target } : b));
+  }, []);
+  /** The request finished; the lock now waits only on the copies feed. */
+  const lockSettling = useCallback(() => {
+    setBusy((b) => (b ? { ...b, inFlight: false } : b));
+  }, []);
+  /** The transition failed, or was never going to happen. The caller has
+   *  already said why — this only takes the sheet down. */
+  const unlock = useCallback(() => setBusy(null), []);
+  const uiLock: UiLock = useMemo(
+    () => ({ lock, target: lockTarget, settling: lockSettling, release: unlock }),
+    [lock, lockTarget, lockSettling, unlock],
+  );
+
+  // The destination is renderable when it is BOTH selected and present in the
+  // copies snapshot: `wt` is what the banner and the pipeline read, and a
+  // selected copy the feed hasn't delivered yet renders as "no copy" — which is
+  // the half-state the lock exists to hide.
+  const busyDone =
+    busy !== null &&
+    !busy.inFlight &&
+    busy.target !== null &&
+    copy === busy.target &&
+    copies.some((c) => c.name === busy.target);
+  useEffect(() => {
+    if (busyDone) setBusy(null);
+  }, [busyDone]);
+
+  // A destination that never arrives must not leave the app locked. Say what
+  // did not happen and hand the interface back — loudly, because the user's
+  // action may well have taken effect server-side and the app can no longer
+  // tell them whether it did.
+  useEffect(() => {
+    if (!busy) return;
+    const left = busy.startedAt + busy.timeoutMs - Date.now();
+    const label = busy.label;
+    const id = window.setTimeout(
+      () => {
+        setBusy(null);
+        toast.error(`Gave up waiting: ${label}`, {
+          id: 'copy-transition-timeout',
+          description:
+            `It did not finish within ${Math.round(busy.timeoutMs / 1000)}s. It may ` +
+            `still be running on the server — reload to see where you actually are.`,
+        });
+      },
+      Math.max(0, left),
+    );
+    return () => window.clearTimeout(id);
+  }, [busy]);
+
+  // The human name of the ONE business process an experiment is on, for the
+  // banner. Resolved from `wt.bp` — the directory name gitops recorded — never
+  // from the experiment's slug. Empty when there is no recorded process (a
+  // legacy experiment) or the feed hasn't delivered the process yet; the banner
+  // handles both by not naming one rather than by naming a guess.
+  const experimentBpLabel = useMemo(() => {
+    const dir = wt?.bp;
+    if (!dir) return '';
+    const p = allBps.find((b) => b.id === dir || b.name === dir);
+    return p?.displayName ?? p?.name ?? dir;
+  }, [wt, allBps]);
 
   // Where the user is, from explicit metadata only. Their own copy is the
   // everyday case; an experiment is one of their side branches off it;
@@ -626,6 +776,10 @@ function Shell() {
     const label = wt.title ?? name;
     const id = `merge-parent-${name}`;
     setMerging(true);
+    // Merging ends the experiment and moves the user to another copy, so the
+    // interface is locked for the whole thing: the merge, the discard and the
+    // landing all have to happen before the chrome is correct again.
+    lock(`Merging “${label}” back into your copy…`, BUSY_TIMEOUT_CREATE_MS, parent);
     toast.loading(`Merging “${label}” back into your copy…`, {
       id,
       duration: Infinity,
@@ -641,6 +795,7 @@ function Shell() {
       // Land on the parent first: the work is already there, so the user
       // belongs on their own copy whether or not the teardown succeeds.
       setCopy(parent);
+      lockSettling();
       try {
         // deleteCopy resolves on 4xx too (owner/kind guards) — check, never
         // assume it worked.
@@ -672,6 +827,9 @@ function Shell() {
         return;
       }
       if (res.status === 'needs_rebase') {
+        // The experiment survives and the user stays in it, so there is no
+        // transition left to wait for — hand the interface back.
+        unlock();
         toast.error(`“${label}”: ${res.message}`, { id, duration: 10000 });
         if (bpId) {
           // The agent works inside the experiment, rebasing it onto the
@@ -694,6 +852,8 @@ function Shell() {
       });
       await finishExperiment(`“${label}” merged — back on your copy`);
     } catch (err) {
+      // Nothing moved — take the sheet down and let the error speak.
+      unlock();
       if (err instanceof SessionExpiredError) {
         // The app-wide re-login banner already prompts; don't pile on.
         toast.dismiss?.(id);
@@ -709,7 +869,17 @@ function Shell() {
       // commits — re-read its behind-main count.
       setSyncCheckNonce((n) => n + 1);
     }
-  }, [wt, merging, bpId, startMergeBackSession, handleTab, handleCopyDeleted]);
+  }, [
+    wt,
+    merging,
+    bpId,
+    startMergeBackSession,
+    handleTab,
+    handleCopyDeleted,
+    lock,
+    lockSettling,
+    unlock,
+  ]);
 
   // Discarding an experiment is a real delete (branch, checkout, live-dev
   // containers), so it goes through the same warn+confirm dialog as any other
@@ -717,6 +887,86 @@ function Shell() {
   const handleDiscardExperiment = useCallback(() => {
     if (wt) setDiscardTarget(wt);
   }, [wt]);
+
+  // Start an experiment. The SHELL owns this rather than the dialog, because
+  // what it really is is a copy transition: the dialog closes on submit, the
+  // interface locks, and it unlocks on the far side — in the experiment, with
+  // the banner and the pipeline already correct. Done from the dialog it could
+  // only ever hand back a half-updated app and a toast.
+  const handleStartExperiment = useCallback(
+    (title: string, onBp: BusinessProcess) => {
+      uiLock.lock(
+        `Starting experiment “${title}” on ${onBp.displayName}…`,
+        BUSY_TIMEOUT_CREATE_MS,
+        null, // gitops generates the slug; `uiLock.target` fills it in below
+      );
+      const id = `create-experiment-${title}`;
+      toast.loading(`Starting experiment “${title}” on ${onBp.displayName}…`, {
+        id,
+        duration: Infinity,
+      });
+      void api
+        .createExperiment({ title, bp: onBp.name })
+        .then((res) => {
+          toast.success(`Experiment “${title}” created`, { id, duration: 6000 });
+          // Selecting it is not enough to lift the lock: the copies feed still
+          // has to deliver it before the banner can render. `target` is what
+          // the lock waits on.
+          uiLock.target(res.name);
+          justCreatedCopyRef.current = res.name;
+          setCopy(res.name);
+          uiLock.settling();
+          // An experiment deploys nothing up front — the business process the
+          // user opens is brought up lazily on access. These branches only fire
+          // if gitops ever does spawn a deploy here.
+          if (res.deploy_error) {
+            toast.error(
+              `Failed to start automations in “${title}”: ${res.deploy_error}`,
+            );
+          } else if (res.deploy_task_id) {
+            void watchDeployTask(res.deploy_task_id, `exp-deploy-${res.name}`, {
+              loading: `Starting automations in “${title}”…`,
+              success: `Experiment “${title}” automations started`,
+              failurePrefix: `Failed to start automations in “${title}”`,
+            });
+          }
+        })
+        .catch((err: unknown) => {
+          // Nothing was created, or we cannot tell — hand the interface back
+          // and say so with the server's own words, which name the fix.
+          uiLock.release();
+          if (err instanceof SessionExpiredError) {
+            toast.dismiss?.(id);
+            return;
+          }
+          toast.error(`Failed to start experiment: ${errorMessage(err)}`, {
+            id,
+            duration: 10000,
+          });
+        });
+    },
+    [uiLock],
+  );
+
+  // Move to another copy — a colleague's, one of your experiments, or back to
+  // your own. The destination already exists, so the only thing the lock waits
+  // for is any business process being materialized into it on the way.
+  const handleEnterCopy = useCallback(
+    (name: string, label: string, after?: () => Promise<void>) => {
+      if (name === copy && !after) return;
+      uiLock.lock(label, BUSY_TIMEOUT_SWITCH_MS, name);
+      setCopy(name);
+      if (!after) {
+        uiLock.settling();
+        return;
+      }
+      // Work that has to finish before the destination is usable — a business
+      // process being cloned into it. It reports its own failures; the lock
+      // only cares that it is over.
+      void after().finally(() => uiLock.settling());
+    },
+    [copy, uiLock],
+  );
 
   const isLoading = processes === null;
 
@@ -737,7 +987,8 @@ function Shell() {
         onAddingBpChange={setAddingBp}
         copy={copy}
         copies={copies}
-        onSelectCopy={setCopy}
+        onEnterCopy={handleEnterCopy}
+        onStartExperiment={handleStartExperiment}
         myCopy={myCopy}
         syncVisible={syncVisible}
         isMyExperiment={isMyExperiment}
@@ -753,12 +1004,18 @@ function Shell() {
       {wt && isColleagueView && (
         <ViewingBanner
           copy={wt}
-          {...(myCopy ? { onSwitchBack: () => setCopy(myCopy) } : {})}
+          {...(myCopy
+            ? {
+                onSwitchBack: () =>
+                  handleEnterCopy(myCopy, 'Switching back to your copy…'),
+              }
+            : {})}
         />
       )}
       {wt && isMyExperiment && (
         <ExperimentBanner
           copy={wt}
+          bpLabel={experimentBpLabel}
           merging={merging}
           refreshKey={copyEditNonce}
           onMergeBack={() => void handleMergeBack()}
@@ -793,11 +1050,29 @@ function Shell() {
         isOwnCopy={false}
         onClose={() => setDiscardTarget(null)}
         onDeleted={handleCopyDeleted}
+        {...(myCopy
+          ? {
+              // Discarding is a copy transition too: it ends where the user is
+              // and puts them back on their own copy, so the interface locks
+              // from the confirm click until that copy is what renders.
+              onConfirmed: (label: string) =>
+                uiLock.lock(
+                  `Discarding “${label}”…`,
+                  BUSY_TIMEOUT_SWITCH_MS,
+                  myCopy,
+                ),
+              onSettled: uiLock.settling,
+              onFailed: uiLock.release,
+            }
+          : {})}
       />
       {/* The single activity surface, anchored bottom-left: server-side git
           tasks AND transient notifications (former toasts) in one collapsible
           panel. */}
       <TaskQueuePanel />
+      {/* Last in the tree and fixed: the whole app, including the dialogs and
+          the activity panel, is behind it while a copy transition settles. */}
+      {busy && <BusyOverlay label={busy.label} />}
     </div>
   );
 }

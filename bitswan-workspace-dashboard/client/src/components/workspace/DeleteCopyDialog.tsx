@@ -24,6 +24,14 @@ export interface DeleteCopyDialogProps {
   /** Fired once the delete is ACCEPTED (202) — the parent moves the selection
    *  off the copy; the `copies` SSE snapshot dropping it signals completion. */
   onDeleted: (name: string) => void;
+  /** The user confirmed: a copy transition has begun (the copy in view is
+   *  about to stop existing), so the shell locks the interface. Gets the
+   *  human label of what is being discarded. */
+  onConfirmed?: (label: string) => void;
+  /** The delete was accepted; only the copies feed is still awaited. */
+  onSettled?: () => void;
+  /** The delete failed — nothing moved; hand the interface back. */
+  onFailed?: () => void;
 }
 
 /**
@@ -45,6 +53,9 @@ export function DeleteCopyDialog({
   isOwnCopy,
   onClose,
   onDeleted,
+  onConfirmed,
+  onSettled,
+  onFailed,
 }: DeleteCopyDialogProps) {
   const [busy, setBusy] = useState(false);
   const [unmerged, setUnmerged] = useState<string[]>([]);
@@ -100,9 +111,11 @@ export function DeleteCopyDialog({
   const confirm = async () => {
     if (!copy || busy) return;
     setBusy(true);
+    onConfirmed?.(label);
     try {
       const r = await api.deleteCopy(copy.name);
       if (r.status >= 400) {
+        onFailed?.();
         toast.error(
           isExperiment ? 'Failed to discard experiment' : 'Failed to delete copy',
           {
@@ -117,6 +130,10 @@ export function DeleteCopyDialog({
       });
       onDeleted(copy.name);
       onClose();
+      onSettled?.();
+    } catch (err) {
+      onFailed?.();
+      throw err;
     } finally {
       setBusy(false);
     }

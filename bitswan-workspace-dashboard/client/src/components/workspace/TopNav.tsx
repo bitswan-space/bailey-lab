@@ -57,7 +57,12 @@ interface TopNavProps {
   // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
   copy: string | null;
   copies: Copy[];
-  onSelectCopy: (name: string) => void;
+  /** Move to another copy WITH the interface locked until the destination is
+   *  fully renderable — the only way the chrome should ever change copy. */
+  onEnterCopy: (name: string, label: string, after?: () => Promise<void>) => void;
+  /** Start an experiment on a business process. Owned by the shell (it is a
+   *  copy transition, not a dialog's private business). */
+  onStartExperiment: (title: string, bp: BusinessProcess) => void;
   /** The signed-in user's own personal copy. */
   // eslint-disable-next-line no-restricted-syntax -- null = not yet resolved
   myCopy: string | null;
@@ -162,7 +167,8 @@ export function TopNav({
   onAddingBpChange,
   copy,
   copies,
-  onSelectCopy,
+  onEnterCopy,
+  onStartExperiment,
   myCopy,
   syncVisible,
   isMyExperiment,
@@ -205,28 +211,35 @@ export function TopNav({
     return steps;
   }, [syncVisible, isMyExperiment]);
 
-  // Picking a business process NEVER moves the user to another copy — the copy
-  // in view is where they work. When it doesn't carry the BP yet, clone it in
-  // (the ensureBp flow the old copy switcher used for its "+ from main" rows;
-  // BPs are created in main, so this covers processes other people created).
+  const currentCopy = useMemo(
+    () => (copy ? (copies.find((c) => c.name === copy) ?? null) : null),
+    [copies, copy],
+  );
+
+  // Picking a business process NEVER moves the user to another COPY — the copy
+  // in view is where they work. When it doesn't carry the process yet, clone it
+  // in (the ensureBp flow the old copy switcher used for its "+ from main"
+  // rows; processes are created in main, so this covers ones other people
+  // created).
   //
-  // This is also the EXPERIMENT path, and there it is routine rather than an
-  // edge case: an experiment is cloned with only the business process it was
-  // started on, and every other one is materialized here, on first open, from
-  // the parent copy's current tip.
+  // The one exception is an EXPERIMENT, and it is not really an exception: an
+  // experiment is a side branch of ONE business process, so another process is
+  // not something it can hold. gitops refuses to materialize one (409) — the
+  // client must not ask, and must not leave the user staring at a body that
+  // says the process isn't here. Picking another process LEAVES the experiment
+  // for the copy it branched from, out loud (see `handleSelectBp`).
   // eslint-disable-next-line no-restricted-syntax -- null = nothing in flight
   const addingRef = useRef<string | null>(null);
-  const handleSelectBp = (id: string) => {
-    onSelectBp(id);
-    const bp = bps.find((b) => b.id === id);
-    if (!bp || !copy || bp.copies.includes(copy)) return;
+  const materializeInto = (target: string, bp: BusinessProcess) => {
+    if (bp.copies.includes(target)) return;
+    const id = bp.id;
     addingRef.current = id;
     onAddingBpChange?.(id);
     void api.copyFiles
-      .ensureBp(copy, bp.name)
+      .ensureBp(target, bp.name)
       .catch((err: unknown) => {
         toast.error(
-          `Failed to add ${bp.displayName} to “${copy}”: ${errorMessage(err)}`,
+          `Failed to add ${bp.displayName} to “${target}”: ${errorMessage(err)}`,
         );
       })
       .finally(() => {
@@ -235,6 +248,48 @@ export function TopNav({
         addingRef.current = null;
         onAddingBpChange?.(null);
       });
+  };
+
+  const handleSelectBp = (id: string) => {
+    const bp = bps.find((b) => b.id === id);
+    if (!bp || !copy) {
+      onSelectBp(id);
+      return;
+    }
+
+    // Inside an experiment, on a different business process: the experiment
+    // cannot follow you there, so the copy has to change. Do it explicitly and
+    // say why — a silent copy switch is how the user ends up editing somewhere
+    // they didn't think they were.
+    if (currentCopy?.kind === 'experiment' && bp.name !== currentCopy.bp) {
+      const target = currentCopy.parent ?? myCopy;
+      const label = currentCopy.title ?? currentCopy.name;
+      if (!target) {
+        // Nowhere to land: leave the user where they are rather than dropping
+        // them into an arbitrary copy, and say so.
+        toast.error(
+          `“${label}” is an experiment on one business process only, and we ` +
+            `couldn't work out which copy it branched from — so ${bp.displayName} ` +
+            `can't be opened from in here. Reload once gitops is reachable.`,
+        );
+        return;
+      }
+      onSelectBp(id);
+      onEnterCopy(
+        target,
+        `Leaving the experiment “${label}” — showing ${bp.displayName}…`,
+      );
+      toast.info(
+        `Left the experiment “${label}” — an experiment is on one business ` +
+          `process only. Now showing ${bp.displayName} in ` +
+          `${target === myCopy ? 'your copy' : `“${target}”`}.`,
+      );
+      materializeInto(target, bp);
+      return;
+    }
+
+    onSelectBp(id);
+    materializeInto(copy, bp);
   };
 
   const renderStep = (step: FlowStep) => {
@@ -308,8 +363,9 @@ export function TopNav({
           myCopy={myCopy}
           bps={bps}
           selectedBp={activeBp}
-          onSelectCopy={onSelectCopy}
+          onEnterCopy={onEnterCopy}
           onSelectBp={onSelectBp}
+          onStartExperiment={onStartExperiment}
         />
         <span
           title={roleMeta.hint}
